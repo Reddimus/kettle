@@ -729,7 +729,8 @@ HashMap-shadowed bindings); the palette-completeness drift
 guard (including `OpenContextMenu` / `UndoCloseTab` /
 `DuplicateTab` / `DuplicatePane`); theme look order (the dark and light orders
 split the bundle, stepping never crosses appearance and reverses cleanly, and
-neighbours are at least twice as similar as in name order); palette ranking in
+neighbours are at least twice as similar as in name order); the
+`open_theme_picker` action and its palette entry; palette ranking in
 English and Spanish, English names still matching a Spanish palette, stable
 empty-query order and distinct labels in each language; the
 example-config drift guard; the README-keybind regression guard;
@@ -1324,6 +1325,29 @@ has different metrics from the bundled regular family; it skips when that
 family is absent. A source guard checks that `build_pane` uses the same
 `ShapedRow` for its key and text. Red checks revert only production code
 and retain every test, including after rebasing onto changes to preparation.
+
+The theme picker lists the opening theme's appearance first in look order and
+the other appearance after it, so its rows partition the bundle; a blank query
+is no query; a query keeps only fuzzy matches and puts the theme it names
+exactly first (`dracula` scores the same against "Dracula+"); an unmatched
+query shows a disabled row in English and Spanish and selects nothing; only
+the opening theme is ticked and every row names its appearance; and the
+previewed and kept theme is the highlighted row even past the end of a
+narrowed list. The preview lifecycle runs on a bare `WindowState`: a step
+previews the next theme, reopening over a running preview opens on and ticks
+the theme from before it, an unmatched query shows the opening theme and keeps
+it as the baseline even when something else changes the theme, Esc restores
+it once, and a kept theme stays. Closing the picker ends its input-method
+composition, and screen readers hear each row's appearance and the opening
+theme's tick in English and Spanish. Source guards keep the picker ahead of
+every Settings branch in the key handler and the control plane's modal order,
+gate its auto-repeat like the palette's, record its closing key, end its
+composition on Esc and Enter, suppress its bar under a confirm dialog, and
+close it with every other modal. Only the Settings Theme row opens it. `just theme-picker-smoke` drives the
+picker live: it opens on the current theme, Down previews the next theme, Esc
+restores the first, a typed name previews and Enter keeps it in the config
+file, the Settings Theme row opens it over a hidden panel that Esc brings
+back, and the right-click menu shows "Theme…".
 
 ### kettle-remote (50+ tests)
 
@@ -2528,7 +2552,7 @@ session run
 `just steady-uploads-smoke`, `just cursor-blink-layer-smoke` (macOS),
 `just text-presentation-smoke`,
 `just zoom-keybind-smoke`, `just alt-arrow-zoom-smoke`, `just program-keys-smoke`,
-`just color-scheme-smoke`,
+`just color-scheme-smoke`, `just theme-picker-smoke`,
 `just search-selection-smoke`, `just bell-flash-smoke`,
 `just default-window-size-smoke`, and
 `just underline-scroll-smoke`. Artifacts land under `target/diagnostics/*`

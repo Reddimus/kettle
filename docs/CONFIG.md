@@ -71,7 +71,7 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `theme` | string | `TokyoNight Night` | Any bundled theme (`kettle --list-themes`). Runtime theme changes — the Settings picker, the right-click Theme submenu, `next_theme`/`prev_theme`, light/dark toggle — are written back to this line, so a picked theme persists across launches |
+| `theme` | string | `TokyoNight Night` | Any bundled theme (`kettle --list-themes`). Runtime theme changes — the theme picker, the Settings Theme row, `next_theme`/`prev_theme`, light/dark toggle — are written back to this line, so a picked theme persists across launches |
 | `font-family` | string | `JetBrainsMono Nerd Font` | Bundled; falls back to system fonts |
 | `font-family-bold` / `-italic` / `-bold-italic` | string | — | Per-style family overrides (fall back to `font-family`) |
 | `font-size` | float | `13` | |
@@ -589,7 +589,14 @@ tab or window (prompting for the name), while `group_tab_toggle` and
 (swap between `light-theme` and `dark-theme`). `next_theme` and `prev_theme`
 step through the bundled themes of the current theme's appearance, dark or
 light, each followed by the most similar one, so a step never flips between a
-light and a dark palette.
+light and a dark palette. `open_theme_picker` opens the theme picker: type to
+filter every bundled theme by name, or move through them with the arrows, and
+the window previews the selected theme. Enter keeps it and writes it to the
+config file; Esc restores the theme you started with. With nothing typed it
+lists the current theme's appearance first, in the same look order, and the
+other appearance after it, and each row says whether its theme is dark or
+light. The command palette lists it as "Choose theme…" and the right-click
+menu as "Theme…", and Enter or a click on the Settings Theme row opens it.
 
 **Titles**: `edit_window_title`, `edit_tab_title`, `edit_pane_title` (open the
 inline rename overlay for the OS window / active tab / focused pane).

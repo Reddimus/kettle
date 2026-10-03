@@ -466,7 +466,7 @@ agent geometry use one clamped panel height, so a partially clipped row cannot
 be activated through otherwise blank bottom pixels. Pointer hit-testing streams
 row kinds instead of allocating a temporary vector, and wheel-scroll clamping
 computes the final fitting suffix in one reverse pass. Both remain O(items) for
-the 512-entry theme submenu.
+the theme picker's 533 rows, which share the menu panel.
 
 The remote-context poll submits the newest roots for all panes and windows to
 one background worker. A single-slot wake plus replaceable pending/result state

@@ -286,8 +286,8 @@ Set Window Title, Split Auto/Horiz/Vert (if not zoomed), Open Tab,
 Close, Zoom/Maximize/Restore, Grouping submenu (if titlebar hidden),
 Read-only toggle, Show scrollbar toggle, Preferences, Theme presets.
 
-kettle ✅ context menu. Theme-preset submenu ✅ (Theme ▸ / Profile ▸
-flyouts). **Read-only toggle ✅** — right-click "Read only" check item +
+kettle ✅ context menu. Theme presets ✅ (a Theme… row opens the
+searchable theme picker; Profile ▸ flyout). **Read-only toggle ✅** — right-click "Read only" check item +
 `toggle_read_only` keybind/palette action; per-pane `Pane::feed_input`
 gate drops keystroke / paste / IME / drag-drop / Lua / remote.cmd /
 agent input (VTE `input-enabled` semantics: protocol replies keep
@@ -750,7 +750,7 @@ and progressed each through implementation. Status snapshot:
 | `tab_position = left/right`  | ✅ A   | 7/8 + 1 polish-deferred | Variants + layout + paint + cfg width. Drag-reorder y-axis deferred (horizontal works; y-axis is identical-shape work). Deployed. |
 | `plugins/terminalshot.py`    | ✅ A   | 7/7        | Action + path helper + Renderer slot + wgpu offscreen-scene readback + focused-pane crop + desktop notification. Deployed. |
 | Named broadcast groups       | ✅ A   | 7/8        | `BroadcastScope { Off, Tab, All, Group(String) }` + mux migration + bulk-apply GroupTab/Window + UngroupTab/Window + ToggleBroadcastGroup/Window + `[group]` titlebar pill + right-click context-menu entries. Cross-window groups via the file-based IPC remain. Deployed. |
-| Right-click theme submenu    | D     | 0/9        | Design doc only; no implementation yet. The command palette covers the same UX via `/theme NAME`. |
+| Right-click theme submenu    | ✅ A   | Superseded | Shipped as a submenu, then replaced by a Theme… row that opens the searchable theme picker (`open_theme_picker`). |
 
 **All 7 Bucket D Terminator features now ship end-to-end on
 the deployed binary** (commit `de32288`). Each has full

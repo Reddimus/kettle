@@ -10,15 +10,15 @@ without editing a config file. Open it with **`Ctrl + ,`** or
 |---|---|
 | ↑ / ↓ | Move between options (skips options that don't apply) |
 | ← / → | Change the highlighted option |
-| Space / Enter | Toggle / cycle the highlighted option |
+| Space / Enter | Toggle / cycle the highlighted option; on the Theme row, open the theme picker |
 | Tab / Shift+Tab | Next / previous category |
 | Esc | Close |
 
 The panel is also fully **mouse-driven**: **left-click** a row to cycle its
 value forward, **right-click** to cycle back, **scroll-wheel** over a row to
 adjust it, **click a category tab** to switch pages, and **click outside** the
-panel to close. (A keybind row starts capture on click; the image-path row opens
-an inline text prompt.)
+panel to close. (A keybind row starts capture on click, the image-path row opens
+an inline text prompt, and the Theme row opens the theme picker.)
 
 With **`vim-menu-nav`** on (the default), the panel also takes vim keys:
 `j`/`k` move between options, `h`/`l` change the highlighted option, `g`/`G`
@@ -48,7 +48,7 @@ have two spaces between them; an underline marks the selected category.
 
 | Option | Config key | Notes |
 |---|---|---|
-| Theme | `theme` | curated list of the most popular themes; ←/→ live-previews each, stepping through the popular themes of the current theme's appearance (dark or light) from one look to the most similar next. The full 500+-theme bundle is also reachable via the right-click **Theme** submenu (which **live-previews on hover** — see [the menu](#beyond-the-panel)), `NextTheme`/`PrevTheme`, or a `theme =` line in your config |
+| Theme | `theme` | curated list of the most popular themes; ←/→ and the wheel live-preview each, stepping through the popular themes of the current theme's appearance (dark or light) from one look to the most similar next. Enter, Space or a click opens the [theme picker](#theme-picker), which searches the full 500+-theme bundle. `NextTheme`/`PrevTheme` and a `theme =` line in your config reach every theme too |
 | Font size | `font-size` | 6–72 pt |
 | Background opacity | `background-opacity` | 20–100% (stored as 0.0–1.0) |
 | Window blur | `window-blur` | native backdrop blur where the window system supports it; changing the startup surface requires a new window |
@@ -149,10 +149,19 @@ For those, edit the config file directly — the full reference is in
 The pre-negotiation Enter fallback `modify-other-keys = auto|always|off` is one of
 these config-only options; edits still reload immediately for every open pane.
 
-**Live theme preview:** in **right-click → Theme**, hovering (or
-arrowing over) a theme applies it instantly so you can browse all 500+ themes
-live; moving off, pressing Esc, or clicking away reverts to your current theme,
-and clicking a theme commits it.
+### Theme picker
+
+The theme picker lists every bundled theme. Type part of a name to filter
+them, or move with ↑/↓ (and Tab); the window wears the selected theme while
+you browse. Enter keeps it and writes it to your config file, and Esc puts
+back the theme you started with. With nothing typed, the themes of your
+current theme's appearance come first, each followed by the most similar one,
+so the arrows never jump between a dark and a light palette until the end of
+the list; each row says whether its theme is dark or light, and your current
+theme is ticked. Open it from the Settings **Theme** row (Enter or a click),
+**right-click → Theme…**, the command palette's **Choose theme…**, or the
+bindable `open_theme_picker` action. Opened from Settings, it covers the panel
+and returns to it when it closes.
 
 > **Tip:** for keybinds beyond the curated list (or to unbind a default),
 > edit the config file directly (`keybind = ctrl+shift+e = split_right`,

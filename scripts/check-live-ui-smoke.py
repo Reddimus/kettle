@@ -19071,6 +19071,121 @@ def run_color_scheme(kettle: str, root: Path) -> Path:
     return out
 
 
+def run_theme_picker(kettle: str, root: Path) -> Path:
+    """The theme picker previews the selected theme, Esc restores the one it
+    opened on, and Enter keeps a typed match and writes it to the config file.
+
+    The arrows step within the opening theme's appearance, so the row after a
+    dark theme is dark. The Settings Theme row opens the picker over the panel,
+    which comes back when the picker closes, and the right-click menu offers
+    one "Theme…" row instead of a submenu of every theme.
+    """
+    out = root / f"theme-picker-{time.strftime('%Y%m%d-%H%M%S')}"
+    out.mkdir(parents=True, exist_ok=True)
+    cfg = out / "config"
+    cfg.write_text(
+        "\n".join(
+            [
+                "agent-server = full",
+                "restore-session = false",
+                "update-check = false",
+                "theme = TokyoNight Night",
+            ]
+        )
+        + "\n"
+    )
+
+    def theme(live: LiveKettle) -> str:
+        return str(live.json_ctl("get_state").get("theme", ""))
+
+    def picker(live: LiveKettle, label: str) -> Dict[str, object]:
+        geo = live.json_ctl("ui_geometry")
+        (out / f"{label}.geometry.json").write_text(json.dumps(geo, indent=2) + "\n")
+        return geo
+
+    def selected(geo: Dict[str, object]) -> str:
+        focused = assert_modal_accessibility(geo, "theme_picker", ("listboxoption",)).get("focused")
+        return str(focused.get("label", "")) if isinstance(focused, dict) else ""
+
+    def keys(live: LiveKettle, *pressed: str) -> None:
+        live.json_ctl("dispatch_ui_key", {"keys": list(pressed)})
+        time.sleep(0.2)
+
+    with LiveKettle(kettle, cfg, out / "kettle.log") as live:
+        time.sleep(1.0)
+        live.json_ctl("perform_action", {"action": "open_theme_picker"})
+        time.sleep(0.3)
+        geo = picker(live, "opened")
+        if not modal_open(geo, "theme_picker"):
+            raise SystemExit("theme-picker smoke: open_theme_picker did not open the picker")
+        if selected(geo) != "TokyoNight Night" or theme(live) != "TokyoNight Night":
+            raise SystemExit(
+                f"theme-picker smoke: the picker opened on {selected(geo)!r} "
+                f"with theme {theme(live)!r}, not the current theme"
+            )
+
+        keys(live, "down")
+        stepped = selected(picker(live, "stepped"))
+        if stepped in ("", "TokyoNight Night") or theme(live) != stepped:
+            raise SystemExit(
+                f"theme-picker smoke: Down selected {stepped!r} but the theme is {theme(live)!r}"
+            )
+        keys(live, "escape")
+        geo = picker(live, "restored")
+        if modal_open(geo, "theme_picker") or theme(live) != "TokyoNight Night":
+            raise SystemExit(f"theme-picker smoke: Esc left the theme at {theme(live)!r}")
+
+        live.json_ctl("perform_action", {"action": "open_theme_picker"})
+        time.sleep(0.3)
+        keys(live, *list("dracula"))
+        typed = selected(picker(live, "typed"))
+        if typed != "Dracula" or theme(live) != "Dracula":
+            raise SystemExit(
+                f"theme-picker smoke: typing selected {typed!r} with theme {theme(live)!r}"
+            )
+        keys(live, "enter")
+        geo = picker(live, "kept")
+        if modal_open(geo, "theme_picker") or theme(live) != "Dracula":
+            raise SystemExit(f"theme-picker smoke: Enter left the theme at {theme(live)!r}")
+        deadline = time.monotonic() + 5.0
+        while "theme = Dracula" not in cfg.read_text():
+            if time.monotonic() > deadline:
+                raise SystemExit("theme-picker smoke: the kept theme was not written to the config file")
+            time.sleep(0.1)
+
+        # Settings: Enter on the Theme row, the first row of the first
+        # category, opens the picker over the panel.
+        live.json_ctl("perform_action", {"action": "open_settings"})
+        time.sleep(0.3)
+        keys(live, "enter")
+        geo = picker(live, "from-settings")
+        if not modal_open(geo, "theme_picker") or geo.get("settings") is not None:
+            raise SystemExit(
+                "theme-picker smoke: the Settings Theme row did not open the picker over the panel"
+            )
+        keys(live, "escape")
+        geo = picker(live, "back-to-settings")
+        if modal_open(geo, "theme_picker") or not modal_open(geo, "settings"):
+            raise SystemExit("theme-picker smoke: Esc did not return to Settings")
+        keys(live, "escape")
+
+        surface = picker(live, "before-menu")["surface"]
+        mx = float(surface["width"]) / 2  # type: ignore[index]
+        my = float(surface["height"]) / 2  # type: ignore[index]
+        live.ctl("send_mouse", params={"event": "click", "x": mx, "y": my, "button": "right"})
+        time.sleep(0.3)
+        menu = picker(live, "menu").get("context_menu")
+        rows = menu.get("rows", []) if isinstance(menu, dict) else []
+        labels = [str(row.get("label", "")) for row in rows if isinstance(row, dict)]
+        if "Theme…" not in labels:
+            raise SystemExit(f"theme-picker smoke: the context menu has no Theme… row: {labels}")
+
+    (out / "analysis.json").write_text(
+        json.dumps({"stepped": stepped, "typed": typed}, indent=2) + "\n"
+    )
+    return out
+
+
 def run_program_keys(kettle: str, root: Path) -> Path:
     """A default chord a program also uses goes to a program that owns the
     keyboard, and stays Kettle's otherwise.
@@ -19961,6 +20076,7 @@ def main() -> int:
             "split-exit-resize",
             "program-keys",
             "color-scheme",
+            "theme-picker",
             "steady-uploads",
             "text-presentation",
             "zoom-keybind",
@@ -20115,6 +20231,9 @@ def main() -> int:
     if args.case in ("color-scheme", "all"):
         out = run_color_scheme(args.kettle, root)
         print(f"color-scheme smoke: OK artifacts={out}")
+    if args.case in ("theme-picker", "all"):
+        out = run_theme_picker(args.kettle, root)
+        print(f"theme-picker smoke: OK artifacts={out}")
     if args.case in ("zoom-keybind", "all"):
         out = run_zoom_keybind(args.kettle, root)
         print(f"zoom-keybind smoke: OK artifacts={out}")

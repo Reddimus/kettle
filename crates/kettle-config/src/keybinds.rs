@@ -311,6 +311,10 @@ pub enum Action {
     /// the `CommandPalette` overlay; uses
     /// `WindowState::layout_picker_input: Option<(String, usize)>`.
     OpenLayoutPicker,
+    /// Open the theme picker: type to filter the bundled themes, step through
+    /// them by look with the arrows (each previews live), Enter keeps one and
+    /// Esc restores the theme it opened on.
+    OpenThemePicker,
     /// Terminator parity (`key_send_newline`). Writes a literal `\n` to the focused
     /// pane's PTY. Mostly useful for inserting a newline into a
     /// shell line-editor that's otherwise consuming Enter
@@ -705,6 +709,7 @@ pub fn action_names() -> Vec<&'static str> {
         "send_newline",
         "layout_launcher",
         "open_layout_picker",
+        "open_theme_picker",
         "preferences",
         "edit_config",
         "settings",
@@ -994,6 +999,7 @@ impl Action {
             "send_newline" | "send-newline" => SendNewline,
             "layout_launcher" | "layout-launcher" | "open_layout_picker" | "open-layout-picker"
             | "layout_picker" | "layout-picker" => OpenLayoutPicker,
+            "open_theme_picker" | "open-theme-picker" => OpenThemePicker,
             "preferences"
             | "preferences_keybindings"
             | "preferences-keybindings"

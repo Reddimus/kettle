@@ -218,8 +218,8 @@ context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row.
 [messages.menu_split_up]
 context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row."
 
-[messages.menu_theme]
-context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row. Submenu listing color themes."
+[messages.menu_theme_picker]
+context = "crates/kettle-ui/src/app.rs append_theme_menu_item: right-click menu row that opens the theme picker. The ellipsis says it opens a picker."
 
 [messages.menu_ungroup_tab]
 context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row."
@@ -536,6 +536,9 @@ context = "crates/kettle-config/src/palette.rs commands(): command palette entry
 [messages.palette_open_ssh]
 context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the OpenSsh action."
 
+[messages.palette_open_theme_picker]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the OpenThemePicker action. Opens the theme picker."
+
 [messages.palette_paste]
 context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the Paste action."
 
@@ -746,6 +749,9 @@ context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-re
 [messages.picker_a11y_ssh]
 context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader name of the ssh launcher dialog."
 
+[messages.picker_a11y_themes]
+context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader name of the theme picker dialog."
+
 [messages.picker_hint_cancel]
 context = "crates/kettle-ui/src/app.rs: key hint after Esc: close the picker or the title editor. Lowercase, one or two words."
 
@@ -754,6 +760,12 @@ context = "crates/kettle-ui/src/app.rs: picker key hint, after Tab in the SSH la
 
 [messages.picker_hint_connect]
 context = "crates/kettle-ui/src/app.rs: picker key hint, after Enter in the SSH launcher: connect to the host. Lowercase, one or two words."
+
+[messages.picker_hint_keep]
+context = "crates/kettle-ui/src/app.rs: theme picker key hint, after Enter: keep the previewed theme. Lowercase, one or two words."
+
+[messages.picker_hint_restore]
+context = "crates/kettle-ui/src/app.rs: theme picker key hint, after Esc: go back to the theme the picker opened on. Lowercase, one or two words."
 
 [messages.picker_hint_run]
 context = "crates/kettle-ui/src/app.rs: picker key hint, after Enter in the command palette: run the command. Lowercase, one or two words."
@@ -779,8 +791,20 @@ context = "crates/kettle-ui/src/app.rs: SSH launcher row when no configured host
 [messages.picker_no_matching_layout]
 context = "crates/kettle-ui/src/app.rs: Layout picker row when nothing matches the query."
 
+[messages.picker_no_matching_theme]
+context = "crates/kettle-ui/src/app.rs theme_picker_list: theme picker row when nothing matches the query."
+
 [messages.picker_no_saved_layouts]
 context = "crates/kettle-ui/src/app.rs: Layout picker row when no layout is saved. A layout is a saved arrangement of tabs and panes."
+
+[messages.picker_theme_dark]
+context = "crates/kettle-ui/src/app.rs theme_picker_list: hint beside a dark theme in the theme picker. Lowercase, one word; describes the theme (masculine 'tema' in Spanish)."
+
+[messages.picker_theme_light]
+context = "crates/kettle-ui/src/app.rs theme_picker_list: hint beside a light theme in the theme picker. Lowercase, one word; describes the theme (masculine 'tema' in Spanish)."
+
+[messages.picker_theme_prompt]
+context = "crates/kettle-render/src/lib.rs theme_picker_prefix: prompt before the theme picker's query. Lowercase, ends with a colon."
 
 [messages.picker_typed_target]
 context = "crates/kettle-ui/src/app.rs: SSH launcher hint: Enter connects to what was typed. Keep Enter."

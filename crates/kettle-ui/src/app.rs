@@ -496,6 +496,7 @@ fn modal_holds_cursor_steady(ws: &WindowState) -> bool {
     ws.ssh_input.is_some()
         || ws.palette_input.is_some()
         || ws.layout_picker_input.is_some()
+        || ws.theme_picker_input.is_some()
         || ws.hint_state.is_some()
         || ws.search.open
         // The title-edit and confirm-dialog input bars are also active text
@@ -728,6 +729,10 @@ fn push_picker_accessibility(
             let id = accessibility_modal_id(kind, index + 3);
             let mut option = Node::new(Role::ListBoxOption);
             option.set_label(row.label.clone());
+            // The painted hint, such as a shortcut or a theme's appearance.
+            if !row.hint.is_empty() {
+                option.set_description(row.hint.clone());
+            }
             if !row.enabled {
                 option.set_disabled();
             }
@@ -792,6 +797,7 @@ fn modal_accessibility_projection(
     }
 
     let picker_open = overlay.palette_query.is_some()
+        || overlay.theme_picker_query.is_some()
         || overlay.layout_picker_query.is_some()
         || overlay.ssh_query.is_some();
     if !picker_open && let Some(menu) = overlay.context_menu.as_ref() {
@@ -857,6 +863,16 @@ fn modal_accessibility_projection(
             overlay.context_menu.as_ref(),
             4,
             tr.text(kettle_i18n::Text::PickerA11yPalette),
+            query,
+            full_bounds,
+        );
+    }
+    if let Some(query) = overlay.theme_picker_query.as_deref() {
+        push_picker_accessibility(
+            &mut projection,
+            overlay.context_menu.as_ref(),
+            10,
+            tr.text(kettle_i18n::Text::PickerA11yThemes),
             query,
             full_bounds,
         );
@@ -4773,13 +4789,6 @@ enum ContextMenuClick {
     /// `menu-item = LABEL = CMD` config entry. Dispatch writes
     /// `CMD\n` to the focused pane's PTY.
     ConfigCommand(String),
-    /// Terminator parity, per
-    /// [`TERMINATOR-THEME-SUBMENU-DESIGN.md`](
-    /// ../../../docs/TERMINATOR-THEME-SUBMENU-DESIGN.md):
-    /// theme picked from the right-click "Theme ▸" submenu.
-    /// Dispatch sets cfg.theme_name + cfg.theme and triggers a
-    /// redraw (same path as `NextTheme`).
-    SetTheme(String),
     /// Profile picked from the right-click "Profile ▸" submenu.
     /// Dispatch sets `App::config_path` via the profile-path
     /// resolution helper and calls `reload_config`.
@@ -4855,14 +4864,6 @@ enum ContextMenuItem {
         // parent items onto `drill_stack` and replaces them with
         // these.
         items: Vec<ContextMenuItem>,
-    },
-    /// A theme-choice leaf row (Terminator parity) used inside a
-    /// `Submenu { label: "Theme", … }`. Clicking dispatches
-    /// `ContextMenuClick::SetTheme(theme)` which swaps the
-    /// current theme to the named one.
-    ThemeChoice {
-        label: String,
-        theme: String,
     },
     /// A profile-choice leaf row used inside a
     /// `Submenu { label: "Profile", … }`. Clicking dispatches
@@ -5432,7 +5433,6 @@ fn context_menu_item_columns(item: &ContextMenuItem, hint: &str) -> usize {
         ContextMenuItem::LuaItem { label, .. } => (label, "", false),
         ContextMenuItem::ConfigItem { label, .. } => (label, "", false),
         ContextMenuItem::Submenu { label, .. } => (label, " ▸", false),
-        ContextMenuItem::ThemeChoice { label, .. } => (label, "", false),
         ContextMenuItem::ProfileChoice { label, .. } => (label, "", false),
         ContextMenuItem::NewTabShell { label, .. } => (label, "", true),
         ContextMenuItem::UrlItem { label, .. } => (label, "", false),
@@ -5467,7 +5467,6 @@ fn assign_mnemonics(items: &[ContextMenuItem], reserved: &[char]) -> Vec<Option<
             ContextMenuItem::LuaItem { label, .. } => label.as_str(),
             ContextMenuItem::ConfigItem { label, .. } => label.as_str(),
             ContextMenuItem::Submenu { label, .. } => label.as_str(),
-            ContextMenuItem::ThemeChoice { label, .. } => label.as_str(),
             ContextMenuItem::ProfileChoice { label, .. } => label.as_str(),
             ContextMenuItem::NewTabShell { label, .. } => label.as_str(),
             ContextMenuItem::UrlItem { label, .. } => *label,
@@ -5536,7 +5535,6 @@ fn typeahead_match(items: &[ContextMenuItem], buf: &str) -> Option<usize> {
         ContextMenuItem::LuaItem { label, .. }
         | ContextMenuItem::ConfigItem { label, .. }
         | ContextMenuItem::Submenu { label, .. }
-        | ContextMenuItem::ThemeChoice { label, .. }
         | ContextMenuItem::ProfileChoice { label, .. }
         | ContextMenuItem::NewTabShell { label, .. } => {
             label.to_ascii_lowercase().starts_with(&needle)
@@ -5896,6 +5894,145 @@ fn layout_picker_list(
     }
 }
 
+/// The themes the theme picker lists for `query`, each with whether it is
+/// dark. An empty query lists every theme of `opened_on`'s appearance in look
+/// order, then the other appearance, so the arrows step between similar
+/// palettes and reach the other appearance only at the end. A query ranks by
+/// fuzzy match, ties keeping that order, except that a theme named exactly by
+/// the query comes first: `dracula` scores the same against "Dracula+".
+fn theme_picker_matches(query: &str, opened_on: &str) -> Vec<(&'static str, bool)> {
+    let opened_dark = kettle_config::Theme::by_name(opened_on).is_dark();
+    let order = [opened_dark, !opened_dark].into_iter().flat_map(|dark| {
+        kettle_config::Theme::look_order(dark)
+            .iter()
+            .map(move |name| (*name, dark))
+    });
+    let query = query.trim();
+    if query.is_empty() {
+        return order.collect();
+    }
+    let mut ranked: Vec<(bool, i32, usize, (&'static str, bool))> = order
+        .enumerate()
+        .filter_map(|(index, theme)| {
+            let exact = theme.0.eq_ignore_ascii_case(query);
+            kettle_config::fuzzy::score(query, theme.0).map(|score| (exact, score, index, theme))
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
+    ranked.into_iter().map(|(_, _, _, theme)| theme).collect()
+}
+
+/// The theme picker's rows. The theme it opened on is ticked, and each row
+/// says whether it is dark or light.
+fn theme_picker_list(
+    query: &str,
+    selected: usize,
+    opened_on: &str,
+    tr: &kettle_i18n::Translator,
+) -> PickerList {
+    use kettle_i18n::Text;
+    let rows: Vec<ContextMenuRow> = theme_picker_matches(query, opened_on)
+        .into_iter()
+        .map(|(name, dark)| {
+            let appearance = tr.text(if dark {
+                Text::PickerThemeDark
+            } else {
+                Text::PickerThemeLight
+            });
+            let tick = if name.eq_ignore_ascii_case(opened_on.trim()) {
+                "✓ "
+            } else {
+                ""
+            };
+            ContextMenuRow {
+                label: name.to_string(),
+                separator: false,
+                enabled: true,
+                hint: format!("{tick}{appearance}"),
+            }
+        })
+        .collect();
+    if rows.is_empty() {
+        return PickerList {
+            rows: vec![ContextMenuRow {
+                label: tr.text(Text::PickerNoMatchingTheme).to_string(),
+                separator: false,
+                enabled: false,
+                hint: String::new(),
+            }],
+            selected: 0,
+        };
+    }
+    let selected = selected.min(rows.len() - 1);
+    PickerList { rows, selected }
+}
+
+/// The theme the picker's highlighted row names, if any row matches. Clamped
+/// like the painted highlight, so the preview and Enter use the row shown.
+fn theme_picker_selection(state: &crate::window_state::ThemePickerState) -> Option<&'static str> {
+    let matches = theme_picker_matches(&state.query, &state.opened_on);
+    let last = matches.len().checked_sub(1)?;
+    Some(matches[state.selected.min(last)].0)
+}
+
+/// A theme the window can wear: its name and colours.
+type ThemeState = (String, kettle_config::Theme);
+
+/// Open the theme picker on `live`, the theme the window wears, and keep it as
+/// the baseline Esc restores. A preview still running from an earlier picker
+/// is cancelled first, so the new picker opens on, ticks and restores the
+/// theme from before that preview. Returns the theme to put back, if any.
+fn begin_theme_picker(ws: &mut WindowState, live: ThemeState) -> Option<ThemeState> {
+    let restore = ws.theme_preview.take();
+    let opened = restore.clone().unwrap_or(live);
+    ws.theme_picker_input = Some(crate::window_state::ThemePickerState {
+        query: String::new(),
+        selected: theme_picker_start(&opened.0),
+        opened_on: opened.0.clone(),
+    });
+    ws.theme_preview = Some(opened);
+    restore
+}
+
+/// The theme the window must switch to after an event, if any, while
+/// `live_name` is the one it wears. An open picker shows its selection, or its
+/// baseline while nothing matches the query; the baseline stays until the
+/// picker closes. A picker that closed without keeping a theme (a kept one
+/// clears the baseline first) puts the baseline back.
+fn theme_preview_change(ws: &mut WindowState, live_name: &str) -> Option<ThemeState> {
+    let Some(state) = ws.theme_picker_input.as_ref() else {
+        return ws.theme_preview.take();
+    };
+    match theme_picker_selection(state) {
+        Some(name) if name == live_name => None,
+        Some(name) => Some((name.to_string(), kettle_config::Theme::by_name(name))),
+        None => ws
+            .theme_preview
+            .as_ref()
+            .filter(|(name, _)| name != live_name)
+            .cloned(),
+    }
+}
+
+/// End an input-method composition when the modal that owned it closes. A
+/// late Commit no longer matches the focus generation, so it is dropped
+/// instead of typed into whatever the modal covered.
+fn end_modal_composition(ws: &mut WindowState) {
+    ws.ime_focus_generation = ws.ime_focus_generation.wrapping_add(1);
+    if ws.ime_preedit_owner.is_some() {
+        ws.ime_preedit = None;
+    }
+}
+
+/// Where the theme picker opens: on the current theme, so the first arrow
+/// press steps to its nearest look.
+fn theme_picker_start(current: &str) -> usize {
+    theme_picker_matches("", current)
+        .iter()
+        .position(|(name, _)| name.eq_ignore_ascii_case(current.trim()))
+        .unwrap_or(0)
+}
+
 fn ssh_picker_list(
     query: &str,
     selected: usize,
@@ -6008,16 +6145,17 @@ fn picker_context_menu(
     })
 }
 
+/// The open picker's rows as a menu panel: the first of `pickers` that is
+/// open, in key-routing order.
 fn picker_overlay_context_menu(
-    palette: Option<PickerList>,
-    layout: Option<PickerList>,
-    ssh: Option<PickerList>,
+    pickers: [Option<PickerList>; 4],
     surface: (f32, f32),
     cell: (f32, f32),
 ) -> Option<ContextMenu> {
-    palette
-        .or(layout)
-        .or(ssh)
+    pickers
+        .into_iter()
+        .flatten()
+        .next()
         .and_then(|list| picker_context_menu(list, surface, cell))
 }
 
@@ -6060,11 +6198,9 @@ fn item_is_dispatchable(item: &ContextMenuItem) -> bool {
             // Submenu rows are dispatchable for keyboard
             // nav (↑↓ lands on them); click / Enter drills in.
             | ContextMenuItem::Submenu { .. }
-            // Theme / profile choice leaves are the
-            // *contents* of a drilled-in Theme ▸ / Profile ▸ submenu.
-            // Without them, keyboard nav inside that submenu could not
-            // land on any row or pick a theme.
-            | ContextMenuItem::ThemeChoice { .. }
+            // Profile choice leaves are the *contents* of a drilled-in
+            // Profile ▸ submenu. Without them, keyboard nav inside that
+            // submenu could not land on any row or pick a profile.
             | ContextMenuItem::ProfileChoice { .. }
             // New-tab ▾ shell choices are always clickable + keyboard-
             // navigable.
@@ -6099,9 +6235,6 @@ fn item_to_click(item: &ContextMenuItem, idx: usize) -> Option<ContextMenuClick>
             Some(ContextMenuClick::ConfigCommand(command.clone()))
         }
         ContextMenuItem::Submenu { .. } => Some(ContextMenuClick::DrillIntoSubmenu(idx)),
-        ContextMenuItem::ThemeChoice { theme, .. } => {
-            Some(ContextMenuClick::SetTheme(theme.clone()))
-        }
         ContextMenuItem::ProfileChoice { profile, .. } => {
             Some(ContextMenuClick::SetProfile(profile.clone()))
         }
@@ -8895,6 +9028,8 @@ impl App {
             return;
         } else if ws.palette_input.is_some() {
             self.palette_key(ws, &key, Some(text), event_loop);
+        } else if ws.theme_picker_input.is_some() {
+            self.theme_picker_key(ws, &key, Some(text));
         } else if ws.settings_nav.is_some() && ws.settings_text_edit.is_some() {
             self.settings_text_key(ws, &key, Some(text));
         } else if ws.settings_nav.is_some() {
@@ -12546,6 +12681,15 @@ impl App {
             .as_ref()
             .map(|(query, _)| (4, query.as_str()))
             .or_else(|| {
+                ws.theme_picker_input.as_ref().map(|state| {
+                    use unicode_width::UnicodeWidthStr as _;
+                    (
+                        kettle_render::theme_picker_prefix(&self.ui_text).width(),
+                        state.query.as_str(),
+                    )
+                })
+            })
+            .or_else(|| {
                 ws.layout_picker_input
                     .as_ref()
                     .map(|(query, _)| (12, query.as_str()))
@@ -13102,6 +13246,26 @@ impl App {
             ),
             None => (None, String::new(), None),
         };
+        let (theme_picker_query, theme_picker_hint, theme_picker) = match &ws.theme_picker_input {
+            Some(state) => (
+                Some(with_preedit(&state.query)),
+                picker_hint(
+                    tr,
+                    &[
+                        ("Enter", T::PickerHintKeep),
+                        ("↑↓", T::PickerHintSelect),
+                        ("Esc", T::PickerHintRestore),
+                    ],
+                ),
+                Some(theme_picker_list(
+                    &state.query,
+                    state.selected,
+                    &state.opened_on,
+                    tr,
+                )),
+            ),
+            None => (None, String::new(), None),
+        };
         let hint_labels: Vec<HintLabel> = match &ws.hint_state {
             Some((targets, typed)) => targets
                 .iter()
@@ -13166,9 +13330,7 @@ impl App {
                 })
                 .unwrap_or((800.0, 600.0));
             picker_overlay_context_menu(
-                palette_picker,
-                layout_picker,
-                ssh_picker,
+                [palette_picker, theme_picker, layout_picker, ssh_picker],
                 surface,
                 self.menu_cell(ws),
             )
@@ -13247,6 +13409,8 @@ impl App {
                 palette_hint,
                 layout_picker_query,
                 layout_picker_hint,
+                theme_picker_query,
+                theme_picker_hint,
                 edit_title,
                 hint_labels,
                 ime_preedit,
@@ -13362,6 +13526,8 @@ impl App {
             palette_hint,
             layout_picker_query,
             layout_picker_hint,
+            theme_picker_query,
+            theme_picker_hint,
             edit_title,
             hint_labels,
             ime_preedit,
@@ -14153,6 +14319,7 @@ impl App {
         // editor) so it can't linger after the panel closes / reopens.
         ws.settings_text_edit = None;
         ws.layout_picker_input = None;
+        ws.theme_picker_input = None;
         ws.hint_state = None;
         ws.ssh_input = None;
         ws.context_menu = None;
@@ -14447,6 +14614,7 @@ impl App {
         ws.palette_input.is_some()
             || ws.settings_nav.is_some()
             || ws.layout_picker_input.is_some()
+            || ws.theme_picker_input.is_some()
             || ws.hint_state.is_some()
             || ws.ssh_input.is_some()
             || ws.context_menu.is_some()
@@ -14827,26 +14995,14 @@ impl App {
         });
     }
 
-    /// Append a `Submenu { "Theme", … }` entry populated from
-    /// `Theme::list()`; clicking "Theme ▸" drills into the list. See
-    /// [`TERMINATOR-THEME-SUBMENU-DESIGN.md`](
-    /// ../../../docs/TERMINATOR-THEME-SUBMENU-DESIGN.md).
-    fn append_theme_submenu_items(&self, items: &mut Vec<ContextMenuItem>) {
-        let theme_names = kettle_config::Theme::list();
-        if theme_names.is_empty() {
-            return;
-        }
+    /// Append a "Theme…" entry that opens the searchable theme picker, which
+    /// replaced a submenu of every bundled theme.
+    fn append_theme_menu_item(&self, items: &mut Vec<ContextMenuItem>) {
         items.push(ContextMenuItem::Separator);
-        let inner: Vec<ContextMenuItem> = theme_names
-            .into_iter()
-            .map(|name| ContextMenuItem::ThemeChoice {
-                label: name.to_string(),
-                theme: name.to_string(),
-            })
-            .collect();
-        items.push(ContextMenuItem::Submenu {
-            label: self.ui_text.text(kettle_i18n::Text::MenuTheme).to_string(),
-            items: inner,
+        items.push(ContextMenuItem::Item {
+            label: self.ui_text.text(kettle_i18n::Text::MenuThemePicker),
+            action: kettle_config::Action::OpenThemePicker,
+            enabled: true,
         });
     }
 
@@ -14934,7 +15090,7 @@ impl App {
         // Append the remote-session reconnect entry when the focused pane
         // has a detected SSH/Docker/Podman/kubectl context.
         self.append_remote_menu_items(ws, &mut items);
-        self.append_theme_submenu_items(&mut items);
+        self.append_theme_menu_item(&mut items);
         // Same machinery for Profile, appended only when
         // ~/.config/kettle/profiles/ has any *.config files.
         self.append_profile_submenu_items(&mut items);
@@ -15023,7 +15179,6 @@ impl App {
                 | ContextMenuItem::LuaItem { .. }
                 | ContextMenuItem::ConfigItem { .. }
                 | ContextMenuItem::Submenu { .. }
-                | ContextMenuItem::ThemeChoice { .. }
                 | ContextMenuItem::ProfileChoice { .. }
                 | ContextMenuItem::NewTabShell { .. }
                 | ContextMenuItem::UrlItem { .. }
@@ -15105,35 +15260,10 @@ impl App {
             .unwrap_or(self.menu_cell(ws).0)
     }
 
-    /// Reconcile the live theme preview with the current context-menu
-    /// highlight. Applying snapshots the pre-preview `(theme_name, theme)` once
-    /// into `ws.theme_preview`; reverting restores + clears it. A committed pick
-    /// (`SetTheme`) clears the baseline first, so this becomes a no-op for it.
+    /// Reconcile the live theme with the theme picker after every event (see
+    /// `theme_preview_change`).
     fn sync_theme_preview(&mut self, ws: &mut WindowState) {
-        let target = ws
-            .context_menu
-            .as_ref()
-            .and_then(|m| match m.items.get(m.highlight) {
-                Some(ContextMenuItem::ThemeChoice { theme, .. }) => Some(theme.clone()),
-                _ => None,
-            });
-        match target {
-            Some(name) => {
-                if ws.theme_preview.is_none() {
-                    ws.theme_preview = Some((self.cfg.theme_name.clone(), self.cfg.theme.clone()));
-                }
-                if self.cfg.theme_name != name {
-                    self.set_runtime_theme_name(ws, &name);
-                }
-            }
-            None => self.revert_theme_preview(ws),
-        }
-    }
-
-    /// Restore the theme captured before a preview began (if any) and clear the
-    /// snapshot. No-op when no preview is active (the common case).
-    fn revert_theme_preview(&mut self, ws: &mut WindowState) {
-        if let Some((name, theme)) = ws.theme_preview.take() {
+        if let Some((name, theme)) = theme_preview_change(ws, &self.cfg.theme_name) {
             self.set_runtime_theme_state(ws, name, theme);
         }
     }
@@ -15141,10 +15271,15 @@ impl App {
     /// Build the renderer-side settings projection from the live `settings_nav`
     /// and config. Used by the draw path AND the mouse hit-test, so the
     /// painted panel and the clickable regions are computed from one source.
+    /// The theme picker hides the panel that opened it, so the preview shows on
+    /// the whole window and a click cannot reach a row it covers.
     fn settings_overlay_projection(
         &self,
         ws: &WindowState,
     ) -> Option<kettle_render::SettingsOverlay> {
+        if ws.theme_picker_input.is_some() {
+            return None;
+        }
         let nav = ws.settings_nav.as_ref()?;
         let cats = crate::settings::categories(&self.gpu_choices);
         let cat = nav.category.min(cats.len().saturating_sub(1));
@@ -15289,13 +15424,18 @@ impl App {
                             nav.capturing = false;
                         }
                         // Keybind + text rows ACTIVATE on click (dir 0 — capture /
-                        // open prompt); a wheel just focuses them. Value rows cycle.
-                        let activate = crate::settings::is_keybind(&cats[cat].fields[f])
-                            || crate::settings::is_text(&cats[cat].fields[f]);
+                        // open prompt); a wheel just focuses them. A click on the
+                        // Theme row opens the theme picker, and a wheel steps it.
+                        // Other value rows cycle.
+                        let field = &cats[cat].fields[f];
+                        let activate =
+                            crate::settings::is_keybind(field) || crate::settings::is_text(field);
                         if activate {
                             if is_click {
                                 self.settings_adjust(ws, &cats, cat, f, 0);
                             }
+                        } else if is_click && crate::settings::opens_theme_picker(field) {
+                            self.settings_adjust(ws, &cats, cat, f, 0);
                         } else {
                             self.settings_adjust(ws, &cats, cat, f, dir);
                         }
@@ -15654,27 +15794,6 @@ impl App {
                     Self::dismiss_media_paste_receipt_after_input(ws, pane_id, result);
                 }
             }
-            ContextMenuClick::SetTheme(name) => {
-                ws.context_menu = None;
-                // Commit the preview by dropping the revert baseline so the
-                // post-event `sync_theme_preview` keeps this pick instead of
-                // restoring the pre-hover theme.
-                ws.theme_preview = None;
-                self.set_runtime_theme_name(ws, &name);
-                // Theme is config-governed, so persist it to the config file, not
-                // the session. A session-pinned theme would OVERRIDE the
-                // config/compile-time default on restore, so neither a default
-                // change nor a fresh-config user would see the new theme. Notify
-                // if the write fails so the pick isn't silently lost on the next
-                // launch.
-                if !self.persist_pref("theme", &name) {
-                    fire_notify(
-                        self.ui_text
-                            .text(kettle_i18n::Text::NotifyTitleThemeNotSaved),
-                        self.ui_text.text(kettle_i18n::Text::NotifyBodyNotSaved),
-                    );
-                }
-            }
             ContextMenuClick::SetProfile(name) => {
                 ws.context_menu = None;
                 if let Some(p) = kettle_config::Config::path_for_profile(&name) {
@@ -15864,15 +15983,9 @@ impl App {
                     enabled: true,
                     hint: String::new(),
                 },
-                // ThemeChoice and ProfileChoice rows only live inside a
-                // Submenu, so they reach menu.items (and this arm) after a
-                // drill-in swaps the submenu's items in.
-                ContextMenuItem::ThemeChoice { label, .. } => ContextMenuRow {
-                    label: label.clone(),
-                    separator: false,
-                    enabled: true,
-                    hint: String::new(),
-                },
+                // ProfileChoice rows only live inside a Submenu, so they
+                // reach menu.items (and this arm) after a drill-in swaps the
+                // submenu's items in.
                 ContextMenuItem::ProfileChoice { label, .. } => ContextMenuRow {
                     label: label.clone(),
                     separator: false,
@@ -17014,6 +17127,7 @@ impl App {
                 ws.layout_picker_entries = crate::session::Session::list_layouts();
                 ws.layout_picker_input = Some((String::new(), 0));
             }
+            Action::OpenThemePicker => self.open_theme_picker(ws),
             Action::HintMode => {
                 let targets = self.collect_hints(ws);
                 if !targets.is_empty() {
@@ -19461,7 +19575,6 @@ impl App {
                         ContextMenuItem::LuaItem { label, .. } => label.as_str(),
                         ContextMenuItem::ConfigItem { label, .. } => label.as_str(),
                         ContextMenuItem::Submenu { label, .. } => label.as_str(),
-                        ContextMenuItem::ThemeChoice { label, .. } => label.as_str(),
                         ContextMenuItem::ProfileChoice { label, .. } => label.as_str(),
                         ContextMenuItem::NewTabShell { label, .. } => label.as_str(),
                         ContextMenuItem::UrlItem { label, .. } => *label,
@@ -19608,6 +19721,8 @@ impl App {
             Some("confirm_dialog")
         } else if diagnostic_overlay.palette_query.is_some() {
             Some("palette")
+        } else if diagnostic_overlay.theme_picker_query.is_some() {
+            Some("theme_picker")
         } else if diagnostic_overlay.settings.is_some() {
             Some("settings")
         } else if diagnostic_overlay.layout_picker_query.is_some() {
@@ -19692,6 +19807,7 @@ impl App {
                     "settings": target.settings_nav.is_some(),
                     "settings_text_edit": target.settings_text_edit.is_some(),
                     "layout_picker": target.layout_picker_input.is_some(),
+                    "theme_picker": target.theme_picker_input.is_some(),
                     "hint_mode": target.hint_state.is_some(),
                     "ssh_launcher": target.ssh_input.is_some(),
                     "context_menu": target.context_menu.is_some(),
@@ -20186,6 +20302,7 @@ impl App {
             match modal {
                 TextModal::Confirm => self.confirm_dialog_key(ws, key, event_loop),
                 TextModal::Palette => self.palette_key(ws, key, text, event_loop),
+                TextModal::ThemePicker => self.theme_picker_key(ws, key, text),
                 TextModal::SettingsText => self.settings_text_key(ws, key, text),
                 TextModal::Settings => self.settings_key(ws, key, event_loop),
                 TextModal::LayoutPicker => self.layout_picker_key(ws, key, text),
@@ -22046,6 +22163,7 @@ impl App {
 enum TextModal {
     Confirm,
     Palette,
+    ThemePicker,
     SettingsText,
     Settings,
     LayoutPicker,
@@ -22108,6 +22226,7 @@ impl TextModal {
         match self {
             Self::Confirm => "confirm",
             Self::Palette => "palette",
+            Self::ThemePicker => "theme_picker",
             Self::SettingsText => "settings_text",
             Self::Settings => "settings",
             Self::LayoutPicker => "layout_picker",
@@ -22128,6 +22247,8 @@ fn open_text_modal(ws: &WindowState) -> Option<TextModal> {
         Some(TextModal::Confirm)
     } else if ws.palette_input.is_some() {
         Some(TextModal::Palette)
+    } else if ws.theme_picker_input.is_some() {
+        Some(TextModal::ThemePicker)
     } else if ws.settings_nav.is_some() && ws.settings_text_edit.is_some() {
         Some(TextModal::SettingsText)
     } else if ws.settings_nav.is_some() {
@@ -23523,6 +23644,10 @@ impl App {
             }
             return;
         }
+        if dir == 0 && crate::settings::opens_theme_picker(field) {
+            self.open_theme_picker(ws);
+            return;
+        }
         // A Text row (the image path) opens an inline prompt on activate
         // (dir 0); ←/→ no-op. A gated/disabled Text row can't be edited.
         if crate::settings::is_text(field) {
@@ -23781,6 +23906,110 @@ impl App {
                     *sel = 0;
                 }
             }
+        }
+    }
+
+    /// Open the theme picker on the current theme. Opened from Settings, the
+    /// picker sits over the panel, which comes back when the picker closes.
+    fn open_theme_picker(&mut self, ws: &mut WindowState) {
+        let settings = ws.settings_nav.take();
+        self.close_all_modals(ws);
+        ws.settings_nav = settings;
+        let live = (self.cfg.theme_name.clone(), self.cfg.theme.clone());
+        if let Some((name, theme)) = begin_theme_picker(ws, live) {
+            self.set_runtime_theme_state(ws, name, theme);
+        }
+    }
+
+    /// The theme picker's keys. Moving the selection previews that theme (see
+    /// `sync_theme_preview`); Enter keeps it and Esc restores the theme the
+    /// picker opened on.
+    fn theme_picker_key(&mut self, ws: &mut WindowState, key: &Key, text: Option<&str>) {
+        let Some(state) = ws.theme_picker_input.as_mut() else {
+            return;
+        };
+        let count = |state: &crate::window_state::ThemePickerState| {
+            theme_picker_matches(&state.query, &state.opened_on).len()
+        };
+        let step = |state: &mut crate::window_state::ThemePickerState, forward: bool, n: usize| {
+            if n > 0 {
+                state.selected = if forward {
+                    (state.selected + 1) % n
+                } else {
+                    (state.selected + n - 1) % n
+                };
+            }
+        };
+        match key {
+            Key::Named(NamedKey::Escape) => {
+                ws.theme_picker_input = None;
+                end_modal_composition(ws);
+                self.reset_blink_phase(ws);
+            }
+            Key::Named(NamedKey::Backspace) => {
+                crate::modal_input::backspace(&mut state.query);
+                state.selected = 0;
+            }
+            Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::Tab) => {
+                let n = count(state);
+                step(state, true, n);
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                let n = count(state);
+                step(state, false, n);
+            }
+            Key::Character(s)
+                if self.cfg.vim_menu_nav
+                    && ws.mods.control_key()
+                    && !ws.mods.alt_key()
+                    && matches!(s.as_str(), "j" | "k" | "n" | "p") =>
+            {
+                let n = count(state);
+                step(state, matches!(s.as_str(), "j" | "n"), n);
+            }
+            Key::Named(NamedKey::Enter) => {
+                let pick = theme_picker_selection(state);
+                ws.theme_picker_input = None;
+                end_modal_composition(ws);
+                if let Some(name) = pick {
+                    self.commit_theme(ws, name);
+                }
+            }
+            Key::Character(s) if crate::modal_input::is_paste_chord(Some(s.as_str()), ws.mods) => {
+                if let Some(pasted) = self.modal_clipboard_text()
+                    && let Some(state) = ws.theme_picker_input.as_mut()
+                    && crate::modal_input::push_text(&mut state.query, &pasted)
+                {
+                    state.selected = 0;
+                }
+            }
+            _ => {
+                if let Some(t) = crate::modal_input::accept_text(text, ws.mods)
+                    && crate::modal_input::push_text(&mut state.query, t)
+                {
+                    state.selected = 0;
+                }
+            }
+        }
+    }
+
+    /// Keep `name` as the theme. Dropping the preview's baseline makes the
+    /// post-event `sync_theme_preview` keep this pick instead of restoring the
+    /// theme the picker opened on.
+    fn commit_theme(&mut self, ws: &mut WindowState, name: &str) {
+        ws.theme_preview = None;
+        self.set_runtime_theme_name(ws, name);
+        // Theme is config-governed, so persist it to the config file, not the
+        // session. A session-pinned theme would OVERRIDE the config/compile-time
+        // default on restore, so neither a default change nor a fresh-config
+        // user would see the new theme. Notify if the write fails so the pick
+        // isn't silently lost on the next launch.
+        if !self.persist_pref("theme", name) {
+            fire_notify(
+                self.ui_text
+                    .text(kettle_i18n::Text::NotifyTitleThemeNotSaved),
+                self.ui_text.text(kettle_i18n::Text::NotifyBodyNotSaved),
+            );
         }
     }
 
@@ -24581,6 +24810,7 @@ enum KeyModal {
     ViMode,
     Hint,
     Palette,
+    ThemePicker,
     SettingsText,
     SettingsCapture,
     Settings,
@@ -24601,6 +24831,8 @@ fn top_modal(ws: &WindowState) -> Option<KeyModal> {
         KeyModal::Hint
     } else if ws.palette_input.is_some() {
         KeyModal::Palette
+    } else if ws.theme_picker_input.is_some() {
+        KeyModal::ThemePicker
     } else if ws.settings_nav.is_some() && ws.settings_text_edit.is_some() {
         KeyModal::SettingsText
     } else if settings_capture_active(ws) {
@@ -25523,6 +25755,7 @@ fn terminal_surface_available(ws: &WindowState) -> bool {
         && ws.palette_input.is_none()
         && ws.settings_nav.is_none()
         && ws.layout_picker_input.is_none()
+        && ws.theme_picker_input.is_none()
         && ws.ssh_input.is_none()
         && ws.confirm_dialog.is_none()
         && ws.editing_title.is_none()
@@ -25752,9 +25985,8 @@ impl ApplicationHandler<UserEvent> for App {
         self.window_event_inner(&mut ws, event_loop, event);
         self.sync_output_wake_gate(&ws);
         // Single chokepoint for the live theme preview. After every event,
-        // make `cfg.theme` reflect the context-menu highlight. Apply the
-        // hovered `ThemeChoice` ephemerally, or revert to the baseline once the
-        // highlight leaves a theme row OR the menu closes without committing.
+        // make `cfg.theme` reflect the theme picker's selection, or revert to
+        // the baseline once the picker closes without committing.
         self.sync_theme_preview(&mut ws);
         self.finish_window_dispatch(event_loop, seq, ws);
         runtime_tracker.set_window_count(self.windows.len());
@@ -26772,6 +27004,7 @@ impl App {
         }
         overlay.palette_query.hash(&mut hasher);
         overlay.layout_picker_query.hash(&mut hasher);
+        overlay.theme_picker_query.hash(&mut hasher);
         overlay.ssh_query.hash(&mut hasher);
         if let Some(edit) = overlay.edit_title.as_ref() {
             edit.label.hash(&mut hasher);
@@ -30405,6 +30638,7 @@ impl App {
                     || ws.palette_input.is_some()
                     || ws.settings_nav.is_some()
                     || ws.layout_picker_input.is_some()
+                    || ws.theme_picker_input.is_some()
                     || ws.ssh_input.is_some()
                     || ws.confirm_dialog.is_some()
                     || ws.editing_title.is_some()
@@ -30641,6 +30875,24 @@ impl App {
                         ws.mods.control_key(),
                     ) {
                         self.palette_key(ws, &event.logical_key, text, event_loop);
+                    }
+                    remember_closing_key(ws, key_modal, event.physical_key);
+                    if let Some(w) = &ws.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+
+                // The theme picker sits over Settings when the Theme row
+                // opened it, so it takes the keys first.
+                if ws.theme_picker_input.is_some() {
+                    if !modal_repeat_is_inert(
+                        ModalRepeat::Palette,
+                        event.repeat,
+                        &event.logical_key,
+                        ws.mods.control_key(),
+                    ) {
+                        self.theme_picker_key(ws, &event.logical_key, text);
                     }
                     remember_closing_key(ws, key_modal, event.physical_key);
                     if let Some(w) = &ws.window {
@@ -33406,6 +33658,7 @@ mod tests {
         for guarded_arm in [
             "overlay.confirm_dialog.is_none()\n            && let Some(search) = overlay.search.as_ref()",
             "overlay.confirm_dialog.is_none()\n            && let Some(q) = &overlay.palette_query",
+            "overlay.confirm_dialog.is_none()\n            && let Some(q) = &overlay.theme_picker_query",
             "overlay.confirm_dialog.is_none()\n            && let Some(q) = &overlay.layout_picker_query",
             "overlay.confirm_dialog.is_none()\n            && let Some(q) = &overlay.ssh_query",
             "overlay.confirm_dialog.is_none()\n            && let Some(edit) = &overlay.edit_title",
@@ -38499,6 +38752,7 @@ mod tests {
         let resolver_order: Vec<&str> = [
             ("ws.confirm_dialog.is_some()", "confirm"),
             ("ws.palette_input.is_some()", "palette"),
+            ("ws.theme_picker_input.is_some()", "theme_picker"),
             // The compound condition, not just the text-edit half: dropping
             // the `settings_nav` guard would diverge from the real handler
             // while a substring probe stayed green.
@@ -38534,6 +38788,7 @@ mod tests {
         let handler_order: Vec<&str> = [
             ("if ws.confirm_dialog.is_some() {", "confirm"),
             ("if ws.palette_input.is_some() {", "palette"),
+            ("if ws.theme_picker_input.is_some() {", "theme_picker"),
             (
                 "if ws.settings_nav.is_some() && ws.settings_text_edit.is_some() {",
                 "settings_text",
@@ -38558,6 +38813,13 @@ mod tests {
             "open_text_modal resolves modals in a different order than the real \
              key handler, so dispatch_ui_key would type into the wrong field"
         );
+        // The Settings Theme row opens the theme picker over the panel, so the
+        // picker must outrank every Settings branch or the panel eats its keys.
+        let at = |name: &str| handler_order.iter().position(|n| *n == name).unwrap();
+        assert!(
+            at("theme_picker") < at("settings_text") && at("theme_picker") < at("settings"),
+            "the theme picker must take keys before the Settings panel it covers"
+        );
 
         // Matching order is not enough: dispatch_ui_key still has to send each
         // variant to *its own* handler. Swapping two arms in that match would
@@ -38571,6 +38833,7 @@ mod tests {
         for (variant, handler) in [
             ("TextModal::Confirm", "self.confirm_dialog_key("),
             ("TextModal::Palette", "self.palette_key("),
+            ("TextModal::ThemePicker", "self.theme_picker_key("),
             ("TextModal::SettingsText", "self.settings_text_key("),
             ("TextModal::Settings", "self.settings_key("),
             ("TextModal::LayoutPicker", "self.layout_picker_key("),
@@ -39448,9 +39711,9 @@ mod tests {
         assert_eq!(
             src.matches("remember_closing_key(ws, key_modal, event.physical_key);")
                 .count(),
-            11,
-            "confirm, context menu, vi, hint, palette, settings text, settings, \
-             layout picker, ssh, title edit and search"
+            12,
+            "confirm, context menu, vi, hint, palette, theme picker, settings \
+             text, settings, layout picker, ssh, title edit and search"
         );
         for gate in [
             "ModalRepeat::ConfirmDialog,",
@@ -41605,14 +41868,17 @@ mod tests {
     #[test]
     fn picker_overlay_projection_installs_the_vertical_context_menu() {
         let menu = picker_overlay_context_menu(
-            Some(command_picker_list(
-                "",
-                3,
-                &kettle_config::keybinds::defaults(),
-                &kettle_i18n::Translator::new(kettle_i18n::Language::En),
-            )),
-            None,
-            None,
+            [
+                Some(command_picker_list(
+                    "",
+                    3,
+                    &kettle_config::keybinds::defaults(),
+                    &kettle_i18n::Translator::new(kettle_i18n::Language::En),
+                )),
+                None,
+                None,
+                None,
+            ],
             (480.0, 240.0),
             (8.0, 16.0),
         )
@@ -41621,6 +41887,18 @@ mod tests {
         assert!(menu.rows.len() > 3);
         assert_eq!(menu.highlight, 3);
         assert!(menu.rows.iter().all(|row| !row.separator));
+
+        // The theme picker's rows use the same panel.
+        let tr = kettle_i18n::Translator::new(kettle_i18n::Language::En);
+        let themes = super::theme_picker_list("", 2, "TokyoNight Night", &tr);
+        let menu = picker_overlay_context_menu(
+            [None, Some(themes), None, None],
+            (480.0, 240.0),
+            (8.0, 16.0),
+        )
+        .expect("an active theme picker must install the shared vertical panel");
+        assert_eq!(menu.rows.len(), kettle_config::Theme::list().len());
+        assert_eq!(menu.highlight, 2);
     }
 
     #[test]
@@ -42220,6 +42498,10 @@ mod tests {
         assert!(
             close_modals.contains("self.finish_selection_gesture(ws);"),
             "every modal transition must commit copy-on-select before ending pointer ownership"
+        );
+        assert!(
+            close_modals.contains("ws.theme_picker_input = None;"),
+            "opening another modal must close the theme picker, which reverts its preview"
         );
 
         let finish_selection = src
@@ -43818,17 +44100,7 @@ mod tests {
             ),
             Some(ContextMenuClick::ConfigCommand(_))
         ));
-        // Theme / profile choices → SetTheme / SetProfile.
-        assert!(matches!(
-            item_to_click(
-                &ContextMenuItem::ThemeChoice {
-                    label: "Dracula".into(),
-                    theme: "Dracula".into()
-                },
-                0
-            ),
-            Some(ContextMenuClick::SetTheme(_))
-        ));
+        // Profile choices → SetProfile.
         assert!(matches!(
             item_to_click(
                 &ContextMenuItem::ProfileChoice {
@@ -43889,16 +44161,11 @@ mod tests {
         assert!(item_to_click(&ContextMenuItem::Separator, 0).is_none());
     }
 
-    /// Theme + profile choice leaves must be keyboard-
-    /// navigable, otherwise drilling into a Theme ▸ / Profile ▸ submenu
-    /// leaves ↑/↓ unable to land on any row.
+    /// Profile choice leaves must be keyboard-navigable, otherwise drilling
+    /// into a Profile ▸ submenu leaves ↑/↓ unable to land on any row.
     #[test]
-    fn theme_and_profile_choices_are_keyboard_navigable() {
+    fn profile_choices_are_keyboard_navigable() {
         use super::{ContextMenuItem, item_is_dispatchable};
-        assert!(item_is_dispatchable(&ContextMenuItem::ThemeChoice {
-            label: "Nord".into(),
-            theme: "Nord".into()
-        }));
         assert!(item_is_dispatchable(&ContextMenuItem::ProfileChoice {
             label: "work".into(),
             profile: "work".into()
@@ -44037,15 +44304,6 @@ mod tests {
         assert_eq!(
             context_menu_item_columns(&submenu, "ignored"),
             "主题 ▸".width()
-        );
-
-        let theme = ContextMenuItem::ThemeChoice {
-            label: "長いテーマ".into(),
-            theme: "long-theme".into(),
-        };
-        assert_eq!(
-            context_menu_item_columns(&theme, "ignored"),
-            "長いテーマ".width()
         );
 
         let profile = ContextMenuItem::ProfileChoice {
@@ -46232,6 +46490,295 @@ mod picker_text_tests {
         assert_eq!(
             ssh_picker_list("zzz", 0, &hosts, &EN).rows[0].label,
             "No configured host matches"
+        );
+    }
+}
+
+#[cfg(test)]
+mod theme_picker_tests {
+    use super::{
+        begin_theme_picker, end_modal_composition, modal_accessibility_projection,
+        picker_overlay_context_menu, production_source, theme_picker_list, theme_picker_matches,
+        theme_picker_selection, theme_picker_start, theme_preview_change,
+    };
+    use crate::mux::Mux;
+    use crate::window_state::{ImePreeditOwner, ImePreeditSession, ThemePickerState, WindowState};
+    use kettle_config::Theme;
+    use kettle_i18n::{Language, Translator};
+
+    const EN: Translator = Translator::new(Language::En);
+    const ES: Translator = Translator::new(Language::Es);
+
+    fn state(query: &str, selected: usize, opened_on: &str) -> ThemePickerState {
+        ThemePickerState {
+            query: query.to_string(),
+            selected,
+            opened_on: opened_on.to_string(),
+        }
+    }
+
+    /// With no query the picker lists the opening theme's appearance first, in
+    /// look order, and the other appearance after it, so the arrows step
+    /// between similar palettes and cross from dark to light only at the end.
+    #[test]
+    fn an_empty_query_lists_the_opening_appearance_first_in_look_order() {
+        for opened_on in ["TokyoNight Night", "TokyoNight Day"] {
+            let dark = Theme::by_name(opened_on).is_dark();
+            let matches = theme_picker_matches("", opened_on);
+            let names: Vec<&str> = matches.iter().map(|(name, _)| *name).collect();
+            let first = Theme::look_order(dark);
+            assert_eq!(names.len(), Theme::list().len());
+            assert_eq!(&names[..first.len()], first, "{opened_on}");
+            assert_eq!(
+                &names[first.len()..],
+                Theme::look_order(!dark),
+                "{opened_on}"
+            );
+            for (name, is_dark) in &matches {
+                assert_eq!(Theme::by_name(name).is_dark(), *is_dark, "{name}");
+            }
+            assert_eq!(names[theme_picker_start(opened_on)], opened_on);
+            // A blank query is no query.
+            assert_eq!(theme_picker_matches("   ", opened_on), matches);
+        }
+    }
+
+    #[test]
+    fn a_query_ranks_matching_themes_and_says_when_none_match() {
+        // "Dracula+" scores the same and comes first in look order, but the
+        // theme the query names exactly wins.
+        let matches = theme_picker_matches("dracula", "TokyoNight Night");
+        assert_eq!(matches.first().map(|(name, _)| *name), Some("Dracula"));
+        assert!(matches.iter().any(|(name, _)| *name == "Dracula+"));
+        for (name, _) in &matches {
+            assert!(
+                kettle_config::fuzzy::score("dracula", name).is_some(),
+                "{name}"
+            );
+        }
+        assert!(matches.len() < Theme::list().len());
+
+        let none = theme_picker_list("zzqqxxjj", 3, "TokyoNight Night", &ES);
+        assert_eq!(none.rows.len(), 1);
+        assert_eq!(none.rows[0].label, "Ningún tema coincide");
+        assert!(!none.rows[0].enabled);
+        assert_eq!(
+            theme_picker_list("zzqqxxjj", 0, "TokyoNight Night", &EN).rows[0].label,
+            "No matching theme"
+        );
+        assert_eq!(
+            theme_picker_selection(&state("zzqqxxjj", 3, "TokyoNight Night")),
+            None
+        );
+    }
+
+    /// The theme the picker opened on keeps its tick while the preview changes
+    /// the live theme, and every row names its appearance.
+    #[test]
+    fn rows_tick_the_opening_theme_and_name_their_appearance() {
+        let list = theme_picker_list("tokyonight", 0, "TokyoNight Night", &EN);
+        assert!(list.rows.len() > 1);
+        for row in &list.rows {
+            let appearance = row.hint.strip_prefix("✓ ").unwrap_or(&row.hint);
+            assert_eq!(row.hint.starts_with("✓ "), row.label == "TokyoNight Night");
+            let expected = if Theme::by_name(&row.label).is_dark() {
+                "dark"
+            } else {
+                "light"
+            };
+            assert_eq!(appearance, expected, "{}", row.label);
+        }
+        let es = theme_picker_list("tokyonight", 0, "TokyoNight Night", &ES);
+        let hint = |name: &str| {
+            es.rows
+                .iter()
+                .find(|row| row.label == name)
+                .map(|row| row.hint.as_str())
+        };
+        assert_eq!(hint("TokyoNight Night"), Some("✓ oscuro"));
+        assert_eq!(hint("TokyoNight Day"), Some("claro"));
+    }
+
+    fn live(name: &str) -> (String, Theme) {
+        (name.to_string(), Theme::by_name(name))
+    }
+
+    /// Apply the preview's next change as the App would, returning the theme
+    /// the window then wears.
+    fn settle(ws: &mut WindowState, wearing: &str) -> String {
+        theme_preview_change(ws, wearing)
+            .map(|(name, _)| name)
+            .unwrap_or_else(|| wearing.to_string())
+    }
+
+    /// The picker previews its selection, shows its opening theme while
+    /// nothing matches without dropping it, and puts it back on Esc.
+    /// Reopening over a running preview opens on the theme from before it.
+    #[test]
+    fn the_preview_restores_the_theme_the_picker_opened_on() {
+        let opened = "TokyoNight Night";
+        let mut ws = WindowState::new(0, false, Mux::new());
+        assert!(begin_theme_picker(&mut ws, live(opened)).is_none());
+        let mut wearing = settle(&mut ws, opened);
+        assert_eq!(wearing, opened, "it opens on the current theme");
+
+        ws.theme_picker_input.as_mut().unwrap().selected += 1;
+        wearing = settle(&mut ws, &wearing);
+        let previewed = wearing.clone();
+        assert_ne!(previewed, opened, "a step previews the next theme");
+
+        // Opening again (from the palette, say) cancels the running preview.
+        ws.theme_picker_input = None;
+        let restore = begin_theme_picker(&mut ws, live(&wearing));
+        assert_eq!(restore.map(|(name, _)| name).as_deref(), Some(opened));
+        wearing = opened.to_string();
+        let state = ws.theme_picker_input.as_ref().unwrap();
+        assert_eq!(
+            state.opened_on, opened,
+            "the new picker ticks the theme from before"
+        );
+        assert_eq!(theme_picker_selection(state), Some(opened));
+
+        // Nothing matches: the window wears the opening theme again, and the
+        // baseline survives for Esc even if something else changes the theme.
+        ws.theme_picker_input.as_mut().unwrap().selected += 1;
+        wearing = settle(&mut ws, &wearing);
+        let state = ws.theme_picker_input.as_mut().unwrap();
+        state.query = "zzqqxxjj".into();
+        state.selected = 0;
+        wearing = settle(&mut ws, &wearing);
+        assert_eq!(wearing, opened);
+        assert_eq!(settle(&mut ws, "Dracula"), opened, "the baseline was kept");
+
+        // Esc: the picker closes and the opening theme comes back, once.
+        ws.theme_picker_input = None;
+        assert_eq!(settle(&mut ws, &previewed), opened);
+        assert!(ws.theme_preview.is_none());
+        assert!(theme_preview_change(&mut ws, opened).is_none());
+    }
+
+    /// Enter keeps the previewed theme: nothing puts the opening one back.
+    #[test]
+    fn a_kept_theme_stays() {
+        let mut ws = WindowState::new(0, false, Mux::new());
+        begin_theme_picker(&mut ws, live("TokyoNight Night"));
+        ws.theme_picker_input.as_mut().unwrap().selected += 1;
+        let kept = settle(&mut ws, "TokyoNight Night");
+        // `commit_theme` drops the baseline, then the picker closes.
+        ws.theme_preview = None;
+        ws.theme_picker_input = None;
+        assert!(theme_preview_change(&mut ws, &kept).is_none());
+    }
+
+    /// A composition the picker owned ends when it closes, so a late Commit
+    /// cannot type into the terminal; the owner marker stays to recognise it.
+    #[test]
+    fn closing_the_picker_ends_its_composition() {
+        let mut ws = WindowState::new(0, false, Mux::new());
+        ws.ime_preedit = Some(("ka".into(), None));
+        ws.ime_preedit_owner = Some(ImePreeditSession {
+            owner: ImePreeditOwner::Other,
+            generation: ws.ime_focus_generation,
+        });
+        let before = ws.ime_focus_generation;
+        end_modal_composition(&mut ws);
+        assert_ne!(ws.ime_focus_generation, before);
+        assert!(ws.ime_preedit.is_none());
+        assert!(ws.ime_preedit_owner.is_some());
+
+        let src = production_source();
+        let handler = src
+            .split("fn theme_picker_key(")
+            .nth(1)
+            .and_then(|body| body.split("\n    fn ").next())
+            .expect("theme picker key handler");
+        for arm in [
+            "Key::Named(NamedKey::Escape) =>",
+            "Key::Named(NamedKey::Enter) =>",
+        ] {
+            let body = handler
+                .split(arm)
+                .nth(1)
+                .and_then(|rest| rest.split("Key::").next())
+                .unwrap_or_else(|| panic!("{arm} arm"));
+            assert!(
+                body.contains("end_modal_composition(ws);"),
+                "{arm} closes the picker, so it must end its composition"
+            );
+        }
+        // Holding the Enter that opened the picker from Settings must not
+        // pick a theme: its repeats are gated like the palette's.
+        let branch = src
+            .split(
+                "if ws.theme_picker_input.is_some() {\n                    if !modal_repeat_is_inert(",
+            )
+            .nth(1)
+            .and_then(|rest| rest.split("return;").next())
+            .expect("the theme picker's key branch gates repeats");
+        assert!(branch.contains("ModalRepeat::Palette,"));
+        assert!(branch.contains("self.theme_picker_key(ws, &event.logical_key, text);"));
+    }
+
+    /// Screen readers hear the picker's name in the UI's language, and each
+    /// row's appearance (and the opening theme's tick) as its description.
+    #[test]
+    fn the_picker_reads_out_its_name_and_each_rows_appearance() {
+        let projection = |tr: &Translator| {
+            let list = theme_picker_list("tokyonight", 0, "TokyoNight Night", tr);
+            let overlay = kettle_render::Overlay {
+                theme_picker_query: Some("tokyonight".into()),
+                context_menu: picker_overlay_context_menu(
+                    [None, Some(list), None, None],
+                    (800.0, 600.0),
+                    (8.0, 16.0),
+                ),
+                ..kettle_render::Overlay::default()
+            };
+            modal_accessibility_projection(&overlay, (800.0, 600.0), tr)
+        };
+        let es = projection(&ES);
+        assert!(
+            es.nodes
+                .iter()
+                .any(|(_, node)| node.label() == Some("Selector de temas"))
+        );
+        let described = |name: &str| {
+            es.nodes
+                .iter()
+                .find(|(_, node)| node.label() == Some(name))
+                .and_then(|(_, node)| node.description().map(str::to_string))
+        };
+        assert_eq!(described("TokyoNight Night").as_deref(), Some("✓ oscuro"));
+        assert_eq!(described("TokyoNight Day").as_deref(), Some("claro"));
+        assert!(
+            projection(&EN)
+                .nodes
+                .iter()
+                .any(|(_, node)| node.label() == Some("Theme picker"))
+        );
+    }
+
+    /// The preview and Enter use the row the list highlights, including when
+    /// the selection is past the end of a narrowed list.
+    #[test]
+    fn the_selection_is_the_highlighted_row() {
+        let opened_on = "TokyoNight Night";
+        for (query, selected) in [
+            ("", theme_picker_start(opened_on) + 1),
+            ("tokyo", 2),
+            ("tokyo", 999),
+        ] {
+            let picked = theme_picker_selection(&state(query, selected, opened_on));
+            let list = theme_picker_list(query, selected, opened_on, &EN);
+            assert_eq!(
+                picked,
+                Some(list.rows[list.selected].label.as_str()),
+                "{query:?} {selected}"
+            );
+        }
+        assert_eq!(
+            theme_picker_selection(&state("", theme_picker_start(opened_on), opened_on)),
+            Some(opened_on)
         );
     }
 }
