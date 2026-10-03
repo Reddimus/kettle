@@ -164,6 +164,8 @@ pub(crate) struct Shared {
     /// Those of them not reaped yet, kept so they are reaped once they do
     /// exit, at the next check or render.
     abandoned: Mutex<Vec<Box<dyn WorkerProcess>>>,
+    /// Starts still running after their attempt stopped waiting.
+    pub(crate) late_spawns: AtomicUsize,
 }
 
 #[derive(Default)]
@@ -218,6 +220,7 @@ impl WorkerClient {
                 state: Mutex::new(State::default()),
                 stuck: AtomicUsize::new(0),
                 abandoned: Mutex::new(Vec::new()),
+                late_spawns: AtomicUsize::new(0),
             }),
             budgets,
             rendering: Mutex::new(()),

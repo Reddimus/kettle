@@ -7,6 +7,7 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -19,6 +20,10 @@ use crate::{BuildId, FailureCode, HandshakeOutcome, Hello, Job, JobKind, Rendere
 /// reader: an exit can come with no frame, when something the worker started
 /// still holds its stdout.
 const TICK: Duration = Duration::from_millis(25);
+
+/// The signal a kill sends. A worker reaped with any other status ended by
+/// itself before the kill landed.
+const SIGKILL: i32 = 9;
 
 /// The time each stage may take.
 #[derive(Clone, Copy, Debug)]
@@ -117,13 +122,15 @@ pub(crate) fn attempt(
 
     match worker.next(&received, ready_until) {
         Err(Wait::Timeout) => {
-            // An exit with nothing said is not a cold start; it is not retried.
+            // An exit with nothing said, even one just before the kill, is
+            // not a cold start: it is not retried.
             if let Some(exit) = worker.own_exit() {
                 return Ok(Err(exit_failure(exit)));
             }
             return match worker.kill() {
+                Stopped::Exited(exit) => Ok(Err(exit_failure(exit))),
                 Stopped::Stuck => Ok(Err(FailureCode::RenderTimeout)),
-                _ => Err(NeverReady),
+                Stopped::Killed => Err(NeverReady),
             };
         }
         Ok(Event::First(Ok(Some(Frame::Ready(ready))), _)) => {
@@ -197,6 +204,11 @@ fn spawn_within(
     until: Instant,
     budgets: Budgets,
 ) -> Result<SpawnedWorker, FailureCode> {
+    // A start that hung once would hang again: while one is outstanding, no
+    // other begins, so hung starts cannot pile up.
+    if shared.late_spawns.load(Ordering::Acquire) > 0 {
+        return Err(FailureCode::WorkerUnavailable);
+    }
     let slot = Arc::new((Mutex::new(SpawnSlot::Waiting), Condvar::new()));
     let helper_slot = Arc::clone(&slot);
     let helper_shared = Arc::clone(shared);
@@ -212,6 +224,7 @@ fn spawn_within(
                 if let Ok(late) = spawned {
                     Running::new(late.process, &helper_shared, budgets).kill();
                 }
+                helper_shared.late_spawns.fetch_sub(1, Ordering::AcqRel);
                 return;
             }
             *state = SpawnSlot::Done(spawned);
@@ -231,6 +244,7 @@ fn spawn_within(
         let now = Instant::now();
         if now >= until {
             *state = SpawnSlot::Abandoned;
+            shared.late_spawns.fetch_add(1, Ordering::AcqRel);
             return Err(FailureCode::RenderTimeout);
         }
         state = changed
@@ -357,12 +371,24 @@ impl<'a> Running<'a> {
         let Some(mut process) = self.process.take() else {
             return Stopped::Killed;
         };
-        process.kill();
-        if poll(process.as_mut(), self.budgets.cleanup).is_some() {
-            return Stopped::Killed;
+        // It may have exited by itself a moment ago; that exit is its own.
+        if let Ok(Some(exit)) = process.try_wait() {
+            self.exited = Some((exit, Instant::now()));
+            return Stopped::Exited(exit);
         }
-        self.shared.abandon(process);
-        Stopped::Stuck
+        process.kill();
+        match poll(process.as_mut(), self.budgets.cleanup) {
+            Some(WorkerExit::Signal(SIGKILL) | WorkerExit::Lost) => Stopped::Killed,
+            // Reaped with another status: it ended by itself as the kill went.
+            Some(exit) => {
+                self.exited = Some((exit, Instant::now()));
+                Stopped::Exited(exit)
+            }
+            None => {
+                self.shared.abandon(process);
+                Stopped::Stuck
+            }
+        }
     }
 }
 
@@ -549,6 +575,8 @@ mod tests {
         /// Whether it exits right after its output while something it
         /// started keeps stdout open (until its group is killed).
         exits_holding_stdout: bool,
+        /// Whether it exits by itself, with `exits`, just as a kill is sent.
+        exits_at_kill: bool,
     }
 
     impl Script {
@@ -559,6 +587,7 @@ mod tests {
                 exits: Some(exit),
                 killable: true,
                 exits_holding_stdout: false,
+                exits_at_kill: false,
             }
         }
         fn silent() -> Self {
@@ -568,6 +597,7 @@ mod tests {
                 exits: None,
                 killable: true,
                 exits_holding_stdout: false,
+                exits_at_kill: false,
             }
         }
         /// Writes `output` and exits with `exit`, leaving stdout open.
@@ -589,6 +619,7 @@ mod tests {
         /// For an unkillable worker: set once it finally exits.
         released: Arc<std::sync::atomic::AtomicBool>,
         reaped: Arc<AtomicUsize>,
+        exits_at_kill: bool,
     }
 
     impl FakeProcess {
@@ -620,7 +651,9 @@ mod tests {
             Ok(exit)
         }
         fn kill(&mut self) {
-            if self.killable {
+            if self.exits_at_kill {
+                *self.done.lock().unwrap() = true;
+            } else if self.killable {
                 self.free_stdout();
             }
             self.kills.fetch_add(1, Ordering::SeqCst);
@@ -632,8 +665,9 @@ mod tests {
         scripts: Mutex<VecDeque<Script>>,
         spawns: AtomicUsize,
         kills: Arc<AtomicUsize>,
-        /// How long each spawn takes.
+        /// How long each spawn takes, and how many have begun.
         spawn_delay: Mutex<Duration>,
+        spawn_calls: AtomicUsize,
         released: Arc<std::sync::atomic::AtomicBool>,
         reaped: Arc<AtomicUsize>,
         /// Threads that guarded their pipe writes, and writes from any other.
@@ -701,7 +735,9 @@ mod tests {
             Ok(())
         }
         fn spawn(&self, _: &Path) -> std::io::Result<SpawnedWorker> {
-            std::thread::sleep(*self.spawn_delay.lock().unwrap());
+            self.spawn_calls.fetch_add(1, Ordering::SeqCst);
+            let delay = *self.spawn_delay.lock().unwrap();
+            std::thread::sleep(delay);
             self.spawns.fetch_add(1, Ordering::SeqCst);
             let script = self
                 .scripts
@@ -729,6 +765,7 @@ mod tests {
                     kills: Arc::clone(&self.kills),
                     released: Arc::clone(&self.released),
                     reaped: Arc::clone(&self.reaped),
+                    exits_at_kill: script.exits_at_kill,
                 }),
                 stdin: Box::new(CheckedStdin {
                     inner: stdin_writer,
@@ -968,6 +1005,61 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn a_spawn_still_hanging_blocks_the_next() {
+        let output = reply(&[ready(build_id()), frame(&Frame::Rendered(rendered()))]);
+        let fake = Fake::new(vec![
+            Script::silent(),
+            Script::replies(output, WorkerExit::Code(0)),
+        ]);
+        *fake.spawn_delay.lock().unwrap() = FAST.ready * 3;
+        let client = client(&fake);
+        assert_eq!(client.render(&job(1)), Err(FailureCode::RenderTimeout));
+        // The first start is still hung: no second one begins.
+        assert_eq!(client.render(&job(1)), Err(FailureCode::WorkerUnavailable));
+        assert_eq!(fake.spawn_calls.load(Ordering::SeqCst), 1);
+        // Once it returns (and its worker is killed), starts resume.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while fake.kills.load(Ordering::SeqCst) == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "the late worker was never killed"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        *fake.spawn_delay.lock().unwrap() = Duration::ZERO;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match client.render(&job(1)) {
+                Ok(result) => {
+                    assert_eq!(result, rendered());
+                    break;
+                }
+                Err(FailureCode::WorkerUnavailable) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn an_exit_as_the_startup_deadline_passes_is_its_own_answer() {
+        // Silent until the deadline, then it exits 9 by itself just as the
+        // kill goes out: another build, not a cold start to retry.
+        let script = Script {
+            exits: Some(WorkerExit::Code(9)),
+            exits_at_kill: true,
+            ..Script::silent()
+        };
+        let fake = Fake::new(vec![script]);
+        assert_eq!(
+            client(&fake).render(&job(1)),
+            Err(FailureCode::RestartRequired)
+        );
+        assert_eq!(fake.spawns.load(Ordering::SeqCst), 1);
     }
 
     #[test]

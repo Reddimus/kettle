@@ -106,6 +106,11 @@ fn guard_pipe_writes() -> std::io::Result<()> {
 /// its own.
 #[cfg(unix)]
 fn spawn(path: &Path) -> std::io::Result<SpawnedWorker> {
+    if children_reap_themselves()? {
+        return Err(std::io::Error::other(
+            "SIGCHLD is ignored, so a worker could be reaped before its group is killed",
+        ));
+    }
     let mut child = kettle_media::client::worker_command(path).spawn()?;
     let pipes = (child.stdin.take(), child.stdout.take());
     let mut process = GroupProcess {
@@ -126,6 +131,22 @@ fn spawn(path: &Path) -> std::io::Result<SpawnedWorker> {
         stdin: Box::new(stdin),
         stdout: Box::new(stdout),
     })
+}
+
+/// Whether exited children reap themselves here (SIGCHLD ignored, or
+/// `SA_NOCLDWAIT`), as a parent can arrange before starting Kettle. A worker
+/// could then vanish and its process group id be reused before Kettle sees it
+/// exit, so no worker is started.
+#[cfg(unix)]
+fn children_reap_themselves() -> std::io::Result<bool> {
+    // SAFETY: an all-zero sigaction is a valid value for the query to fill,
+    // and a null new action changes nothing.
+    let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
+    // SAFETY: as above.
+    if unsafe { libc::sigaction(libc::SIGCHLD, std::ptr::null(), &mut current) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(current.sa_sigaction == libc::SIG_IGN || current.sa_flags & libc::SA_NOCLDWAIT != 0)
 }
 
 /// `F_SETNOSIGPIPE` from `<sys/fcntl.h>`, which the `libc` crate lacks for
@@ -181,9 +202,17 @@ impl WorkerProcess for GroupProcess {
     }
 
     fn kill(&mut self) {
-        if !self.reaped {
-            self.kill_group();
+        if self.reaped {
+            return;
         }
+        // Something else reaped it: its group id is no longer ours.
+        if let Err(error) = self.exited()
+            && error.raw_os_error() == Some(libc::ECHILD)
+        {
+            self.reaped = true;
+            return;
+        }
+        self.kill_group();
     }
 }
 
@@ -1015,15 +1044,27 @@ mod tests {
             unsafe { libc::signal(libc::SIGCHLD, libc::SIG_IGN) };
             let directory = tempfile::tempdir().unwrap();
             let path = script(directory.path(), "exit 0");
-            let mut process = GroupProcess {
+            // No worker is started while children reap themselves.
+            assert!(spawn(&path).is_err());
+            // One started anyway is lost once reaped, and never signalled:
+            // neither asking first nor killing first touches its group.
+            let mut asked = GroupProcess {
                 child: kettle_media::client::worker_command(&path).spawn().unwrap(),
                 reaped: false,
             };
-            assert_eq!(wait_exit(&mut process), WorkerExit::Lost);
-            assert!(
-                process.reaped,
-                "a lost worker's group must not be signalled"
-            );
+            assert_eq!(wait_exit(&mut asked), WorkerExit::Lost);
+            assert!(asked.reaped, "a lost worker's group must not be signalled");
+            let mut killed = GroupProcess {
+                child: kettle_media::client::worker_command(&path).spawn().unwrap(),
+                reaped: false,
+            };
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while killed.exited().is_ok() {
+                assert!(Instant::now() < deadline, "never reaped elsewhere");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            killed.kill();
+            assert!(killed.reaped, "a lost worker's group must not be signalled");
         }
 
         #[test]

@@ -206,7 +206,8 @@ file. The caller's thread watches the clock:
 - **Ready within 5 s of the start, the start itself included.** The worker
   is started on a helper thread, so a start that blocks (an executable on a
   stalled network filesystem) cannot hold the caller; a worker that starts
-  too late is killed by the helper. A worker that never answers is killed
+  too late is killed by the helper, and while such a start is still running
+  no other begins. A worker that never answers is killed
   and, once reaped, retried once; total startup is at most 10 s. A Ready from
   another build is `RestartRequired`, never retried. Before a job, only a
   handshake refusal (`RestartRequired`, `UnknownMethod`) counts, and only with
@@ -228,12 +229,17 @@ file. The caller's thread watches the clock:
   something the worker started still holds its stdout and no frame comes.
 
 Stopping a worker gives it 250 ms to exit by itself, then kills its process
-group and gives it 250 ms more. The platform kills the group before it reaps
+group and gives it 250 ms more. A worker reaped after the kill with any status
+but `SIGKILL` ended by itself first, and that exit is its answer, so one that
+exits 9 just as the startup deadline passes is `RestartRequired`, not a cold
+start to retry. The platform kills the group before it reaps
 the worker, even one that exited by itself (it checks with `waitid(WNOWAIT)`
 first), so nothing the worker started outlives it and a process group id that
-could already be someone else's is never signalled. A worker that something
-else reaped (an inherited ignored `SIGCHLD` does that) reads as lost and is
-never signalled again. A worker that will not exit after the kill, as one
+could already be someone else's is never signalled. No worker starts while
+exited children reap themselves (an inherited ignored `SIGCHLD`, or
+`SA_NOCLDWAIT`), since one could vanish and its group id be reused before
+Kettle sees it exit; a worker something else reaped anyway reads as lost and
+is never signalled again, by a kill or otherwise. A worker that will not exit after the kill, as one
 stuck in uninterruptible I/O on a network filesystem can, is kept and
 counted, and reaped at a later check once it does exit; after two, media is
 off for the life of the process (`stuck_workers`). The pipe threads end when
