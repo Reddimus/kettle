@@ -34,8 +34,8 @@ pub(crate) fn sweep_fds_and_disable_dumping() -> io::Result<()> {
 
 /// The worker's resource limits: CPU time, no regular-file growth, few
 /// descriptors, and on Linux an address-space ceiling (macOS does not enforce
-/// one). Each is lowered to its value, or to an inherited hard limit that is
-/// already lower, never raised; failing to set one refuses setup.
+/// one). Each is lowered to its value, or to an inherited soft or hard limit
+/// that is already lower, never raised; failing to set one refuses setup.
 pub(crate) fn install_limits() -> io::Result<()> {
     #[cfg(target_os = "linux")]
     set_limit(libc::RLIMIT_AS, 1 << 30)?;
@@ -54,7 +54,8 @@ pub(crate) fn set_limit(resource: Resource, value: libc::rlim_t) -> io::Result<(
     if unsafe { libc::getrlimit(resource, &mut inherited) } != 0 {
         return Err(io::Error::last_os_error());
     }
-    let value = value.min(inherited.rlim_max);
+    // Never above either inherited limit: a lower soft limit stays too.
+    let value = value.min(inherited.rlim_cur).min(inherited.rlim_max);
     let limit = libc::rlimit {
         rlim_cur: value,
         rlim_max: value,
@@ -90,40 +91,35 @@ fn close_above_stderr() -> io::Result<()> {
         return Ok(());
     }
     // Kernels before 5.9 lack close_range, and some seccomp policies refuse
-    // it: close each number below the hard descriptor limit instead.
-    close_each_below(descriptor_ceiling()?)
+    // it: close each descriptor /proc lists instead. Not each number below
+    // the descriptor limit, which a parent can lower below a descriptor it
+    // already holds.
+    close_listed()
 }
 
-/// The most descriptors to sweep one by one. A higher or unlimited hard limit
-/// refuses setup rather than leave descriptors open.
 #[cfg(target_os = "linux")]
-const MAX_SWEPT_DESCRIPTORS: libc::rlim_t = 1 << 20;
+pub(crate) fn close_listed() -> io::Result<()> {
+    open_descriptors()?
+        .into_iter()
+        .filter(|&fd| fd > 2)
+        .try_for_each(close_unowned)
+}
 
+/// The descriptors /proc lists for this process. The listing's own
+/// descriptor is among them; it is closed again before they are, and then
+/// reads as not open.
 #[cfg(target_os = "linux")]
-fn descriptor_ceiling() -> io::Result<c_int> {
-    let mut limit = libc::rlimit {
-        rlim_cur: 0,
-        rlim_max: 0,
-    };
-    // SAFETY: `limit` is a valid rlimit for the call to fill.
-    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
-        return Err(io::Error::last_os_error());
+fn open_descriptors() -> io::Result<Vec<c_int>> {
+    let mut listed = Vec::new();
+    for entry in std::fs::read_dir("/proc/self/fd")? {
+        let name = entry?.file_name();
+        let fd = name
+            .to_str()
+            .and_then(|name| name.parse::<c_int>().ok())
+            .ok_or_else(|| io::Error::other("unexpected /proc/self/fd entry"))?;
+        listed.push(fd);
     }
-    sweep_ceiling(limit.rlim_max)
-}
-
-/// How many descriptor numbers to sweep for a hard limit of `hard`.
-#[cfg(target_os = "linux")]
-pub(crate) fn sweep_ceiling(hard: libc::rlim_t) -> io::Result<c_int> {
-    if hard == libc::RLIM_INFINITY || hard > MAX_SWEPT_DESCRIPTORS {
-        return Err(io::Error::other("descriptor limit too high to sweep"));
-    }
-    c_int::try_from(hard).map_err(io::Error::other)
-}
-
-#[cfg(target_os = "linux")]
-pub(crate) fn close_each_below(ceiling: c_int) -> io::Result<()> {
-    (3..ceiling).try_for_each(close_unowned)
+    Ok(listed)
 }
 
 /// macOS has no close_range, but the kernel lists a process's descriptors.
@@ -254,23 +250,18 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn the_fallback_sweep_closes_everything_below_the_limit() {
-        if !in_child("early_unix::tests::the_fallback_sweep_closes_everything_below_the_limit") {
+    fn the_fallback_sweep_closes_descriptors_above_the_limit() {
+        if !in_child("early_unix::tests::the_fallback_sweep_closes_descriptors_above_the_limit") {
             return;
         }
-        inherited_at(40);
-        close_each_below(descriptor_ceiling().unwrap()).unwrap();
-        assert!(!is_open(40));
-        assert!(is_open(2));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn an_unbounded_descriptor_limit_refuses_the_fallback_sweep() {
-        assert_eq!(sweep_ceiling(4096).unwrap(), 4096);
-        assert_eq!(sweep_ceiling(1 << 20).unwrap(), 1 << 20);
-        assert!(sweep_ceiling((1 << 20) + 1).is_err());
-        assert!(sweep_ceiling(libc::RLIM_INFINITY).is_err());
+        // A descriptor the parent opened before lowering its limit below it.
+        inherited_at(200);
+        set_limit(libc::RLIMIT_NOFILE, 32).unwrap();
+        close_listed().unwrap();
+        assert!(!is_open(200));
+        for fd in 0..=2 {
+            assert!(is_open(fd), "stdio {fd} was closed");
+        }
     }
 
     #[test]
@@ -278,15 +269,23 @@ mod tests {
         if !in_child("early_unix::tests::limits_are_lowered_never_raised") {
             return;
         }
-        // An inherited hard limit below the worker's own stays.
+        // An inherited hard limit below the worker's own stays, and so does
+        // a lower soft limit under a higher hard one.
         set_limit(libc::RLIMIT_NOFILE, 20).unwrap();
+        let cpu = limit(libc::RLIMIT_CPU);
+        let lower = libc::rlimit {
+            rlim_cur: 2,
+            rlim_max: cpu.rlim_max,
+        };
+        // SAFETY: `lower` is a valid rlimit the call only reads.
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_CPU, &lower) }, 0);
         install_limits().unwrap();
         let expect = |resource: Resource, value: libc::rlim_t| {
             let limit = limit(resource);
             assert_eq!((limit.rlim_cur, limit.rlim_max), (value, value));
         };
         expect(libc::RLIMIT_NOFILE, 20);
-        expect(libc::RLIMIT_CPU, 5);
+        expect(libc::RLIMIT_CPU, 2);
         expect(libc::RLIMIT_FSIZE, 0);
         #[cfg(target_os = "linux")]
         expect(libc::RLIMIT_AS, 1 << 30);

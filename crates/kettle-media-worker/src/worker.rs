@@ -118,8 +118,8 @@ fn refuse(output: &mut impl Write, read: Result<Option<Frame>, WireError>) -> i3
         Err(WireError::Validation(ValidationError::TooLarge)) => {
             reply(output, FailureCode::TooLarge, EXIT_PROTOCOL)
         }
-        // A failed or cut-off pipe has no one listening.
-        Err(WireError::Io | WireError::Truncated) => EXIT_PROTOCOL,
+        // A frame cut short, by a parent that may still be reading, is
+        // answered like any other bad frame.
         _ => reply(output, FailureCode::BadParams, EXIT_PROTOCOL),
     }
 }

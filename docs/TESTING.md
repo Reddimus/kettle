@@ -784,21 +784,26 @@ formatted (`<version> (<hash>)`) identities.
 Unit tests (`src/early_unix.rs`) run in a child of the test binary, so
 changing limits and descriptors disturbs nothing else: the early sweep closes
 inherited pipe ends at 3, 17 and 200 and keeps stdio, sets the core limit to
-0 and, on Linux, clears the dumpable flag; the Linux fallback sweep closes
-below the hard descriptor limit, and an unlimited or over-2^20 limit refuses
-it; and the resource limits land at their values while an inherited hard
-limit below one stays (never raised). `worker_early_setup_precedes_all_reads`
-reads `main`'s production source: the sweep is its first statement, then the
-panic hook, the limits, the watchdog, the one stdout writer and `serve`, and
-no source prints, reads arguments, the environment or files, or touches
-stderr outside the fixed panic line.
+0 and, on Linux, clears the dumpable flag; the Linux fallback sweep closes a
+descriptor above a hard limit lowered after it was opened; and the resource
+limits land at their values while a lower inherited hard limit, or a lower
+soft limit under a higher hard one, stays (never raised).
+`worker_early_setup_precedes_all_reads` reads the production source as code
+alone (`kettle_test_support::code_only` blanks comments and literals, so a
+mention cannot stand in for a call): the sweep is `main`'s first statement
+and closing descriptors the sweep's first act, then come the panic hook, the
+limits, the watchdog, the one stdout writer and `serve`, each once; no source
+prints, reads arguments, the environment or files (only the Linux fallback
+lists `/proc/self/fd`), or touches stderr outside the fixed panic line.
 
 `tests/process_boundary.rs` drives the built binary: Ready carries this
 build's identity and a job is answered `WorkerUnavailable`, with nothing else
 on stdout or stderr; a Hello from another source hash or version, and a
 header of another protocol version, are `RestartRequired` with exit 9;
-garbage, a job before Hello and a second Hello are `BadParams` with exit 2; a
-parent that closes stdin before Hello or after Ready ends the worker quietly;
+garbage, a job before Hello, a second Hello and a frame cut short in its
+header or payload (with stdin closed and stdout still read) are `BadParams`
+with exit 2; a parent that closes stdin before Hello or after Ready ends the
+worker quietly;
 the watchdog exits 4 after five silent seconds before Hello and after Ready;
 a slow parent within each phase still gets its answer, so Ready starts a new
 deadline; and a pipe left open at fd 40 by the parent is closed by the time
@@ -809,13 +814,14 @@ owned by root, so it is not dumpable (checked when not running as root). With
 `media worker panic` on stderr and no reply. The workspace commands do not
 enable that feature, so `just media-protocol-test` and ci.yml run it.
 
-Red checks: no sweep, a sweep after the hook, a sweep that closes nothing,
-core dumps left on, a non-dumpable flag left set, no CPU or address-space
-limit, limits that raise, a cut-short descriptor list, a fallback sweep that
-closes nothing, an unlimited ceiling accepted, a watchdog that never fires,
-phases sharing one deadline, a panic line with the payload, an uncompared
-build, frame skew read as garbage, and a second frame accepted each fail a
-test above.
+Red checks: no sweep, a sweep after the hook or not first in its function,
+a call moved with a comment left in its place, a sweep that closes nothing,
+core dumps left on, the dumpable flag left set, no CPU or address-space
+limit, limits that raise past a hard or soft limit, a cut-short descriptor
+list, a fallback sweep bounded by the descriptor limit, a watchdog that never
+fires, phases sharing one deadline, a panic line with the payload, an
+uncompared build, frame skew read as garbage, a second frame accepted and a
+truncated frame left unanswered each fail a test above.
 
 ### kettle-i18n
 

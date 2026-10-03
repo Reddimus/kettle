@@ -46,17 +46,42 @@ fn main() {
 
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 mod tests {
-    use kettle_test_support::production_source;
+    use kettle_test_support::{code_only, production_source};
+
+    /// The body of the first `fn {name}` in `code`, from its opening brace to
+    /// the matching close.
+    fn body<'a>(code: &'a str, name: &str) -> &'a str {
+        let start = code
+            .find(&format!("fn {name}"))
+            .unwrap_or_else(|| panic!("fn {name} is missing"));
+        let open = start + code[start..].find('{').expect("a body");
+        let mut depth = 0;
+        for (offset, byte) in code[open..].bytes().enumerate() {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &code[open + 1..open + offset];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("fn {name} is not closed")
+    }
 
     /// The order `main` must keep, and what the worker must never do: print
-    /// outside the framed writer, or read arguments, the environment or files.
+    /// outside the framed writer, or read arguments, the environment or
+    /// files. Matched against code alone: comments and strings are blanked,
+    /// so mentioning a call cannot stand in for making it.
     #[test]
     fn worker_early_setup_precedes_all_reads() {
-        let main = production_source(include_str!("main.rs"));
-        let body = main
-            .split("fn main() {")
-            .nth(1)
-            .expect("the Unix main is present");
+        let main = code_only(&production_source(include_str!("main.rs")));
+        let worker = code_only(&production_source(include_str!("worker.rs")));
+        let early = code_only(&production_source(include_str!("early_unix.rs")));
+
+        let unix_main = body(&main, "main()");
         let order = [
             "early_unix::sweep_fds_and_disable_dumping()",
             "std::panic::set_hook(",
@@ -67,21 +92,36 @@ mod tests {
         ];
         let positions: Vec<usize> = order
             .iter()
-            .map(|call| body.find(call).unwrap_or_else(|| panic!("{call} missing")))
+            .map(|call| {
+                assert_eq!(unix_main.matches(call).count(), 1, "{call} once");
+                unix_main.find(call).unwrap()
+            })
             .collect();
         assert!(
             positions.windows(2).all(|pair| pair[0] < pair[1]),
             "main must run {order:?} in that order"
         );
-        // The sweep is the first statement.
+        // The sweep is the first statement, and closing descriptors is the
+        // sweep's own first act.
         assert!(
-            body.trim_start()
+            unix_main
+                .trim_start()
                 .starts_with("if early_unix::sweep_fds_and_disable_dumping()")
         );
+        assert!(
+            body(&early, "sweep_fds_and_disable_dumping")
+                .trim_start()
+                .starts_with("close_above_stderr()?;")
+        );
 
-        let worker = production_source(include_str!("worker.rs"));
-        let early = production_source(include_str!("early_unix.rs"));
-        for (name, source) in [("main", &main), ("worker", &worker), ("early_unix", &early)] {
+        // The Linux fallback sweep may list /proc/self/fd; nothing else
+        // touches the filesystem.
+        let early_without_listing = early.replacen("std::fs::read_dir(", "", 1);
+        for (name, code) in [
+            ("main", main.as_str()),
+            ("worker", worker.as_str()),
+            ("early_unix", early_without_listing.as_str()),
+        ] {
             for forbidden in [
                 "println!",
                 "print!",
@@ -89,32 +129,27 @@ mod tests {
                 "eprint!",
                 "dbg!",
                 "std::env",
-                "env::args",
-                "env::var",
+                "env::",
+                "args()",
                 "std::fs",
+                "fs::",
                 "File::",
                 "OpenOptions",
             ] {
-                assert!(!source.contains(forbidden), "{name} uses {forbidden}");
+                assert!(!code.contains(forbidden), "{name} uses {forbidden}");
             }
         }
         // One writer owns stdout; stderr carries only the panic line.
-        assert_eq!(main.matches("io::stdout()").count(), 1);
+        assert_eq!(main.matches("stdout()").count(), 1);
         assert_eq!(
-            worker.matches("io::stdout()").count() + early.matches("io::stdout()").count(),
+            worker.matches("stdout()").count() + early.matches("stdout()").count(),
             0
         );
-        assert_eq!(
-            main.matches("io::stderr()").count() + early.matches("io::stderr()").count(),
-            0
-        );
-        assert_eq!(worker.matches("io::stderr()").count(), 1);
-        let panic_report = worker
-            .split("fn report_panic() {")
-            .nth(1)
-            .and_then(|rest| rest.split("\n}").next())
-            .expect("report_panic is present");
-        assert!(panic_report.contains("io::stderr()"));
-        assert!(panic_report.contains("b\"media worker panic\\n\""));
+        assert_eq!(main.matches("stderr()").count(), 0);
+        assert_eq!(worker.matches("stderr()").count(), 1);
+        assert!(!early.contains("io::stderr()"));
+        assert!(body(&worker, "report_panic").contains("std::io::stderr().write_all("));
+        let source = production_source(include_str!("worker.rs"));
+        assert!(body(&source, "report_panic").contains(r#"write_all(b"media worker panic\n")"#));
     }
 }

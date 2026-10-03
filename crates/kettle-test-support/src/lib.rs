@@ -20,6 +20,34 @@ pub fn production_source(src: &str) -> String {
     })
 }
 
+/// `src` with every comment, and every string, byte-string and char literal,
+/// blanked to spaces (newlines kept, so offsets and lines still match), so a
+/// guard that looks for code cannot be satisfied by a comment or a string
+/// that only mentions it. Panics on unlexable input, like
+/// [`production_source`].
+pub fn code_only(src: &str) -> String {
+    let bytes = src.as_bytes();
+    let mut code = bytes.to_vec();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        match skip_lexeme(bytes, cursor) {
+            Ok(Some(end)) => {
+                for byte in &mut code[cursor..end] {
+                    if *byte != b'\n' {
+                        *byte = b' ';
+                    }
+                }
+                cursor = end;
+            }
+            Ok(None) => cursor += 1,
+            Err(()) => panic!("code_only could not lex this source"),
+        }
+    }
+    // Whole lexemes start and end at ASCII delimiters, so blanking them
+    // never splits a character.
+    String::from_utf8(code).expect("blanking whole lexemes keeps UTF-8")
+}
+
 fn strip_test_items(src: &str) -> Result<String, ()> {
     let bytes = src.as_bytes();
     let mut production = String::with_capacity(src.len());
@@ -794,7 +822,31 @@ mod sweep_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::production_source;
+    use super::{code_only, production_source};
+
+    #[test]
+    fn code_only_blanks_comments_and_literals_and_keeps_code() {
+        let src = "call(); // call_in_comment();\n/* nested /* call_b(); */ */ let s = \"call_c();\";\nlet r = r#\"call_d();\"#; let b = b'x'; let c = '\\n'; let l: &'static str = s;\nlet é = \"ü\";";
+        let code = code_only(src);
+        assert_eq!(code.len(), src.len());
+        assert_eq!(code.lines().count(), src.lines().count());
+        assert!(code.contains("call();"));
+        assert!(code.contains("let l: &'static str = s;"));
+        assert!(code.contains("let é ="));
+        for gone in [
+            "call_in_comment",
+            "call_b",
+            "call_c",
+            "call_d",
+            "'x'",
+            "\\n",
+            "ü",
+        ] {
+            assert!(!code.contains(gone), "{gone} survived: {code}");
+        }
+        let outcome = std::panic::catch_unwind(|| code_only("let s = \"unterminated;"));
+        assert!(outcome.is_err());
+    }
 
     const BEFORE: &str = "const BEFORE: usize = 1;\n";
     const AFTER: &str = "\nconst AFTER: usize = 2;\n";

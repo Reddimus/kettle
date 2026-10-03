@@ -198,6 +198,28 @@ fn garbage_and_frames_out_of_order_are_refused() {
 }
 
 #[test]
+fn a_frame_cut_short_is_still_answered() {
+    let whole = encode(&hello(own_build()), Direction::ParentToWorker).unwrap();
+    // Part of the header, then part of the payload, then the parent stops
+    // writing but keeps reading.
+    for cut in [5, whole.len() - 3] {
+        let mut child = worker();
+        send_bytes(&mut child, &whole[..cut]);
+        drop(child.stdin.take());
+        assert_eq!(
+            receive(&mut child),
+            failure(FailureCode::BadParams),
+            "cut at {cut}"
+        );
+        assert_eq!(
+            exit_code(&mut child, Duration::from_secs(10)),
+            EXIT_PROTOCOL
+        );
+        assert_eq!(finish(&mut child), "");
+    }
+}
+
+#[test]
 fn a_parent_that_leaves_ends_the_worker_quietly() {
     // Before Hello, and after Ready.
     let mut child = worker();

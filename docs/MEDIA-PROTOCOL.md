@@ -197,17 +197,17 @@ both binaries of one source answer with one `BuildId`. On Linux and macOS:
    environment variable or input is read, and before any thread, hook or
    library starts, it closes every descriptor above stderr and sets the core
    size limit to 0. Linux uses `close_range(3, ~0, 0)`; where the kernel or a
-   seccomp policy refuses that, it closes each number below the hard
-   descriptor limit, and refuses to start if that limit is unlimited or above
-   2^20. macOS has no `close_range`; it closes each descriptor the kernel lists
-   for the process (`proc_pidinfo(PROC_PIDLISTFDS)`), refusing a list that
-   fills its buffer. Linux also clears the dumpable flag
+   seccomp policy refuses that, it closes each descriptor `/proc/self/fd`
+   lists (not each number below the descriptor limit, which a parent can
+   lower below a descriptor it already holds). macOS has no `close_range`; it
+   closes each descriptor the kernel lists for the process
+   (`proc_pidinfo(PROC_PIDLISTFDS)`), refusing a list that fills its buffer. Linux also clears the dumpable flag
    (`PR_SET_DUMPABLE`). Only `EBADF` is tolerated; any other failure exits 8.
 2. **A panic hook** that writes `media worker panic` to stderr and nothing
    else: no message, payload, location, backtrace or crash file. The GUI will
    discard the worker's stderr anyway.
-3. **Resource limits**, each lowered to its value or to an inherited hard
-   limit that is already lower, never raised: CPU 5 s, regular-file size 0,
+3. **Resource limits**, each lowered to its value or to an inherited soft or
+   hard limit that is already lower, never raised: CPU 5 s, regular-file size 0,
    descriptors 32, and on Linux address space 1 GiB (macOS does not enforce
    one). Failure exits 8.
 4. **A watchdog thread** that exits 4 when the current phase's deadline
@@ -218,9 +218,9 @@ both binaries of one source answer with one `BuildId`. On Linux and macOS:
 5. **One job.** Hello must carry this build's identity. A different build, or
    a frame header of another protocol version, is answered
    `RestartRequired` and exits 9. Ready follows, then one Job and one reply,
-   then exit 0. A frame out of order or that does not decode is answered
-   `BadParams` (or `TooLarge`) and exits 2; a parent that closes stdin ends the
-   worker quietly with 0. stdout carries frames only, through one writer.
+   then exit 0. A frame out of order, cut short or that does not decode is
+   answered `BadParams` (or `TooLarge`) and exits 2; a parent that closes stdin
+   between frames ends the worker quietly with 0. stdout carries frames only, through one writer.
 
 This build answers every job `WorkerUnavailable`: no renderer is linked in.
 Exit codes 4, 8 and 9 mean what they mean for the video-preview worker. On
