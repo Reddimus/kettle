@@ -45821,6 +45821,9 @@ mod tests {
             fn spawn(&self, _: &Path) -> std::io::Result<kettle_media::client::SpawnedWorker> {
                 Err(std::io::ErrorKind::Unsupported.into())
             }
+            fn guard_pipe_writes(&self) -> std::io::Result<()> {
+                Ok(())
+            }
         }
 
         assert_eq!(

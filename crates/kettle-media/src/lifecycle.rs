@@ -6,24 +6,30 @@
 //! nothing followed the reply on its stdout.
 
 use std::io::{Read, Write};
-use std::path::Path;
-use std::sync::atomic::Ordering;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::client::{Shared, SpawnedWorker, WorkerExit, WorkerProcess};
 use crate::wire::{self, Direction, Frame, MAX_READY_FRAME_BYTES, WireError};
 use crate::{BuildId, FailureCode, HandshakeOutcome, Hello, Job, JobKind, Rendered, check_ready};
 
+/// How often the caller's thread looks at the worker while it waits for the
+/// reader: an exit can come with no frame, when something the worker started
+/// still holds its stdout.
+const TICK: Duration = Duration::from_millis(25);
+
 /// The time each stage may take.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Budgets {
-    /// From start until Ready.
+    /// From start (the spawn included) until Ready.
     pub(crate) ready: Duration,
     /// From the job's write until its reply; `None` takes each kind's own.
     pub(crate) render: Option<Duration>,
     /// How long a stopping worker gets to exit, first by itself and then
-    /// again after it is killed.
+    /// again after it is killed; and how long the reader gets to pass on
+    /// what the pipe held once the worker has exited.
     pub(crate) cleanup: Duration,
 }
 
@@ -47,10 +53,20 @@ impl Budgets {
 pub(crate) struct NeverReady;
 
 enum Event {
-    /// The first frame: Ready, or a refusal at startup.
-    First(Result<Option<Frame>, WireError>),
+    /// The first frame (Ready, or a refusal at startup) and, for a refusal,
+    /// whether end of file followed it with nothing between.
+    First(Result<Option<Frame>, WireError>, bool),
     /// The reply, and whether end of file followed it with nothing between.
     Reply(Result<Option<Frame>, WireError>, bool),
+}
+
+/// Why waiting for the reader brought no event.
+enum Wait {
+    /// The deadline passed, or the worker exited and the reader had nothing
+    /// more within the cleanup budget.
+    Timeout,
+    /// The reader thread is gone without a word.
+    ReaderGone,
 }
 
 /// How a stopped worker ended.
@@ -59,12 +75,13 @@ enum Stopped {
     Exited(WorkerExit),
     /// It was killed, and reaped.
     Killed,
-    /// It was killed and would not exit: it is left to a reaper and counted.
+    /// It was killed and would not exit: it is kept for later reaping and
+    /// counted.
     Stuck,
 }
 
 pub(crate) fn attempt(
-    shared: &Shared,
+    shared: &Arc<Shared>,
     path: &Path,
     build_id: &BuildId,
     job: &Job,
@@ -79,52 +96,58 @@ pub(crate) fn attempt(
     ) else {
         return Ok(Err(FailureCode::BadParams));
     };
-    let Ok(SpawnedWorker {
+    let ready_until = Instant::now() + budgets.ready;
+    let SpawnedWorker {
         process,
         stdin,
         stdout,
-    }) = shared.platform().spawn(path)
-    else {
-        return Ok(Err(FailureCode::WorkerUnavailable));
+    } = match spawn_within(shared, path, ready_until, budgets) {
+        Ok(spawned) => spawned,
+        Err(code) => return Ok(Err(code)),
     };
-    let started = Instant::now();
-    let mut worker = Running {
-        process: Some(process),
-        shared,
-        budgets,
-    };
+    let mut worker = Running::new(process, shared, budgets);
     let (events, received) = mpsc::channel();
     let (go, job_ready) = mpsc::channel();
-    if spawn_reader(stdout, events).is_err() || spawn_writer(stdin, hello_bytes, job_ready).is_err()
+    if spawn_reader(stdout, events).is_err()
+        || spawn_writer(Arc::clone(shared), stdin, hello_bytes, job_ready).is_err()
     {
         worker.kill();
         return Ok(Err(FailureCode::WorkerUnavailable));
     }
 
-    match wait(&received, started + budgets.ready) {
-        Err(RecvTimeoutError::Timeout) => {
+    match worker.next(&received, ready_until) {
+        Err(Wait::Timeout) => {
+            // An exit with nothing said is not a cold start; it is not retried.
+            if let Some(exit) = worker.own_exit() {
+                return Ok(Err(exit_failure(exit)));
+            }
             return match worker.kill() {
                 Stopped::Stuck => Ok(Err(FailureCode::RenderTimeout)),
                 _ => Err(NeverReady),
             };
         }
-        Ok(Event::First(Ok(Some(Frame::Ready(ready))))) => {
+        Ok(Event::First(Ok(Some(Frame::Ready(ready))), _)) => {
             if check_ready(&hello, &ready) != HandshakeOutcome::Compatible {
                 worker.kill();
                 return Ok(Err(FailureCode::RestartRequired));
             }
         }
-        Ok(Event::First(Ok(Some(Frame::Failure(failure))))) => {
-            return Ok(match worker.stop() {
-                Stopped::Exited(_) => Err(refusal(failure.code)),
-                _ => Err(FailureCode::WorkerUnavailable),
-            });
+        Ok(Event::First(Ok(Some(Frame::Failure(failure))), true)) => {
+            // Before a job, only a handshake refusal means anything, and only
+            // from a worker that then exits rather than crashes.
+            let code = match failure.code {
+                FailureCode::RestartRequired | FailureCode::UnknownMethod => failure.code,
+                _ => FailureCode::WorkerUnavailable,
+            };
+            return Ok(Err(match worker.stop() {
+                Stopped::Exited(WorkerExit::Code(_)) => code,
+                Stopped::Exited(exit) => exit_failure(exit),
+                Stopped::Killed | Stopped::Stuck => FailureCode::WorkerUnavailable,
+            }));
         }
-        // Another frame, one that did not decode, end of file, or a reader
-        // that is gone: the exit says why.
-        Ok(_) | Err(RecvTimeoutError::Disconnected) => {
-            return Ok(Err(worker.stop_failure()));
-        }
+        // Another frame, a refusal with more after it, one that did not
+        // decode, end of file, or a reader that is gone: the exit says why.
+        Ok(_) | Err(Wait::ReaderGone) => return Ok(Err(worker.stop_failure())),
     }
 
     // The job's deadline starts before the job is written.
@@ -132,11 +155,14 @@ pub(crate) fn attempt(
     if go.send(job_bytes).is_err() {
         return Ok(Err(worker.stop_failure()));
     }
-    Ok(match wait(&received, reply_until) {
-        Err(RecvTimeoutError::Timeout) => {
-            worker.kill();
-            Err(FailureCode::RenderTimeout)
-        }
+    Ok(match worker.next(&received, reply_until) {
+        Err(Wait::Timeout) => match worker.own_exit() {
+            Some(exit) => Err(exit_failure(exit)),
+            None => {
+                worker.kill();
+                Err(FailureCode::RenderTimeout)
+            }
+        },
         Ok(Event::Reply(Ok(Some(Frame::Rendered(rendered))), true)) => match worker.stop() {
             Stopped::Exited(WorkerExit::Code(0)) if rendered.validate().is_ok() => Ok(rendered),
             Stopped::Exited(WorkerExit::Code(0)) => Err(FailureCode::WorkerUnavailable),
@@ -150,12 +176,68 @@ pub(crate) fn attempt(
         },
         // A second Ready, more after the reply, a reply cut short or that
         // did not decode, or end of file.
-        Ok(_) | Err(RecvTimeoutError::Disconnected) => Err(worker.stop_failure()),
+        Ok(_) | Err(Wait::ReaderGone) => Err(worker.stop_failure()),
     })
 }
 
-fn wait(received: &Receiver<Event>, until: Instant) -> Result<Event, RecvTimeoutError> {
-    received.recv_timeout(until.saturating_duration_since(Instant::now()))
+enum SpawnSlot {
+    Waiting,
+    Done(std::io::Result<SpawnedWorker>),
+    /// The caller stopped waiting: whatever starts now is the helper's to
+    /// kill.
+    Abandoned,
+}
+
+/// Start the worker on a helper thread, so a start that blocks (an
+/// executable on a stalled network filesystem) cannot hold the caller past
+/// `until`. A worker that starts after that is killed by the helper.
+fn spawn_within(
+    shared: &Arc<Shared>,
+    path: &Path,
+    until: Instant,
+    budgets: Budgets,
+) -> Result<SpawnedWorker, FailureCode> {
+    let slot = Arc::new((Mutex::new(SpawnSlot::Waiting), Condvar::new()));
+    let helper_slot = Arc::clone(&slot);
+    let helper_shared = Arc::clone(shared);
+    let path: PathBuf = path.to_path_buf();
+    let started = std::thread::Builder::new()
+        .name("kettle-media-spawn".into())
+        .spawn(move || {
+            let spawned = helper_shared.platform().spawn(&path);
+            let (state, changed) = &*helper_slot;
+            let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
+            if matches!(*state, SpawnSlot::Abandoned) {
+                drop(state);
+                if let Ok(late) = spawned {
+                    Running::new(late.process, &helper_shared, budgets).kill();
+                }
+                return;
+            }
+            *state = SpawnSlot::Done(spawned);
+            changed.notify_one();
+        });
+    if started.is_err() {
+        return Err(FailureCode::WorkerUnavailable);
+    }
+    let (state, changed) = &*slot;
+    let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
+    loop {
+        match std::mem::replace(&mut *state, SpawnSlot::Waiting) {
+            SpawnSlot::Done(Ok(spawned)) => return Ok(spawned),
+            SpawnSlot::Done(Err(_)) => return Err(FailureCode::WorkerUnavailable),
+            SpawnSlot::Waiting | SpawnSlot::Abandoned => {}
+        }
+        let now = Instant::now();
+        if now >= until {
+            *state = SpawnSlot::Abandoned;
+            return Err(FailureCode::RenderTimeout);
+        }
+        state = changed
+            .wait_timeout(state, until - now)
+            .unwrap_or_else(PoisonError::into_inner)
+            .0;
+    }
 }
 
 /// A worker's own failure code, kept only when a worker can mean it: one
@@ -181,25 +263,79 @@ pub(crate) fn exit_failure(exit: WorkerExit) -> FailureCode {
         WorkerExit::Code(9) => FailureCode::RestartRequired,
         // A CPU, file-size or memory limit, or a crash.
         WorkerExit::Signal(_) => FailureCode::RenderResource,
-        WorkerExit::Code(_) => FailureCode::WorkerUnavailable,
+        WorkerExit::Code(_) | WorkerExit::Lost => FailureCode::WorkerUnavailable,
     }
 }
 
 struct Running<'a> {
     process: Option<Box<dyn WorkerProcess>>,
-    shared: &'a Shared,
+    /// The worker's own exit, seen before any kill, and when.
+    exited: Option<(WorkerExit, Instant)>,
+    shared: &'a Arc<Shared>,
     budgets: Budgets,
 }
 
-impl Running<'_> {
+impl<'a> Running<'a> {
+    fn new(process: Box<dyn WorkerProcess>, shared: &'a Arc<Shared>, budgets: Budgets) -> Self {
+        Self {
+            process: Some(process),
+            exited: None,
+            shared,
+            budgets,
+        }
+    }
+
+    fn own_exit(&self) -> Option<WorkerExit> {
+        self.exited.map(|(exit, _)| exit)
+    }
+
+    /// The next thing the reader says before `until`, looking at the worker
+    /// meanwhile. Once it has exited, the reader gets the cleanup budget to
+    /// pass on what the pipe still held.
+    fn next(&mut self, received: &Receiver<Event>, until: Instant) -> Result<Event, Wait> {
+        loop {
+            let limit = match self.exited {
+                Some((_, seen)) => until.min(seen + self.budgets.cleanup),
+                None => until,
+            };
+            let now = Instant::now();
+            if now >= limit {
+                return Err(Wait::Timeout);
+            }
+            match received.recv_timeout((limit - now).min(TICK)) {
+                Ok(event) => return Ok(event),
+                Err(RecvTimeoutError::Disconnected) => return Err(Wait::ReaderGone),
+                Err(RecvTimeoutError::Timeout) => self.look(),
+            }
+        }
+    }
+
+    /// Note the worker's exit if it has exited by itself (the platform kills
+    /// its process group before reaping it, which also frees its pipes).
+    fn look(&mut self) {
+        if self.exited.is_some() {
+            return;
+        }
+        if let Some(process) = self.process.as_mut()
+            && let Ok(Some(exit)) = process.try_wait()
+        {
+            self.process = None;
+            self.exited = Some((exit, Instant::now()));
+        }
+    }
+
     /// Let the worker exit by itself within the cleanup budget, as it does
     /// after a reply or a refusal, and kill it if it does not.
     fn stop(&mut self) -> Stopped {
+        if let Some(exit) = self.own_exit() {
+            return Stopped::Exited(exit);
+        }
         let Some(process) = self.process.as_mut() else {
             return Stopped::Killed;
         };
         if let Some(exit) = poll(process.as_mut(), self.budgets.cleanup) {
             self.process = None;
+            self.exited = Some((exit, Instant::now()));
             return Stopped::Exited(exit);
         }
         self.kill()
@@ -215,8 +351,8 @@ impl Running<'_> {
     }
 
     /// Kill the worker's process group now and reap it. One that will not
-    /// exit within the cleanup budget is handed to a reaper thread and
-    /// counted; enough of those turn media off.
+    /// exit within the cleanup budget is kept for later reaping and counted;
+    /// enough of those turn media off.
     fn kill(&mut self) -> Stopped {
         let Some(mut process) = self.process.take() else {
             return Stopped::Killed;
@@ -225,14 +361,7 @@ impl Running<'_> {
         if poll(process.as_mut(), self.budgets.cleanup).is_some() {
             return Stopped::Killed;
         }
-        self.shared.stuck.fetch_add(1, Ordering::AcqRel);
-        let _ = std::thread::Builder::new()
-            .name("kettle-media-reap".into())
-            .spawn(move || {
-                while let Ok(None) = process.try_wait() {
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-            });
+        self.shared.abandon(process);
         Stopped::Stuck
     }
 }
@@ -258,8 +387,8 @@ fn poll(process: &mut dyn WorkerProcess, budget: Duration) -> Option<WorkerExit>
     }
 }
 
-/// Reads the first frame, capped at Ready's size, then the reply and the end
-/// of file after it.
+/// Reads the first frame, capped at Ready's size, then the reply, checking
+/// for end of file after a refusal or the reply.
 fn spawn_reader(mut stdout: Box<dyn Read + Send>, events: Sender<Event>) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("kettle-media-read".into())
@@ -269,9 +398,21 @@ fn spawn_reader(mut stdout: Box<dyn Read + Send>, events: Sender<Event>) -> std:
                 Direction::WorkerToParent,
                 MAX_READY_FRAME_BYTES,
             );
-            let ready = matches!(first, Ok(Some(Frame::Ready(_))));
-            if events.send(Event::First(first)).is_err() || !ready {
-                return;
+            match first {
+                Ok(Some(Frame::Ready(_))) => {
+                    if events.send(Event::First(first, true)).is_err() {
+                        return;
+                    }
+                }
+                Ok(Some(Frame::Failure(_))) => {
+                    let clean = at_end(&mut *stdout);
+                    let _ = events.send(Event::First(first, clean));
+                    return;
+                }
+                _ => {
+                    let _ = events.send(Event::First(first, false));
+                    return;
+                }
             }
             let reply = wire::read_frame(&mut stdout, Direction::WorkerToParent);
             let clean = matches!(reply, Ok(Some(_))) && at_end(&mut *stdout);
@@ -293,8 +434,11 @@ fn at_end(reader: &mut dyn Read) -> bool {
 }
 
 /// Writes Hello, then the job once Ready has matched, then closes stdin. If
-/// the attempt ends first, the job never comes and stdin closes anyway.
+/// the attempt ends first, the job never comes and stdin closes anyway. The
+/// platform first guards this thread's pipe writes: a worker that has died
+/// must turn a write into an error, never a signal that ends Kettle.
 fn spawn_writer(
+    shared: Arc<Shared>,
     mut stdin: Box<dyn Write + Send>,
     hello: Vec<u8>,
     job: Receiver<Vec<u8>>,
@@ -302,6 +446,9 @@ fn spawn_writer(
     std::thread::Builder::new()
         .name("kettle-media-write".into())
         .spawn(move || {
+            if shared.platform().guard_pipe_writes().is_err() {
+                return;
+            }
             if stdin
                 .write_all(&hello)
                 .and_then(|()| stdin.flush())
@@ -326,8 +473,8 @@ mod tests {
     use crate::{Canvas, Failure, PROTOCOL_VERSION, Ready, Source, Target, Theme, content_digest};
     use std::collections::VecDeque;
     use std::io::{PipeReader, PipeWriter};
-    use std::sync::atomic::AtomicUsize;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     const FAST: Budgets = Budgets {
         ready: Duration::from_millis(300),
@@ -399,6 +546,9 @@ mod tests {
         exits: Option<WorkerExit>,
         /// Whether a kill ends it.
         killable: bool,
+        /// Whether it exits right after its output while something it
+        /// started keeps stdout open (until its group is killed).
+        exits_holding_stdout: bool,
     }
 
     impl Script {
@@ -408,6 +558,7 @@ mod tests {
                 closes: true,
                 exits: Some(exit),
                 killable: true,
+                exits_holding_stdout: false,
             }
         }
         fn silent() -> Self {
@@ -416,6 +567,15 @@ mod tests {
                 closes: false,
                 exits: None,
                 killable: true,
+                exits_holding_stdout: false,
+            }
+        }
+        /// Writes `output` and exits with `exit`, leaving stdout open.
+        fn exits_holding(output: Vec<u8>, exit: WorkerExit) -> Self {
+            Self {
+                exits: Some(exit),
+                exits_holding_stdout: true,
+                ..Self::silent_with(output)
             }
         }
     }
@@ -426,23 +586,42 @@ mod tests {
         killed: Arc<(Mutex<bool>, std::sync::Condvar)>,
         done: Arc<Mutex<bool>>,
         kills: Arc<AtomicUsize>,
+        /// For an unkillable worker: set once it finally exits.
+        released: Arc<std::sync::atomic::AtomicBool>,
+        reaped: Arc<AtomicUsize>,
+    }
+
+    impl FakeProcess {
+        /// What a group kill does to the script: whatever holds stdout lets
+        /// go.
+        fn free_stdout(&self) {
+            *self.killed.0.lock().unwrap() = true;
+            self.killed.1.notify_all();
+        }
     }
 
     impl WorkerProcess for FakeProcess {
         fn try_wait(&mut self) -> std::io::Result<Option<WorkerExit>> {
-            if *self.killed.0.lock().unwrap() && self.killable {
-                return Ok(Some(WorkerExit::Signal(9)));
-            }
-            Ok(if *self.done.lock().unwrap() {
+            let killed = *self.killed.0.lock().unwrap();
+            let exit = if (self.killable && killed)
+                || (!self.killable && self.released.load(Ordering::SeqCst))
+            {
+                Some(WorkerExit::Signal(9))
+            } else if *self.done.lock().unwrap() {
+                // Reaping an exited worker kills its group first.
+                self.free_stdout();
                 self.exits
             } else {
                 None
-            })
+            };
+            if exit.is_some() {
+                self.reaped.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(exit)
         }
         fn kill(&mut self) {
             if self.killable {
-                *self.killed.0.lock().unwrap() = true;
-                self.killed.1.notify_all();
+                self.free_stdout();
             }
             self.kills.fetch_add(1, Ordering::SeqCst);
         }
@@ -453,6 +632,38 @@ mod tests {
         scripts: Mutex<VecDeque<Script>>,
         spawns: AtomicUsize,
         kills: Arc<AtomicUsize>,
+        /// How long each spawn takes.
+        spawn_delay: Mutex<Duration>,
+        released: Arc<std::sync::atomic::AtomicBool>,
+        reaped: Arc<AtomicUsize>,
+        /// Threads that guarded their pipe writes, and writes from any other.
+        guarded: Arc<Mutex<Vec<std::thread::ThreadId>>>,
+        unguarded_writes: Arc<AtomicUsize>,
+    }
+
+    /// The worker's stdin, counting writes from a thread that never guarded
+    /// its pipe writes.
+    struct CheckedStdin {
+        inner: PipeWriter,
+        guarded: Arc<Mutex<Vec<std::thread::ThreadId>>>,
+        unguarded_writes: Arc<AtomicUsize>,
+    }
+
+    impl Write for CheckedStdin {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if !self
+                .guarded
+                .lock()
+                .unwrap()
+                .contains(&std::thread::current().id())
+            {
+                self.unguarded_writes.fetch_add(1, Ordering::SeqCst);
+            }
+            self.inner.write(bytes)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.inner.flush()
+        }
     }
 
     impl Fake {
@@ -482,7 +693,15 @@ mod tests {
         fn verify(&self, _: &Path) -> Result<(), UnavailableCause> {
             Ok(())
         }
+        fn guard_pipe_writes(&self) -> std::io::Result<()> {
+            self.guarded
+                .lock()
+                .unwrap()
+                .push(std::thread::current().id());
+            Ok(())
+        }
         fn spawn(&self, _: &Path) -> std::io::Result<SpawnedWorker> {
+            std::thread::sleep(*self.spawn_delay.lock().unwrap());
             self.spawns.fetch_add(1, Ordering::SeqCst);
             let script = self
                 .scripts
@@ -508,8 +727,14 @@ mod tests {
                     killed,
                     done,
                     kills: Arc::clone(&self.kills),
+                    released: Arc::clone(&self.released),
+                    reaped: Arc::clone(&self.reaped),
                 }),
-                stdin: Box::new(stdin_writer),
+                stdin: Box::new(CheckedStdin {
+                    inner: stdin_writer,
+                    guarded: Arc::clone(&self.guarded),
+                    unguarded_writes: Arc::clone(&self.unguarded_writes),
+                }),
                 stdout: Box::new(stdout_reader),
             })
         }
@@ -537,6 +762,9 @@ mod tests {
                 drop(stdout);
                 *done.lock().unwrap() = true;
             } else {
+                if script.exits_holding_stdout {
+                    *done.lock().unwrap() = true;
+                }
                 let (lock, changed) = &*killed;
                 let mut killed = lock.lock().unwrap();
                 while !*killed {
@@ -623,13 +851,34 @@ mod tests {
 
     #[test]
     fn worker_refusals_keep_only_worker_codes() {
-        for (code, expected) in [
-            (FailureCode::UnsupportedMedia, FailureCode::UnsupportedMedia),
-            (FailureCode::UnknownMethod, FailureCode::UnknownMethod),
-            (FailureCode::DisplayDisabled, FailureCode::WorkerUnavailable),
-            (FailureCode::ReadOnly, FailureCode::WorkerUnavailable),
+        // (code, as the reply, at startup)
+        for (code, as_reply, at_startup) in [
+            (
+                FailureCode::UnsupportedMedia,
+                FailureCode::UnsupportedMedia,
+                FailureCode::WorkerUnavailable,
+            ),
+            (
+                FailureCode::UnknownMethod,
+                FailureCode::UnknownMethod,
+                FailureCode::UnknownMethod,
+            ),
+            (
+                FailureCode::RestartRequired,
+                FailureCode::RestartRequired,
+                FailureCode::RestartRequired,
+            ),
+            (
+                FailureCode::DisplayDisabled,
+                FailureCode::WorkerUnavailable,
+                FailureCode::WorkerUnavailable,
+            ),
+            (
+                FailureCode::ReadOnly,
+                FailureCode::WorkerUnavailable,
+                FailureCode::WorkerUnavailable,
+            ),
         ] {
-            // At startup, and as the reply.
             let fake = Fake::new(vec![
                 Script::replies(failure(code), WorkerExit::Code(9)),
                 Script::replies(
@@ -638,13 +887,96 @@ mod tests {
                 ),
             ]);
             let client = client(&fake);
-            assert_eq!(client.render(&job(1)), Err(expected), "{code:?} at startup");
             assert_eq!(
                 client.render(&job(1)),
-                Err(expected),
+                Err(at_startup),
+                "{code:?} at startup"
+            );
+            assert_eq!(
+                client.render(&job(1)),
+                Err(as_reply),
                 "{code:?} as the reply"
             );
         }
+    }
+
+    #[test]
+    fn startup_refusals_must_end_cleanly() {
+        for (script, expected) in [
+            // More after the refusal.
+            (
+                Script::replies(
+                    reply(&[failure(FailureCode::RestartRequired), vec![0]]),
+                    WorkerExit::Code(0),
+                ),
+                FailureCode::WorkerUnavailable,
+            ),
+            // A refusal, then a crash rather than an exit.
+            (
+                Script::replies(failure(FailureCode::RestartRequired), WorkerExit::Signal(6)),
+                FailureCode::RenderResource,
+            ),
+        ] {
+            let fake = Fake::new(vec![script]);
+            assert_eq!(client(&fake).render(&job(1)), Err(expected));
+        }
+    }
+
+    #[test]
+    fn an_exit_is_seen_while_something_holds_stdout() {
+        // The worker exits 9 at startup, or crashes after Ready, while a
+        // child it started keeps stdout open: the exit decides, at once,
+        // with no retry.
+        for (script, expected) in [
+            (
+                Script::exits_holding(vec![], WorkerExit::Code(9)),
+                FailureCode::RestartRequired,
+            ),
+            (
+                Script::exits_holding(ready(build_id()), WorkerExit::Signal(11)),
+                FailureCode::RenderResource,
+            ),
+        ] {
+            let fake = Fake::new(vec![script]);
+            let started = Instant::now();
+            assert_eq!(client(&fake).render(&job(1)), Err(expected));
+            assert!(started.elapsed() < FAST.ready, "{:?}", started.elapsed());
+            assert_eq!(fake.spawns.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
+    fn a_spawn_that_hangs_is_bounded() {
+        let fake = Fake::new(vec![Script::silent()]);
+        *fake.spawn_delay.lock().unwrap() = FAST.ready * 3;
+        let started = Instant::now();
+        assert_eq!(
+            client(&fake).render(&job(1)),
+            Err(FailureCode::RenderTimeout)
+        );
+        assert!(
+            started.elapsed() < FAST.ready * 2,
+            "{:?}",
+            started.elapsed()
+        );
+        // The worker that finally starts is killed by the helper.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while fake.kills.load(Ordering::SeqCst) == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "the late worker was never killed"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn pipe_writes_are_guarded_before_the_first_write() {
+        let output = reply(&[ready(build_id()), frame(&Frame::Rendered(rendered()))]);
+        let fake = Fake::new(vec![Script::replies(output, WorkerExit::Code(0))]);
+        assert_eq!(client(&fake).render(&job(1)), Ok(rendered()));
+        assert_eq!(fake.guarded.lock().unwrap().len(), 1);
+        assert_eq!(fake.unguarded_writes.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -728,6 +1060,7 @@ mod tests {
     }
 
     /// The second stuck worker turns media off: nothing more is started.
+    /// Both are still reaped once they finally exit.
     fn second_abandoned_child_disables_media(client: &WorkerClient, fake: &Arc<Fake>) {
         assert_eq!(client.render(&job(1)), Err(FailureCode::RenderTimeout));
         assert_eq!(
@@ -736,6 +1069,16 @@ mod tests {
         );
         assert_eq!(client.render(&job(1)), Err(FailureCode::WorkerUnavailable));
         assert_eq!(fake.spawns.load(Ordering::SeqCst), MAX_STUCK_WORKERS);
+        assert_eq!(client.shared.abandoned_count(), 2);
+        fake.released.store(true, Ordering::SeqCst);
+        client.availability();
+        assert_eq!(client.shared.abandoned_count(), 0);
+        assert_eq!(fake.reaped.load(Ordering::SeqCst), 2);
+        // Media stays off for the life of the process.
+        assert_eq!(
+            client.availability(),
+            MediaAvailability::Unavailable(UnavailableCause::StuckWorkers)
+        );
     }
 
     #[test]
@@ -758,6 +1101,10 @@ mod tests {
         );
         assert_eq!(
             exit_failure(WorkerExit::Code(2)),
+            FailureCode::WorkerUnavailable
+        );
+        assert_eq!(
+            exit_failure(WorkerExit::Lost),
             FailureCode::WorkerUnavailable
         );
     }

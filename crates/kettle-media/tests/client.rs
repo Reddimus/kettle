@@ -75,6 +75,10 @@ impl WorkerPlatform for Stub {
     fn verify(&self, _: &Path) -> Result<(), UnavailableCause> {
         Ok(())
     }
+    fn guard_pipe_writes(&self) -> std::io::Result<()> {
+        // Test binaries keep Rust's ignored SIGPIPE.
+        Ok(())
+    }
     fn spawn(&self, path: &Path) -> std::io::Result<SpawnedWorker> {
         let mut child = worker_command(path).spawn()?;
         let stdin = child.stdin.take().unwrap();

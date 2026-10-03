@@ -2601,7 +2601,7 @@ struct WorkerOutput {
 /// writes. The exec stdout worker is different: it must observe `EPIPE`, report
 /// exit 74, and reap the PTY child instead of letting the signal kill Kettle.
 #[cfg(unix)]
-fn block_sigpipe_for_current_thread() -> std::io::Result<()> {
+pub(crate) fn block_sigpipe_for_current_thread() -> std::io::Result<()> {
     // SAFETY: sigemptyset/sigaddset initialize and mutate only this local set;
     // pthread_sigmask applies it to the calling writer thread.
     unsafe {
@@ -2620,7 +2620,7 @@ fn block_sigpipe_for_current_thread() -> std::io::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn block_sigpipe_for_current_thread() -> std::io::Result<()> {
+pub(crate) fn block_sigpipe_for_current_thread() -> std::io::Result<()> {
     Ok(())
 }
 

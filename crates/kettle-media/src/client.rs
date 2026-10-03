@@ -86,15 +86,19 @@ pub struct FileIdentity {
 pub enum WorkerExit {
     Code(i32),
     Signal(i32),
+    /// Something else reaped it (an inherited ignored `SIGCHLD` does that),
+    /// so how it ended is unknown and its process group is no longer ours.
+    Lost,
 }
 
 /// A running worker as the platform started it, in a process group of its
 /// own. Implementations must not block or panic.
 pub trait WorkerProcess: Send {
-    /// Whether it has exited, reaping it if so.
+    /// Whether it has exited, reaping it if so. Before reaping a worker that
+    /// exited by itself, kill its process group: nothing it started outlives
+    /// it, and the group id is never signalled once it could be reused.
     fn try_wait(&mut self) -> std::io::Result<Option<WorkerExit>>;
-    /// Kill its whole process group. Called before it is reaped, while its
-    /// process group cannot belong to anyone else; safe to repeat.
+    /// Kill its whole process group, if it is not reaped yet. Safe to repeat.
     fn kill(&mut self);
 }
 
@@ -135,13 +139,18 @@ pub trait WorkerPlatform: Send + Sync {
     fn verify(&self, path: &Path) -> Result<(), UnavailableCause>;
     /// Start the worker at `path` with [`worker_command`].
     fn spawn(&self, path: &Path) -> std::io::Result<SpawnedWorker>;
+    /// Called first on the thread that writes to the worker's stdin: make a
+    /// write to a pipe whose worker has died fail with an error instead of
+    /// raising `SIGPIPE`, which ends a process that keeps its default action
+    /// (`kettle` restores it for its command line).
+    fn guard_pipe_writes(&self) -> std::io::Result<()>;
 }
 
 /// Answers whether media previews are available, without blocking the caller
 /// on the filesystem or a signature check, and renders one job at a time.
 pub struct WorkerClient {
     build_id: BuildId,
-    shared: Arc<Shared>,
+    pub(crate) shared: Arc<Shared>,
     budgets: Budgets,
     /// One job at a time.
     rendering: Mutex<()>,
@@ -150,8 +159,11 @@ pub struct WorkerClient {
 pub(crate) struct Shared {
     platform: Box<dyn WorkerPlatform>,
     state: Mutex<State>,
-    /// Workers killed that would not exit, left to a reaper.
+    /// How many killed workers would not exit.
     pub(crate) stuck: AtomicUsize,
+    /// Those of them not reaped yet, kept so they are reaped once they do
+    /// exit, at the next check or render.
+    abandoned: Mutex<Vec<Box<dyn WorkerProcess>>>,
 }
 
 #[derive(Default)]
@@ -205,6 +217,7 @@ impl WorkerClient {
                 platform,
                 state: Mutex::new(State::default()),
                 stuck: AtomicUsize::new(0),
+                abandoned: Mutex::new(Vec::new()),
             }),
             budgets,
             rendering: Mutex::new(()),
@@ -220,6 +233,7 @@ impl WorkerClient {
     /// running, so a replaced or removed worker shows on the next call. The
     /// first call answers [`MediaAvailability::Checking`].
     pub fn availability(&self) -> MediaAvailability {
+        self.shared.reap_abandoned();
         if self.shared.stuck.load(Ordering::Acquire) >= MAX_STUCK_WORKERS {
             return MediaAvailability::Unavailable(UnavailableCause::StuckWorkers);
         }
@@ -257,6 +271,7 @@ impl WorkerClient {
             .rendering
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        self.shared.reap_abandoned();
         for attempt in 0..2 {
             if self.shared.stuck.load(Ordering::Acquire) >= MAX_STUCK_WORKERS {
                 return Err(FailureCode::WorkerUnavailable);
@@ -292,6 +307,31 @@ impl Shared {
 
     pub(crate) fn platform(&self) -> &dyn WorkerPlatform {
         self.platform.as_ref()
+    }
+
+    /// Count a killed worker that would not exit, and keep it to reap later.
+    pub(crate) fn abandon(&self, process: Box<dyn WorkerProcess>) {
+        self.stuck.fetch_add(1, Ordering::AcqRel);
+        self.abandoned
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(process);
+    }
+
+    /// Reap the abandoned workers that have exited since; never waits.
+    fn reap_abandoned(&self) {
+        self.abandoned
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain_mut(|process| !matches!(process.try_wait(), Ok(Some(_))));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn abandoned_count(&self) -> usize {
+        self.abandoned
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
     }
 }
 
@@ -382,6 +422,9 @@ mod tests {
         }
         fn spawn(&self, _: &Path) -> std::io::Result<SpawnedWorker> {
             Err(std::io::ErrorKind::Unsupported.into())
+        }
+        fn guard_pipe_writes(&self) -> std::io::Result<()> {
+            Ok(())
         }
     }
 

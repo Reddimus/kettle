@@ -789,8 +789,13 @@ a worker that never answers is tried twice, and a second one that answers is
 used; startup exits are never retried; silence after Ready is one
 `RenderTimeout`; a reply cut short is killed at the deadline; a worker that
 will not die is not retried, is left to a reaper and counted, and a second
-turns media off (`stuck_workers`) with nothing more started; and exit codes
-map as documented. `tests/client.rs` (with `--features test-worker`) runs the
+turns media off (`stuck_workers`) with nothing more started, both reaped once
+they exit, and media stays off; startup refusals must end cleanly and exit
+rather than crash, and only handshake codes count before a job; an exit is
+seen at once while something holds the worker's stdout, before Ready and
+after it; a start that hangs returns at the startup deadline and the late
+worker is killed; the writer guards its pipe writes before the first one; and
+exit codes map as documented. `tests/client.rs` (with `--features test-worker`) runs the
 stub worker as a real process, copied under a name that picks its behavior: a
 job rendered; a worker that never answers tried twice within bounds; a 4 MiB
 job to a worker that never reads it, ended by the deadline; a reply followed
@@ -1762,14 +1767,22 @@ status and stderr. In kettle-ui,
 nothing (an empty environment), `/bin/pwd` prints `/`, and a script leads its
 own process group; a kill reaches a background child before anything is
 reaped; a worker that exits 0 by itself keeps that status while the child it
-left behind is killed before the reap; and asking whether a running worker
-has exited never reaps it. Red checks for the spawn client: no Ready cap, no
+left behind is killed before the reap; asking whether a running worker has
+exited never reaps it; in a child process with SIGPIPE's default action, a
+worker that answers Ready and exits before reading a 4 MiB job cannot end the
+process, and it can render again; and in a child process with SIGCHLD
+ignored, a worker reaped elsewhere reads as lost and is marked never to be
+signalled. Red checks for the spawn client: no Ready cap, no
 cold retry, a retry after a stuck worker or after Ready, a reply accepted
 without a clean end or whatever the exit, skew accepted, any worker code
 kept, stuck workers not counted or not stopping `render`, no kill at the
 reply deadline, an inherited environment or working directory, no process
-group, no group kill before the reap, a leader-only kill, and an exit check
-that always says exited each fail a test above.
+group, no group kill before the reap, a leader-only kill, an exit check
+that always says exited, unguarded pipe writes, no `F_SETNOSIGPIPE` on macOS,
+exits not watched, a late worker left alive, a start waited on forever, a
+startup refusal with its end unchecked or masking a crash, any code kept at
+startup, abandoned workers never reaped, and `ECHILD` not read as lost each
+fail a test above.
 `get_state_reports_media_availability_without_waiting` checks that
 `get_state` carries `media`, that an unconfigured GUI reports
 `not_configured`, that a held check answers `checking` at once, and that a

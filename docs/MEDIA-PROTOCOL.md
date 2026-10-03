@@ -203,9 +203,14 @@ frame under Ready's own cap (`wire::read_frame_within`, 149 bytes, checked
 from the header before any payload is allocated), then the reply, then end of
 file. The caller's thread watches the clock:
 
-- **Ready within 5 s of the start.** A worker that never answers is killed
+- **Ready within 5 s of the start, the start itself included.** The worker
+  is started on a helper thread, so a start that blocks (an executable on a
+  stalled network filesystem) cannot hold the caller; a worker that starts
+  too late is killed by the helper. A worker that never answers is killed
   and, once reaped, retried once; total startup is at most 10 s. A Ready from
-  another build is `RestartRequired`, never retried.
+  another build is `RestartRequired`, never retried. Before a job, only a
+  handshake refusal (`RestartRequired`, `UnknownMethod`) counts, and only with
+  end of file after it and an exit rather than a crash.
 - **The reply within the job's deadline**, 2 s for a raster and 3 s for other
   kinds, counted from before the job is written. A missed deadline kills the
   worker: `RenderTimeout`. Nothing is retried after Ready.
@@ -218,17 +223,28 @@ file. The caller's thread watches the clock:
 - **An exit without a usable reply** says why: 4 (the worker's watchdog) is
   `RenderTimeout`, 9 is `RestartRequired`, a signal (a CPU, file-size or memory
   limit, or a crash) is `RenderResource`, and anything else, including a
-  protocol violation, is `WorkerUnavailable`.
+  protocol violation, is `WorkerUnavailable`. While it waits, the caller's
+  thread also looks at the worker every 25 ms, so an exit is seen even when
+  something the worker started still holds its stdout and no frame comes.
 
 Stopping a worker gives it 250 ms to exit by itself, then kills its process
 group and gives it 250 ms more. The platform kills the group before it reaps
 the worker, even one that exited by itself (it checks with `waitid(WNOWAIT)`
 first), so nothing the worker started outlives it and a process group id that
-could already be someone else's is never signalled. A worker that will not
-exit after the kill, as one stuck in uninterruptible I/O on a network
-filesystem can, is left to a reaper thread and counted; after two, media is
+could already be someone else's is never signalled. A worker that something
+else reaped (an inherited ignored `SIGCHLD` does that) reads as lost and is
+never signalled again. A worker that will not exit after the kill, as one
+stuck in uninterruptible I/O on a network filesystem can, is kept and
+counted, and reaped at a later check once it does exit; after two, media is
 off for the life of the process (`stuck_workers`). The pipe threads end when
 the worker's pipes close; nothing joins them, so none can hang the caller.
+
+`kettle` restores SIGPIPE's default action for its command line, so a write
+to a worker that has died must not raise it. The writer thread first asks the
+platform to guard its writes: on Linux, where the signal goes to the writing
+thread, it is blocked there; on macOS, where it goes to the whole process,
+the platform marks the worker's stdin pipe `F_SETNOSIGPIPE` when it starts
+the worker. Either way the write fails with `EPIPE` instead.
 
 Not yet: footprint polling and the 768 MiB aggregate limit, the GUI's
 preview account and admission, and cancellation follow in later slices.
