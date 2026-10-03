@@ -2870,6 +2870,13 @@ request from another build and an old-frame request (both exit with the skew
 code, stdout empty) and one from its own build (not skew).
 Red checks: ignoring the identity, reading an older frame as garbage,
 retrying skew, and dropping the skew exit mapping each fail a test.
+A cached Linux poster's `Thumb::MTime` matches in whole seconds or with
+tumbler's fraction when it agrees with the file's nanoseconds to its own
+precision, truncated or rounded, a rounding that carries into the next second
+included (`thumbnail_mtime_matches`); another second, another fraction,
+signs, exponents, spaces, leading zeros, over nine digits and a fraction
+before 1970 (where the sign makes it ambiguous) do not, and the Linux cache test accepts a tumbler-style poster while
+rejecting a stale time and another URI.
 Linux unit coverage invokes its complete Freedesktop
 cache resolver in an isolated child environment. Portable state tests also
 prove that a missing worker response expires and that the event loop

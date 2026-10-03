@@ -1108,13 +1108,14 @@ fn platform_thumbnail(path: &Path) -> Option<RawPreview> {
     let cache = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
-    let source_mtime = std::fs::metadata(path).ok()?.mtime().to_string();
+    let metadata = std::fs::metadata(path).ok()?;
+    let source_mtime = (metadata.mtime(), metadata.mtime_nsec());
     for class in ["xx-large", "x-large", "large", "normal"] {
         let candidate = cache
             .join("thumbnails")
             .join(class)
             .join(format!("{digest}.png"));
-        if let Some(preview) = load_linux_cached_thumbnail(&candidate, &uri, &source_mtime) {
+        if let Some(preview) = load_linux_cached_thumbnail(&candidate, &uri, source_mtime) {
             return Some(preview);
         }
     }
@@ -1122,7 +1123,7 @@ fn platform_thumbnail(path: &Path) -> Option<RawPreview> {
 }
 
 #[cfg(target_os = "linux")]
-fn load_linux_cached_thumbnail(path: &Path, uri: &str, mtime: &str) -> Option<RawPreview> {
+fn load_linux_cached_thumbnail(path: &Path, uri: &str, mtime: (i64, i64)) -> Option<RawPreview> {
     // Decode the exact leaf opened through kettle-state's held, trusted parent
     // chain. Leaf-only O_NOFOLLOW still lets a writable cache ancestor swap a
     // directory or redirect an intermediate symlink before open.
@@ -1143,7 +1144,7 @@ fn load_linux_cached_thumbnail(path: &Path, uri: &str, mtime: &str) -> Option<Ra
 }
 
 #[cfg(target_os = "linux")]
-fn thumbnail_metadata_matches(file: &mut std::fs::File, uri: &str, mtime: &str) -> bool {
+fn thumbnail_metadata_matches(file: &mut std::fs::File, uri: &str, mtime: (i64, i64)) -> bool {
     if file.seek(std::io::SeekFrom::Start(0)).is_err() {
         return false;
     }
@@ -1162,7 +1163,46 @@ fn thumbnail_metadata_matches(file: &mut std::fs::File, uri: &str, mtime: &str) 
             .find(|chunk| chunk.keyword == key)
             .map(|chunk| chunk.text.as_str())
     };
-    text("Thumb::URI") == Some(uri) && text("Thumb::MTime") == Some(mtime)
+    text("Thumb::URI") == Some(uri)
+        && text("Thumb::MTime").is_some_and(|recorded| thumbnail_mtime_matches(recorded, mtime))
+}
+
+/// Whether a thumbnail's recorded `Thumb::MTime` is the source's modification
+/// time, `(seconds, nanoseconds)`. The standard writes whole seconds; tumbler
+/// adds a fraction (`1696300000.123456`). Either is the source's time when it
+/// agrees with the seconds and nanoseconds to the recorded precision,
+/// truncated or rounded, a rounding that carries into the next second
+/// included. Anything else (another time, signs, exponents, spaces, more than
+/// nine fraction digits, a fraction before 1970, where the sign makes it
+/// ambiguous) is stale.
+#[cfg(any(test, target_os = "linux"))]
+fn thumbnail_mtime_matches(recorded: &str, (seconds, nanos): (i64, i64)) -> bool {
+    let Some((whole, fraction)) = recorded.split_once('.') else {
+        return recorded == seconds.to_string();
+    };
+    if seconds < 0
+        || fraction.is_empty()
+        || fraction.len() > 9
+        || !fraction.bytes().all(|b| b.is_ascii_digit())
+    {
+        return false;
+    }
+    let (Ok(recorded_seconds), Ok(value)) = (whole.parse::<i64>(), fraction.parse::<i64>()) else {
+        return false;
+    };
+    // Exactly the digits an integer prints: no sign, no leading zero.
+    if whole != recorded_seconds.to_string() {
+        return false;
+    }
+    // The fraction's unit, in nanoseconds: 100_000_000 for one digit.
+    let digits = fraction.len() as u32;
+    let unit = 10i64.pow(9 - digits);
+    let truncated = (seconds, nanos / unit);
+    let rounded = match (nanos + unit / 2) / unit {
+        carry if carry == 10i64.pow(digits) => (seconds + 1, 0),
+        rounded => (seconds, rounded),
+    };
+    (recorded_seconds, value) == truncated || (recorded_seconds, value) == rounded
 }
 
 #[cfg(target_os = "linux")]
@@ -1739,7 +1779,9 @@ mod tests {
         let video = dir.path().join("clip.mp4");
         write_test_video(&video, b"fixture");
         let uri = url::Url::from_file_path(&video).unwrap().to_string();
-        let mtime = std::fs::metadata(&video).unwrap().mtime().to_string();
+        let metadata = std::fs::metadata(&video).unwrap();
+        let mtime = metadata.mtime().to_string();
+        let source = (metadata.mtime(), metadata.mtime_nsec());
         let thumbnail = dir.path().join("thumbnail.png");
         {
             let file = std::fs::File::create(&thumbnail).unwrap();
@@ -1759,23 +1801,23 @@ mod tests {
         }
         std::fs::set_permissions(&thumbnail, std::fs::Permissions::from_mode(0o600)).unwrap();
 
-        let preview = load_linux_cached_thumbnail(&thumbnail, &uri, &mtime)
+        let preview = load_linux_cached_thumbnail(&thumbnail, &uri, source)
             .expect("matching private thumbnail");
         assert_eq!((preview.width, preview.height), (256, 128));
 
         std::fs::set_permissions(&thumbnail, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(
-            load_linux_cached_thumbnail(&thumbnail, &uri, &mtime).is_some(),
+            load_linux_cached_thumbnail(&thumbnail, &uri, source).is_some(),
             "a conventional read-only thumbnail cache leaf is safe"
         );
         std::fs::set_permissions(&thumbnail, std::fs::Permissions::from_mode(0o664)).unwrap();
-        assert!(load_linux_cached_thumbnail(&thumbnail, &uri, &mtime).is_none());
+        assert!(load_linux_cached_thumbnail(&thumbnail, &uri, source).is_none());
         std::fs::set_permissions(&thumbnail, std::fs::Permissions::from_mode(0o600)).unwrap();
-        assert!(load_linux_cached_thumbnail(&thumbnail, &uri, "0").is_none());
+        assert!(load_linux_cached_thumbnail(&thumbnail, &uri, (0, 0)).is_none());
 
         let linked = dir.path().join("linked.png");
         symlink(&thumbnail, &linked).unwrap();
-        assert!(load_linux_cached_thumbnail(&linked, &uri, &mtime).is_none());
+        assert!(load_linux_cached_thumbnail(&linked, &uri, source).is_none());
 
         let writable_parent = dir.path().join("writable-cache");
         std::fs::create_dir(&writable_parent).unwrap();
@@ -1784,9 +1826,95 @@ mod tests {
         std::fs::copy(&thumbnail, &untrusted).unwrap();
         std::fs::set_permissions(&untrusted, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert!(
-            load_linux_cached_thumbnail(&untrusted, &uri, &mtime).is_none(),
+            load_linux_cached_thumbnail(&untrusted, &uri, source).is_none(),
             "a private leaf cannot make a writable cache ancestor trustworthy"
         );
+
+        // tumbler records the time with a fraction: the same source still
+        // matches, another time or another URI does not.
+        let fractional = |name: &str, uri: &str, recorded: &str| {
+            let path = dir.path().join(name);
+            let file = std::fs::File::create(&path).unwrap();
+            let mut encoder = png::Encoder::new(file, 2, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .add_text_chunk("Thumb::URI".to_string(), uri.to_string())
+                .unwrap();
+            encoder
+                .add_text_chunk("Thumb::MTime".to_string(), recorded.to_string())
+                .unwrap();
+            let mut writer = encoder.write_header().unwrap();
+            writer
+                .write_image_data(&[1, 2, 3, 255, 4, 5, 6, 255])
+                .unwrap();
+            drop(writer);
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            path
+        };
+        let micros = format!("{mtime}.{:06}", metadata.mtime_nsec() / 1_000);
+        let tumbler = fractional("tumbler.png", &uri, &micros);
+        assert!(load_linux_cached_thumbnail(&tumbler, &uri, source).is_some());
+        let stale = fractional(
+            "stale.png",
+            &uri,
+            &format!("{}.000001", metadata.mtime() - 1),
+        );
+        assert!(load_linux_cached_thumbnail(&stale, &uri, source).is_none());
+        let other = fractional("other.png", "file:///tmp/other.mp4", &micros);
+        assert!(load_linux_cached_thumbnail(&other, &uri, source).is_none());
+    }
+
+    /// A recorded `Thumb::MTime` is the source's time in whole seconds, or
+    /// with a fraction (tumbler) that agrees with the nanoseconds to its own
+    /// precision, truncated or rounded; nothing else matches.
+    #[test]
+    fn a_fractional_thumbnail_mtime_matches_the_same_source() {
+        let source = (1_696_300_000, 123_456_789);
+        for recorded in [
+            "1696300000",
+            "1696300000.1",
+            "1696300000.12",
+            "1696300000.123456",
+            "1696300000.123457",
+            "1696300000.123456789",
+        ] {
+            assert!(thumbnail_mtime_matches(recorded, source), "{recorded}");
+        }
+        for recorded in [
+            "1696299999",
+            "1696300001",
+            "1696300000.2",
+            "1696300000.123458",
+            "1696300000.1234567890",
+            "1696300000.",
+            ".123",
+            "+1696300000",
+            "1696300000.12e3",
+            " 1696300000",
+            "1696300000.12 ",
+            "01696300000",
+            "1696300000.-1",
+            "-1696300000.1",
+        ] {
+            assert!(!thumbnail_mtime_matches(recorded, source), "{recorded}");
+        }
+        // Rounding may carry into the next second.
+        assert!(thumbnail_mtime_matches(
+            "1696300001.000000",
+            (1_696_300_000, 999_999_600)
+        ));
+        assert!(thumbnail_mtime_matches(
+            "1696300000.999999",
+            (1_696_300_000, 999_999_600)
+        ));
+        assert!(!thumbnail_mtime_matches(
+            "1696300001.000000",
+            (1_696_300_000, 999_999_000)
+        ));
+        // Before 1970 the sign makes a fraction ambiguous: whole seconds only.
+        assert!(thumbnail_mtime_matches("-1", (-1, 250_000_000)));
+        assert!(!thumbnail_mtime_matches("-1.250000", (-1, 250_000_000)));
     }
 
     #[test]
