@@ -684,6 +684,16 @@ impl MediaPasteReceiptState {
     }
 }
 
+/// The theme picker's query and selected row, and the theme it opened on. That
+/// theme fixes the list's order while the preview changes the live theme, is
+/// ticked, and is what Esc restores.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ThemePickerState {
+    pub(crate) query: String,
+    pub(crate) selected: usize,
+    pub(crate) opened_on: String,
+}
+
 pub(crate) struct WindowState {
     /// Stable per-window sequence number (1-based, process-lifetime unique).
     /// Exposed to agents via the ctl API and used as the map key. Never
@@ -858,18 +868,20 @@ pub(crate) struct WindowState {
     /// Saved-layout names captured when the picker opens. The directory is
     /// refreshed for each opening, never on every painted frame.
     pub(crate) layout_picker_entries: Vec<String>,
+    /// `Action::OpenThemePicker` modal state. The selected theme previews
+    /// live through `theme_preview`.
+    pub(crate) theme_picker_input: Option<ThemePickerState>,
     /// Active quick-select hint mode: detected targets + typed prefix.
     pub(crate) hint_state: Option<(Vec<HintTarget>, String)>,
     /// Right-click context menu state (`Some` while open). Lives next
     /// to the other modal overlays — same close-all-modals discipline,
     /// same Esc-to-dismiss key route.
     pub(crate) context_menu: Option<ContextMenuState>,
-    /// Live theme preview. While the cursor (or keyboard) is on a
-    /// `ThemeChoice` row in the right-click → Theme submenu, the theme is applied
-    /// ephemerally to `cfg`; this holds the `(theme_name, theme)` to restore on
-    /// dismiss-without-select. A commit (`SetTheme`) clears it and keeps the
-    /// theme. Reverted by the single post-event chokepoint in `window_event`
-    /// when the highlight leaves a theme row or the menu closes.
+    /// Live theme preview. While the theme picker is open, its selection is
+    /// applied ephemerally to `cfg`; this holds the `(theme_name, theme)` it
+    /// opened on, to restore when it closes without keeping a theme. Keeping
+    /// one (`commit_theme`) clears it first. Reverted by the single post-event
+    /// chokepoint in `window_event` (`theme_preview_change`).
     pub(crate) theme_preview: Option<(String, kettle_config::Theme)>,
     /// When `Some`, the user is editing a window/tab/pane title via
     /// an inline overlay.
@@ -1183,6 +1195,7 @@ impl WindowState {
             last_bg_frame: None,
             layout_picker_input: None,
             layout_picker_entries: Vec::new(),
+            theme_picker_input: None,
             hint_state: None,
             context_menu: None,
             theme_preview: None,

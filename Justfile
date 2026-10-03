@@ -938,6 +938,12 @@ pane-focus-reports-smoke:
 color-scheme-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release color-scheme
 
+# Prove the theme picker previews the selected theme, restores the opening one
+# on Esc, keeps a typed match on Enter and writes it to the config file, opens
+# over Settings from the Theme row, and is the right-click menu's Theme… row.
+theme-picker-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release theme-picker
+
 # Prove a default chord a program also uses goes to the program while it owns
 # the keyboard: a byte recorder takes kitty flags and the alternate screen in a
 # split, Shift+Left reaches it as ESC [1;2D (a real key press on macOS) without

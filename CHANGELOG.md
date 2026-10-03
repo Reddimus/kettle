@@ -6,8 +6,22 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Added
+
+- A theme picker: type to filter the 500+ bundled themes by name, or move
+  through them with the arrows, and the window previews the selected theme.
+  Enter keeps it and Esc puts back the theme you started with. With nothing
+  typed it lists the current theme's appearance first, each theme followed by
+  the most similar one, and tags each row dark or light. Open it from the
+  Settings Theme row (Enter or a click), right-click → Theme…, the command
+  palette's "Choose theme…", or the bindable `open_theme_picker` action.
+
 ### Changed
 
+- The right-click menu's Theme submenu, a list of every bundled theme, is now
+  a Theme… row that opens the theme picker.
+- Screen readers read a picker row's hint after its name, such as a
+  command's shortcut or a theme's appearance.
 - Stepping through themes (`next_theme`, `prev_theme`, and ←/→ on the Settings
   Theme row) stays with the current theme's appearance and moves to the most
   similar theme each time, judged by background, foreground and accent. It used

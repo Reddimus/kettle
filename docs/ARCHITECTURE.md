@@ -41,8 +41,8 @@ named arguments. A missing key, a placeholder mismatch, or a wrong argument
 fails the build; nothing is parsed at run time. Each process picks one language
 and passes an immutable `Translator` to the code that shows text, so there is no
 global locale. Terminal content, user and shell names, config values and
-protocol text never pass through it. Settings, the command palette, the layout
-and SSH pickers, the right-click menu with its Preferences submenu, the new-tab
+protocol text never pass through it. Settings, the command palette, the theme,
+layout and SSH pickers, the right-click menu with its Preferences submenu, the new-tab
 dropdown, the About panel, the close, paste and key-rebind confirmations, the
 title editors, the search bar, the completion card and Kettle's desktop
 notifications are on it so far; the other surfaces move in the
@@ -1812,9 +1812,9 @@ no context reads, clock queries, formatting or writes.
   byte slice into a fresh `Vec<u8>` for the Lua callback (no
   shared ownership because mlua's `IntoLuaMulti` consumes the
   argument); `ContextMenuRow.label` clones the visible row text
-  each frame the menu is open (~512 clones/frame in the worst
-  case — Theme submenu drilled-in). The menu allocation is bounded
-  by user interaction (only allocates while the menu is OPEN) so
+  each frame the menu is open (~533 clones/frame in the worst
+  case — the theme picker with nothing typed). The menu allocation is bounded
+  by user interaction (only allocates while a menu or picker is OPEN) so
   the steady-state allocator pressure is zero. A `Cow<'static, str>`
   refactor of `ContextMenuRow.label` is the natural next step if
   this ever shows up in a profile; today it's not measurable

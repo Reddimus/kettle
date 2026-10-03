@@ -645,6 +645,7 @@ fn text_overlay_requires_continuous_prepare(overlay: &Overlay) -> bool {
         || overlay.ssh_query.is_some()
         || overlay.palette_query.is_some()
         || overlay.layout_picker_query.is_some()
+        || overlay.theme_picker_query.is_some()
         || overlay.edit_title.is_some()
         || overlay.confirm_dialog.is_some()
         || overlay.settings.is_some()
@@ -754,6 +755,12 @@ pub struct TitleEditOverlay {
 /// the input-method window after it, so both measure the same text.
 pub fn title_edit_prefix(label: &str) -> String {
     format!("  ✎ {label} ")
+}
+
+/// The theme picker input bar's text before the query, which the UI measures
+/// to place an input method's candidate window at the painted caret.
+pub fn theme_picker_prefix(tr: &Translator) -> String {
+    format!("  ◐ {} ", tr.text(Text::PickerThemePrompt))
 }
 
 /// Active input-method composition projected over the focused terminal cursor.
@@ -1097,6 +1104,10 @@ pub struct Overlay {
     /// command palette.
     pub layout_picker_query: Option<String>,
     pub layout_picker_hint: String,
+    /// `Some(typed)` while the theme picker is open. Its rows use the same
+    /// menu projection as the command palette.
+    pub theme_picker_query: Option<String>,
+    pub theme_picker_hint: String,
     /// Terminator parity (edit-title overlay UX): the in-progress
     /// title-edit text + a scope label and chrome rect.
     /// `None` when no edit is in progress.
@@ -7257,6 +7268,38 @@ impl Renderer {
             search_rect = (0.0, sh - bar_h, sw, bar_h);
             quads.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[5], 0.96));
             let label = format!("  ⌘ {q}_   {}", overlay.palette_hint);
+            let label = fit_single_line_label(&label, overlay_label_cols(sw, cw));
+            self.search_buffer.set_metrics(metrics);
+            self.search_buffer.set_size(Some(sw), Some(bar_h));
+            // Same equality gate as the other chrome buffers. Only one arm of
+            // this `if`/`else if` chain runs per frame, so a single cache is
+            // enough (see `search_buffer_text`'s doc comment).
+            if self.search_buffer_text != label {
+                self.search_buffer.set_text(
+                    &label,
+                    &Attrs::new().family(Family::Name(&family)),
+                    Shaping::Advanced,
+                    None,
+                );
+                self.search_buffer_text = label;
+            }
+            self.search_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+        } else if overlay.confirm_dialog.is_none()
+            && let Some(q) = &overlay.theme_picker_query
+        {
+            // Theme picker input. The ranked themes live in the shared
+            // context-menu panel above this lane, and the window behind them
+            // already wears the selected theme.
+            have_search = true;
+            let bar_h = ch + 10.0;
+            search_rect = (0.0, sh - bar_h, sw, bar_h);
+            quads.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[5], 0.96));
+            let label = format!(
+                "{}{q}_   {}",
+                theme_picker_prefix(&overlay.tr),
+                overlay.theme_picker_hint
+            );
             let label = fit_single_line_label(&label, overlay_label_cols(sw, cw));
             self.search_buffer.set_metrics(metrics);
             self.search_buffer.set_size(Some(sw), Some(bar_h));

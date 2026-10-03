@@ -763,6 +763,12 @@ pub fn is_text(field: &Field) -> bool {
     matches!(field.kind, FieldKind::Text { .. })
 }
 
+/// Does this row open the theme picker when activated (Enter, Space or a
+/// click)? ←/→ and the wheel still step it through looks of one appearance.
+pub fn opens_theme_picker(field: &Field) -> bool {
+    field.key == "theme"
+}
+
 /// Is `key`'s row inapplicable to the current config, so the overlay should DIM
 /// it and skip it during nav/click? The image path only matters for `image`,
 /// animation and chrome color only matter with a wallpaper (image or
@@ -1529,6 +1535,19 @@ mod tests {
     /// ←/→ on the theme row step through popular themes of the current
     /// theme's appearance. The list's own order used to jump from
     /// TokyoNight Moon to the light TokyoNight Day.
+    /// Enter, Space or a click on the Theme row opens the theme picker; no
+    /// other row does.
+    #[test]
+    fn only_the_theme_row_opens_the_theme_picker() {
+        let openers: Vec<&str> = categories(&[])
+            .iter()
+            .flat_map(|category| category.fields.iter())
+            .filter(|field| opens_theme_picker(field))
+            .map(|field| field.key)
+            .collect();
+        assert_eq!(openers, ["theme"]);
+    }
+
     #[test]
     fn the_theme_row_never_flips_between_light_and_dark() {
         let row = categories(&[])

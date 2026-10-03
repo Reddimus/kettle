@@ -358,8 +358,8 @@ kettle --print-default-config > "$(kettle --config-path)"
 ```
 
 Inside kettle: **right-click anywhere in a pane** for the context menu —
-Copy / Paste / Split / Close, plus **Theme ▸** (cycle through 500+ bundled
-themes), **Profile ▸**, and **Preferences ▸** with one-click toggles for
+Copy / Paste / Split / Close, plus **Theme…** (search or arrow through 500+
+bundled themes with a live preview), **Profile ▸**, and **Preferences ▸** with one-click toggles for
 cursor blink, scrollbar mode, bell, copy-on-select, mouse-hide, and font
 size. Reload config with `Ctrl+Shift+M`; cycle themes from the command
 palette (`Ctrl+Shift+K`, type "Next theme"); jump between prompts with

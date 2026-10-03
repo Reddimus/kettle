@@ -1,10 +1,12 @@
 # Terminator right-click theme submenu — design
 
-> Status: design only. The context menu
-> currently flat-lists Item + Separator + LuaItem + ConfigItem.
-> Adding a submenu for theme picking — a Terminator UX pattern
-> (`terminal_popup_menu.py`) — needs a hierarchical menu structure
-> + nested-render path + hover-to-open flyout.
+> Status: superseded. The submenu shipped, then gave way to the searchable
+> theme picker (`open_theme_picker`, see [SETTINGS.md](SETTINGS.md#theme-picker)):
+> a menu of 500+ themes could be neither searched nor browsed by look, and
+> its arrows jumped between light and dark palettes. The right-click menu
+> keeps a Theme… row that opens the picker. The rest of this document is the
+> original design, kept for history; the submenu machinery still serves
+> Profile ▸ and Preferences ▸.
 
 ## What it is
 

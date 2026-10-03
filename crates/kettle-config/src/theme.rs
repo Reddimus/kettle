@@ -71,7 +71,7 @@ impl Theme {
     /// (rough popularity order), surfaced as the Settings → Appearance → Theme
     /// list of options — cycling them with ←/→ live-previews each. Every entry
     /// MUST be a bundled theme name (`popular_names_are_all_bundled` guards it).
-    /// The full 500+ bundle stays reachable via the right-click Theme submenu,
+    /// The full 500+ bundle stays reachable via the theme picker,
     /// the `NextTheme`/`PrevTheme` actions, and the `theme =` config line.
     pub const POPULAR: &'static [&'static str] = &[
         "TokyoNight Night",
