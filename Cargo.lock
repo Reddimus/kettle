@@ -1992,6 +1992,7 @@ dependencies = [
  "image",
  "kettle-config",
  "kettle-core",
+ "kettle-i18n",
  "kettle-state",
  "kettle-test-support",
  "log",

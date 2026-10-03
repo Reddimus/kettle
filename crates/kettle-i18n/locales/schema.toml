@@ -17,6 +17,17 @@ args = [{ name = "tag", type = "str" }]
 [messages.about_update_unknown]
 context = "crates/kettle-ui/src/app.rs open_about_panel: About panel row. No update check has finished."
 
+[messages.completion_kind_completions]
+context = "crates/kettle-ui/src/app.rs: completion card header, before the source shell's name: what the rows are."
+
+[messages.completion_kind_prediction]
+context = "crates/kettle-ui/src/app.rs: completion card header, before the source shell's name: what the rows are."
+
+[messages.completion_matches]
+context = "crates/kettle-render/src/lib.rs completion_header_count: completion card header, the number of shell completions."
+args = [{ name = "count", type = "u64" }]
+plural = "count"
+
 [messages.confirm_button_cancel]
 context = "crates/kettle-ui/src/app.rs: Confirmation button that closes the dialog and does nothing."
 
@@ -555,6 +566,9 @@ context = "crates/kettle-ui/src/app.rs: picker key hint, after ↑↓ or Tab/↑
 [messages.picker_hint_spawn]
 context = "crates/kettle-ui/src/app.rs: picker key hint, after Enter in the layout picker: open the layout. Lowercase, one or two words."
 
+[messages.picker_layout_prompt]
+context = "crates/kettle-render/src/lib.rs: prompt before the layout picker's query. Lowercase, ends with a colon."
+
 [messages.picker_no_configured_hosts]
 context = "crates/kettle-ui/src/app.rs: SSH launcher row when no host is configured."
 
@@ -572,6 +586,88 @@ context = "crates/kettle-ui/src/app.rs: Layout picker row when no layout is save
 
 [messages.picker_typed_target]
 context = "crates/kettle-ui/src/app.rs: SSH launcher hint: Enter connects to what was typed. Keep Enter."
+
+[messages.search_a11y_case]
+context = "crates/kettle-render/src/lib.rs SearchControl::accessible_label: screen-reader name of a search bar control."
+
+[messages.search_a11y_close]
+context = "crates/kettle-render/src/lib.rs SearchControl::accessible_label: screen-reader name of a search bar control."
+
+[messages.search_a11y_editor]
+context = "crates/kettle-render/src/lib.rs SearchControl::accessible_label: screen-reader name of a search bar control."
+
+[messages.search_a11y_invert]
+context = "crates/kettle-render/src/lib.rs SearchControl::accessible_label: screen-reader name of a search bar control."
+
+[messages.search_a11y_next]
+context = "crates/kettle-render/src/lib.rs SearchControl::accessible_label: screen-reader name of a search bar control."
+
+[messages.search_a11y_previous]
+context = "crates/kettle-render/src/lib.rs SearchControl::accessible_label: screen-reader name of a search bar control."
+
+[messages.search_a11y_wrap]
+context = "crates/kettle-render/src/lib.rs SearchControl::accessible_label: screen-reader name of a search bar control."
+
+[messages.search_case]
+context = "crates/kettle-render/src/lib.rs search_bar_segments: search bar control. Keep it short; the bar widens a control to fit its longest label. Button that cycles the case mode; mode is Smart, Match or Ignore in the UI language, padded to the longest. Keep the › arrow."
+args = [{ name = "mode", type = "str" }]
+
+[messages.search_close]
+context = "crates/kettle-render/src/lib.rs search_bar_segments: search bar control. Keep it short; the bar widens a control to fit its longest label. Button that closes the search bar. Keep the × mark."
+
+[messages.search_enter_next]
+context = "crates/kettle-render/src/lib.rs search_bar_segments: search bar control. Keep it short; the bar widens a control to fit its longest label. Toggle naming what Enter does: search forward. Keep Enter."
+
+[messages.search_enter_prev]
+context = "crates/kettle-render/src/lib.rs search_bar_segments: search bar control. Keep it short; the bar widens a control to fit its longest label. Toggle naming what Enter does: search backward. Keep Enter."
+
+[messages.search_label]
+context = "crates/kettle-render/src/lib.rs search_bar_segments: search bar control. Keep it short; the bar widens a control to fit its longest label. Label before the search field."
+
+[messages.search_next]
+context = "crates/kettle-render/src/lib.rs search_bar_segments: search bar control. Keep it short; the bar widens a control to fit its longest label. Button: next match. Keep the › arrow."
+
+[messages.search_prev]
+context = "crates/kettle-render/src/lib.rs search_bar_segments: search bar control. Keep it short; the bar widens a control to fit its longest label. Button: previous match. Keep the ‹ arrow."
+
+[messages.search_status_end]
+context = "crates/kettle-render/src/lib.rs SearchStatus::label: search bar status. The bar widens its status slot to fit the longest."
+
+[messages.search_status_invalid]
+context = "crates/kettle-render/src/lib.rs SearchStatus::label: search bar status. The bar widens its status slot to fit the longest."
+
+[messages.search_status_limited]
+context = "crates/kettle-render/src/lib.rs SearchStatus::label: search bar status. The bar widens its status slot to fit the longest."
+
+[messages.search_status_match]
+context = "crates/kettle-render/src/lib.rs SearchStatus::label: search bar status. The bar widens its status slot to fit the longest."
+
+[messages.search_status_no_match]
+context = "crates/kettle-render/src/lib.rs SearchStatus::label: search bar status. The bar widens its status slot to fit the longest."
+
+[messages.search_status_searching]
+context = "crates/kettle-render/src/lib.rs SearchStatus::label: search bar status. The bar widens its status slot to fit the longest."
+
+[messages.search_status_start]
+context = "crates/kettle-render/src/lib.rs SearchStatus::label: search bar status. The bar widens its status slot to fit the longest."
+
+[messages.search_status_too_complex]
+context = "crates/kettle-render/src/lib.rs SearchStatus::label: search bar status. The bar widens its status slot to fit the longest."
+
+[messages.search_status_too_long]
+context = "crates/kettle-render/src/lib.rs SearchStatus::label: search bar status. The bar widens its status slot to fit the longest."
+
+[messages.search_status_typing]
+context = "crates/kettle-render/src/lib.rs SearchStatus::label: search bar status. The bar widens its status slot to fit the longest."
+
+[messages.search_status_wrapped]
+context = "crates/kettle-render/src/lib.rs SearchStatus::label: search bar status. The bar widens its status slot to fit the longest."
+
+[messages.search_wrap_off]
+context = "crates/kettle-render/src/lib.rs search_bar_segments: search bar control. Keep it short; the bar widens a control to fit its longest label. Toggle: the search stops at the ends."
+
+[messages.search_wrap_on]
+context = "crates/kettle-render/src/lib.rs search_bar_segments: search bar control. Keep it short; the bar widens a control to fit its longest label. Toggle: the search continues from the other end."
 
 [messages.settings_a11y_dialog]
 context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader name of the Settings dialog. category is a translated category name."

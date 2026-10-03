@@ -19,6 +19,7 @@ bytemuck = { version = "1", features = ["derive"] }
 glyphon = "0.12.0"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "bmp", "gif"] }
 kettle-config.workspace = true
+kettle-i18n.workspace = true
 kettle-core.workspace = true
 kettle-state.workspace = true
 log.workspace = true
