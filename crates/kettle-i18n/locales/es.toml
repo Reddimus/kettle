@@ -6,6 +6,17 @@ about_open_github = "Abrir la página de GitHub"
 about_open_release = "Abrir la página de la versión"
 about_update_available = "Actualización disponible: {tag}"
 about_update_unknown = "Estado de actualización desconocido"
+confirm_button_cancel = "Cancelar"
+confirm_button_close = "Cerrar"
+confirm_button_paste = "Pegar"
+confirm_button_reassign = "Reasignar"
+confirm_close_pane = "¿Cerrar este panel?"
+confirm_rebind = "{chord} ya está asignado a \"{taken}\". ¿Reasignarlo a \"{action}\"?"
+edit_hint_apply = "aplicar"
+edit_title_group = "Editar el grupo del panel:"
+edit_title_pane = "Editar el título del panel:"
+edit_title_tab = "Editar el título de la pestaña:"
+edit_title_window = "Editar el título de la ventana:"
 menu_about = "Acerca de kettle"
 menu_close_pane = "Cerrar panel"
 menu_close_tab = "Cerrar pestaña"
@@ -292,3 +303,15 @@ settings_value_visual_flash = "Destello visual"
 settings_value_visual_flash_and_attention = "Destello y llamar la atención"
 settings_value_when_focused = "Con el foco"
 settings_value_white = "Blanco"
+
+[confirm_close_tab]
+one = "¿Cerrar la pestaña con {count} panel?"
+other = "¿Cerrar la pestaña con {count} paneles?"
+
+[confirm_close_window]
+one = "¿Cerrar {count} panel?"
+other = "¿Cerrar {count} paneles?"
+
+[confirm_paste]
+one = "¿Pegar {count} línea en un destino tipo shell?"
+other = "¿Pegar {count} líneas en un destino tipo shell?"

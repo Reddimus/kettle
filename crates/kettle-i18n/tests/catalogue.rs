@@ -49,6 +49,35 @@ fn formatted_messages_keep_their_arguments_verbatim() {
     );
 }
 
+/// Only 1 selects the singular; 0 and every larger count read as plural.
+#[test]
+fn integer_plural_boundaries() {
+    let en = Translator::new(Language::En);
+    let es = Translator::new(Language::Es);
+    for count in [0, 1, 2, 1000, 1_000_000, u64::MAX] {
+        let one = count == 1;
+        assert_eq!(
+            en.confirm_close_tab(count),
+            format!(
+                "Close tab with {count} {}?",
+                if one { "pane" } else { "panes" }
+            )
+        );
+        assert_eq!(
+            es.confirm_close_tab(count),
+            format!(
+                "¿Cerrar la pestaña con {count} {}?",
+                if one { "panel" } else { "paneles" }
+            )
+        );
+    }
+    assert_eq!(
+        en.confirm_paste(1),
+        "Paste 1 line into a shell-like target?"
+    );
+    assert_eq!(es.confirm_close_window(1), "¿Cerrar 1 panel?");
+}
+
 #[cfg(not(debug_assertions))]
 #[test]
 fn release_translator_contains_only_shipping_language() {

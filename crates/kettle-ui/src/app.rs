@@ -2844,7 +2844,7 @@ fn paste_needs_confirmation(
     protection_enabled && any_target_without_bracketed_paste && text_contains_line_break(text)
 }
 
-fn paste_confirm_prompt(text: &str) -> String {
+fn paste_confirm_prompt(text: &str, tr: &kettle_i18n::Translator) -> String {
     let mut line_breaks = 0usize;
     let mut prev_cr = false;
     for b in text.bytes() {
@@ -2864,7 +2864,7 @@ fn paste_confirm_prompt(text: &str) -> String {
         }
     }
     let commands = line_breaks.saturating_add(1);
-    format!("Paste {commands} lines into a shell-like target?")
+    tr.confirm_paste(commands as u64)
 }
 
 /// Pin a single-pane paste request to its current pane. Broadcast deliberately
@@ -2991,11 +2991,39 @@ fn tab_drag_cursor_icon(state: &crate::detach::DragState) -> Option<CursorIcon> 
     }
 }
 
-fn confirm_button_label(button: &ConfirmButton) -> &str {
+/// The text a confirmation button shows. Painting and hit testing both use it,
+/// so a click lands on what is drawn in every language.
+fn confirm_button_label<'a>(button: &'a ConfirmButton, tr: &kettle_i18n::Translator) -> &'a str {
     match button {
-        ConfirmButton::Cancel => "Cancel",
+        ConfirmButton::Cancel => tr.text(kettle_i18n::Text::ConfirmButtonCancel),
         ConfirmButton::Confirm { label, .. } => label.as_str(),
     }
+}
+
+/// The title editor's label for `scope`. The overlay paints it and the
+/// input-method placement measures it, so both use this.
+fn title_edit_label(scope: TitleEditScope, tr: &kettle_i18n::Translator) -> &'static str {
+    use kettle_i18n::Text;
+    tr.text(match scope {
+        TitleEditScope::Window => Text::EditTitleWindow,
+        TitleEditScope::Tab => Text::EditTitleTab,
+        TitleEditScope::Pane => Text::EditTitlePane,
+        TitleEditScope::Group => Text::EditTitleGroup,
+    })
+}
+
+/// The column of the title editor's caret: the painted prefix in the UI's
+/// language, the input, then any composition before the focus point.
+fn title_edit_caret_cols(
+    scope: TitleEditScope,
+    input: &str,
+    preedit_before_focus: &str,
+    tr: &kettle_i18n::Translator,
+) -> usize {
+    use unicode_width::UnicodeWidthStr as _;
+    kettle_render::title_edit_prefix(title_edit_label(scope, tr)).width()
+        + input.width()
+        + preedit_before_focus.width()
 }
 
 /// Where the title-edit overlay is painted.
@@ -3033,21 +3061,19 @@ fn title_edit_rect_for(
     }
 }
 
-fn confirm_dialog_button_cells(button: &ConfirmButton) -> usize {
+fn confirm_dialog_button_cells(button: &ConfirmButton, tr: &kettle_i18n::Translator) -> usize {
     // Renderer format is `[<marker> <label>]`, where marker is either `▶` or a
     // single space. The hit-test uses the same cell budget so clicks track the
     // visible right-aligned button row.
-    confirm_button_label(button).width() + 4
+    confirm_button_label(button, tr).width() + 4
 }
 
 fn confirm_dialog_button_hit(
     buttons: &[ConfirmButton],
-    px: f32,
-    py: f32,
-    window_w: f32,
-    window_h: f32,
-    cell_w: f32,
-    cell_h: f32,
+    (px, py): (f32, f32),
+    (window_w, window_h): (f32, f32),
+    (cell_w, cell_h): (f32, f32),
+    tr: &kettle_i18n::Translator,
 ) -> Option<usize> {
     if buttons.is_empty() || window_w <= 0.0 || window_h <= 0.0 || cell_w <= 0.0 || cell_h <= 0.0 {
         return None;
@@ -3062,7 +3088,7 @@ fn confirm_dialog_button_hit(
     let gap_cells = 2usize;
     let buttons_cells = buttons
         .iter()
-        .map(confirm_dialog_button_cells)
+        .map(|button| confirm_dialog_button_cells(button, tr))
         .sum::<usize>()
         + gap_cells.saturating_mul(buttons.len().saturating_sub(1));
     // Use the renderer's exact painted budget: one column narrower than the
@@ -3074,7 +3100,7 @@ fn confirm_dialog_button_hit(
 
     let mut x_cells = cols - buttons_cells;
     for (idx, button) in buttons.iter().enumerate() {
-        let w_cells = confirm_dialog_button_cells(button);
+        let w_cells = confirm_dialog_button_cells(button, tr);
         let x0 = x_cells as f32 * cell_w;
         let x1 = (x_cells + w_cells) as f32 * cell_w;
         if px >= x0 && px < x1 {
@@ -8290,12 +8316,10 @@ impl App {
         let (cw, ch) = self.cell_px(ws);
         confirm_dialog_button_hit(
             &dialog.buttons,
-            ws.cursor.x as f32,
-            ws.cursor.y as f32,
-            size.width as f32,
-            size.height as f32,
-            cw as f32,
-            ch as f32,
+            (ws.cursor.x as f32, ws.cursor.y as f32),
+            (size.width as f32, size.height as f32),
+            (cw as f32, ch as f32),
+            &self.ui_text,
         )
         .is_some()
     }
@@ -8307,12 +8331,10 @@ impl App {
         let (cw, ch) = self.cell_px(ws);
         let idx = confirm_dialog_button_hit(
             &dialog.buttons,
-            ws.cursor.x as f32,
-            ws.cursor.y as f32,
-            size.width as f32,
-            size.height as f32,
-            cw as f32,
-            ch as f32,
+            (ws.cursor.x as f32, ws.cursor.y as f32),
+            (size.width as f32, size.height as f32),
+            (cw as f32, ch as f32),
+            &self.ui_text,
         )?;
         match dialog.buttons.get(idx)? {
             ConfirmButton::Cancel => Some(ConfirmKeyResult::Cancel),
@@ -10150,11 +10172,14 @@ impl App {
             self.install_confirm_dialog(
                 ws,
                 ConfirmDialogState {
-                    prompt: paste_confirm_prompt(text),
+                    prompt: paste_confirm_prompt(text, &self.ui_text),
                     buttons: vec![
                         ConfirmButton::Cancel,
                         ConfirmButton::Confirm {
-                            label: "Paste".into(),
+                            label: self
+                                .ui_text
+                                .text(kettle_i18n::Text::ConfirmButtonPaste)
+                                .to_string(),
                             destructive: false,
                         },
                     ],
@@ -10276,11 +10301,14 @@ impl App {
             self.install_confirm_dialog(
                 ws,
                 ConfirmDialogState {
-                    prompt: paste_confirm_prompt(&preview),
+                    prompt: paste_confirm_prompt(&preview, &self.ui_text),
                     buttons: vec![
                         ConfirmButton::Cancel,
                         ConfirmButton::Confirm {
-                            label: "Paste".into(),
+                            label: self
+                                .ui_text
+                                .text(kettle_i18n::Text::ConfirmButtonPaste)
+                                .to_string(),
                             destructive: false,
                         },
                     ],
@@ -12498,18 +12526,11 @@ impl App {
                 (size.height as f32 - ch - 5.0).max(0.0),
             )
         } else if let Some(edit) = &ws.editing_title {
-            use unicode_width::UnicodeWidthStr as _;
-
             let rect = self.title_edit_rect(ws);
-            let label_cols = match edit.scope {
-                TitleEditScope::Window => 20,
-                TitleEditScope::Tab => 17,
-                TitleEditScope::Pane => 18,
-                TitleEditScope::Group => 19,
-            };
+            let caret =
+                title_edit_caret_cols(edit.scope, &edit.input, preedit_before_focus, &self.ui_text);
             (
-                rect.0
-                    + (label_cols + edit.input.width() + preedit_before_focus.width()) as f32 * cw,
+                rect.0 + caret as f32 * cw,
                 rect.1 + ((rect.3 - ch) * 0.5).max(0.0),
             )
         } else if ws.settings_text_edit.is_some() {
@@ -13081,15 +13102,17 @@ impl App {
         // rows.
         let edit_title: Option<kettle_render::TitleEditOverlay> =
             ws.editing_title.as_ref().map(|s| {
-                let label = match s.scope {
-                    TitleEditScope::Window => "Edit window title:",
-                    TitleEditScope::Tab => "Edit tab title:",
-                    TitleEditScope::Pane => "Edit pane title:",
-                    TitleEditScope::Group => "Edit pane group:",
-                };
+                let label = title_edit_label(s.scope, &self.ui_text);
                 kettle_render::TitleEditOverlay {
                     label: label.to_string(),
                     input: with_preedit(&s.input),
+                    hint: picker_hint(
+                        &self.ui_text,
+                        &[
+                            ("Enter", kettle_i18n::Text::EditHintApply),
+                            ("Esc", kettle_i18n::Text::PickerHintCancel),
+                        ],
+                    ),
                     rect: self.title_edit_rect(ws),
                 }
             });
@@ -13106,7 +13129,7 @@ impl App {
                         .iter()
                         .map(|b| match b {
                             ConfirmButton::Cancel => kettle_render::ConfirmDialogButton {
-                                label: "Cancel".to_string(),
+                                label: confirm_button_label(b, tr).to_string(),
                                 destructive: false,
                             },
                             ConfirmButton::Confirm { label, destructive } => {
@@ -16291,7 +16314,9 @@ impl App {
                 if let Some(target) = ws.mux.active_focus()
                     && self.confirm_close(
                         ws,
-                        "Close this pane?".to_string(),
+                        self.ui_text
+                            .text(kettle_i18n::Text::ConfirmClosePane)
+                            .to_string(),
                         1,
                         busy,
                         ConfirmAction::ClosePane(target),
@@ -16333,7 +16358,7 @@ impl App {
                 let (panes_in_tab, busy_in_tab) = tab_close_scope(ws, ws.mux.active);
                 if self.confirm_close(
                     ws,
-                    format!("Close tab with {panes_in_tab} pane(s)?"),
+                    self.ui_text.confirm_close_tab(panes_in_tab as u64),
                     panes_in_tab,
                     busy_in_tab,
                     ConfirmAction::CloseTabHolding(ws.mux.tab_anchor_panes(ws.mux.active)),
@@ -16361,7 +16386,7 @@ impl App {
                 let (scope, busy) = window_close_scope(ws);
                 if self.confirm_close(
                     ws,
-                    format!("Close {scope} pane(s)?"),
+                    self.ui_text.confirm_close_window(scope as u64),
                     scope,
                     busy,
                     ConfirmAction::CloseWindow {
@@ -18092,7 +18117,10 @@ impl App {
                 buttons: vec![
                     ConfirmButton::Cancel,
                     ConfirmButton::Confirm {
-                        label: "Close".to_string(),
+                        label: self
+                            .ui_text
+                            .text(kettle_i18n::Text::ConfirmButtonClose)
+                            .to_string(),
                         destructive: true,
                     },
                 ],
@@ -20451,7 +20479,7 @@ impl App {
                         Some(ws.mux.tab_anchor_panes(seg.idx)).filter(|a| !a.is_empty())
                         && self.confirm_close(
                             ws,
-                            format!("Close tab with {panes} pane(s)?"),
+                            self.ui_text.confirm_close_tab(panes as u64),
                             panes,
                             busy,
                             ConfirmAction::CloseTabHolding(anchor),
@@ -23230,14 +23258,18 @@ impl App {
                         self.install_confirm_dialog(
                             ws,
                             ConfirmDialogState {
-                                prompt: format!(
-                                    "{chord_label} is already bound to \"{stolen_name}\". \
-                                 Reassign it to \"{new_name}\"?"
+                                prompt: self.ui_text.confirm_rebind(
+                                    &chord_label,
+                                    &stolen_name,
+                                    &new_name,
                                 ),
                                 buttons: vec![
                                     ConfirmButton::Cancel,
                                     ConfirmButton::Confirm {
-                                        label: "Reassign".to_string(),
+                                        label: self
+                                            .ui_text
+                                            .text(kettle_i18n::Text::ConfirmButtonReassign)
+                                            .to_string(),
                                         destructive: false,
                                     },
                                 ],
@@ -28829,7 +28861,7 @@ impl App {
                     let (scope, busy) = window_close_scope(ws);
                     if self.confirm_close(
                         ws,
-                        format!("Close {scope} pane(s)?"),
+                        self.ui_text.confirm_close_window(scope as u64),
                         scope,
                         busy,
                         ConfirmAction::CloseWindow {
@@ -29547,7 +29579,7 @@ impl App {
                                 Some(ws.mux.tab_anchor_panes(seg.idx)).filter(|a| !a.is_empty())
                                 && self.confirm_close(
                                     ws,
-                                    format!("Close tab with {panes} pane(s)?"),
+                                    self.ui_text.confirm_close_tab(panes as u64),
                                     panes,
                                     busy,
                                     ConfirmAction::CloseTabHolding(anchor),
@@ -31438,7 +31470,8 @@ mod modal_discipline_guard {
              must be gated too"
         );
         for (at, _) in close_sites {
-            let body: String = src[at..].chars().take(1100).collect();
+            // Wide enough to reach each hit test's confirm_close call.
+            let body: String = src[at..].chars().take(1400).collect();
             assert!(
                 body.contains("self.confirm_close("),
                 "a tab ✕ / middle-click close must ask before closing"
@@ -31813,6 +31846,9 @@ mod modal_discipline_guard {
 
 #[cfg(test)]
 mod tests {
+    const EN_TEXT: kettle_i18n::Translator =
+        kettle_i18n::Translator::new(kettle_i18n::Language::En);
+
     #[test]
     fn startup_plan_truth_table() {
         use kettle_config::WindowState::{Fullscreen, Hidden, Maximise, Normal};
@@ -44532,8 +44568,18 @@ mod tests {
             true
         ));
         assert_eq!(
-            paste_confirm_prompt("one\r\ntwo\nthree"),
+            paste_confirm_prompt(
+                "one\r\ntwo\nthree",
+                &kettle_i18n::Translator::new(kettle_i18n::Language::En)
+            ),
             "Paste 3 lines into a shell-like target?"
+        );
+        assert_eq!(
+            paste_confirm_prompt(
+                "one\r\ntwo\nthree",
+                &kettle_i18n::Translator::new(kettle_i18n::Language::Es)
+            ),
+            "¿Pegar 3 líneas en un destino tipo shell?"
         );
     }
 
@@ -44628,7 +44674,10 @@ mod tests {
             "fixture must genuinely require the paste-protection prompt"
         );
         let dialog = ConfirmDialogState {
-            prompt: super::paste_confirm_prompt(&preview),
+            prompt: super::paste_confirm_prompt(
+                &preview,
+                &kettle_i18n::Translator::new(kettle_i18n::Language::En),
+            ),
             buttons: vec![
                 ConfirmButton::Cancel,
                 ConfirmButton::Confirm {
@@ -44789,27 +44838,33 @@ mod tests {
         // window width would shift the live region one column right, past the
         // last painted glyph.
         assert_eq!(
-            confirm_dialog_button_hit(&buttons, 78.0 * cw + 1.0, y, sw, sh, cw, ch),
+            confirm_dialog_button_hit(&buttons, (78.0 * cw + 1.0, y), (sw, sh), (cw, ch), &EN_TEXT),
             Some(0),
             "clicking the visible Cancel button should cancel"
         );
         assert_eq!(
-            confirm_dialog_button_hit(&buttons, 90.0 * cw + 1.0, y, sw, sh, cw, ch),
+            confirm_dialog_button_hit(&buttons, (90.0 * cw + 1.0, y), (sw, sh), (cw, ch), &EN_TEXT),
             Some(1),
             "clicking the visible Close button should confirm"
         );
         assert_eq!(
-            confirm_dialog_button_hit(&buttons, 88.0 * cw + 1.0, y, sw, sh, cw, ch),
+            confirm_dialog_button_hit(&buttons, (88.0 * cw + 1.0, y), (sw, sh), (cw, ch), &EN_TEXT),
             None,
             "the gap between buttons is not a button"
         );
         assert_eq!(
-            confirm_dialog_button_hit(&buttons, 99.0 * cw + 1.0, y, sw, sh, cw, ch),
+            confirm_dialog_button_hit(&buttons, (99.0 * cw + 1.0, y), (sw, sh), (cw, ch), &EN_TEXT),
             None,
             "the column past the painted bar is not a button"
         );
         assert_eq!(
-            confirm_dialog_button_hit(&buttons, 91.0 * cw + 1.0, sh - ch - 20.0, sw, sh, cw, ch),
+            confirm_dialog_button_hit(
+                &buttons,
+                (91.0 * cw + 1.0, sh - ch - 20.0),
+                (sw, sh),
+                (cw, ch),
+                &EN_TEXT
+            ),
             None,
             "clicks above the confirm bar are still generic modal clicks"
         );
@@ -44818,11 +44873,11 @@ mod tests {
         // complete row is visible and live at that exact boundary; one column
         // narrower paints no buttons and therefore must expose no target.
         assert_eq!(
-            confirm_dialog_button_hit(&buttons, 1.0, y, 22.0 * cw, sh, cw, ch),
+            confirm_dialog_button_hit(&buttons, (1.0, y), (22.0 * cw, sh), (cw, ch), &EN_TEXT),
             Some(0)
         );
         assert_eq!(
-            confirm_dialog_button_hit(&buttons, 1.0, y, 21.0 * cw, sh, cw, ch),
+            confirm_dialog_button_hit(&buttons, (1.0, y), (21.0 * cw, sh), (cw, ch), &EN_TEXT),
             None
         );
     }
@@ -44844,11 +44899,47 @@ mod tests {
         let ch = 16.0;
         let y = sh - (ch + 10.0) + 4.0;
 
-        assert_eq!(confirm_dialog_button_cells(&buttons[1]), 6);
+        assert_eq!(confirm_dialog_button_cells(&buttons[1], &EN_TEXT), 6);
         assert_eq!(
-            confirm_dialog_button_hit(&buttons, 81.0 * cw + 1.0, y, sw, sh, cw, ch),
+            confirm_dialog_button_hit(&buttons, (81.0 * cw + 1.0, y), (sw, sh), (cw, ch), &EN_TEXT),
             Some(0),
             "the hit row must start where the wide-glyph button row is painted"
+        );
+    }
+
+    /// Hit testing measures the buttons in the UI's language, as the renderer
+    /// paints them. A 24-column window fits `[  Cancel]  [  Close]` (21 cells)
+    /// but not `[  Cancelar]  [  Cerrar]` (24 cells), so in Spanish the row is
+    /// hidden and must expose no target: an invisible Close would confirm.
+    #[test]
+    fn confirm_dialog_button_hit_measures_translated_labels() {
+        use super::{ConfirmButton, confirm_dialog_button_hit};
+        let es = kettle_i18n::Translator::new(kettle_i18n::Language::Es);
+        let buttons = |close: &str| {
+            vec![
+                ConfirmButton::Cancel,
+                ConfirmButton::Confirm {
+                    label: close.to_string(),
+                    destructive: true,
+                },
+            ]
+        };
+        let (sh, cw, ch) = (600.0, 8.0, 16.0);
+        let y = sh - (ch + 10.0) + 4.0;
+        let sw = 24.0 * cw;
+        assert_eq!(
+            confirm_dialog_button_hit(
+                &buttons("Close"),
+                (20.0 * cw, y),
+                (sw, sh),
+                (cw, ch),
+                &EN_TEXT
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            confirm_dialog_button_hit(&buttons("Cerrar"), (20.0 * cw, y), (sw, sh), (cw, ch), &es),
+            None
         );
     }
 
@@ -45902,6 +45993,48 @@ mod picker_text_tests {
             ..kettle_render::Overlay::default()
         };
         assert!(names(ssh, &ES).iter().any(|n| n == "Lanzador SSH"));
+    }
+
+    /// The title editor's hint is built like the pickers', from its keys and
+    /// what they do.
+    #[test]
+    fn the_title_editor_hint_keeps_its_keys() {
+        let hint = [
+            ("Enter", Text::EditHintApply),
+            ("Esc", Text::PickerHintCancel),
+        ];
+        assert_eq!(picker_hint(&EN, &hint), "(Enter apply · Esc cancel)");
+        assert_eq!(picker_hint(&ES, &hint), "(Enter aplicar · Esc cancelar)");
+    }
+
+    /// The input-method window opens at the painted caret, whatever the
+    /// label's language: the caret follows the prefix the renderer paints.
+    #[test]
+    fn the_title_editor_caret_follows_the_painted_prefix() {
+        use super::{TitleEditScope, title_edit_caret_cols};
+        use unicode_width::UnicodeWidthStr as _;
+        for tr in [EN, ES] {
+            for (scope, text) in [
+                (TitleEditScope::Window, Text::EditTitleWindow),
+                (TitleEditScope::Tab, Text::EditTitleTab),
+                (TitleEditScope::Pane, Text::EditTitlePane),
+                (TitleEditScope::Group, Text::EditTitleGroup),
+            ] {
+                let painted = format!("  ✎ {} 界x", tr.text(text));
+                assert_eq!(
+                    title_edit_caret_cols(scope, "界x", "", &tr),
+                    painted.width()
+                );
+            }
+        }
+        assert_eq!(
+            title_edit_caret_cols(TitleEditScope::Window, "", "", &EN),
+            23
+        );
+        assert_eq!(
+            title_edit_caret_cols(TitleEditScope::Window, "", "", &ES),
+            36
+        );
     }
 
     #[test]

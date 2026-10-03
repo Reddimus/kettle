@@ -6,8 +6,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Changed
+
+- Close confirmations count in words that match the number: "Close tab with 1
+  pane?", "Close 3 panes?". The paste prompt says "1 line" or "2 lines". They
+  used to say "pane(s)" and "lines" whatever the count.
+
 ### Fixed
 
+- In the window, tab, pane and group title editors, the input method's
+  candidate window opens at the caret. It opened two or three columns to the
+  caret's left.
 - A Settings keybind row for an action with more than one shortcut shows the
   same shortcut on every launch, the one the command palette and menus show.
   It used to show any of them, and could change between launches.

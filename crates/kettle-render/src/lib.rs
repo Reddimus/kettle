@@ -744,7 +744,16 @@ fn context_menu_clip_indicators(
 pub struct TitleEditOverlay {
     pub label: String,
     pub input: String,
+    /// The key hint after the input, already in the UI's language.
+    pub hint: String,
     pub rect: Rect4,
+}
+
+/// The title editor's text before its input: the pencil and the label. The
+/// line is this prefix, the input with its caret, then the hint. The UI places
+/// the input-method window after it, so both measure the same text.
+pub fn title_edit_prefix(label: &str) -> String {
+    format!("  ✎ {label} ")
 }
 
 /// Active input-method composition projected over the focused terminal cursor.
@@ -7357,8 +7366,10 @@ impl Renderer {
                 0.96,
             ));
             let label = format!(
-                "  ✎ {} {}_   (Enter apply · Esc cancel)",
-                edit.label, edit.input
+                "{}{}_   {}",
+                title_edit_prefix(&edit.label),
+                edit.input,
+                edit.hint
             );
             let label = fit_single_line_label(&label, overlay_label_cols(edit.rect.2, cw));
             self.search_buffer.set_metrics(metrics);
