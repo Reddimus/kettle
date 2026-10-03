@@ -156,6 +156,9 @@ windows = { version = "0.62", features = [
 
 [dev-dependencies]
 kettle-test-support.workspace = true
+# Layout checks run every text-sized surface against the pseudo-locale, which
+# exists only in debug test builds.
+kettle-i18n = { workspace = true, features = ["dev-pseudo"] }
 # Tests may build renderer overlays from defaults; production code may not.
 kettle-render = { workspace = true, features = ["test-defaults"] }
 tempfile = "3"

@@ -778,6 +778,29 @@ tested at 0, 1, 2, 1000, one million and `u64::MAX`; only 1 reads as singular.
 Every line of a paste receipt shows whole at the standard size in English and
 Spanish, and an expanded remote card is admitted only when its translated
 warning fits (`remote_warning_columns`, 18 columns in English).
+
+Pseudo-locale layout checks run the same layouts against text about 38%
+longer, in debug test builds only: the Settings rows, category tabs and key
+hints fit the 144 columns of a default window on a 1366 px laptop; a 2400 px
+search bar shows every label whole, and from 300 to 2400 px its controls
+never overlap or leave the bar; every compact receipt title shows whole, the
+card widening for it; a widened compact card stays inside the expanded card
+it shares a lane with and gives its title every column it was sized for, with
+chrome and terminal cells of different widths; and an admitted expanded remote
+card shows its warning whole at every pane width from 140 to 600 px with 6 and
+8 px cells, which English and Spanish must exercise (the pseudo-locale's
+warning never fits the expanded detail box, so it keeps the compact card);
+Dock titles carry no ellipsis. Informational receipt lines may be cut with an
+ellipsis in a longer language; the remote warning may not where the card has
+room. The `ui_text_sinks_never_take_literal_text` drift guard scans the
+production source of kettle-ui and kettle-render for prose literals given to a
+screen-reader label or description, a window title, a desktop notification, a
+menu or picker row's label or hint, a prompt or a painted label: in any
+argument, inside `format!` and in raw strings. Prose is two words, a
+capitalised word or a non-ASCII letter outside `{…}` placeholders, so GPU
+debug labels and config keys pass; key names and the layout picker's shell
+command are listed as language-neutral. Its scanner has its own test, and
+reintroducing one literal label fails it.
 The search bar's control widths equal the old fixed widths in English, and a
 Spanish bar shows every word whole with no ellipsis. The renderer's `Overlay`
 and `SearchOverlay` implement `Default` only for tests (kettle-render's

@@ -37,6 +37,9 @@ unicode-width.workspace = true
 wgpu = "30.0.0"
 
 [dev-dependencies]
+# Layout checks run every text-sized surface against the pseudo-locale, which
+# exists only in debug test builds.
+kettle-i18n = { workspace = true, features = ["dev-pseudo"] }
 # Temp PNG output for the menu-visual integration test
 # (tests/menu_visual.rs). Standard crate for this; tiny dep, only
 # pulled in for test compilation.
