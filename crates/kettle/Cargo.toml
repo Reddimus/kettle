@@ -108,4 +108,6 @@ ignored = ["winresource"]
 
 [dev-dependencies]
 kettle-test-support.workspace = true
+# Short client budgets for the media platform's end-to-end tests.
+kettle-media = { workspace = true, features = ["test-worker"] }
 tempfile = "3"

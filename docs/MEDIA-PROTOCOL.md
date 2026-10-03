@@ -254,8 +254,29 @@ thread, it is blocked there; on macOS, where it goes to the whole process,
 the platform marks the worker's stdin pipe `F_SETNOSIGPIPE` when it starts
 the worker. Either way the write fails with `EPIPE` instead.
 
-Not yet: footprint polling and the 768 MiB aggregate limit, the GUI's
-preview account and admission, and cancellation follow in later slices.
+**Memory.** While it waits, the caller's thread also measures the worker and
+everything in its process group on a fixed 25 ms schedule (a slow probe skips
+ticks rather than shifting them): that is everything a group kill reaches,
+including a grandchild whose parent has exited. On macOS the group comes from
+`proc_listpgrppids` and each member's physical footprint from
+`proc_pid_rusage`, as Activity Monitor reports it; on Linux from each thread's
+`children` list plus a scan of `/proc` for the group at most once a second
+(every 100 ms on a kernel without those lists, where the scan is the only way
+to find a new child), and each member's resident pages from `statm`, read as
+bytes since a command name need not be UTF-8. A member counts, toward the sum
+and toward the 64-process cap, only if it is still in the group once
+measured, so a pid reused in between is not counted and a remembered one that
+has exited is forgotten.
+The sum may count shared pages twice, which errs toward stopping the job. Above
+768 MiB the worker's group is killed: `RenderResource`, never retried, before
+Ready, after it, or while a worker that has replied is exiting (a reply does
+not excuse memory held on the way out). A live worker that cannot be measured, or a tree of more than
+64 processes, fails the job closed (`WorkerUnavailable`) rather than count as
+nothing; one that exited as it was measured does not. Sampling is protection,
+not proof: an allocation can cross the limit briefly between samples.
+
+Not yet: the GUI's preview account and admission, and cancellation follow in
+later slices.
 
 ## The worker executable
 

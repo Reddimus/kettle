@@ -38,6 +38,8 @@ pub(crate) struct Budgets {
     /// again after it is killed; and how long the reader gets to pass on
     /// what the pipe held once the worker has exited.
     pub(crate) cleanup: Duration,
+    /// The most memory the worker and everything it started may hold.
+    pub(crate) footprint_limit: u64,
 }
 
 impl Budgets {
@@ -45,6 +47,7 @@ impl Budgets {
         ready: Duration::from_secs(5),
         render: None,
         cleanup: Duration::from_millis(250),
+        footprint_limit: 768 * 1024 * 1024,
     };
 
     fn render_deadline(&self, kind: JobKind) -> Duration {
@@ -74,6 +77,10 @@ enum Wait {
     Timeout,
     /// The reader thread is gone without a word.
     ReaderGone,
+    /// The worker and what it started held more memory than allowed.
+    OverFootprint,
+    /// A live worker could not be measured.
+    Unmeasured,
 }
 
 /// How a stopped worker ended.
@@ -85,6 +92,9 @@ enum Stopped {
     /// It was killed and would not exit: it is kept for later reaping and
     /// counted.
     Stuck,
+    /// It held more memory than allowed while it was meant to be exiting,
+    /// and was killed.
+    OverFootprint,
 }
 
 pub(crate) fn attempt(
@@ -131,7 +141,7 @@ pub(crate) fn attempt(
             return match worker.kill() {
                 Stopped::Exited(exit) => Ok(Err(exit_failure(exit))),
                 Stopped::Stuck => Ok(Err(FailureCode::RenderTimeout)),
-                Stopped::Killed => Err(NeverReady),
+                Stopped::Killed | Stopped::OverFootprint => Err(NeverReady),
             };
         }
         Ok(Event::First(Ok(Some(Frame::Ready(ready))), _)) => {
@@ -150,8 +160,17 @@ pub(crate) fn attempt(
             return Ok(Err(match worker.stop() {
                 Stopped::Exited(WorkerExit::Code(_)) => code,
                 Stopped::Exited(exit) => exit_failure(exit),
+                Stopped::OverFootprint => FailureCode::RenderResource,
                 Stopped::Killed | Stopped::Stuck => FailureCode::WorkerUnavailable,
             }));
+        }
+        Err(Wait::OverFootprint) => {
+            worker.kill();
+            return Ok(Err(FailureCode::RenderResource));
+        }
+        Err(Wait::Unmeasured) => {
+            worker.kill();
+            return Ok(Err(FailureCode::WorkerUnavailable));
         }
         // Another frame, a refusal with more after it, one that did not
         // decode, end of file, or a reader that is gone: the exit says why.
@@ -170,6 +189,7 @@ pub(crate) fn attempt(
                 // It ended by itself just as the deadline passed: its exit
                 // says why.
                 Stopped::Exited(exit) => Err(exit_failure(exit)),
+                Stopped::OverFootprint => Err(FailureCode::RenderResource),
                 Stopped::Killed | Stopped::Stuck => Err(FailureCode::RenderTimeout),
             },
         },
@@ -177,13 +197,23 @@ pub(crate) fn attempt(
             Stopped::Exited(WorkerExit::Code(0)) if rendered.validate().is_ok() => Ok(rendered),
             Stopped::Exited(WorkerExit::Code(0)) => Err(FailureCode::WorkerUnavailable),
             Stopped::Exited(exit) => Err(exit_failure(exit)),
+            Stopped::OverFootprint => Err(FailureCode::RenderResource),
             Stopped::Killed | Stopped::Stuck => Err(FailureCode::WorkerUnavailable),
         },
         Ok(Event::Reply(Ok(Some(Frame::Failure(failure))), true)) => match worker.stop() {
             Stopped::Exited(WorkerExit::Code(0)) => Err(refusal(failure.code)),
             Stopped::Exited(exit) => Err(exit_failure(exit)),
+            Stopped::OverFootprint => Err(FailureCode::RenderResource),
             Stopped::Killed | Stopped::Stuck => Err(FailureCode::WorkerUnavailable),
         },
+        Err(Wait::OverFootprint) => {
+            worker.kill();
+            Err(FailureCode::RenderResource)
+        }
+        Err(Wait::Unmeasured) => {
+            worker.kill();
+            Err(FailureCode::WorkerUnavailable)
+        }
         // A second Ready, more after the reply, a reply cut short or that
         // did not decode, or end of file.
         Ok(_) | Err(Wait::ReaderGone) => Err(worker.stop_failure()),
@@ -299,6 +329,8 @@ struct Running<'a> {
     process: Option<Box<dyn WorkerProcess>>,
     /// The worker's own exit, seen before any kill, and when.
     exited: Option<(WorkerExit, Instant)>,
+    /// When the worker is next looked at and measured, on a fixed schedule.
+    next_sample: Instant,
     shared: &'a Arc<Shared>,
     budgets: Budgets,
 }
@@ -308,6 +340,7 @@ impl<'a> Running<'a> {
         Self {
             process: Some(process),
             exited: None,
+            next_sample: Instant::now() + TICK,
             shared,
             budgets,
         }
@@ -318,8 +351,8 @@ impl<'a> Running<'a> {
     }
 
     /// The next thing the reader says before `until`, looking at the worker
-    /// meanwhile. Once it has exited, the reader gets the cleanup budget to
-    /// pass on what the pipe still held.
+    /// and measuring its memory meanwhile. Once it has exited, the reader
+    /// gets the cleanup budget to pass on what the pipe still held.
     fn next(&mut self, received: &Receiver<Event>, until: Instant) -> Result<Event, Wait> {
         loop {
             let limit = match self.exited {
@@ -330,10 +363,22 @@ impl<'a> Running<'a> {
             if now >= limit {
                 return Err(Wait::Timeout);
             }
-            match received.recv_timeout((limit - now).min(TICK)) {
+            if now >= self.next_sample {
+                self.look();
+                self.measure()?;
+                // The next tick on the schedule, not a tick after this probe;
+                // ticks a slow probe overran are skipped, not made up.
+                self.next_sample += TICK;
+                let now = Instant::now();
+                if self.next_sample <= now {
+                    self.next_sample = now + TICK;
+                }
+                continue;
+            }
+            match received.recv_timeout(limit.min(self.next_sample) - now) {
                 Ok(event) => return Ok(event),
                 Err(RecvTimeoutError::Disconnected) => return Err(Wait::ReaderGone),
-                Err(RecvTimeoutError::Timeout) => self.look(),
+                Err(RecvTimeoutError::Timeout) => {}
             }
         }
     }
@@ -352,19 +397,70 @@ impl<'a> Running<'a> {
         }
     }
 
+    /// Measure the worker and what it started, unless it has exited.
+    /// Sampling every tick is protection, not proof: an allocation can cross
+    /// the limit briefly between samples.
+    fn measure(&mut self) -> Result<(), Wait> {
+        let Some(process) = self.process.as_mut() else {
+            return Ok(());
+        };
+        match process.footprint() {
+            Ok(bytes) if bytes > self.budgets.footprint_limit => Err(Wait::OverFootprint),
+            Ok(_) => Ok(()),
+            // A worker that exited as it was measured is not unmeasurable.
+            Err(_) => {
+                self.look();
+                if self.exited.is_some() {
+                    Ok(())
+                } else {
+                    Err(Wait::Unmeasured)
+                }
+            }
+        }
+    }
+
     /// Let the worker exit by itself within the cleanup budget, as it does
     /// after a reply or a refusal, and kill it if it does not.
     fn stop(&mut self) -> Stopped {
         if let Some(exit) = self.own_exit() {
             return Stopped::Exited(exit);
         }
-        let Some(process) = self.process.as_mut() else {
-            return Stopped::Killed;
-        };
-        if let Some(exit) = poll(process.as_mut(), self.budgets.cleanup) {
-            self.process = None;
-            self.exited = Some((exit, Instant::now()));
-            return Stopped::Exited(exit);
+        // Waiting for the exit, the memory limit still holds: a worker that
+        // replied must not hold more than its share on its way out.
+        let until = Instant::now() + self.budgets.cleanup;
+        loop {
+            // A measurement may have just seen it exit.
+            if let Some(exit) = self.own_exit() {
+                return Stopped::Exited(exit);
+            }
+            let Some(process) = self.process.as_mut() else {
+                return Stopped::Killed;
+            };
+            match process.try_wait() {
+                Ok(Some(exit)) => {
+                    self.process = None;
+                    self.exited = Some((exit, Instant::now()));
+                    return Stopped::Exited(exit);
+                }
+                Ok(None) => {}
+                Err(_) => break,
+            }
+            let now = Instant::now();
+            if now >= self.next_sample {
+                match self.measure() {
+                    Err(Wait::OverFootprint) => {
+                        self.kill();
+                        return Stopped::OverFootprint;
+                    }
+                    Err(_) => break,
+                    Ok(()) => {}
+                }
+                self.next_sample = Instant::now() + TICK;
+            }
+            if Instant::now() >= until {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
         }
         self.kill()
     }
@@ -374,6 +470,7 @@ impl<'a> Running<'a> {
     fn stop_failure(&mut self) -> FailureCode {
         match self.stop() {
             Stopped::Exited(exit) => exit_failure(exit),
+            Stopped::OverFootprint => FailureCode::RenderResource,
             Stopped::Killed | Stopped::Stuck => FailureCode::WorkerUnavailable,
         }
     }
@@ -383,7 +480,8 @@ impl<'a> Running<'a> {
     /// enough of those turn media off.
     fn kill(&mut self) -> Stopped {
         let Some(mut process) = self.process.take() else {
-            return Stopped::Killed;
+            // Already reaped: by its own exit, if one was seen.
+            return self.own_exit().map_or(Stopped::Killed, Stopped::Exited);
         };
         // It may have exited by itself a moment ago; that exit is its own.
         if let Ok(Some(exit)) = process.try_wait() {
@@ -521,6 +619,7 @@ mod tests {
         ready: Duration::from_millis(300),
         render: Some(Duration::from_millis(300)),
         cleanup: Duration::from_millis(50),
+        footprint_limit: 64 * 1024 * 1024,
     };
 
     fn build_id() -> BuildId {
@@ -592,6 +691,13 @@ mod tests {
         exits_holding_stdout: bool,
         /// Whether it exits by itself, with `exits`, just as a kill is sent.
         exits_at_kill: bool,
+        /// What measuring its memory says: bytes, or `None` for an error.
+        footprint: Option<u64>,
+        /// How long after closing stdout it exits.
+        exit_delay: Duration,
+        /// Whether it exits just as its memory is measured, so the
+        /// measurement fails.
+        exits_when_measured: bool,
     }
 
     impl Script {
@@ -603,6 +709,9 @@ mod tests {
                 killable: true,
                 exits_holding_stdout: false,
                 exits_at_kill: false,
+                footprint: Some(1024 * 1024),
+                exit_delay: Duration::ZERO,
+                exits_when_measured: false,
             }
         }
         fn silent() -> Self {
@@ -613,6 +722,9 @@ mod tests {
                 killable: true,
                 exits_holding_stdout: false,
                 exits_at_kill: false,
+                footprint: Some(1024 * 1024),
+                exit_delay: Duration::ZERO,
+                exits_when_measured: false,
             }
         }
         /// Writes `output` and exits with `exit`, leaving stdout open.
@@ -635,6 +747,8 @@ mod tests {
         released: Arc<std::sync::atomic::AtomicBool>,
         reaped: Arc<AtomicUsize>,
         exits_at_kill: bool,
+        footprint: Option<u64>,
+        exits_when_measured: bool,
     }
 
     impl FakeProcess {
@@ -664,6 +778,14 @@ mod tests {
                 self.reaped.fetch_add(1, Ordering::SeqCst);
             }
             Ok(exit)
+        }
+        fn footprint(&mut self) -> std::io::Result<u64> {
+            if self.exits_when_measured {
+                *self.done.lock().unwrap() = true;
+                return Err(std::io::Error::other("it exited as it was measured"));
+            }
+            self.footprint
+                .ok_or_else(|| std::io::Error::other("cannot measure"))
         }
         fn kill(&mut self) {
             if self.exits_at_kill {
@@ -785,6 +907,8 @@ mod tests {
                     released: Arc::clone(&self.released),
                     reaped: Arc::clone(&self.reaped),
                     exits_at_kill: script.exits_at_kill,
+                    footprint: script.footprint,
+                    exits_when_measured: script.exits_when_measured,
                 }),
                 stdin: Box::new(CheckedStdin {
                     inner: stdin_writer,
@@ -816,6 +940,7 @@ mod tests {
             });
             if script.closes {
                 drop(stdout);
+                std::thread::sleep(script.exit_delay);
                 *done.lock().unwrap() = true;
             } else {
                 if script.exits_holding_stdout {
@@ -1135,6 +1260,110 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_footprint_kills_group() {
+        let over = Some(FAST.footprint_limit + 1);
+        // Before Ready, and while rendering after it: killed, never retried.
+        for script in [
+            Script {
+                footprint: over,
+                ..Script::silent()
+            },
+            Script {
+                footprint: over,
+                ..Script::silent_with(ready(build_id()))
+            },
+        ] {
+            let fake = Fake::new(vec![script]);
+            let started = Instant::now();
+            assert_eq!(
+                client(&fake).render(&job(1)),
+                Err(FailureCode::RenderResource)
+            );
+            assert!(started.elapsed() < FAST.ready, "{:?}", started.elapsed());
+            assert_eq!(fake.spawns.load(Ordering::SeqCst), 1);
+            assert_eq!(fake.kills.load(Ordering::SeqCst), 1);
+        }
+        // At the limit is allowed: sampled at it for a whole deadline, the
+        // worker ends by the deadline, not the limit.
+        let fake = Fake::new(vec![Script {
+            footprint: Some(FAST.footprint_limit),
+            ..Script::silent_with(ready(build_id()))
+        }]);
+        assert_eq!(
+            client(&fake).render(&job(1)),
+            Err(FailureCode::RenderTimeout)
+        );
+    }
+
+    #[test]
+    fn the_limit_holds_while_a_replying_worker_exits() {
+        // A full reply and a clean end, then over the limit on its way out
+        // before exiting 0 inside the cleanup budget: not a success.
+        // Several sampling ticks fit inside its exit, however the earlier
+        // samples fell.
+        let budgets = Budgets {
+            cleanup: Duration::from_millis(500),
+            ..FAST
+        };
+        let output = reply(&[ready(build_id()), frame(&Frame::Rendered(rendered()))]);
+        let fake = Fake::new(vec![Script {
+            footprint: Some(FAST.footprint_limit + 1),
+            exit_delay: Duration::from_millis(300),
+            ..Script::replies(output, WorkerExit::Code(0))
+        }]);
+        let client = WorkerClient::with(build_id(), Box::new(Arc::clone(&fake)), budgets);
+        assert_eq!(client.render(&job(1)), Err(FailureCode::RenderResource));
+    }
+
+    #[test]
+    fn an_exit_seen_while_measuring_keeps_the_reply() {
+        // After a complete reply, the worker exits 0 just as a measurement
+        // runs, so the measurement fails but sees the exit: the reply stands.
+        let output = reply(&[ready(build_id()), frame(&Frame::Rendered(rendered()))]);
+        let fake = Fake::new(vec![Script {
+            exit_delay: Duration::from_secs(10),
+            exits_when_measured: true,
+            ..Script::replies(output, WorkerExit::Code(0))
+        }]);
+        assert_eq!(client(&fake).render(&job(1)), Ok(rendered()));
+    }
+
+    #[test]
+    fn a_kill_after_a_seen_exit_keeps_that_exit() {
+        // However a stop ends, a worker whose own exit was already seen and
+        // reaped reports that exit, not a kill.
+        let fake = Fake::new(vec![Script::replies(vec![], WorkerExit::Code(0))]);
+        let shared = Arc::clone(&client(&fake).shared);
+        let spawned = fake.spawn(Path::new("/w")).unwrap();
+        let mut worker = Running::new(spawned.process, &shared, FAST);
+        drop(spawned.stdin);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while worker.own_exit().is_none() {
+            assert!(Instant::now() < deadline, "the exit was never seen");
+            worker.look();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(matches!(
+            worker.kill(),
+            Stopped::Exited(WorkerExit::Code(0))
+        ));
+    }
+
+    #[test]
+    fn footprint_probe_failure_fails_closed() {
+        let fake = Fake::new(vec![Script {
+            footprint: None,
+            ..Script::silent_with(ready(build_id()))
+        }]);
+        assert_eq!(
+            client(&fake).render(&job(1)),
+            Err(FailureCode::WorkerUnavailable)
+        );
+        assert_eq!(fake.kills.load(Ordering::SeqCst), 1);
+        assert_eq!(fake.spawns.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn pipe_writes_are_guarded_before_the_first_write() {
         let output = reply(&[ready(build_id()), frame(&Frame::Rendered(rendered()))]);
         let fake = Fake::new(vec![Script::replies(output, WorkerExit::Code(0))]);
@@ -1286,6 +1515,7 @@ mod tests {
             Duration::from_secs(3)
         );
         assert_eq!(budgets.cleanup, Duration::from_millis(250));
+        assert_eq!(budgets.footprint_limit, 768 * 1024 * 1024);
         let _ = PROTOCOL_VERSION;
     }
 

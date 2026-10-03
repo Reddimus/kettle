@@ -104,7 +104,9 @@ Reports that fit any of these are welcome:
   The client starts it with no arguments, an empty environment, `/` as its
   working directory and stderr discarded, in a process group of its own that
   is killed before the worker is reaped, and accepts a reply only after the
-  worker exits 0 with nothing after the reply. A worker process or a child
+  worker exits 0 with nothing after the reply. It measures the worker and
+  everything it started every 25 ms and kills them above 768 MiB together;
+  a tree that cannot be measured fails the job. A worker process or a child
   of one that outlives its job, or a reply accepted from a worker that then
   crashed, is in scope.
 - **Lua plugin sandbox escape** — `lua-sandbox = safe` (the default)

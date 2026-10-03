@@ -116,6 +116,7 @@ fn spawn(path: &Path) -> std::io::Result<SpawnedWorker> {
     let mut process = GroupProcess {
         child,
         reaped: false,
+        probe: footprint::Probe::default(),
     };
     let (Some(stdin), Some(stdout)) = pipes else {
         process.kill();
@@ -179,6 +180,7 @@ fn spawn(_: &Path) -> std::io::Result<SpawnedWorker> {
 struct GroupProcess {
     child: std::process::Child,
     reaped: bool,
+    probe: footprint::Probe,
 }
 
 #[cfg(unix)]
@@ -213,6 +215,14 @@ impl WorkerProcess for GroupProcess {
             return;
         }
         self.kill_group();
+    }
+
+    fn footprint(&mut self) -> std::io::Result<u64> {
+        if self.reaped {
+            return Ok(0);
+        }
+        let pid = self.pid()?;
+        self.probe.measure(pid)
     }
 }
 
@@ -276,6 +286,318 @@ impl GroupProcess {
             // process_group(0)), and no one else's.
             unsafe { libc::killpg(pid, libc::SIGKILL) };
         }
+    }
+}
+
+/// The memory a worker and everything it started hold.
+#[cfg(unix)]
+mod footprint {
+    use std::io;
+
+    use libc::pid_t;
+
+    /// More processes than a worker's group may hold; past this, measuring
+    /// fails, and the job with it.
+    const MAX_TRACKED: usize = 64;
+
+    /// How a worker's group is measured from one sample to the next.
+    #[derive(Default)]
+    pub(super) struct Probe {
+        /// Linux has no cheap list of a process group, so the group is found
+        /// by scanning `/proc` now and then, and its members kept meanwhile.
+        #[cfg(target_os = "linux")]
+        group: Vec<pid_t>,
+        #[cfg(target_os = "linux")]
+        scanned: Option<std::time::Instant>,
+    }
+
+    impl Probe {
+        /// The memory held by the worker (`leader`) and every process in its
+        /// process group, summed. Shared pages may be counted twice, which
+        /// errs on the side of stopping the job.
+        pub(super) fn measure(&mut self, leader: pid_t) -> io::Result<u64> {
+            let mut total: u64 = 0;
+            let mut counted = 0;
+            for pid in self.members(leader)? {
+                match of_member(leader, pid) {
+                    Ok(Some(bytes)) => {
+                        // Only processes still in the group count toward the
+                        // limit, not stale candidates.
+                        counted += 1;
+                        if counted > MAX_TRACKED {
+                            return Err(io::Error::other("too many processes to measure"));
+                        }
+                        total = total
+                            .checked_add(bytes)
+                            .ok_or_else(|| io::Error::other("footprint overflow"))?;
+                    }
+                    // Gone, or a reused pid now outside the group.
+                    Ok(None) => self.forget(pid),
+                    Err(error) if pid != leader && gone(&error) => self.forget(pid),
+                    Err(error) => return Err(error),
+                }
+            }
+            Ok(total)
+        }
+
+        /// Drop a candidate that turned out to be gone or not ours.
+        fn forget(&mut self, pid: pid_t) {
+            #[cfg(target_os = "linux")]
+            self.group.retain(|&member| member != pid);
+            #[cfg(not(target_os = "linux"))]
+            let _ = pid;
+        }
+
+        /// The worker and its group, the worker first: everything a group
+        /// kill reaches, including a grandchild whose parent has exited.
+        #[cfg(target_os = "macos")]
+        pub(super) fn members(&mut self, leader: pid_t) -> io::Result<Vec<pid_t>> {
+            let mut members = vec![leader];
+            for pid in listed(leader, libc::proc_listpgrppids)? {
+                if !members.contains(&pid) {
+                    members.push(pid);
+                }
+            }
+            Ok(members)
+        }
+
+        /// The worker and its group, the worker first. Its descendants come
+        /// from each thread's list of the children it started; the process
+        /// group (which also holds a grandchild whose parent has exited) from
+        /// a scan of `/proc`, which reads every process, so it runs at most
+        /// every [`rescan_interval`].
+        #[cfg(target_os = "linux")]
+        pub(super) fn members(&mut self, leader: pid_t) -> io::Result<Vec<pid_t>> {
+            if self
+                .scanned
+                .is_none_or(|at| at.elapsed() >= rescan_interval(children_listed()))
+            {
+                self.group = group_members(leader)?;
+                self.scanned = Some(std::time::Instant::now());
+            }
+            let mut members = if children_listed() {
+                descendants(leader)?
+            } else {
+                vec![leader]
+            };
+            for &pid in &self.group {
+                if !members.contains(&pid) {
+                    members.push(pid);
+                }
+            }
+            Ok(members)
+        }
+    }
+
+    /// How often Linux rescans `/proc` for the worker's process group: once
+    /// a second where children lists find descendants at every sample, and
+    /// every 100 ms where the kernel has none, since the scan is then the only
+    /// way a new child is found.
+    #[cfg(target_os = "linux")]
+    pub(super) fn rescan_interval(children_listed: bool) -> std::time::Duration {
+        std::time::Duration::from_millis(if children_listed { 1000 } else { 100 })
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    impl Probe {
+        pub(super) fn remember_stale(&mut self, pids: Vec<pid_t>) {
+            self.group.extend(pids);
+        }
+        pub(super) fn remembered(&self) -> &[pid_t] {
+            &self.group
+        }
+    }
+
+    fn gone(error: &io::Error) -> bool {
+        error.kind() == io::ErrorKind::NotFound || error.raw_os_error() == Some(libc::ESRCH)
+    }
+
+    /// The leader and every process below it, through each thread's
+    /// children list, the leader first.
+    #[cfg(target_os = "linux")]
+    pub(super) fn descendants(leader: pid_t) -> io::Result<Vec<pid_t>> {
+        let mut found = vec![leader];
+        let mut next = 0;
+        while let Some(&pid) = found.get(next) {
+            next += 1;
+            let children = match children(pid) {
+                Ok(children) => children,
+                Err(error) if pid != leader && gone(&error) => continue,
+                Err(error) => return Err(error),
+            };
+            for child in children {
+                if !found.contains(&child) {
+                    found.push(child);
+                    if found.len() > MAX_TRACKED {
+                        return Err(io::Error::other("too many processes to measure"));
+                    }
+                }
+            }
+        }
+        Ok(found)
+    }
+
+    /// The children `pid`'s threads started. A thread that exits while it is
+    /// read has none left; only the process itself being gone is an error.
+    #[cfg(target_os = "linux")]
+    fn children(pid: pid_t) -> io::Result<Vec<pid_t>> {
+        let mut found = Vec::new();
+        for task in std::fs::read_dir(format!("/proc/{pid}/task"))? {
+            let task = task?.file_name();
+            let listed = match read_capped(
+                &format!("/proc/{pid}/task/{}/children", task.to_string_lossy()),
+                64 * 1024,
+            ) {
+                Ok(listed) => listed,
+                Err(error) if gone(&error) => continue,
+                Err(error) => return Err(error),
+            };
+            for field in String::from_utf8_lossy(&listed).split_ascii_whitespace() {
+                found.push(field.parse().map_err(io::Error::other)?);
+            }
+        }
+        Ok(found)
+    }
+
+    /// Whether this kernel lists each thread's children
+    /// (`CONFIG_PROC_CHILDREN`).
+    #[cfg(target_os = "linux")]
+    fn children_listed() -> bool {
+        static LISTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *LISTED.get_or_init(|| {
+            std::path::Path::new(&format!("/proc/self/task/{}/children", std::process::id()))
+                .exists()
+        })
+    }
+
+    /// The processes in `leader`'s process group other than itself, from
+    /// each process's `stat`.
+    #[cfg(target_os = "linux")]
+    pub(super) fn group_members(leader: pid_t) -> io::Result<Vec<pid_t>> {
+        let mut members = Vec::new();
+        for entry in std::fs::read_dir("/proc")? {
+            let Ok(pid) = entry?.file_name().to_string_lossy().parse::<pid_t>() else {
+                continue;
+            };
+            if pid == leader {
+                continue;
+            }
+            // Another process's `stat` that cannot be read is not ours to
+            // fail on; a member is checked again when it is measured.
+            if read_capped(&format!("/proc/{pid}/stat"), 4096)
+                .is_ok_and(|stat| process_group(&stat) == Some(leader))
+            {
+                members.push(pid);
+            }
+        }
+        Ok(members)
+    }
+
+    /// The process group in a `/proc/<pid>/stat` line. The command name is in
+    /// parentheses and may hold spaces or parentheses itself, so the fields
+    /// are counted from the last `)`: state, parent, then group.
+    /// Read as bytes: a command name need not be UTF-8.
+    #[cfg(target_os = "linux")]
+    pub(super) fn process_group(stat: &[u8]) -> Option<pid_t> {
+        let close = stat.iter().rposition(|&byte| byte == b')')?;
+        let rest = std::str::from_utf8(&stat[close + 1..]).ok()?;
+        rest.split_ascii_whitespace().nth(2)?.parse().ok()
+    }
+
+    /// The memory `pid` holds, if it is still in `leader`'s process group
+    /// once measured: a pid that exited and was reused by someone else in
+    /// the meantime is not counted. Resident pages times the page size.
+    #[cfg(target_os = "linux")]
+    pub(super) fn of_member(leader: pid_t, pid: pid_t) -> io::Result<Option<u64>> {
+        let statm = read_capped(&format!("/proc/{pid}/statm"), 256)?;
+        let pages: u64 = String::from_utf8_lossy(&statm)
+            .split_ascii_whitespace()
+            .nth(1)
+            .and_then(|field| field.parse().ok())
+            .ok_or_else(|| io::Error::other("unreadable statm"))?;
+        let stat = read_capped(&format!("/proc/{pid}/stat"), 4096)?;
+        if process_group(&stat) != Some(leader) {
+            return Ok(None);
+        }
+        // SAFETY: sysconf reads a constant.
+        let page = u64::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) })
+            .map_err(io::Error::other)?;
+        pages
+            .checked_mul(page)
+            .map(Some)
+            .ok_or_else(|| io::Error::other("footprint overflow"))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn read_capped(path: &str, cap: u64) -> io::Result<Vec<u8>> {
+        use std::io::Read as _;
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)?
+            .take(cap)
+            .read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    /// A libproc pid list (`proc_listpgrppids`, `proc_listchildpids`) for
+    /// `id`. A list that fills its buffer may be cut short, so that fails
+    /// rather than guesses.
+    #[cfg(target_os = "macos")]
+    pub(super) fn listed(
+        id: pid_t,
+        list: unsafe extern "C" fn(pid_t, *mut libc::c_void, libc::c_int) -> libc::c_int,
+    ) -> io::Result<Vec<pid_t>> {
+        // SAFETY: with a null buffer the call only reports how many there are.
+        let count = unsafe { list(id, std::ptr::null_mut(), 0) };
+        let capacity = usize::try_from(count).map_err(|_| io::Error::last_os_error())? + 16;
+        let mut pids: Vec<pid_t> = vec![0; capacity];
+        let bytes = libc::c_int::try_from(capacity * std::mem::size_of::<pid_t>())
+            .map_err(io::Error::other)?;
+        // SAFETY: `pids` is writable for `bytes` bytes of pids.
+        let filled = unsafe { list(id, pids.as_mut_ptr().cast(), bytes) };
+        let filled = usize::try_from(filled).map_err(|_| io::Error::last_os_error())?;
+        if filled >= capacity {
+            return Err(io::Error::other("process list did not fit"));
+        }
+        pids.truncate(filled);
+        Ok(pids)
+    }
+
+    /// The physical footprint the kernel accounts to `pid`, as Activity
+    /// Monitor reports it, if `pid` is still in `leader`'s process group once
+    /// measured: a pid that exited and was reused meanwhile is not counted.
+    #[cfg(target_os = "macos")]
+    pub(super) fn of_member(leader: pid_t, pid: pid_t) -> io::Result<Option<u64>> {
+        // SAFETY: an all-zero rusage_info_v2 is a valid value for the call to
+        // fill.
+        let mut usage: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
+        // SAFETY: `usage` is writable storage of the size RUSAGE_INFO_V2
+        // fills; the call takes it through the `rusage_info_t *` the header
+        // declares.
+        let read = unsafe {
+            libc::proc_pid_rusage(
+                pid,
+                libc::RUSAGE_INFO_V2,
+                (&raw mut usage).cast::<libc::rusage_info_t>(),
+            )
+        };
+        if read != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: an all-zero proc_bsdinfo is a valid value for the call to
+        // fill.
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>())
+            .map_err(io::Error::other)?;
+        // SAFETY: `info` is writable for `size` bytes, the size this flavor
+        // fills.
+        let filled = unsafe {
+            libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size)
+        };
+        if filled != size {
+            return Err(io::Error::last_os_error());
+        }
+        let group = pid_t::try_from(info.pbi_pgid).map_err(io::Error::other)?;
+        Ok((group == leader).then_some(usage.ri_phys_footprint))
     }
 }
 
@@ -821,6 +1143,25 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
         use std::time::{Duration, Instant};
 
+        /// `spawn`, retried while Linux reports a just-written script busy:
+        /// another test's fork can hold its write descriptor for a moment,
+        /// until that child execs.
+        fn spawn_retrying(path: &Path) -> std::io::Result<SpawnedWorker> {
+            for _ in 0..100 {
+                match spawn(path) {
+                    Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    other => return other,
+                }
+            }
+            spawn(path)
+        }
+
+        fn spawn_script(path: &Path) -> SpawnedWorker {
+            spawn_retrying(path).unwrap()
+        }
+
         /// A shell script standing in for the worker.
         fn script(directory: &Path, body: &str) -> PathBuf {
             let path = directory.join(WORKER_NAME);
@@ -895,7 +1236,7 @@ mod tests {
                 directory.path(),
                 "echo \"$$ $(ps -o pgid= -p $$ | tr -d ' ')\"",
             );
-            let mut worker = spawn(&path).unwrap();
+            let mut worker = spawn_script(&path);
             let line = first_line(&mut worker);
             let ids: Vec<&str> = line.split(' ').collect();
             assert_eq!(ids[0], ids[1], "not its own process group: {line}");
@@ -906,7 +1247,7 @@ mod tests {
         fn killing_the_worker_kills_its_group() {
             let directory = tempfile::tempdir().unwrap();
             let path = script(directory.path(), "/bin/sleep 30 &\necho $!\nwait");
-            let mut worker = spawn(&path).unwrap();
+            let mut worker = spawn_script(&path);
             let grandchild = first_line(&mut worker);
             assert!(running(&grandchild), "{grandchild} never started");
             worker.process.kill();
@@ -924,7 +1265,7 @@ mod tests {
             // own exit status is kept, and the child does not survive it.
             let directory = tempfile::tempdir().unwrap();
             let path = script(directory.path(), "/bin/sleep 30 &\necho $!\nexit 0");
-            let mut worker = spawn(&path).unwrap();
+            let mut worker = spawn_script(&path);
             let grandchild = first_line(&mut worker);
             assert_eq!(wait_exit(worker.process.as_mut()), WorkerExit::Code(0));
             assert!(gone(&grandchild), "{grandchild} outlived the worker");
@@ -967,10 +1308,33 @@ mod tests {
                 Ok(())
             }
             fn spawn(&self, path: &Path) -> std::io::Result<SpawnedWorker> {
-                spawn(path)
+                spawn_retrying(path)
             }
             fn guard_pipe_writes(&self) -> std::io::Result<()> {
                 guard_pipe_writes()
+            }
+        }
+
+        /// A one-pixel raster job.
+        fn small_job() -> kettle_media::Job {
+            kettle_media::Job {
+                kind: kettle_media::JobKind::Raster,
+                source: kettle_media::Source::Bytes(vec![7]),
+                theme: kettle_media::Theme {
+                    background: [0; 4],
+                    foreground: [255; 4],
+                    palette: [[0; 4]; 16],
+                    accent: [0; 4],
+                    is_dark: true,
+                },
+                canvas: kettle_media::Canvas::Theme,
+                target: kettle_media::Target {
+                    width: 1,
+                    height: 1,
+                    scale: 1.0,
+                    crop: None,
+                },
+                fallback_fonts: vec![],
             }
         }
 
@@ -1007,25 +1371,8 @@ mod tests {
                 &format!("/bin/cat '{}'\nexit 0", ready.display()),
             );
             let client = kettle_media::client::WorkerClient::new(build_id, Box::new(Stand(path)));
-            let mut job = kettle_media::Job {
-                kind: kettle_media::JobKind::Raster,
-                source: kettle_media::Source::Bytes(vec![7; 4 * 1024 * 1024]),
-                theme: kettle_media::Theme {
-                    background: [0; 4],
-                    foreground: [255; 4],
-                    palette: [[0; 4]; 16],
-                    accent: [0; 4],
-                    is_dark: true,
-                },
-                canvas: kettle_media::Canvas::Theme,
-                target: kettle_media::Target {
-                    width: 1,
-                    height: 1,
-                    scale: 1.0,
-                    crop: None,
-                },
-                fallback_fonts: vec![],
-            };
+            let mut job = small_job();
+            job.source = kettle_media::Source::Bytes(vec![7; 4 * 1024 * 1024]);
             assert!(client.render(&job).is_err());
             job.source = kettle_media::Source::Bytes(vec![7]);
             // Still alive, and still able to try again.
@@ -1051,12 +1398,14 @@ mod tests {
             let mut asked = GroupProcess {
                 child: kettle_media::client::worker_command(&path).spawn().unwrap(),
                 reaped: false,
+                probe: footprint::Probe::default(),
             };
             assert_eq!(wait_exit(&mut asked), WorkerExit::Lost);
             assert!(asked.reaped, "a lost worker's group must not be signalled");
             let mut killed = GroupProcess {
                 child: kettle_media::client::worker_command(&path).spawn().unwrap(),
                 reaped: false,
+                probe: footprint::Probe::default(),
             };
             let deadline = Instant::now() + Duration::from_secs(10);
             while killed.exited().is_ok() {
@@ -1068,10 +1417,191 @@ mod tests {
         }
 
         #[test]
+        fn a_worker_tree_is_found_whole() {
+            let directory = tempfile::tempdir().unwrap();
+            let path = script(
+                directory.path(),
+                "/bin/sleep 30 &\n/bin/sleep 30 &\necho $$\nwait",
+            );
+            let mut worker = spawn_script(&path);
+            let leader: libc::pid_t = first_line(&mut worker).parse().unwrap();
+            let members = footprint::Probe::default().members(leader).unwrap();
+            assert_eq!(members[0], leader);
+            assert_eq!(members.len(), 3, "{members:?}");
+            worker.process.kill();
+            wait_exit(worker.process.as_mut());
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn without_child_lists_the_process_group_holds_the_tree() {
+            let directory = tempfile::tempdir().unwrap();
+            let path = script(
+                directory.path(),
+                "/bin/sleep 30 &\n/bin/sleep 30 &\necho $$\nwait",
+            );
+            let mut worker = spawn_script(&path);
+            let leader: libc::pid_t = first_line(&mut worker).parse().unwrap();
+            let members = footprint::group_members(leader).unwrap();
+            assert_eq!(members.len(), 2, "{members:?}");
+            assert!(!members.contains(&leader));
+            worker.process.kill();
+            wait_exit(worker.process.as_mut());
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn the_process_group_is_read_past_the_command_name() {
+            for (stat, group) in [
+                (&b"42 (sleep) S 1 42 42 0 -1"[..], Some(42)),
+                (b"43 (a) b) (c) R 42 77 42 0", Some(77)),
+                (b"44 (sp ace) S 1 9 9", Some(9)),
+                // A command name need not be UTF-8.
+                (b"45 (\xff\xfe) S 1 66 66", Some(66)),
+                (b"garbage", None),
+            ] {
+                assert_eq!(footprint::process_group(stat), group, "{stat:?}");
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn stale_candidates_do_not_count_toward_the_cap() {
+            // A group scan remembered 100 processes that have since exited:
+            // only the live worker counts, and they are forgotten.
+            let directory = tempfile::tempdir().unwrap();
+            let path = script(directory.path(), "echo $$\n/bin/sleep 30");
+            let mut worker = spawn_script(&path);
+            let leader: libc::pid_t = first_line(&mut worker).parse().unwrap();
+            let mut probe = footprint::Probe::default();
+            probe.measure(leader).unwrap();
+            probe.remember_stale((0..100).map(|i| 3_999_000 + i).collect());
+            assert!(probe.measure(leader).is_ok());
+            assert!(
+                probe.remembered().iter().all(|&pid| pid < 3_999_000),
+                "{:?}",
+                probe.remembered()
+            );
+            worker.process.kill();
+            wait_exit(worker.process.as_mut());
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn without_child_lists_the_group_is_rescanned_often() {
+            assert_eq!(footprint::rescan_interval(true), Duration::from_secs(1));
+            assert_eq!(
+                footprint::rescan_interval(false),
+                Duration::from_millis(100)
+            );
+        }
+
+        #[test]
+        fn an_orphaned_grandchild_still_counts() {
+            // A child starts a grandchild holding 32 MiB, then exits: the
+            // grandchild is no longer below the worker, but still in its
+            // process group, which a kill reaches.
+            let directory = tempfile::tempdir().unwrap();
+            let path = script(
+                directory.path(),
+                "( ( x=$(head -c 33554432 /dev/zero | tr '\\0' a); echo $$; /bin/sleep 30; : ) & )\n/bin/sleep 30",
+            );
+            let mut worker = spawn_script(&path);
+            let leader: libc::pid_t = first_line(&mut worker).parse().unwrap();
+            let held = worker.process.footprint().unwrap();
+            assert!(held >= 32 << 20, "the group holds {held}");
+            worker.process.kill();
+            wait_exit(worker.process.as_mut());
+            let _ = leader;
+        }
+
+        #[test]
+        fn a_process_outside_the_group_is_not_counted() {
+            // As a reused pid would be: this test process is in another group.
+            let directory = tempfile::tempdir().unwrap();
+            let path = script(directory.path(), "echo $$\n/bin/sleep 30");
+            let mut worker = spawn_script(&path);
+            let leader: libc::pid_t = first_line(&mut worker).parse().unwrap();
+            let outsider = libc::pid_t::try_from(std::process::id()).unwrap();
+            assert_eq!(footprint::of_member(leader, outsider).unwrap(), None);
+            assert!(footprint::of_member(leader, leader).unwrap().is_some());
+            worker.process.kill();
+            wait_exit(worker.process.as_mut());
+        }
+
+        #[test]
+        fn footprint_counts_what_descendants_hold() {
+            // A child holds 32 MiB; the worker itself holds little. (The `:`
+            // keeps the child shell alive: dash would replace it with its last
+            // command, freeing the memory.)
+            let directory = tempfile::tempdir().unwrap();
+            let path = script(
+                directory.path(),
+                "( x=$(head -c 33554432 /dev/zero | tr '\\0' a); echo $$; /bin/sleep 30; : ) &\nwait",
+            );
+            let mut worker = spawn_script(&path);
+            // A subshell's `$$` is still the worker's own pid.
+            let leader: libc::pid_t = first_line(&mut worker).parse().unwrap();
+            let own = footprint::of_member(leader, leader).unwrap().unwrap();
+            let tree = worker.process.footprint().unwrap();
+            assert!(own < 16 << 20, "the worker alone holds {own}");
+            assert!(tree >= 32 << 20, "the tree holds {tree}");
+            worker.process.kill();
+            wait_exit(worker.process.as_mut());
+            // Reaped, it holds nothing.
+            assert_eq!(worker.process.footprint().unwrap(), 0);
+        }
+
+        #[test]
+        fn aggregate_footprint_kills_group_through_the_client() {
+            // Ready, then a child holding 64 MiB against a 16 MiB limit.
+            let build_id = kettle_media::BuildId::from_embedded("5.0.0", "ab12").unwrap();
+            let directory = tempfile::tempdir().unwrap();
+            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+            let ready = directory.path().join("ready.bin");
+            std::fs::write(
+                &ready,
+                kettle_media::wire::encode(
+                    &kettle_media::wire::Frame::Ready(kettle_media::Ready {
+                        build_id: build_id.clone(),
+                    }),
+                    kettle_media::wire::Direction::WorkerToParent,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            let path = script(
+                directory.path(),
+                &format!(
+                    "/bin/cat '{}'\n( x=$(head -c 67108864 /dev/zero | tr '\\0' a); /bin/sleep 30; : ) &\nwait",
+                    ready.display()
+                ),
+            );
+            let client = kettle_media::client::WorkerClient::with_test_budgets(
+                build_id,
+                Box::new(Stand(path)),
+                Duration::from_secs(5),
+                Duration::from_secs(30),
+                16 << 20,
+            );
+            let started = Instant::now();
+            assert_eq!(
+                client.render(&small_job()),
+                Err(kettle_media::FailureCode::RenderResource)
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "{:?}",
+                started.elapsed()
+            );
+        }
+
+        #[test]
         fn a_running_worker_is_not_reaped_by_asking() {
             let directory = tempfile::tempdir().unwrap();
             let path = script(directory.path(), "read line\nexit 3");
-            let mut worker = spawn(&path).unwrap();
+            let mut worker = spawn_script(&path);
             for _ in 0..5 {
                 assert_eq!(worker.process.try_wait().unwrap(), None);
             }

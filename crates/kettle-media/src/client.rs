@@ -100,6 +100,10 @@ pub trait WorkerProcess: Send {
     fn try_wait(&mut self) -> std::io::Result<Option<WorkerExit>>;
     /// Kill its whole process group, if it is not reaped yet. Safe to repeat.
     fn kill(&mut self);
+    /// The memory the worker and everything it started hold now, in bytes.
+    /// An error when a live worker cannot be measured: the job then fails
+    /// rather than count it as nothing.
+    fn footprint(&mut self) -> std::io::Result<u64>;
 }
 
 /// A worker just started: the process, and the two pipes to it.
@@ -196,6 +200,7 @@ impl WorkerClient {
         platform: Box<dyn WorkerPlatform>,
         ready: std::time::Duration,
         render: std::time::Duration,
+        footprint_limit: u64,
     ) -> Self {
         Self::with(
             build_id,
@@ -203,6 +208,7 @@ impl WorkerClient {
             Budgets {
                 ready,
                 render: Some(render),
+                footprint_limit,
                 ..Budgets::PRODUCTION
             },
         )

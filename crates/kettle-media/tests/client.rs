@@ -55,6 +55,10 @@ impl WorkerProcess for Plain {
     fn kill(&mut self) {
         let _ = self.0.kill();
     }
+    fn footprint(&mut self) -> std::io::Result<u64> {
+        // Measured for real by the kettle platform's own tests.
+        Ok(0)
+    }
 }
 
 impl WorkerPlatform for Stub {
@@ -92,7 +96,13 @@ impl WorkerPlatform for Stub {
 }
 
 fn client(mode: &str) -> WorkerClient {
-    WorkerClient::with_test_budgets(common::build(), Box::new(Stub::new(mode)), READY, RENDER)
+    WorkerClient::with_test_budgets(
+        common::build(),
+        Box::new(Stub::new(mode)),
+        READY,
+        RENDER,
+        u64::MAX,
+    )
 }
 
 #[test]
@@ -130,8 +140,17 @@ fn blocked_stdin_is_deadline_bounded() {
 
 #[test]
 fn complete_reply_before_crash_is_discarded() {
+    // The stub's abort can write a core dump first (it has no core limit, as
+    // the real worker does), which takes a CI runner seconds: allow for it.
+    let client = WorkerClient::with_test_budgets(
+        common::build(),
+        Box::new(Stub::new("crash-after-reply")),
+        READY,
+        Duration::from_secs(60),
+        u64::MAX,
+    );
     assert_eq!(
-        client("crash-after-reply").render(&common::job()),
+        client.render(&common::job()),
         Err(FailureCode::RenderResource)
     );
 }
