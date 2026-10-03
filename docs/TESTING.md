@@ -1415,6 +1415,32 @@ from the UI thread. A climb with `..`, a base that is unknown or not local
 Windows no path hint opens. Red checks: the old pattern detects
 `/diagram.png`, dropping the CIDR rule makes `10.0.0.1/24` a path, and
 a comma treated as a boundary in every position lets `out/report,1.pdf` open.
+A local link that names a program or shortcut is refused (kettle-core
+`names_program_or_shortcut`, kettle-ui `check_file_link`): Windows, macOS and
+Linux program, script and shortcut extensions, read as Windows reads a name
+(`payload.exe.`, `a.exe::$DATA`, `notes.txt:payload.exe`); a folder only as a
+bundle (`.app`, or `Contents/Info.plist`), so a folder named `archive.sh`
+opens; a macOS alias by its Finder flag (a classic alias with an empty data
+fork) or its bookmark data, even renamed `report.pdf`; a Linux launcher whose
+first group, past a byte-order mark, comments and blank lines, is `[Desktop
+Entry]` (a config file starting `# Config File` opens); and an executable file
+without a document extension (`tool`, `a.out`). A document with its executable bits set (as on exFAT)
+opens, as does a non-executable file with an unknown extension, and a missing
+file resolves to nothing. Symlinks are resolved
+first: `notes.md` linking to an executable or a bundle is refused, and a link
+to a document opens the document. `local_file_path` decodes a `file://` URI
+strictly, up to its `?` or `#` as a URL parser reads it, and refuses a bad
+escape, an encoded separator (`%2F`, `%5C`: `file:///%2Fhost/share` would be a
+share on Windows), a decoded `//` start, control character or `..` segment;
+`file_url_for_path` encodes the URL a custom handler gets, rewriting `\` only
+on Windows. Source guards keep the check ahead of
+the custom handler and the system opener, on a spawned thread, refuse an
+undecodable file link instead of passing it on, and hand openers the
+resolved path only; at most four openers run at once. On Windows a resolved
+verbatim path is kept only when Win32 reads it the same without `\\?\`: no
+name ending in a dot or a space, no reserved device name (`CON`, `nul.txt`,
+`COM1`). Red checks: each of
+these rules, removed on its own, fails a test.
 
 URL tails (kettle-core `url_trim`, shared by links and hints) drop trailing
 prose punctuation, Markdown backticks and `*` emphasis, and closing brackets

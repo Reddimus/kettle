@@ -30,6 +30,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- Kettle no longer opens programs or shortcuts from terminal links: a
+  clicked `file://` link, OSC 8 link or path to an `.exe`, `.app`, `.lnk`,
+  `.desktop`, `.rdp`, script, executable file without a document extension
+  (`a.out`), macOS alias or Linux launcher is refused with a notification
+  instead of being run. A symlink is judged by what it points at, a name is
+  read as Windows reads it (`payload.exe.`), and a configured custom URL
+  handler gets a file link only after the check. Documents and folders open
+  as before, though a file link's `?query` or `#fragment` is no longer passed
+  on, and one with an encoded `/` or `\` (`%2F`, `%5C`) is refused.
 - `TRANSLATING.md` explains how Kettle's text is translated and reviewed, and
   each Spanish message's review status is recorded by key. The Spanish
   catalogue is a draft until a fluent reviewer accepts it.

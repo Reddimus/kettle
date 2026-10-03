@@ -3206,6 +3206,284 @@ fn cwd_is_local(cwd: &str) -> bool {
     !cwd.is_empty() && !cwd.starts_with("//") && !cwd.starts_with('\\') && !cwd.contains("..")
 }
 
+/// What opening a local file link would do, decided on the opener thread.
+#[derive(Debug, PartialEq)]
+enum FileLinkCheck {
+    /// Open this resolved path: a document or a folder.
+    Open(std::path::PathBuf),
+    /// Refuse: it is a program or a shortcut. Holds the name to report.
+    Program(String),
+    /// Refuse quietly: it does not resolve to a local file or folder.
+    Unresolved,
+}
+
+/// Whether opening the local file `path` would run a program or follow a
+/// shortcut. Symlinks are resolved first, because the OS opener follows them:
+/// `notes.md` linking to an application must not launch it. Refused when
+/// either the name or the resolved name names a program or a shortcut (see
+/// [`kettle_core::links::names_program_or_shortcut`]), when a folder is a
+/// macOS bundle by its contents, when a file is a shortcut by its first bytes
+/// (a macOS alias, which the opener follows whatever its name, or a Linux
+/// launcher), or when an executable file lacks a known document extension:
+/// macOS runs `a.out` in Terminal. A document whose executable bits are set,
+/// as every file on a FAT or exFAT volume is, still opens.
+///
+/// This looks at an untrusted path, which can stall on a network mount, so
+/// it runs off the UI thread. What it resolves is what opens, but a local
+/// process that rewrites the file between the check and the open is not
+/// stopped.
+fn check_file_link(path: &std::path::Path) -> FileLinkCheck {
+    use kettle_core::links::names_program_or_shortcut;
+    let Ok(resolved) = std::fs::canonicalize(path) else {
+        return FileLinkCheck::Unresolved;
+    };
+    let Some(resolved) = local_resolved_path(resolved) else {
+        return FileLinkCheck::Unresolved;
+    };
+    let Ok(metadata) = std::fs::metadata(&resolved) else {
+        return FileLinkCheck::Unresolved;
+    };
+    let is_dir = metadata.is_dir();
+    let program = names_program_or_shortcut(path, is_dir)
+        || names_program_or_shortcut(&resolved, is_dir)
+        || (is_dir && resolved.join("Contents").join("Info.plist").exists())
+        || (metadata.is_file()
+            && (starts_like_a_shortcut(&resolved)
+                || (is_executable(&metadata) && !names_a_document(&resolved))));
+    if program {
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        FileLinkCheck::Program(name)
+    } else {
+        FileLinkCheck::Open(resolved)
+    }
+}
+
+/// `resolved` as a path the opener may take: on Windows a canonical path is
+/// a verbatim `\\?\C:\…`, kept as `C:\…`, while a share (`\\?\UNC\…`) or a
+/// volume GUID is refused. Elsewhere, any absolute path.
+fn local_resolved_path(resolved: std::path::PathBuf) -> Option<std::path::PathBuf> {
+    if !cfg!(windows) {
+        return resolved.is_absolute().then_some(resolved);
+    }
+    let text = resolved.to_str()?;
+    let drive = |path: &str| {
+        let b = path.as_bytes();
+        b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/')
+    };
+    let local = text.strip_prefix(r"\\?\").unwrap_or(text);
+    (drive(local) && win32_keeps_path(local)).then(|| std::path::PathBuf::from(local))
+}
+
+/// Whether Win32 reads the drive path `local` as written once the verbatim
+/// `\\?\` prefix is gone: no name ends with a dot or a space, which Win32
+/// drops, and none is a reserved device name (`CON`, `NUL`, `COM1`…), which
+/// Win32 opens as the device.
+fn win32_keeps_path(local: &str) -> bool {
+    local.split(['\\', '/']).skip(1).all(|name| {
+        let stem = name.split('.').next().unwrap_or(name).trim_end();
+        let device = matches!(
+            stem.to_ascii_uppercase().as_str(),
+            "CON" | "PRN" | "AUX" | "NUL"
+        ) || (stem.len() == 4
+            && ["COM", "LPT"].iter().any(|prefix| {
+                stem.get(..3)
+                    .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+            })
+            && matches!(stem.as_bytes()[3], b'1'..=b'9'));
+        !name.ends_with(['.', ' ']) && !device
+    })
+}
+
+/// Whether a file's mode lets it run (Unix); never on Windows, which runs by
+/// extension.
+fn is_executable(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        false
+    }
+}
+
+/// Whether `path` has the extension of a common document, image, media,
+/// archive, text or source file, which the OS opener shows in an app rather
+/// than runs even when its executable bits are set.
+fn names_a_document(path: &std::path::Path) -> bool {
+    const DOCUMENTS: &[&str] = &[
+        "pdf", "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "tif", "tiff", "heic", "ico",
+        "psd", "mp4", "mov", "m4v", "mkv", "webm", "avi", "mp3", "m4a", "wav", "flac", "ogg",
+        "opus", "aac", "txt", "md", "markdown", "rst", "adoc", "org", "tex", "html", "htm", "css",
+        "json", "jsonl", "yaml", "yml", "toml", "xml", "csv", "tsv", "log", "rtf", "doc", "docx",
+        "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "pages", "numbers", "key", "epub",
+        "zip", "tar", "gz", "tgz", "bz2", "xz", "zst", "7z", "rar", "c", "h", "cc", "cpp", "hpp",
+        "rs", "go", "java", "kt", "swift", "ts", "tsx", "jsx", "sql", "ini", "conf", "cfg", "lock",
+        "ipynb", "diff", "patch", "mmd", "dot",
+    ];
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            DOCUMENTS
+                .iter()
+                .any(|known| extension.eq_ignore_ascii_case(known))
+        })
+}
+
+/// Whether a file is a shortcut an opener follows: a macOS alias, by its
+/// Finder flag (a classic alias keeps its data in the resource fork) or by
+/// its bookmark data, or a Linux desktop launcher, whose first group, past
+/// blank and comment lines, is `[Desktop Entry]`.
+fn starts_like_a_shortcut(path: &std::path::Path) -> bool {
+    use std::io::Read as _;
+    if finder_alias_flag(path) {
+        return true;
+    }
+    let mut head = Vec::with_capacity(4096);
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    if file.take(4096).read_to_end(&mut head).is_err() {
+        return false;
+    }
+    if head.starts_with(b"book") && head.get(8..12) == Some(b"mark") {
+        return true;
+    }
+    let head = head.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&head);
+    head.split(|&byte| byte == b'\n')
+        .map(<[u8]>::trim_ascii)
+        .find(|line| !line.is_empty() && !line.starts_with(b"#"))
+        .is_some_and(|group| {
+            [
+                &b"[Desktop Entry]"[..],
+                b"[Desktop Action",
+                b"[KDE Desktop Entry]",
+            ]
+            .iter()
+            .any(|launcher| group.starts_with(launcher))
+        })
+}
+
+/// Whether macOS marks `path` as a Finder alias (`kIsAlias` in the Finder
+/// flags of its `com.apple.FinderInfo` attribute).
+#[cfg(target_os = "macos")]
+fn finder_alias_flag(path: &std::path::Path) -> bool {
+    use std::os::unix::ffi::OsStrExt as _;
+    const IS_ALIAS: u16 = 0x8000;
+    let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    let mut info = [0u8; 32];
+    // SAFETY: both names are NUL-terminated C strings that outlive the call,
+    // and `info` is writable for the length passed.
+    let read = unsafe {
+        libc::getxattr(
+            c_path.as_ptr(),
+            c"com.apple.FinderInfo".as_ptr(),
+            info.as_mut_ptr().cast(),
+            info.len(),
+            0,
+            0,
+        )
+    };
+    read >= 10 && u16::from_be_bytes([info[8], info[9]]) & IS_ALIAS != 0
+}
+
+#[cfg(not(target_os = "macos"))]
+fn finder_alias_flag(_path: &std::path::Path) -> bool {
+    false
+}
+
+/// At most this many file links are checked and opened at once; a stalled
+/// network path cannot pile up threads click by click.
+const MAX_FILE_LINK_OPENERS: usize = 4;
+static FILE_LINK_OPENERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// A slot among `limit` concurrent users of `counter`, released on drop, or
+/// `None` when all are taken.
+fn take_opener_slot(
+    counter: &'static std::sync::atomic::AtomicUsize,
+    limit: usize,
+) -> Option<OpenerSlot> {
+    use std::sync::atomic::Ordering;
+    // Rust 1.99 renames fetch_update to try_update; the MSRV (1.89) predates it.
+    #[allow(deprecated)]
+    let taken = counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |taken| {
+        (taken < limit).then_some(taken + 1)
+    });
+    taken.ok().map(|_| OpenerSlot(counter))
+}
+
+struct OpenerSlot(&'static std::sync::atomic::AtomicUsize);
+
+impl Drop for OpenerSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+/// Check the local file link `path` and open what it resolves to, on its own
+/// thread: with the custom URL handler, if one is set, given a file URL for
+/// the resolved path, or with the system opener. A program or shortcut is
+/// refused with a notification.
+fn spawn_file_link_opener(
+    path: std::path::PathBuf,
+    handler: Option<String>,
+    tr: kettle_i18n::Translator,
+) {
+    let Some(slot) = take_opener_slot(&FILE_LINK_OPENERS, MAX_FILE_LINK_OPENERS) else {
+        log::warn!("too many file links are still opening; ignoring this one");
+        return;
+    };
+    let spawned = std::thread::Builder::new()
+        .name("kettle-open-link".into())
+        .spawn(move || {
+            let _slot = slot;
+            match check_file_link(&path) {
+                FileLinkCheck::Program(name) => fire_notify(
+                    tr.text(kettle_i18n::Text::NotifyTitleProgramNotOpened),
+                    &tr.notify_body_program_not_opened(&name),
+                ),
+                FileLinkCheck::Unresolved => {
+                    log::warn!("not opening a file link that names no local file or folder");
+                }
+                FileLinkCheck::Open(resolved) => open_checked_file(&resolved, handler.as_deref()),
+            }
+        });
+    if let Err(e) = spawned {
+        log::warn!("could not start the link opener: {e}");
+    }
+}
+
+/// Open a checked, resolved local file: through `handler` with a file URL
+/// built from the resolved path, falling back to the system opener, which
+/// takes the path itself. Neither sees the link's own text, so neither can
+/// read a different path out of it.
+fn open_checked_file(resolved: &std::path::Path, handler: Option<&str>) {
+    if let (Some(cmd), Some(url)) = (handler, kettle_core::links::file_url_for_path(resolved)) {
+        match std::process::Command::new(cmd)
+            .arg(&url)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(_) => return,
+            Err(e) => {
+                log::warn!("custom-url-handler {cmd:?}: {e}; opening the file with the system")
+            }
+        }
+    }
+    if let Err(e) = open::that_detached(resolved) {
+        log::warn!("failed to open a terminal-supplied file link: {e}");
+    }
+}
+
 /// Record a keystroke into the dev recorder as a privacy-preserving
 /// token. Named keys (`Enter`, `ArrowUp`, `Ctrl+ArrowUp`) are recorded by name;
 /// they aren't secret. A printable character, bare or with modifiers, is
@@ -10355,6 +10633,26 @@ impl App {
             }
             crate::lua::UrlHandlerOutcome::Fallthrough => uri,
         };
+        // A local file link is checked before anything opens it, the custom
+        // handler included: a program or a shortcut is refused, since opening
+        // it would run it or follow it elsewhere. One that does not decode to
+        // a local path is refused here. The check looks at an untrusted path,
+        // which can stall on a network mount, so it and the open run off the
+        // UI thread.
+        if uri
+            .get(..7)
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("file://"))
+        {
+            let Some(path) = kettle_core::links::local_file_path(uri) else {
+                log::warn!("refusing a file link that names no local path");
+                return;
+            };
+            let handler = (self.cfg.use_custom_url_handler
+                && !self.cfg.custom_url_handler.is_empty())
+            .then(|| self.cfg.custom_url_handler.clone());
+            spawn_file_link_opener(path, handler, self.ui_text);
+            return;
+        }
         if self.cfg.use_custom_url_handler && !self.cfg.custom_url_handler.is_empty() {
             // Custom handler — spawn detached so a long-running
             // browser launch doesn't freeze kettle.
@@ -47559,6 +47857,291 @@ mod hint_action_tests {
         assert_eq!(
             hint_path_url("/net/evil.example/share/x.pdf", None, None).as_deref(),
             Some("file:///net/evil.example/share/x.pdf")
+        );
+    }
+}
+
+#[cfg(test)]
+mod program_link_tests {
+    use super::{production_source, take_opener_slot};
+
+    /// A link to a program or a shortcut does not open: by extension, or a
+    /// file with no extension that is executable or begins like a shortcut.
+    /// A document stays openable even with its executable bits set, as on
+    /// FAT and exFAT volumes, and so does a folder, even one named like a
+    /// script. A missing file resolves to nothing.
+    #[cfg(unix)]
+    #[test]
+    fn programs_are_refused_and_documents_and_folders_open() {
+        use super::{FileLinkCheck, check_file_link};
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let root_path = std::fs::canonicalize(root.path()).unwrap();
+        let file = |name: &str, mode: u32, body: &[u8]| {
+            let path = root_path.join(name);
+            std::fs::write(&path, body).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            path
+        };
+        let refused =
+            |path: &std::path::Path| matches!(check_file_link(path), FileLinkCheck::Program(_));
+        assert!(
+            refused(&file("tool", 0o755, b"x")),
+            "an executable with no extension"
+        );
+        assert!(
+            refused(&file("build.sh", 0o644, b"x")),
+            "a script by its extension"
+        );
+        assert!(refused(&file("Setup.EXE", 0o644, b"x")));
+        assert!(
+            refused(&file(
+                "Calculator alias",
+                0o644,
+                b"book\0\0\0\0mark\0\0\0\0rest"
+            )),
+            "a macOS alias"
+        );
+        assert!(
+            refused(&file("launcher", 0o644, b"[Desktop Entry]\nExec=x\n")),
+            "a Linux launcher"
+        );
+        assert!(
+            refused(&file(
+                "commented",
+                0o644,
+                b"\xEF\xBB\xBF# made by hand\n\n  # more\r\n[Desktop Entry]\nExec=x\n"
+            )),
+            "a launcher behind a byte-order mark, comments and blank lines"
+        );
+        let config = file("settings", 0o644, b"# Config File\n[settings]\nkey=1\n");
+        assert_eq!(
+            check_file_link(&config),
+            FileLinkCheck::Open(config.clone()),
+            "a config file whose first group is not a desktop entry"
+        );
+        assert!(
+            refused(&file("report.pdf", 0o644, b"book\0\0\0\0mark\0\0\0\0rest")),
+            "a macOS alias renamed like a document"
+        );
+        assert!(
+            refused(&file("a.out", 0o755, b"x")),
+            "an executable with an unknown extension"
+        );
+        let data = file("archive.dat", 0o644, b"x");
+        assert_eq!(
+            check_file_link(&data),
+            FileLinkCheck::Open(data.clone()),
+            "the same name, not executable"
+        );
+        let plain = file("plain", 0o644, b"text");
+        assert_eq!(check_file_link(&plain), FileLinkCheck::Open(plain.clone()));
+        let notes = file("notes.md", 0o777, b"# notes");
+        assert_eq!(
+            check_file_link(&notes),
+            FileLinkCheck::Open(notes.clone()),
+            "a document on exFAT"
+        );
+        assert_eq!(
+            check_file_link(&root_path),
+            FileLinkCheck::Open(root_path.clone()),
+            "a folder"
+        );
+        let scripts = root_path.join("archive.sh");
+        std::fs::create_dir(&scripts).unwrap();
+        assert_eq!(
+            check_file_link(&scripts),
+            FileLinkCheck::Open(scripts.clone()),
+            "a folder named like a script"
+        );
+        let bundle = root_path.join("Calculator.app");
+        std::fs::create_dir(&bundle).unwrap();
+        assert!(refused(&bundle), "an application bundle");
+        let unnamed_bundle = root_path.join("Unnamed");
+        std::fs::create_dir_all(unnamed_bundle.join("Contents")).unwrap();
+        std::fs::write(unnamed_bundle.join("Contents").join("Info.plist"), b"x").unwrap();
+        assert!(refused(&unnamed_bundle), "a bundle by its contents");
+        assert_eq!(
+            check_file_link(&root_path.join("missing")),
+            FileLinkCheck::Unresolved
+        );
+    }
+
+    /// The opener follows symlinks, so the check does too: a document name
+    /// linking to a program, or a plain name linking to a bundle, is refused,
+    /// and a link to a document opens the document itself.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_is_judged_by_what_it_resolves_to() {
+        use super::{FileLinkCheck, check_file_link};
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+        let root = tempfile::tempdir().unwrap();
+        let root_path = std::fs::canonicalize(root.path()).unwrap();
+        let program = root_path.join("evil");
+        std::fs::write(&program, b"x").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let bundle = root_path.join("Calculator.app");
+        std::fs::create_dir(&bundle).unwrap();
+        let document = root_path.join("real.pdf");
+        std::fs::write(&document, b"%PDF").unwrap();
+        for (link, target) in [
+            ("notes.md", &program),
+            ("readme", &bundle),
+            ("doc.pdf", &bundle),
+        ] {
+            let path = root_path.join(link);
+            symlink(target, &path).unwrap();
+            assert!(
+                matches!(check_file_link(&path), FileLinkCheck::Program(_)),
+                "{link}"
+            );
+        }
+        let to_document = root_path.join("latest.pdf");
+        symlink(&document, &to_document).unwrap();
+        assert_eq!(check_file_link(&to_document), FileLinkCheck::Open(document));
+        // A link named like a program is refused whatever it points at.
+        let named = root_path.join("run.command");
+        symlink(root_path.join("real.pdf"), &named).unwrap();
+        assert!(matches!(check_file_link(&named), FileLinkCheck::Program(_)));
+    }
+
+    /// Openers are bounded: a stalled path cannot pile up a thread per click,
+    /// and a finished one frees its slot.
+    #[test]
+    fn file_link_openers_are_bounded() {
+        static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let held = (0..3)
+            .map(|_| take_opener_slot(&COUNTER, 3).expect("a free slot"))
+            .collect::<Vec<_>>();
+        assert!(
+            take_opener_slot(&COUNTER, 3).is_none(),
+            "all slots are taken"
+        );
+        drop(held);
+        assert!(take_opener_slot(&COUNTER, 3).is_some());
+        assert_eq!(COUNTER.load(std::sync::atomic::Ordering::Acquire), 0);
+    }
+
+    /// A file link is decided before anything opens it, the custom handler
+    /// included, and off the UI thread; one that does not decode is refused
+    /// rather than handed on. The opener and the handler get the resolved
+    /// path, never the link's own text.
+    #[test]
+    fn file_links_are_checked_off_the_ui_thread_before_any_opener() {
+        let src = production_source();
+        let body = src
+            .split("fn open_url(&mut self, ws: &WindowState, uri: &str) {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("open_url");
+        let local = body
+            .find("let Some(path) = kettle_core::links::local_file_path(uri) else {")
+            .expect("open_url decodes a local file link");
+        let refuse = body[local..]
+            .find("return;")
+            .expect("an undecodable link is refused")
+            + local;
+        let spawn = body
+            .find("spawn_file_link_opener(path, handler, self.ui_text);")
+            .expect("a spawned opener");
+        let custom = body
+            .find("if self.cfg.use_custom_url_handler")
+            .expect("the custom handler for other links");
+        assert!(local < refuse && refuse < spawn && spawn < custom);
+
+        let opener = src
+            .split("fn spawn_file_link_opener(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("spawn_file_link_opener");
+        let thread = opener.find(".spawn(move ||").expect("its own thread");
+        let check = opener.find("check_file_link(&path)").expect("the check");
+        let open = opener
+            .find("open_checked_file(&resolved, handler.as_deref())")
+            .expect("the open");
+        assert!(thread < check && check < open);
+
+        let open_checked = src
+            .split("fn open_checked_file(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("open_checked_file");
+        assert!(open_checked.contains("file_url_for_path(resolved)"));
+        assert!(open_checked.contains("open::that_detached(resolved)"));
+        assert!(
+            !open_checked.contains("uri"),
+            "the link text never reaches an opener"
+        );
+    }
+
+    /// A classic Finder alias keeps its data in the resource fork; its
+    /// Finder flag still marks it, whatever its name.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_finder_alias_is_refused_by_its_flag() {
+        use super::{FileLinkCheck, check_file_link};
+        use std::os::unix::ffi::OsStrExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let alias = std::fs::canonicalize(root.path())
+            .unwrap()
+            .join("report.pdf");
+        std::fs::write(&alias, b"").unwrap();
+        let mut info = [0u8; 32];
+        info[8] = 0x80; // kIsAlias
+        let c_path = std::ffi::CString::new(alias.as_os_str().as_bytes()).unwrap();
+        // SAFETY: both names are NUL-terminated and `info` is readable for its length.
+        let set = unsafe {
+            libc::setxattr(
+                c_path.as_ptr(),
+                c"com.apple.FinderInfo".as_ptr(),
+                info.as_ptr().cast(),
+                info.len(),
+                0,
+                0,
+            )
+        };
+        assert_eq!(set, 0, "set the Finder info");
+        assert!(matches!(check_file_link(&alias), FileLinkCheck::Program(_)));
+    }
+
+    /// Win32 drops a trailing dot or space and opens reserved names as
+    /// devices, so a verbatim path holding either is not kept.
+    #[test]
+    fn a_verbatim_path_must_read_the_same_to_win32() {
+        use super::win32_keeps_path;
+        assert!(win32_keeps_path(r"C:\docs\report.pdf"));
+        assert!(win32_keeps_path(r"C:\docs\console.txt"));
+        assert!(win32_keeps_path(r"C:\"));
+        for path in [
+            r"C:\docs\report.pdf ",
+            r"C:\docs.\a.pdf",
+            r"C:\docs\CON",
+            r"C:\docs\nul.txt",
+            r"C:\docs\com1",
+            r"C:\docs\LPT9.log",
+            r"C:\docs\aux .txt",
+        ] {
+            assert!(!win32_keeps_path(path), "{path}");
+        }
+    }
+
+    /// On Windows a resolved path is kept only as a local drive path.
+    #[cfg(windows)]
+    #[test]
+    fn a_resolved_windows_path_must_be_a_local_drive() {
+        use super::local_resolved_path;
+        use std::path::PathBuf;
+        assert_eq!(
+            local_resolved_path(PathBuf::from(r"\\?\C:\Users\me\a.pdf")),
+            Some(PathBuf::from(r"C:\Users\me\a.pdf"))
+        );
+        assert_eq!(
+            local_resolved_path(PathBuf::from(r"\\?\UNC\host\share\a.pdf")),
+            None
+        );
+        assert_eq!(
+            local_resolved_path(PathBuf::from(r"\\?\Volume{0000}\a.pdf")),
+            None
         );
     }
 }
