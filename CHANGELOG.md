@@ -68,6 +68,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- A video paste after an update replaced Kettle no longer asks the new build's
+  preview helper to read the old build's request. On Linux the helper is the
+  running Kettle itself; elsewhere a helper from another build says so, and
+  Kettle shows no video card and logs once that previews wait for a restart.
 - Opening the current directory in the file manager works for a folder whose
   name holds a space or `#`. The link was refused, or named another folder.
 - A `file://` link or a reported working directory (OSC 7) is checked after

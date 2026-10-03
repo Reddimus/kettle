@@ -4,7 +4,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 
-const INPUT_MAGIC: &[u8; 8] = b"KTLVPIN1";
+/// The request frame: this magic, the parent's build identity, the path.
+const INPUT_MAGIC: &[u8; 8] = b"KTLVPIN2";
+/// What every version of the request frame starts with, so a worker from
+/// another build can tell a skewed request from garbage.
+const INPUT_MAGIC_FAMILY: &[u8; 7] = b"KTLVPIN";
+const MAX_BUILD_IDENTITY_BYTES: usize = 128;
 const OUTPUT_MAGIC: &[u8; 8] = b"KTLVPOU1";
 const MAX_PATH_BYTES: usize = 64 * 1024;
 const MAX_PREVIEW_WIDTH: u32 = 256;
@@ -13,6 +18,37 @@ const MAX_PREVIEW_BYTES: usize = MAX_PREVIEW_WIDTH as usize * MAX_PREVIEW_HEIGHT
 const WORKER_TIMEOUT: Duration = Duration::from_secs(2);
 const WORKER_TIMEOUT_EXIT: i32 = 4;
 const WORKER_WATCHDOG_SETUP_EXIT: i32 = 8;
+/// The worker is another build than its parent (an update replaced the
+/// executable on disk): it refuses rather than answer in a protocol the
+/// parent may not share.
+const WORKER_SKEW_EXIT: i32 = 9;
+
+static BUILD_IDENTITY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Record the source this build came from (the version and a hash of the
+/// Rust sources), which the preview worker must share with its parent. Set
+/// once, at process start.
+pub(crate) fn set_build_identity(identity: &str) {
+    let mut identity = identity.to_owned();
+    while identity.len() > MAX_BUILD_IDENTITY_BYTES {
+        identity.pop();
+    }
+    let _ = BUILD_IDENTITY.set(identity);
+}
+
+fn build_identity() -> &'static str {
+    BUILD_IDENTITY
+        .get()
+        .map_or(env!("CARGO_PKG_VERSION"), String::as_str)
+}
+
+/// Whether a request frame came from this build (see [`decode_request`]).
+#[derive(Debug, Eq, PartialEq)]
+enum RequestError {
+    /// Another build's frame: an older or newer magic, or another identity.
+    Skewed,
+    Malformed,
+}
 const MAX_WORKER_ATTEMPTS: u32 = 2;
 const PREVIEW_THREAD_COUNT: usize = 2;
 const PREVIEW_QUEUE_CAPACITY: usize = 8;
@@ -348,6 +384,10 @@ impl VideoPreviewer {
                                 preview,
                             ),
                             PreviewChildOutcome::Failed => (None, None),
+                            PreviewChildOutcome::Skewed => {
+                                note_worker_skew();
+                                (None, None)
+                            }
                             PreviewChildOutcome::WorkerLost => {
                                 let _ =
                                     proxy.send_event(crate::app::UserEvent::VideoPreviewReady {
@@ -432,6 +472,7 @@ enum PreviewChildAttempt<T> {
     Ready(T),
     TimedOut,
     Failed,
+    Skewed,
     WorkerLost,
 }
 
@@ -439,6 +480,8 @@ enum PreviewChildAttempt<T> {
 enum PreviewChildOutcome<T> {
     Ready(T),
     Failed,
+    /// The worker is another Kettle build; previews wait for a restart.
+    Skewed,
     WorkerLost,
 }
 
@@ -450,6 +493,7 @@ fn retry_preview_timeout<T>(
             PreviewChildAttempt::Ready(output) => return PreviewChildOutcome::Ready(output),
             PreviewChildAttempt::TimedOut => {}
             PreviewChildAttempt::Failed => return PreviewChildOutcome::Failed,
+            PreviewChildAttempt::Skewed => return PreviewChildOutcome::Skewed,
             PreviewChildAttempt::WorkerLost => return PreviewChildOutcome::WorkerLost,
         }
     }
@@ -458,6 +502,34 @@ fn retry_preview_timeout<T>(
 
 fn worker_exit_is_retryable(code: Option<i32>) -> bool {
     code == Some(WORKER_TIMEOUT_EXIT)
+}
+
+/// Say once that the preview worker is another build: an update replaced
+/// Kettle's executable, and previews wait for a restart.
+fn note_worker_skew() {
+    static NOTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !NOTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        log::warn!(
+            "video previews are off until Kettle restarts: an update replaced its \
+             executable, and the preview helper is now another build"
+        );
+    }
+}
+
+/// The program to run as the preview worker: this very executable. On Linux
+/// `/proc/self/exe` names the running image even after an update renamed or
+/// deleted its file, so the worker is always this build. Elsewhere it is the
+/// path Kettle started from, where an update may have put another build,
+/// which then answers with [`WORKER_SKEW_EXIT`].
+fn worker_executable() -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        let image = Path::new("/proc/self/exe");
+        if image.exists() {
+            return Some(image.to_path_buf());
+        }
+    }
+    std::env::current_exe().ok()
 }
 
 fn read_bounded_preview(reader: &mut impl std::io::Read) -> std::io::Result<Vec<u8>> {
@@ -482,10 +554,10 @@ fn run_preview_child(path: &Path) -> PreviewChildOutcome<(u64, Option<kettle_cor
 fn run_preview_child_once(
     path: &Path,
 ) -> PreviewChildAttempt<(u64, Option<kettle_core::ImageData>)> {
-    let Some(input) = encode_path(path) else {
+    let Some(input) = encode_request(path, build_identity()) else {
         return PreviewChildAttempt::Failed;
     };
-    let Ok(executable) = std::env::current_exe() else {
+    let Some(executable) = worker_executable() else {
         return PreviewChildAttempt::Failed;
     };
     let mut command = Command::new(executable);
@@ -572,6 +644,8 @@ fn run_preview_child_once(
     if !status.success() {
         return if worker_exit_is_retryable(status.code()) {
             PreviewChildAttempt::TimedOut
+        } else if status.code() == Some(WORKER_SKEW_EXIT) {
+            PreviewChildAttempt::Skewed
         } else {
             PreviewChildAttempt::Failed
         };
@@ -582,7 +656,7 @@ fn run_preview_child_once(
     }
 }
 
-fn encode_path(path: &Path) -> Option<Vec<u8>> {
+fn encode_request(path: &Path, build: &str) -> Option<Vec<u8>> {
     #[cfg(unix)]
     let bytes = {
         use std::os::unix::ffi::OsStrExt as _;
@@ -596,36 +670,60 @@ fn encode_path(path: &Path) -> Option<Vec<u8>> {
             .flat_map(u16::to_le_bytes)
             .collect::<Vec<_>>()
     };
-    if bytes.is_empty() || bytes.len() > MAX_PATH_BYTES {
+    if bytes.is_empty() || bytes.len() > MAX_PATH_BYTES || build.len() > MAX_BUILD_IDENTITY_BYTES {
         return None;
     }
-    let mut out = Vec::with_capacity(INPUT_MAGIC.len() + 4 + bytes.len());
+    let mut out = Vec::with_capacity(INPUT_MAGIC.len() + 1 + build.len() + 4 + bytes.len());
     out.extend_from_slice(INPUT_MAGIC);
+    out.push(build.len() as u8);
+    out.extend_from_slice(build.as_bytes());
     out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
     out.extend_from_slice(&bytes);
     Some(out)
 }
 
-fn decode_path(input: &[u8]) -> Option<PathBuf> {
-    if input.len() < 12 || &input[..8] != INPUT_MAGIC {
-        return None;
+/// The path a request frame names, if `build` sent it. A frame from another
+/// build (another frame version, or another identity) is [`Skewed`], so the
+/// worker can say so instead of guessing at its layout.
+///
+/// [`Skewed`]: RequestError::Skewed
+fn decode_request(input: &[u8], build: &str) -> Result<PathBuf, RequestError> {
+    if input.len() < INPUT_MAGIC.len() + 1 || !input.starts_with(INPUT_MAGIC_FAMILY) {
+        return Err(RequestError::Malformed);
     }
-    let len = u32::from_le_bytes(input[8..12].try_into().ok()?) as usize;
-    if len == 0 || len > MAX_PATH_BYTES || input.len() != 12 + len {
-        return None;
+    if &input[..INPUT_MAGIC.len()] != INPUT_MAGIC {
+        return Err(RequestError::Skewed);
     }
+    let identity_len = usize::from(input[INPUT_MAGIC.len()]);
+    let identity_start = INPUT_MAGIC.len() + 1;
+    let path_start = identity_start + identity_len + 4;
+    if identity_len > MAX_BUILD_IDENTITY_BYTES || input.len() < path_start {
+        return Err(RequestError::Malformed);
+    }
+    if &input[identity_start..identity_start + identity_len] != build.as_bytes() {
+        return Err(RequestError::Skewed);
+    }
+    let len = u32::from_le_bytes(
+        input[path_start - 4..path_start]
+            .try_into()
+            .map_err(|_| RequestError::Malformed)?,
+    ) as usize;
+    if len == 0 || len > MAX_PATH_BYTES || input.len() != path_start + len {
+        return Err(RequestError::Malformed);
+    }
+    let bytes = &input[path_start..];
     #[cfg(unix)]
     let path = {
         use std::os::unix::ffi::OsStringExt as _;
-        PathBuf::from(OsString::from_vec(input[12..].to_vec()))
+        PathBuf::from(OsString::from_vec(bytes.to_vec()))
     };
     #[cfg(windows)]
     let path = {
         use std::os::windows::ffi::OsStringExt as _;
         if len & 1 != 0 {
-            return None;
+            return Err(RequestError::Malformed);
         }
-        let wide = input[12..]
+        let wide = bytes
             .as_chunks::<2>()
             .0
             .iter()
@@ -633,7 +731,7 @@ fn decode_path(input: &[u8]) -> Option<PathBuf> {
             .collect::<Vec<_>>();
         PathBuf::from(OsString::from_wide(&wide))
     };
-    Some(path)
+    Ok(path)
 }
 
 fn encode_preview(size: u64, preview: Option<&RawPreview>) -> Option<Vec<u8>> {
@@ -721,14 +819,16 @@ pub fn run_worker() -> i32 {
     }
     let mut input = Vec::new();
     if std::io::stdin()
-        .take((MAX_PATH_BYTES + 13) as u64)
+        .take((INPUT_MAGIC.len() + 1 + MAX_BUILD_IDENTITY_BYTES + 4 + MAX_PATH_BYTES + 1) as u64)
         .read_to_end(&mut input)
         .is_err()
     {
         return 2;
     }
-    let Some(path) = decode_path(&input) else {
-        return 2;
+    let path = match decode_request(&input, build_identity()) {
+        Ok(path) => path,
+        Err(RequestError::Skewed) => return WORKER_SKEW_EXIT,
+        Err(RequestError::Malformed) => return 2,
     };
     let Some((identity, retained)) = file_identity(&path) else {
         return 3;
@@ -1287,7 +1387,7 @@ mod tests {
         let body = source
             .split("fn run_preview_child_once(")
             .nth(1)
-            .and_then(|rest| rest.split("\nfn encode_path(").next())
+            .and_then(|rest| rest.split("\nfn encode_request(").next())
             .expect("run_preview_child_once body");
         assert!(
             !body.contains("std::thread::spawn("),
@@ -1330,7 +1430,7 @@ mod tests {
         let body = source
             .split("fn run_preview_child_once(")
             .nth(1)
-            .and_then(|rest| rest.split("\nfn encode_path(").next())
+            .and_then(|rest| rest.split("\nfn encode_request(").next())
             .expect("run_preview_child_once body");
         let timeout_arm = body
             .split("Ok(None) => {")
@@ -1460,16 +1560,127 @@ mod tests {
     #[test]
     fn worker_protocol_rejects_trailing_and_oversized_payloads() {
         let path = std::env::current_dir().unwrap().join("clip.mp4");
-        let encoded = encode_path(&path).unwrap();
-        assert_eq!(decode_path(&encoded), Some(path));
+        let encoded = encode_request(&path, "1.0 (abc)").unwrap();
+        assert_eq!(decode_request(&encoded, "1.0 (abc)"), Ok(path));
 
         let mut trailing = encoded.clone();
         trailing.push(0);
-        assert!(decode_path(&trailing).is_none());
+        assert_eq!(
+            decode_request(&trailing, "1.0 (abc)"),
+            Err(RequestError::Malformed)
+        );
 
         let mut wrong_magic = encoded;
         wrong_magic[0] ^= 0xff;
-        assert!(decode_path(&wrong_magic).is_none());
+        assert_eq!(
+            decode_request(&wrong_magic, "1.0 (abc)"),
+            Err(RequestError::Malformed)
+        );
+        assert!(encode_request(&PathBuf::from("/a"), &"x".repeat(129)).is_none());
+    }
+
+    /// A request from another build, by its frame version or its identity,
+    /// is skew: the worker says so with its own exit code, which the parent
+    /// does not retry and reports once.
+    #[test]
+    fn another_build_s_request_is_skew() {
+        let path = PathBuf::from("/tmp/clip.mp4");
+        let request = encode_request(&path, "4.9.0 (aaaaaaaaaaaa)").unwrap();
+        assert_eq!(
+            decode_request(&request, "5.0.0 (bbbbbbbbbbbb)"),
+            Err(RequestError::Skewed)
+        );
+        // The frame before build identities: same family, older version.
+        let mut old = b"KTLVPIN1".to_vec();
+        old.extend_from_slice(&13u32.to_le_bytes());
+        old.extend_from_slice(b"/tmp/clip.mp4");
+        assert_eq!(decode_request(&old, "4.9.0"), Err(RequestError::Skewed));
+
+        let mut calls = 0;
+        let result = retry_preview_timeout(|| {
+            calls += 1;
+            PreviewChildAttempt::<u8>::Skewed
+        });
+        assert_eq!(result, PreviewChildOutcome::Skewed);
+        assert_eq!(calls, 1, "skew is not retried");
+        assert!(!worker_exit_is_retryable(Some(WORKER_SKEW_EXIT)));
+
+        let src = include_str!("video_preview.rs");
+        let child = src
+            .split("fn run_preview_child_once(")
+            .nth(1)
+            .and_then(|rest| rest.split("\nfn encode_request(").next())
+            .expect("run_preview_child_once");
+        assert!(child.contains("status.code() == Some(WORKER_SKEW_EXIT)"));
+        assert!(child.contains("encode_request(path, build_identity())"));
+        let worker = src
+            .split("pub fn run_worker() -> i32 {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("run_worker");
+        assert!(worker.contains("Err(RequestError::Skewed) => return WORKER_SKEW_EXIT,"));
+    }
+
+    /// The identity is what `main` records, bounded.
+    #[test]
+    fn the_build_identity_is_recorded_once_and_bounded() {
+        set_build_identity(&format!("9.9.9 (abc+{})", "f".repeat(200)));
+        assert!(build_identity().starts_with("9.9.9 (abc+"));
+        assert_eq!(build_identity().len(), MAX_BUILD_IDENTITY_BYTES);
+        set_build_identity("another");
+        assert!(build_identity().starts_with("9.9.9"), "set once");
+    }
+
+    /// On Linux the worker is the running image itself, so an update that
+    /// replaced or deleted Kettle's file cannot hand the parent another
+    /// build. Elsewhere it is the path Kettle started from.
+    #[test]
+    fn the_worker_is_this_executable() {
+        let worker = worker_executable().expect("a worker program");
+        if cfg!(target_os = "linux") {
+            assert_eq!(worker, PathBuf::from("/proc/self/exe"));
+        } else {
+            assert_eq!(worker, std::env::current_exe().unwrap());
+        }
+    }
+
+    /// A copy of this test binary deletes its own file, as an update that
+    /// replaced Kettle would, then starts its worker program: on Linux that
+    /// still runs, because it names the running image, not the path.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_worker_runs_after_its_file_is_deleted() {
+        use std::os::unix::fs::PermissionsExt as _;
+        const CHILD: &str = "KETTLE_TEST_DELETED_WORKER_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let me = std::env::current_exe().unwrap();
+            std::fs::remove_file(&me).unwrap();
+            assert!(!me.exists());
+            let status = Command::new(worker_executable().unwrap())
+                .args(["--list"])
+                .stdout(Stdio::null())
+                .status()
+                .expect("start the worker program after the file is gone");
+            assert!(status.success());
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let copy = dir.path().join("kettle-ui-test-copy");
+        std::fs::copy(std::env::current_exe().unwrap(), &copy).unwrap();
+        std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let status = Command::new(&copy)
+            .args([
+                "--exact",
+                "video_preview::tests::the_worker_runs_after_its_file_is_deleted",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .status()
+            .expect("run the test copy");
+        assert!(
+            status.success(),
+            "the deleted copy could not start its worker"
+        );
     }
 
     #[test]

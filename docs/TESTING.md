@@ -2857,7 +2857,20 @@ production keeps the empty result as a valid generic receipt. Neither path
 retries malformed output, read errors, or trust failures. Windows validates
 the response when its shell thumbnail provider supports that fixture; set
 `KETTLE_REQUIRE_NATIVE_VIDEO_POSTER=1` on a capable Windows host to make a
-missing poster fail. Linux unit coverage invokes its complete Freedesktop
+missing poster fail. Worker identity: the
+identity is `KETTLE_SOURCE_ID` (the version and a hash of the Rust sources),
+bounded; a request
+from another build, by frame version or identity, is skew, which the worker
+reports with its own exit code and the parent neither retries nor treats as
+an ordinary failure; on Linux the worker program is `/proc/self/exe`, and a
+copy of the test binary that deletes its own file can still start it; a
+source guard keeps `main` setting the identity before the worker dispatch.
+On every native runner `video_preview_native` sends the shipped binary a
+request from another build and an old-frame request (both exit with the skew
+code, stdout empty) and one from its own build (not skew).
+Red checks: ignoring the identity, reading an older frame as garbage,
+retrying skew, and dropping the skew exit mapping each fail a test.
+Linux unit coverage invokes its complete Freedesktop
 cache resolver in an isolated child environment. Portable state tests also
 prove that a missing worker response expires and that the event loop
 schedules the cleanup deadline instead of retaining a pending path forever.

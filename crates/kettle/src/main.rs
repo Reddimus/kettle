@@ -1023,6 +1023,8 @@ fn main() -> anyhow::Result<()> {
     // The isolated poster worker is not an application startup. Dispatch it
     // before update recovery so a paste cannot contend on install locks or
     // launch a pending-update helper from a hidden, time-bounded child.
+    // The poster worker must be built from this very source; it compares.
+    kettle_ui::set_build_identity(env!("KETTLE_SOURCE_ID"));
     if is_media_preview_worker_argv(std::env::args_os()) {
         std::process::exit(kettle_ui::run_media_preview_worker());
     }
@@ -2391,6 +2393,13 @@ mod activation_cli_tests {
         assert!(
             worker < update,
             "poster workers must exit before application update recovery"
+        );
+        let identity = source
+            .find("kettle_ui::set_build_identity(env!(\"KETTLE_SOURCE_ID\"));")
+            .expect("the build identity is recorded");
+        assert!(
+            identity < worker,
+            "the worker compares its build identity with the request, so it must be set first"
         );
         assert!(
             !source.contains("Cmd::MediaPreviewWorker => unreachable!"),

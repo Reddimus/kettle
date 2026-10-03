@@ -94,6 +94,13 @@ pub fn run_media_preview_worker() -> i32 {
     video_preview::run_worker()
 }
 
+/// Record this build's identity, which the video-preview worker must share
+/// with the GUI that starts it. Call once, first thing in `main`.
+#[doc(hidden)]
+pub fn set_build_identity(identity: &str) {
+    video_preview::set_build_identity(identity);
+}
+
 /// First-tab startup overrides from the CLI.
 #[derive(Debug, Default, Clone)]
 pub struct Options {
