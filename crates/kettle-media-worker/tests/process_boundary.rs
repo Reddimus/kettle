@@ -8,8 +8,12 @@ use std::time::{Duration, Instant};
 
 use kettle_media::wire::{Direction, Frame, encode, read_frame, write_frame};
 use kettle_media::{
-    BuildId, Canvas, Failure, FailureCode, Hello, Job, JobKind, Ready, Source, Target, Theme,
+    BuildId, Canvas, Failure, FailureCode, FallbackFont, Hello, Job, JobKind, NativePath, Ready,
+    Source, Target, Theme, Warning,
 };
+
+#[path = "../../kettle-media-render/tests/support/fonts.rs"]
+mod fonts;
 
 const WORKER: &str = env!("CARGO_BIN_EXE_kettle-media-worker");
 const EXIT_PROTOCOL: i32 = 2;
@@ -171,6 +175,56 @@ fn an_svg_job_is_rendered() {
     assert_eq!(receive(&mut child), None);
     assert_eq!(exit_code(&mut child, Duration::from_secs(10)), 0);
     assert_eq!(finish(&mut child), "");
+}
+
+#[test]
+fn explicit_collection_faces_and_font_failures_cross_the_worker_protocol() {
+    use std::os::unix::ffi::OsStrExt as _;
+    let directory = kettle_test_support::private_tempdir("kettle-worker-font-");
+    let path = directory.path().join("faces.ttc");
+    std::fs::write(&path, fonts::collection().0).unwrap();
+    let svg = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"160\" height=\"64\"><text y=\"42\" font-size=\"32\" font-family=\"{}\">\u{4e2d}</text></svg>",
+        fonts::FAMILY
+    );
+    for (index, expected) in [(0, None), (1, None), (2, Some(FailureCode::RenderParse))] {
+        let Frame::Job(mut job) = job_of(JobKind::Svg, svg.as_bytes()) else {
+            unreachable!()
+        };
+        job.target.width = 160;
+        job.target.height = 64;
+        job.fallback_fonts.push(FallbackFont {
+            path: NativePath::new(path.as_os_str().as_bytes().to_vec()).unwrap(),
+            face_index: index,
+        });
+        let mut child = worker();
+        handshake(&mut child);
+        send(&mut child, &Frame::Job(job));
+        let reply = receive(&mut child);
+        if let Some(code) = expected {
+            assert_eq!(reply, failure(code));
+        } else {
+            let Some(Frame::Rendered(rendered)) = reply else {
+                panic!("no font result")
+            };
+            assert_eq!((rendered.width, rendered.height), (160, 64));
+            assert_eq!(
+                rendered.warnings.contains(&Warning::MissingGlyphs),
+                index == 0
+            );
+            assert_eq!(
+                rendered.warnings.contains(&Warning::FontFallback),
+                index == 1
+            );
+            assert_eq!(
+                rendered.uncovered_scripts,
+                if index == 0 { vec!["Han"] } else { Vec::new() }
+            );
+        }
+        assert_eq!(receive(&mut child), None);
+        assert_eq!(exit_code(&mut child, Duration::from_secs(10)), 0);
+        assert_eq!(finish(&mut child), "");
+    }
 }
 
 #[test]

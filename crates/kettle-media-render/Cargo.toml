@@ -31,6 +31,10 @@ usvg = { version = "=0.48.1", default-features = false, features = ["text"] }
 # Parses SVG for sanitizing before usvg sees it, and writes the result back.
 roxmltree = "=0.21.1"
 xmlwriter = "=0.1.0"
+# Read just the selected font face with the same maintained parser usvg
+# uses, without fontdb's all-face collection/name loader.
+skrifa = "=0.44.0"
+unicode-script = "=0.5.8"
 
 [dev-dependencies]
 kettle-test-support.workspace = true

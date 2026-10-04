@@ -8,7 +8,9 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
 use image::{ImageFormat, Rgba, RgbaImage};
-use kettle_media::{Canvas, FailureCode, Job, JobKind, Rendered, Source, Target, Theme};
+use kettle_media::{
+    Canvas, FailureCode, FallbackFont, Job, JobKind, NativePath, Rendered, Source, Target, Theme,
+};
 use kettle_media_render::render;
 
 /// The system allocator, recording the largest single request made on each
@@ -64,6 +66,16 @@ fn measured_as(
     width: u32,
     height: u32,
 ) -> (Result<Rendered, FailureCode>, usize) {
+    measured_with_fonts(kind, bytes, width, height, Vec::new())
+}
+
+fn measured_with_fonts(
+    kind: JobKind,
+    bytes: Vec<u8>,
+    width: u32,
+    height: u32,
+    fallback_fonts: Vec<FallbackFont>,
+) -> (Result<Rendered, FailureCode>, usize) {
     let job = Job {
         kind,
         source: Source::Bytes(bytes),
@@ -81,11 +93,37 @@ fn measured_as(
             scale: 1.0,
             crop: None,
         },
-        fallback_fonts: Vec::new(),
+        fallback_fonts,
     };
     LARGEST.set(0);
     let result = render(&job);
     (result, LARGEST.get())
+}
+
+#[test]
+fn a_collection_count_cannot_allocate_all_faces() {
+    use std::os::unix::ffi::OsStrExt as _;
+    // Warm only the trusted bundled database, outside the measurement.
+    kettle_media_render::prepare();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("huge-count.ttc");
+    std::fs::write(&path, b"ttcf\0\x01\0\0\xff\xff\xff\xff").unwrap();
+    let entry = FallbackFont {
+        path: NativePath::new(path.as_os_str().as_bytes().to_vec()).unwrap(),
+        face_index: 0,
+    };
+    let (result, largest) = measured_with_fonts(
+        JobKind::Svg,
+        b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\"/>".to_vec(),
+        1,
+        1,
+        vec![entry],
+    );
+    assert_eq!(result.unwrap_err(), FailureCode::RenderParse);
+    assert!(
+        largest < 64 * 1024,
+        "collection count caused a {largest}-byte allocation"
+    );
 }
 
 /// A 2x2 lossy VP8 key frame of one color, from `cwebp -q 80` (libwebp) on a

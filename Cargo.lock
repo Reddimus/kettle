@@ -2041,7 +2041,9 @@ dependencies = [
  "libc",
  "resvg",
  "roxmltree 0.21.1",
+ "skrifa 0.44.0",
  "tempfile",
+ "unicode-script",
  "usvg",
  "xmlwriter",
 ]

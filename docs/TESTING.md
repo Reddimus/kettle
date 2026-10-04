@@ -1046,6 +1046,41 @@ a read, and an external request's attested inode must match the open file.
 refuses any file creation, write, rename, removal or permission change, and
 any use of `std::process`, `std::net` or `std::env`.
 
+`tests/svg_fonts.rs` uses synthetic outline fixtures derived in memory from
+the bundled OFL font. Renamed faces retain copyright/license metadata;
+codepoint remapping is a selection/coverage fixture, not evidence of real
+Arabic, Hebrew or CJK typography. `svg_fallback_face_index_is_preserved`
+compares both faces of a TTC with their standalone equivalents, with different
+advance widths, and refuses nonexistent indexes. `svg_only_explicit_font_bytes_are_loaded`
+proves that a family name or file on disk does not load bytes, supplying the
+file changes the result, and later jobs do not retain it. Tests cover actual
+fallback use, multiple missing scripts, a first uncovered character followed
+by a covered one, invisible/unpainted text, unused supplied fonts, text in
+patterns, and refusing report overflow instead of silently truncating scripts.
+Directory/missing/FIFO inputs, per-file cap plus one, exact 32 MiB files and
+exact 128 MiB aggregate admission are checked, along with oversized selected
+names, name tables/record counts, table directories, cmap records and
+variation axes. Every blocked embedded SVG/color/bitmap table is refused.
+The hostile allocator test `a_collection_count_cannot_allocate_all_faces`
+refuses a huge TTC face count without any allocation reaching 64 KiB after
+warming the trusted bundled database. This measures the largest allocation,
+not the complete process footprint.
+
+The real worker's
+`explicit_collection_faces_and_font_failures_cross_the_worker_protocol`
+sends both TTC indexes and an invalid index through Hello/Ready/Job, checks
+the result's script/warning fields or fixed failure, then requires EOF,
+exit 0 and empty stderr. It exercises a built worker, not an installed,
+signed release or the future GUI fallback requeue.
+
+Font red checks: forcing a TTC's stored index to zero, skipping explicit file
+loads, increasing the per-file or aggregate policy limits, removing the
+remaining aggregate read budget, accepting embedded glyph tables, lifting
+each metadata bound, stopping at the first uncovered character, dropping
+either glyph warning, truncating the script report and omitting pattern text
+each fail their focused regression. Sources are restored and hash-checked
+after every mutation; no build, edit or second mutation overlaps a run.
+
 Red checks: no size pre-check and no codec limit, transparent pixels left
 colored, resampling without premultiplied alpha, an uncentered crop, a fit
 that ignores the aspect ratio, a non-regular file accepted, an ignored

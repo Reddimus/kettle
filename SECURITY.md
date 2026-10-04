@@ -135,14 +135,20 @@ Reports that fit any of these are welcome:
   filters, a duplicate id, or a number large enough to overflow what usvg
   multiplies, refuses it (a tiny one is written as zero). resvg then parses it with image resolvers that load
   nothing and no resources directory, and draws text with the bundled face
-  only, never a host font. Its expanded size (references, `use` copies and
+  and explicit job fonts, with no host discovery. Up to eight held-read regular
+  font files are allowed, 32 MiB each and 128 MiB total. Only the selected
+  collection face is parsed, with bounded metadata and its index preserved;
+  embedded SVG, color and bitmap glyph tables are refused before usvg can
+  reach their separate parsers. Per-job databases cannot retain another job's
+  supplied fonts. Its expanded size (references, `use` copies and
   per-vertex markers and filter input-name copies counted every time) and
   every layer, filter result, mask, clip and pattern tile resvg would allocate,
   plus each merge input's
   layer-sized copy, conversion and compositing charge, are admitted before any
   is built. Blend, composite and displacement also charge both input surfaces
   beside their output. A reference cycle, through inherited paint as well, is
-  refused. An SVG that makes the worker read or fetch anything,
+  refused. An SVG that makes the worker read or fetch anything outside its
+  explicit job inputs,
   load a font it was not given, expand or allocate past those limits before
   being refused, or crash the worker, is in scope. This is resource isolation,
   not an operating-system sandbox: code execution inside the worker after

@@ -460,7 +460,8 @@ mod tests {
         let svg = format!(
             r#"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64">{body}</svg>"#
         );
-        usvg::Tree::from_str(&svg, &super::super::options()).unwrap()
+        let fonts = super::super::fonts::for_job(&[]).unwrap();
+        usvg::Tree::from_str(&svg, &super::super::options(&fonts)).unwrap()
     }
 
     fn patterned(rects: usize) -> usvg::Tree {

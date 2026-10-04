@@ -23,9 +23,15 @@ slowed down.
 - **Process:** a 2 s (raster) or 3 s (other kinds) job deadline, a 5 s CPU
   limit, and a 768 MiB limit on the memory the worker and everything it
   started hold, sampled every 25 ms.
+- **SVG fonts:** at most eight explicit regular files, 32 MiB each and 128 MiB
+  total; only one selected collection face per entry, with bounded metadata
+  and no host discovery. Reads and per-job setup are inside the 3 s deadline.
+  Coverage scans retained text/resource roots once, with a one-million-unit
+  traversal cap; each fallback search examines at most nine loaded faces.
 
 Area is not a time model: filter cost per pixel varies by primitive, and
-path tessellation and filter scratch buffers are not counted. The deadline
+path tessellation, font shaping/outline scratch and filter scratch buffers
+are not counted. File byte limits do not measure allocator capacity. The deadline
 is what bounds time. These ceilings are meant to come down as the hostile
 corpus and real agent output are measured.
 
