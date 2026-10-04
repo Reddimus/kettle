@@ -62,13 +62,20 @@ through one held descriptor, the format comes from the content, the decoded
 size is checked before any pixel is decoded, and the image is fitted into the
 job's target box as straight RGBA. An SVG is parsed with no DTD, rewritten so
 it refers to nothing outside itself, admitted on its expanded size and on
-every layer resvg would allocate, and only then rendered, with the one font
-bundled in the worker. Raster images and SVG are rendered; every other kind
+every layer resvg would allocate, and only then rendered. A per-job font
+database combines the bundled face with held-read snapshots of explicitly
+named regular files; only the requested collection face is inserted, with its
+index preserved and bounded metadata. The worker does no host font discovery
+and refuses embedded SVG/color/bitmap glyph formats. Actual shaped glyphs
+produce fallback and missing-script warnings; databases are isolated across
+jobs. Raster images and SVG are rendered; every other kind
 is refused as unsupported until its renderer lands. The client's `render` runs one job in a
 fresh worker under startup and job deadlines, with the worker in its own
 process group, killed before it is reaped; nothing in the GUI calls it yet. The byte layouts, digest
 framing, availability codes and decisions are in
 [MEDIA-PROTOCOL.md](MEDIA-PROTOCOL.md).
+The campaign's ownership, distribution decisions and remaining acceptance
+boundaries are recorded in [AGENT-VISUALS-DESIGN.md](AGENT-VISUALS-DESIGN.md).
 
 `kettle-i18n` holds Kettle-owned UI text. Its build script reads
 `locales/schema.toml`, `en.toml` and `es.toml`, validates them, and generates

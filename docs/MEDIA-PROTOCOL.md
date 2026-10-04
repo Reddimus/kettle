@@ -50,7 +50,9 @@ private-channel authorization tag 1 with no payload. ExternalRequest refuses tag
 Theme stores background, foreground, all 16 palette colors and accent as four-byte RGBA
 colors, then its dark flag. Canvas tags 0/1/2 mean theme/white/checker. Target stores width
 u32, height u32, scale f64, optional crop of x/y/width/height u32. Crop lies within the target
-box. Each font stores a native path and u32 face index.
+box. Each font stores a native path and u32 face index. At most eight entries
+are accepted. These paths are explicit job inputs, not font names or paths
+derived from SVG content. SVG font loading and its byte limits are below.
 
 Path identity stores dev, ino and size u64, signed seconds i64, then nanoseconds u32 below
 one billion. Rendered rows use straight RGBA, without premultiplication. There is no stride
@@ -543,16 +545,63 @@ aborts on panic instead leaves the worker as the crash boundary: the panic
 ends only the worker, the job fails, and Kettle is untouched. The fuzzing
 that follows this work aims at what remains.
 
+**SVG: fonts.** The worker discovers no host fonts. Every generic family maps
+to the bundled JetBrains Mono face. A job may additionally name at most eight
+regular font files, 32 MiB each and 128 MiB in total
+(`MAX_FALLBACK_FONT_BYTES`, `MAX_FALLBACK_FONT_TOTAL_BYTES`). Each file uses
+the source loader's held, read-only, non-blocking descriptor and before/after
+identity checks; a leaf symlink is followed, while a FIFO, directory or device
+is `FileNotRegular`. File failures use the same fixed codes as source files.
+The font list has no dev/ino attestation field. Raster jobs ignore it.
+
+After sanitizing and structural admission, the worker builds a per-job font
+database from those byte snapshots and the shared bundled face. Only the
+requested face is parsed and inserted, preserving its TTC/OTC index; it never
+enumerates every face in an untrusted collection. An invalid face index or
+font is `RenderParse`. The selected face must have outline data and usable
+metrics. Embedded SVG, color and bitmap glyph tables (`SVG `, `COLR`, `CPAL`,
+`CBDT`, `CBLC`, `sbix`, `EBDT`, `EBLC`, `EBSC`, `bdat`, `bloc`) are refused
+as `RenderParse`, even if their data is malformed: usvg's embedded-glyph paths
+would otherwise bypass the document's restricted resolvers.
+
+Selected-face metadata is bounded before name decoding or shaping: 128 sorted,
+unique table records, a 64 KiB name table, 512 name records, 4,096 UTF-8 bytes
+per selected name, 64 variation axes and 64 cmap encoding records. Exceeding
+a bound is `RenderResource`; duplicate or unsorted table tags, empty selected
+names or control characters in them are `RenderParse`. Family selection uses
+the English or first available typographic family, falling back to the legacy
+family; PostScript name falls back to that family if absent. Classification
+retains weight, style, stretch and fixed-pitch metadata. Font names in the SVG
+only query this database; neither resolver loads additional bytes. Fallback
+prefers a face covering the requested character, then matching style, stretch
+and weight, with supplied order breaking ties. Other remaining faces are
+also tried because usvg reshapes the whole run but asks about only its first
+missing character. No face survives into another job's database.
+
+`FontFallback` means a supplied face was used for a non-missing shaped glyph,
+including a face selected directly by family name. `MissingGlyphs` means a
+painted, visible text span contains a missing non-control, non-whitespace
+character. `uncovered_scripts` contains its sorted, unique Unicode script
+names, including Common, Inherited or Unknown when applicable. Coverage walks
+text in the document and retained patterns, masks, clips and filter-image
+roots, charging visited nodes, glyphs and missing-glyph characters against
+1,000,000 units. More than 32 scripts or excess traversal is
+`RenderResource`, not a truncated success. These report the actual shaped
+result; they do not promise complete fallback across differently shaped
+clusters, a limitation of the pinned usvg shaper. Font outlines, shaping
+scratch and tessellation are not part of the layer-pixel model. The 3 s
+deadline and 768 MiB process-group limit still bound those costs.
+
 **SVG: result.** resvg's premultiplied pixels come back as straight RGBA,
-rounded, with every fully transparent pixel all zero. Text is drawn with the
-JetBrains Mono face bundled in the worker and nothing else: no host font is
-discovered or loaded, and any `font-family` resolves to that face. The
-result carries the source as display lines: at most 2,000 lines of at most
+rounded, with every fully transparent pixel all zero. The result carries the
+source as display lines: at most 2,000 lines of at most
 4,096 bytes, cut at a character boundary, with `SourceDisplayClipped` when
 anything was left out. As for a raster, the canvas is the GUI's to draw
 behind the result, and the target's scale is unused (the box is already in
-device pixels). The worker builds the font database before it reports
-Ready, outside the job's deadline.
+device pixels). The worker prepares only the bundled database before Ready.
+Explicit font reads, per-job setup and shaping are inside the job deadline.
+The digest still identifies source content and identity, not the pixels,
+theme or fallback font bytes; a future render cache must also key those inputs.
 
 ## P2 boundary and separate worker decision
 

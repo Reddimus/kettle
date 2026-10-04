@@ -60,6 +60,22 @@ pub(crate) fn load_path(
     cap: usize,
     after_open: impl FnOnce(),
 ) -> Result<Snapshot<'static>, FailureCode> {
+    let attested = match authorization {
+        Authorization::ExternalAttested(attested) => Some((attested.dev, attested.ino)),
+        Authorization::UserPull(_) => None,
+    };
+    load_regular_path(path, attested, cap, after_open)
+}
+
+/// A named regular file, optionally requiring the source's external
+/// attestation. Font entries have no attestation field; they use the same
+/// held-descriptor, non-blocking read and before/after identity checks.
+pub(crate) fn load_regular_path(
+    path: &Path,
+    attested: Option<(u64, u64)>,
+    cap: usize,
+    after_open: impl FnOnce(),
+) -> Result<Snapshot<'static>, FailureCode> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
@@ -69,8 +85,8 @@ pub(crate) fn load_path(
     if !opened.file_type().is_file() {
         return Err(FailureCode::FileNotRegular);
     }
-    if let Authorization::ExternalAttested(attested) = authorization
-        && (attested.dev, attested.ino) != (opened.dev(), opened.ino())
+    if let Some(attested) = attested
+        && attested != (opened.dev(), opened.ino())
     {
         return Err(FailureCode::Changed);
     }

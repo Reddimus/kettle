@@ -49,7 +49,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   both inputs of blend, composite and displacement filters count toward the
   layer budget. SVG
   results are at most 1024 pixels a side and a million pixels, and text is
-  drawn with the bundled JetBrains Mono face only.
+  drawn with the bundled JetBrains Mono face by default. A job can explicitly
+  supply up to eight regular outline font files, 32 MiB each and 128 MiB total,
+  preserving a selected TTC face index. Each job has its own font database;
+  no host fonts are discovered, and embedded SVG, color and bitmap glyph
+  formats are refused. Results report actual font use and missing scripts
+  through `FontFallback`, `MissingGlyphs` and `uncovered_scripts`.
 - `kettle ctl dispatch_ui_key` drives quick-select hint mode too, in the order
   the keyboard reaches it: right after a confirmation.
 - In quick-select hint mode (`Ctrl+Shift+H`), holding Shift while typing a

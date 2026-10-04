@@ -4,7 +4,7 @@
 //! no DTD and admitted structurally (`structure`), rewritten so nothing in it
 //! refers outside the document (`sanitize`), and only then parsed by usvg,
 //! with resolvers that load nothing, no resources directory, and the bundled
-//! font alone (`fonts`). The image is fitted inside the target box keeping
+//! face and explicit per-job outline fonts (`fonts`). The image is fitted inside the target box keeping
 //! its aspect ratio, then within `MAX_SVG_RENDERED_EDGE` and
 //! `MAX_SVG_RENDERED_PIXELS`; a crop, in target-box coordinates around the
 //! centered image, must itself fit those. Every layer, filter result, mask,
@@ -39,11 +39,13 @@ pub(crate) fn render(job: &Job) -> Result<Rendered, FailureCode> {
     // the text usvg will parse.
     let sanitized = sanitize::write(&sanitize::parse(text)?)?;
     structure::admit(&sanitize::parse(&sanitized)?)?;
+    let fonts = fonts::for_job(&job.fallback_fonts)?;
     let tree = crate::guarded(FailureCode::RenderParse, || {
-        usvg::Tree::from_str(&sanitized, &options()).map_err(|_| FailureCode::RenderParse)
+        usvg::Tree::from_str(&sanitized, &options(&fonts)).map_err(|_| FailureCode::RenderParse)
     })?;
     drop(sanitized);
     let placement = place(tree.size(), job.target)?;
+    let mut coverage = fonts.coverage(&tree)?;
     let pixmap = crate::guarded(FailureCode::RenderParse, || {
         layers::admit(
             &tree,
@@ -61,6 +63,9 @@ pub(crate) fn render(job: &Job) -> Result<Rendered, FailureCode> {
     let digest =
         content_digest(&snapshot.bytes, snapshot.identity).map_err(|_| FailureCode::BadParams)?;
     let (source_text, clipped) = source_lines(text);
+    if clipped {
+        coverage.warnings.push(Warning::SourceDisplayClipped);
+    }
     let rendered = Rendered {
         width: placement.width,
         height: placement.height,
@@ -70,12 +75,8 @@ pub(crate) fn render(job: &Job) -> Result<Rendered, FailureCode> {
         fence_sources: Vec::new(),
         fence_count: 0,
         fence_index: None,
-        uncovered_scripts: Vec::new(),
-        warnings: if clipped {
-            vec![Warning::SourceDisplayClipped]
-        } else {
-            Vec::new()
-        },
+        uncovered_scripts: coverage.scripts,
+        warnings: coverage.warnings,
     };
     rendered
         .validate()
@@ -85,13 +86,13 @@ pub(crate) fn render(job: &Job) -> Result<Rendered, FailureCode> {
 
 /// usvg's options: no resources directory, resolvers that load nothing for
 /// data and string references alike (a `None` directory alone would still
-/// let the default resolver read absolute paths), and the bundled font.
-fn options() -> usvg::Options<'static> {
-    let (fontdb, family) = fonts::bundled();
+/// let the default resolver read absolute paths), and this job's font bytes.
+fn options(fonts: &fonts::JobFonts) -> usvg::Options<'static> {
     usvg::Options {
         resources_dir: None,
-        font_family: family.clone(),
-        fontdb: fontdb.clone(),
+        font_family: fonts.family.clone(),
+        fontdb: fonts.database.clone(),
+        font_resolver: fonts::resolver(),
         image_href_resolver: usvg::ImageHrefResolver {
             resolve_data: Box::new(|_, _, _| None),
             resolve_string: Box::new(|_, _| None),
@@ -313,7 +314,8 @@ mod tests {
             r#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><image href="{}" width="8" height="8"/><image href="data:image/png;base64,iVBORw0KGgo=" width="8" height="8"/><image href="data:image/svg+xml;utf8,&lt;svg xmlns='http://www.w3.org/2000/svg'&gt;&lt;rect width='8' height='8'/&gt;&lt;/svg&gt;" width="8" height="8"/></svg>"#,
             png.display()
         );
-        let tree = usvg::Tree::from_str(&text, &options()).unwrap();
+        let fonts = fonts::for_job(&[]).unwrap();
+        let tree = usvg::Tree::from_str(&text, &options(&fonts)).unwrap();
         assert!(!has_image(tree.root()));
     }
 

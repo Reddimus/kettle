@@ -49,6 +49,10 @@ pub const MAX_FENCES: usize = 32;
 pub const MAX_FENCE_BYTES: usize = 64 * 1024;
 /// Maximum fallback path/face pairs.
 pub const MAX_FALLBACK_FONTS: usize = 8;
+/// Maximum bytes held for one explicitly supplied fallback font file.
+pub const MAX_FALLBACK_FONT_BYTES: usize = 32 * 1024 * 1024;
+/// Maximum bytes held for all fallback font files in one job.
+pub const MAX_FALLBACK_FONT_TOTAL_BYTES: usize = 128 * 1024 * 1024;
 /// Display text line limit in UTF-8 bytes.
 pub const MAX_SOURCE_LINE_BYTES: usize = 4 * 1024;
 /// Display text line count limit.

@@ -56,8 +56,11 @@ Bundled assets:
 
 * JetBrains Mono Nerd Font — SIL Open Font License 1.1
   See assets/fonts/OFL.txt
-  The regular face is also embedded in the media worker, as the only font
-  SVG text is drawn with.
+  The regular face is also embedded in the media worker as its default SVG
+  font; explicit per-job outline faces may supplement it. Font tests derive
+  synthetic renamed outline fixtures in memory from this asset, retaining
+  its copyright and license records. They test coverage and collection-face
+  selection, not authentic non-Latin typography.
 
 * iTerm2-Color-Schemes (Ghostty theme set) — MIT
   See assets/themes/LICENSE
