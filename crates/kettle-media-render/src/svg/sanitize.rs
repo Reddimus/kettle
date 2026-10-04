@@ -49,6 +49,8 @@ pub(super) const SVG_NS: &str = "http://www.w3.org/2000/svg";
 pub(super) const XLINK_NS: &str = "http://www.w3.org/1999/xlink";
 const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
 
+/// The most attributes one element may hold.
+const MAX_ATTRIBUTES: usize = 256;
 /// Nodes of every kind (elements, text, comments) the parser will build.
 const MAX_NODES: u32 = 500_000;
 /// The rewritten document's size.
@@ -73,6 +75,11 @@ const MIN_NUMBER: f64 = 1e-6;
 
 /// Parse `text` as XML with no DTD and bounded nodes.
 pub(super) fn parse(text: &str) -> Result<Document<'_>, FailureCode> {
+    // The parser compares each attribute with every one before it on the
+    // element: count them first, in one pass, before it runs.
+    if most_attributes(text) > MAX_ATTRIBUTES {
+        return Err(FailureCode::RenderResource);
+    }
     let options = ParsingOptions {
         allow_dtd: false,
         nodes_limit: MAX_NODES,
@@ -82,6 +89,53 @@ pub(super) fn parse(text: &str) -> Result<Document<'_>, FailureCode> {
         roxmltree::Error::NodesLimitReached => FailureCode::RenderResource,
         _ => FailureCode::RenderParse,
     })
+}
+
+/// The most attributes any start tag in `text` holds: its `=` signs outside
+/// quotes, with comments, character data and declarations skipped. A rough
+/// count (it does not validate), but never lower than the parser's.
+fn most_attributes(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    let mut most = 0;
+    let mut at = 0;
+    while let Some(offset) = bytes[at..].iter().position(|&byte| byte == b'<') {
+        let start = at + offset;
+        let rest = &text[start..];
+        let skip_to = |end: &str| {
+            rest.find(end)
+                .map_or(bytes.len(), |found| start + found + end.len())
+        };
+        if rest.starts_with("<!--") {
+            at = skip_to("-->");
+            continue;
+        }
+        if rest.starts_with("<![CDATA[") {
+            at = skip_to("]]>");
+            continue;
+        }
+        if rest.starts_with("<?") {
+            at = skip_to("?>");
+            continue;
+        }
+        let mut count = 0;
+        let mut quote = None;
+        let mut end = bytes.len();
+        for (index, &byte) in bytes[start + 1..].iter().enumerate() {
+            match (byte, quote) {
+                (b'"' | b'\'', None) => quote = Some(byte),
+                (byte, Some(open)) if byte == open => quote = None,
+                (b'=', None) => count += 1,
+                (b'>', None) => {
+                    end = start + 1 + index + 1;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        most = most.max(count);
+        at = end;
+    }
+    most
 }
 
 /// An element that is written back: in the SVG namespace, and not one whose
@@ -734,6 +788,22 @@ mod tests {
             assert!(!out.contains(absent), "{absent} in {out}");
         }
         assert!(out.contains("<text>fallback</text>"), "{out}");
+    }
+
+    #[test]
+    fn attributes_are_counted_before_the_parser_runs() {
+        let many: String = (0..257).map(|i| format!(" a{i}=\"\"")).collect();
+        assert_eq!(
+            parse(&format!("{OPEN}<rect{many}/></svg>")).unwrap_err(),
+            FailureCode::RenderResource
+        );
+        // Signs inside quotes, comments and character data are not counted.
+        let quoted = "=".repeat(1_000);
+        assert!(parse(&format!(
+            r#"{OPEN}<!-- <a {quoted}> --><text data-x="{quoted}"><![CDATA[<{quoted}>]]></text></svg>"#
+        ))
+        .is_ok());
+        assert_eq!(most_attributes(r#"<a b="1" c='>=' d=2>"#), 3);
     }
 
     #[test]

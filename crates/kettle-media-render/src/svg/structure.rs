@@ -50,6 +50,11 @@ const BASIC_SHAPE_VERTICES: u64 = 16;
 /// The primitives a filter may hold: usvg looks up each primitive's input
 /// among those before it, which is quadratic in their number.
 const MAX_FILTER_PRIMITIVES: usize = 64;
+/// The characters one text element may hold: usvg's layout is quadratic in
+/// them.
+const MAX_TEXT_CHARACTERS: u64 = 20_000;
+/// The stops one gradient may hold.
+const MAX_GRADIENT_STOPS: usize = 256;
 /// The bytes of attribute text one unit of work stands for.
 const ATTRIBUTE_BYTES: u64 = 64;
 /// The copies of its paint usvg makes per character of text: for the span,
@@ -264,16 +269,36 @@ pub(super) fn admit(document: &Document<'_>) -> Result<(), FailureCode> {
             subtree_spans[parent] = subtree_spans[parent].saturating_add(subtree_spans[index]);
         }
     }
+    for (index, node) in nodes.iter().enumerate() {
+        match node.tag_name().name() {
+            // usvg's layout scans a text's prefix for every glyph.
+            "text" if subtree_chars[index] > MAX_TEXT_CHARACTERS => {
+                return Err(FailureCode::RenderResource);
+            }
+            // usvg compacts stops that share an offset one by one.
+            "linearGradient" | "radialGradient"
+                if node
+                    .children()
+                    .filter(|child| child.has_tag_name((sanitize::SVG_NS, "stop")))
+                    .count()
+                    > MAX_GRADIENT_STOPS =>
+            {
+                return Err(FailureCode::RenderResource);
+            }
+            _ => {}
+        }
+    }
     let pairs: Vec<u64> = nodes
         .iter()
         .enumerate()
         .map(|(index, node)| match node.tag_name().name() {
             "text" => subtree_spans[index].saturating_mul(subtree_chars[index]),
             "textPath" => {
+                // usvg lays text along any shape, point lists included.
                 let segments = sanitize::href(*node)
                     .and_then(|id| ids.get(id))
-                    .and_then(|&target| sanitize::plain(nodes[target], "d"))
-                    .map_or(0, count_numbers);
+                    .and_then(|&target| vertices(nodes[target]))
+                    .unwrap_or(0);
                 subtree_chars[index].saturating_mul(segments)
             }
             _ => 0,
@@ -923,6 +948,43 @@ mod tests {
             ))
             .unwrap_err(),
             FailureCode::RenderResource
+        );
+    }
+
+    #[test]
+    fn quadratic_text_and_gradients_are_bounded() {
+        // A text's characters, laid out quadratically by usvg.
+        assert_eq!(
+            admitted(&format!("<text>{}</text>", "x".repeat(20_001))).unwrap_err(),
+            FailureCode::RenderResource
+        );
+        assert!(admitted(&format!("<text>{}</text>", "x".repeat(20_000))).is_ok());
+        // A text path along a point list counts its segments too.
+        let points = "0,0 1,0 ".repeat(25_000);
+        assert_eq!(
+            admitted(&format!(
+                r##"<defs><polyline id="p" points="{points}"/></defs><text><textPath href="#p">{}</textPath></text>"##,
+                "x".repeat(10_000)
+            ))
+            .unwrap_err(),
+            FailureCode::RenderResource
+        );
+        // A gradient's stops, compacted one by one.
+        let stops = |count: usize| "<stop/>".repeat(count);
+        assert_eq!(
+            admitted(&format!(
+                r#"<linearGradient id="g">{}</linearGradient>"#,
+                stops(257)
+            ))
+            .unwrap_err(),
+            FailureCode::RenderResource
+        );
+        assert!(
+            admitted(&format!(
+                r#"<linearGradient id="g">{}</linearGradient>"#,
+                stops(256)
+            ))
+            .is_ok()
         );
     }
 

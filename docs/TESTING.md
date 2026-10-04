@@ -942,7 +942,9 @@ zero (`1e-9.5` as `0 .5`, `1e-30em` as `0em`, a style sheet's too) while
 `1e30em` is refused, and refuses font-size keywords, a relative size in the
 `font` shorthand, `inherit` for a mask or clip, filter lists and filter
 functions, a percentage past 1000%, a 65-entry dash list, font lists over
-256 bytes and a 2,000-byte inherited value, and drops
+256 bytes and a 2,000-byte inherited value, counts 257 attributes on one
+element before the parser runs (not counting signs in quotes, comments or
+character data), and drops
 `tref`, and carries `mix-blend-mode`, `isolation` and `font-kerning` in a
 composed `style` of checked keywords; `src/svg/css.rs` tests parse simple
 selectors and refuse the rest (non-ASCII ones included),
@@ -956,8 +958,9 @@ eight deep (symbols reached through uses included), charges a filter table
 of 1,000 numbers and a 200,000-byte result name per element using them,
 charges decorated positioned text per copy and text per enclosing text
 level, charges ten thousand one-character spans by spans times characters
-and a text path by characters times segments, holds a filter to 64
-primitives,
+and a text path by characters times segments (along a point list too),
+holds a filter to 64 primitives, a text element to 20,000 characters and a
+gradient to 256 stops,
 charges a shared definition per use (900 uses of a thousand elements pass,
 999 do not), refuses nested uses, reference cycles (but not a link to an
 ancestor), cycles through paint contexts (a pattern under an element whose
@@ -1013,8 +1016,10 @@ selector split by byte, CSS-only properties written as attributes or with
 unchecked values, panics not caught, only path numbers counted, attribute
 bytes left free, text painted once per character, font lists, filter
 primitives or text nesting left unbounded, property bytes left unbounded,
-span and text-path pairs left free, and declarations left out of the style
-matching bound.
+span and text-path pairs left free, declarations left out of the style
+matching bound, attributes uncounted or quoted signs counted, text
+characters or gradient stops unbounded, and text paths measured along
+paths only.
 
 `tests/source.rs` loads paths: a group-writable file (as umask 002 leaves it)
 and a symbolic link at the leaf are accepted; a FIFO with no writer is

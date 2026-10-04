@@ -406,6 +406,7 @@ back, so usvg only ever sees the rewritten text:
 | a backslash, or an unclosed `url(`, in a property | `RenderParse` |
 | a selector other than a type or `*` with `.class` and `#id` parts (a combinator, pseudo-class or attribute selector), an at-rule, any `!` in a declaration, or a property name other than lower-case letters and hyphens | `RenderParse` |
 | style rules plus the declarations they apply, times elements, over 10,000,000 | `RenderResource` |
+| more than 256 attributes on one element | `RenderResource`, counted in one pass before any parser runs: the parser compares each attribute with all before it |
 | a presentation property value over 1,024 bytes | `RenderParse`: usvg parses an inherited value again for every element it reaches |
 | a font size other than a number with an absolute unit (`em`, `ex`, `%`, or a keyword such as `larger` or `xx-large`) | `RenderParse`: usvg scales each by the parent's size, and a chain multiplies past any bound |
 | a percentage past 1000% | `RenderParse`: viewports nest, each scaling the next |
@@ -455,8 +456,8 @@ hold (path data, point lists and filter tables alike; identifiers such as
 characters of its text times the text elements it sits in (usvg copies what
 each of them sets into every positioned piece), plus, for a text element, its
 spans times its characters (usvg shapes the whole chunk once per span), and
-for a text path, its characters times its path's numbers (each character is
-laid against every segment), plus a target's whole cost each
+for a text path, its characters times its path's vertices, a point list or a
+shape's included (each character is laid against every segment), plus a target's whole cost each
 time it is referenced (`use`, paint servers, clips, masks, filters, `feImage`,
 text paths and linked templates), plus, on a shape that can carry markers,
 its vertices times the most expensive marker (a path's vertices are its
@@ -481,6 +482,8 @@ targets inherit from where they are defined. Each of these is
   percentage takes its size from the viewport around it;
 - a filter of more than 64 primitives: usvg looks up each primitive's input
   among those before it;
+- a text element of more than 20,000 characters, or a gradient of more than
+  256 stops: usvg's layout and its stop compaction are quadratic in them;
 - a marker that could hold markers: one whose content, or what it references,
   sets a marker property, or one that inherits one. usvg allows such nesting,
   and it multiplies per vertex at every level.
@@ -519,7 +522,8 @@ rectangle reaching past 16,777,216 pixels on its layer (tiny-skia's integer
 conversion of it unwraps), a list of filters on one element, and an image
 node, which nothing may load. Pixels are not time, and filter scratch
 buffers and path tessellation are not counted: the worker's deadline and the
-client's memory limit still stand behind this.
+client's memory limit still stand behind this, as they do behind any CPU-time
+cost in usvg or resvg below these bounds.
 
 The admission above is built from usvg's and resvg's source as pinned, and
 it refuses what it cannot follow rather than guess. It is not a proof that
