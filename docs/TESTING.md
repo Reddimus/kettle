@@ -931,7 +931,8 @@ quotes and line breaks exactly, drops scripts, foreign content, events and
 metadata, refuses a DTD, writes back a non-ASCII attribute name, keeps of
 two `href` spellings only the one usvg uses and of other namespaced
 attributes only `xml:space`, refuses numbers past the bounds while keeping
-editor rounding noise, hex colors and names with digits, writes style sheets
+editor rounding noise, hex colors and names with digits, ignores style sheets
+inside dropped subtrees (including otherwise refused CSS), writes style sheets
 and `style` attributes back as attributes (an id rule beating a class rule
 beating the attribute, the `style` attribute last, an outside reference
 left out, the `marker` and `font` shorthands expanded, non-presentation
@@ -1018,8 +1019,18 @@ bytes left free, text painted once per character, font lists, filter
 primitives or text nesting left unbounded, property bytes left unbounded,
 span and text-path pairs left free, declarations left out of the style
 matching bound, attributes uncounted or quoted signs counted, text
-characters or gradient stops unbounded, and text paths measured along
-paths only.
+characters or gradient stops unbounded, text paths measured along
+paths only, filter input-name copies left free (including implicit second
+inputs and linked templates), merge inputs and dual-primitive input surfaces
+left out of the layer budget, style sheets collected from dropped subtrees,
+and real blank source lines
+removed at the line cap. Exactly-at-cap blank lines do not report clipping;
+a clipped long line does not erase a following real blank line. Public SVG
+jobs also exercise the dropped styles and filter accounting refusals.
+The real worker's `svg_admission_failures_are_framed_and_exit_cleanly`
+test sends name-copy, merge and dual-input multipliers through
+Hello/Ready/Job, checks the `RenderResource` frame, and requires EOF, a zero
+exit and empty stderr.
 
 `tests/source.rs` loads paths: a group-writable file (as umask 002 leaves it)
 and a symbolic link at the leaf are accepted; a FIFO with no writer is

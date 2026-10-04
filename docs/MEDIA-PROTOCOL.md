@@ -420,7 +420,8 @@ back, so usvg only ever sees the rewritten text:
 | a non-zero number below 1e-6 | written as `0` |
 | event attributes, comments, processing instructions | dropped |
 
-CSS is applied here, the way usvg applies it: an element's presentation
+Style sheets inside a dropped subtree are dropped with it and never affect
+kept elements. CSS is applied here, the way usvg applies it: an element's presentation
 attributes, then the matching rules in ascending specificity (a later rule
 winning a tie), then its `style` attribute, each declaration replacing the
 value before it, and only presentation properties applying; the `marker`
@@ -452,7 +453,9 @@ file and no network.
 **SVG: structure.** Before usvg, the document's cost once its references are
 expanded is counted: one unit per element, plus every number its attributes
 hold (path data, point lists and filter tables alike; identifiers such as
-`id` and `class` aside), a unit per 64 bytes of attribute text, and the
+`id` and `class` aside), a unit per 64 bytes of attribute text and filter
+input-name copies (including the previous result name for an omitted or
+unknown `in` or `in2`), and the
 characters of its text times the text elements it sits in (usvg copies what
 each of them sets into every positioned piece), plus, for a text element, its
 spans times its characters (usvg shapes the whole chunk once per span), and
@@ -498,8 +501,8 @@ ratio, then, without a crop, within 1024 pixels a side and 1,048,576 pixels
 (`MAX_SVG_RENDERED_EDGE`, `MAX_SVG_RENDERED_PIXELS`); the result may be
 smaller than the box. A crop selects target-box pixels around the centered
 image at the full fitted size, and must itself fit those limits, or it is
-`BadParams`. Before the canvas is allocated, every allocation resvg 0.48.1
-would make is counted, each time it would make it, against 4,194,304 pixels
+`BadParams`. Before the canvas is allocated, the following resvg 0.48.1
+surfaces are counted, each time they are used, against 4,194,304 pixels
 (`MAX_SVG_LAYER_PIXELS`):
 
 - an isolated group's layer, at its transformed bounds widened by 2 pixels a
@@ -507,7 +510,12 @@ would make is counted, each time it would make it, against 4,194,304 pixels
   heights: up to 25 times the canvas area);
 - each filter primitive's result at the layer's size (an input that is the
   source graphic copies the whole layer, and every result lives until the
-  filter ends), and what an `feImage` renders;
+  filter ends), plus a layer-sized charge and drawing step per merge input
+  for its possible copy or color conversion and compositing, and what an
+  `feImage` renders;
+- both input surfaces of blend, composite and displacement primitives,
+  for possible source copies or shared-result color conversion beside the
+  primitive's output;
 - a clip's canvas and mask at the layer's size, for every clip in a chain
   and every clipped group inside one;
 - a mask's canvas and masks at the layer's size, and its content, for every

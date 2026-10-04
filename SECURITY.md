@@ -127,7 +127,8 @@ Reports that fit any of these are welcome:
 - **SVG rendering** — an SVG is parsed with no DTD, and written back without
   scripts, foreign content, event attributes, namespaced attributes other
   than `xlink:href` and `xml:space`, or any `href` or `url()` that names
-  something outside the document. Its CSS (simple selectors only) is applied
+  something outside the document. Style sheets in those dropped subtrees
+  have no effect. Its CSS (simple selectors only) is applied
   here and written as attributes, so usvg's own CSS engine never runs. A
   reference that cannot be read plainly, CSS this does not resolve, a font
   size other than an absolute number, `inherit` for a reference, a list of
@@ -135,9 +136,12 @@ Reports that fit any of these are welcome:
   multiplies, refuses it (a tiny one is written as zero). resvg then parses it with image resolvers that load
   nothing and no resources directory, and draws text with the bundled face
   only, never a host font. Its expanded size (references, `use` copies and
-  per-vertex markers counted every time) and every layer, filter result,
-  mask, clip and pattern tile resvg would allocate are admitted before any
-  is built, and a reference cycle, through inherited paint as well, is
+  per-vertex markers and filter input-name copies counted every time) and
+  every layer, filter result, mask, clip and pattern tile resvg would allocate,
+  plus each merge input's
+  layer-sized copy, conversion and compositing charge, are admitted before any
+  is built. Blend, composite and displacement also charge both input surfaces
+  beside their output. A reference cycle, through inherited paint as well, is
   refused. An SVG that makes the worker read or fetch anything,
   load a font it was not given, expand or allocate past those limits before
   being refused, or crash the worker, is in scope. This is resource isolation,

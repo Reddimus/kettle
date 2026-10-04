@@ -2,8 +2,8 @@
 //! counted on the tree before any pixmap exists.
 //!
 //! The walk follows resvg 0.48.1's own traversal (`render.rs`, `clip.rs`,
-//! `mask.rs`, `path.rs`, `filter/mod.rs`) and charges every allocation it
-//! would make, each time it would make it:
+//! `mask.rs`, `path.rs`, `filter/mod.rs`) and charges the following surfaces,
+//! each time they are used:
 //!
 //! - an isolated group's layer: its transformed layer bounds, floored and
 //!   ceiled, widened by 2 pixels a side without filters, and clamped to the
@@ -11,7 +11,11 @@
 //!   25 times the canvas area, whatever resvg's comment says);
 //! - every filter primitive's result at the layer's size (an input that is
 //!   the source graphic is a copy of the whole layer, and every result lives
-//!   until the filter ends), and what an `feImage` renders;
+//!   until the filter ends), plus a layer-sized charge and drawing step for
+//!   every merge input's copy, conversion and compositing, and what an
+//!   `feImage` renders;
+//! - both input surfaces of blend, composite and displacement primitives,
+//!   which can copy sources or convert shared results beside their output;
 //! - a clip path's canvas and mask at the layer's size, again for each clip
 //!   in a chain and for each clipped group inside one;
 //! - a mask's canvas and masks at the layer's size, its content, and again
@@ -352,6 +356,25 @@ fn isolate<'a>(
             // A result is a copy of the whole layer whenever its input is the
             // source graphic, and every result lives until the filter ends.
             budget.charge(size.0, size.1)?;
+            if matches!(
+                primitive.kind(),
+                usvg::filter::Kind::Blend(_)
+                    | usvg::filter::Kind::Composite(_)
+                    | usvg::filter::Kind::DisplacementMap(_)
+            ) {
+                // These primitives create an output beside both inputs;
+                // each input may copy a source or convert a shared result.
+                budget.charge(size.0, size.1)?;
+                budget.charge(size.0, size.1)?;
+            }
+            if let usvg::filter::Kind::Merge(merge) = primitive.kind() {
+                // Each input can copy a whole source layer or convert a
+                // shared result, and each is composited across that area.
+                for _ in merge.inputs() {
+                    budget.step()?;
+                    budget.charge(size.0, size.1)?;
+                }
+            }
             if let usvg::filter::Kind::Image(image) = primitive.kind() {
                 let (sx, sy) = transform.get_scale();
                 tasks.push(Task::Children {
@@ -461,6 +484,50 @@ mod tests {
             admit(&tree, Transform::identity(), 64, 64).unwrap_err(),
             FailureCode::RenderParse
         );
+    }
+
+    #[test]
+    fn merge_inputs_each_consume_area() {
+        for input in ["SourceGraphic", "SourceAlpha", "previous"] {
+            let merged = |count| {
+                let inputs = format!(r#"<feMergeNode in="{input}"/>"#).repeat(count);
+                tree(&format!(
+                    r#"<filter id="f" filterUnits="userSpaceOnUse" x="0" y="0" width="64" height="64"><feFlood result="previous" color-interpolation-filters="sRGB"/><feMerge>{inputs}</feMerge></filter><rect width="64" height="64" filter="url(#f)"/>"#
+                ))
+            };
+            let transform = Transform::from_scale(8.0, 8.0);
+            assert_eq!(
+                admit(&merged(20), transform, 512, 512),
+                Err(FailureCode::RenderResource),
+                "{input}"
+            );
+            assert!(admit(&merged(4), transform, 512, 512).is_ok(), "{input}");
+        }
+    }
+
+    #[test]
+    fn dual_filter_inputs_each_consume_area() {
+        for kind in ["feBlend", "feComposite", "feDisplacementMap"] {
+            for input in ["SourceGraphic", "SourceAlpha", "previous"] {
+                let filtered = |count| {
+                    let primitives =
+                        format!(r#"<{kind} in="{input}" in2="{input}"/>"#).repeat(count);
+                    tree(&format!(
+                        r#"<filter id="f" filterUnits="userSpaceOnUse" x="0" y="0" width="64" height="64"><feFlood result="previous" color-interpolation-filters="sRGB"/>{primitives}</filter><rect width="64" height="64" filter="url(#f)"/>"#
+                    ))
+                };
+                let transform = Transform::from_scale(8.0, 8.0);
+                assert_eq!(
+                    admit(&filtered(8), transform, 512, 512),
+                    Err(FailureCode::RenderResource),
+                    "{kind}: {input}"
+                );
+                assert!(
+                    admit(&filtered(4), transform, 512, 512).is_ok(),
+                    "{kind}: {input}"
+                );
+            }
+        }
     }
 
     #[test]

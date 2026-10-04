@@ -611,12 +611,20 @@ pub(super) fn write(document: &Document<'_>) -> Result<String, FailureCode> {
         attributes_indent: Indent::None,
     });
     writer.set_preserve_whitespaces(true);
-    let sheets: String = document
-        .descendants()
-        .filter(|node| kept(*node) && node.tag_name().name() == "style")
-        .flat_map(|node| node.children().filter_map(|child| child.text()))
-        .collect();
-    let elements = document.descendants().filter(Node::is_element).count();
+    let mut sheets = String::new();
+    let mut elements = 0;
+    let mut pending = vec![root];
+    while let Some(node) = pending.pop() {
+        if !kept(node) {
+            continue;
+        }
+        elements += 1;
+        if node.tag_name().name() == "style" {
+            sheets.extend(node.children().filter_map(|child| child.text()));
+        } else {
+            pending.extend(node.children().filter(Node::is_element).rev());
+        }
+    }
     let sheets = css::StyleSheets::parse(&sheets, elements)?;
     // Each entry is a node to enter, or (None) the end of an open element.
     let mut stack: Vec<Option<Node<'_, '_>>> = vec![Some(root)];
@@ -788,6 +796,32 @@ mod tests {
             assert!(!out.contains(absent), "{absent} in {out}");
         }
         assert!(out.contains("<text>fallback</text>"), "{out}");
+    }
+
+    #[test]
+    fn style_sheets_in_dropped_subtrees_have_no_effect() {
+        for (open, close) in [
+            ("<foreignObject>", "</foreignObject>"),
+            ("<script>", "</script>"),
+            (
+                r#"<html xmlns="http://www.w3.org/1999/xhtml"><svg xmlns="http://www.w3.org/2000/svg">"#,
+                "</svg></html>",
+            ),
+        ] {
+            for style in ["rect { display: none }", "@import 'outside.css';"] {
+                let out = clean(&format!(
+                    "{OPEN}<style>rect {{ fill: red }}</style>{open}<g><style>{style}</style></g>{close}<rect/></svg>"
+                ))
+                .unwrap();
+                let document = parse(&out).unwrap();
+                let rect = document
+                    .descendants()
+                    .find(|node| node.has_tag_name("rect"))
+                    .unwrap();
+                assert_eq!(rect.attribute("fill"), Some("red"), "{out}");
+                assert_eq!(rect.attribute("display"), None, "{out}");
+            }
+        }
     }
 
     #[test]

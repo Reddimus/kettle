@@ -37,13 +37,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Kettle asks for a render yet.
 - The media worker renders SVG with resvg. The document is parsed with no
   DTD, scripts and foreign content are dropped, its style sheets (simple
-  selectors) are applied and written as attributes, and every reference
+  selectors, only from retained subtrees) are applied and written as
+  attributes, and every reference
   outside the document (files, network, data URLs) is removed before resvg
   sees it;
   resvg's own resolvers load nothing either. A document whose references
   would expand past a million units, nest deeper than 256, or make resvg
   allocate more than four million pixels of layers, filter results, masks,
-  clips or pattern tiles is refused before any of it is allocated. SVG
+  clips or pattern tiles is refused before any of it is allocated. Filter
+  input-name copies count toward expanded work, and every merge input and
+  both inputs of blend, composite and displacement filters count toward the
+  layer budget. SVG
   results are at most 1024 pixels a side and a million pixels, and text is
   drawn with the bundled JetBrains Mono face only.
 - `kettle ctl dispatch_ui_key` drives quick-select hint mode too, in the order

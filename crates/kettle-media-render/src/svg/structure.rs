@@ -3,7 +3,8 @@
 //!
 //! Each element costs one unit, plus every number its attributes hold (path
 //! data, point lists, filter tables alike), a unit per `ATTRIBUTE_BYTES` of
-//! attribute text, and the characters of its text. A reference adds its target's whole
+//! attribute text and copied filter input names, and the characters of its
+//! text. A reference adds its target's whole
 //! cost every time it is used: `use` (whose copy inherits from the `use`),
 //! and paint servers, clips, masks, filters, `feImage`, text paths and the
 //! templates gradients, patterns and filters link to (which inherit from
@@ -33,7 +34,8 @@
 //! property, or that inherits one. usvg allows such nesting, and it
 //! multiplies per vertex at every level.
 
-use std::collections::HashMap;
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 
 use kettle_media::{FailureCode, MAX_SVG_DEPTH, MAX_SVG_ELEMENTS, MAX_SVG_WORK};
 use roxmltree::{Document, Node};
@@ -155,6 +157,73 @@ fn painted(name: &str) -> bool {
             | "textPath"
             | "tref"
     )
+}
+
+/// Names copied by usvg 0.48.1 while resolving filter inputs. The names in
+/// this pass borrow the document; only its short generated names are owned.
+fn filter_input_bytes(filter: Node<'_, '_>) -> u64 {
+    fn input_bytes(node: Node<'_, '_>, attribute: &str, results: &[Cow<'_, str>]) -> u64 {
+        let previous = results.last().map_or(0, |name| name.len() as u64);
+        match sanitize::plain(node, attribute) {
+            Some(
+                "SourceGraphic" | "SourceAlpha" | "BackgroundImage" | "BackgroundAlpha"
+                | "FillPaint" | "StrokePaint",
+            ) => 0,
+            Some(name) => (name.len() as u64).saturating_add(
+                if results.iter().any(|result| result.as_ref() == name) {
+                    0
+                } else {
+                    previous
+                },
+            ),
+            None => previous,
+        }
+    }
+
+    let mut results: Vec<Cow<'_, str>> = Vec::new();
+    let mut explicit = HashSet::new();
+    let mut next = 1usize;
+    let mut bytes = 0u64;
+    for child in filter.children().filter(|node| sanitize::kept(*node)) {
+        let copied = match child.tag_name().name() {
+            "feMerge" => child
+                .children()
+                .filter(|node| sanitize::kept(*node))
+                .fold(0u64, |bytes, node| {
+                    bytes.saturating_add(input_bytes(node, "in", &results))
+                }),
+            "feBlend" | "feComposite" | "feDisplacementMap" => input_bytes(child, "in", &results)
+                .saturating_add(input_bytes(child, "in2", &results)),
+            "feDropShadow"
+            | "feGaussianBlur"
+            | "feOffset"
+            | "feTile"
+            | "feComponentTransfer"
+            | "feColorMatrix"
+            | "feConvolveMatrix"
+            | "feMorphology"
+            | "feDiffuseLighting"
+            | "feSpecularLighting" => input_bytes(child, "in", &results),
+            "feFlood" | "feImage" | "feTurbulence" => 0,
+            _ => continue,
+        };
+        bytes = bytes.saturating_add(copied);
+        let result = if let Some(name) = sanitize::plain(child, "result") {
+            explicit.insert(name);
+            next += 1;
+            Cow::Borrowed(name)
+        } else {
+            loop {
+                let name = format!("result{next}");
+                next += 1;
+                if !explicit.contains(name.as_str()) {
+                    break Cow::Owned(name);
+                }
+            }
+        };
+        results.push(result);
+    }
+    bytes
 }
 
 fn count_numbers(text: &str) -> u64 {
@@ -385,6 +454,11 @@ pub(super) fn admit(document: &Document<'_>) -> Result<(), FailureCode> {
             .saturating_add(bytes / ATTRIBUTE_BYTES)
             .saturating_add(text.saturating_mul(text_depth[index].max(1)))
             .saturating_add(pairs[index])
+            .saturating_add(if name == "filter" {
+                filter_input_bytes(*node) / ATTRIBUTE_BYTES
+            } else {
+                0
+            })
             .min(CAP);
         elements.push(Element {
             inherited,
@@ -600,6 +674,42 @@ mod tests {
         assert_eq!(count_numbers("M10-20.5.5e-1L1e+2 3"), 5);
         assert_eq!(count_numbers("1,2 3,4"), 4);
         assert_eq!(count_numbers(""), 0);
+    }
+
+    #[test]
+    fn implicit_filter_input_names_are_charged_per_copy() {
+        let name = "a".repeat(200_000);
+        for input in ["", r#" in="missing""#, r#" in="result1""#] {
+            let inputs = format!("<feMergeNode{input}/>").repeat(500);
+            assert_eq!(
+                admitted(&format!(
+                    r#"<filter id="f"><feFlood result="{name}"/><feMerge>{inputs}</feMerge></filter><rect filter="url(#f)"/>"#
+                )),
+                Err(FailureCode::RenderResource)
+            );
+        }
+        // Special source inputs do not copy the preceding name.
+        let inputs = r#"<feMergeNode in="SourceGraphic"/>"#.repeat(500);
+        assert!(admitted(&format!(
+            r#"<filter id="f"><feFlood result="{name}"/><feMerge>{inputs}</feMerge></filter><rect filter="url(#f)"/>"#
+        )).is_ok());
+        let inputs = r#"<feMergeNode in="result1"/>"#.repeat(500);
+        assert!(admitted(&format!(
+            r#"<filter id="f"><feFlood/><feFlood result="{name}"/><feMerge>{inputs}</feMerge></filter><rect filter="url(#f)"/>"#
+        )).is_ok());
+    }
+
+    #[test]
+    fn implicit_second_inputs_and_filter_templates_are_charged() {
+        let name = "a".repeat(200_000);
+        let primitives = r#"<feBlend in="SourceGraphic"/>"#.repeat(60);
+        let rects = r#"<rect filter="url(#copy)"/>"#.repeat(200);
+        assert_eq!(
+            admitted(&format!(
+                r##"<filter id="f"><feFlood result="{name}"/>{primitives}</filter><filter id="copy" href="#f"/>{rects}"##
+            )),
+            Err(FailureCode::RenderResource)
+        );
     }
 
     #[test]

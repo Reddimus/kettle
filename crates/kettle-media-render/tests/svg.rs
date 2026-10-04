@@ -91,6 +91,20 @@ fn shapes_render_with_straight_alpha() {
 }
 
 #[test]
+fn dropped_style_subtrees_cannot_hide_shapes() {
+    for tag in ["foreignObject", "script"] {
+        let rendered = render_svg(
+            &format!(
+                "<style>rect {{ fill: red }}</style><{tag}><style>rect {{ display: none }}</style></{tag}><rect width=\"10\" height=\"10\"/>"
+            ),
+            10,
+        )
+        .unwrap();
+        assert_eq!(pixel(&rendered, 5, 5), [255, 0, 0, 255]);
+    }
+}
+
+#[test]
 fn text_renders_with_the_bundled_face_whatever_family_is_named() {
     for family in ["Arial", "serif", "NoSuchFont, sans-serif", "monospace"] {
         let rendered = render_svg(
@@ -196,6 +210,56 @@ fn filter_primitives_each_consume_area() {
         render_svg(&primitives(16), 512).unwrap_err(),
         FailureCode::RenderResource
     );
+}
+
+#[test]
+fn implicit_merge_input_name_copies_are_rejected_before_parsing() {
+    let name = "a".repeat(200_000);
+    let inputs = "<feMergeNode/>".repeat(500);
+    assert_eq!(
+        render_svg(
+            &format!(
+                r#"<filter id="f"><feFlood result="{name}"/><feMerge>{inputs}</feMerge></filter><rect width="64" height="64" filter="url(#f)"/>"#
+            ),
+            64,
+        ).unwrap_err(),
+        FailureCode::RenderResource
+    );
+}
+
+#[test]
+fn filter_merge_inputs_each_consume_area() {
+    for input in ["SourceGraphic", "SourceAlpha", "previous"] {
+        let body = |count| {
+            let inputs = format!(r#"<feMergeNode in="{input}"/>"#).repeat(count);
+            format!(
+                r#"<filter id="f" filterUnits="userSpaceOnUse" x="0" y="0" width="512" height="512"><feFlood result="previous" color-interpolation-filters="sRGB"/><feMerge>{inputs}</feMerge></filter><rect width="512" height="512" filter="url(#f)"/>"#
+            )
+        };
+        assert_eq!(
+            render_svg(&body(20), 512).unwrap_err(),
+            FailureCode::RenderResource
+        );
+        assert!(render_svg(&body(4), 512).is_ok());
+    }
+}
+
+#[test]
+fn dual_filter_inputs_each_consume_area() {
+    for kind in ["feBlend", "feComposite", "feDisplacementMap"] {
+        let body = |count| {
+            let primitives =
+                format!(r#"<{kind} in="SourceGraphic" in2="SourceGraphic"/>"#).repeat(count);
+            format!(
+                r#"<filter id="f" filterUnits="userSpaceOnUse" x="0" y="0" width="512" height="512">{primitives}</filter><rect width="512" height="512" filter="url(#f)"/>"#
+            )
+        };
+        assert_eq!(
+            render_svg(&body(8), 512).unwrap_err(),
+            FailureCode::RenderResource
+        );
+        assert!(render_svg(&body(4), 512).is_ok());
+    }
 }
 
 #[test]

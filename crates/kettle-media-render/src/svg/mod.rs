@@ -216,7 +216,7 @@ fn unpremultiply(mut rgba: Vec<u8>) -> Vec<u8> {
 fn source_lines(text: &str) -> (Vec<String>, bool) {
     let mut clipped = false;
     let mut lines = Vec::new();
-    for line in text.split('\n') {
+    for line in text.strip_suffix('\n').unwrap_or(text).split('\n') {
         if lines.len() == MAX_SOURCE_LINES {
             clipped = true;
             break;
@@ -228,9 +228,6 @@ fn source_lines(text: &str) -> (Vec<String>, bool) {
         }
         clipped |= end < line.len();
         lines.push(line[..end].replace('\r', ""));
-    }
-    if text.ends_with('\n') && lines.last().is_some_and(String::is_empty) {
-        lines.pop();
     }
     (lines, clipped)
 }
@@ -340,5 +337,19 @@ mod tests {
         let many = "x\n".repeat(MAX_SOURCE_LINES + 1);
         let (lines, clipped) = source_lines(&many);
         assert!(clipped && lines.len() == MAX_SOURCE_LINES);
+    }
+
+    #[test]
+    fn source_lines_keep_real_blank_lines_at_the_cap() {
+        for count in [MAX_SOURCE_LINES + 1, MAX_SOURCE_LINES, MAX_SOURCE_LINES - 1] {
+            let (lines, clipped) = source_lines(&"\n".repeat(count));
+            assert_eq!(lines.len(), count.min(MAX_SOURCE_LINES), "{count}");
+            assert!(lines.iter().all(String::is_empty));
+            assert_eq!(clipped, count > MAX_SOURCE_LINES, "{count}");
+        }
+        let long = format!("{}\n\n", "x".repeat(MAX_SOURCE_LINE_BYTES + 1));
+        let (lines, clipped) = source_lines(&long);
+        assert!(clipped);
+        assert_eq!(lines, ["x".repeat(MAX_SOURCE_LINE_BYTES), String::new()]);
     }
 }

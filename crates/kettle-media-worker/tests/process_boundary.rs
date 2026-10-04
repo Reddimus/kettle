@@ -174,6 +174,37 @@ fn an_svg_job_is_rendered() {
 }
 
 #[test]
+fn svg_admission_failures_are_framed_and_exit_cleanly() {
+    let names = format!(
+        "<feFlood result=\"{}\"/><feMerge>{}</feMerge>",
+        "a".repeat(200_000),
+        "<feMergeNode/>".repeat(500),
+    );
+    let layers = format!(
+        "<feMerge>{}</feMerge>",
+        "<feMergeNode in=\"SourceGraphic\"/>".repeat(20),
+    );
+    let dual = "<feBlend in=\"SourceGraphic\" in2=\"SourceGraphic\"/>".repeat(8);
+    for primitives in [names, layers, dual] {
+        let svg = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"512\" height=\"512\"><defs><filter id=\"f\">{primitives}</filter></defs><rect width=\"512\" height=\"512\" filter=\"url(#f)\"/></svg>"
+        );
+        let Frame::Job(mut job) = job_of(JobKind::Svg, svg.as_bytes()) else {
+            unreachable!();
+        };
+        job.target.width = 512;
+        job.target.height = 512;
+        let mut child = worker();
+        handshake(&mut child);
+        send(&mut child, &Frame::Job(job));
+        assert_eq!(receive(&mut child), failure(FailureCode::RenderResource));
+        assert_eq!(receive(&mut child), None);
+        assert_eq!(exit_code(&mut child, Duration::from_secs(10)), 0);
+        assert_eq!(finish(&mut child), "");
+    }
+}
+
+#[test]
 fn a_job_it_cannot_render_is_refused() {
     let mut child = worker();
     handshake(&mut child);
