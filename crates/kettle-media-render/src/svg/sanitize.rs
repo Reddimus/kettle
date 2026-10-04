@@ -53,6 +53,8 @@ const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
 const MAX_NODES: u32 = 500_000;
 /// The rewritten document's size.
 pub(super) const MAX_SANITIZED_BYTES: usize = 8 * 1024 * 1024;
+/// The longest font family list or font setting list.
+const MAX_FONT_LIST_BYTES: usize = 256;
 /// The most entries a dash list may hold.
 const MAX_DASHES: usize = 64;
 /// The largest percentage: viewports nest, and each multiplies the next.
@@ -417,6 +419,10 @@ pub(super) fn check_declaration(name: &str, value: &str) -> Result<String, Failu
             }),
         "clip-path" | "mask" | "marker" | "marker-start" | "marker-mid" | "marker-end" => {
             lower == "inherit"
+        }
+        // usvg copies these lists into every positioned piece of text.
+        "font-family" | "font-variation-settings" | "font-feature-settings" => {
+            lower.len() > MAX_FONT_LIST_BYTES
         }
         // usvg keeps a copy of the dash list for every element it applies to.
         "stroke-dasharray" => {
@@ -824,6 +830,11 @@ mod tests {
             format!(
                 r#"{OPEN}<rect stroke-dasharray="{}"/></svg>"#,
                 "1 ".repeat(65)
+            ),
+            format!(r#"{OPEN}<text font-family="{}"/></svg>"#, "a,".repeat(200)),
+            format!(
+                r#"{OPEN}<text style="font-variation-settings:{}"/></svg>"#,
+                "'wght' 400,".repeat(30)
             ),
         ] {
             assert_eq!(clean(&svg).unwrap_err(), FailureCode::RenderParse, "{svg}");

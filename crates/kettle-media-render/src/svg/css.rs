@@ -4,9 +4,10 @@
 //! matches, how often it matches again in `use` copies, how it splits a
 //! property name or an `!important`) is more than the structural count can
 //! follow. So the writer applies CSS itself, the way usvg would, and writes
-//! the result as presentation attributes: no `<style>` and no `style`
-//! attribute reach usvg, and the structural count sees exactly what usvg
-//! draws.
+//! the result as presentation attributes: no `<style>` and none of the
+//! document's own CSS reach usvg (the one `style` attribute it may see is
+//! composed here, of checked keywords for the three properties usvg reads
+//! only from CSS), and the structural count sees exactly what usvg draws.
 //!
 //! The order is usvg's: an element's presentation attributes, then the
 //! matching rules in ascending specificity (a later rule winning a tie), then

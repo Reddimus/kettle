@@ -397,7 +397,7 @@ back, so usvg only ever sees the rewritten text:
 |---|---|
 | elements outside the SVG namespace (editor metadata) | dropped, with their content |
 | `script`, `foreignObject`, `tref` | dropped, with their content (a `switch` falls back to its next child) |
-| `<style>` elements and `style` attributes | resolved here and written as presentation attributes (below); no CSS reaches usvg |
+| `<style>` elements and `style` attributes | resolved here and written as presentation attributes (below); none of the document's CSS reaches usvg |
 | `href` or `xlink:href` naming a local fragment (`#id`) | kept: the plain one when both do, as usvg prefers it |
 | any other `href` (`file:`, `http:`, `data:`, a path) | removed |
 | other namespaced attributes (`xlink:title`, `xml:base`, ...) | dropped (`xml:space` kept): usvg reads attributes by local name |
@@ -409,6 +409,7 @@ back, so usvg only ever sees the rewritten text:
 | a font size other than a number with an absolute unit (`em`, `ex`, `%`, or a keyword such as `larger` or `xx-large`) | `RenderParse`: usvg scales each by the parent's size, and a chain multiplies past any bound |
 | a percentage past 1000% | `RenderParse`: viewports nest, each scaling the next |
 | a dash list of more than 64 entries | `RenderParse`: usvg keeps a copy for every element it applies to |
+| a `font-family`, `font-variation-settings` or `font-feature-settings` over 256 bytes | `RenderParse`: usvg copies them into every positioned piece of text |
 | `inherit` for a clip, mask, filter or marker | `RenderParse`: it takes a reference from the parent |
 | a filter other than `none` or one `url(#id)` (a list, or a function such as `blur()`) | `RenderParse`: resvg runs a list on one layer with results of different sizes |
 | an `feConvolveMatrix` order over 64 | `RenderParse` (usvg multiplies the two in 32 bits) |
@@ -426,8 +427,8 @@ shorthand sets all three marker properties and the `font` shorthand its parts
 `isolation` and `font-kerning`, which usvg reads from CSS but ignores as
 attributes, are written in a `style` attribute composed here from the
 keywords usvg reads, and any other value is left out. Comments are removed
-first. The winners are written as attributes, so usvg's own CSS engine never
-runs: which elements a rule reaches, how often it matches again in `use`
+first. The winners are written as attributes, so usvg's CSS engine never
+sees the document's CSS (only the composed keyword `style` above): which elements a rule reaches, how often it matches again in `use`
 copies, and how it splits a property name are no longer questions.
 
 The number bounds keep the products usvg forms directly and then unwraps (a
@@ -450,7 +451,8 @@ file and no network.
 expanded is counted: one unit per element, plus every number its attributes
 hold (path data, point lists and filter tables alike; identifiers such as
 `id` and `class` aside), a unit per 64 bytes of attribute text, and the
-characters of its text, plus a target's whole cost each
+characters of its text times the text elements it sits in (usvg copies what
+each of them sets into every positioned piece), plus a target's whole cost each
 time it is referenced (`use`, paint servers, clips, masks, filters, `feImage`,
 text paths and linked templates), plus, on a shape that can carry markers,
 its vertices times the most expensive marker (a path's vertices are its
@@ -473,6 +475,8 @@ targets inherit from where they are defined. Each of these is
 - an expanded nesting deeper than 256 (usvg and resvg recurse that deep);
 - more than 8 viewports (`svg`, `symbol`) nested, references followed: a
   percentage takes its size from the viewport around it;
+- a filter of more than 64 primitives: usvg looks up each primitive's input
+  among those before it;
 - a marker that could hold markers: one whose content, or what it references,
   sets a marker property, or one that inherits one. usvg allows such nesting,
   and it multiplies per vertex at every level.

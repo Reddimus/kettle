@@ -47,6 +47,9 @@ const MAX_VIEWPORTS: usize = 8;
 /// Vertices charged for a shape whose outline is not listed: a line,
 /// rectangle, circle or ellipse (a rounded rectangle has at most 13 points).
 const BASIC_SHAPE_VERTICES: u64 = 16;
+/// The primitives a filter may hold: usvg looks up each primitive's input
+/// among those before it, which is quadratic in their number.
+const MAX_FILTER_PRIMITIVES: usize = 64;
 /// The bytes of attribute text one unit of work stands for.
 const ATTRIBUTE_BYTES: u64 = 64;
 /// The copies of its paint usvg makes per character of text: for the span,
@@ -209,11 +212,28 @@ pub(super) fn admit(document: &Document<'_>) -> Result<(), FailureCode> {
             .collect()
     };
 
-    // Whether an element is text or inside it.
+    // Whether an element is text or inside it, and how many text elements
+    // (itself included) it sits in: usvg copies a list of what each of them
+    // sets into every positioned piece.
     let mut in_text = Vec::with_capacity(nodes.len());
+    let mut text_depth: Vec<u64> = Vec::with_capacity(nodes.len());
     for (index, node) in nodes.iter().enumerate() {
-        let inside = parents[index].is_some_and(|parent: usize| in_text[parent]);
-        in_text.push(inside || node.tag_name().name() == "text");
+        let name = node.tag_name().name();
+        let parent = parents[index];
+        let inside = parent.is_some_and(|parent: usize| in_text[parent]) || name == "text";
+        in_text.push(inside);
+        let outer = parent.map_or(0, |parent| text_depth[parent]);
+        text_depth
+            .push(outer + u64::from(inside && matches!(name, "text" | "tspan" | "textPath" | "a")));
+        if name == "filter"
+            && node
+                .children()
+                .filter(|child| child.is_element() && child.tag_name().name().starts_with("fe"))
+                .count()
+                > MAX_FILTER_PRIMITIVES
+        {
+            return Err(FailureCode::RenderResource);
+        }
     }
 
     // Indices: the elements, then each element's paint context, then the
@@ -294,7 +314,7 @@ pub(super) fn admit(document: &Document<'_>) -> Result<(), FailureCode> {
         let own = 1u64
             .saturating_add(numbers)
             .saturating_add(bytes / ATTRIBUTE_BYTES)
-            .saturating_add(text)
+            .saturating_add(text.saturating_mul(text_depth[index].max(1)))
             .min(CAP);
         elements.push(Element {
             inherited,
@@ -810,6 +830,33 @@ mod tests {
             .unwrap_err(),
             FailureCode::RenderResource
         );
+    }
+
+    #[test]
+    fn filters_hold_sixty_four_primitives_at_most() {
+        let filter = |count: usize| {
+            let primitives = r#"<feOffset in="missing"/>"#.repeat(count);
+            format!(r##"<filter id="f">{primitives}</filter><rect filter="url(#f)"/>"##)
+        };
+        assert!(admitted(&filter(64)).is_ok());
+        assert_eq!(
+            admitted(&filter(65)).unwrap_err(),
+            FailureCode::RenderResource
+        );
+    }
+
+    #[test]
+    fn deeply_nested_text_is_charged_per_level() {
+        // usvg copies what each enclosing text element sets into every
+        // positioned piece: 10,000 characters two hundred levels deep.
+        let text = "x".repeat(10_000);
+        let nested = format!(
+            "<text>{}{text}{}</text>",
+            "<tspan>".repeat(200),
+            "</tspan>".repeat(200)
+        );
+        assert_eq!(admitted(&nested).unwrap_err(), FailureCode::RenderResource);
+        assert!(admitted(&format!("<text><tspan>{text}</tspan></text>")).is_ok());
     }
 
     #[test]

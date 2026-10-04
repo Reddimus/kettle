@@ -941,7 +941,8 @@ unclosed comment), bounds convolution orders, writes numbers below 1e-6 as
 zero (`1e-9.5` as `0 .5`, `1e-30em` as `0em`, a style sheet's too) while
 `1e30em` is refused, and refuses font-size keywords, a relative size in the
 `font` shorthand, `inherit` for a mask or clip, filter lists and filter
-functions, a percentage past 1000% and a 65-entry dash list, and drops
+functions, a percentage past 1000%, a 65-entry dash list and font lists over
+256 bytes, and drops
 `tref`, and carries `mix-blend-mode`, `isolation` and `font-kerning` in a
 composed `style` of checked keywords; `src/svg/css.rs` tests parse simple
 selectors and refuse the rest (non-ASCII ones included),
@@ -953,7 +954,8 @@ marker's content per vertex and text paint per character (through a `use`
 of text and a link inside text as well), refuses viewports nested more than
 eight deep (symbols reached through uses included), charges a filter table
 of 1,000 numbers and a 200,000-byte result name per element using them,
-charges decorated positioned text per copy,
+charges decorated positioned text per copy and text per enclosing text
+level, holds a filter to 64 primitives,
 charges a shared definition per use (900 uses of a thousand elements pass,
 999 do not), refuses nested uses, reference cycles (but not a link to an
 ancestor), cycles through paint contexts (a pattern under an element whose
@@ -1007,7 +1009,8 @@ lists left unbounded, `tref` kept, viewports left unbounded, a link inside
 text not counted as text, copies counting elements rather than pieces, a
 selector split by byte, CSS-only properties written as attributes or with
 unchecked values, panics not caught, only path numbers counted, attribute
-bytes left free, and text painted once per character.
+bytes left free, text painted once per character, font lists, filter
+primitives or text nesting left unbounded.
 
 `tests/source.rs` loads paths: a group-writable file (as umask 002 leaves it)
 and a symbolic link at the leaf are accepted; a FIFO with no writer is
