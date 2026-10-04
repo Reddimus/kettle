@@ -316,6 +316,12 @@ fn isolate<'a>(
             bbox.height().ceil().max(1.0) as u32,
         )
     };
+    // A list of filters runs on one layer with results of different sizes,
+    // which resvg's lighting and displacement index past; the sanitizer
+    // allows one filter, and this holds whatever usvg built.
+    if group.filters().len() > 1 {
+        return Err(FailureCode::RenderParse);
+    }
     let Some(layer) = layer.and_then(|layer| fit(layer, bounds)) else {
         return Ok(());
     };
@@ -444,6 +450,17 @@ mod tests {
         tree(&format!(
             r#"<style>.p {{ fill: url(#p) }}</style><pattern id="p" width="2" height="2" patternUnits="userSpaceOnUse">{content}</pattern><g class="p">{rects}</g>"#
         ))
+    }
+
+    #[test]
+    fn a_filter_list_is_refused_whatever_the_sanitizer_allowed() {
+        let tree = tree(
+            r#"<filter id="a"><feOffset/></filter><filter id="b"><feOffset/></filter><rect width="8" height="8" filter="url(#a) url(#b)"/>"#,
+        );
+        assert_eq!(
+            admit(&tree, Transform::identity(), 64, 64).unwrap_err(),
+            FailureCode::RenderParse
+        );
     }
 
     #[test]

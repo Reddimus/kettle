@@ -906,9 +906,8 @@ blur pass and sixteen are refused (charged per use); a filter of eight
 primitives passes and sixteen are refused; ten translucent groups pass and
 twenty are refused; an 8192-unit pattern tile, a chain of forty masks and a
 chain of forty clips are refused while a small tile and one clip draw
-correctly. A one-pixel filter taking the source graphic ten times on a layer
-a thousand pixels square is refused, each result charged at the layer's
-size. Two finite scales that overflow when composed are `RenderParse`, and
+correctly. Two filters on one element, the second a pixel wide with
+lighting on the source graphic, are refused. Two finite scales that overflow when composed are `RenderParse`, and
 so is a filter rectangle scaled past what tiny-skia converts without
 panicking; marker sizes past the number bounds are `RenderParse`, while the
 extremes inside them render. A use bomb is refused within two seconds; a
@@ -934,15 +933,20 @@ editor rounding noise, hex colors and names with digits, lets a style sheet
 style (counting each selector of a list) but refuses one that names
 anything, `!important` and relative font sizes (behind a comment or not),
 refuses `!important` and relative font sizes in attributes too, and bounds
-convolution orders; the structural count splits numbers as a parser does,
+convolution orders, writes numbers below 1e-6 as zero (`1e-9.5` as
+`0 .5`, `1e-30em` as `0em`) while `1e30em` is refused, and refuses font-size
+keywords, a relative size in the `font` shorthand, `inherit` for a mask or
+clip, filter lists and filter functions, and context paint in a style sheet;
+the structural count splits numbers as a parser does, refuses duplicate ids,
+charges context paint inherited by a marker's content per vertex and text
+paint per character,
 charges a shared definition per use (900 uses of a thousand elements pass,
 999 do not), refuses nested uses, reference cycles (but not a link to an
 ancestor), cycles through paint contexts (a pattern under an element whose
 fill names it, whatever the pattern's shape declares: nothing, `inherit`, a
 color or a removed outside reference; three patterns chained through
 inherited fills; a `use` copy inheriting it), while patterns filling shapes
-elsewhere pass, resolves a duplicated id to two elements at most (sixty
-thousand rectangles and uses finish within seconds), charges inherited paint
+elsewhere pass, charges inherited paint
 per drawing element (directly and through a `use`) and a context-painted
 marker's pattern per vertex, markers per vertex whether set directly,
 inherited through a `use` or behind a comment, with `H` and `V` steps
@@ -952,7 +956,7 @@ counts the `href` usvg follows, refuses markers that could hold markers
 paths passes), and too many
 elements, too deep a tree, too long a path and too much style matching (a
 ten-thousand-selector list included); the layer walk refuses drawing work
-past its count on a tree built straight from usvg; placement fits the box
+past its count and a filter list on trees built straight from usvg; placement fits the box
 and then the ceiling and shifts a crop; unpremultiplying rounds and clears
 alpha-0 pixels; source lines are bounded, without line breaks; usvg with
 these options builds no image node even from unsanitized absolute paths and
@@ -977,7 +981,11 @@ selector list counted as one rule, inherited or style-sheet paint ignored, a
 their region, filter rectangles left unbounded, a style sheet allowed to
 name, `!important` or relative font sizes allowed, kernel orders unbounded,
 a paint context without its ancestors, shapes or `use` copies not linked to
-their paint context, and context paint unlinked.
+their paint context, context paint unlinked, a unit's `e` read as an
+exponent, tiny numbers kept, font-size keywords or an unchecked `font`
+shorthand allowed, `inherit` for a reference allowed, filter lists allowed
+by the sanitizer or the layer walk, duplicate ids allowed, context paint in
+a style sheet, context paint not inherited, and text drawn once.
 
 `tests/source.rs` loads paths: a group-writable file (as umask 002 leaves it)
 and a symbolic link at the leaf are accepted; a FIFO with no writer is

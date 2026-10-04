@@ -128,9 +128,10 @@ Reports that fit any of these are welcome:
   scripts, foreign content, event attributes, namespaced attributes other
   than `xlink:href` and `xml:space`, or any `href` or `url()` that names
   something outside the document; a reference that cannot be read plainly,
-  a style sheet that names anything, `!important`, a relative font size, or
-  a number large or small enough to overflow what usvg multiplies, refuses
-  it. resvg then parses it with image resolvers that load
+  a style sheet that names anything, `!important`, a font size other than
+  an absolute number, `inherit` for a reference, a list of filters, a
+  duplicate id, or a number large enough to overflow what usvg multiplies,
+  refuses it (a tiny one is written as zero). resvg then parses it with image resolvers that load
   nothing and no resources directory, and draws text with the bundled face
   only, never a host font. Its expanded size (references, `use` copies and
   per-vertex markers counted every time) and every layer, filter result,

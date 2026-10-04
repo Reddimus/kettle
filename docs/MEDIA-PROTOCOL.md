@@ -403,16 +403,22 @@ back, so usvg only ever sees the rewritten text:
 | a property `url(#id)` | kept |
 | a property naming anything else | the attribute, or the `style` declaration, removed |
 | a backslash escape or an unclosed `url(` in a property | `RenderParse` |
-| a style sheet with any `url(`, an `@import` or an escape | `RenderParse`: a sheet may style, never name, since which elements a rule reaches is not counted |
-| `!important`, or a font size relative to an inherited one (`em`, `ex`, `%`, `larger`, `smaller`) | `RenderParse`: the first lets a lower declaration win, and chains of the second multiply past any bound |
+| a style sheet with any `url(`, context paint, an `@import` or an escape | `RenderParse`: a sheet may style, never name, since which elements a rule reaches is not counted |
+| `!important` | `RenderParse`: it lets a lower declaration win |
+| a font size other than a number with an absolute unit (`em`, `ex`, `%`, or a keyword such as `larger` or `xx-large`) | `RenderParse`: usvg scales each by the parent's size, and a chain multiplies past any bound |
+| `inherit` for a clip, mask, filter or marker | `RenderParse`: it takes a reference from the parent |
+| a filter other than `none` or one `url(#id)` (a list, or a function such as `blur()`) | `RenderParse`: resvg runs a list on one layer with results of different sizes |
 | an `feConvolveMatrix` order over 64 | `RenderParse` (usvg multiplies the two in 32 bits) |
+| a duplicate `id` | `RenderParse`: usvg resolves a duplicate by its first or last element depending on the reference |
 | comments in a style sheet or a `style` attribute | removed before either is read; usvg gets the stripped text |
-| a number in a property or declaration past 10,000,000, or non-zero below 1e-20 | `RenderParse` |
+| a number in a property or declaration past 10,000,000 | `RenderParse` |
+| a non-zero number below 1e-6 | written as `0` |
 | event attributes, comments, processing instructions | dropped |
 
 The number bounds keep the products usvg forms and then unwraps (a marker's
 size times a stroke width, a radius times a scale) finite and non-zero; the
-rounding noise editors write (about 6e-17) stays inside them. Hex colors,
+rounding noise editors write (about 6e-17) becomes the zero it stands for. A
+unit that begins with `e` (`2em`) is read as a unit, not an exponent. Hex colors,
 fragment names and identifiers (`id`, `class`, filter result names) are not
 read as numbers.
 
@@ -433,13 +439,13 @@ numbers: an `H` or `V` takes one). Paint is counted without following the
 cascade: since a style sheet can name nothing and `!important` is refused,
 the paint an element is drawn with is one declared on it or an ancestor.
 Every element's paint context reaches all of those (its own references, then
-its parent's context); a shape or text is charged for its context, a `use`
-for its own context once per painted element in its copy, and
-`context-fill` or `context-stroke` for every paint server the document uses.
-A `use` copy inherits marker properties from the `use`; other targets
-inherit from where they are defined. An `id` resolves to its first and last
-elements, as usvg resolves `use` by the first and other references by the
-last. Each of these is `RenderResource`:
+its parent's context, and every paint server the document uses where it
+declares `context-fill` or `context-stroke`); a shape is charged for its
+context once, text once per character (positioned text is drawn a piece per
+character, each copying its paint), and a `use` once per painted element in
+its copy. A `use` copy inherits marker properties from the `use`; other
+targets inherit from where they are defined. Each of these is
+`RenderResource`:
 
 - more than 125,000 elements;
 - an expanded cost over 1,000,000 units;
@@ -478,14 +484,21 @@ would make is counted, each time it would make it, against 4,194,304 pixels
 - a pattern tile at its own transformed size, for every fill and stroke that
   uses it, and its content.
 
-Past that is `RenderResource`, and so is drawing more than 1,000,000 nodes
-(a style sheet can give every shape a pattern without a reference the
-structural count sees). A transform that is not finite is `RenderParse`, and
-so is a filter or primitive rectangle reaching past 16,777,216 pixels on its
-layer (tiny-skia's integer conversion of it unwraps), and an image node,
-which nothing may load. Pixels are not time, and filter
-scratch buffers and path tessellation are not counted: the worker's deadline
-and the client's memory limit still stand behind this.
+Past that is `RenderResource`, and so is drawing more than 1,000,000 nodes,
+which bounds the drawing whatever the structural count allowed. A transform
+that is not finite is `RenderParse`, and so are a filter or primitive
+rectangle reaching past 16,777,216 pixels on its layer (tiny-skia's integer
+conversion of it unwraps), a list of filters on one element, and an image
+node, which nothing may load. Pixels are not time, and filter scratch
+buffers and path tessellation are not counted: the worker's deadline and the
+client's memory limit still stand behind this.
+
+The admission above is built from usvg's and resvg's source as pinned, and
+it refuses what it cannot follow rather than guess. It is not a proof that
+neither library can panic or overflow on some input it allows; where one
+does, the worker is the crash boundary: the panic aborts only the worker,
+the job fails, and Kettle is untouched. The fuzzing that follows this work
+aims at that remainder.
 
 **SVG: result.** resvg's premultiplied pixels come back as straight RGBA,
 rounded, with every fully transparent pixel all zero. Text is drawn with the

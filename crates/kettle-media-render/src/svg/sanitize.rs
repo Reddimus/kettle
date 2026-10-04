@@ -56,9 +56,10 @@ const MAX_KERNEL_ORDER: f64 = 64.0;
 /// The largest number a property may hold: ten million user units, far past
 /// any drawing, and five such factors stay finite in `f32`.
 const MAX_NUMBER: f64 = 1e7;
-/// The smallest non-zero magnitude: below the rounding noise editors write
-/// (about 6e-17), while two such factors stay above `f32`'s smallest value.
-const MIN_NUMBER: f64 = 1e-20;
+/// The smallest non-zero magnitude kept: anything smaller (such as the
+/// rounding noise editors write, about 6e-17) is written as zero, and six
+/// factors of the rest stay above `f32`'s smallest normal value.
+const MIN_NUMBER: f64 = 1e-6;
 
 /// Parse `text` as XML with no DTD and bounded nodes.
 pub(super) fn parse(text: &str) -> Result<Document<'_>, FailureCode> {
@@ -186,8 +187,6 @@ pub(super) fn marker_property(name: &str) -> bool {
 pub(super) struct Declaration<'a> {
     pub(super) name: &'a str,
     pub(super) value: &'a str,
-    /// The declaration's text, to write back.
-    pub(super) text: &'a str,
 }
 
 /// `css` without its comments (each becomes a space). An unclosed comment
@@ -209,8 +208,14 @@ pub(super) fn strip_comments(css: &str) -> Result<String, FailureCode> {
 
 /// Call `each` with every number in `text`, split the way a parser splits
 /// them (`1-2.5.5e-1` is three). Not necessarily a valid number: a lone sign
-/// is returned as it is.
+/// is returned as it is, and so is the `e` of a unit after a number (`2em`
+/// gives `2e`).
 pub(super) fn numbers(text: &str, mut each: impl FnMut(&str)) {
+    number_spans(text, |start, end| each(&text[start..end]));
+}
+
+/// `numbers`, by byte range.
+fn number_spans(text: &str, mut each: impl FnMut(usize, usize)) {
     let bytes = text.as_bytes();
     let mut start: Option<usize> = None;
     let mut dot = false;
@@ -227,7 +232,7 @@ pub(super) fn numbers(text: &str, mut each: impl FnMut(&str)) {
             }
             _ => {
                 if let Some(begun) = start.take() {
-                    each(&text[begun..index]);
+                    each(begun, index);
                 }
                 previous = byte;
                 continue;
@@ -235,7 +240,7 @@ pub(super) fn numbers(text: &str, mut each: impl FnMut(&str)) {
         };
         if begins {
             if let Some(begun) = start {
-                each(&text[begun..index]);
+                each(begun, index);
             }
             start = Some(index);
             dot = false;
@@ -247,53 +252,78 @@ pub(super) fn numbers(text: &str, mut each: impl FnMut(&str)) {
         previous = byte;
     }
     if let Some(begun) = start {
-        each(&text[begun..]);
+        each(begun, bytes.len());
     }
 }
 
-/// Refuse a value holding a number past `MAX_NUMBER` or, unless zero, below
-/// `MIN_NUMBER`. `url(...)` references and `#` names (hex colors, fragments)
-/// are skipped first.
-pub(super) fn check_numbers(value: &str) -> Result<(), FailureCode> {
-    let mut plain = String::with_capacity(value.len());
+/// `value` with its numbers bounded: one past `MAX_NUMBER` refuses the
+/// document, and a non-zero one below `MIN_NUMBER` is written as `0` (editor
+/// rounding noise becomes the zero it stands for, and no product usvg forms
+/// of the rest can underflow). `url(...)` references and `#` names (hex
+/// colors, fragments) are kept as they are.
+pub(super) fn bound_numbers(value: &str) -> Result<String, FailureCode> {
+    let mut out = String::with_capacity(value.len());
     let mut rest = value;
     loop {
         let lower = rest.to_ascii_lowercase();
-        match (lower.find("url("), rest.find('#')) {
+        let (plain, kept) = match (lower.find("url("), rest.find('#')) {
             (Some(url), hash) if hash.is_none_or(|hash| url < hash) => {
-                plain.push_str(&rest[..url]);
-                plain.push(' ');
                 let end = rest[url..]
                     .find(')')
                     .map_or(rest.len(), |end| url + end + 1);
-                rest = &rest[end..];
+                (&rest[..url], &rest[url..end])
             }
             (_, Some(hash)) => {
-                plain.push_str(&rest[..hash]);
-                plain.push(' ');
-                let name = rest[hash + 1..]
+                let end = rest[hash + 1..]
                     .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
                     .map_or(rest.len(), |end| hash + 1 + end);
-                rest = &rest[name..];
+                (&rest[..hash], &rest[hash..end])
             }
-            _ => {
-                plain.push_str(rest);
-                break;
-            }
+            _ => (rest, ""),
+        };
+        bound_plain(plain, &mut out)?;
+        out.push_str(kept);
+        rest = &rest[plain.len() + kept.len()..];
+        if kept.is_empty() {
+            break;
         }
     }
-    let mut refused = false;
-    numbers(&plain, |token| {
-        if let Ok(number) = token.parse::<f64>() {
-            let magnitude = number.abs();
-            refused |= !magnitude.is_finite()
-                || magnitude > MAX_NUMBER
-                || (magnitude != 0.0 && magnitude < MIN_NUMBER);
+    Ok(out)
+}
+
+/// `bound_numbers` for text holding no references or names.
+fn bound_plain(text: &str, out: &mut String) -> Result<(), FailureCode> {
+    let mut spans = Vec::new();
+    number_spans(text, |start, end| spans.push((start, end)));
+    let mut written = 0;
+    for (start, end) in spans {
+        let token = &text[start..end];
+        // A unit beginning with `e` (`em`, `ex`) ends the token with it.
+        let (number, unit) = match token.parse::<f64>() {
+            Ok(number) => (number, ""),
+            Err(_) => match token
+                .strip_suffix(['e', 'E'])
+                .and_then(|number| number.parse::<f64>().ok())
+            {
+                Some(number) => (number, &token[token.len() - 1..]),
+                None => continue,
+            },
+        };
+        let magnitude = number.abs();
+        if !magnitude.is_finite() || magnitude > MAX_NUMBER {
+            return Err(FailureCode::RenderParse);
         }
-    });
-    if refused {
-        return Err(FailureCode::RenderParse);
+        if magnitude != 0.0 && magnitude < MIN_NUMBER {
+            out.push_str(&text[written..start]);
+            out.push('0');
+            out.push_str(unit);
+            if text[end..].starts_with('.') {
+                out.push(' ');
+            }
+            written = end;
+        }
     }
+    out.push_str(&text[written..]);
     Ok(())
 }
 
@@ -338,7 +368,6 @@ pub(super) fn declarations(style: &str) -> Result<Vec<Declaration<'_>>, FailureC
                 found.push(Declaration {
                     name: name.trim(),
                     value,
-                    text,
                 });
             }
             _ => {}
@@ -368,7 +397,12 @@ pub(super) struct StyleSheet {
 pub(super) fn check_style_sheet(css: &str) -> Result<StyleSheet, FailureCode> {
     let text = strip_comments(css)?;
     let lower = text.to_ascii_lowercase();
-    if text.contains('\\') || lower.contains("@import") || lower.contains("url(") {
+    if text.contains('\\')
+        || lower.contains("@import")
+        || lower.contains("url(")
+        || lower.contains("context-fill")
+        || lower.contains("context-stroke")
+    {
         return Err(FailureCode::RenderParse);
     }
     // A segment ending at `{` is a selector list or an at-rule prelude; one
@@ -381,42 +415,93 @@ pub(super) fn check_style_sheet(css: &str) -> Result<StyleSheet, FailureCode> {
         }
         let segment = &text[start..index];
         start = index + 1;
-        if c == '{' {
-            if !segment.trim_start().starts_with('@') {
+        if c != '{'
+            && let Some((name, value)) = segment.split_once(':')
+        {
+            sheet.text.push_str(name);
+            sheet.text.push(':');
+            sheet.text.push_str(&check_declaration(name.trim(), value)?);
+        } else {
+            if c == '{' && !segment.trim_start().starts_with('@') {
                 sheet.selectors += 1 + segment.matches(',').count() as u64;
             }
-            continue;
+            sheet.text.push_str(segment);
         }
-        if let Some((name, value)) = segment.split_once(':') {
-            check_declaration(name.trim(), value)?;
-        }
+        sheet.text.push(c);
     }
-    sheet.text = text;
+    sheet.text.push_str(&text[start..]);
     Ok(sheet)
 }
 
 /// A declaration, in a style sheet or a `style` attribute, or a presentation
-/// attribute: no `!important` (which would let a lower declaration win, past
-/// what the structural count follows), no font size relative to an
-/// inherited one (`em`, `ex`, `%`, `larger`, `smaller`: a chain of them
-/// multiplies past any bound), and no number past the bounds.
-fn check_declaration(name: &str, value: &str) -> Result<(), FailureCode> {
-    if value.to_ascii_lowercase().contains("!important") {
+/// attribute, checked and with its numbers bounded:
+///
+/// - no `!important`, which would let a lower declaration win past what the
+///   structural count follows;
+/// - a font size only as a number with an absolute unit: a relative one
+///   (`em`, `ex`, `%`) or a keyword (usvg scales `larger` and the named sizes
+///   by the parent's) multiplies along a chain past any bound;
+/// - no `inherit` for a clip, mask, filter or marker, which would take a
+///   reference from the parent where the structural count does not look;
+/// - a filter only as `none` or a single `url(#id)`: resvg applies a list of
+///   filters to one layer with results of different sizes.
+fn check_declaration(name: &str, value: &str) -> Result<String, FailureCode> {
+    let lower = value.trim().to_ascii_lowercase();
+    if lower.contains("!important") {
         return Err(FailureCode::RenderParse);
     }
-    if matches!(name, "font-size" | "font") {
-        let relative = value.split_ascii_whitespace().any(|token| {
-            let token = token.to_ascii_lowercase();
-            token.ends_with("em")
-                || token.ends_with("ex")
-                || token.ends_with('%')
-                || matches!(token.as_str(), "larger" | "smaller")
-        });
-        if relative {
-            return Err(FailureCode::RenderParse);
+    let refused = match name {
+        "font-size" => !absolute_length(&lower),
+        "font" => lower
+            .split(|c: char| c.is_ascii_whitespace() || c == '/')
+            .any(|token| {
+                size_keyword(token)
+                    || (token
+                        .starts_with(|c: char| c.is_ascii_digit() || matches!(c, '.' | '+' | '-'))
+                        && !absolute_length(token))
+            }),
+        "clip-path" | "mask" | "marker" | "marker-start" | "marker-mid" | "marker-end" => {
+            lower == "inherit"
         }
+        "filter" => {
+            lower != "none"
+                && !(lower.starts_with("url(")
+                    && lower.ends_with(')')
+                    && lower.matches("url(").count() == 1
+                    && lower.matches(')').count() == 1)
+        }
+        _ => false,
+    };
+    if refused {
+        return Err(FailureCode::RenderParse);
     }
-    check_numbers(value)
+    bound_numbers(value)
+}
+
+/// A number with no unit or an absolute one.
+fn absolute_length(value: &str) -> bool {
+    let number = ["px", "pt", "pc", "in", "cm", "mm"]
+        .iter()
+        .find_map(|unit| value.strip_suffix(unit))
+        .unwrap_or(value);
+    number.trim().parse::<f64>().is_ok()
+}
+
+/// The font-size keywords, all of which usvg scales by the parent's size.
+fn size_keyword(token: &str) -> bool {
+    matches!(
+        token,
+        "xx-small"
+            | "x-small"
+            | "small"
+            | "medium"
+            | "large"
+            | "x-large"
+            | "xx-large"
+            | "xxx-large"
+            | "larger"
+            | "smaller"
+    )
 }
 
 /// What an attribute becomes when written back.
@@ -465,8 +550,8 @@ fn attribute_policy(
             if urls(declaration.value)? == Urls::External {
                 continue;
             }
-            check_declaration(declaration.name, declaration.value)?;
-            kept.push(declaration.text.trim().to_owned());
+            let value = check_declaration(declaration.name, declaration.value)?;
+            kept.push(format!("{}:{}", declaration.name, value.trim()));
         }
         return Ok(Kept::Rewritten(name, kept.join(";")));
     }
@@ -478,8 +563,7 @@ fn attribute_policy(
             return Ok(Kept::Dropped);
         }
     }
-    check_declaration(local, value)?;
-    Ok(Kept::As(name))
+    Ok(Kept::Rewritten(name, check_declaration(local, value)?))
 }
 
 /// Escape `text` for an attribute value or a text node. Attributes also
@@ -705,6 +789,49 @@ mod tests {
     }
 
     #[test]
+    fn tiny_numbers_are_written_as_zero() {
+        let out = clean(&format!(
+            r#"{OPEN}<marker markerWidth="1e-30" markerHeight="1e-30em"/><path d="M1e-9.5 2" style="stroke-width:3e-12"/></svg>"#
+        ))
+        .unwrap();
+        assert!(out.contains(r#"markerWidth="0""#), "{out}");
+        assert!(out.contains(r#"markerHeight="0em""#), "{out}");
+        assert!(out.contains(r#"d="M0 .5 2""#), "{out}");
+        assert!(out.contains(r#"style="stroke-width:0""#), "{out}");
+        assert_eq!(
+            check_style_sheet("rect { stroke-width: 1e-30px }")
+                .unwrap()
+                .text,
+            "rect { stroke-width: 0px }"
+        );
+    }
+
+    #[test]
+    fn declarations_refuse_what_the_structural_count_cannot_follow() {
+        for svg in [
+            format!(r#"{OPEN}<text font-size="xx-large"/></svg>"#),
+            format!(r#"{OPEN}<text style="font:10000000em/1 serif"/></svg>"#),
+            format!(r#"{OPEN}<text style="font:bold medium serif"/></svg>"#),
+            format!(r#"{OPEN}<rect mask="inherit"/></svg>"#),
+            format!(r#"{OPEN}<rect style="clip-path:inherit"/></svg>"#),
+            format!(r##"{OPEN}<rect filter="url(#a) url(#b)"/></svg>"##),
+            format!(r#"{OPEN}<rect filter="blur(2)"/></svg>"#),
+        ] {
+            assert_eq!(clean(&svg).unwrap_err(), FailureCode::RenderParse, "{svg}");
+        }
+        assert_eq!(
+            check_style_sheet(".c { fill: context-fill }").unwrap_err(),
+            FailureCode::RenderParse
+        );
+        assert!(
+            clean(&format!(
+                r##"{OPEN}<text font-size="12pt" style="font:bold 14px/1.2 serif" filter="url(#f)" mask="none"/></svg>"##
+            ))
+            .is_ok()
+        );
+    }
+
+    #[test]
     fn declarations_refuse_important_and_relative_font_sizes() {
         for svg in [
             format!(r##"{OPEN}<rect style="fill:url(#a)!important;fill:none"/></svg>"##),
@@ -760,7 +887,7 @@ mod tests {
     fn numbers_past_the_bounds_refuse_the_document() {
         for svg in [
             format!(r#"{OPEN}<rect width="1e30" height="1"/></svg>"#),
-            format!(r#"{OPEN}<marker markerWidth="1e-30"/></svg>"#),
+            format!(r#"{OPEN}<marker markerWidth="1e30em"/></svg>"#),
             format!(r#"{OPEN}<path d="M0 0L99999999 0"/></svg>"#),
             format!(r#"{OPEN}<rect style="stroke-width: 1e10"/></svg>"#),
             format!(r#"{OPEN}<style>rect {{ stroke-width: 1e10 }}</style></svg>"#),

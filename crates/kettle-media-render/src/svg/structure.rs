@@ -54,9 +54,13 @@ struct Element {
     inherited: Vec<usize>,
     /// Targets rendered with the inheritance of where they are defined.
     referenced: Vec<usize>,
-    /// For a `use`: its paint context, drawn by every painted element in the
-    /// copy.
+    /// The paint context this element draws with: for a shape once, for
+    /// text once per character, and for a `use` once per painted element in
+    /// its copy.
     copy_paint: Vec<usize>,
+    /// How many times a shape or text draws its paint (0 for a `use`, which
+    /// counts its copy instead).
+    pieces: u64,
     own: u64,
     /// For an element that can carry markers, its vertices.
     vertices: Option<u64>,
@@ -178,26 +182,21 @@ pub(super) fn admit(document: &Document<'_>) -> Result<(), FailureCode> {
                 .map(|child| (child, Some(index))),
         );
     }
-    // An id's first and last elements.
-    let mut ids: HashMap<&str, (usize, usize)> = HashMap::new();
+    // Ids must be unique: usvg resolves a duplicate differently by kind of
+    // reference and by which elements it keeps, past what this can follow.
+    let mut ids: HashMap<&str, usize> = HashMap::new();
     for (index, node) in nodes.iter().enumerate() {
-        if let Some(id) = sanitize::plain(*node, "id") {
-            ids.entry(id)
-                .and_modify(|(_, last)| *last = index)
-                .or_insert((index, index));
+        if let Some(id) = sanitize::plain(*node, "id")
+            && ids.insert(id, index).is_some()
+        {
+            return Err(FailureCode::RenderParse);
         }
     }
     let resolve = |targets: &[String]| -> Vec<usize> {
-        let mut found = Vec::new();
-        for id in targets {
-            if let Some(&(first, last)) = ids.get(id.as_str()) {
-                found.push(first);
-                if last != first {
-                    found.push(last);
-                }
-            }
-        }
-        found
+        targets
+            .iter()
+            .filter_map(|id| ids.get(id.as_str()).copied())
+            .collect()
     };
 
     let mut selectors = 0u64;
@@ -225,12 +224,24 @@ pub(super) fn admit(document: &Document<'_>) -> Result<(), FailureCode> {
         let parent = parents[index];
         let paint = resolve(&found.paint);
         all_paint.extend(paint.iter().copied());
+        // Context paint inherits like any paint: a descendant drawn with it
+        // reaches whatever the marker's shape is painted with.
         contexts.push(Element {
-            referenced: paint.into_iter().chain(parent.map(context_of)).collect(),
+            referenced: paint
+                .into_iter()
+                .chain(parent.map(context_of))
+                .chain(found.context_paint.then_some(context_paint))
+                .collect(),
             linking: true,
             ..Element::default()
         });
+        let text: u64 = node
+            .children()
+            .filter_map(|child| child.text())
+            .map(|text| text.chars().count() as u64)
+            .sum();
         let mut referenced = resolve(&found.other);
+        let mut paint_pieces = 0u64;
         let mut inherited = Vec::new();
         let mut copy_paint = Vec::new();
         if let Some(id) = sanitize::href(*node) {
@@ -243,18 +254,18 @@ pub(super) fn admit(document: &Document<'_>) -> Result<(), FailureCode> {
             }
         }
         if painted(name) {
-            referenced.push(context_of(index));
+            // Positioned text is drawn in pieces down to a character each,
+            // and each piece copies its paint: charge it per character.
+            let pieces = if name.starts_with('t') {
+                text.max(1)
+            } else {
+                1
+            };
+            paint_pieces = pieces;
+            copy_paint.push(context_of(index));
         } else if name == "use" {
             copy_paint.push(context_of(index));
         }
-        if found.context_paint {
-            referenced.push(context_paint);
-        }
-        let text: u64 = node
-            .children()
-            .filter_map(|child| child.text())
-            .map(|text| text.chars().count() as u64)
-            .sum();
         let ancestor_declares = parent.is_some_and(|parent| {
             elements[parent].ancestor_declares || elements[parent].declares_marker
         });
@@ -271,6 +282,7 @@ pub(super) fn admit(document: &Document<'_>) -> Result<(), FailureCode> {
             inherited,
             referenced,
             copy_paint,
+            pieces: paint_pieces,
             own,
             vertices: vertices(*node),
             painted: painted(name),
@@ -420,13 +432,18 @@ fn costs(
                 work = work.saturating_add(costs[target].0[defined(target)]);
                 depth = depth.max(costs[target].1[defined(target)]);
             }
-            // A copy's painted elements each draw the paint it inherits.
-            let painters = element.inherited.iter().fold(0u64, |count, &target| {
-                count.saturating_add(painted_count[target])
-            });
+            // A shape draws its paint once, text once per character, and a
+            // `use` once per painted element in its copy.
+            let draws = if element.inherited.is_empty() {
+                element.pieces
+            } else {
+                element.inherited.iter().fold(0u64, |count, &target| {
+                    count.saturating_add(painted_count[target])
+                })
+            };
             for &target in &element.copy_paint {
                 let paint = costs[target].0[defined(target)];
-                work = work.saturating_add(painters.saturating_mul(paint));
+                work = work.saturating_add(draws.saturating_mul(paint));
                 depth = depth.max(costs[target].1[defined(target)]);
             }
             if let Some(vertices) = element.vertices
@@ -682,14 +699,37 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_ids_resolve_to_two_elements_at_most() {
-        // Sixty thousand rectangles sharing an id and as many uses of it:
-        // each use links its first and last element, never all of them.
-        let rects: String = (0..60_000).map(|_| r#"<rect id="d"/>"#).collect();
-        let uses: String = (0..60_000).map(|_| r##"<use href="#d"/>"##).collect();
-        let started = std::time::Instant::now();
-        let _ = admitted(&format!("<defs>{rects}</defs>{uses}"));
-        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    fn duplicate_ids_are_refused() {
+        // usvg resolves a duplicate by the first or the last element
+        // depending on the reference, and skips some elements entirely.
+        assert_eq!(
+            admitted(r##"<style id="p"/><pattern id="p"><rect/></pattern><rect fill="url(#p)"/>"##)
+                .unwrap_err(),
+            FailureCode::RenderParse
+        );
+    }
+
+    #[test]
+    fn context_paint_and_text_are_charged_per_drawing() {
+        let content: String = (0..1_000).map(|_| "<rect/>").collect();
+        let pattern = format!(r#"<defs><pattern id="p">{content}</pattern></defs>"#);
+        // Context paint inherited by the marker's content still copies the
+        // shape's pattern per vertex.
+        let steps: String = (0..10_000).map(|i| format!("L{i} 0")).collect();
+        assert_eq!(
+            admitted(&format!(
+                r##"{pattern}<marker id="m"><g fill="context-fill"><rect/></g></marker><path d="M0 0{steps}" fill="url(#p)" marker-mid="url(#m)"/>"##
+            ))
+            .unwrap_err(),
+            FailureCode::RenderResource
+        );
+        // Text drawn in pieces copies its paint per character.
+        let text = "x".repeat(2_000);
+        assert_eq!(
+            admitted(&format!(r##"{pattern}<text fill="url(#p)">{text}</text>"##)).unwrap_err(),
+            FailureCode::RenderResource
+        );
+        assert!(admitted(&format!(r##"{pattern}<text fill="url(#p)">short</text>"##)).is_ok());
     }
     #[test]
     fn inherited_paint_is_charged_where_it_is_drawn() {

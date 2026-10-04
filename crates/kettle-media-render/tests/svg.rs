@@ -414,18 +414,14 @@ fn style_applied_patterns_are_refused() {
 }
 
 #[test]
-fn filter_results_are_charged_at_the_layer_size() {
-    // One filter makes the layer 1000x1000; a second, a pixel wide, takes
-    // the source graphic ten times, and each result is a copy of the layer.
-    let matrices: String = (0..10)
-        .map(|_| r#"<feColorMatrix in="SourceGraphic" type="saturate" values="0.5"/>"#)
-        .collect();
-    let body = format!(
-        r#"<filter id="a" x="0" y="0" width="1000" height="1000" filterUnits="userSpaceOnUse"><feOffset dx="1"/></filter><filter id="b" x="0" y="0" width="1" height="1" filterUnits="userSpaceOnUse">{matrices}</filter><rect width="1000" height="1000" fill="green" filter="url(#a) url(#b)"/>"#
-    );
+fn a_list_of_filters_is_refused() {
+    // One filter makes the layer 1000x1000 and a second, a pixel wide, takes
+    // the source graphic: resvg runs both on one layer with results of
+    // different sizes, which its lighting indexes past.
+    let body = r#"<filter id="a" x="0" y="0" width="1000" height="1000" filterUnits="userSpaceOnUse"><feOffset dx="1"/></filter><filter id="b" x="0" y="0" width="1" height="1" filterUnits="userSpaceOnUse"><feDiffuseLighting in="SourceGraphic"><feDistantLight/></feDiffuseLighting></filter><rect width="1000" height="1000" fill="green" filter="url(#a) url(#b)"/>"#;
     assert_eq!(
-        render_svg(&body, 1000).unwrap_err(),
-        FailureCode::RenderResource
+        render_svg(body, 1000).unwrap_err(),
+        FailureCode::RenderParse
     );
 }
 
