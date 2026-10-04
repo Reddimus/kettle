@@ -22,6 +22,15 @@ kettle-media.workspace = true
 image = { workspace = true, features = ["png", "jpeg", "webp", "bmp", "gif"] }
 # O_NONBLOCK and O_NOCTTY for the source open; no unsafe call is made.
 libc = "0.2"
+# SVG, pinned exactly: admission mirrors this renderer's allocation geometry,
+# so a version change needs that audit. Defaults off: no system font
+# discovery, memory-mapped fonts, compressed SVG or embedded raster images;
+# text shapes with the fonts the job names only.
+resvg = { version = "=0.48.1", default-features = false, features = ["text"] }
+usvg = { version = "=0.48.1", default-features = false, features = ["text"] }
+# Parses SVG for sanitizing before usvg sees it, and writes the result back.
+roxmltree = "=0.21.1"
+xmlwriter = "=0.1.0"
 
 [dev-dependencies]
 kettle-test-support.workspace = true

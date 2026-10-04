@@ -30,7 +30,7 @@ use crate::{container, source};
 
 pub(crate) fn render(job: &Job) -> Result<Rendered, FailureCode> {
     let snapshot = source::load(&job.source, job.kind.input_cap())?;
-    let image = decode(&snapshot.bytes)?;
+    let image = crate::guarded(FailureCode::RenderParse, || decode(&snapshot.bytes))?;
     let (width, height, rgba) = fit(image, job.target)?;
     let digest =
         content_digest(&snapshot.bytes, snapshot.identity).map_err(|_| FailureCode::BadParams)?;

@@ -5,6 +5,30 @@ Windows-supported release, and the PowerShell benchmark suite is available in
 the [`v3.3.0` source tree](https://github.com/Reddimus/kettle/tree/v3.3.0/scripts/perf).
 Kettle 4.0 keeps the macOS and Linux comparators in the current checkout.
 
+## Unreleased — media worker bounds (policy, not measurements)
+
+The media worker renders raster images and SVG under fixed bounds, and this
+section records them as policy: nothing here is a timing claim, and none of
+these limits was calibrated on a quiet machine. Every bound is checked
+before the work it would cost, so a hostile input is refused rather than
+slowed down.
+
+- **Raster:** 32 MiB encoded, 8192 pixels a side and 64 MiB decoded, both
+  checked from the decoder's header before any pixel; resizing holds a few
+  rows beside the result, never a full-size working copy.
+- **SVG:** 2 MiB of source; 125,000 elements, nesting 256 deep and 1,000,000
+  units of work with references expanded; at most 1024 pixels a side and a
+  million pixels out; 4,194,304 pixels of layers, filter results, masks,
+  clips and pattern tiles in all; 1,000,000 nodes drawn.
+- **Process:** a 2 s (raster) or 3 s (other kinds) job deadline, a 5 s CPU
+  limit, and a 768 MiB limit on the memory the worker and everything it
+  started hold, sampled every 25 ms.
+
+Area is not a time model: filter cost per pixel varies by primitive, and
+path tessellation and filter scratch buffers are not counted. The deadline
+is what bounds time. These ceilings are meant to come down as the hostile
+corpus and real agent output are measured.
+
 ## 4.7.0 — macOS standing
 
 Measured on 2026-09-28 with `scripts/perf/macos-standing.py`, using the same

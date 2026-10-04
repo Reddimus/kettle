@@ -188,5 +188,14 @@ opt-level = 3
 [profile.release.package.kettle-media-render]
 opt-level = 3
 
+# The media worker's own build: release, but unwinding, so a panic in a
+# decoder or renderer on hostile input is caught and answered as a failure
+# rather than aborting the worker. Built on its own (`--profile
+# media-worker -p kettle-media-worker`); a plain release build of the worker
+# aborts instead, and the process stays the boundary.
+[profile.media-worker]
+inherits = "release"
+panic = "unwind"
+
 [profile.dev]
 opt-level = 1

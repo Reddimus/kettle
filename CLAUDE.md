@@ -18,7 +18,7 @@ Keep the crate boundaries intact:
 | `kettle-i18n` | Kettle-owned UI text, typed, in English and Spanish |
 | `kettle-media` | bounded media jobs and results, caps and worker frames |
 | `kettle-media-worker` | the media worker executable: early setup, limits, watchdog |
-| `kettle-media-render` | what the worker renders: source loading, decoding, fitting |
+| `kettle-media-render` | what the worker renders: source loading, raster and SVG |
 | `kettle-ctl` | control IPC |
 | `kettle-remote` | the remote command spool |
 | `kettle-state` | durable writes and advisory locking |

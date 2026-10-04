@@ -834,7 +834,8 @@ lists `/proc/self/fd`), or touches stderr outside the fixed panic line.
 
 `tests/process_boundary.rs` drives the built binary: Ready carries this
 build's identity and a 1x1 PNG raster job comes back rendered, pixel for
-pixel, while bytes no decoder recognizes are `UnsupportedMedia`, each with
+pixel, as does a 4x4 SVG fitted into a 1x1 box, while bytes no decoder
+recognizes are `UnsupportedMedia`, each with
 nothing else on stdout or stderr; a Hello from another source hash or version, and a
 header of another protocol version, are `RestartRequired` with exit 9;
 garbage, a job before Hello, a second Hello and a frame cut short in its
@@ -875,7 +876,7 @@ keeps it pure blue. An 8x8 box fits a 4x2 image at 8x4; a crop in box
 coordinates is transparent where the centered image does not reach; a box
 over the rendered edge or a crop outside it is `BadParams`. A file's digest
 covers its bytes and the open file's identity, the same bytes inline carry
-none, and kinds other than raster are `UnsupportedMedia` for now.
+none, and kinds other than raster and SVG are `UnsupportedMedia` for now.
 
 `tests/hostile.rs` renders under a global allocator that records the largest
 single allocation each thread makes. A WebP whose 1x1 canvas holds a bitstream
@@ -889,6 +890,147 @@ animated, with and without alpha. BMP headers of 70000x1, 1x-70000 and
 whichever decoder would have refused them. Halving a 2048x2048 image
 allocates nothing larger than the decoded image itself. The lossy fixture is
 a 2x2 VP8 frame from `cwebp`, with its size fields rewritten per case.
+
+`tests/svg.rs` renders SVG jobs. Opaque and half-transparent fills come back
+as straight RGBA (within one level), uncovered pixels all zero. Text renders
+with the bundled face whatever family it names (`Arial`, `serif`, a missing
+font). Eight injection vectors render with nothing of theirs drawn: an
+`<image>` naming a readable red PNG by absolute path (as a Mermaid style
+value that broke out of its attribute would), by `file:` URL, by relative
+path and over the network; a data URL; a script, an event attribute and a
+`javascript:` link; a `use` of another file; and an `feImage` of the PNG with
+a style fill naming the other file. A `foreignObject` in a `switch` is
+dropped and its fallback drawn; a DTD with entities, or naming an external
+subset, is `RenderParse`. At 512 pixels, four filtered rectangles sharing one
+blur pass and sixteen are refused (charged per use); a filter of eight
+primitives passes and sixteen are refused; ten translucent groups pass and
+twenty are refused; an 8192-unit pattern tile, a chain of forty masks and a
+chain of forty clips are refused while a small tile and one clip draw
+correctly. Two filters on one element, the second a pixel wide with
+lighting on the source graphic, are refused. Two finite scales that overflow when composed are `RenderParse`, and
+so is a filter rectangle scaled past what tiny-skia converts without
+panicking; marker sizes past the number bounds are `RenderParse`, while the
+extremes inside them render. A use bomb is refused within two seconds; a
+style sheet giving two thousand rectangles a thousand-shape pattern is
+charged per drawing and refused. Three inputs that would crash usvg or
+resvg are refused as `RenderParse`: three patterns drawn with each other
+through inherited fills, relative font sizes multiplying a marker and a
+stroke past what usvg unwraps, and a 65536-square convolution kernel; and a
+filter region so small and far that usvg panics is answered as `RenderParse`
+by the guard. A 10x10
+image in a 4096x2048 box comes back at 1024x1024, and a crop reaches the
+full fitted image within the ceiling. An input of exactly 2 MiB renders and
+one byte more is `TooLarge`; a path source renders through its held file
+with its identity in the digest; bytes that are not UTF-8, not XML or not
+SVG are `RenderParse`.
+
+Unit tests in `src/svg/` pin the parts: the sanitizer keeps local references
+and removes the rest, rewrites `style` declarations, refuses escapes and
+unclosed `url(` and outside style-sheet references, round-trips `&`, `<`,
+quotes and line breaks exactly, drops scripts, foreign content, events and
+metadata, refuses a DTD, writes back a non-ASCII attribute name, keeps of
+two `href` spellings only the one usvg uses and of other namespaced
+attributes only `xml:space`, refuses numbers past the bounds while keeping
+editor rounding noise, hex colors and names with digits, ignores style sheets
+inside dropped subtrees (including otherwise refused CSS), writes style sheets
+and `style` attributes back as attributes (an id rule beating a class rule
+beating the attribute, the `style` attribute last, an outside reference
+left out, the `marker` and `font` shorthands expanded, non-presentation
+properties ignored), refuses CSS it does not resolve (combinators, at-rules,
+`! important`, a `*fill` property, a backslash, a relative font size, an
+unclosed comment), bounds convolution orders, writes numbers below 1e-6 as
+zero (`1e-9.5` as `0 .5`, `1e-30em` as `0em`, a style sheet's too) while
+`1e30em` is refused, and refuses font-size keywords, a relative size in the
+`font` shorthand, `inherit` for a mask or clip, filter lists and filter
+functions, a percentage past 1000%, a 65-entry dash list, font lists over
+256 bytes and a 2,000-byte inherited value, counts 257 attributes on one
+element before the parser runs (not counting signs in quotes, comments or
+character data), and drops
+`tref`, and carries `mix-blend-mode`, `isolation` and `font-kerning` in a
+composed `style` of checked keywords; `src/svg/css.rs` tests parse simple
+selectors and refuse the rest (non-ASCII ones included),
+refuse sheets it does not resolve, bound rules and their declarations
+times elements, and expand shorthands;
+the structural count splits numbers as a parser does, refuses duplicate ids
+(but not one on a dropped style sheet), charges context paint inherited by a
+marker's content per vertex and text paint per character (through a `use`
+of text and a link inside text as well), refuses viewports nested more than
+eight deep (symbols reached through uses included), charges a filter table
+of 1,000 numbers and a 200,000-byte result name per element using them,
+charges decorated positioned text per copy and text per enclosing text
+level, charges ten thousand one-character spans by spans times characters
+and a text path by characters times segments (along a point list too),
+holds a filter to 64 primitives, a text element to 20,000 characters and a
+gradient to 256 stops,
+charges a shared definition per use (900 uses of a thousand elements pass,
+999 do not), refuses nested uses, reference cycles (but not a link to an
+ancestor), cycles through paint contexts (a pattern under an element whose
+fill names it, whatever the pattern's shape declares: nothing, `inherit`, a
+color or a removed outside reference; three patterns chained through
+inherited fills; a `use` copy inheriting it), while patterns filling shapes
+elsewhere pass, charges inherited paint
+per drawing element (directly and through a `use`) and a context-painted
+marker's pattern per vertex, markers per vertex whether set directly,
+inherited through a `use` or behind a comment, with `H` and `V` steps
+counted as vertices and a namespaced `points` not hiding the real one,
+counts the `href` usvg follows, refuses markers that could hold markers
+(context paint included, while a context-stroke arrowhead on two hundred
+paths passes), and too many
+elements, too deep a tree and too long a path; the layer walk refuses drawing work
+past its count and a filter list on trees built straight from usvg; placement fits the box
+and then the ceiling and shifts a crop; unpremultiplying rounds and clears
+alpha-0 pixels; source lines are bounded, without line breaks; usvg with
+these options builds no image node even from unsanitized absolute paths and
+data URLs; and the font database holds the bundled face alone, which every
+family resolves to. A unit test shows the guard answering a panic with its failure and passing
+results through. `tests/hostile.rs` also shows an SVG filter five
+canvases wide refused before any allocation as large as the canvas itself.
+
+SVG red checks: an `href` kept whatever it names, a DTD allowed, scripts and
+foreign content kept, outside references kept in a style declaration or a
+property, `&` left unescaped, style sheets unchecked, usvg's default
+resolvers, `use` copies uncounted, markers uncounted, nested markers
+allowed, cycles followed, nesting, element count or style matching left
+unbounded, a `use` copy not inheriting its marker context, filter
+primitives, group layers, pattern tiles, clips or masks left free,
+non-finite transforms passed, drawing work unbounded, no SVG ceiling, a crop
+past it, and premultiplied output each fail a test above; so do an event
+prefix sliced through a character, the `xlink:` spelling followed first or
+both spellings written, any namespaced attribute kept or read by name,
+comments kept in a style sheet, a path counted as half its numbers, a
+selector list counted as one rule, inherited or style-sheet paint ignored, a
+`use` copy's paint left free, numbers left unbounded, primitives charged at
+their region, filter rectangles left unbounded, a style sheet allowed to
+name, `!important` or relative font sizes allowed, kernel orders unbounded,
+a paint context without its ancestors, shapes or `use` copies not linked to
+their paint context, context paint unlinked, a unit's `e` read as an
+exponent, tiny numbers kept, font-size keywords or an unchecked `font`
+shorthand allowed, `inherit` for a reference allowed, filter lists allowed
+by the sanitizer or the layer walk, duplicate ids allowed, context paint in
+a style sheet, context paint not inherited, text drawn once, a `style`
+attribute passed to usvg, combinators accepted, any property name accepted,
+non-presentation properties applied, rules left unsorted, matching left
+unbounded, `!` or a backslash allowed in a declaration, percentages or dash
+lists left unbounded, `tref` kept, viewports left unbounded, a link inside
+text not counted as text, copies counting elements rather than pieces, a
+selector split by byte, CSS-only properties written as attributes or with
+unchecked values, panics not caught, only path numbers counted, attribute
+bytes left free, text painted once per character, font lists, filter
+primitives or text nesting left unbounded, property bytes left unbounded,
+span and text-path pairs left free, declarations left out of the style
+matching bound, attributes uncounted or quoted signs counted, text
+characters or gradient stops unbounded, text paths measured along
+paths only, filter input-name copies left free (including implicit second
+inputs and linked templates), merge inputs and dual-primitive input surfaces
+left out of the layer budget, style sheets collected from dropped subtrees,
+and real blank source lines
+removed at the line cap. Exactly-at-cap blank lines do not report clipping;
+a clipped long line does not erase a following real blank line. Public SVG
+jobs also exercise the dropped styles and filter accounting refusals.
+The real worker's `svg_admission_failures_are_framed_and_exit_cleanly`
+test sends name-copy, merge and dual-input multipliers through
+Hello/Ready/Job, checks the `RenderResource` frame, and requires EOF, a zero
+exit and empty stderr.
 
 `tests/source.rs` loads paths: a group-writable file (as umask 002 leaves it)
 and a symbolic link at the leaf are accepted; a FIFO with no writer is

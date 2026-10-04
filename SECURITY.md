@@ -124,6 +124,29 @@ Reports that fit any of these are welcome:
   that allocates past those caps, a decoder panic reached from hostile
   input, or rendered output that carries a transparent pixel's hidden color
   is in scope.
+- **SVG rendering** — an SVG is parsed with no DTD, and written back without
+  scripts, foreign content, event attributes, namespaced attributes other
+  than `xlink:href` and `xml:space`, or any `href` or `url()` that names
+  something outside the document. Style sheets in those dropped subtrees
+  have no effect. Its CSS (simple selectors only) is applied
+  here and written as attributes, so usvg's own CSS engine never runs. A
+  reference that cannot be read plainly, CSS this does not resolve, a font
+  size other than an absolute number, `inherit` for a reference, a list of
+  filters, a duplicate id, or a number large enough to overflow what usvg
+  multiplies, refuses it (a tiny one is written as zero). resvg then parses it with image resolvers that load
+  nothing and no resources directory, and draws text with the bundled face
+  only, never a host font. Its expanded size (references, `use` copies and
+  per-vertex markers and filter input-name copies counted every time) and
+  every layer, filter result, mask, clip and pattern tile resvg would allocate,
+  plus each merge input's
+  layer-sized copy, conversion and compositing charge, are admitted before any
+  is built. Blend, composite and displacement also charge both input surfaces
+  beside their output. A reference cycle, through inherited paint as well, is
+  refused. An SVG that makes the worker read or fetch anything,
+  load a font it was not given, expand or allocate past those limits before
+  being refused, or crash the worker, is in scope. This is resource isolation,
+  not an operating-system sandbox: code execution inside the worker after
+  a renderer exploit is not yet confined.
 - **Lua plugin sandbox escape** — `lua-sandbox = safe` (the default)
   nils `os.execute`, `os.exit`, `io.open`, `io.popen`,
   `package.loadlib`, `loadfile`, `dofile`, etc. A bypass that lets a

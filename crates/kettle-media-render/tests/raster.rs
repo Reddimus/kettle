@@ -310,9 +310,9 @@ fn source_digest_uses_held_identity() {
 }
 
 #[test]
-fn jobs_other_than_raster_are_unsupported_for_now() {
+fn jobs_other_than_raster_and_svg_are_unsupported_for_now() {
     let png = encode(&solid(2, 2, [1, 1, 1, 255]), ImageFormat::Png);
-    for kind in [JobKind::Svg, JobKind::Mermaid, JobKind::VideoProbe] {
+    for kind in [JobKind::Mermaid, JobKind::VideoProbe] {
         let mut job = job(Source::Bytes(png.clone()), target(2, 2, None));
         job.kind = kind;
         assert_eq!(render(&job).unwrap_err(), FailureCode::UnsupportedMedia);

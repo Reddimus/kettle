@@ -91,7 +91,9 @@ pub(crate) fn serve(input: &mut impl Read, output: &mut impl Write, watchdog: &W
     if check_ready(&hello, &ready) != HandshakeOutcome::Compatible {
         return reply(output, FailureCode::RestartRequired, EXIT_SKEW);
     }
-    // Setup is complete: this build has no fonts or renderer to prepare.
+    // Setup completes before Ready: the renderer's shared fonts are built
+    // here, outside the job's deadline.
+    kettle_media_render::prepare();
     if write_frame(output, &Frame::Ready(ready), Direction::WorkerToParent).is_err() {
         return EXIT_PROTOCOL;
     }

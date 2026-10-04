@@ -331,12 +331,12 @@ of 0 backs it up. Every size is checked before the work it would cost, so the
 worker's limits and the client's deadlines and memory limit are a second
 bound, not the only one. An empty target box, one over 4096 pixels on an
 edge, a scale that is not a positive finite number, or a crop that is empty or
-leaves the box, is `BadParams`. Raster jobs are rendered; every other kind is
-`UnsupportedMedia` until its renderer lands. On Windows, where no worker
-runs, every job is `UnsupportedPlatform`.
+leaves the box, is `BadParams`. Raster and SVG jobs are rendered; every other
+kind is `UnsupportedMedia` until its renderer lands. On Windows, where no
+worker runs, every job is `UnsupportedPlatform`.
 
 **The source.** Inline bytes over the job kind's input cap (32 MiB for a
-raster) are `TooLarge`. A path is opened once, read-only, non-blocking and
+raster, 2 MiB for an SVG) are `TooLarge`. A path is opened once, read-only, non-blocking and
 without becoming a controlling terminal, and everything after that is decided
 from the open descriptor, never the path:
 
@@ -386,6 +386,173 @@ box coordinates, with the fitted image centered in the box: it returns just
 that region, transparent wherever the image does not reach. The canvas color
 is the GUI's to draw behind the result, and the scale is for vector content: a
 raster target is already in device pixels.
+
+**SVG: sanitizing.** The source must be UTF-8 (`RenderParse` otherwise). It
+is parsed once with at most 500,000 nodes (`RenderResource` past that) and no
+DTD: a document type declaration, and with it any entity, is `RenderParse`.
+The root must be an SVG-namespace `svg` element. The document is then written
+back, so usvg only ever sees the rewritten text:
+
+| In the source | Written back |
+|---|---|
+| elements outside the SVG namespace (editor metadata) | dropped, with their content |
+| `script`, `foreignObject`, `tref` | dropped, with their content (a `switch` falls back to its next child) |
+| `<style>` elements and `style` attributes | resolved here and written as presentation attributes (below); none of the document's CSS reaches usvg |
+| `href` or `xlink:href` naming a local fragment (`#id`) | kept: the plain one when both do, as usvg prefers it |
+| any other `href` (`file:`, `http:`, `data:`, a path) | removed |
+| other namespaced attributes (`xlink:title`, `xml:base`, ...) | dropped (`xml:space` kept): usvg reads attributes by local name |
+| a property `url(#id)` | kept |
+| a property naming anything else | the attribute, or the declaration, removed |
+| a backslash, or an unclosed `url(`, in a property | `RenderParse` |
+| a selector other than a type or `*` with `.class` and `#id` parts (a combinator, pseudo-class or attribute selector), an at-rule, any `!` in a declaration, or a property name other than lower-case letters and hyphens | `RenderParse` |
+| style rules plus the declarations they apply, times elements, over 10,000,000 | `RenderResource` |
+| more than 256 attributes on one element | `RenderResource`, counted in one pass before any parser runs: the parser compares each attribute with all before it |
+| a presentation property value over 1,024 bytes | `RenderParse`: usvg parses an inherited value again for every element it reaches |
+| a font size other than a number with an absolute unit (`em`, `ex`, `%`, or a keyword such as `larger` or `xx-large`) | `RenderParse`: usvg scales each by the parent's size, and a chain multiplies past any bound |
+| a percentage past 1000% | `RenderParse`: viewports nest, each scaling the next |
+| a dash list of more than 64 entries | `RenderParse`: usvg keeps a copy for every element it applies to |
+| a `font-family`, `font-variation-settings` or `font-feature-settings` over 256 bytes | `RenderParse`: usvg copies them into every positioned piece of text |
+| `inherit` for a clip, mask, filter or marker | `RenderParse`: it takes a reference from the parent |
+| a filter other than `none` or one `url(#id)` (a list, or a function such as `blur()`) | `RenderParse`: resvg runs a list on one layer with results of different sizes |
+| an `feConvolveMatrix` order over 64 | `RenderParse` (usvg multiplies the two in 32 bits) |
+| a duplicate `id` | `RenderParse`: usvg resolves a duplicate by its first or last element depending on the reference |
+| a number in a property or declaration past 10,000,000 | `RenderParse` |
+| a non-zero number below 1e-6 | written as `0` |
+| event attributes, comments, processing instructions | dropped |
+
+Style sheets inside a dropped subtree are dropped with it and never affect
+kept elements. CSS is applied here, the way usvg applies it: an element's presentation
+attributes, then the matching rules in ascending specificity (a later rule
+winning a tie), then its `style` attribute, each declaration replacing the
+value before it, and only presentation properties applying; the `marker`
+shorthand sets all three marker properties and the `font` shorthand its parts
+(one usvg could not read is left out, as usvg leaves it). `mix-blend-mode`,
+`isolation` and `font-kerning`, which usvg reads from CSS but ignores as
+attributes, are written in a `style` attribute composed here from the
+keywords usvg reads, and any other value is left out. Comments are removed
+first. The winners are written as attributes, so usvg's CSS engine never
+sees the document's CSS (only the composed keyword `style` above): which elements a rule reaches, how often it matches again in `use`
+copies, and how it splits a property name are no longer questions.
+
+The number bounds keep the products usvg forms directly and then unwraps (a
+marker's size times a stroke width, a radius times a scale) finite and
+non-zero; the rounding noise editors write (about 6e-17) becomes the zero it
+stands for. They cannot rule out every derived value rounding away (a tiny
+width added to a far coordinate); the guard below answers those. A
+unit that begins with `e` (`2em`) is read as a unit, not an exponent. Hex colors,
+fragment names and identifiers (`id`, `class`, filter result names) are not
+read as numbers.
+
+The writer escapes `&`, `<`, `>` and quotes itself, and tabs and line breaks
+in attributes, so values reach usvg exactly as they were parsed. A rewritten
+document over 8 MiB is `RenderResource`. usvg then parses it with no
+resources directory and with image resolvers that return nothing for data
+and string references alike, so even a reference the rewrite missed reads no
+file and no network.
+
+**SVG: structure.** Before usvg, the document's cost once its references are
+expanded is counted: one unit per element, plus every number its attributes
+hold (path data, point lists and filter tables alike; identifiers such as
+`id` and `class` aside), a unit per 64 bytes of attribute text and filter
+input-name copies (including the previous result name for an omitted or
+unknown `in` or `in2`), and the
+characters of its text times the text elements it sits in (usvg copies what
+each of them sets into every positioned piece), plus, for a text element, its
+spans times its characters (usvg shapes the whole chunk once per span), and
+for a text path, its characters times its path's vertices, a point list or a
+shape's included (each character is laid against every segment), plus a target's whole cost each
+time it is referenced (`use`, paint servers, clips, masks, filters, `feImage`,
+text paths and linked templates), plus, on a shape that can carry markers,
+its vertices times the most expensive marker (a path's vertices are its
+numbers: an `H` or `V` takes one). This runs on the rewritten text, where
+CSS is already attributes. Paint is counted without following which
+declaration wins: the paint an element is drawn with is one declared on it
+or an ancestor.
+Every element's paint context reaches all of those (its own references, then
+its parent's context, and every paint server the document uses where it
+declares `context-fill` or `context-stroke`); a shape is charged for its
+context once, text (a link inside text included) twelve times per character
+(usvg copies a piece's paint for the span, its laid-out chunk and its
+flattened outline, each with up to three decorations), and a `use` once per
+piece in its copy. A `use` copy inherits marker properties from the `use`; other
+targets inherit from where they are defined. Each of these is
+`RenderResource`:
+
+- more than 125,000 elements;
+- an expanded cost over 1,000,000 units;
+- an expanded nesting deeper than 256 (usvg and resvg recurse that deep);
+- more than 8 viewports (`svg`, `symbol`) nested, references followed: a
+  percentage takes its size from the viewport around it;
+- a filter of more than 64 primitives: usvg looks up each primitive's input
+  among those before it;
+- a text element of more than 20,000 characters, or a gradient of more than
+  256 stops: usvg's layout and its stop compaction are quadratic in them;
+- a marker that could hold markers: one whose content, or what it references,
+  sets a marker property, or one that inherits one. usvg allows such nesting,
+  and it multiplies per vertex at every level.
+
+A reference cycle is `RenderParse`, through paint contexts as well: usvg
+recurses through a pattern whose content may draw with that pattern without
+end, so a pattern defined under an element whose paint names it is refused
+whatever its own content declares.
+
+**SVG: layers.** The image is fitted inside the target box keeping its aspect
+ratio, then, without a crop, within 1024 pixels a side and 1,048,576 pixels
+(`MAX_SVG_RENDERED_EDGE`, `MAX_SVG_RENDERED_PIXELS`); the result may be
+smaller than the box. A crop selects target-box pixels around the centered
+image at the full fitted size, and must itself fit those limits, or it is
+`BadParams`. Before the canvas is allocated, the following resvg 0.48.1
+surfaces are counted, each time they are used, against 4,194,304 pixels
+(`MAX_SVG_LAYER_PIXELS`):
+
+- an isolated group's layer, at its transformed bounds widened by 2 pixels a
+  side, clamped to resvg's own limit (from -2 to +3 canvas widths and
+  heights: up to 25 times the canvas area);
+- each filter primitive's result at the layer's size (an input that is the
+  source graphic copies the whole layer, and every result lives until the
+  filter ends), plus a layer-sized charge and drawing step per merge input
+  for its possible copy or color conversion and compositing, and what an
+  `feImage` renders;
+- both input surfaces of blend, composite and displacement primitives,
+  for possible source copies or shared-result color conversion beside the
+  primitive's output;
+- a clip's canvas and mask at the layer's size, for every clip in a chain
+  and every clipped group inside one;
+- a mask's canvas and masks at the layer's size, and its content, for every
+  mask in a chain;
+- a pattern tile at its own transformed size, for every fill and stroke that
+  uses it, and its content.
+
+Past that is `RenderResource`, and so is drawing more than 1,000,000 nodes,
+which bounds the drawing whatever the structural count allowed. A transform
+that is not finite is `RenderParse`, and so are a filter or primitive
+rectangle reaching past 16,777,216 pixels on its layer (tiny-skia's integer
+conversion of it unwraps), a list of filters on one element, and an image
+node, which nothing may load. Pixels are not time, and filter scratch
+buffers and path tessellation are not counted: the worker's deadline and the
+client's memory limit still stand behind this, as they do behind any CPU-time
+cost in usvg or resvg below these bounds.
+
+The admission above is built from usvg's and resvg's source as pinned, and
+it refuses what it cannot follow rather than guess. It is not a proof that
+neither library can panic on some input it allows, so usvg's parsing,
+resvg's rendering and the raster decoders run inside a guard that answers a
+panic as `RenderParse`. That takes unwinding: the worker is built with the
+`media-worker` profile (release, unwinding) for that reason. A build that
+aborts on panic instead leaves the worker as the crash boundary: the panic
+ends only the worker, the job fails, and Kettle is untouched. The fuzzing
+that follows this work aims at what remains.
+
+**SVG: result.** resvg's premultiplied pixels come back as straight RGBA,
+rounded, with every fully transparent pixel all zero. Text is drawn with the
+JetBrains Mono face bundled in the worker and nothing else: no host font is
+discovered or loaded, and any `font-family` resolves to that face. The
+result carries the source as display lines: at most 2,000 lines of at most
+4,096 bytes, cut at a character boundary, with `SourceDisplayClipped` when
+anything was left out. As for a raster, the canvas is the GUI's to draw
+behind the result, and the target's scale is unused (the box is already in
+device pixels). The worker builds the font database before it reports
+Ready, outside the job's deadline.
 
 ## P2 boundary and separate worker decision
 
