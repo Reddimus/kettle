@@ -1,5 +1,10 @@
 //! Shared test fixtures and source-guard helpers for Kettle's workspace tests.
 
+#[cfg(unix)]
+mod executable;
+#[cfg(unix)]
+pub use executable::copy_executable_fixture;
+
 use std::path::Path;
 
 /// Remove test-only items so source guards cannot match their own assertions.

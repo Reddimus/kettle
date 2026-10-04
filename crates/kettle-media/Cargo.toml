@@ -12,6 +12,7 @@ description = "Bounded media jobs and strict parent-worker frames for kettle"
 sha2 = "0.11"
 
 [dev-dependencies]
+kettle-test-support.workspace = true
 # The client tests copy the stub worker under names that pick its behavior.
 tempfile = "3"
 

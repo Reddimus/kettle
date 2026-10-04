@@ -787,10 +787,15 @@ first restart, recover an interrupted bootstrap idempotently, and restore the
 old pair after either binary publication. macOS fixtures require the helper
 and exchange/restore the whole pair. `installed_worker_renders_svg_and_raster`
 copies the real compiled worker to a private install directory, checks Ready,
-exact pixels, framed EOF and clean exits. Its copy fixture uses a lock barrier
+exact pixels, framed EOF and clean exits. Shared Unix executable fixtures in
+`kettle-test-support` use a lock barrier
 to wait for writable descriptors inherited by concurrent forks before launch,
 with a 5 s failure bound. A retained-writer regression checks both the bounded
-failure and success after the writer closes. These are hermetic tests; final
+failure and success after the writer closes. The stub-worker client suite uses
+the same helper: a concurrent fork must not turn a watchdog timeout assertion
+into a copy-and-execute failure. Linux also holds a duplicated writer to
+reproduce `ETXTBSY`, then verifies execution succeeds after the barrier.
+These are hermetic tests; final
 release acceptance separately uses actual signed macOS and Linux release
 archives for the 4.9-to-5.0 upgrade on each shipped architecture.
 
