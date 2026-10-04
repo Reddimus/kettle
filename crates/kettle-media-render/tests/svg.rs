@@ -395,12 +395,10 @@ fn clip_chains_are_charged_per_clip() {
 }
 
 #[test]
-fn style_applied_patterns_are_refused() {
+fn style_applied_patterns_are_charged_per_drawing() {
     // A style sheet gives every rectangle a pattern whose content is drawn
-    // for each: two thousand fills of a thousand shapes. The structural pass
-    // cannot tell which elements a rule matches, so a sheet naming a pattern
-    // that holds painted shapes may close a cycle, and is refused as one
-    // (the layer walk's drawing count stands behind it).
+    // for each: two thousand fills of a thousand shapes. The sheet reaches
+    // the structural count as attributes, and the fills are charged there.
     let content: String = (0..1000)
         .map(|_| r#"<rect width="1" height="1" fill="red"/>"#)
         .collect();
@@ -410,7 +408,10 @@ fn style_applied_patterns_are_refused() {
     let body = format!(
         r#"<style>.p {{ fill: url(#p) }}</style><pattern id="p" width="2" height="2" patternUnits="userSpaceOnUse">{content}</pattern><g class="p">{rects}</g>"#
     );
-    assert_eq!(render_svg(&body, 64).unwrap_err(), FailureCode::RenderParse);
+    assert_eq!(
+        render_svg(&body, 64).unwrap_err(),
+        FailureCode::RenderResource
+    );
 }
 
 #[test]

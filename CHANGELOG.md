@@ -36,8 +36,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   bleeding color. Other media kinds are refused for now, and nothing in
   Kettle asks for a render yet.
 - The media worker renders SVG with resvg. The document is parsed with no
-  DTD, scripts and foreign content are dropped, and every reference outside
-  the document (files, network, data URLs) is removed before resvg sees it;
+  DTD, scripts and foreign content are dropped, its style sheets (simple
+  selectors) are applied and written as attributes, and every reference
+  outside the document (files, network, data URLs) is removed before resvg
+  sees it;
   resvg's own resolvers load nothing either. A document whose references
   would expand past a million units, nest deeper than 256, or make resvg
   allocate more than four million pixels of layers, filter results, masks,

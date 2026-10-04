@@ -127,11 +127,12 @@ Reports that fit any of these are welcome:
 - **SVG rendering** — an SVG is parsed with no DTD, and written back without
   scripts, foreign content, event attributes, namespaced attributes other
   than `xlink:href` and `xml:space`, or any `href` or `url()` that names
-  something outside the document; a reference that cannot be read plainly,
-  a style sheet that names anything, `!important`, a font size other than
-  an absolute number, `inherit` for a reference, a list of filters, a
-  duplicate id, or a number large enough to overflow what usvg multiplies,
-  refuses it (a tiny one is written as zero). resvg then parses it with image resolvers that load
+  something outside the document. Its CSS (simple selectors only) is applied
+  here and written as attributes, so usvg's own CSS engine never runs. A
+  reference that cannot be read plainly, CSS this does not resolve, a font
+  size other than an absolute number, `inherit` for a reference, a list of
+  filters, a duplicate id, or a number large enough to overflow what usvg
+  multiplies, refuses it (a tiny one is written as zero). resvg then parses it with image resolvers that load
   nothing and no resources directory, and draws text with the bundled face
   only, never a host font. Its expanded size (references, `use` copies and
   per-vertex markers counted every time) and every layer, filter result,

@@ -41,6 +41,8 @@
 
 use kettle_media::FailureCode;
 use roxmltree::{Document, Node, ParsingOptions};
+
+use super::css;
 use xmlwriter::{Indent, Options, XmlWriter};
 
 pub(super) const SVG_NS: &str = "http://www.w3.org/2000/svg";
@@ -51,6 +53,10 @@ const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
 const MAX_NODES: u32 = 500_000;
 /// The rewritten document's size.
 pub(super) const MAX_SANITIZED_BYTES: usize = 8 * 1024 * 1024;
+/// The most entries a dash list may hold.
+const MAX_DASHES: usize = 64;
+/// The largest percentage: viewports nest, and each multiplies the next.
+const MAX_PERCENT: f64 = 1000.0;
 /// The largest convolution kernel side: usvg multiplies the two in 32 bits.
 const MAX_KERNEL_ORDER: f64 = 64.0;
 /// The largest number a property may hold: ten million user units, far past
@@ -79,7 +85,7 @@ pub(super) fn parse(text: &str) -> Result<Document<'_>, FailureCode> {
 pub(super) fn kept(node: Node<'_, '_>) -> bool {
     node.is_element()
         && node.tag_name().namespace() == Some(SVG_NS)
-        && !matches!(node.tag_name().name(), "script" | "foreignObject")
+        && !matches!(node.tag_name().name(), "script" | "foreignObject" | "tref")
 }
 
 /// What an element's `href` names, as usvg reads it: the plain attribute when
@@ -310,7 +316,10 @@ fn bound_plain(text: &str, out: &mut String) -> Result<(), FailureCode> {
             },
         };
         let magnitude = number.abs();
-        if !magnitude.is_finite() || magnitude > MAX_NUMBER {
+        if !magnitude.is_finite()
+            || magnitude > MAX_NUMBER
+            || (text[end..].starts_with('%') && magnitude > MAX_PERCENT)
+        {
             return Err(FailureCode::RenderParse);
         }
         if magnitude != 0.0 && magnitude < MIN_NUMBER {
@@ -379,60 +388,6 @@ pub(super) fn declarations(style: &str) -> Result<Vec<Declaration<'_>>, FailureC
     Ok(found)
 }
 
-/// What a style sheet holds, once checked.
-#[derive(Debug, Default)]
-pub(super) struct StyleSheet {
-    /// The sheet without comments: what usvg is given.
-    pub(super) text: String,
-    /// Selectors, counting each in a comma-separated list: the rules usvg
-    /// matches against every element.
-    pub(super) selectors: u64,
-}
-
-/// A style sheet may style but never name: no `url(` (so no paint server,
-/// clip, mask, filter or marker can come from a rule, whose reach the
-/// structural count cannot know), no import, no escapes that could spell
-/// either, no `!important`, no relative font size and no number past the
-/// bounds.
-pub(super) fn check_style_sheet(css: &str) -> Result<StyleSheet, FailureCode> {
-    let text = strip_comments(css)?;
-    let lower = text.to_ascii_lowercase();
-    if text.contains('\\')
-        || lower.contains("@import")
-        || lower.contains("url(")
-        || lower.contains("context-fill")
-        || lower.contains("context-stroke")
-    {
-        return Err(FailureCode::RenderParse);
-    }
-    // A segment ending at `{` is a selector list or an at-rule prelude; one
-    // ending at `;` or `}` is a declaration.
-    let mut sheet = StyleSheet::default();
-    let mut start = 0;
-    for (index, c) in text.char_indices() {
-        if !matches!(c, '{' | '}' | ';') {
-            continue;
-        }
-        let segment = &text[start..index];
-        start = index + 1;
-        if c != '{'
-            && let Some((name, value)) = segment.split_once(':')
-        {
-            sheet.text.push_str(name);
-            sheet.text.push(':');
-            sheet.text.push_str(&check_declaration(name.trim(), value)?);
-        } else {
-            if c == '{' && !segment.trim_start().starts_with('@') {
-                sheet.selectors += 1 + segment.matches(',').count() as u64;
-            }
-            sheet.text.push_str(segment);
-        }
-        sheet.text.push(c);
-    }
-    sheet.text.push_str(&text[start..]);
-    Ok(sheet)
-}
-
 /// A declaration, in a style sheet or a `style` attribute, or a presentation
 /// attribute, checked and with its numbers bounded:
 ///
@@ -445,9 +400,9 @@ pub(super) fn check_style_sheet(css: &str) -> Result<StyleSheet, FailureCode> {
 ///   reference from the parent where the structural count does not look;
 /// - a filter only as `none` or a single `url(#id)`: resvg applies a list of
 ///   filters to one layer with results of different sizes.
-fn check_declaration(name: &str, value: &str) -> Result<String, FailureCode> {
+pub(super) fn check_declaration(name: &str, value: &str) -> Result<String, FailureCode> {
     let lower = value.trim().to_ascii_lowercase();
-    if lower.contains("!important") {
+    if lower.contains('!') || lower.contains('\\') {
         return Err(FailureCode::RenderParse);
     }
     let refused = match name {
@@ -462,6 +417,12 @@ fn check_declaration(name: &str, value: &str) -> Result<String, FailureCode> {
             }),
         "clip-path" | "mask" | "marker" | "marker-start" | "marker-mid" | "marker-end" => {
             lower == "inherit"
+        }
+        // usvg keeps a copy of the dash list for every element it applies to.
+        "stroke-dasharray" => {
+            let mut count = 0;
+            numbers(&lower, |_| count += 1);
+            count > MAX_DASHES
         }
         "filter" => {
             lower != "none"
@@ -540,28 +501,14 @@ fn attribute_policy(
     if identifier(local) || attribute.namespace().is_some() {
         return Ok(Kept::As(name));
     }
+    // Resolved with the style sheets, into presentation attributes.
     if local == "style" {
-        let style = strip_comments(value)?;
-        if style.contains('\\') {
-            return Err(FailureCode::RenderParse);
-        }
-        let mut kept = Vec::new();
-        for declaration in declarations(&style)? {
-            if urls(declaration.value)? == Urls::External {
-                continue;
-            }
-            let value = check_declaration(declaration.name, declaration.value)?;
-            kept.push(format!("{}:{}", declaration.name, value.trim()));
-        }
-        return Ok(Kept::Rewritten(name, kept.join(";")));
+        return Ok(Kept::Dropped);
     }
-    if value.to_ascii_lowercase().contains("url(") {
-        if value.contains('\\') {
-            return Err(FailureCode::RenderParse);
-        }
-        if urls(value)? == Urls::External {
-            return Ok(Kept::Dropped);
-        }
+    // `check_declaration` below refuses a backslash; an unreadable `url(`
+    // is refused by `urls`.
+    if value.to_ascii_lowercase().contains("url(") && urls(value)? == Urls::External {
+        return Ok(Kept::Dropped);
     }
     Ok(Kept::Rewritten(name, check_declaration(local, value)?))
 }
@@ -598,6 +545,13 @@ pub(super) fn write(document: &Document<'_>) -> Result<String, FailureCode> {
         attributes_indent: Indent::None,
     });
     writer.set_preserve_whitespaces(true);
+    let sheets: String = document
+        .descendants()
+        .filter(|node| kept(*node) && node.tag_name().name() == "style")
+        .flat_map(|node| node.children().filter_map(|child| child.text()))
+        .collect();
+    let elements = document.descendants().filter(Node::is_element).count();
+    let sheets = css::StyleSheets::parse(&sheets, elements)?;
     // Each entry is a node to enter, or (None) the end of an open element.
     let mut stack: Vec<Option<Node<'_, '_>>> = vec![Some(root)];
     let mut written = 0usize;
@@ -610,7 +564,7 @@ pub(super) fn write(document: &Document<'_>) -> Result<String, FailureCode> {
             let text = escape(node.text().unwrap_or_default(), false);
             written += text.len();
             writer.write_text(&text);
-        } else if kept(node) {
+        } else if kept(node) && node.tag_name().name() != "style" {
             let name = node.tag_name().name();
             writer.start_element(name);
             if node == root {
@@ -629,27 +583,35 @@ pub(super) fn write(document: &Document<'_>) -> Result<String, FailureCode> {
                 }
             }
             let plain_href = plain(node, "href").and_then(fragment).is_some();
+            // CSS, the element's `style` last, replaces presentation
+            // attributes: the last value of each property is written.
+            let mut applied: Vec<(String, String)> = Vec::new();
+            for (property, value) in sheets.applied(node)? {
+                applied.retain(|(name, _)| *name != property);
+                applied.push((property, value));
+            }
+            let mut attributes = Vec::new();
             for attribute in node.attributes() {
-                let (name, value) = match attribute_policy(&attribute, plain_href)? {
-                    Kept::As(name) => (name, escape(attribute.value(), true)),
-                    Kept::Rewritten(name, value) => (name, escape(&value, true)),
-                    Kept::Dropped => continue,
-                };
+                if attribute.namespace().is_none()
+                    && applied.iter().any(|(name, _)| name == attribute.name())
+                {
+                    continue;
+                }
+                match attribute_policy(&attribute, plain_href)? {
+                    Kept::As(name) => attributes.push((name, attribute.value().to_owned())),
+                    Kept::Rewritten(name, value) => attributes.push((name, value)),
+                    Kept::Dropped => {}
+                }
+            }
+            for (name, value) in attributes.into_iter().chain(applied) {
+                let value = escape(&value, true);
                 written += name.len() + value.len() + 4;
                 writer.write_attribute_raw(&name, |buffer| {
                     buffer.extend_from_slice(value.as_bytes())
                 });
             }
             stack.push(None);
-            if name == "style" {
-                // The sheet as checked, comments removed, in place of its text.
-                let css: String = node.children().filter_map(|child| child.text()).collect();
-                let sheet = escape(&check_style_sheet(&css)?.text, false);
-                written += sheet.len();
-                writer.write_text(&sheet);
-            } else {
-                stack.extend(node.children().rev().map(Some));
-            }
+            stack.extend(node.children().rev().map(Some));
         }
         if written > MAX_SANITIZED_BYTES {
             return Err(FailureCode::RenderResource);
@@ -693,10 +655,9 @@ mod tests {
             r##"{OPEN}<rect style="fill:url(#g); stroke: url('https://x/p.png') ; opacity:0.5"/></svg>"##
         ))
         .unwrap();
-        assert!(
-            out.contains(r##"style="fill:url(#g);opacity:0.5""##),
-            "{out}"
-        );
+        assert!(out.contains(r##"fill="url(#g)""##), "{out}");
+        assert!(out.contains(r#"opacity="0.5""#), "{out}");
+        assert!(!out.contains("https"), "{out}");
     }
 
     #[test]
@@ -706,7 +667,6 @@ mod tests {
             format!(r#"{OPEN}<rect fill="url(#g"/></svg>"#),
             format!(r#"{OPEN}<rect style="fill:url('#g)"/></svg>"#),
             format!(r#"{OPEN}<style>@import "x.css";</style></svg>"#),
-            format!(r#"{OPEN}<style>rect {{ fill: url(http://x/p.png) }}</style></svg>"#),
             format!(r#"{OPEN}<style>rect {{ fill: \75 rl(x) }}</style></svg>"#),
         ] {
             assert_eq!(clean(&svg).unwrap_err(), FailureCode::RenderParse, "{svg}");
@@ -731,7 +691,7 @@ mod tests {
     #[test]
     fn scripts_foreign_content_and_events_are_dropped() {
         let out = clean(&format!(
-            r#"{OPEN}<script>alert(1)</script><switch><foreignObject><p xmlns="http://www.w3.org/1999/xhtml">html</p></foreignObject><text>fallback</text></switch><rect onload="x()" onclick="y()"/><metadata><x:rdf xmlns:x="urn:x"/></metadata></svg>"#
+            r##"{OPEN}<script>alert(1)</script><switch><foreignObject><p xmlns="http://www.w3.org/1999/xhtml">html</p></foreignObject><text>fallback</text></switch><rect onload="x()" onclick="y()"/><metadata><x:rdf xmlns:x="urn:x"/></metadata><text><tref href="#t"/></text></svg>"##
         ))
         .unwrap();
         for absent in [
@@ -742,6 +702,7 @@ mod tests {
             "onload",
             "onclick",
             "rdf",
+            "tref",
         ] {
             assert!(!out.contains(absent), "{absent} in {out}");
         }
@@ -755,55 +716,72 @@ mod tests {
     }
 
     #[test]
-    fn style_sheets_style_but_never_name() {
-        // Styling is fine, and every selector of a list counts.
-        let sheet = check_style_sheet(
-            ".marker { fill: red } .marker:hover, .a,.b { opacity: 0.5; font-size: 12px }",
-        )
+    fn style_sheets_and_style_attributes_become_attributes() {
+        let out = clean(&format!(
+            r##"{OPEN}<style>/* c */ #b {{ stroke: blue }} .a {{ fill: red; stroke: green }} rect {{ opacity: .5 }} .p {{ fill: url(#g) }} .q {{ fill: url(http://x/) }}</style><rect class="a p q" id="b" fill="black" style="stroke-width:2"/></svg>"##
+        ))
         .unwrap();
-        assert_eq!(sheet.selectors, 4);
-        // A reference, an `!important`, a relative font size or a number
-        // past the bounds is refused, a comment hiding it or not.
-        for css in [
-            "path { marker-mid: url(#m) }",
-            "@media screen { g { marker: url(#m); } }",
-            "rect { fill: url(#g) }",
-            "rect { fill: red !important }",
-            "text { font-size: 2em }",
-            "text { /* x */ font-size: 150% }",
-            "text { font: bold larger serif }",
-            "rect { stroke-width: 1e10 }",
-            "rect { fill: red } /* unclosed",
-        ] {
-            assert_eq!(
-                check_style_sheet(css).unwrap_err(),
-                FailureCode::RenderParse,
-                "{css}"
-            );
+        // No CSS reaches usvg: the winners are written as attributes.
+        for absent in ["<style", "style=", "black", "green", "http://x"] {
+            assert!(!out.contains(absent), "{absent} in {out}");
         }
-        // Comments are gone from what usvg is given.
-        assert_eq!(
-            check_style_sheet("a{/*b*/fill:red}").unwrap().text,
-            "a{ fill:red}"
-        );
+        for present in [
+            r#"stroke="blue""#,
+            r##"fill="url(#g)""##,
+            r#"opacity=".5""#,
+            r#"stroke-width="2""#,
+        ] {
+            assert!(out.contains(present), "{present} in {out}");
+        }
+        // Shorthands expand; non-presentation properties do not apply.
+        let out = clean(&format!(
+            r##"{OPEN}<path style="marker:url(#m);width:100;font:italic 14px serif"/></svg>"##
+        ))
+        .unwrap();
+        for present in [
+            r##"marker-start="url(#m)""##,
+            r##"marker-end="url(#m)""##,
+            r#"font-style="italic""#,
+            r#"font-size="14px""#,
+        ] {
+            assert!(out.contains(present), "{present} in {out}");
+        }
+        assert!(!out.contains("width"), "{out}");
+    }
+
+    #[test]
+    fn css_this_does_not_resolve_is_refused() {
+        for svg in [
+            format!("{OPEN}<style>g rect {{ fill: red }}</style></svg>"),
+            format!("{OPEN}<style>a + b {{ fill: red }}</style></svg>"),
+            format!("{OPEN}<style>@media screen {{ rect {{ fill: red }} }}</style></svg>"),
+            format!("{OPEN}<style>rect {{ fill: red ! important }}</style></svg>"),
+            format!("{OPEN}<style>rect {{ *fill: red }}</style></svg>"),
+            format!(r#"{OPEN}<rect style="*fill:red"/></svg>"#),
+            format!(r#"{OPEN}<rect style="fill:red!important"/></svg>"#),
+            format!(r#"{OPEN}<rect fill="\red"/></svg>"#),
+            format!("{OPEN}<style>rect {{ font-size: 2em }}</style></svg>"),
+            format!("{OPEN}<style>rect {{ fill: red }} /* unclosed</style></svg>"),
+        ] {
+            assert_eq!(clean(&svg).unwrap_err(), FailureCode::RenderParse, "{svg}");
+        }
     }
 
     #[test]
     fn tiny_numbers_are_written_as_zero() {
         let out = clean(&format!(
-            r#"{OPEN}<marker markerWidth="1e-30" markerHeight="1e-30em"/><path d="M1e-9.5 2" style="stroke-width:3e-12"/></svg>"#
+            r#"{OPEN}<style>rect {{ stroke-width: 1e-30px }}</style><marker markerWidth="1e-30" markerHeight="1e-30em"/><path d="M1e-9.5 2" style="stroke-opacity:3e-12"/><rect/></svg>"#
         ))
         .unwrap();
-        assert!(out.contains(r#"markerWidth="0""#), "{out}");
-        assert!(out.contains(r#"markerHeight="0em""#), "{out}");
-        assert!(out.contains(r#"d="M0 .5 2""#), "{out}");
-        assert!(out.contains(r#"style="stroke-width:0""#), "{out}");
-        assert_eq!(
-            check_style_sheet("rect { stroke-width: 1e-30px }")
-                .unwrap()
-                .text,
-            "rect { stroke-width: 0px }"
-        );
+        for present in [
+            r#"markerWidth="0""#,
+            r#"markerHeight="0em""#,
+            r#"d="M0 .5 2""#,
+            r#"stroke-opacity="0""#,
+            r#"stroke-width="0px""#,
+        ] {
+            assert!(out.contains(present), "{present} in {out}");
+        }
     }
 
     #[test]
@@ -811,21 +789,28 @@ mod tests {
         for svg in [
             format!(r#"{OPEN}<text font-size="xx-large"/></svg>"#),
             format!(r#"{OPEN}<text style="font:10000000em/1 serif"/></svg>"#),
-            format!(r#"{OPEN}<text style="font:bold medium serif"/></svg>"#),
             format!(r#"{OPEN}<rect mask="inherit"/></svg>"#),
             format!(r#"{OPEN}<rect style="clip-path:inherit"/></svg>"#),
             format!(r##"{OPEN}<rect filter="url(#a) url(#b)"/></svg>"##),
             format!(r#"{OPEN}<rect filter="blur(2)"/></svg>"#),
+            format!(r#"{OPEN}<svg width="10000000%"/></svg>"#),
+            format!(
+                r#"{OPEN}<rect stroke-dasharray="{}"/></svg>"#,
+                "1 ".repeat(65)
+            ),
         ] {
             assert_eq!(clean(&svg).unwrap_err(), FailureCode::RenderParse, "{svg}");
         }
-        assert_eq!(
-            check_style_sheet(".c { fill: context-fill }").unwrap_err(),
-            FailureCode::RenderParse
-        );
+        // A `font` shorthand with no readable size is left out, as usvg
+        // leaves it.
+        let out = clean(&format!(
+            r#"{OPEN}<text style="font:bold medium serif"/></svg>"#
+        ))
+        .unwrap();
+        assert!(!out.contains("font"), "{out}");
         assert!(
             clean(&format!(
-                r##"{OPEN}<text font-size="12pt" style="font:bold 14px/1.2 serif" filter="url(#f)" mask="none"/></svg>"##
+                r##"{OPEN}<text font-size="12pt" style="font:bold 14px/1.2 serif" filter="url(#f)" mask="none"/><rect width="120%" stroke-dasharray="4 2"/></svg>"##
             ))
             .is_ok()
         );

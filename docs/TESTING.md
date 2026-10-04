@@ -912,7 +912,7 @@ so is a filter rectangle scaled past what tiny-skia converts without
 panicking; marker sizes past the number bounds are `RenderParse`, while the
 extremes inside them render. A use bomb is refused within two seconds; a
 style sheet giving two thousand rectangles a thousand-shape pattern is
-refused (a sheet may name nothing). Three inputs that would crash usvg or
+charged per drawing and refused. Three inputs that would crash usvg or
 resvg are `RenderParse`: three patterns drawn with each other through
 inherited fills, relative font sizes multiplying a marker and a stroke past
 what usvg unwraps, and a 65536-square convolution kernel. A 10x10
@@ -929,17 +929,25 @@ quotes and line breaks exactly, drops scripts, foreign content, events and
 metadata, refuses a DTD, writes back a non-ASCII attribute name, keeps of
 two `href` spellings only the one usvg uses and of other namespaced
 attributes only `xml:space`, refuses numbers past the bounds while keeping
-editor rounding noise, hex colors and names with digits, lets a style sheet
-style (counting each selector of a list) but refuses one that names
-anything, `!important` and relative font sizes (behind a comment or not),
-refuses `!important` and relative font sizes in attributes too, and bounds
-convolution orders, writes numbers below 1e-6 as zero (`1e-9.5` as
-`0 .5`, `1e-30em` as `0em`) while `1e30em` is refused, and refuses font-size
-keywords, a relative size in the `font` shorthand, `inherit` for a mask or
-clip, filter lists and filter functions, and context paint in a style sheet;
-the structural count splits numbers as a parser does, refuses duplicate ids,
-charges context paint inherited by a marker's content per vertex and text
-paint per character,
+editor rounding noise, hex colors and names with digits, writes style sheets
+and `style` attributes back as attributes (an id rule beating a class rule
+beating the attribute, the `style` attribute last, an outside reference
+left out, the `marker` and `font` shorthands expanded, non-presentation
+properties ignored), refuses CSS it does not resolve (combinators, at-rules,
+`! important`, a `*fill` property, a backslash, a relative font size, an
+unclosed comment), bounds convolution orders, writes numbers below 1e-6 as
+zero (`1e-9.5` as `0 .5`, `1e-30em` as `0em`, a style sheet's too) while
+`1e30em` is refused, and refuses font-size keywords, a relative size in the
+`font` shorthand, `inherit` for a mask or clip, filter lists and filter
+functions, a percentage past 1000% and a 65-entry dash list, and drops
+`tref`; `src/svg/css.rs` tests parse simple selectors and refuse the rest,
+refuse sheets it does not resolve, bound rules times elements, and expand
+shorthands;
+the structural count splits numbers as a parser does, refuses duplicate ids
+(but not one on a dropped style sheet), charges context paint inherited by a
+marker's content per vertex and text paint per character (through a `use`
+of text and a link inside text as well), refuses viewports nested more than
+eight deep (symbols reached through uses included),
 charges a shared definition per use (900 uses of a thousand elements pass,
 999 do not), refuses nested uses, reference cycles (but not a link to an
 ancestor), cycles through paint contexts (a pattern under an element whose
@@ -954,8 +962,7 @@ counted as vertices and a namespaced `points` not hiding the real one,
 counts the `href` usvg follows, refuses markers that could hold markers
 (context paint included, while a context-stroke arrowhead on two hundred
 paths passes), and too many
-elements, too deep a tree, too long a path and too much style matching (a
-ten-thousand-selector list included); the layer walk refuses drawing work
+elements, too deep a tree and too long a path; the layer walk refuses drawing work
 past its count and a filter list on trees built straight from usvg; placement fits the box
 and then the ceiling and shifts a crop; unpremultiplying rounds and clears
 alpha-0 pixels; source lines are bounded, without line breaks; usvg with
@@ -985,7 +992,12 @@ their paint context, context paint unlinked, a unit's `e` read as an
 exponent, tiny numbers kept, font-size keywords or an unchecked `font`
 shorthand allowed, `inherit` for a reference allowed, filter lists allowed
 by the sanitizer or the layer walk, duplicate ids allowed, context paint in
-a style sheet, context paint not inherited, and text drawn once.
+a style sheet, context paint not inherited, text drawn once, a `style`
+attribute passed to usvg, combinators accepted, any property name accepted,
+non-presentation properties applied, rules left unsorted, matching left
+unbounded, `!` or a backslash allowed in a declaration, percentages or dash
+lists left unbounded, `tref` kept, viewports left unbounded, a link inside
+text not counted as text, and copies counting elements rather than pieces.
 
 `tests/source.rs` loads paths: a group-writable file (as umask 002 leaves it)
 and a symbolic link at the leaf are accepted; a FIFO with no writer is

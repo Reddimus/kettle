@@ -10,10 +10,10 @@
 //! the cost of the most expensive marker. The total bounds the tree usvg
 //! will build.
 //!
-//! Paint is modelled without modelling the cascade. A style sheet may not
-//! name anything (the sanitizer refuses `url(` in one, and `!important`
-//! anywhere), so the paint an element can be drawn with is one declared on
-//! it or on an ancestor, whichever wins. Every element has a paint context
+//! This runs on the sanitized text, where CSS has already been resolved into
+//! presentation attributes, so it reads attributes only. Paint is modelled
+//! without modelling which declaration wins: the paint an element can be
+//! drawn with is one declared on it or on an ancestor. Every element has a paint context
 //! that reaches all of those: its own paint references, then its parent's
 //! context. A shape or text is charged for, and linked to, its context; a
 //! `use` links its copy to its own context, charged once per painted
@@ -26,8 +26,8 @@
 //! would recurse through a pattern drawn with itself without end), an
 //! expanded nesting past `MAX_SVG_DEPTH` (usvg and resvg recurse that
 //! deep), more than `MAX_SVG_ELEMENTS` elements, an expanded cost over
-//! `MAX_SVG_WORK`, style sheets whose selectors matched against every
-//! element would cost more than ten times that, and markers that could hold
+//! `MAX_SVG_WORK`, more than `MAX_VIEWPORTS` viewports nested (references
+//! followed), and markers that could hold
 //! markers: a marker whose content (or what it references) sets a marker
 //! property, or that inherits one. usvg allows such nesting, and it
 //! multiplies per vertex at every level.
@@ -39,8 +39,10 @@ use roxmltree::{Document, Node};
 
 use super::sanitize::{self, Urls};
 
-/// Selectors times elements: the matching usvg does.
-const MAX_STYLE_MATCHING: u64 = 10 * MAX_SVG_WORK;
+/// Viewports (`svg`, `symbol`) nested in one another, references followed:
+/// a percentage length takes its size from the viewport around it, so each
+/// level can multiply the next.
+const MAX_VIEWPORTS: usize = 8;
 /// Vertices charged for a shape whose outline is not listed: a line,
 /// rectangle, circle or ellipse (a rounded rectangle has at most 13 points).
 const BASIC_SHAPE_VERTICES: u64 = 16;
@@ -58,13 +60,14 @@ struct Element {
     /// text once per character, and for a `use` once per painted element in
     /// its copy.
     copy_paint: Vec<usize>,
-    /// How many times a shape or text draws its paint (0 for a `use`, which
-    /// counts its copy instead).
+    /// How many times a shape or text draws its paint: once for a shape,
+    /// once per character for text (0 for a `use`, which counts its copy).
     pieces: u64,
     own: u64,
     /// For an element that can carry markers, its vertices.
     vertices: Option<u64>,
-    painted: bool,
+    /// An `svg` or `symbol`: a viewport for percentages inside it.
+    viewport: bool,
     declares_marker: bool,
     marker: bool,
     ancestor_declares: bool,
@@ -199,15 +202,11 @@ pub(super) fn admit(document: &Document<'_>) -> Result<(), FailureCode> {
             .collect()
     };
 
-    let mut selectors = 0u64;
-    for node in &nodes {
-        if node.tag_name().name() == "style" {
-            let css: String = node.children().filter_map(|child| child.text()).collect();
-            selectors = selectors.saturating_add(sanitize::check_style_sheet(&css)?.selectors);
-        }
-    }
-    if selectors.saturating_mul(all as u64) > MAX_STYLE_MATCHING {
-        return Err(FailureCode::RenderResource);
+    // Whether an element is text or inside it.
+    let mut in_text = Vec::with_capacity(nodes.len());
+    for (index, node) in nodes.iter().enumerate() {
+        let inside = parents[index].is_some_and(|parent: usize| in_text[parent]);
+        in_text.push(inside || node.tag_name().name() == "text");
     }
 
     // Indices: the elements, then each element's paint context, then the
@@ -253,15 +252,11 @@ pub(super) fn admit(document: &Document<'_>) -> Result<(), FailureCode> {
                 _ => {}
             }
         }
-        if painted(name) {
+        let text_like = in_text[index] && matches!(name, "text" | "tspan" | "textPath" | "a");
+        if text_like || painted(name) {
             // Positioned text is drawn in pieces down to a character each,
             // and each piece copies its paint: charge it per character.
-            let pieces = if name.starts_with('t') {
-                text.max(1)
-            } else {
-                1
-            };
-            paint_pieces = pieces;
+            paint_pieces = if text_like { text.max(1) } else { 1 };
             copy_paint.push(context_of(index));
         } else if name == "use" {
             copy_paint.push(context_of(index));
@@ -285,7 +280,7 @@ pub(super) fn admit(document: &Document<'_>) -> Result<(), FailureCode> {
             pieces: paint_pieces,
             own,
             vertices: vertices(*node),
-            painted: painted(name),
+            viewport: matches!(name, "svg" | "symbol"),
             declares_marker: found.declares_marker,
             marker: name == "marker",
             ancestor_declares,
@@ -306,10 +301,12 @@ pub(super) fn admit(document: &Document<'_>) -> Result<(), FailureCode> {
 
     let order = post_order(&elements)?;
 
-    // Whether an element, or what it renders, sets a marker property; and
-    // how many painted elements it draws in place.
+    // Whether an element, or what it renders, sets a marker property; how
+    // many pieces of paint it draws in place; and how many viewports nest
+    // in what it renders.
     let mut declares = vec![false; elements.len()];
     let mut painted_count = vec![0u64; elements.len()];
+    let mut viewports = vec![0usize; elements.len()];
     for &index in &order {
         let element = &elements[index];
         let in_place = element.children.iter().chain(&element.inherited);
@@ -318,10 +315,21 @@ pub(super) fn admit(document: &Document<'_>) -> Result<(), FailureCode> {
             || in_place.clone().any(|&target| declares[target])
             || elsewhere.any(|&target| declares[target] || elements[target].ancestor_declares);
         painted_count[index] = in_place
-            .fold(u64::from(element.painted), |count, &target| {
+            .clone()
+            .fold(element.pieces, |count, &target| {
                 count.saturating_add(painted_count[target])
             })
             .min(CAP);
+        viewports[index] = usize::from(element.viewport)
+            + in_place
+                .chain(&element.referenced)
+                .chain(&element.copy_paint)
+                .map(|&target| viewports[target])
+                .max()
+                .unwrap_or(0);
+        if viewports[index] > MAX_VIEWPORTS {
+            return Err(FailureCode::RenderResource);
+        }
     }
     for (index, element) in elements.iter().enumerate() {
         if element.marker && (element.ancestor_declares || declares[index]) {
@@ -468,7 +476,9 @@ mod tests {
         let svg = format!(
             r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">{body}</svg>"#
         );
-        admit(&sanitize::parse(&svg)?)
+        // Admission runs on the sanitized text, as in `render`.
+        let sanitized = sanitize::write(&sanitize::parse(&svg)?)?;
+        admit(&sanitize::parse(&sanitized)?)
     }
 
     #[test]
@@ -543,13 +553,13 @@ mod tests {
             .unwrap_err(),
             FailureCode::RenderResource
         );
-        // A style sheet may not set one at all.
+        // ...or set by a style sheet, which reaches the count as attributes.
         assert_eq!(
             admitted(&format!(
                 r##"<style>polyline {{ marker-mid: url(#m) }}</style><marker id="m">{marker}</marker><polyline points="{points}"/>"##
             ))
             .unwrap_err(),
-            FailureCode::RenderParse
+            FailureCode::RenderResource
         );
         // Without a marker property in effect the same polyline is cheap.
         assert!(
@@ -699,13 +709,57 @@ mod tests {
     }
 
     #[test]
+    fn text_pieces_are_charged_through_uses_and_links() {
+        let content: String = (0..1_000).map(|_| "<rect/>").collect();
+        let pattern = format!(r#"<defs><pattern id="p">{content}</pattern></defs>"#);
+        let text = "x".repeat(1_000);
+        // A hundred copies of thousand-character text, each piece copying
+        // the pattern its use passes down.
+        let uses: String = (0..100).map(|_| r##"<use href="#t"/>"##).collect();
+        assert_eq!(
+            admitted(&format!(
+                r##"{pattern}<defs><text id="t">{text}</text></defs><g fill="url(#p)">{uses}</g>"##
+            ))
+            .unwrap_err(),
+            FailureCode::RenderResource
+        );
+        // A link inside text is text too.
+        assert_eq!(
+            admitted(&format!(
+                r##"{pattern}<text><a fill="url(#p)">{text}</a></text>"##
+            ))
+            .unwrap_err(),
+            FailureCode::RenderResource
+        );
+    }
+
+    #[test]
+    fn viewports_nest_eight_deep_at_most() {
+        let nested = |depth: usize| format!("{}{}", "<svg>".repeat(depth), "</svg>".repeat(depth));
+        // The root is one viewport already.
+        assert!(admitted(&nested(7)).is_ok());
+        assert_eq!(
+            admitted(&nested(8)).unwrap_err(),
+            FailureCode::RenderResource
+        );
+        // Symbols reached through uses count as they are drawn.
+        let symbols = r##"<symbol id="a"><use href="#b"/></symbol><symbol id="b"><use href="#c"/></symbol><symbol id="c"><use href="#d"/></symbol><symbol id="d"><use href="#e"/></symbol><symbol id="e"><use href="#f"/></symbol><symbol id="f"><use href="#g"/></symbol><symbol id="g"><use href="#h"/></symbol><symbol id="h"><rect/></symbol><use href="#a"/>"##;
+        assert_eq!(admitted(symbols).unwrap_err(), FailureCode::RenderResource);
+    }
+
+    #[test]
     fn duplicate_ids_are_refused() {
         // usvg resolves a duplicate by the first or the last element
-        // depending on the reference, and skips some elements entirely.
+        // depending on the reference.
         assert_eq!(
-            admitted(r##"<style id="p"/><pattern id="p"><rect/></pattern><rect fill="url(#p)"/>"##)
+            admitted(r##"<rect id="p"/><pattern id="p"><rect/></pattern><rect fill="url(#p)"/>"##)
                 .unwrap_err(),
             FailureCode::RenderParse
+        );
+        // An id on a style sheet, which the writer drops, is no duplicate.
+        assert!(
+            admitted(r##"<style id="p"/><pattern id="p"><rect/></pattern><rect fill="url(#p)"/>"##)
+                .is_ok()
         );
     }
 

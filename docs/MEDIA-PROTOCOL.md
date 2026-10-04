@@ -396,24 +396,36 @@ back, so usvg only ever sees the rewritten text:
 | In the source | Written back |
 |---|---|
 | elements outside the SVG namespace (editor metadata) | dropped, with their content |
-| `script`, `foreignObject` | dropped, with their content (a `switch` falls back to its next child) |
+| `script`, `foreignObject`, `tref` | dropped, with their content (a `switch` falls back to its next child) |
+| `<style>` elements and `style` attributes | resolved here and written as presentation attributes (below); no CSS reaches usvg |
 | `href` or `xlink:href` naming a local fragment (`#id`) | kept: the plain one when both do, as usvg prefers it |
 | any other `href` (`file:`, `http:`, `data:`, a path) | removed |
 | other namespaced attributes (`xlink:title`, `xml:base`, ...) | dropped (`xml:space` kept): usvg reads attributes by local name |
 | a property `url(#id)` | kept |
-| a property naming anything else | the attribute, or the `style` declaration, removed |
-| a backslash escape or an unclosed `url(` in a property | `RenderParse` |
-| a style sheet with any `url(`, context paint, an `@import` or an escape | `RenderParse`: a sheet may style, never name, since which elements a rule reaches is not counted |
-| `!important` | `RenderParse`: it lets a lower declaration win |
+| a property naming anything else | the attribute, or the declaration, removed |
+| a backslash, or an unclosed `url(`, in a property | `RenderParse` |
+| a selector other than a type or `*` with `.class` and `#id` parts (a combinator, pseudo-class or attribute selector), an at-rule, any `!` in a declaration, or a property name other than lower-case letters and hyphens | `RenderParse` |
+| style rules times elements over 10,000,000 | `RenderResource` |
 | a font size other than a number with an absolute unit (`em`, `ex`, `%`, or a keyword such as `larger` or `xx-large`) | `RenderParse`: usvg scales each by the parent's size, and a chain multiplies past any bound |
+| a percentage past 1000% | `RenderParse`: viewports nest, each scaling the next |
+| a dash list of more than 64 entries | `RenderParse`: usvg keeps a copy for every element it applies to |
 | `inherit` for a clip, mask, filter or marker | `RenderParse`: it takes a reference from the parent |
 | a filter other than `none` or one `url(#id)` (a list, or a function such as `blur()`) | `RenderParse`: resvg runs a list on one layer with results of different sizes |
 | an `feConvolveMatrix` order over 64 | `RenderParse` (usvg multiplies the two in 32 bits) |
 | a duplicate `id` | `RenderParse`: usvg resolves a duplicate by its first or last element depending on the reference |
-| comments in a style sheet or a `style` attribute | removed before either is read; usvg gets the stripped text |
 | a number in a property or declaration past 10,000,000 | `RenderParse` |
 | a non-zero number below 1e-6 | written as `0` |
 | event attributes, comments, processing instructions | dropped |
+
+CSS is applied here, the way usvg applies it: an element's presentation
+attributes, then the matching rules in ascending specificity (a later rule
+winning a tie), then its `style` attribute, each declaration replacing the
+value before it, and only presentation properties applying; the `marker`
+shorthand sets all three marker properties and the `font` shorthand its parts
+(one usvg could not read is left out, as usvg leaves it). Comments are removed
+first. The winners are written as attributes, so usvg's own CSS engine never
+runs: which elements a rule reaches, how often it matches again in `use`
+copies, and how it splits a property name are no longer questions.
 
 The number bounds keep the products usvg forms and then unwraps (a marker's
 size times a stroke width, a radius times a scale) finite and non-zero; the
@@ -435,27 +447,27 @@ or point list and the characters of its text, plus a target's whole cost each
 time it is referenced (`use`, paint servers, clips, masks, filters, `feImage`,
 text paths and linked templates), plus, on a shape that can carry markers,
 its vertices times the most expensive marker (a path's vertices are its
-numbers: an `H` or `V` takes one). Paint is counted without following the
-cascade: since a style sheet can name nothing and `!important` is refused,
-the paint an element is drawn with is one declared on it or an ancestor.
+numbers: an `H` or `V` takes one). This runs on the rewritten text, where
+CSS is already attributes. Paint is counted without following which
+declaration wins: the paint an element is drawn with is one declared on it
+or an ancestor.
 Every element's paint context reaches all of those (its own references, then
 its parent's context, and every paint server the document uses where it
 declares `context-fill` or `context-stroke`); a shape is charged for its
-context once, text once per character (positioned text is drawn a piece per
-character, each copying its paint), and a `use` once per painted element in
-its copy. A `use` copy inherits marker properties from the `use`; other
+context once, text (a link inside text included) once per character
+(positioned text is drawn a piece per character, each copying its paint),
+and a `use` once per piece in its copy. A `use` copy inherits marker properties from the `use`; other
 targets inherit from where they are defined. Each of these is
 `RenderResource`:
 
 - more than 125,000 elements;
 - an expanded cost over 1,000,000 units;
 - an expanded nesting deeper than 256 (usvg and resvg recurse that deep);
-- selectors (each in a comma-separated list counted) times elements over
-  10,000,000 (the matching usvg does);
+- more than 8 viewports (`svg`, `symbol`) nested, references followed: a
+  percentage takes its size from the viewport around it;
 - a marker that could hold markers: one whose content, or what it references,
-  sets a marker property, one that inherits one, or one holding a shape while
-  a style sheet sets marker properties. usvg allows such nesting, and it
-  multiplies per vertex at every level.
+  sets a marker property, or one that inherits one. usvg allows such nesting,
+  and it multiplies per vertex at every level.
 
 A reference cycle is `RenderParse`, through paint contexts as well: usvg
 recurses through a pattern whose content may draw with that pattern without

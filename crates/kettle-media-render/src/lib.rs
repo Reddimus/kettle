@@ -59,6 +59,7 @@ mod tests {
             ("source", include_str!("source.rs")),
             ("container", include_str!("container.rs")),
             ("svg", include_str!("svg/mod.rs")),
+            ("svg/css", include_str!("svg/css.rs")),
             ("svg/fonts", include_str!("svg/fonts.rs")),
             ("svg/layers", include_str!("svg/layers.rs")),
             ("svg/sanitize", include_str!("svg/sanitize.rs")),

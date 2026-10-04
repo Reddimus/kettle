@@ -13,6 +13,7 @@
 //! with fully transparent pixels all zero, beside the source as display
 //! lines.
 
+mod css;
 mod fonts;
 mod layers;
 mod sanitize;
@@ -34,10 +35,10 @@ pub(crate) fn prepare() {
 pub(crate) fn render(job: &Job) -> Result<Rendered, FailureCode> {
     let snapshot = source::load(&job.source, job.kind.input_cap())?;
     let text = std::str::from_utf8(&snapshot.bytes).map_err(|_| FailureCode::RenderParse)?;
-    let document = sanitize::parse(text)?;
-    structure::admit(&document)?;
-    let sanitized = sanitize::write(&document)?;
-    drop(document);
+    // Sanitized (CSS resolved into attributes), then admitted on exactly
+    // the text usvg will parse.
+    let sanitized = sanitize::write(&sanitize::parse(text)?)?;
+    structure::admit(&sanitize::parse(&sanitized)?)?;
     let tree =
         usvg::Tree::from_str(&sanitized, &options()).map_err(|_| FailureCode::RenderParse)?;
     drop(sanitized);
