@@ -5,8 +5,8 @@
 //! nothing here trusts those to be the only bound, so every size is checked
 //! before the work it would cost.
 //!
-//! Raster jobs are rendered. Every other kind answers `UnsupportedMedia` until
-//! its renderer lands, and on Windows, where no worker runs, every job answers
+//! Raster and SVG jobs are rendered. Other kinds answer `UnsupportedMedia` until
+//! their renderers land, and on Windows, where no worker runs, every job answers
 //! `UnsupportedPlatform`.
 
 use kettle_media::{FailureCode, Job, Rendered};
