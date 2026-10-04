@@ -128,14 +128,15 @@ Reports that fit any of these are welcome:
   scripts, foreign content, event attributes, namespaced attributes other
   than `xlink:href` and `xml:space`, or any `href` or `url()` that names
   something outside the document; a reference that cannot be read plainly,
-  or a number large or small enough to overflow what usvg multiplies,
-  refuses it. resvg then parses it with image resolvers that load
+  a style sheet that names anything, `!important`, a relative font size, or
+  a number large or small enough to overflow what usvg multiplies, refuses
+  it. resvg then parses it with image resolvers that load
   nothing and no resources directory, and draws text with the bundled face
   only, never a host font. Its expanded size (references, `use` copies and
   per-vertex markers counted every time) and every layer, filter result,
   mask, clip and pattern tile resvg would allocate are admitted before any
-  is built, and a reference cycle, through inherited or style-sheet paint
-  as well, is refused. An SVG that makes the worker read or fetch anything,
+  is built, and a reference cycle, through inherited paint as well, is
+  refused. An SVG that makes the worker read or fetch anything,
   load a font it was not given, expand or allocate past those limits before
   being refused, or crash the worker, is in scope. This is resource isolation,
   not an operating-system sandbox: code execution inside the worker after

@@ -450,3 +450,23 @@ fn marker_sizes_stay_within_what_usvg_multiplies() {
         render_svg(&body, 64).unwrap_or_else(|code| panic!("{code:?}: {body}"));
     }
 }
+
+#[test]
+fn inputs_that_would_crash_usvg_or_resvg_are_refused() {
+    for body in [
+        // A pattern drawn with itself through inherited paint: usvg recurses
+        // until the stack overflows.
+        r##"<g fill="url(#p2)"><pattern id="p1" width="4" height="4"><rect width="2" height="2"/></pattern></g><g fill="url(#p3)"><pattern id="p2" width="4" height="4"><rect width="2" height="2"/></pattern></g><g fill="url(#p1)"><pattern id="p3" width="4" height="4"><rect width="2" height="2"/></pattern><rect width="8" height="8"/></g>"##,
+        // Relative font sizes multiplying a marker's size and a stroke width
+        // past what usvg unwraps.
+        r##"<g font-size="10000000"><g font-size="10000000em"><marker id="m" markerWidth="10000000em" markerHeight="10000000em" viewBox="0 0 1 1"><rect width="1" height="1"/></marker><path d="M0 0L10 10" stroke="black" stroke-width="10000000em" marker-end="url(#m)"/></g></g>"##,
+        // A kernel whose dimensions multiply past 32 bits.
+        r##"<filter id="f"><feConvolveMatrix order="65536 65536"/></filter><rect width="8" height="8" filter="url(#f)"/>"##,
+    ] {
+        assert_eq!(
+            render_svg(body, 64).unwrap_err(),
+            FailureCode::RenderParse,
+            "{body}"
+        );
+    }
+}

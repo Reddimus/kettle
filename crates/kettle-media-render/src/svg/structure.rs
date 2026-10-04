@@ -6,25 +6,31 @@
 //! cost every time it is used: `use` (whose copy inherits from the `use`),
 //! and paint servers, clips, masks, filters, `feImage`, text paths and the
 //! templates gradients, patterns and filters link to (which inherit from
-//! where they are defined). Paint counts where it is drawn: a shape or text
-//! is charged for the `fill` and `stroke` it inherits as well as its own, and
-//! a `use` for the paint its copy inherits, once per painted element in the
-//! copy. A style sheet may apply any of its references to any element, so
-//! every painted element is charged for the sheet's paint, and every
-//! graphics element for its clips, masks and filters. A shape that can carry
-//! markers adds, per vertex, the cost of the most expensive marker. The
-//! total bounds the tree usvg will build.
+//! where they are defined). A shape that can carry markers adds, per vertex,
+//! the cost of the most expensive marker. The total bounds the tree usvg
+//! will build.
 //!
-//! The walk refuses a reference cycle (inherited and style-sheet paint
-//! included: usvg would recurse through one without end), a document whose
-//! expanded nesting passes `MAX_SVG_DEPTH` (usvg and resvg recurse that
+//! Paint is modelled without modelling the cascade. A style sheet may not
+//! name anything (the sanitizer refuses `url(` in one, and `!important`
+//! anywhere), so the paint an element can be drawn with is one declared on
+//! it or on an ancestor, whichever wins. Every element has a paint context
+//! that reaches all of those: its own paint references, then its parent's
+//! context. A shape or text is charged for, and linked to, its context; a
+//! `use` links its copy to its own context, charged once per painted
+//! element in the copy; `context-fill` and `context-stroke` reach every
+//! paint server the document uses. An `id` resolves to its first and its
+//! last element, as usvg resolves `use` by the first and other references
+//! by the last.
+//!
+//! The walk refuses a reference cycle (through paint contexts as well: usvg
+//! would recurse through a pattern drawn with itself without end), an
+//! expanded nesting past `MAX_SVG_DEPTH` (usvg and resvg recurse that
 //! deep), more than `MAX_SVG_ELEMENTS` elements, an expanded cost over
 //! `MAX_SVG_WORK`, style sheets whose selectors matched against every
 //! element would cost more than ten times that, and markers that could hold
 //! markers: a marker whose content (or what it references) sets a marker
-//! property, or that inherits one, or that holds a shape while a style sheet
-//! sets marker properties. usvg allows such nesting, and it multiplies per
-//! vertex at every level.
+//! property, or that inherits one. usvg allows such nesting, and it
+//! multiplies per vertex at every level.
 
 use std::collections::HashMap;
 
@@ -48,8 +54,8 @@ struct Element {
     inherited: Vec<usize>,
     /// Targets rendered with the inheritance of where they are defined.
     referenced: Vec<usize>,
-    /// For a `use`: the paint its copy inherits, drawn by every painted
-    /// element in the copy.
+    /// For a `use`: its paint context, drawn by every painted element in the
+    /// copy.
     copy_paint: Vec<usize>,
     own: u64,
     /// For an element that can carry markers, its vertices.
@@ -58,48 +64,45 @@ struct Element {
     declares_marker: bool,
     marker: bool,
     ancestor_declares: bool,
+    /// Bookkeeping (a paint context), not an element: adds no nesting.
+    linking: bool,
 }
 
-impl Element {
-    fn edges(&self) -> impl Iterator<Item = &usize> + Clone {
-        self.children
-            .iter()
-            .chain(&self.inherited)
-            .chain(&self.referenced)
-            .chain(&self.copy_paint)
-    }
-}
-
-/// What an element declares: its paint (when it declares `fill` or `stroke`
-/// at all, the fragments they name), other rendering references, and markers.
+/// What an element declares, in its attributes and `style` together.
 #[derive(Default)]
 struct Declared {
-    fill: Option<Vec<String>>,
-    stroke: Option<Vec<String>>,
+    /// Fragments its `fill` and `stroke` name.
+    paint: Vec<String>,
+    /// Whether its `fill` or `stroke` is the marker's context paint.
+    context_paint: bool,
+    /// Fragments its clips, masks and filters name.
     other: Vec<String>,
     declares_marker: bool,
 }
 
 fn declared(node: Node<'_, '_>) -> Result<Declared, FailureCode> {
     fn property(name: &str, value: &str, found: &mut Declared) -> Result<(), FailureCode> {
+        // A value naming anything outside the document is removed by the
+        // writer, so usvg never sees it: it declares nothing.
         let ids = || -> Result<Vec<String>, FailureCode> {
             Ok(match sanitize::urls(value)? {
                 Urls::Local(ids) => ids.into_iter().map(str::to_owned).collect(),
-                // Removed by the writer: usvg never sees it.
                 Urls::External => Vec::new(),
             })
         };
         match name {
             _ if sanitize::marker_property(name) => found.declares_marker = true,
-            "fill" => found.fill = Some(ids()?),
-            "stroke" => found.stroke = Some(ids()?),
+            "fill" | "stroke" => {
+                found.paint.extend(ids()?);
+                found.context_paint |=
+                    value.contains("context-fill") || value.contains("context-stroke");
+            }
             "clip-path" | "mask" | "filter" => found.other.extend(ids()?),
             _ => {}
         }
         Ok(())
     }
     let mut found = Declared::default();
-    // Presentation attributes first: a `style` declaration overrides one.
     for attribute in node.attributes() {
         if attribute.namespace().is_none() && attribute.name() != "style" {
             property(attribute.name(), attribute.value(), &mut found)?;
@@ -130,15 +133,6 @@ fn painted(name: &str) -> bool {
             | "textPath"
             | "tref"
     )
-}
-
-/// Elements a style sheet's clip, mask or filter can apply to.
-fn graphic(name: &str) -> bool {
-    painted(name)
-        || matches!(
-            name,
-            "g" | "svg" | "a" | "switch" | "use" | "symbol" | "image"
-        )
 }
 
 fn count_numbers(text: &str) -> u64 {
@@ -184,80 +178,58 @@ pub(super) fn admit(document: &Document<'_>) -> Result<(), FailureCode> {
                 .map(|child| (child, Some(index))),
         );
     }
-    let mut ids: HashMap<&str, Vec<usize>> = HashMap::new();
+    // An id's first and last elements.
+    let mut ids: HashMap<&str, (usize, usize)> = HashMap::new();
     for (index, node) in nodes.iter().enumerate() {
         if let Some(id) = sanitize::plain(*node, "id") {
-            ids.entry(id).or_default().push(index);
+            ids.entry(id)
+                .and_modify(|(_, last)| *last = index)
+                .or_insert((index, index));
         }
     }
     let resolve = |targets: &[String]| -> Vec<usize> {
-        targets
-            .iter()
-            .flat_map(|id| ids.get(id.as_str()).into_iter().flatten().copied())
-            .collect()
+        let mut found = Vec::new();
+        for id in targets {
+            if let Some(&(first, last)) = ids.get(id.as_str()) {
+                found.push(first);
+                if last != first {
+                    found.push(last);
+                }
+            }
+        }
+        found
     };
 
-    // What the style sheets apply, and two stand-ins for "whatever a rule
-    // may apply to": one for their paint, one for their other references.
-    let mut sheet_paint = Vec::new();
-    let mut sheet_other = Vec::new();
-    let mut style_marks = false;
     let mut selectors = 0u64;
     for node in &nodes {
         if node.tag_name().name() == "style" {
             let css: String = node.children().filter_map(|child| child.text()).collect();
-            let sheet = sanitize::check_style_sheet(&css)?;
-            style_marks |= sheet.marks;
-            selectors = selectors.saturating_add(sheet.selectors);
-            sheet_paint.extend(sheet.paint);
-            sheet_other.extend(sheet.other);
+            selectors = selectors.saturating_add(sanitize::check_style_sheet(&css)?.selectors);
         }
     }
     if selectors.saturating_mul(all as u64) > MAX_STYLE_MATCHING {
         return Err(FailureCode::RenderResource);
     }
-    let sheet_paint_node = nodes.len();
-    let sheet_other_node = nodes.len() + 1;
 
-    let mut elements: Vec<Element> = Vec::with_capacity(nodes.len() + 2);
-    // The nearest element (itself included) declaring `fill` or `stroke`.
-    let mut fill_source: Vec<Option<usize>> = Vec::with_capacity(nodes.len());
-    let mut stroke_source: Vec<Option<usize>> = Vec::with_capacity(nodes.len());
-    let mut declarations: Vec<Declared> = Vec::with_capacity(nodes.len());
+    // Indices: the elements, then each element's paint context, then the
+    // stand-in for context paint.
+    let count = nodes.len();
+    let context_of = |index: usize| count + index;
+    let context_paint = 2 * count;
+    let mut elements: Vec<Element> = Vec::with_capacity(2 * count + 1);
+    let mut contexts: Vec<Element> = Vec::with_capacity(count);
+    let mut all_paint = Vec::new();
     for (index, node) in nodes.iter().enumerate() {
         let name = node.tag_name().name();
         let found = declared(*node)?;
         let parent = parents[index];
-        fill_source.push(if found.fill.is_some() {
-            Some(index)
-        } else {
-            parent.and_then(|parent| fill_source[parent])
+        let paint = resolve(&found.paint);
+        all_paint.extend(paint.iter().copied());
+        contexts.push(Element {
+            referenced: paint.into_iter().chain(parent.map(context_of)).collect(),
+            linking: true,
+            ..Element::default()
         });
-        stroke_source.push(if found.stroke.is_some() {
-            Some(index)
-        } else {
-            parent.and_then(|parent| stroke_source[parent])
-        });
-        // The paint in effect here, inherited or declared.
-        let mut paint = Vec::new();
-        for (source, pick) in [(fill_source[index], 0), (stroke_source[index], 1)] {
-            if let Some(source) = source {
-                let declaration = if source == index {
-                    &found
-                } else {
-                    &declarations[source]
-                };
-                let targets = if pick == 0 {
-                    &declaration.fill
-                } else {
-                    &declaration.stroke
-                };
-                paint.extend(resolve(targets.as_deref().unwrap_or_default()));
-            }
-        }
-        if !sheet_paint.is_empty() {
-            paint.push(sheet_paint_node);
-        }
         let mut referenced = resolve(&found.other);
         let mut inherited = Vec::new();
         let mut copy_paint = Vec::new();
@@ -271,12 +243,12 @@ pub(super) fn admit(document: &Document<'_>) -> Result<(), FailureCode> {
             }
         }
         if painted(name) {
-            referenced.extend(paint);
+            referenced.push(context_of(index));
         } else if name == "use" {
-            copy_paint = paint;
+            copy_paint.push(context_of(index));
         }
-        if graphic(name) && !sheet_other.is_empty() {
-            referenced.push(sheet_other_node);
+        if found.context_paint {
+            referenced.push(context_paint);
         }
         let text: u64 = node
             .children()
@@ -307,35 +279,32 @@ pub(super) fn admit(document: &Document<'_>) -> Result<(), FailureCode> {
             ancestor_declares,
             ..Element::default()
         });
-        declarations.push(found);
         if let Some(parent) = parent {
             elements[parent].children.push(index);
         }
     }
-    for targets in [&sheet_paint, &sheet_other] {
-        elements.push(Element {
-            referenced: resolve(targets),
-            ..Element::default()
-        });
-    }
+    elements.extend(contexts);
+    all_paint.sort_unstable();
+    all_paint.dedup();
+    elements.push(Element {
+        referenced: all_paint,
+        linking: true,
+        ..Element::default()
+    });
 
     let order = post_order(&elements)?;
 
-    // Whether an element, or what it renders, sets a marker property or
-    // holds a shape; and how many painted elements it draws in place.
+    // Whether an element, or what it renders, sets a marker property; and
+    // how many painted elements it draws in place.
     let mut declares = vec![false; elements.len()];
-    let mut shape = vec![false; elements.len()];
     let mut painted_count = vec![0u64; elements.len()];
     for &index in &order {
         let element = &elements[index];
         let in_place = element.children.iter().chain(&element.inherited);
-        let elsewhere = element.referenced.iter().chain(&element.copy_paint);
+        let mut elsewhere = element.referenced.iter().chain(&element.copy_paint);
         declares[index] = element.declares_marker
             || in_place.clone().any(|&target| declares[target])
-            || elsewhere
-                .clone()
-                .any(|&target| declares[target] || elements[target].ancestor_declares);
-        shape[index] = element.vertices.is_some() || element.edges().any(|&target| shape[target]);
+            || elsewhere.any(|&target| declares[target] || elements[target].ancestor_declares);
         painted_count[index] = in_place
             .fold(u64::from(element.painted), |count, &target| {
                 count.saturating_add(painted_count[target])
@@ -343,14 +312,12 @@ pub(super) fn admit(document: &Document<'_>) -> Result<(), FailureCode> {
             .min(CAP);
     }
     for (index, element) in elements.iter().enumerate() {
-        if element.marker
-            && (element.ancestor_declares || declares[index] || (style_marks && shape[index]))
-        {
+        if element.marker && (element.ancestor_declares || declares[index]) {
             return Err(FailureCode::RenderResource);
         }
     }
 
-    let first = costs(&elements, &order, &painted_count, style_marks, (0, 0));
+    let first = costs(&elements, &order, &painted_count, (0, 0));
     let markers = elements
         .iter()
         .enumerate()
@@ -361,11 +328,10 @@ pub(super) fn admit(document: &Document<'_>) -> Result<(), FailureCode> {
     let costs = if markers == (0, 0) {
         first
     } else {
-        costs(&elements, &order, &painted_count, style_marks, markers)
+        costs(&elements, &order, &painted_count, markers)
     };
     let (work, depth) = costs[0];
-    let context = usize::from(style_marks);
-    if work[context] > MAX_SVG_WORK || depth[context] > MAX_SVG_DEPTH {
+    if work[0] > MAX_SVG_WORK || depth[0] > MAX_SVG_DEPTH {
         return Err(FailureCode::RenderResource);
     }
     Ok(())
@@ -436,15 +402,14 @@ fn costs(
     elements: &[Element],
     order: &[usize],
     painted_count: &[u64],
-    style_marks: bool,
     (marker_work, marker_depth): (u64, usize),
 ) -> Vec<([u64; 2], [usize; 2])> {
     let mut costs = vec![([0u64; 2], [0usize; 2]); elements.len()];
-    let defined = |target: usize| usize::from(elements[target].ancestor_declares || style_marks);
+    let defined = |target: usize| usize::from(elements[target].ancestor_declares);
     for &index in order {
         let element = &elements[index];
         for context in 0..2 {
-            let inner = usize::from(context == 1 || element.declares_marker || style_marks);
+            let inner = usize::from(context == 1 || element.declares_marker);
             let mut work = element.own;
             let mut depth = 0;
             for &target in element.children.iter().chain(&element.inherited) {
@@ -460,8 +425,8 @@ fn costs(
                 count.saturating_add(painted_count[target])
             });
             for &target in &element.copy_paint {
-                work =
-                    work.saturating_add(painters.saturating_mul(costs[target].0[defined(target)]));
+                let paint = costs[target].0[defined(target)];
+                work = work.saturating_add(painters.saturating_mul(paint));
                 depth = depth.max(costs[target].1[defined(target)]);
             }
             if let Some(vertices) = element.vertices
@@ -471,7 +436,8 @@ fn costs(
                 depth = depth.max(marker_depth);
             }
             costs[index].0[context] = work.min(CAP);
-            costs[index].1[context] = (depth + 1).min(MAX_SVG_DEPTH + 1);
+            costs[index].1[context] =
+                (depth + usize::from(!element.linking)).min(MAX_SVG_DEPTH + 1);
         }
     }
     costs
@@ -552,7 +518,7 @@ mod tests {
             .unwrap_err(),
             FailureCode::RenderResource
         );
-        // ...inherited through a `use`...
+        // ...or inherited through a `use`.
         assert_eq!(
             admitted(&format!(
                 r##"<marker id="m">{marker}</marker><defs><polyline id="p" points="{points}"/></defs><g style="marker-mid:url(#m)"><use href="#p"/></g>"##
@@ -560,13 +526,13 @@ mod tests {
             .unwrap_err(),
             FailureCode::RenderResource
         );
-        // ...or from a style sheet.
+        // A style sheet may not set one at all.
         assert_eq!(
             admitted(&format!(
                 r##"<style>polyline {{ marker-mid: url(#m) }}</style><marker id="m">{marker}</marker><polyline points="{points}"/>"##
             ))
             .unwrap_err(),
-            FailureCode::RenderResource
+            FailureCode::RenderParse
         );
         // Without a marker property in effect the same polyline is cheap.
         assert!(
@@ -576,14 +542,14 @@ mod tests {
             .is_ok()
         );
     }
-
     #[test]
     fn markers_that_could_hold_markers_are_refused() {
         for body in [
             r##"<marker id="a"><path d="M0 0L1 1" marker-end="url(#b)"/></marker><marker id="b"><rect/></marker>"##,
             r##"<g marker-end="url(#b)"><marker id="a"><path d="M0 0L1 1"/></marker></g><marker id="b"/>"##,
             r##"<marker id="a"><use href="#p"/></marker><path id="p" d="M0 0L1 1" marker-end="url(#a)"/>"##,
-            r##"<style>path { marker-end: url(#a) }</style><marker id="a"><path d="M0 0L1 1"/></marker>"##,
+            // Context paint reaches a pattern whose shape carries a marker.
+            r##"<marker id="a"><rect fill="context-fill"/></marker><pattern id="p"><path d="M0 0L1 1" marker-end="url(#a)"/></pattern><path d="M0 0L9 9" fill="url(#p)" marker-end="url(#a)"/>"##,
         ] {
             assert_eq!(
                 admitted(body).unwrap_err(),
@@ -597,12 +563,11 @@ mod tests {
             .collect();
         assert!(
             admitted(&format!(
-                r##"<marker id="arrow"><path d="M0 0L10 5L0 10z"/></marker>{paths}"##
+                r##"<marker id="arrow"><path d="M0 0L10 5L0 10z" fill="context-stroke"/></marker>{paths}"##
             ))
             .is_ok()
         );
     }
-
     #[test]
     fn tree_size_and_depth_are_bounded() {
         let many: String = (0..MAX_SVG_ELEMENTS).map(|_| "<g/>").collect();
@@ -671,35 +636,31 @@ mod tests {
     }
 
     #[test]
-    fn comments_do_not_hide_marker_rules() {
+    fn comments_do_not_hide_marker_declarations() {
         let marker: String = (0..100).map(|_| "<rect/>").collect();
         let points: String = (0..12_000).map(|i| format!("{i},{i} ")).collect();
-        for style in ["<style>polyline { /*c*/ marker-mid: url(#m) }</style>", ""] {
-            let inline = if style.is_empty() {
-                r#" style="/*c*/marker-mid:url(#m)""#
-            } else {
-                ""
-            };
-            assert_eq!(
-                admitted(&format!(
-                    r##"{style}<marker id="m">{marker}</marker><polyline points="{points}"{inline}/>"##
-                ))
-                .unwrap_err(),
-                FailureCode::RenderResource,
-                "{style}{inline}"
-            );
-        }
+        assert_eq!(
+            admitted(&format!(
+                r##"<marker id="m">{marker}</marker><polyline points="{points}" style="/*c:d*/marker-mid:url(#m)"/>"##
+            ))
+            .unwrap_err(),
+            FailureCode::RenderResource
+        );
     }
-
     #[test]
-    fn inherited_and_style_sheet_paint_close_cycles() {
+    fn paint_contexts_close_cycles() {
         for body in [
             // The pattern's rectangle inherits the fill naming the pattern.
             r##"<g fill="url(#p)"><pattern id="p" width="8" height="8"><rect width="4" height="4"/></pattern><rect width="8" height="8"/></g>"##,
+            // ...whatever it declares itself: `inherit`, a colour, or a
+            // reference the writer removes.
+            r##"<g fill="url(#p)"><pattern id="p"><rect fill="inherit"/></pattern></g>"##,
+            r##"<g fill="url(#p)"><pattern id="p"><rect fill="red"/></pattern></g>"##,
+            r##"<g fill="url(#p)"><pattern id="p"><rect fill="url(http://x/)"/></pattern></g>"##,
+            // Three patterns chained through inherited fills.
+            r##"<g fill="url(#p2)"><pattern id="p1"><rect/></pattern></g><g fill="url(#p3)"><pattern id="p2"><rect/></pattern></g><g fill="url(#p1)"><pattern id="p3"><rect/></pattern></g>"##,
             // A use inside the pattern copies a shape that inherits it.
             r##"<g fill="url(#p)"><pattern id="p" width="8" height="8"><use href="#r"/></pattern></g><rect id="r" width="4" height="4"/>"##,
-            // A style sheet's fills chain three patterns into a loop.
-            r##"<style>.a { fill: url(#p2) } .b { fill: url(#p3) } .c { fill: url(#p1) }</style><pattern id="p1"><rect class="a"/></pattern><pattern id="p2"><rect class="b"/></pattern><pattern id="p3"><rect class="c"/></pattern><rect fill="url(#p1)"/>"##,
         ] {
             assert_eq!(
                 admitted(body).unwrap_err(),
@@ -707,13 +668,29 @@ mod tests {
                 "{body}"
             );
         }
-        // A style sheet's gradient, whose stops are not painted, is ordinary.
+        // A style sheet naming a pattern is refused before any of this.
+        assert_eq!(
+            admitted(r##"<style>.a { fill: url(#p) }</style><pattern id="p"><rect class="a"/></pattern>"##)
+                .unwrap_err(),
+            FailureCode::RenderParse
+        );
+        // Patterns in definitions, filling shapes elsewhere, are ordinary.
         assert!(
-            admitted(r##"<style>.a { fill: url(#g) }</style><linearGradient id="g"><stop offset="0"/><stop offset="1"/></linearGradient><rect class="a"/>"##)
+            admitted(r##"<defs><pattern id="p"><rect fill="red"/></pattern><linearGradient id="g"><stop offset="0"/></linearGradient></defs><rect fill="url(#p)" stroke="url(#g)"/>"##)
                 .is_ok()
         );
     }
 
+    #[test]
+    fn duplicate_ids_resolve_to_two_elements_at_most() {
+        // Sixty thousand rectangles sharing an id and as many uses of it:
+        // each use links its first and last element, never all of them.
+        let rects: String = (0..60_000).map(|_| r#"<rect id="d"/>"#).collect();
+        let uses: String = (0..60_000).map(|_| r##"<use href="#d"/>"##).collect();
+        let started = std::time::Instant::now();
+        let _ = admitted(&format!("<defs>{rects}</defs>{uses}"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
     #[test]
     fn inherited_paint_is_charged_where_it_is_drawn() {
         // A thousand-element pattern inherited by a thousand rectangles,
@@ -732,26 +709,17 @@ mod tests {
             .unwrap_err(),
             FailureCode::RenderResource
         );
-        // ...and a style sheet's paint is charged to every painted element
-        // (a gradient here: a sheet naming a pattern that holds painted
-        // shapes is a cycle, refused as one).
-        let stops: String = (0..1_000).map(|_| r#"<stop offset="0"/>"#).collect();
+        // A marker drawn with context paint copies the shape's pattern for
+        // every vertex.
+        let steps: String = (0..10_000).map(|i| format!("L{i} 0")).collect();
         assert_eq!(
             admitted(&format!(
-                r##"<style>.x {{ fill: url(#g) }}</style><linearGradient id="g">{stops}</linearGradient>{rects}"##
+                r##"{pattern}<marker id="m"><rect fill="context-fill"/></marker><path d="M0 0{steps}" fill="url(#p)" marker-mid="url(#m)"/>"##
             ))
             .unwrap_err(),
             FailureCode::RenderResource
         );
-        assert_eq!(
-            admitted(&format!(
-                r##"<style>.x {{ fill: url(#p) }}</style>{pattern}{rects}"##
-            ))
-            .unwrap_err(),
-            FailureCode::RenderParse
-        );
     }
-
     #[test]
     fn style_matching_is_bounded() {
         // One rule with ten thousand selectors is ten thousand rules.

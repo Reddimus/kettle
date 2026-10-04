@@ -403,7 +403,9 @@ back, so usvg only ever sees the rewritten text:
 | a property `url(#id)` | kept |
 | a property naming anything else | the attribute, or the `style` declaration, removed |
 | a backslash escape or an unclosed `url(` in a property | `RenderParse` |
-| a style sheet with an `@import`, an escape or an outside `url(` | `RenderParse` |
+| a style sheet with any `url(`, an `@import` or an escape | `RenderParse`: a sheet may style, never name, since which elements a rule reaches is not counted |
+| `!important`, or a font size relative to an inherited one (`em`, `ex`, `%`, `larger`, `smaller`) | `RenderParse`: the first lets a lower declaration win, and chains of the second multiply past any bound |
+| an `feConvolveMatrix` order over 64 | `RenderParse` (usvg multiplies the two in 32 bits) |
 | comments in a style sheet or a `style` attribute | removed before either is read; usvg gets the stripped text |
 | a number in a property or declaration past 10,000,000, or non-zero below 1e-20 | `RenderParse` |
 | event attributes, comments, processing instructions | dropped |
@@ -427,15 +429,17 @@ or point list and the characters of its text, plus a target's whole cost each
 time it is referenced (`use`, paint servers, clips, masks, filters, `feImage`,
 text paths and linked templates), plus, on a shape that can carry markers,
 its vertices times the most expensive marker (a path's vertices are its
-numbers: an `H` or `V` takes one). Paint counts where it is drawn: a shape
-or text is charged for the `fill` and `stroke` it inherits as well as its
-own, and a `use` for the paint its copy inherits, once per painted element
-in the copy. A `use` copy inherits marker properties from the `use`; other
-targets inherit from where they are defined. The structure pass cannot tell
-which elements a style-sheet rule matches, so a sheet's paint is charged to
-every painted element and its clips, masks and filters to every graphics
-element, and a sheet that sets a marker property applies everywhere. Each of
-these is `RenderResource`:
+numbers: an `H` or `V` takes one). Paint is counted without following the
+cascade: since a style sheet can name nothing and `!important` is refused,
+the paint an element is drawn with is one declared on it or an ancestor.
+Every element's paint context reaches all of those (its own references, then
+its parent's context); a shape or text is charged for its context, a `use`
+for its own context once per painted element in its copy, and
+`context-fill` or `context-stroke` for every paint server the document uses.
+A `use` copy inherits marker properties from the `use`; other targets
+inherit from where they are defined. An `id` resolves to its first and last
+elements, as usvg resolves `use` by the first and other references by the
+last. Each of these is `RenderResource`:
 
 - more than 125,000 elements;
 - an expanded cost over 1,000,000 units;
@@ -447,10 +451,10 @@ these is `RenderResource`:
   a style sheet sets marker properties. usvg allows such nesting, and it
   multiplies per vertex at every level.
 
-A reference cycle is `RenderParse`, inherited and style-sheet paint included:
-usvg recurses through a pattern whose content draws with that pattern without
-end. A style sheet naming a pattern that holds painted shapes may close such
-a cycle, and is refused as one.
+A reference cycle is `RenderParse`, through paint contexts as well: usvg
+recurses through a pattern whose content may draw with that pattern without
+end, so a pattern defined under an element whose paint names it is refused
+whatever its own content declares.
 
 **SVG: layers.** The image is fitted inside the target box keeping its aspect
 ratio, then, without a crop, within 1024 pixels a side and 1,048,576 pixels
