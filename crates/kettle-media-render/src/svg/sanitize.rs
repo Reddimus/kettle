@@ -337,7 +337,7 @@ fn bound_plain(text: &str, out: &mut String) -> Result<(), FailureCode> {
 }
 
 /// Attributes that name things rather than measure them.
-fn identifier(name: &str) -> bool {
+pub(super) fn identifier(name: &str) -> bool {
     matches!(
         name,
         "id" | "class"
@@ -603,7 +603,19 @@ pub(super) fn write(document: &Document<'_>) -> Result<String, FailureCode> {
                     Kept::Dropped => {}
                 }
             }
-            for (name, value) in attributes.into_iter().chain(applied) {
+            // usvg reads these three only from CSS: a `style` attribute of
+            // checked keywords, composed here, carries them.
+            let (style, applied): (Vec<_>, Vec<_>) = applied
+                .into_iter()
+                .partition(|(name, _)| css::css_only(name));
+            let style = (!style.is_empty()).then(|| {
+                let declarations: Vec<String> = style
+                    .iter()
+                    .map(|(name, value)| format!("{name}:{value}"))
+                    .collect();
+                ("style".to_owned(), declarations.join(";"))
+            });
+            for (name, value) in attributes.into_iter().chain(applied).chain(style) {
                 let value = escape(&value, true);
                 written += name.len() + value.len() + 4;
                 writer.write_attribute_raw(&name, |buffer| {
@@ -747,6 +759,21 @@ mod tests {
             assert!(out.contains(present), "{present} in {out}");
         }
         assert!(!out.contains("width"), "{out}");
+    }
+
+    #[test]
+    fn properties_usvg_reads_only_from_css_stay_in_a_composed_style() {
+        let out = clean(&format!(
+            r#"{OPEN}<style>g {{ isolation: isolate }}</style><g style="mix-blend-mode:Multiply;font-kerning:none;opacity:.5"/><rect style="mix-blend-mode:plus-darker"/></svg>"#
+        ))
+        .unwrap();
+        assert!(
+            out.contains(r#"style="isolation:isolate;mix-blend-mode:multiply;font-kerning:none""#),
+            "{out}"
+        );
+        assert!(out.contains(r#"opacity=".5""#), "{out}");
+        // A value usvg would not read is left out.
+        assert!(out.contains("<rect/>"), "{out}");
     }
 
     #[test]

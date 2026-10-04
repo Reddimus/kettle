@@ -913,9 +913,11 @@ panicking; marker sizes past the number bounds are `RenderParse`, while the
 extremes inside them render. A use bomb is refused within two seconds; a
 style sheet giving two thousand rectangles a thousand-shape pattern is
 charged per drawing and refused. Three inputs that would crash usvg or
-resvg are `RenderParse`: three patterns drawn with each other through
-inherited fills, relative font sizes multiplying a marker and a stroke past
-what usvg unwraps, and a 65536-square convolution kernel. A 10x10
+resvg are refused as `RenderParse`: three patterns drawn with each other
+through inherited fills, relative font sizes multiplying a marker and a
+stroke past what usvg unwraps, and a 65536-square convolution kernel; and a
+filter region so small and far that usvg panics is answered as `RenderParse`
+by the guard. A 10x10
 image in a 4096x2048 box comes back at 1024x1024, and a crop reaches the
 full fitted image within the ceiling. An input of exactly 2 MiB renders and
 one byte more is `TooLarge`; a path source renders through its held file
@@ -940,14 +942,18 @@ zero (`1e-9.5` as `0 .5`, `1e-30em` as `0em`, a style sheet's too) while
 `1e30em` is refused, and refuses font-size keywords, a relative size in the
 `font` shorthand, `inherit` for a mask or clip, filter lists and filter
 functions, a percentage past 1000% and a 65-entry dash list, and drops
-`tref`; `src/svg/css.rs` tests parse simple selectors and refuse the rest,
+`tref`, and carries `mix-blend-mode`, `isolation` and `font-kerning` in a
+composed `style` of checked keywords; `src/svg/css.rs` tests parse simple
+selectors and refuse the rest (non-ASCII ones included),
 refuse sheets it does not resolve, bound rules times elements, and expand
 shorthands;
 the structural count splits numbers as a parser does, refuses duplicate ids
 (but not one on a dropped style sheet), charges context paint inherited by a
 marker's content per vertex and text paint per character (through a `use`
 of text and a link inside text as well), refuses viewports nested more than
-eight deep (symbols reached through uses included),
+eight deep (symbols reached through uses included), charges a filter table
+of 1,000 numbers and a 200,000-byte result name per element using them,
+charges decorated positioned text per copy,
 charges a shared definition per use (900 uses of a thousand elements pass,
 999 do not), refuses nested uses, reference cycles (but not a link to an
 ancestor), cycles through paint contexts (a pattern under an element whose
@@ -968,7 +974,8 @@ and then the ceiling and shifts a crop; unpremultiplying rounds and clears
 alpha-0 pixels; source lines are bounded, without line breaks; usvg with
 these options builds no image node even from unsanitized absolute paths and
 data URLs; and the font database holds the bundled face alone, which every
-family resolves to. `tests/hostile.rs` also shows an SVG filter five
+family resolves to. A unit test shows the guard answering a panic with its failure and passing
+results through. `tests/hostile.rs` also shows an SVG filter five
 canvases wide refused before any allocation as large as the canvas itself.
 
 SVG red checks: an `href` kept whatever it names, a DTD allowed, scripts and
@@ -997,7 +1004,10 @@ attribute passed to usvg, combinators accepted, any property name accepted,
 non-presentation properties applied, rules left unsorted, matching left
 unbounded, `!` or a backslash allowed in a declaration, percentages or dash
 lists left unbounded, `tref` kept, viewports left unbounded, a link inside
-text not counted as text, and copies counting elements rather than pieces.
+text not counted as text, copies counting elements rather than pieces, a
+selector split by byte, CSS-only properties written as attributes or with
+unchecked values, panics not caught, only path numbers counted, attribute
+bytes left free, and text painted once per character.
 
 `tests/source.rs` loads paths: a group-writable file (as umask 002 leaves it)
 and a symbolic link at the leaf are accepted; a FIFO with no writer is

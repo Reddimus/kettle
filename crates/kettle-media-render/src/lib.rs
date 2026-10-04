@@ -20,6 +20,20 @@ pub mod source;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod svg;
 
+/// Run `work`, answering a panic inside it with `failure`. The decoders and
+/// renderers this calls may panic on input that admission did not foresee;
+/// where the build unwinds (tests, and the worker's own `media-worker`
+/// profile) that is a fixed failure, and where it does not, the worker
+/// process is the boundary instead. Only library calls are guarded, so a
+/// panic in this crate's own checks still shows up in its tests.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub(crate) fn guarded<T>(
+    failure: FailureCode,
+    work: impl FnOnce() -> Result<T, FailureCode>,
+) -> Result<T, FailureCode> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).unwrap_or(Err(failure))
+}
+
 /// Build what every job shares (the bundled font database) ahead of any job,
 /// so a worker does it before it reports Ready rather than inside a job's
 /// deadline.
@@ -49,6 +63,23 @@ pub fn render(job: &Job) -> Result<Rendered, FailureCode> {
 #[cfg(test)]
 mod tests {
     use kettle_test_support::{code_only, production_source};
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_guarded_panic_is_its_failure() {
+        use kettle_media::FailureCode;
+        assert_eq!(
+            super::guarded::<()>(FailureCode::RenderParse, || panic!("a decoder's bug")),
+            Err(FailureCode::RenderParse)
+        );
+        assert_eq!(
+            super::guarded(FailureCode::RenderParse, || Err::<(), _>(
+                FailureCode::TooLarge
+            )),
+            Err(FailureCode::TooLarge)
+        );
+        assert_eq!(super::guarded(FailureCode::RenderParse, || Ok(7)), Ok(7));
+    }
 
     /// The renderer reads its source and writes nothing: no file creation,
     /// write, rename, removal or permission change anywhere in its code.

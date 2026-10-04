@@ -467,3 +467,12 @@ fn inputs_that_would_crash_usvg_or_resvg_are_refused() {
         );
     }
 }
+
+#[test]
+fn a_panic_in_usvg_is_a_failure_not_a_crash() {
+    // A filter region so small, so far from the origin, that tiny-skia's
+    // bounding-box arithmetic rounds its width to zero and unwraps: usvg
+    // panics, and the guard answers it.
+    let body = r#"<filter id="f" x="0" y="0" width=".000001" height=".000001"><feFlood/></filter><rect x="10000000" y="10000000" width="1" height="1" filter="url(#f)"/>"#;
+    assert_eq!(render_svg(body, 64).unwrap_err(), FailureCode::RenderParse);
+}

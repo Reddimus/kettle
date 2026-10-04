@@ -39,19 +39,23 @@ pub(crate) fn render(job: &Job) -> Result<Rendered, FailureCode> {
     // the text usvg will parse.
     let sanitized = sanitize::write(&sanitize::parse(text)?)?;
     structure::admit(&sanitize::parse(&sanitized)?)?;
-    let tree =
-        usvg::Tree::from_str(&sanitized, &options()).map_err(|_| FailureCode::RenderParse)?;
+    let tree = crate::guarded(FailureCode::RenderParse, || {
+        usvg::Tree::from_str(&sanitized, &options()).map_err(|_| FailureCode::RenderParse)
+    })?;
     drop(sanitized);
     let placement = place(tree.size(), job.target)?;
-    layers::admit(
-        &tree,
-        placement.transform,
-        placement.width,
-        placement.height,
-    )?;
-    let mut pixmap =
-        Pixmap::new(placement.width, placement.height).ok_or(FailureCode::RenderResource)?;
-    resvg::render(&tree, placement.transform, &mut pixmap.as_mut());
+    let pixmap = crate::guarded(FailureCode::RenderParse, || {
+        layers::admit(
+            &tree,
+            placement.transform,
+            placement.width,
+            placement.height,
+        )?;
+        let mut pixmap =
+            Pixmap::new(placement.width, placement.height).ok_or(FailureCode::RenderResource)?;
+        resvg::render(&tree, placement.transform, &mut pixmap.as_mut());
+        Ok(pixmap)
+    })?;
     drop(tree);
     let rgba = unpremultiply(pixmap.take());
     let digest =

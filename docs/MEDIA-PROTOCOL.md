@@ -422,14 +422,19 @@ attributes, then the matching rules in ascending specificity (a later rule
 winning a tie), then its `style` attribute, each declaration replacing the
 value before it, and only presentation properties applying; the `marker`
 shorthand sets all three marker properties and the `font` shorthand its parts
-(one usvg could not read is left out, as usvg leaves it). Comments are removed
+(one usvg could not read is left out, as usvg leaves it). `mix-blend-mode`,
+`isolation` and `font-kerning`, which usvg reads from CSS but ignores as
+attributes, are written in a `style` attribute composed here from the
+keywords usvg reads, and any other value is left out. Comments are removed
 first. The winners are written as attributes, so usvg's own CSS engine never
 runs: which elements a rule reaches, how often it matches again in `use`
 copies, and how it splits a property name are no longer questions.
 
-The number bounds keep the products usvg forms and then unwraps (a marker's
-size times a stroke width, a radius times a scale) finite and non-zero; the
-rounding noise editors write (about 6e-17) becomes the zero it stands for. A
+The number bounds keep the products usvg forms directly and then unwraps (a
+marker's size times a stroke width, a radius times a scale) finite and
+non-zero; the rounding noise editors write (about 6e-17) becomes the zero it
+stands for. They cannot rule out every derived value rounding away (a tiny
+width added to a far coordinate); the guard below answers those. A
 unit that begins with `e` (`2em`) is read as a unit, not an exponent. Hex colors,
 fragment names and identifiers (`id`, `class`, filter result names) are not
 read as numbers.
@@ -442,8 +447,10 @@ and string references alike, so even a reference the rewrite missed reads no
 file and no network.
 
 **SVG: structure.** Before usvg, the document's cost once its references are
-expanded is counted: one unit per element, plus the numbers in its path data
-or point list and the characters of its text, plus a target's whole cost each
+expanded is counted: one unit per element, plus every number its attributes
+hold (path data, point lists and filter tables alike; identifiers such as
+`id` and `class` aside), a unit per 64 bytes of attribute text, and the
+characters of its text, plus a target's whole cost each
 time it is referenced (`use`, paint servers, clips, masks, filters, `feImage`,
 text paths and linked templates), plus, on a shape that can carry markers,
 its vertices times the most expensive marker (a path's vertices are its
@@ -454,9 +461,10 @@ or an ancestor.
 Every element's paint context reaches all of those (its own references, then
 its parent's context, and every paint server the document uses where it
 declares `context-fill` or `context-stroke`); a shape is charged for its
-context once, text (a link inside text included) once per character
-(positioned text is drawn a piece per character, each copying its paint),
-and a `use` once per piece in its copy. A `use` copy inherits marker properties from the `use`; other
+context once, text (a link inside text included) twelve times per character
+(usvg copies a piece's paint for the span, its laid-out chunk and its
+flattened outline, each with up to three decorations), and a `use` once per
+piece in its copy. A `use` copy inherits marker properties from the `use`; other
 targets inherit from where they are defined. Each of these is
 `RenderResource`:
 
@@ -507,10 +515,13 @@ client's memory limit still stand behind this.
 
 The admission above is built from usvg's and resvg's source as pinned, and
 it refuses what it cannot follow rather than guess. It is not a proof that
-neither library can panic or overflow on some input it allows; where one
-does, the worker is the crash boundary: the panic aborts only the worker,
-the job fails, and Kettle is untouched. The fuzzing that follows this work
-aims at that remainder.
+neither library can panic on some input it allows, so usvg's parsing,
+resvg's rendering and the raster decoders run inside a guard that answers a
+panic as `RenderParse`. That takes unwinding: the worker is built with the
+`media-worker` profile (release, unwinding) for that reason. A build that
+aborts on panic instead leaves the worker as the crash boundary: the panic
+ends only the worker, the job fails, and Kettle is untouched. The fuzzing
+that follows this work aims at what remains.
 
 **SVG: result.** resvg's premultiplied pixels come back as straight RGBA,
 rounded, with every fully transparent pixel all zero. Text is drawn with the

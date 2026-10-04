@@ -1,8 +1,9 @@
 //! Structural admission: what an SVG document costs once usvg expands its
 //! references, counted on the parsed document before usvg sees it.
 //!
-//! Each element costs one unit, plus the numbers in its path data or point
-//! list and the characters of its text. A reference adds its target's whole
+//! Each element costs one unit, plus every number its attributes hold (path
+//! data, point lists, filter tables alike), a unit per `ATTRIBUTE_BYTES` of
+//! attribute text, and the characters of its text. A reference adds its target's whole
 //! cost every time it is used: `use` (whose copy inherits from the `use`),
 //! and paint servers, clips, masks, filters, `feImage`, text paths and the
 //! templates gradients, patterns and filters link to (which inherit from
@@ -46,6 +47,12 @@ const MAX_VIEWPORTS: usize = 8;
 /// Vertices charged for a shape whose outline is not listed: a line,
 /// rectangle, circle or ellipse (a rounded rectangle has at most 13 points).
 const BASIC_SHAPE_VERTICES: u64 = 16;
+/// The bytes of attribute text one unit of work stands for.
+const ATTRIBUTE_BYTES: u64 = 64;
+/// The copies of its paint usvg makes per character of text: for the span,
+/// its laid-out chunk and its flattened outline, each with up to three
+/// decorations beside the glyph.
+const TEXT_PAINT_COPIES: u64 = 12;
 /// Costs stop counting just past the limit, so sums cannot overflow.
 const CAP: u64 = MAX_SVG_WORK + 1;
 
@@ -256,7 +263,11 @@ pub(super) fn admit(document: &Document<'_>) -> Result<(), FailureCode> {
         if text_like || painted(name) {
             // Positioned text is drawn in pieces down to a character each,
             // and each piece copies its paint: charge it per character.
-            paint_pieces = if text_like { text.max(1) } else { 1 };
+            paint_pieces = if text_like {
+                text.max(1).saturating_mul(TEXT_PAINT_COPIES)
+            } else {
+                1
+            };
             copy_paint.push(context_of(index));
         } else if name == "use" {
             copy_paint.push(context_of(index));
@@ -264,13 +275,25 @@ pub(super) fn admit(document: &Document<'_>) -> Result<(), FailureCode> {
         let ancestor_declares = parent.is_some_and(|parent| {
             elements[parent].ancestor_declares || elements[parent].declares_marker
         });
+        // Every number an attribute holds is parsed and kept, and every
+        // attribute is copied where its element is: charge numbers and bytes.
+        let attributes = node
+            .attributes()
+            .filter(|attribute| attribute.namespace().is_none());
+        let (numbers, bytes) = attributes.fold((0u64, 0u64), |(numbers, bytes), attribute| {
+            let counted = if sanitize::identifier(attribute.name()) {
+                0
+            } else {
+                count_numbers(attribute.value())
+            };
+            (
+                numbers.saturating_add(counted),
+                bytes.saturating_add(attribute.value().len() as u64),
+            )
+        });
         let own = 1u64
-            .saturating_add(count_numbers(
-                sanitize::plain(*node, "d").unwrap_or_default(),
-            ))
-            .saturating_add(count_numbers(
-                sanitize::plain(*node, "points").unwrap_or_default(),
-            ))
+            .saturating_add(numbers)
+            .saturating_add(bytes / ATTRIBUTE_BYTES)
             .saturating_add(text)
             .min(CAP);
         elements.push(Element {
@@ -745,6 +768,48 @@ mod tests {
         // Symbols reached through uses count as they are drawn.
         let symbols = r##"<symbol id="a"><use href="#b"/></symbol><symbol id="b"><use href="#c"/></symbol><symbol id="c"><use href="#d"/></symbol><symbol id="d"><use href="#e"/></symbol><symbol id="e"><use href="#f"/></symbol><symbol id="f"><use href="#g"/></symbol><symbol id="g"><use href="#h"/></symbol><symbol id="h"><rect/></symbol><use href="#a"/>"##;
         assert_eq!(admitted(symbols).unwrap_err(), FailureCode::RenderResource);
+    }
+
+    #[test]
+    fn attribute_payloads_are_charged_per_use() {
+        let rects: String = (0..2_000)
+            .map(|_| r##"<rect width="1" height="1" filter="url(#f)"/>"##)
+            .collect();
+        // A filter's table of 1,000 numbers (2,000 bytes), kept for every
+        // element using it: the numbers, not the bytes, pass the limit.
+        let table = "0 1 ".repeat(500);
+        assert_eq!(
+            admitted(&format!(
+                r#"<filter id="f"><feComponentTransfer><feFuncR type="table" tableValues="{table}"/></feComponentTransfer></filter>{rects}"#
+            ))
+            .unwrap_err(),
+            FailureCode::RenderResource
+        );
+        // A result name of 200,000 bytes, copied likewise.
+        let name = "a".repeat(200_000);
+        assert_eq!(
+            admitted(&format!(
+                r#"<filter id="f"><feFlood result="{name}"/></filter>{rects}"#
+            ))
+            .unwrap_err(),
+            FailureCode::RenderResource
+        );
+    }
+
+    #[test]
+    fn decorated_positioned_text_is_charged_per_copy() {
+        let content: String = (0..1_000).map(|_| "<rect/>").collect();
+        let pattern = format!(r#"<defs><pattern id="p">{content}</pattern></defs>"#);
+        let text = "A".repeat(400);
+        let xs: Vec<String> = (0..400).map(|i| i.to_string()).collect();
+        assert_eq!(
+            admitted(&format!(
+                r##"{pattern}<text x="{}" fill="url(#p)" text-decoration="underline overline line-through">{text}</text>"##,
+                xs.join(" ")
+            ))
+            .unwrap_err(),
+            FailureCode::RenderResource
+        );
     }
 
     #[test]

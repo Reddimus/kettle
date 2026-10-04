@@ -100,6 +100,40 @@ pub(super) fn presentation(name: &str) -> bool {
     )
 }
 
+/// The properties usvg reads from CSS but ignores as attributes: written back
+/// in a `style` attribute composed here, from a keyword checked here.
+pub(super) fn css_only(name: &str) -> bool {
+    matches!(name, "mix-blend-mode" | "isolation" | "font-kerning")
+}
+
+/// Whether `value` is a keyword usvg reads for a CSS-only property.
+fn css_only_value(name: &str, value: &str) -> bool {
+    match name {
+        "mix-blend-mode" => matches!(
+            value,
+            "normal"
+                | "multiply"
+                | "screen"
+                | "overlay"
+                | "darken"
+                | "lighten"
+                | "color-dodge"
+                | "color-burn"
+                | "hard-light"
+                | "soft-light"
+                | "difference"
+                | "exclusion"
+                | "hue"
+                | "saturation"
+                | "color"
+                | "luminosity"
+        ),
+        "isolation" => matches!(value, "auto" | "isolate"),
+        "font-kerning" => matches!(value, "auto" | "normal" | "none"),
+        _ => false,
+    }
+}
+
 /// One simple selector: an optional type, then classes and ids.
 #[derive(Debug, PartialEq)]
 struct Selector {
@@ -164,8 +198,8 @@ fn selector(text: &str) -> Result<Selector, FailureCode> {
             rest = &rest[end..];
         }
     }
-    while !rest.is_empty() {
-        let (kind, after) = rest.split_at(1);
+    while let Some(kind) = rest.chars().next() {
+        let after = &rest[kind.len_utf8()..];
         let end = after
             .find(|c: char| !identifier_char(c))
             .unwrap_or(after.len());
@@ -174,8 +208,8 @@ fn selector(text: &str) -> Result<Selector, FailureCode> {
         }
         let name = after[..end].to_owned();
         match kind {
-            "." => selector.classes.push(name),
-            "#" => selector.ids.push(name),
+            '.' => selector.classes.push(name),
+            '#' => selector.ids.push(name),
             _ => return Err(FailureCode::RenderParse),
         }
         rest = &after[end..];
@@ -227,6 +261,13 @@ fn declarations(body: &str) -> Result<Vec<(String, String)>, FailureCode> {
                 }
             }
             "font" => out.extend(font(value)?),
+            // Kept only as one of the keywords usvg reads.
+            _ if css_only(name) => {
+                let keyword = value.to_ascii_lowercase();
+                if css_only_value(name, &keyword) {
+                    out.push((name.to_owned(), keyword));
+                }
+            }
             _ if presentation(name) => {
                 out.push((name.to_owned(), sanitize::check_declaration(name, value)?));
             }
@@ -359,7 +400,7 @@ mod tests {
         assert!(selector("*").is_ok());
         assert!(selector(".x").is_ok());
         for refused in [
-            "g rect", "g > rect", "a + b", "a ~ b", "a:hover", "[x]", "", ".",
+            "g rect", "g > rect", "a + b", "a ~ b", "a:hover", "[x]", "", ".", "é", "rect.é",
         ] {
             assert_eq!(
                 selector(refused).unwrap_err(),
