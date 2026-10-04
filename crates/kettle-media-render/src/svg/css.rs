@@ -20,13 +20,20 @@
 //! selector or at-rule refuses the document, as does any `!` in a value; so
 //! the matching cost is rules times elements, bounded before it is paid.
 
+use std::rc::Rc;
+
 use kettle_media::{FailureCode, MAX_SVG_WORK};
 use roxmltree::Node;
 
 use super::sanitize;
 
-/// Rules times elements: the matching done here.
+/// Rules and the declarations they apply, times elements: the matching and
+/// applying done here.
 const MAX_MATCHING: u64 = 10 * MAX_SVG_WORK;
+
+/// A declaration, shared by every selector of its rule and every element it
+/// applies to rather than copied.
+pub(super) type Applied = (Rc<str>, Rc<str>);
 
 /// The properties usvg takes from CSS (its `is_presentation` list).
 pub(super) fn presentation(name: &str) -> bool {
@@ -224,7 +231,7 @@ fn selector(text: &str) -> Result<Selector, FailureCode> {
 /// A rule: one selector and its checked declarations.
 struct Rule {
     selector: Selector,
-    declarations: Vec<(String, String)>,
+    declarations: Rc<[Applied]>,
 }
 
 /// The style sheets of a document, parsed and in usvg's order.
@@ -348,11 +355,14 @@ impl StyleSheets {
             if body.contains('{') {
                 return Err(FailureCode::RenderParse);
             }
-            let declarations = declarations(body)?;
+            let declarations: Rc<[Applied]> = declarations(body)?
+                .into_iter()
+                .map(|(name, value)| (Rc::from(name), Rc::from(value)))
+                .collect();
             for part in rest[..open].split(',') {
                 rules.push(Rule {
                     selector: selector(part)?,
-                    declarations: declarations.clone(),
+                    declarations: Rc::clone(&declarations),
                 });
             }
             rest = &rest[close + 1..];
@@ -360,7 +370,12 @@ impl StyleSheets {
         if !rest.trim().is_empty() {
             return Err(FailureCode::RenderParse);
         }
-        if (rules.len() as u64).saturating_mul(elements as u64) > MAX_MATCHING {
+        // Each rule is matched against every element and may apply all its
+        // declarations to each: bound that before any of it is done.
+        let per_element = rules.iter().fold(0u64, |total, rule| {
+            total.saturating_add(1 + rule.declarations.len() as u64)
+        });
+        if per_element.saturating_mul(elements as u64) > MAX_MATCHING {
             return Err(FailureCode::RenderResource);
         }
         // A stable sort: a later rule of equal specificity still wins.
@@ -370,7 +385,7 @@ impl StyleSheets {
 
     /// The presentation properties CSS sets on `node`, its `style` attribute
     /// last, in the order they apply (a later one replacing an earlier).
-    pub(super) fn applied(&self, node: Node<'_, '_>) -> Result<Vec<(String, String)>, FailureCode> {
+    pub(super) fn applied(&self, node: Node<'_, '_>) -> Result<Vec<Applied>, FailureCode> {
         let mut out = Vec::new();
         for rule in &self.rules {
             if rule.selector.matches(node) {
@@ -378,7 +393,12 @@ impl StyleSheets {
             }
         }
         if let Some(style) = sanitize::plain(node, "style") {
-            out.extend(declarations(&sanitize::strip_comments(style)?)?);
+            let style = declarations(&sanitize::strip_comments(style)?)?;
+            out.extend(
+                style
+                    .into_iter()
+                    .map(|(name, value)| (Rc::from(name), Rc::from(value))),
+            );
         }
         Ok(out)
     }
@@ -428,14 +448,21 @@ mod tests {
     }
 
     #[test]
-    fn rules_match_ten_million_times_at_most() {
+    fn rules_and_declarations_apply_ten_million_times_at_most() {
+        // Ten thousand rules of one declaration: 20,000 per element.
         let selectors: Vec<String> = (0..10_000).map(|i| format!(".c{i}")).collect();
         let css = format!("{} {{ fill: red }}", selectors.join(","));
         assert_eq!(
-            StyleSheets::parse(&css, 1_001).err(),
+            StyleSheets::parse(&css, 501).err(),
             Some(FailureCode::RenderResource)
         );
-        assert!(StyleSheets::parse(&css, 999).is_ok());
+        assert!(StyleSheets::parse(&css, 499).is_ok());
+        // Many declarations count as much as many rules.
+        let declarations = "fill: red;".repeat(20_000);
+        assert_eq!(
+            StyleSheets::parse(&format!(".a {{ {declarations} }}"), 501).err(),
+            Some(FailureCode::RenderResource)
+        );
     }
 
     #[test]

@@ -53,6 +53,8 @@ const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
 const MAX_NODES: u32 = 500_000;
 /// The rewritten document's size.
 pub(super) const MAX_SANITIZED_BYTES: usize = 8 * 1024 * 1024;
+/// The longest presentation property value.
+const MAX_PROPERTY_BYTES: usize = 1024;
 /// The longest font family list or font setting list.
 const MAX_FONT_LIST_BYTES: usize = 256;
 /// The most entries a dash list may hold.
@@ -407,6 +409,10 @@ pub(super) fn check_declaration(name: &str, value: &str) -> Result<String, Failu
     if lower.contains('!') || lower.contains('\\') {
         return Err(FailureCode::RenderParse);
     }
+    // usvg parses an inherited property again for every element it reaches.
+    if (css::presentation(name) || name == "marker") && value.len() > MAX_PROPERTY_BYTES {
+        return Err(FailureCode::RenderParse);
+    }
     let refused = match name {
         "font-size" => !absolute_length(&lower),
         "font" => lower
@@ -591,7 +597,7 @@ pub(super) fn write(document: &Document<'_>) -> Result<String, FailureCode> {
             let plain_href = plain(node, "href").and_then(fragment).is_some();
             // CSS, the element's `style` last, replaces presentation
             // attributes: the last value of each property is written.
-            let mut applied: Vec<(String, String)> = Vec::new();
+            let mut applied: Vec<css::Applied> = Vec::new();
             for (property, value) in sheets.applied(node)? {
                 applied.retain(|(name, _)| *name != property);
                 applied.push((property, value));
@@ -599,7 +605,7 @@ pub(super) fn write(document: &Document<'_>) -> Result<String, FailureCode> {
             let mut attributes = Vec::new();
             for attribute in node.attributes() {
                 if attribute.namespace().is_none()
-                    && applied.iter().any(|(name, _)| name == attribute.name())
+                    && applied.iter().any(|(name, _)| &**name == attribute.name())
                 {
                     continue;
                 }
@@ -621,6 +627,9 @@ pub(super) fn write(document: &Document<'_>) -> Result<String, FailureCode> {
                     .collect();
                 ("style".to_owned(), declarations.join(";"))
             });
+            let applied = applied
+                .into_iter()
+                .map(|(name, value)| (name.to_string(), value.to_string()));
             for (name, value) in attributes.into_iter().chain(applied).chain(style) {
                 let value = escape(&value, true);
                 written += name.len() + value.len() + 4;
@@ -832,6 +841,10 @@ mod tests {
                 "1 ".repeat(65)
             ),
             format!(r#"{OPEN}<text font-family="{}"/></svg>"#, "a,".repeat(200)),
+            format!(
+                r#"{OPEN}<g stroke-dasharray="1{}1"/></svg>"#,
+                " ".repeat(2_000)
+            ),
             format!(
                 r#"{OPEN}<text style="font-variation-settings:{}"/></svg>"#,
                 "'wght' 400,".repeat(30)

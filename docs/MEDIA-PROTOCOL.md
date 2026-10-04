@@ -405,7 +405,8 @@ back, so usvg only ever sees the rewritten text:
 | a property naming anything else | the attribute, or the declaration, removed |
 | a backslash, or an unclosed `url(`, in a property | `RenderParse` |
 | a selector other than a type or `*` with `.class` and `#id` parts (a combinator, pseudo-class or attribute selector), an at-rule, any `!` in a declaration, or a property name other than lower-case letters and hyphens | `RenderParse` |
-| style rules times elements over 10,000,000 | `RenderResource` |
+| style rules plus the declarations they apply, times elements, over 10,000,000 | `RenderResource` |
+| a presentation property value over 1,024 bytes | `RenderParse`: usvg parses an inherited value again for every element it reaches |
 | a font size other than a number with an absolute unit (`em`, `ex`, `%`, or a keyword such as `larger` or `xx-large`) | `RenderParse`: usvg scales each by the parent's size, and a chain multiplies past any bound |
 | a percentage past 1000% | `RenderParse`: viewports nest, each scaling the next |
 | a dash list of more than 64 entries | `RenderParse`: usvg keeps a copy for every element it applies to |
@@ -452,7 +453,10 @@ expanded is counted: one unit per element, plus every number its attributes
 hold (path data, point lists and filter tables alike; identifiers such as
 `id` and `class` aside), a unit per 64 bytes of attribute text, and the
 characters of its text times the text elements it sits in (usvg copies what
-each of them sets into every positioned piece), plus a target's whole cost each
+each of them sets into every positioned piece), plus, for a text element, its
+spans times its characters (usvg shapes the whole chunk once per span), and
+for a text path, its characters times its path's numbers (each character is
+laid against every segment), plus a target's whole cost each
 time it is referenced (`use`, paint servers, clips, masks, filters, `feImage`,
 text paths and linked templates), plus, on a shape that can carry markers,
 its vertices times the most expensive marker (a path's vertices are its

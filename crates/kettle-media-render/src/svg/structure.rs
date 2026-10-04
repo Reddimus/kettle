@@ -236,6 +236,50 @@ pub(super) fn admit(document: &Document<'_>) -> Result<(), FailureCode> {
         }
     }
 
+    // Text work usvg does per pair: it shapes a text element's whole chunk
+    // once per span in it, and lays each character of a text path against
+    // every segment of its path. Charge the products where they happen.
+    let mut subtree_chars: Vec<u64> = nodes
+        .iter()
+        .map(|node| {
+            node.children()
+                .filter_map(|child| child.text())
+                .map(|text| text.chars().count() as u64)
+                .sum()
+        })
+        .collect();
+    let mut subtree_spans: Vec<u64> = nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| {
+            u64::from(
+                in_text[index]
+                    && matches!(node.tag_name().name(), "text" | "tspan" | "textPath" | "a"),
+            )
+        })
+        .collect();
+    for index in (0..nodes.len()).rev() {
+        if let Some(parent) = parents[index] {
+            subtree_chars[parent] = subtree_chars[parent].saturating_add(subtree_chars[index]);
+            subtree_spans[parent] = subtree_spans[parent].saturating_add(subtree_spans[index]);
+        }
+    }
+    let pairs: Vec<u64> = nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| match node.tag_name().name() {
+            "text" => subtree_spans[index].saturating_mul(subtree_chars[index]),
+            "textPath" => {
+                let segments = sanitize::href(*node)
+                    .and_then(|id| ids.get(id))
+                    .and_then(|&target| sanitize::plain(nodes[target], "d"))
+                    .map_or(0, count_numbers);
+                subtree_chars[index].saturating_mul(segments)
+            }
+            _ => 0,
+        })
+        .collect();
+
     // Indices: the elements, then each element's paint context, then the
     // stand-in for context paint.
     let count = nodes.len();
@@ -315,6 +359,7 @@ pub(super) fn admit(document: &Document<'_>) -> Result<(), FailureCode> {
             .saturating_add(numbers)
             .saturating_add(bytes / ATTRIBUTE_BYTES)
             .saturating_add(text.saturating_mul(text_depth[index].max(1)))
+            .saturating_add(pairs[index])
             .min(CAP);
         elements.push(Element {
             inherited,
@@ -857,6 +902,28 @@ mod tests {
         );
         assert_eq!(admitted(&nested).unwrap_err(), FailureCode::RenderResource);
         assert!(admitted(&format!("<text><tspan>{text}</tspan></text>")).is_ok());
+    }
+
+    #[test]
+    fn text_is_charged_for_spans_times_characters_and_path_segments() {
+        // Ten thousand one-character spans in one text element: usvg shapes
+        // the whole chunk for each span.
+        let spans = "<tspan>x</tspan>".repeat(10_000);
+        assert_eq!(
+            admitted(&format!("<text>{spans}</text>")).unwrap_err(),
+            FailureCode::RenderResource
+        );
+        assert!(admitted(&format!("<text>{}</text>", "<tspan>x</tspan>".repeat(300))).is_ok());
+        // A text path lays every character against every segment.
+        let segments = "L1 0L0 0".repeat(5_000);
+        let text = "x".repeat(10_000);
+        assert_eq!(
+            admitted(&format!(
+                r##"<defs><path id="p" d="M0 0{segments}"/></defs><text><textPath href="#p">{text}</textPath></text>"##
+            ))
+            .unwrap_err(),
+            FailureCode::RenderResource
+        );
     }
 
     #[test]
