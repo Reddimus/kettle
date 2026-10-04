@@ -75,6 +75,10 @@ wide — the dev shell is fully hermetic.
 
 ## Per-release maintenance
 
+Linux outputs include the sibling `kettle-media-worker`, built in its own
+`media-worker` profile invocation. Darwin Nix outputs retain the text terminal;
+media stays unavailable under the existing unsigned-build policy.
+
 The flake's `version` field must match `Cargo.toml`'s workspace version.
 `scripts/release.sh` updates both in the same release PR and rejects a missing
 or stale Nix version before it creates the commit. The committed root

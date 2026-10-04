@@ -7,6 +7,12 @@ Kettle 4.0 keeps the macOS and Linux comparators in the current checkout.
 
 ## Unreleased — media worker bounds (policy, not measurements)
 
+Distribution builds compile the worker separately with `--profile media-worker`.
+Report its artifact size separately from the terminal. First-restart Linux
+migration reads the install record and capsule once; steady startup with an
+installed worker does not hash the install tree. This is an implementation
+property, not a measured startup-time claim.
+
 The media worker renders raster images and SVG under fixed bounds, and this
 section records them as policy: nothing here is a timing claim, and none of
 these limits was calibrated on a quiet machine. Every bound is checked

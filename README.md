@@ -126,7 +126,11 @@ contributors should install the dependencies listed under
 git clone https://github.com/Reddimus/kettle
 cd kettle
 cargo build --locked --release -p kettle
+cargo build --locked --profile media-worker -p kettle-media-worker
 ```
+
+The Unix media worker is built separately and installed beside `kettle`.
+See [Installation](docs/INSTALL.md#from-source) for the paired install route.
 
 Run the repository gate before sending a change:
 

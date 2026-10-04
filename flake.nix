@@ -147,11 +147,20 @@
 
           buildInputs = runtimeLibs;
 
+          # Build the helper separately so GUI image features do not enter it.
+          cargoBuildFlags = [ "-p" "kettle" ];
+          postBuild = pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+            cargo build --locked --offline --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} \
+              --profile media-worker -p kettle-media-worker
+          '';
+
           # Keep the Nix Linux package at feature parity with Kettle's other
           # Linux distribution channels. These assets are intentionally
           # omitted from Darwin outputs, where a Linux Desktop Entry and
           # hicolor icon hierarchy would be inert and misleading.
           postInstall = pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+            install -Dm755 target/${pkgs.stdenv.hostPlatform.rust.rustcTarget}/media-worker/kettle-media-worker \
+              "$out/bin/kettle-media-worker"
             install -Dm644 packaging/linux/kettle.desktop \
               "$out/share/applications/kettle.desktop"
             install -Dm644 packaging/linux/kettle.svg \

@@ -264,6 +264,7 @@ jobs:
             python scripts/test-package-manifest.py
           else
             python3 scripts/test-package-manifest.py
+            python3 scripts/test-install-media.py
           fi
       - name: Hardened online installer fixtures
         if: runner.os == 'Linux'
@@ -279,12 +280,13 @@ jobs:
         env:
           RUSTDOCFLAGS: "-D warnings"
         run: cargo doc --workspace --no-deps
-      - name: Build release binary (Linux/macOS)
-        # The Linux and macOS smokes below invoke ./target/release/kettle, so
-        # build it once here. Windows builds its own release binary in its
-        # pwsh smoke below.
+      - name: Build release binaries (Linux/macOS)
+        # Native smokes use the GUI release build; Linux installer fixtures
+        # additionally require the independently built media worker.
         if: runner.os != 'Windows'
-        run: cargo build --release -p kettle
+        run: |
+          cargo build --locked --release -p kettle
+          cargo build --locked --profile media-worker -p kettle-media-worker
       - name: Pinned Codex image-paste client (Linux/macOS)
         if: runner.os != 'Windows'
         shell: bash

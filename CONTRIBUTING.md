@@ -14,6 +14,17 @@ instead.
 
 ## Anatomy of a change
 
+Unix distribution builds require two separate commands:
+
+```sh
+cargo build --locked --release -p kettle
+cargo build --locked --profile media-worker -p kettle-media-worker
+```
+
+Keep the worker invocation separate to preserve its unwind profile and codec
+feature set. The Linux installer handles both outputs; a terminal-only Cargo
+install leaves media unavailable. See [Installation](docs/INSTALL.md#from-source).
+
 Each change has the same shape:
 
 1. **Find one bounded bug.** Read the source for a *silent-fallback*

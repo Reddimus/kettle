@@ -181,15 +181,25 @@ jobs:
           rustup target add x86_64-apple-darwin aarch64-apple-darwin
           cargo build --locked --release --target x86_64-apple-darwin -p kettle
           cargo build --locked --release --target aarch64-apple-darwin -p kettle
+          cargo build --locked --profile media-worker --target x86_64-apple-darwin -p kettle-media-worker
+          cargo build --locked --profile media-worker --target aarch64-apple-darwin -p kettle-media-worker
           mkdir -p target/release
           lipo -create \
             target/x86_64-apple-darwin/release/kettle \
             target/aarch64-apple-darwin/release/kettle \
             -output target/release/kettle
           file target/release/kettle
+          lipo -create \
+            target/x86_64-apple-darwin/media-worker/kettle-media-worker \
+            target/aarch64-apple-darwin/media-worker/kettle-media-worker \
+            -output target/release/kettle-media-worker
+          file target/release/kettle-media-worker
       - name: Build (Linux x86_64)
         if: runner.os != 'macOS' && matrix.rust_target == ''
-        run: cargo build --locked --release -p kettle
+        run: |
+          cargo build --locked --release -p kettle
+          cargo build --locked --profile media-worker -p kettle-media-worker
+          cp target/media-worker/kettle-media-worker target/release/kettle-media-worker
 
       # ARM64 Linux cross-build. The runner is x86_64; install the
       # aarch64 std + GNU cross-linker and build for the target, then copy the
@@ -203,31 +213,35 @@ jobs:
           sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
           rustup target add aarch64-unknown-linux-gnu
           cargo build --locked --release --target aarch64-unknown-linux-gnu -p kettle
+          cargo build --locked --profile media-worker --target aarch64-unknown-linux-gnu -p kettle-media-worker
           mkdir -p target/release
           cp target/aarch64-unknown-linux-gnu/release/kettle target/release/kettle
+          cp target/aarch64-unknown-linux-gnu/media-worker/kettle-media-worker target/release/kettle-media-worker
 
       - name: Verify Linux glibc ABI floor
         if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t glibc_versions < <(
-            readelf --version-info target/release/kettle \
-              | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' \
-              | sort -Vu
-          )
-          if [[ ${#glibc_versions[@]} -eq 0 ]]; then
-            echo "release binary exposes no inspectable GLIBC version requirements" >&2
-            exit 1
-          fi
-          newest=${glibc_versions[${#glibc_versions[@]}-1]}
-          allowed=GLIBC_2.35
-          if [[ $(printf '%s\n' "$newest" "$allowed" | sort -V | tail -n1) != "$allowed" ]]; then
-            echo "release binary requires $newest, newer than the $allowed floor" >&2
-            exit 1
-          fi
-          printf 'verified glibc ABI floor: newest requirement %s <= %s\n' \
-            "$newest" "$allowed"
+          for binary in target/release/kettle target/release/kettle-media-worker; do
+            mapfile -t glibc_versions < <(
+              readelf --version-info "$binary" \
+                | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' \
+                | sort -Vu
+            )
+            if [[ ${#glibc_versions[@]} -eq 0 ]]; then
+              echo "$binary exposes no inspectable GLIBC version requirements" >&2
+              exit 1
+            fi
+            newest=${glibc_versions[${#glibc_versions[@]}-1]}
+            allowed=GLIBC_2.35
+            if [[ $(printf '%s\n' "$newest" "$allowed" | sort -V | tail -n1) != "$allowed" ]]; then
+              echo "$binary requires $newest, newer than the $allowed floor" >&2
+              exit 1
+            fi
+            printf '%s: verified glibc ABI floor: newest requirement %s <= %s\n' \
+              "$binary" "$newest" "$allowed"
+          done
 
       - name: Package (Linux)
         if: runner.os == 'Linux'
@@ -235,6 +249,7 @@ jobs:
           mkdir -p dist/kettle/packaging/linux
           mkdir -p dist/kettle/docs
           cp target/release/kettle dist/kettle/
+          cp target/release/kettle-media-worker dist/kettle/
           cp LICENSE NOTICE README.md CHANGELOG.md dist/kettle/
           cp -R docs/changelog dist/kettle/docs/
           # Desktop integration assets — packaged at the SAME relative
@@ -268,6 +283,7 @@ jobs:
           if [ -z "$TARGET" ]; then
             TARGET=x86_64-unknown-linux-gnu
           fi
+          cargo run --locked -p kettle-update --example worker-capsule -- dist/kettle "$TARGET"
           python3 scripts/package-manifest.py generate \
             --root dist/kettle --target "$TARGET" --version "$VERSION"
           python3 scripts/package-manifest.py verify \
@@ -302,6 +318,7 @@ jobs:
             packaging/macos/Info.plist
           cp packaging/macos/Info.plist "$APP/Contents/Info.plist"
           cp target/release/kettle "$APP/Contents/MacOS/kettle"
+          cp target/release/kettle-media-worker "$APP/Contents/MacOS/kettle-media-worker"
           cp LICENSE NOTICE README.md CHANGELOG.md "$APP/Contents/Resources/"
           mkdir -p "$APP/Contents/Resources/docs"
           cp -R docs/changelog "$APP/Contents/Resources/docs/"
@@ -382,7 +399,12 @@ jobs:
 
           while IFS= read -r -d '' candidate; do
             if file -b "$candidate" | grep -q 'Mach-O'; then
+              identifier=()
+              if [[ "$candidate" == "$APP/Contents/MacOS/kettle-media-worker" ]]; then
+                identifier=(--identifier org.kettle.terminal.media-worker)
+              fi
               codesign --force --timestamp --options runtime \
+                "${identifier[@]}" \
                 --entitlements packaging/macos/kettle.entitlements \
                 --sign "$SIGNING_IDENTITY" --keychain "$KEYCHAIN" \
                 "$candidate"

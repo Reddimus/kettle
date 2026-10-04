@@ -52,12 +52,12 @@ The `kettle` binary supplies one (`media_platform`): the worker beside the
 running executable, recorded at startup, never from `PATH` or the working
 directory, with its file checked and, on macOS, its code signature checked
 against Kettle's own requirement. `kettle-ui` receives the configured client
-and reports it in `get_state`. No worker ships yet, so a worker that passes
-every check still reads as unavailable. Kettle and every worker share one
+and reports it in `get_state`. A worker that passes these checks reads as
+available; each render still requires the matching build handshake. Kettle and every worker share one
 build identity, the source hash its build script computes
 (`crates/kettle/build_support/source_id.rs`). `kettle-media-worker` is that
-worker, a separate executable that serves one job per process; nothing ships
-it yet. It renders through `kettle-media-render`: the source is read once
+worker, a separate executable shipped beside the terminal on Unix that serves
+one job per process. It renders through `kettle-media-render`: the source is read once
 through one held descriptor, the format comes from the content, the decoded
 size is checked before any pixel is decoded, and the image is fitted into the
 job's target box as straight RGBA. An SVG is parsed with no DTD, rewritten so
@@ -346,6 +346,14 @@ and explicit update first authenticate the marker, layout, prefix ownership, and
 update journal under the update lock; they recover an incomplete transaction
 before checking file-content provenance, so the old record cannot strand the
 recovery data after a crash between publication and provenance replacement.
+Linux updates preflight both binaries and publish the worker before the GUI
+inside that transaction. A running old GUI rejects a new worker at the build
+handshake. The 4.9 updater carries inert worker bytes and metadata as
+shell-integration data; the first new process recovers its update journal,
+then promotes the recorded matching capsule into the sibling binary path in
+a second transaction under the same lock. A prepared migration rolls back
+before retry. Missing or unusable migration data leaves text startup usable.
+Once the worker exists, steady startup skips capsule and provenance hashing.
 The archived Windows lock order was update then running; the helper released
 running then update after durable commit and pending-record removal, before
 asking a fully qualified system PowerShell to execute the exact

@@ -29,6 +29,9 @@ version=$(awk -F\" '/^version = "/ { print $2; exit }' Cargo.toml)
 if [ ! -x target/release/kettle ]; then
   fail "target/release/kettle missing; run cargo build --release -p kettle first"
 fi
+if [ ! -x target/media-worker/kettle-media-worker ]; then
+  fail "media worker missing; build kettle-media-worker with --profile media-worker first"
+fi
 
 tmp_root=$(mktemp -d /tmp/kettle-install-smoke.XXXXXX)
 normal_binary="${tmp_root}/kettle-release"
@@ -256,6 +259,7 @@ cp "${normal_binary}" target/release/kettle
 bundle="${tmp_root}/bundle"
 mkdir -p "${bundle}/packaging"
 cp "${normal_binary}" "${bundle}/kettle"
+cp target/media-worker/kettle-media-worker "${bundle}/kettle-media-worker"
 cp scripts/install.sh "${bundle}/install.sh"
 cp scripts/install-unix.py "${bundle}/install-unix.py"
 cp -R packaging/linux "${bundle}/packaging/linux"

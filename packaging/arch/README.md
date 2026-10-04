@@ -15,6 +15,9 @@ yay -S kettle-bin
 
 ## One-time AUR submission
 
+The generated package installs both `kettle` and `kettle-media-worker` into
+`/usr/bin`. Package-manager updates replace the pair together.
+
 1. Create an AUR account and register an SSH public key.
 2. Clone `ssh://aur@aur.archlinux.org/kettle-bin.git`.
 3. Download the generated package definition and create `.SRCINFO`:

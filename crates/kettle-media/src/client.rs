@@ -2,9 +2,8 @@
 //! it may run, and running one job in a fresh worker (see `lifecycle`). The
 //! platform work (paths, file checks, signatures, starting and killing the
 //! process) is injected through [`WorkerPlatform`], so this crate stays free
-//! of unsafe code and opens nothing itself. No shipped worker renders yet, so
-//! a worker that passes every check is still reported as
-//! [`UnavailableCause::Incomplete`].
+//! of unsafe code and opens nothing itself. Availability checks the installed
+//! worker without starting it; each render also checks the build handshake.
 
 use std::io::{Read, Write};
 use std::path::Path;
@@ -37,8 +36,6 @@ pub enum UnavailableCause {
     Unverified,
     /// The check itself could not run.
     CheckFailed,
-    /// The worker passed its checks, but this build cannot render yet.
-    Incomplete,
     /// Workers that were killed would not exit, so media is off until Kettle
     /// restarts.
     StuckWorkers,
@@ -54,7 +51,6 @@ impl UnavailableCause {
             Self::UnsafeWorkerFile => "unsafe_worker_file",
             Self::Unverified => "unverified_worker",
             Self::CheckFailed => "check_failed",
-            Self::Incomplete => "incomplete",
             Self::StuckWorkers => "stuck_workers",
         }
     }
@@ -64,6 +60,9 @@ impl UnavailableCause {
 pub enum MediaAvailability {
     /// The first check has not finished.
     Checking,
+    /// The worker passed its file/platform checks. Each job still requires
+    /// a matching Ready and a successful reply and process exit.
+    Available,
     Unavailable(UnavailableCause),
 }
 
@@ -265,7 +264,7 @@ impl WorkerClient {
         }
         match state.last {
             None => MediaAvailability::Checking,
-            Some(Ok(_)) => MediaAvailability::Unavailable(UnavailableCause::Incomplete),
+            Some(Ok(_)) => MediaAvailability::Available,
             Some(Err(cause)) => MediaAvailability::Unavailable(cause),
         }
     }
@@ -427,7 +426,7 @@ mod tests {
             self.verifies
         }
         fn spawn(&self, _: &Path) -> std::io::Result<SpawnedWorker> {
-            Err(std::io::ErrorKind::Unsupported.into())
+            panic!("availability must not start a worker")
         }
         fn guard_pipe_writes(&self) -> std::io::Result<()> {
             Ok(())
@@ -486,13 +485,10 @@ mod tests {
     }
 
     #[test]
-    fn a_verified_worker_is_still_incomplete() {
+    fn a_verified_worker_is_available_without_being_spawned() {
         let platform = Arc::new(Scripted::new(vec![Ok(identity(1))]));
         let client = client(&platform);
-        assert_eq!(
-            settle(&client),
-            MediaAvailability::Unavailable(UnavailableCause::Incomplete)
-        );
+        assert_eq!(settle(&client), MediaAvailability::Available);
     }
 
     #[test]
@@ -568,10 +564,7 @@ mod tests {
         for _ in 0..4 {
             open.send(()).unwrap();
         }
-        assert_eq!(
-            settle(&client),
-            MediaAvailability::Unavailable(UnavailableCause::Incomplete)
-        );
+        assert_eq!(settle(&client), MediaAvailability::Available);
         assert_eq!(platform.verify_calls.load(Ordering::SeqCst), 1);
     }
 

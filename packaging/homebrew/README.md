@@ -33,7 +33,7 @@ brew install kettle
 ```
 
 The formula installs the universal macOS application bundle or the
-architecture-matched Linux binary, desktop launcher, icons, man page, shell
+architecture-matched Linux terminal and sibling media worker, desktop launcher, icons, man page, shell
 integration examples, and offline documentation as appropriate.
 
 ## Per-release maintenance
