@@ -36,7 +36,11 @@ impl Stub {
             format!("media-test-worker-{mode}")
         };
         let path = directory.path().join(name);
-        std::fs::copy(env!("CARGO_BIN_EXE_media-test-worker"), &path).unwrap();
+        kettle_test_support::copy_executable_fixture(
+            Path::new(env!("CARGO_BIN_EXE_media-test-worker")),
+            &path,
+        )
+        .unwrap();
         Self {
             _directory: directory,
             path,

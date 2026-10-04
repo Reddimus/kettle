@@ -2027,6 +2027,7 @@ dependencies = [
 name = "kettle-media"
 version = "4.9.0"
 dependencies = [
+ "kettle-test-support",
  "sha2",
  "tempfile",
 ]
