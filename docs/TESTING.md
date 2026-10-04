@@ -906,9 +906,14 @@ blur pass and sixteen are refused (charged per use); a filter of eight
 primitives passes and sixteen are refused; ten translucent groups pass and
 twenty are refused; an 8192-unit pattern tile, a chain of forty masks and a
 chain of forty clips are refused while a small tile and one clip draw
-correctly. Two finite scales that overflow when composed are `RenderParse`. A
-use bomb is refused within two seconds; a style sheet giving two thousand
-rectangles a thousand-shape pattern is refused on drawing work. A 10x10
+correctly. A one-pixel filter taking the source graphic ten times on a layer
+a thousand pixels square is refused, each result charged at the layer's
+size. Two finite scales that overflow when composed are `RenderParse`, and
+so is a filter rectangle scaled past what tiny-skia converts without
+panicking; marker sizes past the number bounds are `RenderParse`, while the
+extremes inside them render. A use bomb is refused within two seconds; a
+style sheet giving two thousand rectangles a thousand-shape pattern is
+refused as a possible cycle. A 10x10
 image in a 4096x2048 box comes back at 1024x1024, and a crop reaches the
 full fitted image within the ceiling. An input of exactly 2 MiB renders and
 one byte more is `TooLarge`; a path source renders through its held file
@@ -919,14 +924,25 @@ Unit tests in `src/svg/` pin the parts: the sanitizer keeps local references
 and removes the rest, rewrites `style` declarations, refuses escapes and
 unclosed `url(` and outside style-sheet references, round-trips `&`, `<`,
 quotes and line breaks exactly, drops scripts, foreign content, events and
-metadata, refuses a DTD, and tells marker rules in a style sheet from a
-`.marker` class; the structural count splits numbers as a parser does,
-charges a shared definition per use (900 uses of a thousand elements pass,
-999 do not), refuses nested uses, reference cycles (but not a link to an
-ancestor), markers per vertex whether set directly, inherited through a
-`use` or set by a style sheet, markers that could hold markers (while an
-arrowhead on two hundred paths passes), and too many elements, too deep a
-tree, too long a path and too much style matching; placement fits the box
+metadata, refuses a DTD, writes back a non-ASCII attribute name, keeps of
+two `href` spellings only the one usvg uses and of other namespaced
+attributes only `xml:space`, refuses numbers past the bounds while keeping
+editor rounding noise, hex colors and names with digits, and tells marker
+rules in a style sheet (a commented one included) from a `.marker` class,
+counting each selector of a list; the structural count splits numbers as a
+parser does, charges a shared definition per use (900 uses of a thousand
+elements pass, 999 do not), refuses nested uses, reference cycles (but not a
+link to an ancestor), cycles closed by inherited paint, by a `use` copy that
+inherits it, or by style-sheet fills (while a style-sheet gradient passes),
+charges inherited paint per drawing element (directly, through a `use`, and
+from a style sheet), markers per vertex whether set directly, inherited
+through a `use`, set by a style sheet or a commented declaration, with `H`
+and `V` steps counted as vertices and a namespaced `points` not hiding the
+real one, counts the `href` usvg follows, refuses markers that could hold
+markers (while an arrowhead on two hundred paths passes), and too many
+elements, too deep a tree, too long a path and too much style matching (a
+ten-thousand-selector list included); the layer walk refuses drawing work
+past its count on a tree built straight from usvg; placement fits the box
 and then the ceiling and shifts a crop; unpremultiplying rounds and clears
 alpha-0 pixels; source lines are bounded, without line breaks; usvg with
 these options builds no image node even from unsanitized absolute paths and
@@ -942,7 +958,13 @@ allowed, cycles followed, nesting, element count or style matching left
 unbounded, a `use` copy not inheriting its marker context, filter
 primitives, group layers, pattern tiles, clips or masks left free,
 non-finite transforms passed, drawing work unbounded, no SVG ceiling, a crop
-past it, and premultiplied output each fail a test above.
+past it, and premultiplied output each fail a test above; so do an event
+prefix sliced through a character, the `xlink:` spelling followed first or
+both spellings written, any namespaced attribute kept or read by name,
+comments kept in a style sheet, a path counted as half its numbers, a
+selector list counted as one rule, inherited or style-sheet paint ignored, a
+`use` copy's paint left free, numbers left unbounded, primitives charged at
+their region, and filter rectangles left unbounded.
 
 `tests/source.rs` loads paths: a group-writable file (as umask 002 leaves it)
 and a symbolic link at the leaf are accepted; a FIFO with no writer is

@@ -15,7 +15,18 @@
 //!   `url(`) refuses the document rather than be guessed at, and a style
 //!   sheet may not import or refer outside the document at all.
 //! - Event attributes, `xml:base`, comments and processing instructions are
-//!   dropped.
+//!   dropped, and of namespaced attributes only `xlink:href` and `xml:space`
+//!   survive (usvg reads others by their local name). Of an element's two
+//!   `href` spellings only the one usvg uses is kept: the plain one when it
+//!   names a fragment.
+//! - Comments are removed from style sheets and `style` attributes before
+//!   either is read, and the stripped text is what usvg sees.
+//! - Every number in a property value or style declaration must lie within
+//!   `MAX_NUMBER` and, unless zero, at least `MIN_NUMBER`, so the products
+//!   usvg forms (a marker's size times a stroke width, a radius times a
+//!   scale) stay finite and non-zero where it unwraps them. Hex colors and
+//!   fragment names are not numbers; identifiers (`id`, `class`, filter
+//!   result names) are not read.
 //!
 //! Values are escaped here (`&`, `<`, `>`, quotes, and in attributes tabs and
 //! line breaks), never by substring replacement on the output, because
@@ -35,6 +46,12 @@ const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
 const MAX_NODES: u32 = 500_000;
 /// The rewritten document's size.
 pub(super) const MAX_SANITIZED_BYTES: usize = 8 * 1024 * 1024;
+/// The largest number a property may hold: ten million user units, far past
+/// any drawing, and five such factors stay finite in `f32`.
+const MAX_NUMBER: f64 = 1e7;
+/// The smallest non-zero magnitude: below the rounding noise editors write
+/// (about 6e-17), while two such factors stay above `f32`'s smallest value.
+const MIN_NUMBER: f64 = 1e-20;
 
 /// Parse `text` as XML with no DTD and bounded nodes.
 pub(super) fn parse(text: &str) -> Result<Document<'_>, FailureCode> {
@@ -57,14 +74,24 @@ pub(super) fn kept(node: Node<'_, '_>) -> bool {
         && !matches!(node.tag_name().name(), "script" | "foreignObject")
 }
 
-/// What an element's `href` (plain or `xlink:`) names: a local fragment id,
-/// or `None` when it has none or names anything else.
+/// What an element's `href` names, as usvg reads it: the plain attribute when
+/// it is a local fragment, else `xlink:href` when that is one (a plain value
+/// naming anything else is removed, leaving the `xlink:` one).
 pub(super) fn href<'a>(node: Node<'a, '_>) -> Option<&'a str> {
+    let named = |namespace: Option<&str>| {
+        node.attributes()
+            .find(|attribute| attribute.name() == "href" && attribute.namespace() == namespace)
+            .and_then(|attribute| fragment(attribute.value()))
+    };
+    named(None).or_else(|| named(Some(XLINK_NS)))
+}
+
+/// A plain (unnamespaced) attribute: roxmltree's lookup by name alone also
+/// matches namespaced attributes the writer drops.
+pub(super) fn plain<'a>(node: Node<'a, '_>, name: &str) -> Option<&'a str> {
     node.attributes()
-        .filter(|attribute| {
-            attribute.name() == "href" && matches!(attribute.namespace(), None | Some(XLINK_NS))
-        })
-        .find_map(|attribute| fragment(attribute.value()))
+        .find(|attribute| attribute.namespace().is_none() && attribute.name() == name)
+        .map(|attribute| attribute.value())
 }
 
 /// `#id`, with surrounding whitespace, as the id; anything else is `None`.
@@ -156,8 +183,132 @@ pub(super) struct Declaration<'a> {
     pub(super) text: &'a str,
 }
 
-/// The declarations of a `style` attribute: split at semicolons outside
-/// quotes and parentheses. Unbalanced text refuses the document.
+/// `css` without its comments (each becomes a space). An unclosed comment
+/// refuses the document.
+pub(super) fn strip_comments(css: &str) -> Result<String, FailureCode> {
+    let mut out = String::with_capacity(css.len());
+    let mut rest = css;
+    while let Some(start) = rest.find("/*") {
+        out.push_str(&rest[..start]);
+        out.push(' ');
+        let end = rest[start + 2..]
+            .find("*/")
+            .ok_or(FailureCode::RenderParse)?;
+        rest = &rest[start + 2 + end + 2..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+/// Call `each` with every number in `text`, split the way a parser splits
+/// them (`1-2.5.5e-1` is three). Not necessarily a valid number: a lone sign
+/// is returned as it is.
+pub(super) fn numbers(text: &str, mut each: impl FnMut(&str)) {
+    let bytes = text.as_bytes();
+    let mut start: Option<usize> = None;
+    let mut dot = false;
+    let mut exponent = false;
+    let mut previous = b' ';
+    for (index, &byte) in bytes.iter().enumerate() {
+        let begins = match byte {
+            b'0'..=b'9' => start.is_none(),
+            b'.' => start.is_none() || dot || exponent,
+            b'+' | b'-' => !(start.is_some() && matches!(previous, b'e' | b'E')),
+            b'e' | b'E' if start.is_some() => {
+                exponent = true;
+                false
+            }
+            _ => {
+                if let Some(begun) = start.take() {
+                    each(&text[begun..index]);
+                }
+                previous = byte;
+                continue;
+            }
+        };
+        if begins {
+            if let Some(begun) = start {
+                each(&text[begun..index]);
+            }
+            start = Some(index);
+            dot = false;
+            exponent = false;
+        }
+        if byte == b'.' {
+            dot = true;
+        }
+        previous = byte;
+    }
+    if let Some(begun) = start {
+        each(&text[begun..]);
+    }
+}
+
+/// Refuse a value holding a number past `MAX_NUMBER` or, unless zero, below
+/// `MIN_NUMBER`. `url(...)` references and `#` names (hex colors, fragments)
+/// are skipped first.
+pub(super) fn check_numbers(value: &str) -> Result<(), FailureCode> {
+    let mut plain = String::with_capacity(value.len());
+    let mut rest = value;
+    loop {
+        let lower = rest.to_ascii_lowercase();
+        match (lower.find("url("), rest.find('#')) {
+            (Some(url), hash) if hash.is_none_or(|hash| url < hash) => {
+                plain.push_str(&rest[..url]);
+                plain.push(' ');
+                let end = rest[url..]
+                    .find(')')
+                    .map_or(rest.len(), |end| url + end + 1);
+                rest = &rest[end..];
+            }
+            (_, Some(hash)) => {
+                plain.push_str(&rest[..hash]);
+                plain.push(' ');
+                let name = rest[hash + 1..]
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+                    .map_or(rest.len(), |end| hash + 1 + end);
+                rest = &rest[name..];
+            }
+            _ => {
+                plain.push_str(rest);
+                break;
+            }
+        }
+    }
+    let mut refused = false;
+    numbers(&plain, |token| {
+        if let Ok(number) = token.parse::<f64>() {
+            let magnitude = number.abs();
+            refused |= !magnitude.is_finite()
+                || magnitude > MAX_NUMBER
+                || (magnitude != 0.0 && magnitude < MIN_NUMBER);
+        }
+    });
+    if refused {
+        return Err(FailureCode::RenderParse);
+    }
+    Ok(())
+}
+
+/// Attributes that name things rather than measure them.
+fn identifier(name: &str) -> bool {
+    matches!(
+        name,
+        "id" | "class"
+            | "lang"
+            | "result"
+            | "in"
+            | "in2"
+            | "requiredFeatures"
+            | "requiredExtensions"
+            | "systemLanguage"
+    ) || name.starts_with("data-")
+        || name.starts_with("aria-")
+}
+
+/// The declarations of a `style` attribute (comments already removed): split
+/// at semicolons outside quotes and parentheses. Unbalanced text refuses the
+/// document.
 pub(super) fn declarations(style: &str) -> Result<Vec<Declaration<'_>>, FailureCode> {
     let mut found = Vec::new();
     let mut depth = 0usize;
@@ -192,31 +343,68 @@ pub(super) fn declarations(style: &str) -> Result<Vec<Declaration<'_>>, FailureC
     Ok(found)
 }
 
+/// What a style sheet holds, once checked.
+#[derive(Debug, Default)]
+pub(super) struct StyleSheet {
+    /// The sheet without comments: what usvg is given.
+    pub(super) text: String,
+    /// Whether any rule sets a marker property.
+    pub(super) marks: bool,
+    /// Selectors, counting each in a comma-separated list: the rules usvg
+    /// matches against every element.
+    pub(super) selectors: u64,
+    /// Fragments named by `fill` and `stroke` declarations.
+    pub(super) paint: Vec<String>,
+    /// Fragments named by `clip-path`, `mask` and `filter` declarations.
+    pub(super) other: Vec<String>,
+}
+
 /// A style sheet may hold rules referring to nothing outside the document:
-/// no import, no `url(` other than a local fragment, and no escapes that
-/// could spell one. Returns whether any rule sets a marker property.
-pub(super) fn check_style_sheet(css: &str) -> Result<bool, FailureCode> {
-    if css.contains('\\') || css.to_ascii_lowercase().contains("@import") {
+/// no import, no `url(` other than a local fragment, no escapes that could
+/// spell one, and no number past the bounds.
+pub(super) fn check_style_sheet(css: &str) -> Result<StyleSheet, FailureCode> {
+    let text = strip_comments(css)?;
+    if text.contains('\\') || text.to_ascii_lowercase().contains("@import") {
         return Err(FailureCode::RenderParse);
     }
-    if urls(css)? == Urls::External {
+    if urls(&text)? == Urls::External {
         return Err(FailureCode::RenderParse);
     }
-    // Declarations are the text between `{` or `;` and `;` or `}`; whatever
-    // precedes a `{` is a selector or an at-rule prelude.
-    let mut marks = false;
+    // A segment ending at `{` is a selector list or an at-rule prelude; one
+    // ending at `;` or `}` is a declaration.
+    let mut sheet = StyleSheet::default();
     let mut start = 0;
-    for (index, c) in css.char_indices() {
-        if matches!(c, '{' | '}' | ';') {
-            if c != '{'
-                && let Some((name, _)) = css[start..index].split_once(':')
-            {
-                marks |= marker_property(name.trim());
+    for (index, c) in text.char_indices() {
+        if !matches!(c, '{' | '}' | ';') {
+            continue;
+        }
+        let segment = &text[start..index];
+        start = index + 1;
+        if c == '{' {
+            if !segment.trim_start().starts_with('@') {
+                sheet.selectors += 1 + segment.matches(',').count() as u64;
             }
-            start = index + 1;
+            continue;
+        }
+        let Some((name, value)) = segment.split_once(':') else {
+            continue;
+        };
+        let name = name.trim();
+        check_numbers(value)?;
+        sheet.marks |= marker_property(name);
+        let Urls::Local(ids) = urls(value)? else {
+            return Err(FailureCode::RenderParse);
+        };
+        match name {
+            "fill" | "stroke" => sheet.paint.extend(ids.into_iter().map(str::to_owned)),
+            "clip-path" | "mask" | "filter" => {
+                sheet.other.extend(ids.into_iter().map(str::to_owned));
+            }
+            _ => {}
         }
     }
-    Ok(marks)
+    sheet.text = text;
+    Ok(sheet)
 }
 
 /// What an attribute becomes when written back.
@@ -229,16 +417,21 @@ enum Kept {
     Dropped,
 }
 
-fn attribute_policy(attribute: &roxmltree::Attribute<'_, '_>) -> Result<Kept, FailureCode> {
+/// What to write for `attribute`; `plain_href` is whether its element has a
+/// plain `href` naming a fragment, which usvg prefers to `xlink:href`.
+fn attribute_policy(
+    attribute: &roxmltree::Attribute<'_, '_>,
+    plain_href: bool,
+) -> Result<Kept, FailureCode> {
     let local = attribute.name();
     let name = match attribute.namespace() {
         None => local.to_owned(),
-        Some(XLINK_NS) => format!("xlink:{local}"),
+        Some(XLINK_NS) if local == "href" && !plain_href => "xlink:href".to_owned(),
         Some(XML_NS) if local == "space" => "xml:space".to_owned(),
         Some(_) => return Ok(Kept::Dropped),
     };
     let value = attribute.value();
-    if local.len() > 2 && local[..2].eq_ignore_ascii_case("on") {
+    if local.len() > 2 && local.as_bytes()[..2].eq_ignore_ascii_case(b"on") {
         return Ok(Kept::Dropped);
     }
     if local == "href" {
@@ -247,21 +440,25 @@ fn attribute_policy(attribute: &roxmltree::Attribute<'_, '_>) -> Result<Kept, Fa
             None => Kept::Dropped,
         });
     }
+    if identifier(local) || attribute.namespace().is_some() {
+        return Ok(Kept::As(name));
+    }
     if local == "style" {
-        if value.contains('\\') {
+        let style = strip_comments(value)?;
+        if style.contains('\\') {
             return Err(FailureCode::RenderParse);
         }
         let mut kept = Vec::new();
-        for declaration in declarations(value)? {
+        for declaration in declarations(&style)? {
             if urls(declaration.value)? == Urls::External {
                 continue;
             }
-            kept.push(declaration.text.trim());
+            check_numbers(declaration.value)?;
+            kept.push(declaration.text.trim().to_owned());
         }
         return Ok(Kept::Rewritten(name, kept.join(";")));
     }
-    let lower = value.to_ascii_lowercase();
-    if lower.contains("url(") {
+    if value.to_ascii_lowercase().contains("url(") {
         if value.contains('\\') {
             return Err(FailureCode::RenderParse);
         }
@@ -269,6 +466,7 @@ fn attribute_policy(attribute: &roxmltree::Attribute<'_, '_>) -> Result<Kept, Fa
             return Ok(Kept::Dropped);
         }
     }
+    check_numbers(value)?;
     Ok(Kept::As(name))
 }
 
@@ -318,17 +516,14 @@ pub(super) fn write(document: &Document<'_>) -> Result<String, FailureCode> {
             writer.write_text(&text);
         } else if kept(node) {
             let name = node.tag_name().name();
-            if name == "style" {
-                let css: String = node.children().filter_map(|child| child.text()).collect();
-                check_style_sheet(&css)?;
-            }
             writer.start_element(name);
             if node == root {
                 writer.write_attribute("xmlns", SVG_NS);
                 writer.write_attribute("xmlns:xlink", XLINK_NS);
             }
+            let plain_href = plain(node, "href").and_then(fragment).is_some();
             for attribute in node.attributes() {
-                let (name, value) = match attribute_policy(&attribute)? {
+                let (name, value) = match attribute_policy(&attribute, plain_href)? {
                     Kept::As(name) => (name, escape(attribute.value(), true)),
                     Kept::Rewritten(name, value) => (name, escape(&value, true)),
                     Kept::Dropped => continue,
@@ -339,7 +534,15 @@ pub(super) fn write(document: &Document<'_>) -> Result<String, FailureCode> {
                 });
             }
             stack.push(None);
-            stack.extend(node.children().rev().map(Some));
+            if name == "style" {
+                // The sheet as checked, comments removed, in place of its text.
+                let css: String = node.children().filter_map(|child| child.text()).collect();
+                let sheet = escape(&check_style_sheet(&css)?.text, false);
+                written += sheet.len();
+                writer.write_text(&sheet);
+            } else {
+                stack.extend(node.children().rev().map(Some));
+            }
         }
         if written > MAX_SANITIZED_BYTES {
             return Err(FailureCode::RenderResource);
@@ -447,9 +650,70 @@ mod tests {
     #[test]
     fn style_sheets_report_marker_rules() {
         assert!(
-            !check_style_sheet(".marker { fill: red } .marker:hover { opacity: 0.5 }").unwrap()
+            !check_style_sheet(".marker { fill: red } .marker:hover { opacity: 0.5 }")
+                .unwrap()
+                .marks
         );
-        assert!(check_style_sheet("path { marker-mid: url(#m) }").unwrap());
-        assert!(check_style_sheet("@media screen { g { marker: url(#m); } }").unwrap());
+        assert!(
+            check_style_sheet("path { marker-mid: url(#m) }")
+                .unwrap()
+                .marks
+        );
+        assert!(
+            check_style_sheet("@media screen { g { marker: url(#m); } }")
+                .unwrap()
+                .marks
+        );
+        assert!(
+            check_style_sheet("path { /* x */ marker-end: url(#m) }")
+                .unwrap()
+                .marks
+        );
+        let sheet = check_style_sheet(".a, .b,.c { fill: url(#g) } .d { mask: url(#m) }").unwrap();
+        assert_eq!(sheet.selectors, 4);
+        assert_eq!(
+            (sheet.paint, sheet.other),
+            (vec!["g".to_owned()], vec!["m".to_owned()])
+        );
+    }
+
+    #[test]
+    fn a_non_ascii_attribute_name_is_written_back() {
+        let out = clean(&format!(r#"{OPEN}<rect 名="x" o="y"/></svg>"#)).unwrap();
+        assert!(out.contains(r#"名="x""#), "{out}");
+    }
+
+    #[test]
+    fn of_namespaced_attributes_only_the_used_href_and_space_survive() {
+        let out = clean(&format!(
+            r##"{OPEN}<use xlink:href="#small" href="#large"/><use xlink:href="#only"/><text xml:space="preserve" xml:base="file:///x/">a</text><polyline xlink:marker-mid="url(#m)" xlink:title="t"/></svg>"##
+        ))
+        .unwrap();
+        assert!(out.contains(r##"<use href="#large"/>"##), "{out}");
+        assert!(out.contains(r##"<use xlink:href="#only"/>"##), "{out}");
+        assert!(out.contains(r#"xml:space="preserve""#), "{out}");
+        for absent in ["#small", "xml:base", "marker-mid", "xlink:title"] {
+            assert!(!out.contains(absent), "{absent} in {out}");
+        }
+    }
+
+    #[test]
+    fn numbers_past_the_bounds_refuse_the_document() {
+        for svg in [
+            format!(r#"{OPEN}<rect width="1e30" height="1"/></svg>"#),
+            format!(r#"{OPEN}<marker markerWidth="1e-30"/></svg>"#),
+            format!(r#"{OPEN}<path d="M0 0L99999999 0"/></svg>"#),
+            format!(r#"{OPEN}<rect style="stroke-width: 1e10"/></svg>"#),
+            format!(r#"{OPEN}<style>rect {{ stroke-width: 1e10 }}</style></svg>"#),
+        ] {
+            assert_eq!(clean(&svg).unwrap_err(), FailureCode::RenderParse, "{svg}");
+        }
+        // Editor rounding noise, hex colors and names with digits are fine.
+        assert!(
+            clean(&format!(
+                r##"{OPEN}<g id="a1e99" class="c1e99" transform="matrix(1 1.2246468e-16 -1.2246468e-16 1 0 0)"><rect fill="#1e9999" stroke="url(#g1e400)"/></g></svg>"##
+            ))
+            .is_ok()
+        );
     }
 }

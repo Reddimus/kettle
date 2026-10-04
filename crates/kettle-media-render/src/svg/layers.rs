@@ -9,8 +9,9 @@
 //!   ceiled, widened by 2 pixels a side without filters, and clamped to the
 //!   region resvg clamps to (from -2 to +3 canvas widths and heights: up to
 //!   25 times the canvas area, whatever resvg's comment says);
-//! - every filter primitive's result, at the filter region within that
-//!   layer, and what an `feImage` renders;
+//! - every filter primitive's result at the layer's size (an input that is
+//!   the source graphic is a copy of the whole layer, and every result lives
+//!   until the filter ends), and what an `feImage` renders;
 //! - a clip path's canvas and mask at the layer's size, again for each clip
 //!   in a chain and for each clipped group inside one;
 //! - a mask's canvas and masks at the layer's size, its content, and again
@@ -19,7 +20,9 @@
 //!   for every fill and stroke that uses it, and its content.
 //!
 //! The total may not pass `MAX_SVG_LAYER_PIXELS`. A transform that is not
-//! finite is refused, and so is an image node, which nothing here may load.
+//! finite is refused, and so is a filter rectangle reaching past
+//! `MAX_FILTER_COORDINATE` on its layer (tiny-skia's conversion of it
+//! unwraps), and an image node, which nothing here may load.
 //! The walk also counts the nodes it visits, which is the drawing resvg will
 //! do, against `MAX_SVG_WORK`: a style sheet can give every path a pattern
 //! without any reference the structural pass sees. Pixels are not time, and
@@ -98,6 +101,29 @@ fn canvas_bounds(width: u32, height: u32) -> IntRect {
     )
     .or_else(|| IntRect::from_ltrb(i32::MIN / 2, i32::MIN / 2, i32::MAX / 2, i32::MAX / 2))
     .unwrap_or_else(|| unreachable!("a fixed, valid rectangle"))
+}
+
+/// The farthest a filter rectangle may reach on its layer: past any canvas,
+/// and near enough that tiny-skia's integer conversion (which unwraps) and
+/// resvg's translations of the result cannot overflow.
+const MAX_FILTER_COORDINATE: f32 = 16_777_216.0;
+
+/// A filter or primitive rectangle on the layer, as resvg converts it: `None`
+/// where resvg finds none, refused where converting it would overflow.
+fn filter_rect(
+    rect: usvg::NonZeroRect,
+    transform: Transform,
+) -> Result<Option<IntRect>, FailureCode> {
+    let Some(rect) = rect.transform(transform) else {
+        return Ok(None);
+    };
+    if [rect.left(), rect.top(), rect.right(), rect.bottom()]
+        .iter()
+        .any(|edge| edge.abs() > MAX_FILTER_COORDINATE)
+    {
+        return Err(FailureCode::RenderParse);
+    }
+    Ok(Some(rect.to_int_rect()))
 }
 
 /// resvg's `fit_to_rect`: `rect` cut to `bounds`.
@@ -301,25 +327,26 @@ fn isolate<'a>(
     let whole = IntRect::from_xywh(0, 0, size.0, size.1)
         .unwrap_or_else(|| unreachable!("a layer is never empty"));
     for filter in group.filters() {
-        let Some(region) = filter
-            .rect()
-            .transform(transform)
-            .map(|rect| rect.to_int_rect())
-            .and_then(|rect| fit(rect, whole))
+        // Every rectangle resvg will convert must convert without panicking,
+        // whether or not resvg reaches it.
+        let mut subregions = Vec::with_capacity(filter.primitives().len());
+        for primitive in filter.primitives() {
+            subregions.push(filter_rect(primitive.rect(), transform)?);
+        }
+        let Some(region) = filter_rect(filter.rect(), transform)?.and_then(|rect| fit(rect, whole))
         else {
             continue;
         };
-        for primitive in filter.primitives() {
+        for (primitive, subregion) in filter.primitives().iter().zip(subregions) {
+            // resvg ends the filter at a subregion it cannot form.
+            let Some(subregion) = subregion else {
+                break;
+            };
             budget.step()?;
-            budget.charge(region.width(), region.height())?;
+            // A result is a copy of the whole layer whenever its input is the
+            // source graphic, and every result lives until the filter ends.
+            budget.charge(size.0, size.1)?;
             if let usvg::filter::Kind::Image(image) = primitive.kind() {
-                let Some(subregion) = primitive
-                    .rect()
-                    .transform(transform)
-                    .map(|rect| rect.to_int_rect())
-                else {
-                    break;
-                };
                 let (sx, sy) = transform.get_scale();
                 tasks.push(Task::Children {
                     group: image.root(),
@@ -394,4 +421,39 @@ fn patterns<'a>(
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tree(body: &str) -> usvg::Tree {
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64">{body}</svg>"#
+        );
+        usvg::Tree::from_str(&svg, &super::super::options()).unwrap()
+    }
+
+    fn patterned(rects: usize) -> usvg::Tree {
+        let content: String = (0..1000)
+            .map(|_| r#"<rect width="1" height="1" fill="red"/>"#)
+            .collect();
+        let rects: String = (0..rects)
+            .map(|_| r#"<rect width="2" height="2"/>"#)
+            .collect();
+        tree(&format!(
+            r#"<style>.p {{ fill: url(#p) }}</style><pattern id="p" width="2" height="2" patternUnits="userSpaceOnUse">{content}</pattern><g class="p">{rects}</g>"#
+        ))
+    }
+
+    #[test]
+    fn drawing_work_is_bounded_whatever_the_structural_pass_allowed() {
+        // Built straight from usvg: a style sheet gives rectangles a pattern
+        // of a thousand shapes, drawn for each.
+        assert_eq!(
+            admit(&patterned(2000), Transform::identity(), 64, 64).unwrap_err(),
+            FailureCode::RenderResource
+        );
+        assert!(admit(&patterned(200), Transform::identity(), 64, 64).is_ok());
+    }
 }

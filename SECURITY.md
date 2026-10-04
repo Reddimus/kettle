@@ -125,16 +125,19 @@ Reports that fit any of these are welcome:
   input, or rendered output that carries a transparent pixel's hidden color
   is in scope.
 - **SVG rendering** — an SVG is parsed with no DTD, and written back without
-  scripts, foreign content, event attributes, or any `href` or `url()` that
-  names something outside the document; a reference that cannot be read
-  plainly refuses it. resvg then parses it with image resolvers that load
+  scripts, foreign content, event attributes, namespaced attributes other
+  than `xlink:href` and `xml:space`, or any `href` or `url()` that names
+  something outside the document; a reference that cannot be read plainly,
+  or a number large or small enough to overflow what usvg multiplies,
+  refuses it. resvg then parses it with image resolvers that load
   nothing and no resources directory, and draws text with the bundled face
   only, never a host font. Its expanded size (references, `use` copies and
   per-vertex markers counted every time) and every layer, filter result,
   mask, clip and pattern tile resvg would allocate are admitted before any
-  is built. An SVG that makes the worker read or fetch anything, load a
-  font it was not given, expand or allocate past those limits before being
-  refused, or crash the worker, is in scope. This is resource isolation,
+  is built, and a reference cycle, through inherited or style-sheet paint
+  as well, is refused. An SVG that makes the worker read or fetch anything,
+  load a font it was not given, expand or allocate past those limits before
+  being refused, or crash the worker, is in scope. This is resource isolation,
   not an operating-system sandbox: code execution inside the worker after
   a renderer exploit is not yet confined.
 - **Lua plugin sandbox escape** — `lua-sandbox = safe` (the default)

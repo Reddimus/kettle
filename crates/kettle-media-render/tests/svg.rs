@@ -395,10 +395,12 @@ fn clip_chains_are_charged_per_clip() {
 }
 
 #[test]
-fn style_applied_patterns_are_bounded_by_drawing_work() {
+fn style_applied_patterns_are_refused() {
     // A style sheet gives every rectangle a pattern whose content is drawn
-    // for each: two thousand fills of a thousand shapes, with no reference
-    // the structural pass could count.
+    // for each: two thousand fills of a thousand shapes. The structural pass
+    // cannot tell which elements a rule matches, so a sheet naming a pattern
+    // that holds painted shapes may close a cycle, and is refused as one
+    // (the layer walk's drawing count stands behind it).
     let content: String = (0..1000)
         .map(|_| r#"<rect width="1" height="1" fill="red"/>"#)
         .collect();
@@ -408,8 +410,43 @@ fn style_applied_patterns_are_bounded_by_drawing_work() {
     let body = format!(
         r#"<style>.p {{ fill: url(#p) }}</style><pattern id="p" width="2" height="2" patternUnits="userSpaceOnUse">{content}</pattern><g class="p">{rects}</g>"#
     );
+    assert_eq!(render_svg(&body, 64).unwrap_err(), FailureCode::RenderParse);
+}
+
+#[test]
+fn filter_results_are_charged_at_the_layer_size() {
+    // One filter makes the layer 1000x1000; a second, a pixel wide, takes
+    // the source graphic ten times, and each result is a copy of the layer.
+    let matrices: String = (0..10)
+        .map(|_| r#"<feColorMatrix in="SourceGraphic" type="saturate" values="0.5"/>"#)
+        .collect();
+    let body = format!(
+        r#"<filter id="a" x="0" y="0" width="1000" height="1000" filterUnits="userSpaceOnUse"><feOffset dx="1"/></filter><filter id="b" x="0" y="0" width="1" height="1" filterUnits="userSpaceOnUse">{matrices}</filter><rect width="1000" height="1000" fill="green" filter="url(#a) url(#b)"/>"#
+    );
     assert_eq!(
-        render_svg(&body, 64).unwrap_err(),
+        render_svg(&body, 1000).unwrap_err(),
         FailureCode::RenderResource
     );
+}
+
+#[test]
+fn filter_rectangles_past_integer_range_are_refused_not_panicked_on() {
+    // In bounds as written, scaled past what tiny-skia converts without
+    // overflowing (its conversion unwraps).
+    let body = r#"<g transform="scale(1000)"><filter id="f" primitiveUnits="userSpaceOnUse"><feFlood x="10000000" width="10" height="10" flood-color="red"/></filter><rect width="1" height="1" filter="url(#f)"/></g>"#;
+    assert_eq!(render_svg(body, 64).unwrap_err(), FailureCode::RenderParse);
+}
+
+#[test]
+fn marker_sizes_stay_within_what_usvg_multiplies() {
+    // Past the number bounds: refused before usvg multiplies them.
+    let huge = r##"<marker id="m" markerWidth="1e30" markerHeight="1e30" viewBox="0 0 1 1"><rect width="1" height="1"/></marker><path d="M0 0L10 10" stroke="black" stroke-width="1e10" marker-end="url(#m)"/>"##;
+    assert_eq!(render_svg(huge, 64).unwrap_err(), FailureCode::RenderParse);
+    // The extremes the bounds allow multiply to finite, non-zero sizes.
+    for (size, stroke) in [("10000000", "10000000"), ("1e-20", "1e-20")] {
+        let body = format!(
+            r##"<marker id="m" markerWidth="{size}" markerHeight="{size}" viewBox="0 0 1 1"><rect width="1" height="1"/></marker><path d="M0 0L10 10" stroke="black" stroke-width="{stroke}" marker-end="url(#m)"/>"##
+        );
+        render_svg(&body, 64).unwrap_or_else(|code| panic!("{code:?}: {body}"));
+    }
 }
