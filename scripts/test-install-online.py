@@ -502,6 +502,12 @@ fi
             )
             self._add(
                 archive,
+                "kettle/kettle-media-worker",
+                data=b"#!/bin/sh\nexit 97\n",
+                mode=0o755,
+            )
+            self._add(
+                archive,
                 "kettle/install.sh",
                 data=install,
                 mode=0o755,

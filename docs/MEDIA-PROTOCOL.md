@@ -171,7 +171,7 @@ worker. A program running as the same user can rewrite a user-owned install,
 including Kettle itself, so it is outside what they can stop.
 
 `kettle ctl get_state` reports the answer as `media`:
-`{"availability": "checking"}` or `{"availability": "unavailable", "reason":
+`{"availability": "checking"}`, `{"availability": "available"}` or `{"availability": "unavailable", "reason":
 <code>}`. Codes are fixed, never a path or tool output:
 
 | Code | Meaning |
@@ -182,12 +182,13 @@ including Kettle itself, so it is outside what they can stop.
 | `unsafe_worker_file` | The worker or its directory failed the file checks, or could not be read |
 | `unverified_worker` | The signature check failed, or the file changed while it ran |
 | `check_failed` | The check could not run |
-| `incomplete` | The worker passed every check, but this build cannot render yet |
 | `stuck_workers` | Two killed workers would not exit, so media is off until Kettle restarts |
 | `not_configured` | The GUI was started without a media client |
 
-No build renders yet, so `incomplete` is the best answer there is. Nothing
-here spawns a worker.
+Availability describes the installed worker's file/platform checks. It starts
+no worker; each render separately requires the matching Ready, valid result
+and clean process exit. Raster and SVG are available internally. User-facing
+preview callers are introduced separately.
 
 ## Running a job
 

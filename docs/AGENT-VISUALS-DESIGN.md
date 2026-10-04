@@ -4,8 +4,9 @@ This record describes the 5.0 agent-visuals architecture and the boundaries
 that each implementation slice must preserve. It is a design record, not a
 claim that all these features ship. The current implementation has bounded
 media frames, worker discovery/build identity, a separate resource-limited
-worker, and raster/SVG rendering. Packaging, production availability, cards,
-preview lanes, Mermaid, and audio/video playback remain later work.
+worker, raster/SVG rendering, paired packaging/update recovery, and internal
+availability. Cards, preview lanes, Mermaid, and audio/video playback remain
+later work.
 
 ## Ownership
 
@@ -17,7 +18,7 @@ preview lanes, Mermaid, and audio/video playback remain later work.
 | `kettle` | Installed-worker resolution and native verification; CLI/MCP and launch integration as they land |
 | `kettle-ui` | User actions, request admission, lifetime/cancellation, fallback-font resolution and bounded requeue, preview/card/shelf/viewer state as they land |
 | `kettle-core`, `kettle-vt`, `kettle-render` | Terminal state, registered card markers, geometry and GPU presentation as they land |
-| `kettle-update` | Verified packages, installation provenance, publication/recovery of the executable pair as packaging lands |
+| `kettle-update` | Verified packages, installation provenance, publication/recovery of the executable pair |
 
 The heavy renderer dependency belongs only to the worker. Ordinary terminal
 startup does not load worker fonts, start a worker, or create a footprint
@@ -46,9 +47,9 @@ not a complete operating-system sandbox. Decoder-helper confinement and native
 sandbox acceptance are required before later video/playback features ship.
 Windows media remains unsupported; the text terminal continues to work.
 
-Production availability stays incomplete until the packaging and native
-acceptance chain passes. A renderer test or executable placed beside a local
-build does not make previews available to users.
+The packaged raster/SVG worker is available internally after its installation
+checks pass. User-facing preview callers are introduced separately. A renderer
+test does not prove native release-artifact installation or UI acceptance.
 
 ## Source, fonts and rendering
 
@@ -100,9 +101,9 @@ Linux packaging must publish and recover a verified executable pair. The
 4.9-to-5 bootstrap uses a verified worker capsule carried as shell-integration
 data, followed by a journaled first-restart installation. That data directory
 is never an executable lookup or execution location. Capsule contents,
-manifest binding, signatures, interrupted publication and rollback need
-explicit tests before availability is enabled. Provenance must include the
-new installed files.
+manifest binding, interrupted publication and rollback use the existing
+updater. Provenance includes the installed worker. Signed release-artifact
+upgrade smokes remain final release acceptance, separate from hermetic tests.
 
 Build the worker in its own Cargo invocation using `--profile media-worker`,
 so clipboard TIFF features do not unify into its codec graph. Report worker

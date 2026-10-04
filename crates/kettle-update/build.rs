@@ -7,8 +7,22 @@
 //! shipped `kettle.exe` need no elevation; make that policy explicit for every
 //! test target instead of requiring contributors to elevate Cargo.
 
+#[path = "../kettle/build_support/source_id.rs"]
+mod source_id;
+
+fn embed_source_hash() {
+    let root =
+        std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("../..");
+    println!("cargo:rerun-if-changed=NONEXISTENT_FORCE_RERUN_FOR_KETTLE_SOURCE_HASH");
+    println!(
+        "cargo:rustc-env=KETTLE_SOURCE_HASH={:016x}",
+        source_id::source_hash(&root)
+    );
+}
+
 #[cfg(target_os = "windows")]
 fn main() {
+    embed_source_hash();
     // rustc links test harnesses with `/MANIFEST:NO`; adding `/MANIFESTUAC`
     // through Cargo therefore leaves no resource to carry the policy, and
     // linker-argument order makes trying to override that setting brittle.
@@ -34,4 +48,6 @@ fn main() {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn main() {}
+fn main() {
+    embed_source_hash();
+}

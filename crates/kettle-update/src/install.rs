@@ -812,7 +812,97 @@ fn prepare_linux_process_start_at(
     };
     confirm_committed_transaction(&install.prefix, running_version)?;
     recover_transaction(&install.prefix)?;
+    if let Err(error) = bootstrap_linux_worker(&install, running_version) {
+        log::warn!("media worker installation deferred: {error}");
+    }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn bootstrap_linux_worker(
+    install: &ManagedInstall,
+    running_version: &semver::Version,
+) -> Result<(), UpdateError> {
+    use crate::worker_package::{CAPSULE_BYTES, CAPSULE_METADATA, WorkerCapsule};
+    let worker = Path::new("bin/kettle-media-worker");
+    match fs::symlink_metadata(install.prefix.join(worker)) {
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let metadata_path = Path::new("share/kettle").join(CAPSULE_METADATA);
+    if !install.prefix.join(&metadata_path).try_exists()? {
+        return Ok(());
+    }
+    let previous = read_linux_install_provenance(&install.prefix)?;
+    let read_capsule = |relative: &Path, limit: usize| -> Result<Vec<u8>, UpdateError> {
+        let name = relative_to_string(relative)?;
+        let record = previous
+            .files
+            .iter()
+            .find(|record| record.path == name)
+            .ok_or_else(|| {
+                UpdateError::Transaction("worker capsule is not recorded by the installer".into())
+            })?;
+        let parent = anchored_parent(&install.prefix, relative, false)?;
+        let bytes = read_bounded_regular(&parent.destination(relative)?, limit)?;
+        if bytes.len() as u64 != record.size || sha256_bytes(&bytes) != record.sha256 {
+            return Err(UpdateError::Transaction(
+                "worker capsule does not match its install record".into(),
+            ));
+        }
+        Ok(bytes)
+    };
+    let metadata: WorkerCapsule =
+        serde_json::from_slice(&read_capsule(&metadata_path, 16 * 1024)?)?;
+    if !metadata.matches_running_build(
+        current_target().unwrap_or_default(),
+        &running_version.to_string(),
+    ) {
+        return Err(UpdateError::Transaction(
+            "worker capsule belongs to a different build".into(),
+        ));
+    }
+    let bytes = read_capsule(
+        &Path::new("share/kettle").join(CAPSULE_BYTES),
+        MAX_UNPACKED_BYTES as usize,
+    )?;
+    if bytes.is_empty()
+        || bytes.len() as u64 != metadata.size
+        || sha256_bytes(&bytes) != metadata.sha256
+    {
+        return Err(UpdateError::Transaction(
+            "worker capsule bytes do not match their package".into(),
+        ));
+    }
+    let mut transaction = Transaction::begin(&install.prefix, &running_version.to_string())?;
+    let result = (|| {
+        transaction.preflight_destinations(&[
+            worker.to_path_buf(),
+            PathBuf::from(UNIX_INSTALL_PROVENANCE_FILE),
+        ])?;
+        transaction.install_bytes(worker, &bytes, Some(0o755))?;
+        install_unix_provenance(
+            &mut transaction,
+            install,
+            previous,
+            vec![UnixInstallFile {
+                path: relative_to_string(worker)?,
+                size: bytes.len() as u64,
+                sha256: sha256_bytes(&bytes),
+                mode: 0o755,
+            }],
+        )?;
+        transaction.finish_preflight()
+    })();
+    if let Err(error) = result {
+        transaction.rollback()?;
+        return Err(error);
+    }
+    transaction.commit()?;
+    // The terminal already running this bootstrap is the installed target.
+    confirm_committed_transaction(&install.prefix, running_version)?;
+    recover_transaction(&install.prefix)
 }
 
 /// Apply the fixed pending-update record beside this helper executable.
@@ -2875,6 +2965,7 @@ fn apply_verified_linux_update(
     update: &AvailableUpdate,
 ) -> Result<(), UpdateError> {
     package.file(Path::new("kettle"))?;
+    package.file(Path::new("kettle-media-worker"))?;
     package.file(Path::new("install.sh"))?;
     // Provenance verification REQUIRES this file to be recorded, and the update
     // replaces it like everything else, so it has to be installed here too.
@@ -2898,6 +2989,7 @@ fn apply_verified_linux_update(
         validate_archive_path(relative)?;
         destinations.push(Path::new("share/kettle/shell-integration").join(relative));
     }
+    destinations.push(PathBuf::from("bin/kettle-media-worker"));
     destinations.push(PathBuf::from("bin/kettle"));
     destinations.push(PathBuf::from("share/kettle/install.json"));
     destinations.push(PathBuf::from(UNIX_INSTALL_PROVENANCE_FILE));
@@ -2946,6 +3038,14 @@ fn apply_verified_linux_update(
             mode: 0o644,
         });
     }
+    let worker = package.bytes(Path::new("kettle-media-worker"))?;
+    transaction.install_bytes(Path::new("bin/kettle-media-worker"), worker, Some(0o755))?;
+    provenance_files.push(UnixInstallFile {
+        path: "bin/kettle-media-worker".into(),
+        size: worker.len() as u64,
+        sha256: sha256_bytes(worker),
+        mode: 0o755,
+    });
     let binary = package.bytes(Path::new("kettle"))?;
     transaction.install_bytes(Path::new("bin/kettle"), binary, Some(0o755))?;
     provenance_files.push(UnixInstallFile {
@@ -6260,7 +6360,7 @@ mod tests {
         let body = source
             .split("fn prepare_linux_process_start_at(")
             .nth(1)
-            .and_then(|rest| rest.split("pub fn run_pending_update_helper(").next())
+            .and_then(|rest| rest.split("\n}\n").next())
             .expect("Linux startup recovery body");
         assert!(!body.contains("read_linux_install_provenance"));
     }
@@ -7544,6 +7644,183 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    #[test]
+    fn v490_first_update_installs_worker_on_restart() {
+        use crate::worker_package::{CAPSULE_BYTES, CAPSULE_METADATA, WorkerCapsule};
+        let root = test_tempdir();
+        let prefix = root.path().join("install");
+        let worker = b"worker-from-capsule";
+        let metadata = serde_json::to_vec(&WorkerCapsule::for_package(
+            current_target().unwrap().into(),
+            worker,
+        ))
+        .unwrap();
+        let bytes_path = format!("share/kettle/{CAPSULE_BYTES}");
+        let metadata_path = format!("share/kettle/{CAPSULE_METADATA}");
+        create_linux_install_dir_all(&prefix, &prefix.join("share/kettle"));
+        fs::write(
+            prefix.join("share/kettle/install.json"),
+            marker_json(env!("CARGO_PKG_VERSION")).unwrap(),
+        )
+        .unwrap();
+        seed_linux_install_provenance_with(
+            &prefix,
+            &[
+                (&bytes_path, worker, 0o644),
+                (&metadata_path, &metadata, 0o644),
+            ],
+        );
+        let version = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+        let executable = prefix.join("bin/kettle");
+        prepare_linux_process_start_at(&executable, &version).unwrap();
+        assert_eq!(
+            fs::read(prefix.join("bin/kettle-media-worker")).unwrap(),
+            worker
+        );
+        let record = read_linux_install_provenance(&prefix).unwrap();
+        assert!(
+            record
+                .files
+                .iter()
+                .any(|file| file.path == "bin/kettle-media-worker" && file.mode == 0o755)
+        );
+        prepare_linux_process_start_at(&executable, &version).unwrap();
+        assert_eq!(
+            fs::read(prefix.join("bin/kettle-media-worker")).unwrap(),
+            worker
+        );
+        assert!(!prefix.join(".kettle-update-journal.json").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_package_requires_both_binaries() {
+        let package =
+            load_linux_package(&test_linux_package_tar("99.0.0"), &fake_update()).unwrap();
+        for missing in ["kettle", "kettle-media-worker"] {
+            let root = test_tempdir();
+            let prefix = root.path().join("install");
+            seed_linux_install_provenance(&prefix);
+            let incomplete = VerifiedPackage {
+                files: package
+                    .files
+                    .iter()
+                    .filter(|file| file.relative != Path::new(missing))
+                    .map(|file| VerifiedPackageFile {
+                        relative: file.relative.clone(),
+                        bytes: file.bytes.clone(),
+                        mode: file.mode,
+                    })
+                    .collect(),
+            };
+            let install = ManagedInstall {
+                prefix: prefix.clone(),
+                executable: prefix.join("bin/kettle"),
+                marker_path: prefix.join("share/kettle/install.json"),
+            };
+            let mut transaction = Transaction::begin(&prefix, "99.0.0").unwrap();
+            assert!(
+                apply_verified_linux_update(
+                    &mut transaction,
+                    &incomplete,
+                    &install,
+                    &fake_update()
+                )
+                .is_err()
+            );
+            assert!(transaction.journal.entries.is_empty());
+            assert_eq!(fs::read(prefix.join("bin/kettle")).unwrap(), b"fixture");
+            transaction.rollback().unwrap();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn v490_worker_bootstrap_recovery_is_idempotent() {
+        use crate::worker_package::{CAPSULE_BYTES, CAPSULE_METADATA, WorkerCapsule};
+        let root = test_tempdir();
+        let prefix = root.path().join("install");
+        let bytes = b"recovered-worker";
+        let version = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+        let metadata = serde_json::to_vec(&WorkerCapsule::for_package(
+            current_target().unwrap().into(),
+            bytes,
+        ))
+        .unwrap();
+        create_linux_install_dir_all(&prefix, &prefix.join("share/kettle"));
+        fs::write(
+            prefix.join("share/kettle/install.json"),
+            marker_json(&version.to_string()).unwrap(),
+        )
+        .unwrap();
+        seed_linux_install_provenance_with(
+            &prefix,
+            &[
+                (&format!("share/kettle/{CAPSULE_BYTES}"), bytes, 0o644),
+                (
+                    &format!("share/kettle/{CAPSULE_METADATA}"),
+                    &metadata,
+                    0o644,
+                ),
+            ],
+        );
+        let mut interrupted = Transaction::begin(&prefix, &version.to_string()).unwrap();
+        interrupted
+            .install_bytes(Path::new("bin/kettle-media-worker"), bytes, Some(0o755))
+            .unwrap();
+        std::mem::forget(interrupted);
+        for _ in 0..2 {
+            prepare_linux_process_start_at(&prefix.join("bin/kettle"), &version).unwrap();
+            assert_eq!(
+                fs::read(prefix.join("bin/kettle-media-worker")).unwrap(),
+                bytes
+            );
+            read_linux_install_provenance(&prefix).unwrap();
+            assert!(!prefix.join(".kettle-update-journal.json").exists());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_pair_recovers_after_each_binary_publication() {
+        for published in 1..=2 {
+            let root = test_tempdir();
+            let prefix = root.path().join("install");
+            let version = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+            create_linux_install_dir_all(&prefix, &prefix.join("share/kettle"));
+            fs::write(
+                prefix.join("share/kettle/install.json"),
+                marker_json(&version.to_string()).unwrap(),
+            )
+            .unwrap();
+            seed_linux_install_provenance_with(
+                &prefix,
+                &[("bin/kettle-media-worker", b"old-worker", 0o755)],
+            );
+            let mut transaction = Transaction::begin(&prefix, "99.0.0").unwrap();
+            for (path, bytes) in [
+                ("bin/kettle-media-worker", b"new-worker".as_slice()),
+                ("bin/kettle", b"new-gui".as_slice()),
+            ]
+            .into_iter()
+            .take(published)
+            {
+                transaction
+                    .install_bytes(Path::new(path), bytes, Some(0o755))
+                    .unwrap();
+            }
+            std::mem::forget(transaction);
+            prepare_linux_process_start_at(&prefix.join("bin/kettle"), &version).unwrap();
+            assert_eq!(
+                fs::read(prefix.join("bin/kettle-media-worker")).unwrap(),
+                b"old-worker"
+            );
+            assert_eq!(fs::read(prefix.join("bin/kettle")).unwrap(), b"fixture");
+            read_linux_install_provenance(&prefix).unwrap();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
     fn test_linux_package_tar_with(
         version: &str,
         additional_payloads: &[(&str, &[u8], u32)],
@@ -7551,6 +7828,7 @@ mod tests {
     ) -> Vec<u8> {
         let mut payloads: Vec<(&str, &[u8], u32)> = vec![
             ("kettle", b"verified-binary".as_slice(), 0o755),
+            ("kettle-media-worker", b"verified-worker".as_slice(), 0o755),
             ("install.sh", b"verified-installer".as_slice(), 0o755),
             // The real release archive ships this (release.yml installs
             // `scripts/install-unix.py` into `dist/kettle/`), and provenance

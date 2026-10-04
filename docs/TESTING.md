@@ -773,11 +773,26 @@ in `just gauntlet` and ci.yml) runs it with `--features test-worker`.
 The availability client's unit tests (`src/client.rs`) run it against a
 scripted platform: a missing worker is typed and never verified; an
 unsupported platform is never inspected; a worker that passes every check
-still reads `incomplete`; verification is cached by file identity and repeated
+reads `available` without starting a process; verification is cached by file identity and repeated
 for a replaced file; a file replaced during verification is refused; a failed
 verification is not cached; and asking never waits on a held check and never
 starts a second one. `BuildId::from_embedded` refuses empty, non-hex and
 formatted (`<version> (<hash>)`) identities.
+
+Worker distribution is covered by `python3 scripts/test-install-media.py`:
+both binaries are installed, recorded and uninstalled without starting the
+worker, and a missing helper leaves the destination untouched. Linux updater
+tests require both package binaries, promote the 4.9 compatibility capsule on
+first restart, recover an interrupted bootstrap idempotently, and restore the
+old pair after either binary publication. macOS fixtures require the helper
+and exchange/restore the whole pair. `installed_worker_renders_svg_and_raster`
+copies the real compiled worker to a private install directory, checks Ready,
+exact pixels, framed EOF and clean exits. Its copy fixture uses a lock barrier
+to wait for writable descriptors inherited by concurrent forks before launch,
+with a 5 s failure bound. A retained-writer regression checks both the bounded
+failure and success after the writer closes. These are hermetic tests; final
+release acceptance separately uses actual signed macOS and Linux release
+archives for the 4.9-to-5.0 upgrade on each shipped architecture.
 
 `src/lifecycle.rs` drives `render` against scripted workers over real pipes,
 with short budgets: a Ready from another build is `RestartRequired` and never
@@ -2060,7 +2075,8 @@ missing worker then reads `worker_missing`.
 
 Red checks for this slice: ignoring the file identity in the cache, dropping
 the cache, skipping the re-inspection after verification, reporting a
-verified worker as anything but `incomplete`, each file-mode, owner, link and
+verified worker as anything but `incomplete` in the earlier foundation (the
+packaging step now changes that contract to `available`), each file-mode, owner, link and
 directory check, dropping the status time from the identity, leaving the
 executable's links unresolved, resolving from the working directory, dropping
 the requirement or the hardened-runtime check, a requirement without the

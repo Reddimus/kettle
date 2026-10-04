@@ -109,6 +109,8 @@ class PackageTemplateTests(unittest.TestCase):
                 'install -m644 docs/changelog/*.md',
                 pkgbuild,
             )
+            self.assertIn('bin.install "kettle", "kettle-media-worker"', formula)
+            self.assertIn('install -Dm755 kettle-media-worker "${pkgdir}/usr/bin/kettle-media-worker"', pkgbuild)
 
             second = self.run_renderer(root)
             self.assertEqual(second.returncode, 0, second.stderr)

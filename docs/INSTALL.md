@@ -147,6 +147,7 @@ cd kettle
 Either way, after install:
 
 - Binary at `~/.local/bin/kettle`
+- Media worker at `~/.local/bin/kettle-media-worker`
 - Launcher at `~/.local/share/applications/kettle.desktop`
 - Icon at `~/.local/share/icons/hicolor/scalable/apps/kettle.svg`
   (plus 8-bit PNG fallbacks at 16/24/32/48/64/128/256). User-local source,
@@ -444,8 +445,25 @@ sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev \
 
 git clone https://github.com/Reddimus/kettle
 cd kettle
-cargo run --release
+cargo build --locked --release -p kettle
+cargo build --locked --profile media-worker -p kettle-media-worker
+./target/release/kettle
 ```
+
+Build the worker in a separate invocation: its `media-worker` profile retains
+unwinding, and its image codecs do not inherit the terminal's clipboard TIFF
+feature. On Linux, `./scripts/install.sh` builds and installs both binaries;
+`--skip-build` expects both outputs above. A release tarball carries both
+binaries beside its installer. `cargo install --path crates/kettle` installs
+only the terminal and reports `worker_missing` for media until the sibling
+worker is installed. Text-terminal startup does not start the worker.
+
+Official macOS bundles contain both binaries in `Contents/MacOS`. Local
+unsigned worker builds remain unavailable under the existing macOS policy.
+After a Linux 4.9-to-5.0 self-update, the first restart promotes the packaged
+worker data into `bin/kettle-media-worker` using the update journal. Later
+updates publish both binaries directly. An unavailable migration leaves text
+startup usable and media unavailable.
 
 macOS needs only a stable Rust toolchain (`rustup`). Minimum supported Rust
 version is **1.89** (Cargo.toml

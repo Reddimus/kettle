@@ -9,23 +9,22 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ### Added
 
 - `kettle-media`, a new crate, defines the bounded media protocol for the
-  coming agent visuals: jobs and results, caps, source authorization, the
+  agent visuals: jobs and results, caps, source authorization, the
   build handshake and the binary frames between Kettle and a media worker.
-  Nothing uses it yet, so no behaviour changes.
 - `kettle ctl get_state` reports `media`: whether media previews are
   available, and a fixed reason when not. Kettle looks for its media worker
   only beside its own executable, never in `PATH` or the working directory,
   and checks the file and, on macOS, its code signature before trusting it.
-  No worker ships yet, so it reads `worker_missing`. Kettle and its workers
+  Missing workers read `worker_missing`; installed workers that pass their
+  checks read `available`. Kettle and its workers
   now share one build identity, a hash of the source they were built from.
 - `kettle-media-worker`, the media worker executable, is built with the
   workspace. Before reading anything it closes inherited descriptors, turns
   off core dumps and lowers its resource limits, and a watchdog ends it if
-  its parent stalls. Nothing ships it yet. The media
+  its parent stalls. Unix packages now ship it beside the terminal. The media
   client can run a job in a fresh worker under startup and job deadlines and
   a 768 MiB limit on the memory the worker and everything it started hold,
-  killing the worker's whole process group before reaping it; nothing calls
-  it yet.
+  killing the worker's whole process group before reaping it.
 - The media worker renders raster images through `kettle-media-render`, a new
   crate in safe code that writes nothing. It reads a file once through one
   open descriptor, refusing anything but a regular file and a file that
@@ -33,8 +32,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   name, and decodes PNG, JPEG, WebP, BMP and a GIF's first frame only after
   checking the image's size against the decoded caps. The image is fitted
   into the requested box keeping its aspect ratio, without transparent pixels
-  bleeding color. Other media kinds are refused for now, and nothing in
-  Kettle asks for a render yet.
+  bleeding color. Mermaid and video rendering remain later work; GUI preview
+  callers are introduced separately.
 - The media worker renders SVG with resvg. The document is parsed with no
   DTD, scripts and foreign content are dropped, its style sheets (simple
   selectors, only from retained subtrees) are applied and written as
@@ -55,6 +54,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   no host fonts are discovered, and embedded SVG, color and bitmap glyph
   formats are refused. Results report actual font use and missing scripts
   through `FontFallback`, `MissingGlyphs` and `uncovered_scripts`.
+- Unix packaging builds `kettle-media-worker` separately with the unwinding
+  `media-worker` profile. Linux installers and package-manager templates install
+  both executables; updates journal the pair. The first restart after a Linux
+  4.9-to-5.0 update installs the worker from packaged compatibility data through
+  the same recovery journal. macOS updates exchange the whole paired bundle.
+  Raster and SVG are internal services; preview UI and public display callers
+  are introduced separately.
 - `kettle ctl dispatch_ui_key` drives quick-select hint mode too, in the order
   the keyboard reaches it: right after a confirmation.
 - In quick-select hint mode (`Ctrl+Shift+H`), holding Shift while typing a

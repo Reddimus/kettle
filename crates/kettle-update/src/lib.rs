@@ -9,6 +9,7 @@ mod feed;
 mod install;
 #[cfg(target_os = "macos")]
 mod macos;
+pub mod worker_package;
 
 pub use feed::{
     AvailableUpdate, CheckOutcome, FeedClient, Manifest, ManifestAsset, UpdateError,

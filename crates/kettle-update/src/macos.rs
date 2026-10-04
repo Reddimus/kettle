@@ -98,8 +98,9 @@ const PREVIOUS_PREFIX: &str = ".kettle-update-previous-";
 /// Absent any of these, the archive is not a kettle bundle and extraction fails
 /// before anything is swapped. `CodeResources` is the stapled ticket; without it
 /// the replacement would install and then fail Gatekeeper on first launch.
-const MANDATORY_ENTRIES: [&str; 4] = [
+const MANDATORY_ENTRIES: [&str; 5] = [
     "Contents/MacOS/kettle",
+    "Contents/MacOS/kettle-media-worker",
     "Contents/Info.plist",
     "Contents/CodeResources",
     "Contents/_CodeSignature/CodeResources",
@@ -1022,10 +1023,15 @@ mod tests {
         }
     }
 
-    /// The four files a real archive carries, keyed by their in-archive path.
+    /// The mandatory files a real archive carries, keyed by their in-archive path.
     fn bundle_files() -> BTreeMap<String, (Vec<u8>, u32)> {
         [
             ("Contents/MacOS/kettle", b"mach-o".as_slice(), 0o755),
+            (
+                "Contents/MacOS/kettle-media-worker",
+                b"worker".as_slice(),
+                0o755,
+            ),
             ("Contents/Info.plist", b"<plist/>".as_slice(), 0o644),
             ("Contents/CodeResources", b"s8ch-ticket".as_slice(), 0o644),
             (
@@ -1205,6 +1211,18 @@ mod tests {
             "the binary stays executable"
         );
         assert_eq!(mode_of(&bundle.join("Contents/Info.plist")), 0o644);
+    }
+
+    #[test]
+    fn macos_bundle_requires_both_binaries() {
+        let _serial = serialized();
+        let temp = kettle_test_support::private_tempdir("kettle-macos-pair-");
+        let mut files = bundle_files();
+        files.remove(&format!(
+            "{ARCHIVE_ROOT}/Contents/MacOS/kettle-media-worker"
+        ));
+        let staging = Staging::create(temp.path(), "pair").unwrap();
+        assert!(extract_bundle_into(&staging, &zip_from(&files)).is_err());
     }
 
     const UMASK_CHILD: &str = "KETTLE_TEST_UMASK_CHILD";
@@ -1698,8 +1716,18 @@ mod tests {
 
         std::fs::create_dir_all(staging.bundle().join("Contents/MacOS")).unwrap();
         std::fs::write(staging.bundle().join("Contents/MacOS/kettle"), "new").unwrap();
+        std::fs::write(
+            staging.bundle().join("Contents/MacOS/kettle-media-worker"),
+            "new-worker",
+        )
+        .unwrap();
         std::fs::create_dir_all(live.join("Contents/MacOS")).unwrap();
         std::fs::write(live.join("Contents/MacOS/kettle"), "old").unwrap();
+        std::fs::write(
+            live.join("Contents/MacOS/kettle-media-worker"),
+            "old-worker",
+        )
+        .unwrap();
 
         let parent = open_directory(root).unwrap();
         kettle_state::swap_directory_entries(
@@ -1718,6 +1746,28 @@ mod tests {
             "old",
             "and the displaced bundle is still readable, which is what lets a \
              running process keep reading its own resources"
+        );
+        assert_eq!(
+            std::fs::read_to_string(live.join("Contents/MacOS/kettle-media-worker")).unwrap(),
+            "new-worker"
+        );
+        assert_eq!(
+            std::fs::read_to_string(staging.bundle().join("Contents/MacOS/kettle-media-worker"))
+                .unwrap(),
+            "old-worker"
+        );
+        // The same exchange restores the complete previous pair.
+        kettle_state::swap_directory_entries(
+            &staging.directory,
+            std::ffi::OsStr::new(ARCHIVE_ROOT),
+            &parent,
+            std::ffi::OsStr::new("kettle.app"),
+        )
+        .unwrap();
+        assert_eq!(read(&live), "old");
+        assert_eq!(
+            std::fs::read_to_string(live.join("Contents/MacOS/kettle-media-worker")).unwrap(),
+            "old-worker"
         );
     }
 

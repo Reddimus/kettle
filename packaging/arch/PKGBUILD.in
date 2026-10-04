@@ -54,6 +54,7 @@ package() {
     # Binary itself — drops into /usr/bin so it lands on every
     # user's PATH without rcfile edits.
     install -Dm755 kettle "${pkgdir}/usr/bin/kettle"
+    install -Dm755 kettle-media-worker "${pkgdir}/usr/bin/kettle-media-worker"
 
     # XDG launcher + scalable icon + raster fallbacks so kettle
     # shows up in GNOME Activities / KDE Krunner / rofi the same

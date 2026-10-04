@@ -256,6 +256,7 @@ release-script-test:
 [unix]
 package-manifest-test:
     python3 scripts/test-package-manifest.py
+    python3 scripts/test-install-media.py
 
 # Hermetic Linux/POSIX tests for install-online.sh. A private fake curl serves
 # authenticated fixtures so the safe archive path, modern no-downgrade policy,
@@ -295,6 +296,11 @@ build:
 # release tarballs. Use this to test the same artifact CI would build.
 release:
     cargo build --locked --release -p kettle
+
+# Separate profile and invocation preserve worker unwinding and image features.
+[unix]
+media-worker:
+    cargo build --locked --profile media-worker -p kettle-media-worker
 
 # === Verification gauntlet =========================================
 
@@ -693,7 +699,7 @@ install-recording RECORD_DIR=(env_var("HOME") / ".cache/kettle/records"):
 # restores target/release/kettle around the run). Mirrors CI's
 # Linux-only "Linux installer smoke" step.
 [unix]
-linux-installer-smoke: release
+linux-installer-smoke: release media-worker
     ./scripts/check-linux-installers.sh
 
 # === Misc ==========================================================

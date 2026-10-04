@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
 # kettle — Linux user-install (no sudo required)
 #
-# Builds the release binary and drops everything into the standard
+# Builds the terminal and media worker and drops everything into the standard
 # XDG user paths so the kettle entry shows up in the GNOME Activities
 # overview, Ubuntu Super-key search, KDE Krunner, etc. — no system-wide
 # changes, no `sudo`.
 #
 #   ~/.local/bin/kettle                          ← the binary
+#   ~/.local/bin/kettle-media-worker             ← the media helper
 #   ~/.local/share/applications/kettle.desktop   ← XDG launcher entry
 #   ~/.local/share/icons/hicolor/scalable/apps/kettle.svg
 #   ~/.local/share/icons/hicolor/<NNN>x<NNN>/apps/kettle.png  (16,24,32,48,64,128,256)
 #
 # Usage (from the repo root):
-#   ./scripts/install.sh           # cargo build --release && install
-#   ./scripts/install.sh --skip-build   # use an existing target/release/kettle
+#   ./scripts/install.sh           # build both binaries and install
+#   ./scripts/install.sh --skip-build   # use existing release/media-worker outputs
 #   ./scripts/install.sh --record-dir=$HOME/.cache/kettle/records
 #                                 # auto-record every launcher session into DIR
 #                                 # (wires KETTLE_RECORD_DIR into the .desktop
@@ -81,10 +82,12 @@ if [[ -x "${SCRIPT_DIR}/kettle" && -d "${SCRIPT_DIR}/packaging/linux" ]]; then
   TARBALL_MODE=1
   REPO_ROOT="${SCRIPT_DIR}"
   BIN_SRC="${SCRIPT_DIR}/kettle"
+  WORKER_SRC="${SCRIPT_DIR}/kettle-media-worker"
 else
   TARBALL_MODE=0
   REPO_ROOT=$(cd -- "${SCRIPT_DIR}/.." && pwd)
   BIN_SRC="${REPO_ROOT}/target/release/kettle"
+  WORKER_SRC="${REPO_ROOT}/target/media-worker/kettle-media-worker"
 fi
 
 # The `--record-dir` launcher wiring only survives on a source (`local-dev`)
@@ -147,7 +150,9 @@ fi
 
 if [[ "${TARBALL_MODE}" -eq 0 && "${SKIP_BUILD}" -eq 0 ]]; then
   echo "Building kettle (release)…"
-  ( cd "${REPO_ROOT}" && cargo build --release -p kettle )
+  ( cd "${REPO_ROOT}" && cargo build --locked --release -p kettle )
+  echo "Building media worker (media-worker profile)…"
+  ( cd "${REPO_ROOT}" && cargo build --locked --profile media-worker -p kettle-media-worker )
 fi
 
 if [[ ! -x "${BIN_SRC}" ]]; then
@@ -156,6 +161,11 @@ if [[ ! -x "${BIN_SRC}" ]]; then
   else
     echo "error: ${BIN_SRC} not found (did you skip the build but never run cargo build --release?)" >&2
   fi
+  exit 1
+fi
+
+if [[ ! -x "${WORKER_SRC}" ]]; then
+  echo "error: ${WORKER_SRC} not found or not executable; build kettle-media-worker with --profile media-worker" >&2
   exit 1
 fi
 
@@ -185,6 +195,7 @@ fi
 
 INSTALL_FILES=(
   --file "bin/kettle" "0755" "${BIN_SRC}"
+  --file "bin/kettle-media-worker" "0755" "${WORKER_SRC}"
   --file "share/kettle/install.sh" "0755" "${SCRIPT_DIR}/install.sh"
   --file "share/kettle/install-unix.py" "0755" "${HELPER_SRC}"
   --file "share/icons/hicolor/scalable/apps/kettle.svg" "0644" "${REPO_ROOT}/packaging/linux/kettle.svg"
@@ -237,6 +248,7 @@ cat <<MSG
 Kettle installed with no-follow path validation and recorded provenance.
 
     binary  : ${BIN_DIR}/kettle
+    worker  : ${BIN_DIR}/kettle-media-worker
     desktop : ${APP_DIR}/kettle.desktop
     icons   : ${ICON_BASE}/{scalable,256x256,...}/apps/kettle.{svg,png}
     man page: ${MAN_DIR}/kettle.1   (try: man kettle)

@@ -79,7 +79,7 @@ class Kettle < Formula
       else
         # Homebrew stages the Linux archive from inside its single `kettle/`
         # root, alongside the binary and packaging assets.
-        bin.install "kettle"
+        bin.install "kettle", "kettle-media-worker"
         man1.install "packaging/linux/kettle.1" if File.exist?("packaging/linux/kettle.1")
         # Install the XDG launcher and icons so Homebrew-on-Linux (Linuxbrew)
         # users also find kettle in GNOME Activities and Ubuntu's Super-key

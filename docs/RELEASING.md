@@ -5,6 +5,20 @@ annotated tag**, in that order. The two-PR split is project policy;
 `scripts/release.sh` validates repository state but does not query GitHub to
 prove that a separate prep pull request was merged.
 
+Unix packages contain a matching terminal and `kettle-media-worker`. Build the
+worker separately with `--profile media-worker`, including both universal2
+slices on macOS. Its size is reported separately from the terminal. The macOS
+helper identifier is `org.kettle.terminal.media-worker`; the existing bundle
+signing and notarization steps include it before the outer app is sealed.
+
+Linux packages also carry inert copies at
+`shell-integration/kettle-media-worker.{bin,json}`. The `worker-capsule`
+packaging example records the target, version, source hash, byte size and
+SHA-256 before the existing package manifest is generated. This lets the 4.9
+updater carry worker data through to the first 5.0 restart. Runtime lookup
+always uses the installed sibling, never this data directory. Modern updates
+use the existing transaction for both binaries and the installation record.
+
 ```mermaid
 flowchart TD
     prep["1 · prep PR<br/>promote [Unreleased] to [X.Y.Z] — date"] --> prep_m{{"merged to main"}}

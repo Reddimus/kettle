@@ -1501,6 +1501,7 @@ fn ctl_media_state(media: Option<&kettle_media::client::WorkerClient>) -> serde_
     match media.map(kettle_media::client::WorkerClient::availability) {
         None => serde_json::json!({ "availability": "unavailable", "reason": "not_configured" }),
         Some(MediaAvailability::Checking) => serde_json::json!({ "availability": "checking" }),
+        Some(MediaAvailability::Available) => serde_json::json!({ "availability": "available" }),
         Some(MediaAvailability::Unavailable(cause)) => {
             serde_json::json!({ "availability": "unavailable", "reason": cause.code() })
         }
@@ -45805,21 +45806,24 @@ mod tests {
             .to_owned();
         assert!(body.contains("\"media\": ctl_media_state(self.startup.media.as_deref()),"));
 
-        /// No worker is installed. Checking it holds until the test lets go.
-        struct Missing(std::sync::Mutex<std::sync::mpsc::Receiver<()>>);
-        impl WorkerPlatform for Missing {
+        /// Checking holds until the test releases the channel.
+        struct Checked(
+            std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+            Result<FileIdentity, UnavailableCause>,
+        );
+        impl WorkerPlatform for Checked {
             fn worker_path(&self) -> Result<&Path, UnavailableCause> {
                 Ok(Path::new("/install/kettle-media-worker"))
             }
             fn inspect(&self, _: &Path) -> Result<FileIdentity, UnavailableCause> {
                 let _ = self.0.lock().unwrap().recv();
-                Err(UnavailableCause::WorkerMissing)
+                self.1
             }
             fn verify(&self, _: &Path) -> Result<(), UnavailableCause> {
-                Err(UnavailableCause::Unverified)
+                Ok(())
             }
             fn spawn(&self, _: &Path) -> std::io::Result<kettle_media::client::SpawnedWorker> {
-                Err(std::io::ErrorKind::Unsupported.into())
+                panic!("get_state must not start a worker")
             }
             fn guard_pipe_writes(&self) -> std::io::Result<()> {
                 Ok(())
@@ -45833,7 +45837,10 @@ mod tests {
         let (release, held) = std::sync::mpsc::channel();
         let client = WorkerClient::new(
             kettle_media::BuildId::from_embedded("5.0.0", "0123456789abcdef").unwrap(),
-            Box::new(Missing(std::sync::Mutex::new(held))),
+            Box::new(Checked(
+                std::sync::Mutex::new(held),
+                Err(UnavailableCause::WorkerMissing),
+            )),
         );
         // The check is still held: the answer comes back at once.
         assert_eq!(
@@ -45854,6 +45861,36 @@ mod tests {
             assert!(
                 std::time::Instant::now() < deadline,
                 "the check never finished"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let (release, held) = std::sync::mpsc::channel();
+        drop(release);
+        let available = WorkerClient::new(
+            kettle_media::BuildId::from_embedded("5.0.0", "0123456789abcdef").unwrap(),
+            Box::new(Checked(
+                std::sync::Mutex::new(held),
+                Ok(FileIdentity {
+                    dev: 1,
+                    ino: 2,
+                    size: 3,
+                    mtime_seconds: 4,
+                    mtime_nanos: 5,
+                    ctime_seconds: 6,
+                    ctime_nanos: 7,
+                }),
+            )),
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let state = super::ctl_media_state(Some(&available));
+            if state["availability"] != "checking" {
+                assert_eq!(state, serde_json::json!({ "availability": "available" }));
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "availability never settled"
             );
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
