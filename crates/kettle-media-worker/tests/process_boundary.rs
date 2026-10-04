@@ -25,8 +25,12 @@ fn hello(build_id: BuildId) -> Frame {
 }
 
 fn job(bytes: &[u8]) -> Frame {
+    job_of(JobKind::Raster, bytes)
+}
+
+fn job_of(kind: JobKind, bytes: &[u8]) -> Frame {
     Frame::Job(Job {
-        kind: JobKind::Raster,
+        kind,
         source: Source::Bytes(bytes.to_vec()),
         theme: Theme {
             background: [0; 4],
@@ -146,6 +150,24 @@ fn ready_carries_this_build_and_a_raster_job_is_rendered() {
         (1, 1, vec![10, 20, 30, 255])
     );
     drop(child.stdin.take());
+    assert_eq!(receive(&mut child), None);
+    assert_eq!(exit_code(&mut child, Duration::from_secs(10)), 0);
+    assert_eq!(finish(&mut child), "");
+}
+
+#[test]
+fn an_svg_job_is_rendered() {
+    let mut child = worker();
+    handshake(&mut child);
+    let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4" fill="rgb(10,20,30)"/></svg>"#;
+    send(&mut child, &job_of(JobKind::Svg, svg));
+    let Some(Frame::Rendered(rendered)) = receive(&mut child) else {
+        panic!("no rendered reply");
+    };
+    assert_eq!(
+        (rendered.width, rendered.height, rendered.rgba),
+        (1, 1, vec![10, 20, 30, 255])
+    );
     assert_eq!(receive(&mut child), None);
     assert_eq!(exit_code(&mut child, Duration::from_secs(10)), 0);
     assert_eq!(finish(&mut child), "");

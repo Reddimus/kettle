@@ -140,7 +140,7 @@ crates/
   kettle-i18n/     Typed UI text catalogue (English · Spanish), generated at build time
   kettle-media/    Bounded media jobs/results · source authorization · caps · worker frames
   kettle-media-worker/  The media worker executable · early fd sweep · limits · watchdog
-  kettle-media-render/  Worker-side rendering · held-handle source loads · raster decode and fit
+  kettle-media-render/  Worker-side rendering · held-handle source loads · raster decode · SVG admission
   kettle-vt/       Image-protocol extractor (Sixel · kitty · iTerm2 · OSC 7/133)
   kettle-core/     PTY reader · alacritty_terminal+vte · bounded grid search · hints · links
   kettle-render/   wgpu pipelines · glyphon text · search/chrome geometry · screenshots · GPU self-test

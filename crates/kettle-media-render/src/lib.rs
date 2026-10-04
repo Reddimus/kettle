@@ -17,6 +17,16 @@ mod container;
 mod raster;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod source;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod svg;
+
+/// Build what every job shares (the bundled font database) ahead of any job,
+/// so a worker does it before it reports Ready rather than inside a job's
+/// deadline.
+pub fn prepare() {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    svg::prepare();
+}
 
 /// Render one job.
 pub fn render(job: &Job) -> Result<Rendered, FailureCode> {
@@ -25,6 +35,7 @@ pub fn render(job: &Job) -> Result<Rendered, FailureCode> {
         job.target.validate().map_err(|_| FailureCode::BadParams)?;
         match job.kind {
             kettle_media::JobKind::Raster => raster::render(job),
+            kettle_media::JobKind::Svg => svg::render(job),
             _ => Err(FailureCode::UnsupportedMedia),
         }
     }
@@ -47,6 +58,11 @@ mod tests {
             ("lib", include_str!("lib.rs")),
             ("source", include_str!("source.rs")),
             ("container", include_str!("container.rs")),
+            ("svg", include_str!("svg/mod.rs")),
+            ("svg/fonts", include_str!("svg/fonts.rs")),
+            ("svg/layers", include_str!("svg/layers.rs")),
+            ("svg/sanitize", include_str!("svg/sanitize.rs")),
+            ("svg/structure", include_str!("svg/structure.rs")),
             ("raster", include_str!("raster.rs")),
         ] {
             let code = code_only(&production_source(source));

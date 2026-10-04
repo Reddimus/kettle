@@ -37,7 +37,7 @@ graph TD
     media["kettle-media<br/>bounded jobs and results · theme · caps<br/>source authorization · build handshake · binary frames<br/>worker availability client"]
     worker["kettle-media-worker (bin)<br/>early fd sweep · non-dumpable · rlimits<br/>watchdog · one job per process"] --> media
     worker --> mrender
-    mrender["kettle-media-render<br/>held-handle source loads · raster decode under caps<br/>aspect fit · straight RGBA · no unsafe code"] --> media
+    mrender["kettle-media-render<br/>held-handle source loads · raster decode under caps<br/>SVG sanitize · admission · resvg · straight RGBA<br/>no unsafe code"] --> media
 ```
 
 `kettle-media` defines the media protocol for agent visuals: bounded jobs and
@@ -60,8 +60,11 @@ worker, a separate executable that serves one job per process; nothing ships
 it yet. It renders through `kettle-media-render`: the source is read once
 through one held descriptor, the format comes from the content, the decoded
 size is checked before any pixel is decoded, and the image is fitted into the
-job's target box as straight RGBA. Raster images are rendered; every other
-kind is refused as unsupported until its renderer lands. The client's `render` runs one job in a
+job's target box as straight RGBA. An SVG is parsed with no DTD, rewritten so
+it refers to nothing outside itself, admitted on its expanded size and on
+every layer resvg would allocate, and only then rendered, with the one font
+bundled in the worker. Raster images and SVG are rendered; every other kind
+is refused as unsupported until its renderer lands. The client's `render` runs one job in a
 fresh worker under startup and job deadlines, with the worker in its own
 process group, killed before it is reaped; nothing in the GUI calls it yet. The byte layouts, digest
 framing, availability codes and decisions are in

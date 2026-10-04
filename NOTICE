@@ -14,6 +14,13 @@ This product depends on and/or adapts ideas from the following projects:
 * cosmic-text / glyphon — MIT OR Apache-2.0
   Text shaping, font fallback and GPU glyph atlas.
 
+* resvg / usvg — Apache-2.0 OR MIT
+  https://github.com/linebender/resvg
+  The media worker renders SVG with resvg and usvg, which draw with
+  tiny-skia (BSD-3-Clause) and shape text with harfrust (MIT) and skrifa
+  (MIT OR Apache-2.0). Kettle's SVG admission mirrors resvg's allocation
+  geometry; the code is original.
+
 * Contour — Apache-2.0
   Reference for the Sixel parser state machine.
 
@@ -49,6 +56,8 @@ Bundled assets:
 
 * JetBrains Mono Nerd Font — SIL Open Font License 1.1
   See assets/fonts/OFL.txt
+  The regular face is also embedded in the media worker, as the only font
+  SVG text is drawn with.
 
 * iTerm2-Color-Schemes (Ghostty theme set) — MIT
   See assets/themes/LICENSE

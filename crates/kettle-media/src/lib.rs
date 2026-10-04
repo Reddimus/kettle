@@ -26,6 +26,21 @@ pub const MAX_DECODED_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_RENDERED_EDGE: u32 = 4096;
 /// Straight RGBA result limit.
 pub const MAX_RENDERED_BYTES: usize = 64 * 1024 * 1024;
+/// An SVG result's edge limit, tighter than the general one: the image is
+/// fitted within the target and then within this and `MAX_SVG_RENDERED_PIXELS`.
+pub const MAX_SVG_RENDERED_EDGE: u32 = 1024;
+/// An SVG result's pixel limit.
+pub const MAX_SVG_RENDERED_PIXELS: u64 = 1024 * 1024;
+/// The pixels an SVG render may allocate for layers, filter results, masks,
+/// clips and pattern tiles together, counted per use before any is allocated.
+pub const MAX_SVG_LAYER_PIXELS: u64 = 4 * 1024 * 1024;
+/// Elements an SVG document may hold.
+pub const MAX_SVG_ELEMENTS: usize = 125_000;
+/// Element nesting an SVG document may have, references followed.
+pub const MAX_SVG_DEPTH: usize = 256;
+/// An SVG document's work with references expanded: elements, path and
+/// point numbers and text characters, each counted once per use.
+pub const MAX_SVG_WORK: u64 = 1_000_000;
 /// Whole Markdown input limit.
 pub const MAX_MARKDOWN_BYTES: usize = 1024 * 1024;
 /// Maximum Markdown diagram fences.

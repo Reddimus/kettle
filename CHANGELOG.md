@@ -35,6 +35,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   into the requested box keeping its aspect ratio, without transparent pixels
   bleeding color. Other media kinds are refused for now, and nothing in
   Kettle asks for a render yet.
+- The media worker renders SVG with resvg. The document is parsed with no
+  DTD, scripts and foreign content are dropped, and every reference outside
+  the document (files, network, data URLs) is removed before resvg sees it;
+  resvg's own resolvers load nothing either. A document whose references
+  would expand past a million units, nest deeper than 256, or make resvg
+  allocate more than four million pixels of layers, filter results, masks,
+  clips or pattern tiles is refused before any of it is allocated. SVG
+  results are at most 1024 pixels a side and a million pixels, and text is
+  drawn with the bundled JetBrains Mono face only.
 - `kettle ctl dispatch_ui_key` drives quick-select hint mode too, in the order
   the keyboard reaches it: right after a confirmation.
 - In quick-select hint mode (`Ctrl+Shift+H`), holding Shift while typing a

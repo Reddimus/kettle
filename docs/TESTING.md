@@ -834,7 +834,8 @@ lists `/proc/self/fd`), or touches stderr outside the fixed panic line.
 
 `tests/process_boundary.rs` drives the built binary: Ready carries this
 build's identity and a 1x1 PNG raster job comes back rendered, pixel for
-pixel, while bytes no decoder recognizes are `UnsupportedMedia`, each with
+pixel, as does a 4x4 SVG fitted into a 1x1 box, while bytes no decoder
+recognizes are `UnsupportedMedia`, each with
 nothing else on stdout or stderr; a Hello from another source hash or version, and a
 header of another protocol version, are `RestartRequired` with exit 9;
 garbage, a job before Hello, a second Hello and a frame cut short in its
@@ -875,7 +876,7 @@ keeps it pure blue. An 8x8 box fits a 4x2 image at 8x4; a crop in box
 coordinates is transparent where the centered image does not reach; a box
 over the rendered edge or a crop outside it is `BadParams`. A file's digest
 covers its bytes and the open file's identity, the same bytes inline carry
-none, and kinds other than raster are `UnsupportedMedia` for now.
+none, and kinds other than raster and SVG are `UnsupportedMedia` for now.
 
 `tests/hostile.rs` renders under a global allocator that records the largest
 single allocation each thread makes. A WebP whose 1x1 canvas holds a bitstream
@@ -889,6 +890,59 @@ animated, with and without alpha. BMP headers of 70000x1, 1x-70000 and
 whichever decoder would have refused them. Halving a 2048x2048 image
 allocates nothing larger than the decoded image itself. The lossy fixture is
 a 2x2 VP8 frame from `cwebp`, with its size fields rewritten per case.
+
+`tests/svg.rs` renders SVG jobs. Opaque and half-transparent fills come back
+as straight RGBA (within one level), uncovered pixels all zero. Text renders
+with the bundled face whatever family it names (`Arial`, `serif`, a missing
+font). Eight injection vectors render with nothing of theirs drawn: an
+`<image>` naming a readable red PNG by absolute path (as a Mermaid style
+value that broke out of its attribute would), by `file:` URL, by relative
+path and over the network; a data URL; a script, an event attribute and a
+`javascript:` link; a `use` of another file; and an `feImage` of the PNG with
+a style fill naming the other file. A `foreignObject` in a `switch` is
+dropped and its fallback drawn; a DTD with entities, or naming an external
+subset, is `RenderParse`. At 512 pixels, four filtered rectangles sharing one
+blur pass and sixteen are refused (charged per use); a filter of eight
+primitives passes and sixteen are refused; ten translucent groups pass and
+twenty are refused; an 8192-unit pattern tile, a chain of forty masks and a
+chain of forty clips are refused while a small tile and one clip draw
+correctly. Two finite scales that overflow when composed are `RenderParse`. A
+use bomb is refused within two seconds; a style sheet giving two thousand
+rectangles a thousand-shape pattern is refused on drawing work. A 10x10
+image in a 4096x2048 box comes back at 1024x1024, and a crop reaches the
+full fitted image within the ceiling. An input of exactly 2 MiB renders and
+one byte more is `TooLarge`; a path source renders through its held file
+with its identity in the digest; bytes that are not UTF-8, not XML or not
+SVG are `RenderParse`.
+
+Unit tests in `src/svg/` pin the parts: the sanitizer keeps local references
+and removes the rest, rewrites `style` declarations, refuses escapes and
+unclosed `url(` and outside style-sheet references, round-trips `&`, `<`,
+quotes and line breaks exactly, drops scripts, foreign content, events and
+metadata, refuses a DTD, and tells marker rules in a style sheet from a
+`.marker` class; the structural count splits numbers as a parser does,
+charges a shared definition per use (900 uses of a thousand elements pass,
+999 do not), refuses nested uses, reference cycles (but not a link to an
+ancestor), markers per vertex whether set directly, inherited through a
+`use` or set by a style sheet, markers that could hold markers (while an
+arrowhead on two hundred paths passes), and too many elements, too deep a
+tree, too long a path and too much style matching; placement fits the box
+and then the ceiling and shifts a crop; unpremultiplying rounds and clears
+alpha-0 pixels; source lines are bounded, without line breaks; usvg with
+these options builds no image node even from unsanitized absolute paths and
+data URLs; and the font database holds the bundled face alone, which every
+family resolves to. `tests/hostile.rs` also shows an SVG filter five
+canvases wide refused before any allocation as large as the canvas itself.
+
+SVG red checks: an `href` kept whatever it names, a DTD allowed, scripts and
+foreign content kept, outside references kept in a style declaration or a
+property, `&` left unescaped, style sheets unchecked, usvg's default
+resolvers, `use` copies uncounted, markers uncounted, nested markers
+allowed, cycles followed, nesting, element count or style matching left
+unbounded, a `use` copy not inheriting its marker context, filter
+primitives, group layers, pattern tiles, clips or masks left free,
+non-finite transforms passed, drawing work unbounded, no SVG ceiling, a crop
+past it, and premultiplied output each fail a test above.
 
 `tests/source.rs` loads paths: a group-writable file (as umask 002 leaves it)
 and a symbolic link at the leaf are accepted; a FIFO with no writer is

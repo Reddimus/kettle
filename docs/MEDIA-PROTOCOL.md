@@ -331,12 +331,12 @@ of 0 backs it up. Every size is checked before the work it would cost, so the
 worker's limits and the client's deadlines and memory limit are a second
 bound, not the only one. An empty target box, one over 4096 pixels on an
 edge, a scale that is not a positive finite number, or a crop that is empty or
-leaves the box, is `BadParams`. Raster jobs are rendered; every other kind is
-`UnsupportedMedia` until its renderer lands. On Windows, where no worker
-runs, every job is `UnsupportedPlatform`.
+leaves the box, is `BadParams`. Raster and SVG jobs are rendered; every other
+kind is `UnsupportedMedia` until its renderer lands. On Windows, where no
+worker runs, every job is `UnsupportedPlatform`.
 
 **The source.** Inline bytes over the job kind's input cap (32 MiB for a
-raster) are `TooLarge`. A path is opened once, read-only, non-blocking and
+raster, 2 MiB for an SVG) are `TooLarge`. A path is opened once, read-only, non-blocking and
 without becoming a controlling terminal, and everything after that is decided
 from the open descriptor, never the path:
 
@@ -386,6 +386,92 @@ box coordinates, with the fitted image centered in the box: it returns just
 that region, transparent wherever the image does not reach. The canvas color
 is the GUI's to draw behind the result, and the scale is for vector content: a
 raster target is already in device pixels.
+
+**SVG: sanitizing.** The source must be UTF-8 (`RenderParse` otherwise). It
+is parsed once with at most 500,000 nodes (`RenderResource` past that) and no
+DTD: a document type declaration, and with it any entity, is `RenderParse`.
+The root must be an SVG-namespace `svg` element. The document is then written
+back, so usvg only ever sees the rewritten text:
+
+| In the source | Written back |
+|---|---|
+| elements outside the SVG namespace (editor metadata) | dropped, with their content |
+| `script`, `foreignObject` | dropped, with their content (a `switch` falls back to its next child) |
+| `href` or `xlink:href` naming a local fragment (`#id`) | kept |
+| any other `href` (`file:`, `http:`, `data:`, a path) | removed |
+| a property `url(#id)` | kept |
+| a property naming anything else | the attribute, or the `style` declaration, removed |
+| a backslash escape or an unclosed `url(` in a property | `RenderParse` |
+| a style sheet with an `@import`, an escape or an outside `url(` | `RenderParse` |
+| event attributes, `xml:base`, comments, processing instructions | dropped |
+
+The writer escapes `&`, `<`, `>` and quotes itself, and tabs and line breaks
+in attributes, so values reach usvg exactly as they were parsed. A rewritten
+document over 8 MiB is `RenderResource`. usvg then parses it with no
+resources directory and with image resolvers that return nothing for data
+and string references alike, so even a reference the rewrite missed reads no
+file and no network.
+
+**SVG: structure.** Before usvg, the document's cost once its references are
+expanded is counted: one unit per element, plus the numbers in its path data
+or point list and the characters of its text, plus a target's whole cost each
+time it is referenced (`use`, paint servers, clips, masks, filters, `feImage`,
+text paths and linked templates), plus, on a shape that can carry markers,
+its vertices times the most expensive marker. A `use` copy inherits marker
+properties from the `use`; other targets inherit from where they are
+defined; a style sheet that sets a marker property applies everywhere. Each
+of these is `RenderResource`:
+
+- more than 125,000 elements;
+- an expanded cost over 1,000,000 units;
+- an expanded nesting deeper than 256 (usvg and resvg recurse that deep);
+- style rules times elements over 10,000,000 (the selector matching usvg
+  does);
+- a marker that could hold markers: one whose content, or what it references,
+  sets a marker property, one that inherits one, or one holding a shape while
+  a style sheet sets marker properties. usvg allows such nesting, and it
+  multiplies per vertex at every level.
+
+A reference cycle is `RenderParse`.
+
+**SVG: layers.** The image is fitted inside the target box keeping its aspect
+ratio, then, without a crop, within 1024 pixels a side and 1,048,576 pixels
+(`MAX_SVG_RENDERED_EDGE`, `MAX_SVG_RENDERED_PIXELS`); the result may be
+smaller than the box. A crop selects target-box pixels around the centered
+image at the full fitted size, and must itself fit those limits, or it is
+`BadParams`. Before the canvas is allocated, every allocation resvg 0.48.1
+would make is counted, each time it would make it, against 4,194,304 pixels
+(`MAX_SVG_LAYER_PIXELS`):
+
+- an isolated group's layer, at its transformed bounds widened by 2 pixels a
+  side, clamped to resvg's own limit (from -2 to +3 canvas widths and
+  heights: up to 25 times the canvas area);
+- each filter primitive's result at the filter region, and what an
+  `feImage` renders;
+- a clip's canvas and mask at the layer's size, for every clip in a chain
+  and every clipped group inside one;
+- a mask's canvas and masks at the layer's size, and its content, for every
+  mask in a chain;
+- a pattern tile at its own transformed size, for every fill and stroke that
+  uses it, and its content.
+
+Past that is `RenderResource`, and so is drawing more than 1,000,000 nodes
+(a style sheet can give every shape a pattern without a reference the
+structural count sees). A transform that is not finite is `RenderParse`, and
+so is an image node, which nothing may load. Pixels are not time, and filter
+scratch buffers and path tessellation are not counted: the worker's deadline
+and the client's memory limit still stand behind this.
+
+**SVG: result.** resvg's premultiplied pixels come back as straight RGBA,
+rounded, with every fully transparent pixel all zero. Text is drawn with the
+JetBrains Mono face bundled in the worker and nothing else: no host font is
+discovered or loaded, and any `font-family` resolves to that face. The
+result carries the source as display lines: at most 2,000 lines of at most
+4,096 bytes, cut at a character boundary, with `SourceDisplayClipped` when
+anything was left out. As for a raster, the canvas is the GUI's to draw
+behind the result, and the target's scale is unused (the box is already in
+device pixels). The worker builds the font database before it reports
+Ready, outside the job's deadline.
 
 ## P2 boundary and separate worker decision
 

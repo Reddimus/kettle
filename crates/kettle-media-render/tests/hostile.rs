@@ -54,8 +54,18 @@ static ALLOCATOR: Largest = Largest;
 /// Render `bytes` into a `width` by `height` box: the result, and the largest
 /// single allocation this thread made while rendering.
 fn measured(bytes: Vec<u8>, width: u32, height: u32) -> (Result<Rendered, FailureCode>, usize) {
+    measured_as(JobKind::Raster, bytes, width, height)
+}
+
+/// `measured` for a job of `kind`.
+fn measured_as(
+    kind: JobKind,
+    bytes: Vec<u8>,
+    width: u32,
+    height: u32,
+) -> (Result<Rendered, FailureCode>, usize) {
     let job = Job {
-        kind: JobKind::Raster,
+        kind,
         source: Source::Bytes(bytes),
         theme: Theme {
             background: [0; 4],
@@ -264,4 +274,16 @@ fn resize_holds_no_intermediate_larger_than_the_image() {
             .all(|pixel| pixel == [30, 60, 90, 200])
     );
     assert!(largest <= decoded, "allocated {largest} bytes");
+}
+
+#[test]
+fn svg_layer_rejection_precedes_pixmap_allocation() {
+    // A filter region five canvases wide on a 1024 canvas: resvg would
+    // allocate a 5120x5120 layer (100 MiB) and a result per primitive. The
+    // refusal comes first, before the canvas itself.
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024"><filter id="f" x="-2" y="-2" width="5" height="5"><feFlood flood-color="red"/><feFlood flood-color="blue"/></filter><rect width="1024" height="1024" filter="url(#f)"/></svg>"#;
+    let canvas = 1024 * 1024 * 4;
+    let (result, largest) = measured_as(JobKind::Svg, svg.as_bytes().to_vec(), 1024, 1024);
+    assert_eq!(result.unwrap_err(), FailureCode::RenderResource);
+    assert!(largest < canvas, "allocated {largest} bytes");
 }
