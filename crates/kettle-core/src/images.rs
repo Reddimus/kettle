@@ -192,6 +192,99 @@ pub fn resolve_chain(
     Some(relative_origin(base.0, base.1, h, v))
 }
 
+/// A metadata-only snapshot of placement origins and relative parent edges.
+#[derive(Default)]
+pub(crate) struct RelativeResolver {
+    origins: HashMap<PlacementKey, (u64, usize)>,
+    parents: HashMap<PlacementKey, (PlacementKey, i32, i32)>,
+    defaults: HashMap<u32, u32>,
+    relative_defaults: HashMap<u32, u32>,
+}
+
+impl RelativeResolver {
+    pub(crate) fn new(
+        physical: impl IntoIterator<Item = (PlacementKey, (u64, usize))>,
+        virtuals: impl IntoIterator<Item = PlacementKey>,
+        cells: impl IntoIterator<Item = (u64, usize, kettle_vt::placeholder::ResolvedCell)>,
+        relatives: impl IntoIterator<Item = (PlacementKey, PlacementKey, i32, i32)>,
+    ) -> Self {
+        let mut resolver = Self::default();
+        for (key, origin) in physical {
+            resolver.note_key(key);
+            // Anonymous physical placements can share a key. Keep the first
+            // actual origin instead of combining coordinates from two images.
+            resolver.origins.entry(key).or_insert(origin);
+        }
+        let virtuals: HashSet<_> = virtuals.into_iter().collect();
+        let mut virtual_defaults: HashMap<u32, u32> = HashMap::new();
+        for &key in &virtuals {
+            virtual_defaults
+                .entry(key.image_id)
+                .and_modify(|current| *current = (*current).min(key.placement_id))
+                .or_insert(key.placement_id);
+        }
+        for (abs, col, cell) in cells {
+            let placement_id = if cell.placement_id == 0 {
+                let Some(&placement) = virtual_defaults.get(&cell.image_id) else {
+                    continue;
+                };
+                placement
+            } else {
+                cell.placement_id
+            };
+            let key = PlacementKey {
+                image_id: cell.image_id,
+                placement_id,
+            };
+            if virtuals.contains(&key) {
+                resolver.note_key(key);
+                resolver
+                    .origins
+                    .entry(key)
+                    .and_modify(|origin| {
+                        origin.0 = origin.0.min(abs);
+                        origin.1 = origin.1.min(col);
+                    })
+                    .or_insert((abs, col));
+            }
+        }
+        for (key, parent, h, v) in relatives {
+            resolver
+                .relative_defaults
+                .entry(key.image_id)
+                .and_modify(|current| *current = (*current).min(key.placement_id))
+                .or_insert(key.placement_id);
+            resolver.parents.insert(key, (parent, h, v));
+        }
+        resolver
+    }
+
+    fn note_key(&mut self, key: PlacementKey) {
+        self.defaults
+            .entry(key.image_id)
+            .and_modify(|current| *current = (*current).min(key.placement_id))
+            .or_insert(key.placement_id);
+    }
+
+    pub(crate) fn resolve(&self, mut parent: PlacementKey, max_depth: u32) -> Option<(u64, usize)> {
+        if parent.placement_id == 0 {
+            parent.placement_id = *self
+                .defaults
+                .get(&parent.image_id)
+                .or_else(|| self.relative_defaults.get(&parent.image_id))?;
+        }
+        if let Some(&origin) = self.origins.get(&parent) {
+            return Some(origin);
+        }
+        if max_depth == 0 {
+            return None;
+        }
+        let &(grandparent, h, v) = self.parents.get(&parent)?;
+        let origin = self.resolve(grandparent, max_depth - 1)?;
+        Some(relative_origin(origin.0, origin.1, h, v))
+    }
+}
+
 /// A kitty animation: the full display sequence (`imgs[0]` = base/root
 /// frame) with each frame's gap (ms), the control state, and the wall
 /// clock the playback timing is measured from.
@@ -326,6 +419,93 @@ mod tests {
             removed_keys,
             HashSet::from([key(5, 0), key(6, 1), key(7, 0), key(8, 1)])
         );
+    }
+
+    fn relative_key(image_id: u32, placement_id: u32) -> PlacementKey {
+        PlacementKey {
+            image_id,
+            placement_id,
+        }
+    }
+
+    #[test]
+    fn keyed_relative_origins_keep_virtual_prototypes_separate() {
+        let cell = |placement_id| kettle_vt::placeholder::ResolvedCell {
+            image_id: 1,
+            placement_id,
+            row: 0,
+            col: 0,
+        };
+        let resolver = super::RelativeResolver::new(
+            [],
+            [relative_key(1, 2), relative_key(1, 7)],
+            [
+                (100, 9, cell(0)),
+                (50, 4, cell(7)),
+                (1, 1, cell(99)),
+                (120, 3, cell(2)),
+            ],
+            [],
+        );
+        assert_eq!(resolver.resolve(relative_key(1, 2), 8), Some((100, 3)));
+        assert_eq!(resolver.resolve(relative_key(1, 7), 8), Some((50, 4)));
+        assert_eq!(resolver.resolve(relative_key(1, 99), 8), None);
+        assert_eq!(resolver.resolve(relative_key(1, 0), 8), Some((100, 3)));
+        let hidden = super::RelativeResolver::new(
+            [(relative_key(1, 2), (20, 9))],
+            [relative_key(1, 0)],
+            [],
+            [],
+        );
+        assert_eq!(hidden.resolve(relative_key(1, 0), 8), Some((20, 9)));
+        assert_eq!(hidden.resolve(relative_key(1, 1), 8), None);
+    }
+
+    #[test]
+    fn keyed_relative_chains_select_a_specific_placement_and_stable_defaults() {
+        let resolver = super::RelativeResolver::new(
+            [
+                (relative_key(1, 1), (20, 9)),
+                (relative_key(1, 2), (100, 10)),
+            ],
+            [],
+            [],
+            [
+                (relative_key(2, 5), relative_key(1, 2), 1, 1),
+                (relative_key(2, 6), relative_key(1, 1), 5, 0),
+                (relative_key(1, 3), relative_key(1, 0), 1, 0),
+            ],
+        );
+        assert_eq!(resolver.resolve(relative_key(2, 5), 8), Some((101, 11)));
+        assert_eq!(resolver.resolve(relative_key(2, 6), 8), Some((20, 14)));
+        assert_eq!(resolver.resolve(relative_key(2, 0), 8), Some((101, 11)));
+        assert_eq!(resolver.resolve(relative_key(2, 99), 8), None);
+        assert_eq!(resolver.resolve(relative_key(1, 3), 8), Some((20, 10)));
+    }
+
+    #[test]
+    fn keyed_relative_walk_retains_the_depth_limit_and_clamps_offsets() {
+        let edges = (2..=10).map(|id| (relative_key(id, 1), relative_key(id - 1, 1), 0, 0));
+        let resolver = super::RelativeResolver::new([(relative_key(1, 1), (1, 1))], [], [], edges);
+        assert_eq!(resolver.resolve(relative_key(9, 1), 8), Some((1, 1)));
+        assert_eq!(resolver.resolve(relative_key(10, 1), 8), None);
+        let cycle = super::RelativeResolver::new(
+            [],
+            [],
+            [],
+            [
+                (relative_key(2, 1), relative_key(3, 1), 0, 0),
+                (relative_key(3, 1), relative_key(2, 1), 0, 0),
+            ],
+        );
+        assert_eq!(cycle.resolve(relative_key(2, 1), 8), None);
+        let negative = super::RelativeResolver::new(
+            [(relative_key(1, 1), (1, 1))],
+            [],
+            [],
+            [(relative_key(2, 1), relative_key(1, 1), -9, -9)],
+        );
+        assert_eq!(negative.resolve(relative_key(2, 1), 8), Some((0, 0)));
     }
 
     #[test]

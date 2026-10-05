@@ -4932,22 +4932,31 @@ finally:
         ]
         library.sysctl.restype = ctypes.c_int
         mib = (ctypes.c_int * 3)(1, 49, pid)  # CTL_KERN, KERN_PROCARGS2, pid
-        size = ctypes.c_size_t()
-        if library.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0:
-            error = ctypes.get_errno()
-            if error in (getattr(os, "ESRCH", 3), getattr(os, "EINVAL", 22)):
-                return None
-            raise OSError(error, os.strerror(error), pid)
-        if size.value < ctypes.sizeof(ctypes.c_int) or size.value > 4 * 1024 * 1024:
-            raise RuntimeError(
-                f"invalid Darwin process-environment size for {pid}: {size.value}"
-            )
-        buffer = (ctypes.c_ubyte * size.value)()
-        if library.sysctl(mib, 3, buffer, ctypes.byref(size), None, 0) != 0:
-            error = ctypes.get_errno()
-            if error in (getattr(os, "ESRCH", 3), getattr(os, "EINVAL", 22)):
-                return None
-            raise OSError(error, os.strerror(error), pid)
+        # Copying process arguments can return EIO during exit teardown.
+        # Retry the complete read briefly; a persistent error remains an error.
+        deadline = time.monotonic() + 0.2
+        while True:
+            try:
+                size = ctypes.c_size_t()
+                if library.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0:
+                    error = ctypes.get_errno()
+                    raise OSError(error, os.strerror(error), pid)
+                if size.value < ctypes.sizeof(ctypes.c_int) or size.value > 4 * 1024 * 1024:
+                    raise RuntimeError(
+                        f"invalid Darwin process-environment size for {pid}: {size.value}"
+                    )
+                buffer = (ctypes.c_ubyte * size.value)()
+                if library.sysctl(mib, 3, buffer, ctypes.byref(size), None, 0) != 0:
+                    error = ctypes.get_errno()
+                    raise OSError(error, os.strerror(error), pid)
+                break
+            except OSError as error:
+                if error.errno in (errno.ESRCH, errno.EINVAL):
+                    return None
+                remaining = deadline - time.monotonic()
+                if error.errno != errno.EIO or remaining <= 0:
+                    raise
+                time.sleep(min(0.01, remaining))
         data = bytes(buffer[: size.value])
         argc = struct.unpack_from("=i", data)[0]
         if argc < 0 or argc > 1_000_000:
@@ -8489,7 +8498,104 @@ def process_pid_is_running(pid: int) -> bool:
     return sampled.returncode == 0 and bool(state) and not state.startswith("Z")
 
 
+def darwin_process_environment_selftest() -> None:
+    import ctypes
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    data = (
+        struct.pack("=i", 1)
+        + b"/fixture/python\0\0python\0\0"
+        + b"KETTLE_SMOKE_ROOT=/fixture\0XDG_CONFIG_HOME=/fixture/config\0"
+    )
+    expected = {
+        b"KETTLE_SMOKE_ROOT=/fixture",
+        b"XDG_CONFIG_HOME=/fixture/config",
+    }
+
+    class Clock:
+        now = 0.0
+
+        def sleep(self, seconds: float) -> None:
+            self.now += seconds
+
+    class Sysctl:
+        def __init__(self, failures, *, persistent=None):
+            self.failures = list(failures)
+            self.persistent = persistent
+            self.calls = 0
+
+        def __call__(self, mib, count, buffer, size, new, new_size):
+            assert count == 3 and tuple(mib) == (1, 49, 12345)
+            assert new is None and new_size == 0
+            self.calls += 1
+            stage = "size" if buffer is None else "data"
+            failure = self.failures[0] if self.failures else self.persistent
+            if failure is not None and failure[0] == stage:
+                if self.failures:
+                    self.failures.pop(0)
+                ctypes.set_errno(failure[1])
+                return -1
+            size._obj.value = len(data)
+            if buffer is not None:
+                ctypes.memmove(buffer, data, len(data))
+            return 0
+
+    def read(sysctl, clock):
+        previous_errno = ctypes.get_errno()
+        try:
+            with (
+                patch.object(ctypes, "CDLL", return_value=SimpleNamespace(sysctl=sysctl)),
+                patch.object(time, "monotonic", side_effect=lambda: clock.now),
+                patch.object(time, "sleep", side_effect=clock.sleep),
+            ):
+                return AgentShellTarget._darwin_process_environment(12345)
+        finally:
+            ctypes.set_errno(previous_errno)
+
+    for stage in ("size", "data"):
+        clock = Clock()
+        sysctl = Sysctl([(stage, errno.EIO)])
+        assert read(sysctl, clock) == expected
+        assert not sysctl.failures and 0 < clock.now <= 0.25
+
+    clock = Clock()
+    sysctl = Sysctl([("data", errno.EIO), ("size", errno.ESRCH)])
+    assert read(sysctl, clock) is None
+    assert not sysctl.failures and 0 < clock.now <= 0.25
+
+    for stage in ("size", "data"):
+        clock = Clock()
+        sysctl = Sysctl([], persistent=(stage, errno.EIO))
+        try:
+            read(sysctl, clock)
+        except OSError as error:
+            assert error.errno == errno.EIO
+        else:
+            raise AssertionError("a persistent process-read error was ignored")
+        assert 0 < clock.now <= 0.25 and sysctl.calls <= 100
+
+    clock = Clock()
+    sysctl = Sysctl([("size", errno.EPERM)])
+    try:
+        read(sysctl, clock)
+    except OSError as error:
+        assert error.errno == errno.EPERM
+    else:
+        raise AssertionError("a process-read permission error was ignored")
+    assert clock.now == 0 and sysctl.calls == 1
+
+
 def live_helper_selftest() -> None:
+    import importlib.util
+
+    image_paste_spec = importlib.util.spec_from_file_location(
+        "kettle_image_paste_selftest", Path(__file__).with_name("check-image-paste-parity.py")
+    )
+    image_paste_helpers = importlib.util.module_from_spec(image_paste_spec)
+    image_paste_spec.loader.exec_module(image_paste_helpers)
+    image_paste_helpers.composer_readiness_selftest(sys.modules[__name__])
+    darwin_process_environment_selftest()
     assert "mapped_writes" in STEADY_UPLOAD_QUIET_KEYS, "a blink must not write through the mapped ring"
     import inspect
     assert "quiet_keys = STEADY_UPLOAD_QUIET_KEYS" in inspect.getsource(run_steady_uploads), \
