@@ -2923,7 +2923,12 @@ pass catches configured-editor daemons that intentionally detach from the
 PTY session. It reads the actual NUL-delimited environment rather than
 `ps`'s combined argv/environment rendering, so whitespace in a sandbox path
 remains exact and command-line decoys survive; a matching process for which
-no stable handle can be acquired fails the drain closed. Linux
+no stable handle can be acquired fails the drain closed. Darwin process-environment
+reads retry transient `EIO` for at most 200 ms, restarting both the size and data
+query. Portable syscall fixtures cover recovery at either stage, disappearance
+after an I/O error, persistent errors reaching the deadline, and permission
+errors without retries. These checks run in the ordinary helper self-test.
+Linux
 configured-editor containment uses the child-subreaper contract before
 Neovim starts. A helper that detaches, reparents, hides its environment, or
 outlives Kettle is therefore adopted by the harness instead of PID 1. New
@@ -3769,7 +3774,14 @@ proves terminal routing. Optional `--codex /path/to/codex` also tests Codex
 0.155.1's real composer with an empty private profile, a trusted empty directory,
 and an offline provider. It pastes only once the screen names the model: Codex
 first draws a startup draft with the same placeholder, whose composer inserts a
-pasted image path as text, and the draft names no model. Each shortcut must add
+pasted image path as text, and the draft names no model. Readiness polls the
+placeholder and named model together within a 20-second deadline. It does not
+require an unchanged screen: composer animations keep changing the text even
+while image attachment is ready. The ordinary headless helper self-test covers
+continuous animation, rejection of the initial draft, and finite failures when
+the model or placeholder never appears. Its animated fixture failed against the
+former quiet-screen wait before that redundant wait was removed.
+Each shortcut must add
 a new numbered attachment; Kettle thumbnails must follow the documented
 shortcut policy. No prompt is
 submitted and no credentials are needed. CI downloads the fixed official release

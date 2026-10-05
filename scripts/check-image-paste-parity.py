@@ -184,6 +184,80 @@ def codex_session_ready(helpers, live):
     )
 
 
+def wait_for_codex_session(helpers, live):
+    # Composer animations change the screen even while it accepts image pastes.
+    wait_for(
+        lambda: codex_session_ready(helpers, live),
+        "Codex session composer (not its startup draft)",
+        timeout=20,
+    )
+
+
+def composer_readiness_selftest(helpers):
+    class Clock:
+        value = 0.0
+
+        def monotonic(self):
+            return self.value
+
+        def sleep(self, seconds):
+            self.value += seconds
+
+    class AnimatedComposer:
+        wait_for_text = helpers.LiveKettle.wait_for_text
+
+        def __init__(self, clock, *, model=True, placeholder=True):
+            self.clock = clock
+            self.model = model
+            self.placeholder = placeholder
+            self.polls = 0
+
+        def json_ctl(self, method):
+            assert method == "read_screen"
+            self.polls += 1
+            text = "Ask Codex to do anything" if self.placeholder else "Starting"
+            if self.model and self.polls >= 2:
+                text += "\nGPT-6-Astra default"
+            else:
+                text += "\nloading"
+            return {"text": text + f"\nanimated-frame-{self.polls}"}
+
+        def ctl(self, method, *, params, **kwargs):
+            from types import SimpleNamespace
+
+            assert method == "wait_for"
+            start = self.clock.monotonic()
+            while self.clock.monotonic() - start < params["timeout_ms"] / 1000:
+                text = self.json_ctl("read_screen")["text"]
+                # Every poll changes the animation. Content can match while
+                # the entire screen never has the requested quiet interval.
+                if params["text"] in text and not params.get("quiet_ms", 0):
+                    return SimpleNamespace(stdout=json.dumps({"matched": True}))
+                self.clock.sleep(0.05)
+            return SimpleNamespace(stdout=json.dumps({"matched": False, "timed_out": True}))
+
+    original_time = globals()["time"]
+    try:
+        clock = Clock()
+        globals()["time"] = clock
+        live = AnimatedComposer(clock)
+        wait_for_codex_session(helpers, live)
+        assert live.polls >= 2, "the startup draft is not an attachment composer"
+        assert clock.value < 1, "animation must not delay a ready composer"
+        for options in ({"model": False}, {"placeholder": False}):
+            clock = Clock()
+            globals()["time"] = clock
+            try:
+                wait_for_codex_session(helpers, AnimatedComposer(clock, **options))
+            except RuntimeError as error:
+                assert "session composer" in str(error)
+            else:
+                raise AssertionError("incomplete startup must reach the finite deadline")
+            assert 20 <= clock.value < 20.1
+    finally:
+        globals()["time"] = original_time
+
+
 def check_codex(helpers, kettle, config, image, out, codex):
     home = out / "codex-home"
     workspace = out / "workspace"
@@ -233,12 +307,7 @@ def check_codex(helpers, kettle, config, image, out, codex):
         ) as live,
         failure_evidence(live, out, "codex-failure"),
     ):
-        live.wait_for_text("Ask Codex to do anything", timeout_ms=20000)
-        wait_for(
-            lambda: codex_session_ready(helpers, live),
-            "Codex session composer (not its startup draft)",
-            timeout=20,
-        )
+        wait_for_codex_session(helpers, live)
         if platform.system() == "Darwin":
             helpers.focus_live_kettle_window(live)
         else:
