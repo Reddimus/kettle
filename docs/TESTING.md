@@ -795,6 +795,9 @@ failure and success after the writer closes. The stub-worker client suite uses
 the same helper: a concurrent fork must not turn a watchdog timeout assertion
 into a copy-and-execute failure. Linux also holds a duplicated writer to
 reproduce `ETXTBSY`, then verifies execution succeeds after the barrier.
+The two descriptor regressions run serially within their test process so the
+execution regression cannot inherit the other regression's locked writer and
+invalidate its deliberate zero-timeout checks.
 These are hermetic tests; final
 release acceptance separately uses actual signed macOS and Linux release
 archives for the 4.9-to-5.0 upgrade on each shipped architecture.
