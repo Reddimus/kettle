@@ -121,6 +121,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- macOS release packaging works with the system Bash when assembling command
+  arguments for ordinary binaries and the media worker.
+
 - On macOS, a video preview helper that exits before reading its request can
   no longer close Kettle. A write to a pipe nobody reads raises SIGPIPE on the
   whole process there, so blocking it on the writing thread did not help; the

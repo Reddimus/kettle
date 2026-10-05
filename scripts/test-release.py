@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-"""Command-level regression tests for release.sh."""
+"""Command-level regression tests for release preparation and packaging."""
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+import json
 import os
-from pathlib import Path
 import shutil
 import stat
 import subprocess
 import tempfile
+import textwrap
 import unittest
-from typing import Iterator
-
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 RELEASE_SCRIPT = ROOT / "scripts" / "release.sh"
@@ -176,8 +177,7 @@ def run_release(root: Path, environment: dict[str, str]) -> subprocess.Completed
         ["bash", "scripts/release.sh", "4.0.0"],
         cwd=root,
         env=environment,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
         check=False,
     )
@@ -270,6 +270,84 @@ class ReleaseScriptTests(unittest.TestCase):
                     text=True,
                 )
                 self.assertEqual(status.stdout, "")
+
+
+@unittest.skipIf(os.name == "nt", "macOS package loop requires a Unix shell")
+class MacOSWorkflowShellTests(unittest.TestCase):
+    def test_native_shell_preserves_binary_signing_arguments(self) -> None:
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        step = workflow.split("      - name: Sign and notarize (macOS)\n", 1)[1]
+        first = step.index("          while IFS= read -r -d '' candidate; do\n")
+        last = step.index("          done < <(find ", first)
+        last = step.index("\n", last) + 1
+        loop = textwrap.dedent(step[first:last])
+        with tempfile.TemporaryDirectory(prefix="kettle-macos-arguments-") as temporary:
+            root = Path(temporary)
+            app = root / "App with spaces" / "kettle.app"
+            paths = [
+                app / "Contents/MacOS/kettle",
+                app / "Contents/MacOS/kettle-media-worker",
+                app / "Contents/Frameworks/fixture library.dylib",
+            ]
+            for path in paths:
+                write(path, "fixture bytes\n")
+            fake_bin = root / "fake-bin"
+            calls = root / "calls.jsonl"
+            write(fake_bin / "file", "#!/bin/sh\nprintf '%s\\n' 'Mach-O fixture'\n")
+            write(
+                fake_bin / "codesign",
+                """#!/usr/bin/env python3
+import json, os, sys
+with open(os.environ['KETTLE_TEST_SIGN_CALLS'], 'a', encoding='utf-8') as output:
+    output.write(json.dumps(sys.argv[1:]) + '\\n')
+""",
+            )
+            for executable in fake_bin.iterdir():
+                executable.chmod(0o700)
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "APP": str(app),
+                    "SIGNING_IDENTITY": "fixture signer",
+                    "KEYCHAIN": str(root / "fixture keychain"),
+                    "KETTLE_TEST_SIGN_CALLS": str(calls),
+                    "PATH": f"{fake_bin}{os.pathsep}{environment['PATH']}",
+                }
+            )
+            result = subprocess.run(
+                ["/bin/bash", "-c", "set -euo pipefail\n" + loop],
+                cwd=ROOT,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            commands = [json.loads(line) for line in calls.read_text().splitlines()]
+            self.assertEqual(len(commands), len(paths))
+            by_path = {args[-1]: args for args in commands}
+            self.assertEqual(set(by_path), set(map(str, paths)))
+            for path in paths:
+                args = by_path[str(path)]
+                self.assertIn("--force", args)
+                self.assertIn("--timestamp", args)
+                for option, value in (
+                    ("--options", "runtime"),
+                    ("--entitlements", "packaging/macos/kettle.entitlements"),
+                    ("--sign", "fixture signer"),
+                    ("--keychain", environment["KEYCHAIN"]),
+                ):
+                    self.assertEqual(args.count(option), 1)
+                    self.assertEqual(args[args.index(option) + 1], value)
+                if path.name == "kettle-media-worker":
+                    self.assertEqual(args.count("--identifier"), 1)
+                    self.assertEqual(
+                        args[args.index("--identifier") + 1],
+                        "org.kettle.terminal.media-worker",
+                    )
+                else:
+                    self.assertNotIn("--identifier", args)
 
 
 if __name__ == "__main__":

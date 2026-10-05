@@ -2592,14 +2592,21 @@ python3 scripts/test-install-online.py
 ```
 
 The current suites cover fourteen signed-update-manifest cases, six exact
-draft-release cases, two release-preparation cases, seventeen package-manifest
-cases (with platform-dependent skips), and seventeen POSIX online-installer
+draft-release cases, two release-preparation cases, one macOS package-command
+case, seventeen package-manifest cases (with platform-dependent skips), and
+seventeen POSIX online-installer
 cases. They pin the checked-in Ed25519 trust root, canonical manifest bytes and
 sidecars, no-follow same-handle artifact hashing, exact local-to-GitHub
 name/size/SHA-256 binding, bounded release-document updates, immutable archive
 references, bounded archive structure and extraction, modern no-downgrade
 behavior, compatible legacy sidecars, and hostile archive/network/parser
 fixtures.
+The package-command case executes the checked-in workflow's binary-signing
+loop under the system Bash with mock commands. It checks the GUI, helper and
+library argument vectors, including paths with spaces and the helper's explicit
+identifier. On macOS this exercises Bash 3.2 with `set -u`, which refuses an
+empty array expansion. It uses synthetic fixture arguments and no signing
+credentials or keychains.
 On macOS the signed-update suite also opens disposable keychains whose paths
 contain quotes and backslashes, then proves the native Security.framework
 helper's prepend, de-duplication, removal, and empty-list transformations
