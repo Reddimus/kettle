@@ -180,20 +180,29 @@ impl ImageData {
         bytes: &[u8],
         budget: &GraphicsBudget,
     ) -> Option<ImageData> {
-        // Reserve both the retained RGBA output and the decoder's bounded
-        // working allocation before invoking the image crate.
+        use image::ImageDecoder;
+
         let decode_cap = budget.limits().image_bytes.min(MAX_IMAGE_BYTES as usize);
-        let mut output = budget.reserve_image_cpu(decode_cap)?;
         let _scratch = budget.reserve_transient_cpu(decode_cap)?;
         let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
             .with_guessed_format()
             .ok()?;
         reader.limits(decode_limits(decode_cap));
-        let img = reader.decode().ok()?.to_rgba8();
-        let expected = rgba_bytes(img.width(), img.height())?;
-        if expected > decode_cap || !output.shrink_to(expected) {
+        let mut decoder = reader.into_decoder().ok()?;
+        // Match ImageReader::decode's working-buffer accounting while retaining
+        // this decoder so headers are parsed only once.
+        let mut limits = decode_limits(decode_cap);
+        limits.reserve(decoder.total_bytes()).ok()?;
+        decoder.set_limits(limits).ok()?;
+        let (width, height) = decoder.dimensions();
+        let expected = rgba_bytes(width, height)?;
+        if expected > decode_cap {
             return None;
         }
+        let output = budget.reserve_image_cpu(expected)?;
+        let img = image::DynamicImage::from_decoder(decoder)
+            .ok()?
+            .into_rgba8();
         ImageData::from_reserved(img.width(), img.height(), img.into_raw(), output)
     }
 
@@ -519,6 +528,120 @@ mod tests {
             "from_encoded must reject width {} (cap {MAX_IMAGE_DIM})",
             MAX_IMAGE_DIM + 1
         );
+    }
+
+    #[test]
+    fn encoded_images_reserve_their_actual_rgba_size() {
+        use image::ImageEncoder;
+
+        let limits = crate::GraphicsLimits {
+            image_bytes: 64 * 1024,
+            retained_bytes: 64 * 1024,
+            process_cpu_bytes: 128 * 1024,
+            ..crate::GraphicsLimits::default()
+        };
+        let budget = GraphicsBudget::isolated(limits).unwrap();
+        let occupied = ImageData::solid_with_budget(64, 255, [1, 2, 3, 255], &budget)
+            .expect("existing pixels fit");
+        let used = occupied.byte_len();
+        let encode = |width: u32| {
+            let pixels = vec![17; width as usize * 4];
+            let mut bytes = Vec::new();
+            image::codecs::png::PngEncoder::new(&mut bytes)
+                .write_image(&pixels, width, 1, image::ExtendedColorType::Rgba8)
+                .unwrap();
+            bytes
+        };
+
+        let decoded = ImageData::from_encoded_with_budget(&encode(1), &budget)
+            .expect("four output bytes fit without reserving the per-image ceiling");
+        assert_eq!(decoded.rgba.as_slice(), &[17; 4]);
+        assert_eq!(budget.usage(), (used + 4, used + 4, 0, 0));
+        let pinned = decoded.clone();
+        drop(decoded);
+        assert_eq!(budget.usage(), (used + 4, used + 4, 0, 0));
+
+        assert!(ImageData::from_encoded_with_budget(&encode(64), &budget).is_none());
+        assert_eq!(budget.usage(), (used + 4, used + 4, 0, 0));
+        drop(pinned);
+        assert_eq!(budget.usage(), (used, used, 0, 0));
+        let exact = ImageData::from_encoded_with_budget(&encode(64), &budget)
+            .expect("all remaining 256 output bytes fit");
+        assert_eq!(budget.usage(), (64 * 1024, 64 * 1024, 0, 0));
+        drop(exact);
+        drop(occupied);
+        assert_eq!(budget.usage(), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn encoded_image_formats_preserve_pixels_and_charge_rgba_output() {
+        let rgba = image::DynamicImage::ImageRgba8(
+            image::RgbaImage::from_raw(2, 1, vec![17, 31, 47, 127, 61, 79, 97, 255]).unwrap(),
+        );
+        let fixtures = [
+            (rgba.clone(), image::ImageFormat::Png),
+            (rgba.clone(), image::ImageFormat::Jpeg),
+            (rgba, image::ImageFormat::Gif),
+            (
+                image::DynamicImage::ImageRgba16(
+                    image::ImageBuffer::from_raw(
+                        2,
+                        1,
+                        vec![1000, 10000, 40000, 32000, 4000, 20000, 50000, 65535],
+                    )
+                    .unwrap(),
+                ),
+                image::ImageFormat::Png,
+            ),
+            (
+                image::DynamicImage::ImageLuma16(
+                    image::ImageBuffer::from_raw(2, 1, vec![1000, 50000]).unwrap(),
+                ),
+                image::ImageFormat::Png,
+            ),
+        ];
+        for (source, format) in fixtures {
+            let mut encoded = std::io::Cursor::new(Vec::new());
+            source.write_to(&mut encoded, format).unwrap();
+            let bytes = encoded.into_inner();
+            let reference = image::ImageReader::new(std::io::Cursor::new(&bytes))
+                .with_guessed_format()
+                .unwrap()
+                .decode()
+                .unwrap()
+                .to_rgba8();
+            let budget = GraphicsBudget::isolated(crate::GraphicsLimits::default()).unwrap();
+            let decoded = ImageData::from_encoded_with_budget(&bytes, &budget).unwrap();
+            assert_eq!((decoded.width, decoded.height), reference.dimensions());
+            assert_eq!(decoded.rgba.as_slice(), reference.as_raw(), "{format:?}");
+            assert_eq!(budget.usage(), (8, 8, 0, 0));
+            drop(decoded);
+            assert_eq!(budget.usage(), (0, 0, 0, 0));
+        }
+    }
+
+    #[test]
+    fn encoded_image_decode_failure_releases_output_and_scratch() {
+        use image::ImageEncoder;
+
+        let mut bytes = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut bytes)
+            .write_image(&[17; 4], 1, 1, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        let idat = bytes.windows(4).position(|chunk| chunk == b"IDAT").unwrap();
+        let length = u32::from_be_bytes(bytes[idat - 4..idat].try_into().unwrap()) as usize;
+        let incomplete_pixels = &bytes[..idat + 4 + length / 2];
+        assert!(
+            image::ImageReader::new(std::io::Cursor::new(incomplete_pixels))
+                .with_guessed_format()
+                .unwrap()
+                .into_decoder()
+                .is_ok(),
+            "the header must succeed before the pixel decode fails"
+        );
+        let budget = GraphicsBudget::isolated(crate::GraphicsLimits::default()).unwrap();
+        assert!(ImageData::from_encoded_with_budget(incomplete_pixels, &budget).is_none());
+        assert_eq!(budget.usage(), (0, 0, 0, 0));
     }
 
     /// Straight-alpha source-over weights the destination by its OWN alpha

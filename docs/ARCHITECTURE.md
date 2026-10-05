@@ -1224,8 +1224,14 @@ animation payloads at 128 frames/128 MiB; and placements at 256. RAII leases
 charge Kettle-owned decoded buffers, image textures, custom glyph atlases, and
 instance buffers to a 256 MiB terminal/window scope and 512 MiB process
 accounts. Decoders reserve before allocation, image clones share one lease,
-copy-on-write reserves a second image. Before uploads, each image layer derives
-its live set from the complete drawable frame, including images drawn later.
+copy-on-write reserves a second image. Encoded images parse their headers once
+with the decoder's existing dimension and working-allocation limits, then
+reserve the actual RGBA output size before decoding pixels. The separate
+conservative scratch reservation remains bounded by the per-image ceiling;
+unused output capacity does not consume the retained-image quota. Consuming an
+already-RGBA8 decoded buffer avoids an extra full-image copy. Before uploads,
+each image layer derives its live set from the complete drawable frame,
+including images drawn later.
 Retired textures with exactly the dimensions of a new image transfer their
 texture, sampler bind groups and existing GPU lease to that image; incompatible
 and excess textures are released before new allocations. An unused transfer is

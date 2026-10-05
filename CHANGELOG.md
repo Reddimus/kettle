@@ -128,6 +128,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Small encoded terminal images can load when the remaining image quota holds
+  their decoded pixels. They no longer need room for the maximum image size.
+  An already-RGBA8 decode also avoids a redundant copy of its pixels.
+
 - macOS release packaging works with the system Bash when assembling command
   arguments for ordinary binaries and the media worker. It signs nested binaries
   before the app bundle so the new helper does not block packaging.
