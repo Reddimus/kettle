@@ -3335,6 +3335,10 @@ leaked paths or pixels, a path-based open action, a lost batch count, a
 missing poster, unchanged card states, or a dismiss target that does not
 close the receipt. A final re-paste proves later key input clears both the
 file-list text and its stale receipt.
+On macOS the clipboard writer reads back every file-URL item before Swift
+exits, so the full batch remains available to the later paste reader. Native
+readback failures report the writer exit code, distinguishing clipboard setup
+from later receipt failures.
 
 Native CI also runs `video_preview_native`. Every platform leaves worker
 stdin open and proves the child exits at its own deadline. macOS requires a

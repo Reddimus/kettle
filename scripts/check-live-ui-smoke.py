@@ -7790,7 +7790,11 @@ def set_file_list_clipboard(paths: Sequence[Path]) -> Optional[subprocess.Popen]
                     "let paths=try! JSONSerialization.jsonObject(with:data) as! [String]; "
                     "let board=NSPasteboard.general; board.clearContents(); "
                     "let urls=paths.map { NSURL(fileURLWithPath:$0) }; "
-                    "guard board.writeObjects(urls) else { exit(2) }"
+                    "guard board.writeObjects(urls) else { exit(2) }; "
+                    "guard let items=board.pasteboardItems, items.count==urls.count "
+                    "else { exit(3) }; "
+                    "for item in items { guard item.string(forType:.fileURL) != nil "
+                    "else { exit(4) } }"
                 ),
             ],
             env=env,
@@ -7867,7 +7871,7 @@ def set_file_list_clipboard(paths: Sequence[Path]) -> Optional[subprocess.Popen]
         )
     if cp.returncode != 0:
         raise SystemExit(
-            "video-paste-receipt smoke: could not set file-list clipboard:\n"
+            f"video-paste-receipt smoke: could not set file-list clipboard (exit {cp.returncode}):\n"
             f"{cp.stderr}\n{cp.stdout}"
         )
     return None
@@ -8506,6 +8510,22 @@ def live_helper_selftest() -> None:
         write_image_receipt_fixture(fixture, 64, 36)
         width, height, rows = read_rgba_png(fixture)
         assert (width, height, len(rows)) == (64, 36, 36)
+
+    from unittest.mock import patch
+
+    for returncode in (2, 3, 4):
+        writer_failure = subprocess.CompletedProcess([], returncode, "", "")
+        with (
+            patch.object(platform, "system", return_value="Darwin"),
+            patch(__name__ + ".require_cmd"),
+            patch(__name__ + ".run", return_value=writer_failure),
+        ):
+            try:
+                set_file_list_clipboard([Path("fixture.mp4")])
+            except SystemExit as error:
+                assert f"(exit {returncode})" in str(error), str(error)
+            else:
+                raise AssertionError("failed clipboard writer was accepted")
 
     redacted = redact_managed_paste_paths(
         {
