@@ -172,7 +172,9 @@ test "${1:-}" = build
         yield root, environment, real_git
 
 
-def run_release(root: Path, environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
+def run_release(
+    root: Path, environment: dict[str, str]
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["bash", "scripts/release.sh", "4.0.0"],
         cwd=root,
@@ -192,9 +194,7 @@ class ReleaseScriptTests(unittest.TestCase):
 
             readme = (root / "README.md").read_text(encoding="utf-8")
             install = (root / "docs" / "INSTALL.md").read_text(encoding="utf-8")
-            history = (root / "docs" / "VERSION-HISTORY.md").read_text(
-                encoding="utf-8"
-            )
+            history = (root / "docs" / "VERSION-HISTORY.md").read_text(encoding="utf-8")
 
             self.assertEqual(readme, README)
             # Every internal pin moves with the workspace, including crate
@@ -217,9 +217,7 @@ class ReleaseScriptTests(unittest.TestCase):
                 install,
             )
             self.assertIn("blob/v3.3.0/scripts/install.ps1", install)
-            self.assertIn(
-                "releases/download/v3.3.0/kettle-windows-x86_64.zip", install
-            )
+            self.assertIn("releases/download/v3.3.0/kettle-windows-x86_64.zip", install)
             self.assertIn("Latest version in this tree: `v4.0.0`", history)
             self.assertIn("Current workspace version: `4.0.0`", history)
             self.assertIn(
@@ -256,9 +254,14 @@ class ReleaseScriptTests(unittest.TestCase):
         )
 
         for name, install, history in fixtures:
-            with self.subTest(name=name), release_fixture(
-                install=install, history=history
-            ) as (root, environment, real_git):
+            with (
+                self.subTest(name=name),
+                release_fixture(install=install, history=history) as (
+                    root,
+                    environment,
+                    real_git,
+                ),
+            ):
                 result = run_release(root, environment)
                 self.assertNotEqual(result.returncode, 0, result.stdout)
                 self.assertIn("expected exactly one matching line", result.stderr)
@@ -274,13 +277,12 @@ class ReleaseScriptTests(unittest.TestCase):
 
 @unittest.skipIf(os.name == "nt", "macOS package loop requires a Unix shell")
 class MacOSWorkflowShellTests(unittest.TestCase):
-    def test_native_shell_preserves_binary_signing_arguments(self) -> None:
+    def test_native_shell_signs_nested_code_before_the_bundle(self) -> None:
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         step = workflow.split("      - name: Sign and notarize (macOS)\n", 1)[1]
         first = step.index("          while IFS= read -r -d '' candidate; do\n")
-        last = step.index("          done < <(find ", first)
-        last = step.index("\n", last) + 1
-        loop = textwrap.dedent(step[first:last])
+        last = step.index("          codesign --verify --deep --strict", first)
+        signing = textwrap.dedent(step[first:last])
         with tempfile.TemporaryDirectory(prefix="kettle-macos-arguments-") as temporary:
             root = Path(temporary)
             app = root / "App with spaces" / "kettle.app"
@@ -298,7 +300,16 @@ class MacOSWorkflowShellTests(unittest.TestCase):
                 fake_bin / "codesign",
                 """#!/usr/bin/env python3
 import json, os, sys
-with open(os.environ['KETTLE_TEST_SIGN_CALLS'], 'a', encoding='utf-8') as output:
+from pathlib import Path
+calls = Path(os.environ['KETTLE_TEST_SIGN_CALLS'])
+previous = [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
+target = sys.argv[-1]
+if target in (os.environ['APP'], os.environ['APP'] + '/Contents/MacOS/kettle'):
+    nested = set(json.loads(os.environ['KETTLE_TEST_NESTED_CODE']))
+    if not nested.issubset({args[-1] for args in previous}):
+        print('nested binaries must be signed before the app bundle', file=sys.stderr)
+        sys.exit(1)
+with calls.open('a', encoding='utf-8') as output:
     output.write(json.dumps(sys.argv[1:]) + '\\n')
 """,
             )
@@ -311,11 +322,12 @@ with open(os.environ['KETTLE_TEST_SIGN_CALLS'], 'a', encoding='utf-8') as output
                     "SIGNING_IDENTITY": "fixture signer",
                     "KEYCHAIN": str(root / "fixture keychain"),
                     "KETTLE_TEST_SIGN_CALLS": str(calls),
+                    "KETTLE_TEST_NESTED_CODE": json.dumps(list(map(str, paths[1:]))),
                     "PATH": f"{fake_bin}{os.pathsep}{environment['PATH']}",
                 }
             )
             result = subprocess.run(
-                ["/bin/bash", "-c", "set -euo pipefail\n" + loop],
+                ["/bin/bash", "-c", "set -euo pipefail\n" + signing],
                 cwd=ROOT,
                 env=environment,
                 capture_output=True,
@@ -325,10 +337,13 @@ with open(os.environ['KETTLE_TEST_SIGN_CALLS'], 'a', encoding='utf-8') as output
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             commands = [json.loads(line) for line in calls.read_text().splitlines()]
-            self.assertEqual(len(commands), len(paths))
+            expected = [*paths[1:], app]
+            self.assertEqual(len(commands), len(expected))
+            self.assertEqual(commands[-1][-1], str(app))
             by_path = {args[-1]: args for args in commands}
-            self.assertEqual(set(by_path), set(map(str, paths)))
-            for path in paths:
+            self.assertEqual(set(by_path), set(map(str, expected)))
+            self.assertNotIn(str(paths[0]), by_path)
+            for path in expected:
                 args = by_path[str(path)]
                 self.assertIn("--force", args)
                 self.assertIn("--timestamp", args)
@@ -340,7 +355,7 @@ with open(os.environ['KETTLE_TEST_SIGN_CALLS'], 'a', encoding='utf-8') as output
                 ):
                     self.assertEqual(args.count(option), 1)
                     self.assertEqual(args[args.index(option) + 1], value)
-                if path.name == "kettle-media-worker":
+                if path == paths[1]:
                     self.assertEqual(args.count("--identifier"), 1)
                     self.assertEqual(
                         args[args.index("--identifier") + 1],

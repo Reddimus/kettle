@@ -398,6 +398,11 @@ jobs:
           )
 
           while IFS= read -r -d '' candidate; do
+            # Signing the main executable addresses its enclosing bundle;
+            # defer it until the nested binaries have been signed.
+            if [[ "$candidate" == "$APP/Contents/MacOS/kettle" ]]; then
+              continue
+            fi
             if file -b "$candidate" | grep -q 'Mach-O'; then
               sign_args=(--force --timestamp --options runtime
                 --entitlements packaging/macos/kettle.entitlements
