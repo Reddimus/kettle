@@ -659,8 +659,17 @@ one byte at a time still yields exactly one image; an ~8 MiB
 interleaved stream passes through intact in well under 5 s
 (linear-time / bounded-memory guard). Limit and limit-plus-one tests cover
 sequence/transmission, decoded-image, animation, placement, and CPU/GPU RAII
-accounting without allocating host-scale adversarial buffers. Oversized OSC
-and DCS tests also cover real-terminator recovery, bounded recovery when no
+accounting without allocating host-scale adversarial buffers.
+
+Encoded-image admission fills a small isolated account with real existing
+pixels, then decodes a four-byte PNG and an image that exactly fills the
+remaining quota. Shared-clone lifetime and an insufficient-space request pin
+the retained accounting. PNG, JPEG, GIF, RGBA16 PNG and grayscale16 PNG are
+compared with the image library's ordinary decode output; a truncated PNG with
+valid headers verifies release after pixel decoding fails. These are portable
+pixel/accounting tests, independent of a GPU adapter.
+
+Oversized OSC and DCS tests also cover real-terminator recovery, bounded recovery when no
 terminator arrives, and an `ESC` split exactly across the recovery boundary.
 Kitty deletion fixtures cover visible, image/placement, cursor, cell,
 cell-plus-z, id-range, column, row, z-index, and frame selectors; lowercase
