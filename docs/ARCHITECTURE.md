@@ -1239,7 +1239,13 @@ frames compose onto a full base-sized canvas. If neither a background/edit frame
 nor that canvas can be obtained, the request leaves the stored image and frames
 unchanged; the decoded patch cannot substitute for the canvas. Before uploads,
 each image layer derives its live set from the complete drawable frame,
-including images drawn later.
+including images drawn later. Root-frame edits refresh the active screen's physical,
+virtual, and relative placement bases through one shared core helper, including
+synchronized replay. Placement geometry, appended frames, frame selection, and
+the playback clock survive the refresh. Matching numeric ids in the inactive
+screen remain independent. The update walks each active registry once and
+clones pixel handles without copying image payloads, taking O(placements +
+animation frames) time and O(1) extra metadata beyond the animation snapshot.
 Retired textures with exactly the dimensions of a new image transfer their
 texture, sampler bind groups and existing GPU lease to that image; incompatible
 and excess textures are released before new allocations. An unused transfer is
