@@ -838,6 +838,11 @@ as `RenderTimeout`. Tests that need the worker to start and answer allow it
 loaded macOS machine can take longer than the short deadlines the timeout
 tests use.
 
+The stuck-worker scenario retains its short startup and cleanup budgets,
+checks exact spawn/kill/abandon counts, and uses a separate 5 s completion
+watchdog to allow CI scheduling delays. A zero-budget cleanup test requires
+exactly one process poll without a timing assertion.
+
 ### kettle-media-worker
 
 Unit tests (`src/early_unix.rs`) run in a child of the test binary, so
