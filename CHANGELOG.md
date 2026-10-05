@@ -8,6 +8,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- Video paste receipts identify container content before asking the native
+  poster provider. Text or still-image containers named as videos no longer
+  show a video card; movies renamed to another supported video suffix still
+  work. Header inspection reads at most 64 KiB on the background worker.
 - `kettle-media`, a new crate, defines the bounded media protocol for the
   agent visuals: jobs and results, caps, source authorization, the
   build handshake and the binary frames between Kettle and a media worker.

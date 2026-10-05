@@ -271,7 +271,20 @@ build, or one that sees an older frame, exits with its own skew code; the GUI
 does not retry it, logs once that previews wait for a restart, and shows no
 video card.
 
-The child delegates thumbnail extraction instead of bundling a video decoder:
+Before delegating thumbnail extraction to a platform provider, the child
+reads at most 64 KiB from its retained file and
+uses `kettle_media::video::sniff_video_container`. This pure, allocation-free
+classifier recognizes ISO-BMFF/QuickTime, Matroska/WebM by their EBML DocType,
+RIFF AVI, FLV, MPEG program/elementary/transport streams, Ogg and ASF. Work is
+linear in the bounded prefix with constant auxiliary storage. Complete inspected
+header fields and declared file extents identify a family; they do not prove
+that the file has a video track or that a platform supports its codec. The
+background caller owns the prefix buffer and file I/O. Filename extensions
+still schedule receipt candidates cheaply on the event loop, but text or
+still-image containers with video suffixes receive no card. Movie content with
+another supported video suffix can receive a card.
+
+The child uses
 [Quick Look Thumbnailing](https://developer.apple.com/documentation/quicklookthumbnailing)
 on macOS, [IShellItemImageFactory](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nn-shobjidl_core-ishellitemimagefactory)
 in a fresh Windows STA, and the

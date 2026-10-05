@@ -7,12 +7,14 @@ media frames, worker discovery/build identity, a separate resource-limited
 worker, raster/SVG rendering, paired packaging/update recovery, and internal
 availability. Cards, preview lanes, Mermaid, and audio/video playback remain
 later work.
+The existing poster worker also uses the shared content-based video container
+classifier; this does not add a decoder or playback.
 
 ## Ownership
 
 | Component | Responsibility |
 | --- | --- |
-| `kettle-media` | Bounded jobs/results and wire frames; source authorization; build handshake; injected platform client for worker availability, deadlines and footprint monitoring |
+| `kettle-media` | Bounded jobs/results and wire frames; source authorization; build handshake; shared video container identification; injected platform client for worker availability, deadlines and footprint monitoring |
 | `kettle-media-worker` | Separate O3 executable; early descriptor sweep and resource setup; one job/reply per process; watchdog and input-free failure reporting |
 | `kettle-media-render` | Held-descriptor source/font reads; content-based raster selection; SVG sanitizing and admission; rendering into straight RGBA |
 | `kettle` | Installed-worker resolution and native verification; CLI/MCP and launch integration as they land |
