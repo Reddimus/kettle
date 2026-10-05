@@ -1250,6 +1250,24 @@ remain gapless. Matching numeric ids in the inactive
 screen remain independent. The update walks each active registry once and
 clones pixel handles without copying image payloads, taking O(placements +
 animation frames) time and O(1) extra metadata beyond the animation snapshot.
+Relative parent resolution preserves `(image id, placement id)` keys in both
+concrete origins and relative-chain edges. One metadata-only resolver serves
+render-time tiles and live/synchronized spatial deletion. Nonzero `Q=` selects
+only the named placement. Omitted/zero `Q=` selects the smallest concrete
+placement id, or the smallest relative id when there is no concrete parent.
+A virtual prototype without visible cells has no concrete origin and cannot
+shadow a physical parent in this default selection.
+Virtual placeholder cells resolve their omitted placement id using the existing
+smallest-prototype rule; only registered prototypes contribute origins, and
+minimum coordinates are accumulated separately for each prototype. Physical
+anonymous placements retain the first actual origin rather than combining two
+placements' coordinates. Registry locks are acquired separately after the grid/
+geometry snapshot; origin preparation adds no pixel owners. Empty relative
+registries return immediately. Preparation takes expected O(placements + cells)
+time and O(placements) metadata, and each chain retains the eight-hop bound.
+The image-only public `resolve_chain` helper remains available for compatibility;
+terminal callers use the keyed resolver.
+
 Image-id retransmission separates parsed command metadata from interpretation.
 The first accepted chunk retires decoder state and emits a deletion callback
 before allocating replacement pixels. Core releases physical, virtual, relative,

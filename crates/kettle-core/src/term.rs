@@ -30,8 +30,8 @@ use portable_pty::{CommandBuilder, PtySize};
 use crate::event::{EventProxy, OutputWakeGate, TermEvent, Waker};
 use crate::images::{
     AnimEntry, Animations, ImageSourceCrop, ImageSourceRect, Images, Placement, PlacementParams,
-    RelEntry, Relatives, VirtualEntry, Virtuals, cascade_removed_relatives, prune, relative_origin,
-    resolve_chain,
+    RelEntry, RelativeResolver, Relatives, VirtualEntry, Virtuals, cascade_removed_relatives,
+    prune, relative_origin,
 };
 use crate::persistence::{AsyncFileWriter, AsyncWriterStatus};
 
@@ -7456,48 +7456,20 @@ impl Terminal {
                                             // Resolve relative-placement origins before mutating
                                             // any registry. Physical selectors use the same
                                             // render-time parent chain as Terminal::relative_tiles.
-                                            let image_snapshot = if relative_snapshot.is_empty() {
-                                                Vec::new()
-                                            } else {
-                                                images.lock().map(|v| v.clone()).unwrap_or_default()
-                                            };
-                                            let mut origins =
-                                                std::collections::HashMap::<u32, (u64, usize)>::new();
-                                            let mut note_origin =
-                                                |id: u32, abs: u64, col: usize| {
-                                                    origins
-                                                        .entry(id)
-                                                        .and_modify(|origin| {
-                                                            origin.0 = origin.0.min(abs);
-                                                            origin.1 = origin.1.min(col);
-                                                        })
-                                                        .or_insert((abs, col));
-                                                };
-                                            for placement in &image_snapshot {
-                                                if let Some(id) = placement.id {
-                                                    note_origin(
-                                                        id,
-                                                        placement.abs_line,
-                                                        placement.col,
-                                                    );
-                                                }
-                                            }
-                                            for (abs, col, resolved) in &placeholder_cells {
-                                                note_origin(resolved.image_id, *abs, *col);
-                                            }
-                                            let relative_chains = relative_snapshot
-                                                .iter()
-                                                .map(|(&(id, _), entry)| {
-                                                    (id, (entry.parent_img, entry.h, entry.v))
-                                                })
-                                                .collect::<std::collections::HashMap<_, _>>();
+                                            let resolver = relative_resolver(
+                                                &images,
+                                                &virtuals,
+                                                &placeholder_cells,
+                                                relative_snapshot.iter().map(|(&key, entry)| (key, entry)),
+                                            );
                                             let relative_positions = relative_snapshot
                                                 .iter()
                                                 .filter_map(|(&(id, placement_id), entry)| {
-                                                    let (parent_abs, parent_col) = resolve_chain(
-                                                        entry.parent_img,
-                                                        &relative_chains,
-                                                        &origins,
+                                                    let (parent_abs, parent_col) = resolver.resolve(
+                                                        PlacementKey {
+                                                            image_id: entry.parent_img,
+                                                            placement_id: entry.parent_placement,
+                                                        },
                                                         8,
                                                     )?;
                                                     let (abs_line, col) = relative_origin(
@@ -8969,19 +8941,6 @@ impl Terminal {
             entries.truncate(kettle_vt::GraphicsLimits::default().placements);
             entries
         };
-        // Concrete origins: a parent is either a placeholder/virtual image
-        // (top-left of its cells) or a regular placement (its abs_line/col).
-        let mut origins: std::collections::HashMap<u32, (u64, usize)> =
-            std::collections::HashMap::new();
-        let mut note = |id: u32, abs: u64, col: usize| {
-            origins
-                .entry(id)
-                .and_modify(|o: &mut (u64, usize)| {
-                    o.0 = o.0.min(abs);
-                    o.1 = o.1.min(col);
-                })
-                .or_insert((abs, col));
-        };
         // Snapshot visible placeholder origins and exact grid/pixel geometry
         // under the same Term -> geometry order used by resize and insertion.
         // A concurrent DPI reflow therefore cannot pair pre-resize origins
@@ -8997,25 +8956,24 @@ impl Terminal {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             (Self::placeholder_cells_from_term(&term), geometry.geometry)
         };
-        for (abs, col, res) in placeholder_cells {
-            note(res.image_id, abs, col);
-        }
-        if let Ok(imgs) = self.images.lock() {
-            for p in imgs.iter() {
-                if let Some(id) = p.id {
-                    note(id, p.abs_line, p.col);
-                }
-            }
-        }
-        // child image id -> (parent image id, h, v), for chain walking.
-        let rels: std::collections::HashMap<u32, (u32, i32, i32)> = entries
-            .iter()
-            .map(|(image_id, _, entry)| (*image_id, (entry.parent_img, entry.h, entry.v)))
-            .collect();
+        let resolver = relative_resolver(
+            &self.images,
+            &self.virtuals,
+            &placeholder_cells,
+            entries
+                .iter()
+                .map(|(image_id, placement_id, entry)| ((*image_id, *placement_id), entry)),
+        );
         let mut out = Vec::new();
         for (cimg, placement_id, e) in &entries {
             // kitty requires a chain depth of at least 8.
-            let Some((pa, pc)) = resolve_chain(e.parent_img, &rels, &origins, 8) else {
+            let Some((pa, pc)) = resolver.resolve(
+                PlacementKey {
+                    image_id: e.parent_img,
+                    placement_id: e.parent_placement,
+                },
+                8,
+            ) else {
                 continue;
             };
             let (abs, col) = relative_origin(pa, pc, e.h, e.v);
@@ -10571,6 +10529,66 @@ struct GraphicsActionContext<'a> {
     geometry: &'a Arc<Mutex<VersionedPtyGeometry>>,
 }
 
+fn relative_resolver<'a>(
+    images: &Images,
+    virtuals: &Virtuals,
+    cells: &[(u64, usize, placeholder::ResolvedCell)],
+    relatives: impl IntoIterator<Item = ((u32, u32), &'a RelEntry)>,
+) -> RelativeResolver {
+    let mut relatives = relatives.into_iter().peekable();
+    if relatives.peek().is_none() {
+        return RelativeResolver::default();
+    }
+    let physical: Vec<_> = images
+        .lock()
+        .map(|placements| {
+            placements
+                .iter()
+                .filter_map(|placement| {
+                    Some((
+                        PlacementKey {
+                            image_id: placement.id?,
+                            placement_id: placement.placement_id,
+                        },
+                        (placement.abs_line, placement.col),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let virtual_keys: Vec<_> = virtuals
+        .lock()
+        .map(|placements| {
+            placements
+                .keys()
+                .map(|&(image_id, placement_id)| PlacementKey {
+                    image_id,
+                    placement_id,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    RelativeResolver::new(
+        physical,
+        virtual_keys,
+        cells.iter().copied(),
+        relatives.map(|((image_id, placement_id), entry)| {
+            (
+                PlacementKey {
+                    image_id,
+                    placement_id,
+                },
+                PlacementKey {
+                    image_id: entry.parent_img,
+                    placement_id: entry.parent_placement,
+                },
+                entry.h,
+                entry.v,
+            )
+        }),
+    )
+}
+
 fn apply_kitty_delete_at(
     term: &Term<EventProxy>,
     delete: KittyDelete,
@@ -10605,42 +10623,22 @@ fn apply_kitty_delete_at(
         .unwrap_or_else(|_| PtyGeometry::new(1, 1, 1, 1));
 
     // Resolve relative-placement origins before mutating any registry.
-    let image_snapshot = if relative_snapshot.is_empty() {
-        Vec::new()
-    } else {
-        context
-            .images
-            .lock()
-            .map(|placements| placements.clone())
-            .unwrap_or_default()
-    };
-    let mut origins = std::collections::HashMap::<u32, (u64, usize)>::new();
-    let mut note_origin = |id: u32, abs: u64, col: usize| {
-        origins
-            .entry(id)
-            .and_modify(|origin| {
-                origin.0 = origin.0.min(abs);
-                origin.1 = origin.1.min(col);
-            })
-            .or_insert((abs, col));
-    };
-    for placement in &image_snapshot {
-        if let Some(id) = placement.id {
-            note_origin(id, placement.abs_line, placement.col);
-        }
-    }
-    for (abs, col, resolved) in &placeholder_cells {
-        note_origin(resolved.image_id, *abs, *col);
-    }
-    let relative_chains = relative_snapshot
-        .iter()
-        .map(|(&(id, _), entry)| (id, (entry.parent_img, entry.h, entry.v)))
-        .collect::<std::collections::HashMap<_, _>>();
+    let resolver = relative_resolver(
+        context.images,
+        context.virtuals,
+        &placeholder_cells,
+        relative_snapshot.iter().map(|(&key, entry)| (key, entry)),
+    );
     let relative_positions = relative_snapshot
         .iter()
         .filter_map(|(&(id, placement_id), entry)| {
-            let (parent_abs, parent_col) =
-                resolve_chain(entry.parent_img, &relative_chains, &origins, 8)?;
+            let (parent_abs, parent_col) = resolver.resolve(
+                PlacementKey {
+                    image_id: entry.parent_img,
+                    placement_id: entry.parent_placement,
+                },
+                8,
+            )?;
             let (abs_line, col) = relative_origin(parent_abs, parent_col, entry.h, entry.v);
             let resolved = resolve_kitty_placement(&entry.img, entry.params, render_geometry)?;
             Some((
@@ -14450,6 +14448,107 @@ mod teardown_tests {
     }
 
     #[cfg(unix)]
+    fn assert_relative_q_native(
+        commands: &str,
+        expected: &[(u32, u32, u64, usize)],
+        synchronized: bool,
+    ) {
+        let setup = r"\033_Ga=t,i=51,f=32,s=1,v=1;AQID/w==\033\\\033[1;1H\033_Ga=p,i=51,p=1,c=1,r=1,C=1\033\\\033[3;4H\033_Ga=p,i=51,p=2,c=1,r=1,C=1\033\\\033_Ga=t,i=52,f=32,s=1,v=1;CQgH/w==\033\\";
+        let start = if synchronized { r"\033[?2026h" } else { "" };
+        let end = if synchronized { r"\033[?2026l" } else { "" };
+        let script = format!(
+            r"printf '{start}{setup}{commands}{end}\033[5;1HQ_PLACEMENTS_READY'; read finish"
+        );
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let terminal = Terminal::new(
+            &["/bin/sh".into(), "-c".into(), script],
+            None,
+            1000,
+            80,
+            24,
+            8,
+            16,
+            false,
+            CursorShape::Block,
+            None,
+            tx,
+            Arc::new(|| {}),
+        )
+        .expect("native relative-placement PTY");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if terminal.term.lock().is_ok_and(|term| {
+                super::screen_text_of(&term, 0)
+                    .text
+                    .contains("Q_PLACEMENTS_READY")
+            }) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "relative placements did not reach the terminal"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let mut actual: Vec<_> = terminal
+            .relative_tiles()
+            .into_iter()
+            .map(|p| (p.id.unwrap(), p.placement_id, p.abs_line, p.col))
+            .collect();
+        actual.sort_unstable();
+        assert_eq!(actual, expected, "synchronized={synchronized}");
+        terminal.write(b"continue\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_q_selects_exact_parent_placements_through_a_real_pty() {
+        for synchronized in [false, true] {
+            assert_relative_q_native(
+                r"\033_Ga=p,i=52,p=5,P=51,Q=2,H=1,V=0,c=1,r=1\033\\",
+                &[(52, 5, 2, 4)],
+                synchronized,
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_q_resolves_exact_chained_placements_through_a_real_pty() {
+        for synchronized in [false, true] {
+            assert_relative_q_native(
+                r"\033_Ga=p,i=52,p=5,P=51,Q=2,H=1,V=0,c=1,r=1\033\\\033_Ga=p,i=52,p=6,P=51,Q=1,H=5,V=0,c=1,r=1\033\\\033_Ga=t,i=53,f=32,s=1,v=1;BQYH/w==\033\\\033_Ga=p,i=53,p=7,P=52,Q=5,H=1,V=0,c=1,r=1\033\\",
+                &[(52, 5, 2, 4), (52, 6, 0, 5), (53, 7, 2, 5)],
+                synchronized,
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_q_omitted_uses_visible_parent_when_a_virtual_prototype_is_hidden() {
+        for synchronized in [false, true] {
+            assert_relative_q_native(
+                r"\033_Ga=p,i=51,p=0,U=1,c=1,r=1\033\\\033_Ga=p,i=52,p=5,P=51,H=1,V=0,c=1,r=1\033\\",
+                &[(52, 5, 0, 1)],
+                synchronized,
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_q_missing_parent_does_not_fall_back_through_a_real_pty() {
+        for synchronized in [false, true] {
+            assert_relative_q_native(
+                r"\033_Ga=p,i=52,p=5,P=51,Q=99,H=1,V=0,c=1,r=1\033\\",
+                &[],
+                synchronized,
+            );
+        }
+    }
+
+    #[cfg(unix)]
     #[test]
     fn retransmission_releases_old_owners_through_a_real_pty() {
         for synchronized in [false, true] {
@@ -17351,6 +17450,28 @@ mod image_lifecycle_tests {
             assert!(harness.virtuals.lock().unwrap().is_empty());
             assert!(harness.relatives.lock().unwrap().is_empty());
             assert!(harness.anims.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn relative_q_spatial_deletion_uses_the_selected_parent_placement() {
+        for synchronized in [false, true] {
+            let mut harness = SyncGraphicsHarness::new();
+            harness.feed(b"\x1b_Ga=t,i=51,f=32,s=1,v=1;AQID/w==\x1b\\\x1b[1;1H\x1b_Ga=p,i=51,p=1,c=1,r=1,C=1\x1b\\\x1b[3;4H\x1b_Ga=p,i=51,p=2,c=1,r=1,C=1\x1b\\\x1b_Ga=t,i=52,f=32,s=1,v=1;CQgH/w==\x1b\\\x1b_Ga=p,i=52,p=5,P=51,Q=2,H=1,V=0,c=1,r=1\x1b\\");
+            assert!(harness.relatives.lock().unwrap().contains_key(&(52, 5)));
+            if synchronized {
+                harness.feed(b"\x1b[?2026h");
+            }
+            harness.feed(b"\x1b_Ga=d,d=p,x=5,y=3\x1b\\");
+            if synchronized {
+                assert!(harness.relatives.lock().unwrap().contains_key(&(52, 5)));
+                harness.feed(b"\x1b[?2026l");
+            }
+            assert!(
+                harness.relatives.lock().unwrap().is_empty(),
+                "synchronized={synchronized}"
+            );
+            assert_eq!(harness.images.lock().unwrap().len(), 2);
         }
     }
 

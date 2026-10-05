@@ -133,6 +133,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Kitty relative placements select the exact parent named by `Q=`, including
+  chained and virtual placements. Rendering and spatial deletion use the same
+  origins; a missing explicit parent cannot fall back to another placement.
+
 - Kitty image-id retransmission retires old placements and animation data with
   the first accepted chunk, releasing their pixel leases before replacement
   decoding. Unrelated uploads and matching ids on the other screen survive.

@@ -77,10 +77,6 @@ refactor. The Kitty items need protocol probes and have no current consumer.
   now decode direct data and return typed replies in wire order, including
   during synchronized output. Normal transmission/placement success and
   error acknowledgements remain incomplete.
-- **Kitty relative `Q=` selection.** Relative-chain origin maps currently
-  collapse concrete parents by image id; preserve the full `(image id,
-  placement id)` key so a child selects the exact named parent when one image
-  has multiple placements.
 - ~~**Inline-image scrolling inside partial DECSTBM margins.**~~ Done in the
   next release: the terminal engine now emits bounded, ordered scroll-region
   events with direction, margins, count, and monotonic screen-top ids. Images
@@ -942,9 +938,10 @@ updates physical, virtual, relative, animation, and stored-image state using
 the full selector set; same-read delete/replacement order is explicit.
 Physical and relative placements now retain and re-resolve source crop,
 destination cells, pixel offsets, aspect ratio, and cursor-movement intent.
-These fixes do **not** close normal transmission/placement acknowledgements or
-exact `(image id, placement id)` `Q=` parent gaps
-listed above.
+Exact `(image id, placement id)` `Q=` parent resolution now uses one keyed
+resolver for rendering and live/synchronized spatial deletion, including chains
+and virtual prototypes. These fixes do **not** close normal transmission/placement
+acknowledgements listed above.
 
 ## Deferred from the #187 review round
 

@@ -1361,6 +1361,22 @@ failed before the correction. Core wire tests and a real Unix PTY child exercise
 all three placement kinds directly and in synchronized output; the wire test
 also checks that the old pixels remain visible until commit.
 
+Relative `Q=` regressions compiled and failed against unchanged production
+code: three real Unix PTY cases reproduced wrong physical/chained origins and
+fallback for a missing explicit parent; a portable wire case reproduced missed
+spatial deletion. The baseline reached the direct parameters; after correction,
+all direct and synchronized parameters pass. The PTY child waits after its text
+marker so the assertions inspect live registries and `relative_tiles`, rather
+than a parser-only result. Pure origin tests cover separate virtual prototypes,
+omitted placeholder placement selection, unknown prototypes, deterministic
+parent defaults, exact chain keys, offset clamping, and the existing depth bound.
+An additional real PTY regression failed against the initial keyed resolver when
+a hidden virtual prototype shadowed a physical default parent. Only prototypes
+with visible cells now contribute concrete defaults; portable and PTY coverage
+preserve that behavior, directly and in synchronized output.
+These checks do not establish foreground UI pixels, quiet performance, or release
+artifact acceptance.
+
 Retransmission regressions first failed against unchanged production code: four
 VT admission/lifetime cases, one self-composition case, and four Core cases,
 including a real PTY. Small isolated byte quotas check actual lease release,

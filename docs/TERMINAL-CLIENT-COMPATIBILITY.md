@@ -109,6 +109,16 @@ matching numeric id remain independent. Relative children follow parent deletion
 a child with an independent placement retains its image data. Actual retained
 render snapshots remain charged and can prevent replacement admission.
 
+Kitty relative placements preserve the exact parent `(P, Q)` through physical,
+virtual, and relative chains. A nonzero `Q` never falls back to another placement
+of the same image. Rendering and spatial deletion use the same origin. With
+`Q` omitted or zero, Kettle chooses the smallest concrete placement id, falling
+back to the smallest relative placement id only when there is no concrete
+parent. A hidden virtual prototype does not shadow that concrete default.
+Virtual origins use only cells for the selected registered prototype; missing
+explicit parents produce no tile. Normal placement acknowledgements
+remain incomplete; this does not promise an `ENOPARENT` reply.
+
 ## Image attachment boundaries
 
 Kettle does not promise a Codex CLI or Claude Code clipboard-attachment chord.
