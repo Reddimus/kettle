@@ -1347,6 +1347,17 @@ ordinary pane padding while selection/link/mouse hit testing and the native
 IME anchor consume that same renderer-owned origin.
 The wallpaper no-clip test and zero-sized skipped slots pin the independent
 background contract and indexed batching.
+Image-cache lifetime coverage uses an actual GPU upload and a portable weak-pin
+test to prove cached identities remain distinct after CPU pixels are released.
+The native replacement regression checks texture identity, upload counts and
+pixel readback: a same-size, half-transparent replacement reuses the retired
+texture at a full retained budget while preserving a green image drawn later.
+A larger replacement releases the old lease before admission, and an empty
+frame releases the remaining cache. A separate scenario in the same GPU test
+forces instance-buffer growth to fail and verifies its unused transfer lease is
+released. Budget pressure uses accounting reservations, not large VRAM
+allocations. These tests share the existing GPU-test lock; adapter absence is
+reported as a skip and does not establish native GPU acceptance.
 Startup fonts prepared before the scale is known measure what a direct load
 measures at 1x and 2x, for the default family and one the system lacks,
 whichever families were warmed first; warming a family a second time does

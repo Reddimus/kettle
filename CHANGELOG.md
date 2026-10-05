@@ -85,6 +85,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- Image rendering reuses retired textures for same-size replacements without
+  reserving a second texture, preserves every image needed later in the frame,
+  and releases decoded CPU pixels independently of the GPU cache.
 - A clicked file link or path in a pane connected to another machine no
   longer opens the local file of the same name: Kettle says it names a file
   there instead. That covers a detected ssh, mosh or container session and a

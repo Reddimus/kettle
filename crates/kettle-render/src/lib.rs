@@ -6225,10 +6225,6 @@ impl Renderer {
         // cached alpha scan and its destination geometry below.
         let mut opaque_wallpaper_covers_surface =
             matches!(cfg.background_type, BackgroundType::Starfield);
-        let mut bg_live: std::collections::HashSet<usize> = std::collections::HashSet::new();
-        let mut inline_live: std::collections::HashSet<usize> = std::collections::HashSet::new();
-        let mut media_receipt_live: std::collections::HashSet<usize> =
-            std::collections::HashSet::new();
 
         // Terminator parity, bg-image: when cfg.background_type = Image +
         // cfg.background_image is set, decode once, cache, and push the
@@ -6326,7 +6322,6 @@ impl Renderer {
                 //                               adds proportional fit.
                 let img_w = data.width as f32;
                 let img_h = data.height as f32;
-                bg_live.insert(data.allocation_key());
                 if cfg.background_image_mode == "tile" {
                     bg_img_items.push(imgpipe::ImageItem::tiled(sw, sh, data.clone()));
                     opaque_wallpaper_covers_surface = frame_is_opaque;
@@ -6856,7 +6851,6 @@ impl Renderer {
                     };
                     let (image_x, image_y, image_width, image_height) =
                         inline_placement_rect(grid_origin.0, grid_origin.1, row, cw, ch, p);
-                    inline_live.insert(p.img.allocation_key());
                     // Placements shift below the titlebar so a Kitty/Sixel
                     // image at row zero cannot overlap the pane chrome.
                     img_items.push(imgpipe::ImageItem::placement(
@@ -8340,7 +8334,6 @@ impl Renderer {
                     1.0,
                 ));
                 if let Some(image) = receipt.image.as_ref() {
-                    media_receipt_live.insert(image.allocation_key());
                     media_receipt_items.push(imgpipe::ImageItem::placement(
                         [
                             preview_rect.0,
@@ -9358,14 +9351,13 @@ impl Renderer {
         // frame). Last use of `quads` is the upload just above.
         self.quad_scratch = quads;
         // Wallpaper goes into its own back pipeline; inline images into
-        // `imgs`. Each cache gets its own exact live set so an image used in one
-        // role cannot accidentally pin a stale texture in the other pipeline.
-        // Release textures not referenced by this frame before admitting new
-        // ones. This prevents an old+new transient cache peak from breaching
-        // the per-window/process GPU budgets; visible entries remain pinned.
-        self.bg_imgs.gc(&bg_live);
-        self.imgs.gc(&inline_live);
-        self.media_receipt_img.gc(&media_receipt_live);
+        // `imgs`. Prepare all layers before uploading: protect their complete
+        // draw lists, transfer only needed exact-size retired textures, and
+        // release the rest before admitting new allocations.
+        self.bg_imgs.prepare_frame(&self.gpu.device, &bg_img_items);
+        self.imgs.prepare_frame(&self.gpu.device, &img_items);
+        self.media_receipt_img
+            .prepare_frame(&self.gpu.device, &media_receipt_items);
         let wallpaper_upload_complete = self.bg_imgs.upload_retained(
             &self.gpu.device,
             &self.gpu.queue,
