@@ -7,7 +7,7 @@ use std::sync::{Arc, Weak};
 
 use bytemuck::{Pod, Zeroable};
 use kettle_core::{
-    GraphicsBudget, GraphicsReservation, ImageData, ImageSourceCrop, ImageSourceRect,
+    GraphicsBudget, GraphicsReservation, ImageData, ImageSourceCrop, ImageSourceRect, PixelBuffer,
 };
 
 use crate::upload::{
@@ -31,6 +31,74 @@ mod cache_lifetime_tests {
     use super::{ImageItem, ImagePipeline};
     use kettle_core::ImageData;
     use std::sync::Arc;
+
+    #[test]
+    fn composition_after_placement_drop_refreshes_cached_pixels_without_copying() {
+        let _serialized = crate::gpu_tests::gpu_test_guard();
+        pollster::block_on(async {
+            let Ok((_, adapter)) = crate::resolve_headless_adapter(
+                &crate::gpu_tests::gpu_test_config(),
+                "image-cache-compose",
+            )
+            .await
+            else {
+                eprintln!("no GPU adapter on this host; skipped");
+                return;
+            };
+            eprintln!("image-cache-compose adapter: {:?}", adapter.get_info());
+            let (device, queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("image-cache-compose"),
+                    required_limits: crate::live_device_limits(adapter.limits()),
+                    ..Default::default()
+                })
+                .await
+                .expect("GPU device");
+            let mut pipeline = ImagePipeline::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb)
+                .expect("image pipeline");
+            let mut image = ImageData::new(1, 1, vec![255, 0, 0, 255]).unwrap();
+            let later = ImageData::new(1, 1, vec![0, 0, 255, 255]).unwrap();
+            let previous_key = image.allocation_key();
+            let later_key = later.allocation_key();
+            let data_ptr = image.rgba.as_ptr();
+            pipeline.upload(
+                &device,
+                &queue,
+                [2.0, 1.0],
+                &[
+                    ImageItem::full(0.0, 0.0, 1.0, 1.0, image.clone()),
+                    ImageItem::full(1.0, 0.0, 1.0, 1.0, later.clone()),
+                ],
+            );
+            assert_eq!(
+                read_two_pixels(&device, &queue, &pipeline),
+                [255, 0, 0, 255, 0, 0, 255, 255]
+            );
+            assert_eq!(Arc::strong_count(&image.rgba), 1);
+            assert_eq!(pipeline.cache[&previous_key]._pixels.strong_count(), 1);
+            let previous_texture = pipeline.cache[&previous_key].texture.clone();
+            let later_texture = pipeline.cache[&later_key].texture.clone();
+            let patch = ImageData::new(1, 1, vec![0, 255, 0, 255]).unwrap();
+            assert!(image.compose(&patch, 0, 0, true));
+            assert_eq!(image.rgba.as_ptr(), data_ptr);
+            let next_key = image.allocation_key();
+            assert_ne!(next_key, previous_key);
+            assert!(pipeline.cache[&previous_key]._pixels.upgrade().is_none());
+            let items = [
+                ImageItem::full(0.0, 0.0, 1.0, 1.0, image.clone()),
+                ImageItem::full(1.0, 0.0, 1.0, 1.0, later),
+            ];
+            pipeline.prepare_frame(&device, &items);
+            pipeline.upload(&device, &queue, [2.0, 1.0], &items);
+            assert_eq!(pipeline.cache[&next_key].texture, previous_texture);
+            assert_eq!(pipeline.cache[&later_key].texture, later_texture);
+            assert_eq!(pipeline.upload_counts().texture_writes, 3);
+            assert_eq!(
+                read_two_pixels(&device, &queue, &pipeline),
+                [0, 255, 0, 255, 0, 0, 255, 255]
+            );
+        });
+    }
 
     #[test]
     fn cached_texture_does_not_retain_cpu_pixels() {
@@ -431,7 +499,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 /// hit A's stale entry and draw A's pixels.
 struct CachedTexture {
     texture: wgpu::Texture,
-    _pixels: Weak<Vec<u8>>,
+    _pixels: Weak<PixelBuffer>,
     /// Accounts the retained GPU allocation until cache eviction.
     _gpu: GraphicsReservation,
     clamp_bind_group: wgpu::BindGroup,
