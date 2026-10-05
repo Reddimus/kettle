@@ -2620,10 +2620,13 @@ name/size/SHA-256 binding, bounded release-document updates, immutable archive
 references, bounded archive structure and extraction, modern no-downgrade
 behavior, compatible legacy sidecars, and hostile archive/network/parser
 fixtures.
-The package-command case executes the checked-in workflow's binary-signing
-loop under the system Bash with mock commands. It checks the GUI, helper and
-library argument vectors, including paths with spaces and the helper's explicit
-identifier. On macOS this exercises Bash 3.2 with `set -u`, which refuses an
+The package-command case executes the checked-in workflow's nested-binary loop
+and final bundle command under the system Bash with mock commands. It requires
+the helper and libraries to precede the bundle, with the main executable signed
+only through that final bundle operation. It checks argument vectors, including
+paths with spaces and the helper's explicit identifier. This follows
+[Apple's inside-out signing order](https://developer.apple.com/library/archive/technotes/tn2206/).
+On macOS this exercises Bash 3.2 with `set -u`, which refuses an
 empty array expansion. It uses synthetic fixture arguments and no signing
 credentials or keychains.
 On macOS the signed-update suite also opens disposable keychains whose paths
