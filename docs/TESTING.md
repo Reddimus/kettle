@@ -1339,6 +1339,18 @@ Direct RGB/RGBA, encoded PNG and zlib probes succeed with a full small retained
 quota and return every temporary process lease. Normal transmission and
 placement acknowledgements remain separate deferred work.
 
+Root-frame edit regressions exercise real Kitty wire commands through the core
+extractor and graphics application path, both directly and inside synchronized
+output. They verify physical, virtual, and relative bases, unchanged placement
+geometry, and release of the previous pixel allocation. Both stale-pixel tests
+failed before the fix. Additional cases check matching image ids across primary
+and alternate screens, appended-frame selection, and playback-clock continuity
+for stopped and running animations. A Unix end-to-end case launches `/bin/sh`
+in a real PTY, emits all three placement kinds and the edit, then waits for
+a following terminal-text marker before checking the updated pixels and
+physical size in the live reader registries, directly and with synchronized
+output. This does not claim foreground UI or GPU acceptance for this edit path.
+
 Native vi-mode regressions drive Alacritty's own cursor and
 selection through scrollback rotation and reflow, proving the cursor remains
 bounded and evicted selections are invalidated. OSC 133 tests pin monotonic

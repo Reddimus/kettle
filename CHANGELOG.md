@@ -133,6 +133,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Kitty root-frame edits refresh existing physical, virtual, and relative
+  placements, including synchronized output, while preserving placement
+  geometry, animation timing, and independent primary/alternate screen images.
+
 - Kitty animation edits work when the old GPU cache still has a weak reference
   to the pixels. They transfer the buffer without copying it; retained pixel
   snapshots keep their memory charge until their last handle is released.

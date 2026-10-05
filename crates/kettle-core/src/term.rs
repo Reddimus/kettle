@@ -7727,52 +7727,19 @@ impl Terminal {
                                             gaps,
                                             state,
                                         } => {
-                                            if let Ok(mut am) = anims.lock() {
-                                                // An empty/single-image, not-
-                                                // running snapshot = cleared.
-                                                if imgs.len() <= 1 && !state.running {
-                                                    am.remove(&id);
-                                                } else {
-                                                    // Keep the clock unless the
-                                                    // run state flipped.
-                                                    let started = match am.get(&id) {
-                                                        Some(p)
-                                                            if p.state.running == state.running =>
-                                                        {
-                                                            p.started
-                                                        }
-                                                        _ => std::time::Instant::now(),
-                                                    };
-                                                    let limits =
-                                                        kettle_vt::GraphicsLimits::default();
-                                                    let bytes =
-                                                        imgs.iter().try_fold(0usize, |n, img| {
-                                                            n.checked_add(img.byte_len())
-                                                        });
-                                                    if (am.contains_key(&id)
-                                                        || am.len() < limits.placements)
-                                                        && imgs.len()
-                                                            <= limits
-                                                                .animation_frames
-                                                                .saturating_add(1)
-                                                        && limits
-                                                            .animation_bytes
-                                                            .checked_add(limits.image_bytes)
-                                                            .zip(bytes)
-                                                            .is_some_and(|(cap, n)| n <= cap)
-                                                    {
-                                                        am.insert(
-                                                            id,
-                                                            AnimEntry {
-                                                                imgs,
-                                                                gaps,
-                                                                state,
-                                                                started,
-                                                            },
-                                                        );
-                                                    }
-                                                }
-                                            }
+                                            apply_animation_snapshot(
+                                                id,
+                                                imgs,
+                                                gaps,
+                                                state,
+                                                GraphicsActionContext {
+                                                    images: &images,
+                                                    virtuals: &virtuals,
+                                                    anims: &anims,
+                                                    relatives: &relatives,
+                                                    geometry: &shared_geometry,
+                                                },
+                                            );
                                         }
                                         Chunk::Prompt(PromptKind::PromptStart) => {
                                             let prompt_row = if let Ok(t) = term.lock()
@@ -10780,6 +10747,79 @@ fn apply_kitty_delete_at(
     extractor.apply_kitty_delete_result(&removed_keys.into_iter().collect::<Vec<_>>(), &freed_ids);
 }
 
+// Callers hold the graphics gate across this snapshot and its placement bases.
+// Keep registry locks separate so rendering retains the existing lock order.
+fn apply_animation_snapshot(
+    id: u32,
+    imgs: Vec<crate::ImageData>,
+    gaps: Vec<i32>,
+    state: kettle_vt::kitty::AnimationState,
+    context: GraphicsActionContext<'_>,
+) {
+    let root = imgs.first().cloned();
+    {
+        let Ok(mut animations) = context.anims.lock() else {
+            return;
+        };
+        if imgs.len() <= 1 && !state.running {
+            animations.remove(&id);
+        } else {
+            let limits = kettle_vt::GraphicsLimits::default();
+            let bytes = imgs
+                .iter()
+                .try_fold(0usize, |bytes, image| bytes.checked_add(image.byte_len()));
+            if !(animations.contains_key(&id) || animations.len() < limits.placements)
+                || imgs.len() > limits.animation_frames.saturating_add(1)
+                || !limits
+                    .animation_bytes
+                    .checked_add(limits.image_bytes)
+                    .zip(bytes)
+                    .is_some_and(|(cap, bytes)| bytes <= cap)
+            {
+                return;
+            }
+            let started = match animations.get(&id) {
+                Some(previous) if previous.state.running == state.running => previous.started,
+                _ => std::time::Instant::now(),
+            };
+            animations.insert(
+                id,
+                AnimEntry {
+                    imgs,
+                    gaps,
+                    state,
+                    started,
+                },
+            );
+        }
+    }
+    let Some(root) = root else {
+        return;
+    };
+    if let Ok(mut placements) = context.images.lock() {
+        for placement in placements
+            .iter_mut()
+            .filter(|placement| placement.id == Some(id))
+        {
+            placement.img = root.clone();
+        }
+    }
+    if let Ok(mut virtuals) = context.virtuals.lock() {
+        for (&(image_id, _), placement) in virtuals.iter_mut() {
+            if image_id == id {
+                placement.img = root.clone();
+            }
+        }
+    }
+    if let Ok(mut relatives) = context.relatives.lock() {
+        for (&(image_id, _), placement) in relatives.iter_mut() {
+            if image_id == id {
+                placement.img = root.clone();
+            }
+        }
+    }
+}
+
 fn apply_graphics_chunk_at(
     term: &mut Term<EventProxy>,
     chunk: Chunk,
@@ -10857,40 +10897,7 @@ fn apply_graphics_chunk_at(
             gaps,
             state,
         } => {
-            if let Ok(mut animations) = context.anims.lock() {
-                if imgs.len() <= 1 && !state.running {
-                    animations.remove(&id);
-                } else {
-                    let started = match animations.get(&id) {
-                        Some(previous) if previous.state.running == state.running => {
-                            previous.started
-                        }
-                        _ => std::time::Instant::now(),
-                    };
-                    let limits = kettle_vt::GraphicsLimits::default();
-                    let bytes = imgs
-                        .iter()
-                        .try_fold(0usize, |bytes, image| bytes.checked_add(image.byte_len()));
-                    if (animations.contains_key(&id) || animations.len() < limits.placements)
-                        && imgs.len() <= limits.animation_frames.saturating_add(1)
-                        && limits
-                            .animation_bytes
-                            .checked_add(limits.image_bytes)
-                            .zip(bytes)
-                            .is_some_and(|(cap, bytes)| bytes <= cap)
-                    {
-                        animations.insert(
-                            id,
-                            AnimEntry {
-                                imgs,
-                                gaps,
-                                state,
-                                started,
-                            },
-                        );
-                    }
-                }
-            }
+            apply_animation_snapshot(id, imgs, gaps, state, context);
         }
         _ => return false,
     }
@@ -14373,6 +14380,71 @@ mod teardown_tests {
         assert_eq!(code, 0, "child checked the exact query response bytes");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn root_frame_edit_reaches_all_placement_kinds_through_a_real_pty() {
+        for synchronized in [false, true] {
+            let start = if synchronized { r"\033[?2026h" } else { "" };
+            let end = if synchronized { r"\033[?2026l" } else { "" };
+            let script = format!(
+                r"printf '\033_Ga=T,i=1,p=1,f=32,s=1,v=1,c=2,r=2;AQID/w==\033\\\033_Ga=p,i=1,p=2,U=1,c=2,r=2\033\\\033_Ga=p,i=1,p=3,P=1,Q=1,H=1,V=1\033\\{start}\033_Ga=f,i=1,r=1,X=1,f=32,s=1,v=1;BQYH/w==\033\\{end}\r\nROOT_REFRESH_DONE'"
+            );
+            let argv = vec!["/bin/sh".into(), "-c".into(), script];
+            let (tx, _rx) = crossbeam_channel::unbounded();
+            let terminal = Terminal::new(
+                &argv,
+                None,
+                1000,
+                80,
+                24,
+                8,
+                16,
+                false,
+                CursorShape::Block,
+                None,
+                tx,
+                Arc::new(|| {}),
+            )
+            .expect("native root-edit PTY");
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                if terminal.term.lock().is_ok_and(|term| {
+                    super::screen_text_of(&term, 0)
+                        .text
+                        .contains("ROOT_REFRESH_DONE")
+                }) {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "root edit did not reach the terminal"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let placements = terminal.images.lock().unwrap();
+            assert_eq!(placements.len(), 1);
+            assert_eq!(placements[0].img.rgba.as_slice(), &[5, 6, 7, 255]);
+            assert_eq!(
+                (placements[0].display_cols, placements[0].display_rows),
+                (2.0, 2.0)
+            );
+            assert_eq!(
+                terminal.virtuals.lock().unwrap()[&(1, 2)]
+                    .img
+                    .rgba
+                    .as_slice(),
+                &[5, 6, 7, 255]
+            );
+            assert_eq!(
+                terminal.relatives.lock().unwrap()[&(1, 3)]
+                    .img
+                    .rgba
+                    .as_slice(),
+                &[5, 6, 7, 255]
+            );
+        }
+    }
+
     /// `child_exit_code` must surface the child's real exit status once it
     /// exits, because `kettle exec` propagates it as its own process exit code.
     /// Spawns a real PTY child that exits 3 and polls.
@@ -17098,6 +17170,156 @@ mod image_lifecycle_tests {
     fn kitty_image(id: u32, placement: u32, columns: u32, rows: u32) -> Vec<u8> {
         format!("\x1b_Ga=T,i={id},p={placement},f=32,s=1,v=1,c={columns},r={rows};AQIDBA==\x1b\\")
             .into_bytes()
+    }
+
+    #[test]
+    fn root_frame_edit_refreshes_all_existing_placement_kinds() {
+        assert_root_frame_edit_refreshes_all_existing_placement_kinds(false);
+    }
+
+    #[test]
+    fn synchronized_root_frame_edit_refreshes_all_existing_placement_kinds() {
+        assert_root_frame_edit_refreshes_all_existing_placement_kinds(true);
+    }
+
+    fn assert_root_frame_edit_refreshes_all_existing_placement_kinds(synchronized: bool) {
+        let mut harness = SyncGraphicsHarness::new();
+        harness.feed(b"\x1b_Ga=T,i=1,p=1,f=32,s=1,v=1,c=2,r=2;AQID/w==\x1b\\");
+        harness.feed(b"\x1b_Ga=p,i=1,p=2,U=1,c=2,r=2\x1b\\");
+        harness.feed(b"\x1b_Ga=p,i=1,p=3,P=1,Q=1,H=1,V=1\x1b\\");
+        let (old_pixels, old_geometry) = {
+            let placements = harness.images.lock().unwrap();
+            assert_eq!(placements.len(), 1);
+            let p = &placements[0];
+            (
+                Arc::downgrade(&p.img.rgba),
+                (p.abs_line, p.col, p.display_cols, p.display_rows),
+            )
+        };
+        assert_eq!(harness.virtuals.lock().unwrap().len(), 1);
+        assert_eq!(harness.relatives.lock().unwrap().len(), 1);
+        if synchronized {
+            harness.feed(b"\x1b[?2026h");
+        }
+        harness.feed(b"\x1b_Ga=f,i=1,r=1,X=1,f=32,s=1,v=1;BQYH/w==\x1b\\");
+        if synchronized {
+            assert_eq!(
+                harness.images.lock().unwrap()[0].img.rgba.as_slice(),
+                &[1, 2, 3, 255]
+            );
+            harness.feed(b"\x1b[?2026l");
+        }
+        let placements = harness.images.lock().unwrap();
+        let p = &placements[0];
+        assert_eq!(p.img.rgba.as_slice(), &[5, 6, 7, 255]);
+        assert_eq!(
+            (p.abs_line, p.col, p.display_cols, p.display_rows),
+            old_geometry
+        );
+        assert_eq!(
+            harness.virtuals.lock().unwrap()[&(1, 2)]
+                .img
+                .rgba
+                .as_slice(),
+            &[5, 6, 7, 255]
+        );
+        assert_eq!(
+            harness.relatives.lock().unwrap()[&(1, 3)]
+                .img
+                .rgba
+                .as_slice(),
+            &[5, 6, 7, 255]
+        );
+        assert!(harness.anims.lock().unwrap().is_empty());
+        assert!(old_pixels.upgrade().is_none());
+    }
+
+    #[test]
+    fn root_frame_edit_preserves_other_screen_with_the_same_image_id() {
+        for synchronized in [false, true] {
+            let mut harness = SyncGraphicsHarness::new();
+            harness.feed(b"\x1b_Ga=T,i=1,p=1,f=32,s=1,v=1;AQID/w==\x1b\\");
+            let primary = harness.images.lock().unwrap()[0].img.rgba.clone();
+            harness.feed(b"\x1b[?47h");
+            harness.feed(b"\x1b_Ga=T,i=1,p=1,f=32,s=1,v=1;CAkK/w==\x1b\\");
+            if synchronized {
+                harness.feed(b"\x1b[?2026h");
+            }
+            harness.feed(b"\x1b_Ga=f,i=1,r=1,X=1,f=32,s=1,v=1;BQYH/w==\x1b\\");
+            if synchronized {
+                harness.feed(b"\x1b[?2026l");
+            }
+            assert_eq!(
+                harness.images.lock().unwrap()[0].img.rgba.as_slice(),
+                &[5, 6, 7, 255]
+            );
+            assert_eq!(
+                harness.inactive.lock().unwrap().placements[0]
+                    .img
+                    .rgba
+                    .as_slice(),
+                &[1, 2, 3, 255]
+            );
+            harness.feed(b"\x1b[?47l");
+            assert!(Arc::ptr_eq(
+                &harness.images.lock().unwrap()[0].img.rgba,
+                &primary
+            ));
+            harness.feed(b"\x1b[?47h");
+            assert_eq!(
+                harness.images.lock().unwrap()[0].img.rgba.as_slice(),
+                &[5, 6, 7, 255]
+            );
+        }
+    }
+
+    #[test]
+    fn root_frame_edit_preserves_appended_frame_selection_and_playback_clock() {
+        for synchronized in [false, true] {
+            for running in [false, true] {
+                let mut harness = SyncGraphicsHarness::new();
+                harness.feed(b"\x1b_Ga=T,i=1,p=1,f=32,s=1,v=1;AQID/w==\x1b\\");
+                harness.feed(b"\x1b_Ga=f,i=1,f=32,s=1,v=1,z=40;CAkK/w==\x1b\\");
+                let control = if running {
+                    b"\x1b_Ga=a,i=1,c=2,s=3,v=5\x1b\\"
+                } else {
+                    b"\x1b_Ga=a,i=1,c=2,s=1,v=5\x1b\\"
+                };
+                harness.feed(control);
+                let (started, state, selected_pixels) = {
+                    let animations = harness.anims.lock().unwrap();
+                    let animation = &animations[&1];
+                    (
+                        animation.started,
+                        animation.state,
+                        animation.imgs[1].rgba.clone(),
+                    )
+                };
+                if synchronized {
+                    harness.feed(b"\x1b[?2026h");
+                }
+                harness.feed(b"\x1b_Ga=f,i=1,r=1,X=1,f=32,s=1,v=1;BQYH/w==\x1b\\");
+                if synchronized {
+                    harness.feed(b"\x1b[?2026l");
+                }
+                let animations = harness.anims.lock().unwrap();
+                let animation = &animations[&1];
+                assert_eq!(animation.started, started);
+                assert_eq!(animation.state.current, state.current);
+                assert_eq!(animation.state.running, state.running);
+                assert_eq!(animation.state.loops, state.loops);
+                assert_eq!(animation.imgs[0].rgba.as_slice(), &[5, 6, 7, 255]);
+                assert!(Arc::ptr_eq(&animation.imgs[1].rgba, &selected_pixels));
+                assert_eq!(
+                    kettle_vt::kitty::current_frame(&animation.gaps, &animation.state, 0),
+                    1
+                );
+                assert_eq!(
+                    harness.images.lock().unwrap()[0].img.rgba.as_slice(),
+                    &[5, 6, 7, 255]
+                );
+            }
+        }
     }
 
     #[test]
