@@ -1361,6 +1361,21 @@ failed before the correction. Core wire tests and a real Unix PTY child exercise
 all three placement kinds directly and in synchronized output; the wire test
 also checks that the old pixels remain visible until commit.
 
+Retransmission regressions first failed against unchanged production code: four
+VT admission/lifetime cases, one self-composition case, and four Core cases,
+including a real PTY. Small isolated byte quotas check actual lease release,
+retained-snapshot refusal, and same-read callback order at every wire split.
+Core cases verify all placement/animation owners, synchronized visibility,
+primary/alternate id collisions, and preservation of independently placed children.
+The PTY child pauses at text barriers before retirement and before completion;
+the test checks weak handles and all registries between those phases, both directly
+and with synchronized output. Additional cases cover stale frame slot reuse without
+aborting other uploads, exact raw bytes for ESC/C1 terminators and store/display/
+virtual results, oversized-header preservation, and callback reset/screen/new-upload
+invalidation. A preliminary VT fixture compile error was corrected before recording
+the nine runtime failures. These checks do not establish foreground UI, quiet
+performance, or release artifact acceptance.
+
 Native vi-mode regressions drive Alacritty's own cursor and
 selection through scrollback rotation and reflow, proving the cursor remains
 bounded and evicted selections are invalidated. OSC 133 tests pin monotonic

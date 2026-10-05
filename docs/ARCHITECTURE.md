@@ -1250,6 +1250,23 @@ remain gapless. Matching numeric ids in the inactive
 screen remain independent. The update walks each active registry once and
 clones pixel handles without copying image payloads, taking O(placements +
 animation frames) time and O(1) extra metadata beyond the animation snapshot.
+Image-id retransmission separates parsed command metadata from interpretation.
+The first accepted chunk retires decoder state and emits a deletion callback
+before allocating replacement pixels. Core releases physical, virtual, relative,
+and animation owners through the existing deletion cascade; unrelated partial
+uploads survive. A stale partial frame of the same image is cancelled and its
+slot can serve the new upload. Synchronized replay applies each chunk immediately,
+rather than retaining a vector of decoded image owners until parsing completes.
+A checked extractor epoch invalidates pending work when callbacks reset graphics,
+switch screens, or feed a newer graphics command. Raw output is emitted once with
+its original terminator before the callback. Encoded payload headers still parse
+once in the existing decoder; command preparation borrows the payload. Retirement
+uses existing placement/relative metadata and never copies pixel buffers. Strong
+external snapshots retain their real leases and can still cause refusal. Once a
+header has been accepted and retirement occurs, a later decode failure leaves the
+old image retired. Self-composition drops its source handle after copying the
+rectangle, so it does not force an otherwise unnecessary canvas copy.
+
 Retired textures with exactly the dimensions of a new image transfer their
 texture, sampler bind groups and existing GPU lease to that image; incompatible
 and excess textures are released before new allocations. An unused transfer is

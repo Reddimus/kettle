@@ -77,11 +77,6 @@ refactor. The Kitty items need protocol probes and have no current consumer.
   now decode direct data and return typed replies in wire order, including
   during synchronized output. Normal transmission/placement success and
   error acknowledgements remain incomplete.
-- **Kitty image-id replacement lifecycle.** Retransmitting data for an existing
-  id must remove every old physical/virtual/relative placement before retaining
-  the new pixels, including for transmit-only `a=t`. The decoder and terminal
-  core need an ordered replacement signal rather than inferring this from a
-  later placement.
 - **Kitty relative `Q=` selection.** Relative-chain origin maps currently
   collapse concrete parents by image id; preserve the full `(image id,
   placement id)` key so a child selects the exact named parent when one image
@@ -947,8 +942,8 @@ updates physical, virtual, relative, animation, and stored-image state using
 the full selector set; same-read delete/replacement order is explicit.
 Physical and relative placements now retain and re-resolve source crop,
 destination cells, pixel offsets, aspect ratio, and cursor-movement intent.
-These fixes do **not** close normal transmission/placement acknowledgements, existing-id
-retransmission lifecycle, or exact `(image id, placement id)` `Q=` parent gaps
+These fixes do **not** close normal transmission/placement acknowledgements or
+exact `(image id, placement id)` `Q=` parent gaps
 listed above.
 
 ## Deferred from the #187 review round

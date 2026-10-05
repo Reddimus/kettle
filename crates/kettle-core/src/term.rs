@@ -3796,10 +3796,11 @@ fn apply_sync_marker(
     };
 
     extractor.set_graphics_deferred(false);
-    let mut replayed = Vec::new();
-    extractor.feed_with(graphics.as_bytes(), |_, chunk| replayed.push(chunk));
-    extractor.set_graphics_deferred(true);
-    for chunk in replayed {
+    let mut replay_failed = false;
+    extractor.feed_with(graphics.as_bytes(), |extractor, chunk| {
+        if replay_failed {
+            return;
+        }
         match chunk {
             Chunk::Pass(_) | Chunk::Terminal(_) | Chunk::Raw(_) => {
                 // The downstream text engine intentionally ignores malformed
@@ -3808,11 +3809,14 @@ fn apply_sync_marker(
             }
             chunk => {
                 if !apply_graphics_chunk_at(term, chunk, actions, extractor) {
-                    reset_deferred_graphics(active_alternate, deferred, registries, extractor);
-                    return;
+                    replay_failed = true;
                 }
             }
         }
+    });
+    extractor.set_graphics_deferred(true);
+    if replay_failed {
+        reset_deferred_graphics(active_alternate, deferred, registries, extractor);
     }
 }
 
@@ -14447,6 +14451,70 @@ mod teardown_tests {
 
     #[cfg(unix)]
     #[test]
+    fn retransmission_releases_old_owners_through_a_real_pty() {
+        for synchronized in [false, true] {
+            let start = if synchronized { r"\033[?2026h" } else { "" };
+            let end = if synchronized { r"\033[?2026l" } else { "" };
+            let script = format!(
+                r"printf '\033_Ga=T,i=41,p=1,f=32,s=1,v=1;AQID/w==\033\\\033_Ga=p,i=41,p=2,U=1,c=1,r=1\033\\\033_Ga=p,i=41,p=3,P=41,Q=1,H=1,V=1\033\\\033_Ga=f,i=41,f=32,s=1,v=1,z=37;CQgH/w==\033\\\r\nUPLOAD_READY'; read first; printf '{start}\033_Ga=t,i=41,f=32,s=1,v=1,m=1;BQYH\033\\{end}\r\nUPLOAD_RETIRED'; read second; printf '\033_Gm=0;/w==\033\\\033_Ga=p,i=41,p=4\033\\\r\nUPLOAD_COMPLETE'"
+            );
+            let (tx, _rx) = crossbeam_channel::unbounded();
+            let terminal = Terminal::new(
+                &["/bin/sh".into(), "-c".into(), script],
+                None,
+                1000,
+                80,
+                24,
+                8,
+                16,
+                false,
+                CursorShape::Block,
+                None,
+                tx,
+                Arc::new(|| {}),
+            )
+            .expect("native retransmission PTY");
+            let wait_for = |marker: &str| {
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                loop {
+                    if terminal
+                        .term
+                        .lock()
+                        .is_ok_and(|term| super::screen_text_of(&term, 0).text.contains(marker))
+                    {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "missing PTY marker {marker}"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            };
+            wait_for("UPLOAD_READY");
+            let root = Arc::downgrade(&terminal.images.lock().unwrap()[0].img.rgba);
+            let frame = Arc::downgrade(&terminal.anims.lock().unwrap()[&41].imgs[1].rgba);
+            terminal.write(b"continue\n");
+            wait_for("UPLOAD_RETIRED");
+            assert!(terminal.images.lock().unwrap().is_empty());
+            assert!(terminal.virtuals.lock().unwrap().is_empty());
+            assert!(terminal.relatives.lock().unwrap().is_empty());
+            assert!(terminal.anims.lock().unwrap().is_empty());
+            assert!(root.upgrade().is_none());
+            assert!(frame.upgrade().is_none());
+            terminal.write(b"continue\n");
+            wait_for("UPLOAD_COMPLETE");
+            let images = terminal.images.lock().unwrap();
+            assert_eq!(images.len(), 1);
+            assert_eq!(images[0].img.rgba.as_slice(), &[5, 6, 7, 255]);
+            assert!(terminal.virtuals.lock().unwrap().is_empty());
+            assert!(terminal.relatives.lock().unwrap().is_empty());
+            assert!(terminal.anims.lock().unwrap().is_empty());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn frame_composition_offsets_reach_all_placement_kinds_through_a_real_pty() {
         for synchronized in [false, true] {
             let start = if synchronized { r"\033[?2026h" } else { "" };
@@ -17244,6 +17312,92 @@ mod image_lifecycle_tests {
     fn kitty_image(id: u32, placement: u32, columns: u32, rows: u32) -> Vec<u8> {
         format!("\x1b_Ga=T,i={id},p={placement},f=32,s=1,v=1,c={columns},r={rows};AQIDBA==\x1b\\")
             .into_bytes()
+    }
+
+    #[test]
+    fn first_retransmission_chunk_releases_all_active_placement_and_animation_owners() {
+        for synchronized in [false, true] {
+            let mut harness = SyncGraphicsHarness::new();
+            harness.feed(b"\x1b_Ga=T,i=24,p=1,f=32,s=1,v=1,c=2,r=2;AQID/w==\x1b\\");
+            harness.feed(b"\x1b_Ga=p,i=24,p=2,U=1,c=2,r=2\x1b\\");
+            harness.feed(b"\x1b_Ga=p,i=24,p=3,P=24,Q=1,H=1,V=1\x1b\\");
+            harness.feed(b"\x1b_Ga=f,i=24,f=32,s=1,v=1,z=37;AQID/w==\x1b\\");
+            let root = Arc::downgrade(&harness.images.lock().unwrap()[0].img.rgba);
+            let frame = Arc::downgrade(&harness.anims.lock().unwrap()[&24].imgs[1].rgba);
+            if synchronized {
+                harness.feed(b"\x1b[?2026h");
+            }
+            harness.feed(b"\x1b_Ga=t,i=24,f=32,s=1,v=1,m=1;BQYH\x1b\\");
+            if synchronized {
+                assert_eq!(harness.images.lock().unwrap().len(), 1);
+                assert!(root.upgrade().is_some());
+                harness.feed(b"\x1b[?2026l");
+            }
+            assert!(harness.images.lock().unwrap().is_empty());
+            assert!(harness.virtuals.lock().unwrap().is_empty());
+            assert!(harness.relatives.lock().unwrap().is_empty());
+            assert!(harness.anims.lock().unwrap().is_empty());
+            assert!(root.upgrade().is_none());
+            assert!(frame.upgrade().is_none());
+            harness.feed(b"\x1b_Ga=p,i=24\x1b\\");
+            assert!(harness.images.lock().unwrap().is_empty());
+            harness.feed(b"\x1b_Gm=0;/w==\x1b\\");
+            assert!(harness.images.lock().unwrap().is_empty());
+            harness.feed(b"\x1b_Ga=p,i=24,p=4,c=1,r=1\x1b\\");
+            assert_eq!(
+                harness.images.lock().unwrap()[0].img.rgba.as_slice(),
+                &[5, 6, 7, 255]
+            );
+            assert!(harness.virtuals.lock().unwrap().is_empty());
+            assert!(harness.relatives.lock().unwrap().is_empty());
+            assert!(harness.anims.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn retransmission_keeps_same_numeric_id_on_the_other_screen() {
+        let mut harness = SyncGraphicsHarness::new();
+        harness.feed(b"\x1b_Ga=T,i=25,p=1,f=32,s=1,v=1;AQID/w==\x1b\\");
+        let primary = Arc::downgrade(&harness.images.lock().unwrap()[0].img.rgba);
+        harness.feed(b"\x1b[?47h\x1b_Ga=T,i=25,p=1,f=32,s=1,v=1;CQgH/w==\x1b\\");
+        let alternate = Arc::downgrade(&harness.images.lock().unwrap()[0].img.rgba);
+        harness.feed(b"\x1b[?47l\x1b_Ga=t,i=25,f=32,s=1,v=1,m=1;BQYH\x1b\\");
+        assert!(harness.images.lock().unwrap().is_empty());
+        assert!(primary.upgrade().is_none());
+        assert!(alternate.upgrade().is_some());
+        harness.feed(b"\x1b[?47h");
+        assert_eq!(
+            harness.images.lock().unwrap()[0].img.rgba.as_slice(),
+            &[9, 8, 7, 255]
+        );
+        harness.feed(b"\x1b[?47l\x1b_Gm=0;/w==\x1b\\\x1b_Ga=p,i=25,p=2\x1b\\");
+        assert_eq!(
+            harness.images.lock().unwrap()[0].img.rgba.as_slice(),
+            &[5, 6, 7, 255]
+        );
+        assert!(alternate.upgrade().is_some());
+    }
+
+    #[test]
+    fn retransmission_invalidates_relative_children_without_deleting_independent_placements() {
+        let mut harness = SyncGraphicsHarness::new();
+        harness.feed(b"\x1b_Ga=T,i=31,p=1,f=32,s=1,v=1;AQID/w==\x1b\\");
+        harness.feed(b"\x1b_Ga=t,i=32,f=32,s=1,v=1;CQgH/w==\x1b\\");
+        harness.feed(b"\x1b_Ga=p,i=32,p=2,P=31,Q=1,H=1,V=1\x1b\\");
+        harness.feed(b"\x1b_Ga=p,i=32,p=3\x1b\\");
+        let parent = Arc::downgrade(&harness.images.lock().unwrap()[0].img.rgba);
+        let child = Arc::downgrade(&harness.relatives.lock().unwrap()[&(32, 2)].img.rgba);
+        harness.feed(b"\x1b_Ga=t,i=31,f=32,s=1,v=1,m=1;BQYH\x1b\\");
+        assert_eq!(harness.images.lock().unwrap().len(), 1);
+        assert_eq!(harness.images.lock().unwrap()[0].id, Some(32));
+        assert!(harness.relatives.lock().unwrap().is_empty());
+        assert!(parent.upgrade().is_none());
+        assert!(child.upgrade().is_some());
+        harness.feed(b"\x1b_Ga=p,i=32,p=4\x1b\\");
+        assert_eq!(
+            harness.images.lock().unwrap()[0].img.rgba.as_slice(),
+            &[9, 8, 7, 255]
+        );
     }
 
     #[test]

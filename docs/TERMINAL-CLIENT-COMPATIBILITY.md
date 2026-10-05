@@ -100,6 +100,15 @@ nonzero `z` is supplied. Root frames default to zero delay, and negative gaps
 remain gapless. These rules follow the
 [Kitty graphics protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/).
 
+Direct Kitty retransmission of an existing image id retires its previous data,
+placements, and animation at the first accepted chunk. A transmit-only `a=t`
+upload remains unplaced until `a=p` or a new display transmission. Synchronized
+output keeps the old placements visible until commit, then processes retirement
+before replacement decoding. Other partial uploads and the other screen's
+matching numeric id remain independent. Relative children follow parent deletion;
+a child with an independent placement retains its image data. Actual retained
+render snapshots remain charged and can prevent replacement admission.
+
 ## Image attachment boundaries
 
 Kettle does not promise a Codex CLI or Claude Code clipboard-attachment chord.
