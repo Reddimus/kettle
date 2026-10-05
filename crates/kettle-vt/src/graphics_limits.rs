@@ -161,6 +161,15 @@ impl GraphicsBudget {
         })
     }
 
+    /// Decode a capability probe without consuming the terminal's retained quota.
+    pub(crate) fn query_scope(&self) -> Self {
+        Self {
+            limits: self.limits,
+            process: self.process.clone(),
+            scope: Arc::new(Counters::default()),
+        }
+    }
+
     /// Reserve retained CPU image memory in both this terminal and the process.
     pub(crate) fn reserve_image_cpu(&self, bytes: usize) -> Option<GraphicsReservation> {
         if bytes == 0 || bytes > self.limits.image_bytes {

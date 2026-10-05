@@ -51,6 +51,8 @@ pub enum Chunk {
     Raw(Vec<u8>),
     /// A decoded image to place at the current cursor position.
     Image(Placed),
+    /// An immediate Kitty capability-query reply for the PTY event channel.
+    GraphicsReply(crate::kitty::QueryReply),
     /// Kitty `a=d`: delete placements selected by id, number, cursor/cell,
     /// range, column, row, or z-index.
     DeleteImages(Delete),
@@ -1438,7 +1440,13 @@ impl Extractor {
             terminal_only = self.raw_tap;
         }
 
-        if self.defer_graphics && is_graphics_sequence(mode, &seq) {
+        let immediate_query = self.defer_graphics
+            && mode == Mode::Apc
+            && seq.first() == Some(&b'G')
+            && std::str::from_utf8(&seq[1..])
+                .ok()
+                .is_some_and(|body| self.kitty().is_query(body));
+        if self.defer_graphics && !immediate_query && is_graphics_sequence(mode, &seq) {
             self.emit_raw_control(mode, &seq, out);
             let terminator_len = if self.term_is_bel(mode) { 1 } else { 2 };
             let Some(raw_len) = seq
@@ -1487,6 +1495,7 @@ impl Extractor {
 
         enum R {
             None,
+            Reply(crate::kitty::QueryReply),
             Img(Placed),
             Del(Delete),
             Virtual {
@@ -1542,6 +1551,7 @@ impl Extractor {
                         return;
                     };
                     match self.kitty_mut().feed(body) {
+                        KittyOut::Query(reply) => R::Reply(reply),
                         KittyOut::Place(p) => R::Img(p),
                         KittyOut::Delete(delete) => R::Del(delete),
                         // Virtual placements draw nothing at the cursor; the
@@ -1631,6 +1641,10 @@ impl Extractor {
         };
 
         match result {
+            R::Reply(reply) => {
+                self.emit_raw_control(mode, &seq, out);
+                out.push(Chunk::GraphicsReply(reply));
+            }
             R::Img(data) => {
                 self.emit_raw_control(mode, &seq, out);
                 out.push(Chunk::Image(data));

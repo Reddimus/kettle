@@ -1326,7 +1326,20 @@ fg/bg/cursor set + 110/111/112 reset siblings, OSC 8
 hyperlink cell-carry, OSC 52 clipboard copy + paste policies,
 DA1 clipboard-extension advertisement toggled by the live write policy,
 wide CJK (2 cells + spacer) + wide-char wrap, combining-mark
-zero-width. Native vi-mode regressions drive Alacritty's own cursor and
+zero-width.
+
+Kitty graphics capability queries echo the image id before device attributes,
+including immediate delivery during synchronized output. The chunked query
+regression exercises every split of a multi-query PTY read. A native Unix PTY
+child switches to raw input and checks the exact returned query bytes through
+its actual stdin before exiting successfully. Pure VT tests cover invalid data,
+unsupported file transfer, quiet settings across chunks, untouched existing
+pixels/virtual placements/animation frames and another partial image upload.
+Direct RGB/RGBA, encoded PNG and zlib probes succeed with a full small retained
+quota and return every temporary process lease. Normal transmission and
+placement acknowledgements remain separate deferred work.
+
+Native vi-mode regressions drive Alacritty's own cursor and
 selection through scrollback rotation and reflow, proving the cursor remains
 bounded and evicted selections are invalidated. OSC 133 tests pin monotonic
 `history_origin` row ids, prompt navigation offsets, pruning after eviction

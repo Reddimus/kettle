@@ -1002,8 +1002,10 @@ the now-visible frame after releasing the terminal lock.
 
 Graphics controls inside DEC 2026 use the same atomic commit boundary. While
 an update is open, the extractor retains each complete Sixel, Kitty, or iTerm2
-control string without decoding it and inserts a bounded, out-of-band VTE
-marker at the current synchronized byte offset. PTY bytes cannot forge a
+display control string without decoding it. Kitty capability queries and their
+continuations answer immediately through the PTY reply channel. Each deferred
+display control inserts a bounded, out-of-band VTE marker at the current
+synchronized byte offset. PTY bytes cannot forge a
 marker. When VTE commits the buffered text, marker callbacks first apply the
 terminal engine's preceding screen/cursor journal events and then replay that
 one graphics control against the exact buffer and cursor state at its wire
@@ -1313,8 +1315,19 @@ Column reflow clears regular/relative placements whose document rows cannot be
 mapped exactly, but retains virtual prototypes and animations because the
 Unicode placeholder cells themselves are reflowed by the grid.
 
-This remains a deliberately partial Kitty implementation. Immediate
-acknowledgement/query replies, replacement cleanup when new pixels reuse an
+Kitty capability queries (`a=q,i=`) decode direct RGB/RGBA, compressed data,
+and supported encoded images without retaining or replacing an image. Their
+separate partial accumulator shares the existing transmission ceilings;
+temporary decoded pixels use a fresh scope under the same process account,
+so a full terminal retained quota does not prevent a capability probe. All
+temporary leases are released before the reply. Typed query results become
+`Chunk::GraphicsReply` and use the existing `EventProxy` PTY-write channel in
+wire order. Queries and their continuations bypass DEC 2026 graphics deferral;
+they answer immediately even when later device attributes wait for the
+synchronized update to end. `q=1` suppresses success and `q=2` all replies.
+File, temporary-file, and shared-memory queries return unsupported; queries
+require a nonzero image id. Normal transmission/placement acknowledgements,
+replacement cleanup when new pixels reuse an
 existing image id, and exact `Q=` parent-placement selection when an image has
 multiple concrete placements are tracked in
 [AUDIT-DEFERRED.md](AUDIT-DEFERRED.md).

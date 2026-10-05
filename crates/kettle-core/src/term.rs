@@ -2282,6 +2282,11 @@ impl DeferredGraphicsJournal {
     }
 }
 
+fn send_graphics_reply(proxy: &EventProxy, reply: kettle_vt::kitty::QueryReply) {
+    use alacritty_terminal::event::EventListener;
+    proxy.send_event(TermEvent::PtyWrite(reply.encode()));
+}
+
 fn chunk_needs_graphics_gate(chunk: &Chunk) -> bool {
     // Pass bytes are not graphics-free: LF, CSI scrolling/erase, alternate
     // screen switches, and RIS can all commit GraphicsEvents. Hold the gate
@@ -7325,6 +7330,7 @@ impl Terminal {
                                         }
                                     }
                                     match chunk {
+                                        Chunk::GraphicsReply(reply) => send_graphics_reply(&proxy, reply),
                                         Chunk::Pass(bytes) | Chunk::Terminal(bytes) => {
                                             let mut sync_graphics = SyncGraphicsContext {
                                                 active_alternate: &mut active_alternate,
@@ -14323,6 +14329,50 @@ mod teardown_tests {
         assert_eq!(next_reply(), "\x1b[?997;2n");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn kitty_query_round_trips_through_a_real_pty_child() {
+        let argv = vec!["/bin/sh".into(), "-c".into(),
+            r#"stty raw -echo; printf '\033_Gi=91,a=q,t=d,f=24,s=1,v=1;AAAA\033\\'; reply=$(dd bs=1 count=12 2>/dev/null | od -An -tx1 | tr -d ' \n'); test "$reply" = 1b5f47693d39313b4f4b1b5c"#.into()];
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let term = Terminal::new(
+            &argv,
+            None,
+            1000,
+            80,
+            24,
+            8,
+            16,
+            false,
+            CursorShape::Block,
+            None,
+            tx,
+            Arc::new(|| {}),
+        )
+        .expect("native query PTY");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut replies = 0;
+        let code = loop {
+            while let Ok(event) = rx.try_recv() {
+                if let TermEvent::PtyWrite(reply) = event {
+                    assert_eq!(reply, "\x1b_Gi=91;OK\x1b\\");
+                    replies += 1;
+                    term.write(reply.as_bytes());
+                }
+            }
+            if let Some(code) = term.child_exit_code() {
+                break code;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "query child did not finish"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(replies, 1);
+        assert_eq!(code, 0, "child checked the exact query response bytes");
+    }
+
     /// `child_exit_code` must surface the child's real exit status once it
     /// exits, because `kettle exec` propagates it as its own process exit code.
     /// Spawns a real PTY child that exits 3 and polls.
@@ -16716,8 +16766,9 @@ mod image_lifecycle_tests {
         apply_graphics_event, apply_sync_dispatch, chunk_needs_graphics_gate,
         clear_reflowed_regular_placements, commit_local_geometry, finish_deferred_sync,
         receive_pty_chunk, recompute_kitty_placements, scroll_regular_placements,
+        send_graphics_reply,
     };
-    use crate::event::OutputWakeGate;
+    use crate::event::{OutputWakeGate, TermEvent};
     use crate::{EventProxy, ImageData, Waker};
     use alacritty_terminal::Term;
     use alacritty_terminal::index::{Column, Line, Point};
@@ -16786,6 +16837,8 @@ mod image_lifecycle_tests {
 
     struct SyncGraphicsHarness {
         term: SharedTerm,
+        replies: crossbeam_channel::Receiver<TermEvent>,
+        proxy: EventProxy,
         processor: Processor,
         extractor: Extractor,
         deferred: DeferredGraphicsJournal,
@@ -16800,7 +16853,7 @@ mod image_lifecycle_tests {
 
     impl SyncGraphicsHarness {
         fn new() -> Self {
-            let (tx, _rx) = crossbeam_channel::unbounded();
+            let (tx, replies) = crossbeam_channel::unbounded();
             let proxy = EventProxy::new(tx, Arc::new(|| {}));
             let term = Arc::new(Mutex::new(Term::new(
                 TermConfig::default(),
@@ -16808,11 +16861,13 @@ mod image_lifecycle_tests {
                     columns: 8,
                     screen_lines: 4,
                 },
-                proxy,
+                proxy.clone(),
             )));
             let (images, virtuals, anims, relatives, inactive) = registries();
             Self {
                 term,
+                replies,
+                proxy,
                 processor: Processor::new(),
                 extractor: Extractor::new(),
                 deferred: DeferredGraphicsJournal::new(),
@@ -16832,6 +16887,8 @@ mod image_lifecycle_tests {
         fn feed(&mut self, bytes: &[u8]) {
             let Self {
                 term,
+                replies: _,
+                proxy,
                 processor,
                 extractor,
                 deferred,
@@ -16844,6 +16901,7 @@ mod image_lifecycle_tests {
                 geometry,
             } = self;
             extractor.feed_with(bytes, |extractor, chunk| match chunk {
+                Chunk::GraphicsReply(reply) => send_graphics_reply(proxy, reply),
                 Chunk::Pass(bytes) => {
                     let mut context = SyncGraphicsContext {
                         active_alternate,
@@ -16905,6 +16963,98 @@ mod image_lifecycle_tests {
                 .iter()
                 .filter_map(|placement| placement.id)
                 .collect()
+        }
+    }
+
+    #[test]
+    fn kitty_query_echoes_id_before_device_attributes_even_during_sync() {
+        for synchronized in [false, true] {
+            let mut harness = SyncGraphicsHarness::new();
+            if synchronized {
+                harness.feed(b"\x1b[?2026h");
+            }
+            harness.feed(b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[c");
+            if synchronized {
+                let immediate: Vec<_> = harness
+                    .replies
+                    .try_iter()
+                    .filter_map(|event| {
+                        if let TermEvent::PtyWrite(reply) = event {
+                            Some(reply)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                assert_eq!(immediate, ["\x1b_Gi=31;OK\x1b\\"]);
+                harness.feed(b"\x1b[?2026l");
+                assert_eq!(
+                    harness
+                        .replies
+                        .try_iter()
+                        .filter_map(|event| {
+                            if let TermEvent::PtyWrite(reply) = event {
+                                Some(reply)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<String>(),
+                    crate::event::PRIMARY_DA_REPLY
+                );
+            } else {
+                let replies: String = harness
+                    .replies
+                    .try_iter()
+                    .filter_map(|event| {
+                        if let TermEvent::PtyWrite(reply) = event {
+                            Some(reply)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                assert_eq!(
+                    replies,
+                    format!("\x1b_Gi=31;OK\x1b\\{}", crate::event::PRIMARY_DA_REPLY)
+                );
+            }
+            assert!(harness.active_ids().is_empty());
+            harness.feed(b"\x1b_Ga=p,i=31\x1b\\");
+            assert!(
+                harness.active_ids().is_empty(),
+                "query pixels must not be stored"
+            );
+        }
+    }
+
+    #[test]
+    fn chunked_kitty_queries_reply_once_in_wire_order_for_every_read_split() {
+        let wire = b"\x1b[?2026h\x1b_Ga=q,i=77,f=32,s=1,v=1,m=1;AQID\x1b\\\x1b_Gm=0;BA==\x1b\\\x1b_Ga=q,i=78,f=24,s=1,v=1;%%%%\x1b\\\x1b[c\x1b[?2026l";
+        for split in 0..=wire.len() {
+            let mut harness = SyncGraphicsHarness::new();
+            harness.feed(&wire[..split]);
+            harness.feed(&wire[split..]);
+            let replies: String = harness
+                .replies
+                .try_iter()
+                .filter_map(|event| {
+                    if let TermEvent::PtyWrite(reply) = event {
+                        Some(reply)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            assert_eq!(
+                replies,
+                format!(
+                    "\x1b_Gi=77;OK\x1b\\\x1b_Gi=78;EINVAL:Invalid image data\x1b\\{}",
+                    crate::event::PRIMARY_DA_REPLY
+                ),
+                "read split {split}"
+            );
+            assert!(harness.active_ids().is_empty());
         }
     }
 
@@ -17236,6 +17386,8 @@ mod image_lifecycle_tests {
             relatives,
             inactive,
             geometry,
+            replies: _,
+            proxy: _,
         } = &mut harness;
         let mut on_graphics = |dispatch: SyncGraphicsDispatch<'_>| {
             assert_eq!(
