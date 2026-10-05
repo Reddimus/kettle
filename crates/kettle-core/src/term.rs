@@ -14445,6 +14445,80 @@ mod teardown_tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn frame_composition_offsets_reach_all_placement_kinds_through_a_real_pty() {
+        for synchronized in [false, true] {
+            let start = if synchronized { r"\033[?2026h" } else { "" };
+            let end = if synchronized { r"\033[?2026l" } else { "" };
+            let script = format!(
+                r"printf '\033_Ga=T,i=1,p=1,f=32,s=2,v=2,c=2,r=2;/wAA//8AAP//AAD//wAA/w==\033\\\033_Ga=p,i=1,p=2,U=1,c=2,r=2\033\\\033_Ga=p,i=1,p=3,P=1,Q=1,H=1,V=1\033\\\033_Ga=f,i=1,f=32,s=2,v=2;AAD//wD/AP///wD/gACA/w==\033\\{start}\033_Ga=c,i=1,r=2,c=1,w=1,h=1,X=1,Y=1,x=0,y=0,C=1\033\\{end}\r\nCOMPOSE_DONE'"
+            );
+            let argv = vec!["/bin/sh".into(), "-c".into(), script];
+            let (tx, _rx) = crossbeam_channel::unbounded();
+            let terminal = Terminal::new(
+                &argv,
+                None,
+                1000,
+                80,
+                24,
+                8,
+                16,
+                false,
+                CursorShape::Block,
+                None,
+                tx,
+                Arc::new(|| {}),
+            )
+            .expect("native frame-composition PTY");
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                if terminal.term.lock().is_ok_and(|term| {
+                    super::screen_text_of(&term, 0)
+                        .text
+                        .contains("COMPOSE_DONE")
+                }) {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "frame composition did not reach the terminal"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let placements = terminal.images.lock().unwrap();
+            assert_eq!(placements.len(), 1);
+            assert_eq!(
+                placements[0].img.rgba.as_slice(),
+                &[
+                    128, 0, 128, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255
+                ]
+            );
+            assert_eq!(
+                (placements[0].display_cols, placements[0].display_rows),
+                (2.0, 2.0)
+            );
+            assert_eq!(
+                terminal.virtuals.lock().unwrap()[&(1, 2)]
+                    .img
+                    .rgba
+                    .as_slice(),
+                &[
+                    128, 0, 128, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255
+                ]
+            );
+            assert_eq!(
+                terminal.relatives.lock().unwrap()[&(1, 3)]
+                    .img
+                    .rgba
+                    .as_slice(),
+                &[
+                    128, 0, 128, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255
+                ]
+            );
+        }
+    }
+
     /// `child_exit_code` must surface the child's real exit status once it
     /// exits, because `kettle exec` propagates it as its own process exit code.
     /// Spawns a real PTY child that exits 3 and polls.
@@ -17170,6 +17244,49 @@ mod image_lifecycle_tests {
     fn kitty_image(id: u32, placement: u32, columns: u32, rows: u32) -> Vec<u8> {
         format!("\x1b_Ga=T,i={id},p={placement},f=32,s=1,v=1,c={columns},r={rows};AQIDBA==\x1b\\")
             .into_bytes()
+    }
+
+    #[test]
+    fn frame_composition_offsets_refresh_all_placement_kinds() {
+        for synchronized in [false, true] {
+            let mut harness = SyncGraphicsHarness::new();
+            harness.feed(b"\x1b_Ga=T,i=1,p=1,f=32,s=2,v=2,c=2,r=2;/wAA//8AAP//AAD//wAA/w==\x1b\\");
+            harness.feed(b"\x1b_Ga=p,i=1,p=2,U=1,c=2,r=2\x1b\\");
+            harness.feed(b"\x1b_Ga=p,i=1,p=3,P=1,Q=1,H=1,V=1\x1b\\");
+            harness.feed(b"\x1b_Ga=f,i=1,f=32,s=2,v=2;AAD//wD/AP///wD/gACA/w==\x1b\\");
+            if synchronized {
+                harness.feed(b"\x1b[?2026h");
+            }
+            harness.feed(b"\x1b_Ga=c,i=1,r=2,c=1,w=1,h=1,X=1,Y=1,x=0,y=0,C=1\x1b\\");
+            if synchronized {
+                assert_eq!(
+                    harness.images.lock().unwrap()[0].img.rgba.as_slice(),
+                    &[255, 0, 0, 255].repeat(4)
+                );
+                harness.feed(b"\x1b[?2026l");
+            }
+            let expected = [
+                128, 0, 128, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
+            ];
+            assert_eq!(
+                harness.images.lock().unwrap()[0].img.rgba.as_slice(),
+                expected
+            );
+            assert_eq!(
+                harness.virtuals.lock().unwrap()[&(1, 2)]
+                    .img
+                    .rgba
+                    .as_slice(),
+                expected
+            );
+            assert_eq!(
+                harness.relatives.lock().unwrap()[&(1, 3)]
+                    .img
+                    .rgba
+                    .as_slice(),
+                expected
+            );
+        }
     }
 
     #[test]

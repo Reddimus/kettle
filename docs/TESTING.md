@@ -1351,6 +1351,16 @@ a following terminal-text marker before checking the updated pixels and
 physical size in the live reader registries, directly and with synchronized
 output. This does not claim foreground UI or GPU acceptance for this edit path.
 
+Animation compatibility regressions use a four-color source and distinct source
+and destination offsets to catch coordinate reversal, including a second copy
+in the opposite direction and an unchanged source-frame assertion. Timing tests
+read stored gaps and exercise playback with the 40 ms appended-frame default,
+zero/omitted delays, negative gapless frames, and preservation of root and
+appended-frame timing during edits. The coordinate and default-delay tests
+failed before the correction. Core wire tests and a real Unix PTY child exercise
+all three placement kinds directly and in synchronized output; the wire test
+also checks that the old pixels remain visible until commit.
+
 Native vi-mode regressions drive Alacritty's own cursor and
 selection through scrollback rotation and reflow, proving the cursor remains
 bounded and evicted selections are invalidated. OSC 133 tests pin monotonic

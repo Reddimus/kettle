@@ -1242,7 +1242,11 @@ each image layer derives its live set from the complete drawable frame,
 including images drawn later. Root-frame edits refresh the active screen's physical,
 virtual, and relative placement bases through one shared core helper, including
 synchronized replay. Placement geometry, appended frames, frame selection, and
-the playback clock survive the refresh. Matching numeric ids in the inactive
+the playback clock survive the refresh. Frame composition uses uppercase `X`/`Y`
+for the source and lowercase `x`/`y` for the destination. Appended frames default
+to 40 ms when `z` is omitted or zero; root frames retain their zero default.
+Edits without a nonzero `z` preserve existing frame timing, and negative gaps
+remain gapless. Matching numeric ids in the inactive
 screen remain independent. The update walks each active registry once and
 clones pixel handles without copying image payloads, taking O(placements +
 animation frames) time and O(1) extra metadata beyond the animation snapshot.

@@ -215,8 +215,8 @@ pub fn relative_deletion_closure(
 
 /// One animation frame of an image (`a=f`). `img` is the *fully composed*
 /// frame (partial-rect transmissions are already blended onto their canvas).
-/// `gap_ms`: `0` = unset, `> 0` = display this many ms, `< 0` = *gapless*
-/// (skipped on playback, kept only as base data).
+/// Appended frames default to 40 ms. Positive `gap_ms` values set the display
+/// duration; nonpositive values are skipped on playback and kept as base data.
 #[derive(Debug, Clone)]
 pub struct Frame {
     pub img: ImageData,
@@ -780,8 +780,8 @@ impl KittyState {
             let w = dim("w").unwrap_or(src.width);
             let h = dim("h").unwrap_or(src.height);
             let replace = kv.get("C").map(|v| v == "1").unwrap_or(false);
-            let (dx, dy) = (dim("X").unwrap_or(0), dim("Y").unwrap_or(0));
-            let (sx, sy) = (dim("x").unwrap_or(0), dim("y").unwrap_or(0));
+            let (sx, sy) = (dim("X").unwrap_or(0), dim("Y").unwrap_or(0));
+            let (dx, dy) = (dim("x").unwrap_or(0), dim("y").unwrap_or(0));
             if let Some(patch) = src.crop(sx, sy, w, h) {
                 if dn <= 1 {
                     if let Some(b) = self.store.get_mut(&id)
@@ -858,7 +858,10 @@ impl KittyState {
             if let Some(patch) = decode_with_budget(&control, &payload, &self.budget) {
                 let fc = parse_control(&control);
                 let g = |k: &str| fc.get(k).and_then(|v| v.parse::<u32>().ok());
-                let gap = fc.get("z").and_then(|v| v.parse().ok()).unwrap_or(0i32);
+                let gap = fc
+                    .get("z")
+                    .and_then(|v| v.parse::<i32>().ok())
+                    .filter(|&gap| gap != 0);
                 let (x, y) = (g("x").unwrap_or(0), g("y").unwrap_or(0));
                 let replace = fc.get("X").map(|v| v == "1").unwrap_or(false);
                 let edit = g("r");
@@ -916,7 +919,7 @@ impl KittyState {
                 if edit == Some(1) {
                     if let Some(root) = self.store.get_mut(&fid) {
                         *root = frame_img;
-                        if gap != 0 {
+                        if let Some(gap) = gap {
                             self.anim.entry(fid).or_default().root_gap = gap;
                         }
                     }
@@ -925,7 +928,7 @@ impl KittyState {
                         && let Some(fr) = self.frames.get_mut(&fid).and_then(|f| f.get_mut(idx))
                     {
                         fr.img = frame_img;
-                        if gap != 0 {
+                        if let Some(gap) = gap {
                             fr.gap_ms = gap;
                         }
                     }
@@ -944,7 +947,7 @@ impl KittyState {
                         let frames = self.frames.entry(fid).or_default();
                         frames.push(Frame {
                             img: frame_img,
-                            gap_ms: gap,
+                            gap_ms: gap.unwrap_or(40),
                         });
                     }
                 }
@@ -2163,6 +2166,68 @@ mod tests {
     }
 
     #[test]
+    fn frame_composition_uses_uppercase_source_and_lowercase_destination_offsets() {
+        use base64::Engine;
+        let encode = |pixels: &[u8]| base64::engine::general_purpose::STANDARD.encode(pixels);
+        let red = [255, 0, 0, 255];
+        let mut state = KittyState::default();
+        state.feed(&format!("a=T,i=11,f=32,s=2,v=2;{}", encode(&red.repeat(4))));
+        let frame = [
+            0, 0, 255, 255, 0, 255, 0, 255, 255, 255, 0, 255, 128, 0, 128, 255,
+        ];
+        state.feed(&format!("a=f,i=11,f=32,s=2,v=2;{}", encode(&frame)));
+        state.feed("a=c,i=11,r=2,c=1,w=1,h=1,X=1,Y=1,x=0,y=0,C=1");
+        let mut expected = red.repeat(4);
+        expected[..4].copy_from_slice(&frame[12..16]);
+        assert_eq!(state.image(11).unwrap().rgba.as_slice(), expected);
+        state.feed("a=c,i=11,r=2,c=1,w=1,h=1,X=0,Y=0,x=1,y=1,C=1");
+        expected[12..16].copy_from_slice(&frame[..4]);
+        assert_eq!(state.image(11).unwrap().rgba.as_slice(), expected);
+        assert_eq!(state.frames(11)[0].img.rgba.as_slice(), frame);
+    }
+
+    #[test]
+    fn new_animation_frames_default_to_forty_ms_without_changing_root_gap() {
+        let mut state = KittyState::default();
+        state.feed(&format!("a=T,i=12,f=32,s=1,v=1;{PX}"));
+        state.feed(&format!("a=f,i=12,f=32,s=1,v=1;{PX}"));
+        state.feed(&format!("a=f,i=12,f=32,s=1,v=1,z=0;{PX}"));
+        state.feed(&format!("a=f,i=12,f=32,s=1,v=1,z=-1;{PX}"));
+        assert_eq!(
+            state
+                .frames(12)
+                .iter()
+                .map(|f| f.gap_ms)
+                .collect::<Vec<_>>(),
+            [40, 40, -1]
+        );
+        let stopped = state.animation(12).copied().unwrap_or_default();
+        assert_eq!(stopped.root_gap, 0);
+        state.feed("a=a,i=12,s=3");
+        let running = state.animation(12).unwrap();
+        let gaps: Vec<_> = std::iter::once(running.root_gap)
+            .chain(state.frames(12).iter().map(|frame| frame.gap_ms))
+            .collect();
+        assert_eq!(current_frame(&gaps, running, 0), 1);
+        assert_eq!(current_frame(&gaps, running, 40), 2);
+        assert_eq!(current_frame(&gaps, running, 80), 1);
+    }
+
+    #[test]
+    fn frame_edits_with_omitted_or_zero_gap_preserve_existing_timing() {
+        let mut state = KittyState::default();
+        state.feed(&format!("a=T,i=13,f=32,s=1,v=1;{PX}"));
+        state.feed("a=a,i=13,r=1,z=70");
+        state.feed(&format!("a=f,i=13,f=32,s=1,v=1,z=37;{PX}"));
+        for gap in ["", ",z=0"] {
+            state.feed(&format!("a=f,i=13,r=1,X=1,f=32,s=1,v=1{gap};{PX}"));
+            assert_eq!(state.animation(13).unwrap().root_gap, 70);
+            state.feed(&format!("a=f,i=13,r=2,X=1,f=32,s=1,v=1{gap};{PX}"));
+            assert_eq!(state.frames(13)[0].gap_ms, 37);
+        }
+    }
+
+    #[test]
     fn partial_rect_frame_and_compose() {
         use base64::Engine;
         let b = |v: &[u8]| base64::engine::general_purpose::STANDARD.encode(v);
@@ -2190,7 +2255,7 @@ mod tests {
             "frame2(0,0) is black → root(0,0) stays black"
         );
         // Copy frame-2's red pixel (1,0) onto root (0,0).
-        k.feed("a=c,i=1,r=2,c=1,w=1,h=1,x=1,C=1");
+        k.feed("a=c,i=1,r=2,c=1,w=1,h=1,X=1,C=1");
         assert_eq!(
             &k.image(1).unwrap().rgba[0..4],
             &[255, 0, 0, 255],
