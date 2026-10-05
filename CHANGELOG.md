@@ -133,6 +133,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Kitty frame composition uses the correct source and destination offsets.
+  Newly appended animation frames default to 40 ms; edits with omitted or zero
+  delay preserve the existing timing.
+
 - Kitty root-frame edits refresh existing physical, virtual, and relative
   placements, including synchronized output, while preserving placement
   geometry, animation timing, and independent primary/alternate screen images.

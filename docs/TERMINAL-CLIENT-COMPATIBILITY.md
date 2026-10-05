@@ -92,6 +92,14 @@ region, images wholly contained by the page margins move with text and crop
 their destination/source range at an edge; images already crossing a margin
 stay fixed, matching the Kitty graphics protocol.
 
+Kitty animation frame composition (`a=c`) reads source offsets from `X`/`Y`
+and destination offsets from `x`/`y`. Frame data (`a=f`) uses lowercase offsets
+and keeps `X=1` as its replacement flag. Newly appended frames default to
+40 ms when `z` is omitted or zero; edits preserve the existing delay unless a
+nonzero `z` is supplied. Root frames default to zero delay, and negative gaps
+remain gapless. These rules follow the
+[Kitty graphics protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/).
+
 ## Image attachment boundaries
 
 Kettle does not promise a Codex CLI or Claude Code clipboard-attachment chord.
