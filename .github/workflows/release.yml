@@ -399,15 +399,13 @@ jobs:
 
           while IFS= read -r -d '' candidate; do
             if file -b "$candidate" | grep -q 'Mach-O'; then
-              identifier=()
+              sign_args=(--force --timestamp --options runtime
+                --entitlements packaging/macos/kettle.entitlements
+                --sign "$SIGNING_IDENTITY" --keychain "$KEYCHAIN")
               if [[ "$candidate" == "$APP/Contents/MacOS/kettle-media-worker" ]]; then
-                identifier=(--identifier org.kettle.terminal.media-worker)
+                sign_args+=(--identifier org.kettle.terminal.media-worker)
               fi
-              codesign --force --timestamp --options runtime \
-                "${identifier[@]}" \
-                --entitlements packaging/macos/kettle.entitlements \
-                --sign "$SIGNING_IDENTITY" --keychain "$KEYCHAIN" \
-                "$candidate"
+              codesign "${sign_args[@]}" "$candidate"
             fi
           done < <(find "$APP/Contents" -type f -print0)
           codesign --force --timestamp --options runtime \

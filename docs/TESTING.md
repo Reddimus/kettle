@@ -795,6 +795,9 @@ failure and success after the writer closes. The stub-worker client suite uses
 the same helper: a concurrent fork must not turn a watchdog timeout assertion
 into a copy-and-execute failure. Linux also holds a duplicated writer to
 reproduce `ETXTBSY`, then verifies execution succeeds after the barrier.
+The two descriptor regressions run serially within their test process so the
+execution regression cannot inherit the other regression's locked writer and
+invalidate its deliberate zero-timeout checks.
 These are hermetic tests; final
 release acceptance separately uses actual signed macOS and Linux release
 archives for the 4.9-to-5.0 upgrade on each shipped architecture.
@@ -834,6 +837,11 @@ as `RenderTimeout`. Tests that need the worker to start and answer allow it
 10 s: each copies the stub afresh, and a new executable's first launch on a
 loaded macOS machine can take longer than the short deadlines the timeout
 tests use.
+
+The stuck-worker scenario retains its short startup and cleanup budgets,
+checks exact spawn/kill/abandon counts, and uses a separate 5 s completion
+watchdog to allow CI scheduling delays. A zero-budget cleanup test requires
+exactly one process poll without a timing assertion.
 
 ### kettle-media-worker
 
@@ -2592,14 +2600,21 @@ python3 scripts/test-install-online.py
 ```
 
 The current suites cover fourteen signed-update-manifest cases, six exact
-draft-release cases, two release-preparation cases, seventeen package-manifest
-cases (with platform-dependent skips), and seventeen POSIX online-installer
+draft-release cases, two release-preparation cases, one macOS package-command
+case, seventeen package-manifest cases (with platform-dependent skips), and
+seventeen POSIX online-installer
 cases. They pin the checked-in Ed25519 trust root, canonical manifest bytes and
 sidecars, no-follow same-handle artifact hashing, exact local-to-GitHub
 name/size/SHA-256 binding, bounded release-document updates, immutable archive
 references, bounded archive structure and extraction, modern no-downgrade
 behavior, compatible legacy sidecars, and hostile archive/network/parser
 fixtures.
+The package-command case executes the checked-in workflow's binary-signing
+loop under the system Bash with mock commands. It checks the GUI, helper and
+library argument vectors, including paths with spaces and the helper's explicit
+identifier. On macOS this exercises Bash 3.2 with `set -u`, which refuses an
+empty array expansion. It uses synthetic fixture arguments and no signing
+credentials or keychains.
 On macOS the signed-update suite also opens disposable keychains whose paths
 contain quotes and backslashes, then proves the native Security.framework
 helper's prepend, de-duplication, removal, and empty-list transformations

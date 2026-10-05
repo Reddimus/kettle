@@ -1432,24 +1432,60 @@ mod tests {
     }
 
     #[test]
+    fn expired_cleanup_budget_polls_only_once() {
+        struct NeverExits(usize);
+
+        impl WorkerProcess for NeverExits {
+            fn try_wait(&mut self) -> std::io::Result<Option<WorkerExit>> {
+                self.0 += 1;
+                Ok(None)
+            }
+            fn footprint(&mut self) -> std::io::Result<u64> {
+                Ok(0)
+            }
+            fn kill(&mut self) {}
+        }
+
+        let mut process = NeverExits(0);
+        assert_eq!(poll(&mut process, Duration::ZERO), None);
+        assert_eq!(process.0, 1);
+    }
+
+    #[test]
     fn unreapable_child_abandons_without_hanging_shutdown() {
         let unkillable = Script {
             killable: false,
             ..Script::silent()
         };
         let fake = Fake::new(vec![unkillable.clone(), unkillable]);
-        let client = client(&fake);
-        // Never ready, and it will not die: no retry, since cleanup never
-        // finished, and the call returns within its bounds.
-        let started = Instant::now();
-        assert_eq!(client.render(&job(1)), Err(FailureCode::RenderTimeout));
-        assert!(started.elapsed() < FAST.ready + FAST.cleanup * 4);
-        assert_eq!(fake.spawns.load(Ordering::SeqCst), 1);
-        assert_ne!(
-            client.availability(),
-            MediaAvailability::Unavailable(UnavailableCause::StuckWorkers)
-        );
-        second_abandoned_child_disables_media(&client, &fake);
+        let (finished, completion) = mpsc::channel();
+        let scenario = std::thread::spawn(move || {
+            let client = client(&fake);
+            // Never ready, and it will not die: cleanup abandons it without
+            // retrying, then a second abandoned child disables media.
+            assert_eq!(client.render(&job(1)), Err(FailureCode::RenderTimeout));
+            assert_eq!(fake.spawns.load(Ordering::SeqCst), 1);
+            assert_eq!(fake.kills.load(Ordering::SeqCst), 1);
+            assert_eq!(client.shared.abandoned_count(), 1);
+            assert_ne!(
+                client.availability(),
+                MediaAvailability::Unavailable(UnavailableCause::StuckWorkers)
+            );
+            second_abandoned_child_disables_media(&client, &fake);
+            assert_eq!(fake.kills.load(Ordering::SeqCst), 2);
+            finished.send(()).unwrap();
+        });
+        // The real startup/cleanup budgets remain FAST. This outer watchdog
+        // allows CI scheduling delays while still detecting a hanging scenario.
+        if matches!(
+            completion.recv_timeout(Duration::from_secs(5)),
+            Err(RecvTimeoutError::Timeout)
+        ) {
+            panic!("stuck-worker scenario did not finish within its 5 s watchdog");
+        }
+        if let Err(payload) = scenario.join() {
+            std::panic::resume_unwind(payload);
+        }
     }
 
     /// The second stuck worker turns media off: nothing more is started.

@@ -48,8 +48,13 @@ fn finish_fixture_copy(
 mod tests {
     use super::*;
 
+    // The exec regression can fork while the other test holds a locked writer.
+    // Its inherited descriptor would invalidate that test's zero-timeout case.
+    static DESCRIPTOR_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn fixture_copy_waits_for_inherited_writable_descriptors() {
+        let _guard = DESCRIPTOR_TESTS.lock().unwrap();
         let directory = crate::private_tempdir("kettle-worker-copy-");
         let path = directory.path().join("worker");
         let writer = std::fs::File::create_new(&path).unwrap();
@@ -69,6 +74,7 @@ mod tests {
         use std::io::Write as _;
         use std::os::unix::fs::PermissionsExt as _;
 
+        let _guard = DESCRIPTOR_TESTS.lock().unwrap();
         let directory = crate::private_tempdir("kettle-copy-exec-");
         let path = directory.path().join("worker");
         let mut writer = std::fs::File::create_new(&path).unwrap();
