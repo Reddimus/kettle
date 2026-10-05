@@ -11,15 +11,22 @@ fn build_identity() -> String {
     env!("KETTLE_SOURCE_ID").to_string()
 }
 const WORKER_SKEW_EXIT: i32 = 9;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 const OUTPUT_MAGIC: &[u8; 8] = b"KTLVPOU1";
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 const MAX_PREVIEW_WIDTH: u32 = 256;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 const MAX_PREVIEW_HEIGHT: u32 = 160;
 const WORKER_TIMEOUT_EXIT: i32 = 4;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 const VIDEO_FIXTURE: &[u8] = include_bytes!("../../kettle-ui/testdata/video-preview.mp4");
+
+fn write_private_fixture(path: &std::path::Path, bytes: &[u8]) {
+    std::fs::write(path, bytes).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
 
 fn worker_input(path: &std::path::Path, identity: &str) -> Vec<u8> {
     #[cfg(unix)]
@@ -76,6 +83,43 @@ fn shipped_worker_refuses_another_build_s_request() {
     // The same build reads the request: the path is missing, not skew.
     let same = run_worker_with(&worker_input(path, &build_identity()));
     assert_ne!(same.status.code(), Some(WORKER_SKEW_EXIT), "{same:?}");
+}
+
+#[test]
+fn shipped_worker_ignores_non_media_with_a_video_suffix() {
+    let dir = kettle_test_support::private_tempdir("kettle-video-content-");
+    for (name, bytes) in [
+        ("notes.mp4", b"ordinary text, not a movie".as_slice()),
+        ("partial.webm", b"\x1a\x45\xdf\xa3\x90".as_slice()),
+        ("still.mp4", b"\0\0\0\x14ftypavif\0\0\0\0isom".as_slice()),
+    ] {
+        let path = dir.path().join(name);
+        write_private_fixture(&path, bytes);
+        let output = run_worker_with(&worker_input(&path, &build_identity()));
+        assert_eq!(output.status.code(), Some(3), "{name}: {output:?}");
+        assert!(output.stdout.is_empty(), "{name}: {output:?}");
+    }
+}
+
+#[test]
+fn shipped_worker_accepts_movie_bytes_with_another_video_suffix() {
+    let dir = kettle_test_support::private_tempdir("kettle-video-content-");
+    let path = dir.path().join("movie.avi");
+    write_private_fixture(&path, VIDEO_FIXTURE);
+    let input = worker_input(&path, &build_identity());
+    let output = run_worker_with(&input);
+    let output = if output.status.code() == Some(WORKER_TIMEOUT_EXIT) {
+        run_worker_with(&input)
+    } else {
+        output
+    };
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stdout.len() >= 28, "{output:?}");
+    assert_eq!(&output.stdout[..8], OUTPUT_MAGIC);
+    assert_eq!(
+        u64::from_le_bytes(output.stdout[8..16].try_into().unwrap()),
+        VIDEO_FIXTURE.len() as u64
+    );
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -146,12 +190,7 @@ fn macos_warm_retry_accepts_only_an_exact_empty_poster() {
 fn shipped_worker_extracts_a_bounded_native_video_poster() {
     let dir = kettle_test_support::private_tempdir("kettle-video-native-");
     let video = dir.path().join("poster.mp4");
-    std::fs::write(&video, VIDEO_FIXTURE).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&video, std::fs::Permissions::from_mode(0o600)).unwrap();
-    }
+    write_private_fixture(&video, VIDEO_FIXTURE);
 
     let output = run_native_worker(&video);
     let retry = worker_timed_out(&output);

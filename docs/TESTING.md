@@ -3335,6 +3335,10 @@ leaked paths or pixels, a path-based open action, a lost batch count, a
 missing poster, unchanged card states, or a dismiss target that does not
 close the receipt. A final re-paste proves later key input clears both the
 file-list text and its stale receipt.
+On macOS the clipboard writer reads back every file-URL item before Swift
+exits, so the full batch remains available to the later paste reader. Native
+readback failures report the writer exit code, distinguishing clipboard setup
+from later receipt failures.
 
 Native CI also runs `video_preview_native`. Every platform leaves worker
 stdin open and proves the child exits at its own deadline. macOS requires a
@@ -3359,6 +3363,15 @@ reports with its own exit code and the parent neither retries nor treats as
 an ordinary failure; on Linux the worker program is `/proc/self/exe`, and a
 copy of the test binary that deletes its own file can still start it; a
 source guard keeps `main` setting the identity before the worker dispatch.
+The same shipped-worker suite verifies that text named `.mp4`, an incomplete
+EBML header named `.webm`, and an AVIF container named `.mp4` produce no receipt,
+while the real MP4 fixture named `.avi` produces a valid response. Portable
+`kettle-media` tests in `video_sniff` cover ISO-BMFF brands and normal, extended
+and to-EOF atoms; complete EBML headers, top-level DocType and wide sizes; RIFF
+AVI forms; legacy QuickTime, FLV, Ogg, ASF and MPEG families; and the exact
+64 KiB inspection boundary. These identify container families, not video tracks
+or decoder capability. Before wiring the shared classifier, the shipped worker
+returned a receipt for the text fixture; the new test failed on that behavior.
 On every native runner `video_preview_native` sends the shipped binary a
 request from another build and an old-frame request (both exit with the skew
 code, stdout empty) and one from its own build (not skew).

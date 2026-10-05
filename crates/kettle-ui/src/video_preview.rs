@@ -824,6 +824,15 @@ struct RawPreview {
     rgba: Vec<u8>,
 }
 
+fn sniff_held_video(file: &std::fs::File, len: u64) -> Option<kettle_media::video::VideoContainer> {
+    let mut file = file.try_clone().ok()?;
+    file.seek(std::io::SeekFrom::Start(0)).ok()?;
+    let size = len.min(kettle_media::video::MAX_VIDEO_PREFIX_BYTES as u64) as usize;
+    let mut prefix = vec![0; size];
+    file.read_exact(&mut prefix).ok()?;
+    kettle_media::video::sniff_video_container(&prefix, len)
+}
+
 pub fn run_worker() -> i32 {
     // The parent has its own receive deadline, but it may disappear while a
     // platform thumbnail provider is wedged. Bound the hidden child too so it
@@ -854,6 +863,9 @@ pub fn run_worker() -> i32 {
     let Some((identity, retained)) = file_identity(&path) else {
         return 3;
     };
+    if sniff_held_video(&retained, identity.len).is_none() {
+        return 3;
+    }
     // Keep the user-visible absolute path for the platform APIs. In particular,
     // `SHCreateItemFromParsingName` consumes a Shell parsing name, not the
     // extended-length canonical path used for identity. The identity checks

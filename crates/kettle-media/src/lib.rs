@@ -7,6 +7,7 @@
 pub mod client;
 mod digest;
 mod lifecycle;
+pub mod video;
 pub mod wire;
 pub use digest::content_digest;
 
