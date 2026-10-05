@@ -1211,8 +1211,17 @@ animation payloads at 128 frames/128 MiB; and placements at 256. RAII leases
 charge Kettle-owned decoded buffers, image textures, custom glyph atlases, and
 instance buffers to a 256 MiB terminal/window scope and 512 MiB process
 accounts. Decoders reserve before allocation, image clones share one lease,
-copy-on-write reserves a second image, and GPU caches release non-visible
-textures before admitting replacements. An oversized, unterminated control
+copy-on-write reserves a second image. Before uploads, each image layer derives
+its live set from the complete drawable frame, including images drawn later.
+Retired textures with exactly the dimensions of a new image transfer their
+texture, sampler bind groups and existing GPU lease to that image; incompatible
+and excess textures are released before new allocations. An unused transfer is
+released on every upload exit, including instance-buffer admission failure.
+Frame preparation takes expected O(placements + cached textures) time and
+O(placements + retired textures) temporary metadata, with no texture sorting.
+Cache identities use weak pixel-allocation pins: their control blocks cannot
+be reused while cached, but CPU pixels and their leases can be released. An
+oversized, unterminated control
 string is quarantined for at most one additional 64 KiB recovery window before
 the extractor returns to ground state. The 256-placement limit applies to
 inline terminal images; the independent wallpaper pipeline permits up to 4096

@@ -2,7 +2,8 @@
 //! iTerm2) onto the grid. Textures are cached by `ImageData` identity so a
 //! static image uploads once.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Weak};
 
 use bytemuck::{Pod, Zeroable};
 use kettle_core::{
@@ -25,7 +26,303 @@ pub(crate) struct ImageItem {
     repeat: bool,
 }
 
+#[cfg(test)]
+mod cache_lifetime_tests {
+    use super::{ImageItem, ImagePipeline};
+    use kettle_core::ImageData;
+    use std::sync::Arc;
+
+    #[test]
+    fn cached_texture_does_not_retain_cpu_pixels() {
+        let _serialized = crate::gpu_tests::gpu_test_guard();
+        pollster::block_on(async {
+            let Ok((_, adapter)) = crate::resolve_headless_adapter(
+                &crate::gpu_tests::gpu_test_config(),
+                "image-cache-lifetime",
+            )
+            .await
+            else {
+                eprintln!("no GPU adapter on this host; skipped");
+                return;
+            };
+            let (device, queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("image-cache-lifetime"),
+                    required_limits: crate::live_device_limits(adapter.limits()),
+                    ..Default::default()
+                })
+                .await
+                .expect("GPU device");
+            let mut pipeline = ImagePipeline::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb)
+                .expect("image pipeline");
+            let image = ImageData::new(1, 1, vec![255; 4]).unwrap();
+            let key = image.allocation_key();
+            let pixels = Arc::downgrade(&image.rgba);
+            pipeline.upload(
+                &device,
+                &queue,
+                [1.0, 1.0],
+                &[ImageItem::full(0.0, 0.0, 1.0, 1.0, image)],
+            );
+
+            assert!(pipeline.cache.contains_key(&key));
+            assert!(pipeline.has_draws());
+            assert_eq!(pixels.strong_count(), 0, "GPU cache retained CPU pixels");
+            assert_eq!(pipeline.cache[&key]._pixels.as_ptr() as usize, key);
+            drop(pixels);
+            let next = ImageData::new(1, 1, vec![0; 4]).unwrap();
+            assert_ne!(next.allocation_key(), key);
+        });
+    }
+
+    #[test]
+    fn replacement_reuses_texture_and_preserves_later_draws_at_quota() {
+        let _serialized = crate::gpu_tests::gpu_test_guard();
+        pollster::block_on(async {
+            let Ok((_, adapter)) = crate::resolve_headless_adapter(
+                &crate::gpu_tests::gpu_test_config(),
+                "image-cache-reuse",
+            )
+            .await
+            else {
+                eprintln!("no GPU adapter on this host; skipped");
+                return;
+            };
+            let (device, queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("image-cache-reuse"),
+                    required_limits: crate::live_device_limits(adapter.limits()),
+                    ..Default::default()
+                })
+                .await
+                .expect("GPU device");
+            let budget = kettle_core::GraphicsBudget::default();
+            let mut pipeline = ImagePipeline::new_with_budget_and_instance_limit(
+                &device,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+                budget.clone(),
+                2,
+            )
+            .unwrap();
+            let first = kettle_core::ImageData::new(1, 1, vec![255; 4]).unwrap();
+            let first_key = first.allocation_key();
+            let later = kettle_core::ImageData::new(1, 1, vec![0, 255, 0, 255]).unwrap();
+            let later_key = later.allocation_key();
+            pipeline.upload(
+                &device,
+                &queue,
+                [2.0, 1.0],
+                &[
+                    ImageItem::full(0.0, 0.0, 1.0, 1.0, first),
+                    ImageItem::full(1.0, 0.0, 1.0, 1.0, later.clone()),
+                ],
+            );
+            let first_texture = pipeline.cache[&first_key].texture.clone();
+            let later_texture = pipeline.cache[&later_key].texture.clone();
+            let charged = pipeline._screen_gpu.bytes()
+                + pipeline.instance_gpu.bytes()
+                + pipeline
+                    .cache
+                    .values()
+                    .map(|c| c._gpu.bytes())
+                    .sum::<usize>();
+            // Fill accounting only, not VRAM. Leave exactly one extra padded row.
+            let mut remaining = budget.limits().retained_bytes - charged - 256;
+            let mut other_resources = Vec::new();
+            while remaining > 0 {
+                let bytes = remaining.min(budget.limits().image_bytes);
+                other_resources.push(budget.reserve_gpu(bytes).unwrap());
+                remaining -= bytes;
+            }
+            let extra_row = budget.reserve_gpu(256).unwrap();
+            assert!(budget.reserve_gpu(1).is_none());
+            let replacement = ImageData::new(1, 1, vec![255, 0, 0, 128]).unwrap();
+            let replacement_key = replacement.allocation_key();
+            let replacement_items = [
+                ImageItem::full(0.0, 0.0, 1.0, 1.0, replacement),
+                ImageItem::full(1.0, 0.0, 1.0, 1.0, later.clone()),
+            ];
+            pipeline.prepare_frame(&device, &replacement_items);
+            pipeline.upload(&device, &queue, [2.0, 1.0], &replacement_items);
+            assert_eq!(
+                pipeline.cache[&replacement_key].texture, first_texture,
+                "same-size replacement allocated a new texture"
+            );
+            assert_eq!(pipeline.cache[&later_key].texture, later_texture);
+            assert_eq!(pipeline.upload_counts().texture_writes, 3);
+            let pixels = read_two_pixels(&device, &queue, &pipeline);
+            assert!((i16::from(pixels[0]) - 188).abs() <= 2, "{pixels:?}");
+            assert_eq!(&pixels[1..], &[0, 0, 255, 0, 255, 0, 255]);
+
+            drop(replacement_items);
+            assert_eq!(pipeline.cache[&replacement_key]._pixels.strong_count(), 0);
+
+            // A larger replacement must release the old reservation first.
+            drop(extra_row);
+            let larger = ImageData::new(1, 2, vec![0, 0, 255, 255, 0, 0, 255, 255]).unwrap();
+            let larger_key = larger.allocation_key();
+            let larger_items = [
+                ImageItem::full(0.0, 0.0, 1.0, 1.0, larger),
+                ImageItem::full(1.0, 0.0, 1.0, 1.0, later.clone()),
+            ];
+            pipeline.prepare_frame(&device, &larger_items);
+            pipeline.upload(&device, &queue, [2.0, 1.0], &larger_items);
+            assert_eq!(pipeline.cache[&larger_key].texture.height(), 2);
+            assert_ne!(pipeline.cache[&larger_key].texture, first_texture);
+            assert_eq!(
+                read_two_pixels(&device, &queue, &pipeline),
+                [0, 0, 255, 255, 0, 255, 0, 255]
+            );
+            drop(larger_items);
+            pipeline.prepare_frame(&device, &[]);
+            pipeline.upload(&device, &queue, [2.0, 1.0], &[]);
+            assert!(pipeline.cache.is_empty());
+            assert!(!pipeline.has_draws());
+            assert!(budget.reserve_gpu(768).is_some());
+            drop(other_resources);
+            drop(pipeline);
+
+            assert_handoff_released_on_buffer_growth_failure(&device, &queue);
+        });
+    }
+
+    fn assert_handoff_released_on_buffer_growth_failure(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) {
+        let budget = kettle_core::GraphicsBudget::default();
+        let mut pipeline = ImagePipeline::new_with_budget_and_instance_limit(
+            device,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            budget.clone(),
+            128,
+        )
+        .unwrap();
+        pipeline.upload(
+            device,
+            queue,
+            [1.0; 2],
+            &[ImageItem::full(
+                0.0,
+                0.0,
+                1.0,
+                1.0,
+                ImageData::new(1, 1, vec![255; 4]).unwrap(),
+            )],
+        );
+        let charged = pipeline._screen_gpu.bytes() + pipeline.instance_gpu.bytes() + 256;
+        let mut remaining = budget.limits().retained_bytes - charged;
+        let mut other_resources = Vec::new();
+        while remaining > 0 {
+            let bytes = remaining.min(budget.limits().image_bytes);
+            other_resources.push(budget.reserve_gpu(bytes).unwrap());
+            remaining -= bytes;
+        }
+        let replacement = ImageData::new(1, 1, vec![0; 4]).unwrap();
+        let items = (0..65)
+            .map(|_| ImageItem::full(0.0, 0.0, 1.0, 1.0, replacement.clone()))
+            .collect::<Vec<_>>();
+        pipeline.prepare_frame(device, &items);
+        assert_eq!(pipeline.reusable.values().map(Vec::len).sum::<usize>(), 1);
+        assert!(pipeline.cache.is_empty());
+        assert!(!pipeline.upload_retained(device, queue, [1.0; 2], &items));
+        assert!(pipeline.reusable.is_empty());
+        assert!(pipeline.cache.is_empty());
+        assert!(!pipeline.has_draws());
+        assert!(
+            budget.reserve_gpu(256).is_some(),
+            "unused handoff reservation leaked"
+        );
+    }
+
+    fn read_two_pixels(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pipeline: &ImagePipeline,
+    ) -> [u8; 8] {
+        let size = wgpu::Extent3d {
+            width: 2,
+            height: 1,
+            depth_or_array_layers: 1,
+        };
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("image-cache-reuse-target"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&Default::default());
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("image-cache-reuse-readback"),
+            size: 256,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("image-cache-reuse-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pipeline.draw(&mut pass);
+        }
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(1),
+                },
+            },
+            size,
+        );
+        queue.submit([encoder.finish()]);
+        let slice = readback.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            tx.send(result).unwrap();
+        });
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        rx.recv().unwrap().unwrap();
+        let data = slice.get_mapped_range().unwrap();
+        let pixels = data[..8].try_into().unwrap();
+        drop(data);
+        readback.unmap();
+        pixels
+    }
+}
+
 impl ImageItem {
+    fn instance(&self) -> Option<Inst> {
+        let (origin, size) = self
+            .uv_override
+            .or_else(|| source_uv(&self.image, self.source_rect, self.source_crop))?;
+        clipped_instance(self.rect, origin, size, self.clip_rect)
+    }
+
     pub(crate) fn full(x: f32, y: f32, width: f32, height: f32, image: ImageData) -> Self {
         Self {
             rect: [x, y, width, height],
@@ -123,26 +420,25 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// A cached GPU texture for one decoded image, plus a clone of the
-/// `ImageData` whose `rgba` pointer is the cache key.
+/// A cached GPU texture plus a weak pin of the pixel allocation's cache key.
 ///
 /// The cache key is `Arc::as_ptr(&img.rgba)`, the heap address of the pixel
-/// buffer. Holding the clone pins that address while the entry is cached,
-/// which prevents an ABA collision. Without it, image A could cache at
+/// buffer. A weak reference keeps its control block and that address allocated
+/// while allowing the pixels and their CPU reservation to be released. Without
+/// the pin, image A could cache at
 /// address `P` and be dropped, and a different image B could reallocate at
-/// `P` before [`ImagePipeline::gc`] evicts A. `ensure_texture(B)` would then
-/// hit A's stale entry and draw A's pixels. The clone only bumps refcounts
-/// (the VT layer already shares the buffer), and `gc` releases it the first
-/// frame the image isn't drawn.
+/// `P` before [`ImagePipeline::prepare_frame`] evicts A. `ensure_texture(B)` would then
+/// hit A's stale entry and draw A's pixels.
 struct CachedTexture {
-    /// Keeps both the keyed pixels and their CPU reservation alive.
-    _image: ImageData,
+    texture: wgpu::Texture,
+    _pixels: Weak<Vec<u8>>,
     /// Accounts the retained GPU allocation until cache eviction.
     _gpu: GraphicsReservation,
     clamp_bind_group: wgpu::BindGroup,
     repeat_bind_group: wgpu::BindGroup,
-    last_used: u64,
 }
+
+type ReusableTextures = HashMap<[u32; 2], Vec<CachedTexture>>;
 
 fn rgba_texture_bytes(width: u32, height: u32) -> Option<usize> {
     let row = u64::from(width).checked_mul(4)?;
@@ -156,6 +452,19 @@ fn rgba_pixel_bytes(width: u32, height: u32) -> Option<usize> {
         .checked_mul(4)?
         .try_into()
         .ok()
+}
+
+fn valid_texture_bytes(img: &ImageData, max_dimension: u32, image_limit: usize) -> Option<usize> {
+    if img.width == 0 || img.height == 0 || img.width > max_dimension || img.height > max_dimension
+    {
+        return None;
+    }
+    let expected = rgba_pixel_bytes(img.width, img.height)?;
+    if expected != img.byte_len() || expected > image_limit {
+        return None;
+    }
+    let bytes = rgba_texture_bytes(img.width, img.height)?;
+    (bytes <= image_limit).then_some(bytes)
 }
 
 fn source_uv(
@@ -499,10 +808,10 @@ pub struct ImagePipeline {
     instance_gpu: GraphicsReservation,
     cap: usize,
     cache: HashMap<usize, CachedTexture>,
+    reusable: ReusableTextures,
     draws: Vec<(usize, bool, u32, u32)>, // (cache key, repeat, first instance, count)
     budget: GraphicsBudget,
     max_instances: usize,
-    epoch: u64,
     /// Drop count from the last frame a "skipping N image placements"
     /// warning fired, so `upload` logs once per exceedance transition
     /// instead of every frame of a steady-state overflow. `None` once the
@@ -590,10 +899,10 @@ impl ImagePipeline {
             instance_gpu,
             cap,
             cache: HashMap::new(),
+            reusable: HashMap::new(),
             draws: Vec::new(),
             budget,
             max_instances,
-            epoch: 0,
             last_dropped_warn: None,
             retained_key: None,
             screen_held: RetainedBytes::default(),
@@ -618,6 +927,7 @@ impl ImagePipeline {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         img: &ImageData,
+        reusable: &mut ReusableTextures,
     ) -> Option<usize> {
         // Defense-in-depth: never hand wgpu a texture larger than the device
         // supports. wgpu's default (no error-scope) handler turns that
@@ -626,32 +936,30 @@ impl ImagePipeline {
         // MAX_IMAGE_DIM (8192), but the device limit comes from the adapter
         // and can be lower, so this is the last guard before `create_texture`.
         // Skipping the draw is strictly better than aborting the renderer.
-        let max = device.limits().max_texture_dimension_2d;
-        if img.width == 0 || img.height == 0 || img.width > max || img.height > max {
+        let Some(texture_bytes) = valid_texture_bytes(
+            img,
+            device.limits().max_texture_dimension_2d,
+            self.budget.limits().image_bytes,
+        ) else {
             log::warn!(
-                "skipping {}x{} image: exceeds GPU max_texture_dimension_2d {max}",
-                img.width,
-                img.height
-            );
-            return None;
-        }
-        let Some(expected_bytes) = rgba_pixel_bytes(img.width, img.height) else {
-            log::warn!("skipping image with overflowing texture byte size");
-            return None;
-        };
-        if expected_bytes != img.byte_len() || expected_bytes > self.budget.limits().image_bytes {
-            log::warn!(
-                "skipping {}x{} image: {} bytes exceeds/mismatches the texture budget",
+                "skipping {}x{} image: {} bytes exceeds/mismatches GPU dimensions or texture budget",
                 img.width,
                 img.height,
                 img.byte_len()
             );
             return None;
-        }
-        let texture_bytes = rgba_texture_bytes(img.width, img.height)?;
+        };
         let key = img.allocation_key();
-        if let Some(cached) = self.cache.get_mut(&key) {
-            cached.last_used = self.epoch;
+        if self.cache.contains_key(&key) {
+            return Some(key);
+        }
+        if let Some(mut cached) = reusable
+            .get_mut(&[img.width, img.height])
+            .and_then(Vec::pop)
+        {
+            self.write_pixels(queue, &cached.texture, img);
+            cached._pixels = Arc::downgrade(&img.rgba);
+            self.cache.insert(key, cached);
             return Some(key);
         }
         // Reserve before creating or uploading. The cache's RAII token keeps
@@ -674,27 +982,7 @@ impl ImagePipeline {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        write_texture_counted(
-            queue,
-            wgpu::TexelCopyTextureInfo {
-                texture: &tex,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &img.rgba,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: img.width.checked_mul(4),
-                rows_per_image: Some(img.height),
-            },
-            wgpu::Extent3d {
-                width: img.width,
-                height: img.height,
-                depth_or_array_layers: 1,
-            },
-            &self.counters,
-        );
+        self.write_pixels(queue, &tex, img);
         let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
         let make_bind_group = |label, sampler: &wgpu::Sampler| {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -714,20 +1002,41 @@ impl ImagePipeline {
         };
         let clamp_bind_group = make_bind_group("img-tex-bg", &self.clamp_sampler);
         let repeat_bind_group = make_bind_group("img-repeat-tex-bg", &self.repeat_sampler);
-        // Store an `Arc` clone alongside the bind group so the keyed buffer
-        // address stays pinned while cached (ABA guard — see
-        // `CachedTexture`).
         self.cache.insert(
             key,
             CachedTexture {
-                _image: img.clone(),
+                texture: tex,
+                _pixels: Arc::downgrade(&img.rgba),
                 _gpu: gpu_reservation,
                 clamp_bind_group,
                 repeat_bind_group,
-                last_used: self.epoch,
             },
         );
         Some(key)
+    }
+
+    fn write_pixels(&self, queue: &wgpu::Queue, texture: &wgpu::Texture, img: &ImageData) {
+        write_texture_counted(
+            queue,
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &img.rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: img.width.checked_mul(4),
+                rows_per_image: Some(img.height),
+            },
+            wgpu::Extent3d {
+                width: img.width,
+                height: img.height,
+                depth_or_array_layers: 1,
+            },
+            &self.counters,
+        );
     }
 
     /// Image rectangles are in physical pixels; source rectangles are in the
@@ -766,6 +1075,9 @@ impl ImagePipeline {
         screen: [f32; 2],
         items: &[ImageItem],
     ) -> bool {
+        // Local ownership releases unused handoff textures on every return,
+        // including empty frames and instance-buffer admission failures.
+        let mut reusable = std::mem::take(&mut self.reusable);
         write_buffer_if_changed(
             queue,
             &self.screen_buf,
@@ -777,7 +1089,6 @@ impl ImagePipeline {
             &self.counters,
         );
         self.draws.clear();
-        self.epoch = self.epoch.saturating_add(1);
         if items.is_empty() {
             // No placements this frame, so nothing is being dropped; clear the
             // transition memory so a later overflow (even at the same count)
@@ -842,7 +1153,7 @@ impl ImagePipeline {
                 continue;
             };
             insts.push(instance);
-            if let Some(key) = self.ensure_texture(device, queue, &item.image) {
+            if let Some(key) = self.ensure_texture(device, queue, &item.image, &mut reusable) {
                 record_draw(&mut self.draws, key, item.repeat, i as u32);
             } else {
                 complete = false;
@@ -900,16 +1211,43 @@ impl ImagePipeline {
         }
     }
 
-    /// Forget textures no longer referenced this frame.
-    pub fn gc(&mut self, live: &std::collections::HashSet<usize>) {
-        let mut dead: Vec<(u64, usize)> = self
+    /// Protect the entire frame before selecting exact-size reusable textures.
+    /// Release incompatible/excess entries before any new GPU reservation.
+    pub(crate) fn prepare_frame(&mut self, device: &wgpu::Device, items: &[ImageItem]) {
+        self.reusable.clear();
+        let mut needed = HashMap::<[u32; 2], usize>::new();
+        let mut live = HashSet::new();
+        for item in items.iter().take(self.max_instances) {
+            let img = &item.image;
+            let key = img.allocation_key();
+            if item.instance().is_some()
+                && valid_texture_bytes(
+                    img,
+                    device.limits().max_texture_dimension_2d,
+                    self.budget.limits().image_bytes,
+                )
+                .is_some()
+                && live.insert(key)
+                && !self.cache.contains_key(&key)
+            {
+                *needed.entry([img.width, img.height]).or_default() += 1;
+            }
+        }
+        let dead: Vec<usize> = self
             .cache
-            .iter()
-            .filter_map(|(&key, cached)| (!live.contains(&key)).then_some((cached.last_used, key)))
+            .keys()
+            .filter(|key| !live.contains(key))
+            .copied()
             .collect();
-        dead.sort_unstable();
-        for (_, key) in dead {
-            self.cache.remove(&key);
+        for key in dead {
+            let cached = self.cache.remove(&key).expect("retired cache entry");
+            let size = [cached.texture.width(), cached.texture.height()];
+            if let Some(count) = needed.get_mut(&size)
+                && *count > 0
+            {
+                *count -= 1;
+                self.reusable.entry(size).or_default().push(cached);
+            }
         }
     }
 }
@@ -918,63 +1256,20 @@ impl ImagePipeline {
 mod aba_guard_tests {
     use kettle_core::{ImageData, ImageSourceCrop, ImageSourceRect};
 
-    /// The production source of this file, excluding test-only items.
-    fn production_source() -> String {
-        let production = kettle_test_support::production_source(include_str!("imgpipe.rs"));
-        assert!(
-            !production.contains("fn production_source()"),
-            "the production slice retained its own helper"
-        );
-        assert!(
-            !production.contains("#[test]"),
-            "the production slice retained a test function"
-        );
-        assert!(
-            !production.contains("#[cfg(test)]"),
-            "the production slice retained a test-only item"
-        );
-        production
-    }
-
-    /// Drift guard for the ABA hazard. The image cache keys textures by the
-    /// rgba `Arc`'s raw pointer, so it MUST hold an `ImageData` clone
-    /// (`CachedTexture._image`) to pin that address while the entry is cached.
-    /// Otherwise a dropped-then-reallocated image can collide on a stale key
-    /// and draw the wrong texture. The field is `_`-prefixed (never read), so
-    /// a future "remove the unused field" cleanup would silently reintroduce
-    /// the hazard. Exercising the cache needs a real GPU device, so this pins
-    /// the invariant at the source level (same approach as the pane-buffer
-    /// lifecycle guards in `lib.rs`).
     #[test]
-    fn cache_pins_arc_to_prevent_address_reuse() {
-        let src = production_source();
-        assert!(
-            src.contains("_image: ImageData"),
-            "CachedTexture must keep an ImageData clone to pin pixels + CPU reservation"
-        );
-        assert!(
-            src.contains("_image: img.clone()"),
-            "ensure_texture must store the image clone so the keyed address stays pinned"
-        );
-    }
-
-    /// The property the pin relies on, as pure `Arc` semantics (no GPU): a
-    /// clone shares the pointer used as the cache key and keeps the buffer —
-    /// and therefore that exact address — alive after the VT layer drops its
-    /// own reference, so nothing else can allocate at the still-cached key.
-    #[test]
-    fn arc_clone_shares_pointer_and_keeps_address_alive() {
+    fn weak_pin_preserves_the_key_without_retaining_pixels() {
         use std::sync::Arc;
         let rgba: Arc<Vec<u8>> = Arc::new(vec![1, 2, 3, 4]);
         let key = Arc::as_ptr(&rgba) as usize;
-        let pinned = rgba.clone(); // stands in for CachedTexture._image
-        assert_eq!(Arc::as_ptr(&pinned) as usize, key);
-        assert_eq!(Arc::strong_count(&rgba), 2);
-        // VT layer drops its reference; the pin keeps the buffer (and its
-        // address) alive, so `key` cannot be reused while cached.
+        let pinned = Arc::downgrade(&rgba);
+        assert_eq!(pinned.as_ptr() as usize, key);
+        assert_eq!(Arc::strong_count(&rgba), 1);
         drop(rgba);
-        assert_eq!(Arc::strong_count(&pinned), 1);
-        assert_eq!(Arc::as_ptr(&pinned) as usize, key);
+        assert_eq!(pinned.strong_count(), 0);
+        assert!(pinned.upgrade().is_none());
+        assert_eq!(pinned.as_ptr() as usize, key);
+        let next = Arc::new(vec![5, 6, 7, 8]);
+        assert_ne!(Arc::as_ptr(&next) as usize, key);
     }
 
     #[test]
