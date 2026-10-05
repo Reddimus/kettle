@@ -37,8 +37,18 @@ answers these:
 | DECRQM (`CSI ? Ps $ p`) | each mode's state, including 47, 1047, 1049 and 2026 | Claude Code |
 | DECRQSS (`DCS $ q Pt ST`) | the current SGR (`m`), scroll region (`r`) or cursor shape (` q`); anything else is answered as invalid | Neovim's truecolor and undercurl probes |
 | XTGETTCAP (`DCS + q Pt ST`) | `Tc`, `RGB`, `setrgbf`, `setrgbb`, `Smulx`, `Setulc`, `Ss`, `Se`, `Co` and `colors`; one reply per name, in one write, and any other name answered as unknown (kitty's and Ghostty's form; xterm joins the names and stops at the first unknown one) | Neovim, tmux |
+| Kitty graphics (`APC G a=q,i=...`) | `APC G i=<same id>;OK ST` after decoding direct RGB/RGBA or supported encoded data; fixed errors for invalid data or unsupported media | Kitty graphics capability probes |
 | Kitty keyboard flags (`CSI ? u`) | the active flags | Codex, Claude Code, Neovim |
 | Colour scheme (`CSI ? 996 n`), and DEC mode 2031 | `CSI ? 997 ; 1 n` for a dark theme, `CSI ? 997 ; 2 n` for light; with mode 2031 on, the same report whenever the theme's colours change, dark to dark included | Claude Code (mode 2031) |
+
+Kitty graphics queries do not store images or replace existing image data or
+placements. Chunked queries reply once on completion, retaining the first
+image id and the latest nonzero quiet setting. `q=1` suppresses success and
+`q=2` suppresses all replies. File, temporary-file and shared-memory transfer
+queries return `ENOTSUP`; direct transfer is supported. Replies reach the PTY
+in wire order before a following DA1 reply. A query answers immediately during
+DEC 2026 synchronized output; the engine can hold the DA1 reply until the
+update ends. Normal transmit/placement acknowledgements remain deferred work.
 
 What the answers change:
 

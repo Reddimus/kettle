@@ -38,6 +38,12 @@ struct Acc {
     reservation: Option<GraphicsReservation>,
 }
 
+#[derive(Default)]
+struct QueryAcc {
+    data: Acc,
+    quiet: u8,
+}
+
 impl Acc {
     fn projected_bytes(&self, control: &str, payload: &str) -> Option<usize> {
         let control_bytes = if self.control.is_empty() {
@@ -311,9 +317,35 @@ pub fn current_frame(gaps: &[i32], st: &AnimationState, elapsed_ms: u128) -> usi
     last_shown
 }
 
+/// A capability-query result with fixed messages and an echoed numeric id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueryReply {
+    pub id: u32,
+    pub status: QueryStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryStatus {
+    Ok,
+    Invalid,
+    UnsupportedMedium,
+}
+
+impl QueryReply {
+    pub fn encode(self) -> String {
+        let message = match self.status {
+            QueryStatus::Ok => "OK",
+            QueryStatus::Invalid => "EINVAL:Invalid image data",
+            QueryStatus::UnsupportedMedium => "ENOTSUP:Unsupported transmission medium",
+        };
+        format!("\x1b_Gi={};{message}\x1b\\", self.id)
+    }
+}
+
 /// What a kitty APC resolved to.
 pub enum KittyOut {
     None,
+    Query(QueryReply),
     Place(Placed),
     Delete(Delete),
     /// A virtual placement was (re)registered for image `id`; nothing is
@@ -351,6 +383,7 @@ pub struct KittyState {
     /// Continuation chunks omit `i=`, so a slot — not an id map — is right;
     /// the protocol only allows one transmission in flight at a time.
     frame_in_flight: Option<(u32, Acc)>,
+    query_in_flight: Option<QueryAcc>,
     /// Animation frames appended after the root image, per image id.
     frames: HashMap<u32, Vec<Frame>>,
     /// Animation control state per image id (`a=a`).
@@ -376,11 +409,109 @@ impl KittyState {
             next_generated_id: u32::MAX,
             virtual_placements: HashMap::new(),
             frame_in_flight: None,
+            query_in_flight: None,
             frames: HashMap::new(),
             anim: HashMap::new(),
             rel: HashMap::new(),
             budget,
         }
+    }
+
+    pub(crate) fn is_query(&self, body: &str) -> bool {
+        let control = body.split_once(';').map_or(body, |(control, _)| control);
+        if control.len() > 4096 {
+            return false;
+        }
+        self.is_query_control(&parse_control(control))
+    }
+
+    fn is_query_control(&self, kv: &HashMap<String, String>) -> bool {
+        kv.get("a").is_some_and(|action| action == "q")
+            || (self.query_in_flight.is_some()
+                && !kv.contains_key("a")
+                && !kv.contains_key("i")
+                && !kv.contains_key("I"))
+    }
+
+    fn query(
+        &mut self,
+        control: &str,
+        payload: &str,
+        current: HashMap<String, String>,
+    ) -> KittyOut {
+        if current.get("a").is_some_and(|action| action == "q") {
+            self.query_in_flight = None;
+        }
+        let first_control = self
+            .query_in_flight
+            .as_ref()
+            .map(|acc| parse_control(&acc.data.control));
+        let first = first_control.as_ref().unwrap_or(&current);
+        let id = first
+            .get("i")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        let quiet = current
+            .get("q")
+            .and_then(|value| value.parse::<u8>().ok())
+            .filter(|&quiet| quiet != 0)
+            .unwrap_or_else(|| self.query_in_flight.as_ref().map_or(0, |acc| acc.quiet));
+        let reply = |status| {
+            if quiet >= 2 || (quiet == 1 && status == QueryStatus::Ok) {
+                KittyOut::None
+            } else {
+                KittyOut::Query(QueryReply { id, status })
+            }
+        };
+        if id == 0 {
+            self.query_in_flight = None;
+            return KittyOut::None;
+        }
+        if first.contains_key("I") {
+            self.query_in_flight = None;
+            return reply(QueryStatus::Invalid);
+        }
+        let payload = payload.trim();
+        if self.query_in_flight.is_none()
+            && self.in_flight.len() + usize::from(self.frame_in_flight.is_some())
+                >= self.budget.limits().in_flight_slots
+            || !self.in_flight_append_fits(
+                self.query_in_flight.as_ref().map(|acc| &acc.data),
+                control,
+                payload,
+            )
+        {
+            self.query_in_flight = None;
+            return reply(QueryStatus::Invalid);
+        }
+        let acc = self.query_in_flight.get_or_insert_with(QueryAcc::default);
+        acc.quiet = quiet;
+        let accepted = acc.data.append(control, payload, &self.budget);
+        if !accepted {
+            self.query_in_flight = None;
+            return reply(QueryStatus::Invalid);
+        }
+        if current.get("m").is_some_and(|value| value == "1") {
+            return KittyOut::None;
+        }
+        let acc = self
+            .query_in_flight
+            .take()
+            .expect("accepted query accumulator");
+        let status = if first.get("t").is_some_and(|medium| medium != "d") {
+            QueryStatus::UnsupportedMedium
+        } else if decode_with_budget(
+            &acc.data.control,
+            &acc.data.payload,
+            &self.budget.query_scope(),
+        )
+        .is_some()
+        {
+            QueryStatus::Ok
+        } else {
+            QueryStatus::Invalid
+        };
+        reply(status)
     }
 
     /// Feed one APC `G` body (between `ESC _ G` and `ESC \`).
@@ -394,6 +525,9 @@ impl KittyState {
             return KittyOut::None;
         }
         let kv = parse_control(control);
+        if self.is_query_control(&kv) {
+            return self.query(control, payload, kv);
+        }
         let explicit_id = kv.get("i").and_then(|v| v.parse::<u32>().ok());
         let image_number = kv.get("I").and_then(|v| v.parse::<u32>().ok());
         // Continuation chunks carry only `m` (no `a`, `i`, or `I`); route
@@ -419,6 +553,7 @@ impl KittyState {
             // upload, even when the delete selector targets another image.
             self.in_flight.clear();
             self.frame_in_flight = None;
+            self.query_in_flight = None;
 
             if explicit_id.is_some() && image_number.is_some() {
                 return KittyOut::None;
@@ -671,7 +806,8 @@ impl KittyState {
             // `m`, so the id + control come from the in-flight slot.
             let more = kv.get("m").map(|v| v == "1").unwrap_or(false);
             if self.frame_in_flight.is_none()
-                && self.in_flight.len() >= self.budget.limits().in_flight_slots
+                && self.in_flight.len() + usize::from(self.query_in_flight.is_some())
+                    >= self.budget.limits().in_flight_slots
             {
                 return KittyOut::None;
             }
@@ -815,9 +951,6 @@ impl KittyState {
             }
             return KittyOut::Animate { id: fid };
         }
-        if action == "q" {
-            return KittyOut::None; // capability query — nothing to render
-        }
         if action == "p" {
             // `a=p,U=1` registers a virtual placement (shown later via
             // placeholder text); plain `a=p` puts the image at the cursor.
@@ -895,7 +1028,9 @@ impl KittyState {
         // is saturated. A continuation chunk for an existing slot is
         // always allowed — only brand-new ids count against the cap.
         if !self.in_flight.contains_key(&id)
-            && self.in_flight.len() + usize::from(self.frame_in_flight.is_some())
+            && self.in_flight.len()
+                + usize::from(self.frame_in_flight.is_some())
+                + usize::from(self.query_in_flight.is_some())
                 >= self.budget.limits().in_flight_slots
         {
             return KittyOut::None;
@@ -1238,6 +1373,10 @@ impl KittyState {
                 .frame_in_flight
                 .as_ref()
                 .map_or(0, |(_, a)| a.buffered_bytes())
+            + self
+                .query_in_flight
+                .as_ref()
+                .map_or(0, |acc| acc.data.buffered_bytes())
     }
 
     fn in_flight_append_fits(&self, slot: Option<&Acc>, control: &str, payload: &str) -> bool {
@@ -1465,6 +1604,124 @@ fn decode_with_budget(control: &str, b64: &str, budget: &GraphicsBudget) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn query_reply(out: KittyOut) -> Option<String> {
+        match out {
+            KittyOut::Query(reply) => Some(reply.encode()),
+            KittyOut::None => None,
+            _ => panic!("query must not place, delete, or animate an image"),
+        }
+    }
+
+    #[test]
+    fn query_decodes_without_replacing_stored_pixels_or_partial_uploads() {
+        let mut state = KittyState::default();
+        state.feed("a=T,i=31,U=1,p=2,f=32,s=1,v=1;AQIDBA==");
+        state.feed("a=f,i=31,f=32,s=1,v=1;AQIDBA==");
+        state.feed("a=t,i=99,m=1,f=32,s=1,v=1;AQID");
+        let original = state.image(31).unwrap().rgba.clone();
+        assert_eq!(
+            query_reply(state.feed("a=q,i=31,f=24,s=1,v=1;AAAA")),
+            Some("\x1b_Gi=31;OK\x1b\\".into())
+        );
+        assert!(std::sync::Arc::ptr_eq(
+            &original,
+            &state.image(31).unwrap().rgba
+        ));
+        assert!(state.virtual_placement(31, 2).is_some());
+        assert_eq!(state.frames(31).len(), 1);
+        state.feed("i=99,m=0;BA==");
+        assert_eq!(&**state.image(99).unwrap().rgba, &[1, 2, 3, 4]);
+        assert_eq!(state.store.len(), 2);
+    }
+
+    #[test]
+    fn query_reports_invalid_data_and_unsupported_media_and_honors_quiet() {
+        for (payload, quiet, expected) in [
+            ("AAAA", "", Some("OK")),
+            ("AAAA", ",q=1", None),
+            ("AAAA", ",q=2", None),
+            ("AQIDBA==", "", Some("EINVAL:Invalid image data")),
+            ("AQIDBA==", ",q=1", Some("EINVAL:Invalid image data")),
+            ("AQIDBA==", ",q=2", None),
+            ("%%%%", "", Some("EINVAL:Invalid image data")),
+        ] {
+            let mut state = KittyState::default();
+            let reply =
+                query_reply(state.feed(&format!("a=q,i=4294967295,f=24,s=1,v=1{quiet};{payload}")));
+            assert_eq!(
+                reply,
+                expected.map(|text| format!("\x1b_Gi=4294967295;{text}\x1b\\"))
+            );
+            assert!(state.store.is_empty());
+        }
+        let mut state = KittyState::default();
+        assert_eq!(
+            query_reply(state.feed("a=q,i=7,t=f,f=24,s=1,v=1;AAAA")),
+            Some("\x1b_Gi=7;ENOTSUP:Unsupported transmission medium\x1b\\".into())
+        );
+        assert_eq!(
+            query_reply(state.feed("a=q,i=7,I=2,f=24,s=1,v=1;AAAA")),
+            Some("\x1b_Gi=7;EINVAL:Invalid image data\x1b\\".into())
+        );
+    }
+
+    #[test]
+    fn query_uses_temporary_pixels_when_the_retained_quota_is_full() {
+        use image::ImageEncoder;
+        use std::io::Write;
+        let limits = crate::GraphicsLimits {
+            image_bytes: 64 * 1024,
+            retained_bytes: 64 * 1024,
+            process_cpu_bytes: 512 * 1024,
+            ..crate::GraphicsLimits::default()
+        };
+        let budget = GraphicsBudget::isolated(limits).unwrap();
+        let held = ImageData::new_with_budget(128, 128, vec![0; 64 * 1024], &budget).unwrap();
+        let mut state = KittyState::new(budget.clone());
+        let baseline = budget.usage();
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(&[1, 2, 3, 4], 1, 1, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        let mut compressed =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        compressed.write_all(&[1, 2, 3]).unwrap();
+        let encoded_png = base64::engine::general_purpose::STANDARD.encode(png);
+        let encoded_zlib =
+            base64::engine::general_purpose::STANDARD.encode(compressed.finish().unwrap());
+        for (control, payload) in [
+            ("f=24,s=1,v=1", "AQID"),
+            ("f=32,s=1,v=1", "AQIDBA=="),
+            ("f=100", encoded_png.as_str()),
+            ("f=24,s=1,v=1,o=z", encoded_zlib.as_str()),
+        ] {
+            assert_eq!(
+                query_reply(state.feed(&format!("a=q,i=9,{control};{payload}"))),
+                Some("\x1b_Gi=9;OK\x1b\\".into())
+            );
+            assert_eq!(budget.usage(), baseline);
+        }
+        drop(state);
+        drop(held);
+        assert_eq!(budget.usage(), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn chunked_query_retains_id_and_quiet_until_final_chunk() {
+        let mut state = KittyState::default();
+        assert!(query_reply(state.feed("a=q,i=73,f=32,s=1,v=1,m=1;AQ")).is_none());
+        assert!(query_reply(state.feed("m=1,q=1;ID")).is_none());
+        assert!(query_reply(state.feed("m=0;BA==")).is_none());
+        assert!(state.store.is_empty());
+        assert!(query_reply(state.feed("a=q,i=74,f=32,s=1,v=1,m=1;AQID")).is_none());
+        assert_eq!(
+            query_reply(state.feed("m=0;BA==")),
+            Some("\x1b_Gi=74;OK\x1b\\".into())
+        );
+        assert!(state.store.is_empty());
+        assert!(state.query_in_flight.is_none());
+    }
 
     // One opaque RGBA pixel (f=32,s=1,v=1): bytes [1,2,3,4].
     const PX: &str = "AQIDBA==";

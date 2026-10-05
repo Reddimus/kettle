@@ -8,6 +8,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- Kitty graphics capability queries decode the supplied image and echo its
+  image id in an immediate success or error reply. They preserve stored images
+  and placements, support chunked direct transfers and quiet replies, and
+  answer during synchronized output before a following device-attributes reply.
+
 - Video paste receipts identify container content before asking the native
   poster provider. Text or still-image containers named as videos no longer
   show a video card; movies renamed to another supported video suffix still

@@ -73,10 +73,10 @@ refactor. The Kitty items need protocol probes and have no current consumer.
 
 ## Terminal / protocol
 
-- **Kitty graphics acknowledgement/query response path.** Immediate
-  acknowledgements/errors and capability-query replies still need bounded
-  `Chunk::PtyReply`-style plumbing, so probers such as `kitten icat` can
-  distinguish supported operations from silent failure.
+- **Kitty transmission and placement acknowledgements.** Capability queries
+  now decode direct data and return typed replies in wire order, including
+  during synchronized output. Normal transmission/placement success and
+  error acknowledgements remain incomplete.
 - **Kitty image-id replacement lifecycle.** Retransmitting data for an existing
   id must remove every old physical/virtual/relative placement before retaining
   the new pixels, including for transmit-only `a=t`. The decoder and terminal
@@ -947,7 +947,7 @@ updates physical, virtual, relative, animation, and stored-image state using
 the full selector set; same-read delete/replacement order is explicit.
 Physical and relative placements now retain and re-resolve source crop,
 destination cells, pixel offsets, aspect ratio, and cursor-movement intent.
-These fixes do **not** close the acknowledgement/query, existing-id
+These fixes do **not** close normal transmission/placement acknowledgements, existing-id
 retransmission lifecycle, or exact `(image id, placement id)` `Q=` parent gaps
 listed above.
 
