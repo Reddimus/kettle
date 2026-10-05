@@ -1387,6 +1387,20 @@ forces instance-buffer growth to fail and verifies its unused transfer lease is
 released. Budget pressure uses accounting reservations, not large VRAM
 allocations. These tests share the existing GPU-test lock; adapter absence is
 reported as a skip and does not establish native GPU acceptance.
+Pixel-allocation regressions retain a bare pixel handle after dropping its
+image wrapper, verify its quota remains charged, then release it and retry
+admission. A strong pixel snapshot survives composition with its original
+pixels and reservation; a further copy at a full quota leaves the destination
+unchanged. With only a weak cache pin, composition preserves the pixel data
+pointer and charge while retiring the old allocation key. These tests failed
+on the original implementation before the fix was applied.
+The native `composition_after_placement_drop_refreshes_cached_pixels_without_copying`
+regression first uploads and reads red/blue pixels, drops the placement handles,
+then edits the remaining image while the GPU cache still has its weak pin.
+It verifies no pixel copy, old-key retirement, same-size texture reuse, exactly
+one replacement upload and green/blue pixel readback. It failed at composition
+on the original implementation after successful initial GPU readback. Its
+adapter is printed; adapter absence is a skip, not GPU acceptance.
 Startup fonts prepared before the scale is known measure what a direct load
 measures at 1x and 2x, for the default family and one the system lacks,
 whichever families were warmed first; warming a family a second time does

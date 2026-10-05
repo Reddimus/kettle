@@ -43,7 +43,7 @@ pub mod sixel;
 pub use completion::{CompletionCandidate, CompletionKind, CompletionList, CompletionUpdate};
 pub use extract::{Chunk, DeferredGraphics, Extractor, PrivateOutputFilter, Progress, PromptKind};
 pub use graphics_limits::{GraphicsBudget, GraphicsLimits, GraphicsReservation};
-pub use image::{ImageData, Placed, PlacementParams};
+pub use image::{ImageData, PixelBuffer, Placed, PlacementParams};
 
 #[cfg(test)]
 mod tests {
@@ -705,7 +705,7 @@ mod tests {
         use base64::Engine;
         let img = image::ImageData::new(1, 1, vec![255, 0, 0, 255]).unwrap();
         let mut buf = std::io::Cursor::new(Vec::new());
-        let rgba = ::image::RgbaImage::from_raw(1, 1, img.rgba.as_ref().clone()).unwrap();
+        let rgba = ::image::RgbaImage::from_raw(1, 1, img.rgba.to_vec()).unwrap();
         ::image::DynamicImage::ImageRgba8(rgba)
             .write_to(&mut buf, ::image::ImageFormat::Png)
             .unwrap();

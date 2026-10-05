@@ -61,16 +61,28 @@ impl Placed {
     }
 }
 
+/// Read-only pixels and the reservation that accounts for their allocation.
+/// Strong handles retain both; weak cache pins retain only the allocation key.
+pub struct PixelBuffer {
+    pixels: Vec<u8>,
+    reservation: GraphicsReservation,
+}
+
+impl std::ops::Deref for PixelBuffer {
+    type Target = Vec<u8>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.pixels
+    }
+}
+
 /// An RGBA8 image ready to upload as a GPU texture.
 #[derive(Clone)]
 pub struct ImageData {
     pub width: u32,
     pub height: u32,
     /// `width * height * 4` bytes, RGBA8, top-left origin.
-    pub rgba: Arc<Vec<u8>>,
-    /// Pins the CPU reservation for exactly as long as this allocation lives.
-    /// Clones share both the pixel buffer and this token, so bytes count once.
-    _cpu: Arc<GraphicsReservation>,
+    pub rgba: Arc<PixelBuffer>,
 }
 
 /// Limits the image decoder enforces while decoding untrusted bytes: no side
@@ -154,8 +166,10 @@ impl ImageData {
         Some(ImageData {
             width,
             height,
-            rgba: Arc::new(rgba),
-            _cpu: Arc::new(reservation),
+            rgba: Arc::new(PixelBuffer {
+                pixels: rgba,
+                reservation,
+            }),
         })
     }
 
@@ -219,7 +233,7 @@ impl ImageData {
             return None;
         }
         let bytes = rgba_bytes(w, h)?;
-        let reservation = self._cpu.budget().reserve_image_cpu(bytes)?;
+        let reservation = self.rgba.reservation.budget().reserve_image_cpu(bytes)?;
         let mut out = Vec::new();
         out.try_reserve_exact(bytes).ok()?;
         for row in 0..h {
@@ -266,24 +280,40 @@ impl ImageData {
         }
         let cw = src.width.min(self.width - x);
         let ch = src.height.min(self.height - y);
-        if Arc::strong_count(&self.rgba) > 1 {
-            // `Arc::make_mut` would allocate an unaccounted full-image copy.
-            // Reserve first and clone fallibly, then install matching pixels +
-            // lease as one allocation identity.
-            let Some(reservation) = self._cpu.budget().reserve_image_cpu(self.rgba.len()) else {
-                return false;
+        if Arc::get_mut(&mut self.rgba).is_none() {
+            // A weak GPU cache pin requires a fresh key, not a pixel copy.
+            // try_unwrap also handles an upgrade racing with this transfer:
+            // its Err retains the original allocation for fallible COW.
+            let previous = std::mem::replace(&mut self.rgba, src.rgba.clone());
+            let pixels = match Arc::try_unwrap(previous) {
+                Ok(pixels) => pixels,
+                Err(previous) => {
+                    let Some(reservation) = previous
+                        .reservation
+                        .budget()
+                        .reserve_image_cpu(previous.len())
+                    else {
+                        self.rgba = previous;
+                        return false;
+                    };
+                    let mut copy = Vec::new();
+                    if copy.try_reserve_exact(previous.len()).is_err() {
+                        self.rgba = previous;
+                        return false;
+                    }
+                    copy.extend_from_slice(&previous);
+                    PixelBuffer {
+                        pixels: copy,
+                        reservation,
+                    }
+                }
             };
-            let mut copy = Vec::new();
-            if copy.try_reserve_exact(self.rgba.len()).is_err() {
-                return false;
-            }
-            copy.extend_from_slice(&self.rgba);
-            self.rgba = Arc::new(copy);
-            self._cpu = Arc::new(reservation);
+            self.rgba = Arc::new(pixels);
         }
-        let Some(dst) = Arc::get_mut(&mut self.rgba) else {
+        let Some(buffer) = Arc::get_mut(&mut self.rgba) else {
             return false;
         };
+        let dst = &mut buffer.pixels;
         for row in 0..ch {
             for col in 0..cw {
                 // Compute byte offsets in u64 so the multiply can't
@@ -356,6 +386,87 @@ impl std::fmt::Debug for ImageData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rgba_owner_keeps_the_allocation_accounted_after_image_drop() {
+        let budget = GraphicsBudget::isolated(crate::GraphicsLimits {
+            image_bytes: 4,
+            retained_bytes: 4,
+            ..crate::GraphicsLimits::default()
+        })
+        .unwrap();
+        let image = ImageData::new_with_budget(1, 1, vec![1, 2, 3, 255], &budget).unwrap();
+        let pixels = image.rgba.clone();
+        let weak = Arc::downgrade(&pixels);
+        drop(image);
+        assert_eq!(pixels.as_slice(), &[1, 2, 3, 255]);
+        assert_eq!(budget.usage(), (4, 4, 0, 0));
+        assert!(ImageData::new_with_budget(1, 1, vec![5; 4], &budget).is_none());
+        drop(pixels);
+        assert!(weak.upgrade().is_none());
+        assert_eq!(budget.usage(), (0, 0, 0, 0));
+        let next = ImageData::new_with_budget(1, 1, vec![5; 4], &budget).unwrap();
+        drop(next);
+        assert_eq!(budget.usage(), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn compose_detaches_weak_cache_identity_without_copying_pixels() {
+        let budget = GraphicsBudget::isolated(crate::GraphicsLimits {
+            image_bytes: 16,
+            retained_bytes: 16,
+            ..crate::GraphicsLimits::default()
+        })
+        .unwrap();
+        let mut canvas = ImageData::new_with_budget(2, 2, vec![0; 16], &budget).unwrap();
+        let previous_key = canvas.allocation_key();
+        let data_ptr = canvas.rgba.as_ptr();
+        let cached = Arc::downgrade(&canvas.rgba);
+        let patch = ImageData::new(1, 1, vec![1, 2, 3, 255]).unwrap();
+        assert_eq!(Arc::strong_count(&canvas.rgba), 1);
+        assert!(canvas.compose(&patch, 1, 1, true));
+        assert_eq!(canvas.rgba.as_ptr(), data_ptr);
+        assert_ne!(canvas.allocation_key(), previous_key);
+        assert!(cached.upgrade().is_none());
+        assert_eq!(&canvas.rgba[12..], &[1, 2, 3, 255]);
+        assert_eq!(&canvas.rgba[..12], &[0; 12]);
+        assert_eq!(budget.usage(), (16, 16, 0, 0));
+        drop(canvas);
+        assert_eq!(budget.usage(), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn composed_copy_preserves_a_pixel_snapshot_and_its_account() {
+        let budget = GraphicsBudget::isolated(crate::GraphicsLimits {
+            image_bytes: 16,
+            retained_bytes: 32,
+            ..crate::GraphicsLimits::default()
+        })
+        .unwrap();
+        let mut canvas = ImageData::new_with_budget(2, 2, vec![0; 16], &budget).unwrap();
+        let cached = Arc::downgrade(&canvas.rgba);
+        let snapshot = cached.upgrade().unwrap();
+        let patch = ImageData::new(1, 1, vec![1, 2, 3, 255]).unwrap();
+        assert!(canvas.compose(&patch, 0, 0, true));
+        assert_eq!(&canvas.rgba[..4], &[1, 2, 3, 255]);
+        assert_eq!(snapshot.as_slice(), &[0; 16]);
+        assert_eq!(budget.usage(), (32, 32, 0, 0));
+        {
+            let latest_snapshot = canvas.rgba.clone();
+            let latest_key = canvas.allocation_key();
+            let latest_pixels = canvas.rgba.to_vec();
+            assert!(!canvas.compose(&patch, 1, 1, true));
+            assert_eq!(canvas.allocation_key(), latest_key);
+            assert_eq!(canvas.rgba.as_slice(), latest_pixels);
+            assert_eq!(latest_snapshot.as_slice(), latest_pixels);
+            assert_eq!(budget.usage(), (32, 32, 0, 0));
+        }
+        drop(canvas);
+        assert_eq!(budget.usage(), (16, 16, 0, 0));
+        drop(snapshot);
+        assert_eq!(budget.usage(), (0, 0, 0, 0));
+        assert!(cached.upgrade().is_none());
+    }
 
     #[test]
     fn crop_slices_and_clamps() {

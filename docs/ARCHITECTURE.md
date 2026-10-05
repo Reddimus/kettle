@@ -1225,8 +1225,11 @@ most eight/128 MiB in flight; decoded images and individual textures at 64 MiB;
 animation payloads at 128 frames/128 MiB; and placements at 256. RAII leases
 charge Kettle-owned decoded buffers, image textures, custom glyph atlases, and
 instance buffers to a 256 MiB terminal/window scope and 512 MiB process
-accounts. Decoders reserve before allocation, image clones share one lease,
-copy-on-write reserves a second image. Encoded images parse their headers once
+accounts. Decoders reserve before allocation. Pixels and their CPU lease share
+one `Arc<PixelBuffer>`; retaining a pixel handle keeps its allocation charged
+even after its last `ImageData` wrapper is dropped. Read-only access cannot
+detach the lease or resize the buffer. Copy-on-write reserves a second image
+while retaining the original snapshot's charge. Encoded images parse their headers once
 with the decoder's existing dimension and working-allocation limits, then
 reserve the actual RGBA output size before decoding pixels. The separate
 conservative scratch reservation remains bounded by the per-image ceiling;
@@ -1244,8 +1247,14 @@ released on every upload exit, including instance-buffer admission failure.
 Frame preparation takes expected O(placements + cached textures) time and
 O(placements + retired textures) temporary metadata, with no texture sorting.
 Cache identities use weak pixel-allocation pins: their control blocks cannot
-be reused while cached, but CPU pixels and their leases can be released. An
-oversized, unterminated control
+be reused while cached, but CPU pixels and their leases can be released. A
+composition with only weak cache pins transfers the pixel buffer and lease to
+a fresh allocation key without copying pixels or reserving extra quota. A
+racing strong upgrade takes the fallible copy-on-write path; refusal preserves
+the destination's pixels and key. Composition takes O(clipped patch pixels)
+time with exclusive pixel ownership, or O(canvas bytes + clipped patch pixels)
+with a retained strong snapshot, and uses at most one extra canvas allocation.
+An oversized, unterminated control
 string is quarantined for at most one additional 64 KiB recovery window before
 the extractor returns to ground state. The 256-placement limit applies to
 inline terminal images; the independent wallpaper pipeline permits up to 4096

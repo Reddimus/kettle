@@ -57,7 +57,9 @@ pub use alacritty_terminal::vi_mode::ViMotion;
 pub use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor};
 
 pub use event::{EventProxy, TermEvent, Waker};
-pub use images::{ImageData, ImageSourceCrop, ImageSourceRect, Images, Placement, PlacementParams};
+pub use images::{
+    ImageData, ImageSourceCrop, ImageSourceRect, Images, PixelBuffer, Placement, PlacementParams,
+};
 pub use links::{Link, links, links_with_cwd};
 pub use search::{
     CaseSensitivity, CompiledSearch, MAX_SEARCH_LOGICAL_LINE_CONTEXT, MAX_SEARCH_MATCHES,
