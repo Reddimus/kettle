@@ -669,6 +669,13 @@ compared with the image library's ordinary decode output; a truncated PNG with
 valid headers verifies release after pixel decoding fails. These are portable
 pixel/accounting tests, independent of a GPU adapter.
 
+Partial-animation admission uses a real four-by-four root and two retained
+pixel buffers in a small isolated account. A one-pixel patch fits while its
+full canvas does not: both origin and nonzero-offset requests leave the root,
+frames and accounting unchanged. Releasing the retained buffers permits the
+same request, with the full canvas dimensions, exact transparent-background
+pixels, requested gap and complete lease release.
+
 Oversized OSC and DCS tests also cover real-terminator recovery, bounded recovery when no
 terminator arrives, and an `ESC` split exactly across the recovery boundary.
 Kitty deletion fixtures cover visible, image/placement, cursor, cell,
@@ -1953,7 +1960,11 @@ option can never be captured into a slot the reconnect command would drop. The
 portable proc parsers reject invalid/overflowed PIDs and preserve lossy argv;
 Linux CI additionally builds a synthetic proc tree and proves the rooted
 scanner finds the requested SSH descendant and cwd without reading an
-unrelated process.
+unrelated process. Native macOS fixtures read a live rooted process tree,
+check a large environment without confusing it with argv, and isolate an
+oversized argv to its own pane. The environment fixture launches its ignored
+sleeper with the fully qualified test name and `--exact`, so the child stays
+alive for observation rather than exiting after selecting zero tests.
 
 ### Multi-window (v2.18.0, cross-crate)
 

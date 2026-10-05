@@ -1229,7 +1229,10 @@ with the decoder's existing dimension and working-allocation limits, then
 reserve the actual RGBA output size before decoding pixels. The separate
 conservative scratch reservation remains bounded by the per-image ceiling;
 unused output capacity does not consume the retained-image quota. Consuming an
-already-RGBA8 decoded buffer avoids an extra full-image copy. Before uploads,
+already-RGBA8 decoded buffer avoids an extra full-image copy. Partial animation
+frames compose onto a full base-sized canvas. If neither a background/edit frame
+nor that canvas can be obtained, the request leaves the stored image and frames
+unchanged; the decoded patch cannot substitute for the canvas. Before uploads,
 each image layer derives its live set from the complete drawable frame,
 including images drawn later.
 Retired textures with exactly the dimensions of a new image transfer their

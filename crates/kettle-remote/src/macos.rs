@@ -386,7 +386,7 @@ mod tests {
     fn a_large_environment_does_not_displace_argv() {
         let exe = std::env::current_exe().expect("test binary path");
         let args = [
-            "argv_probe_sleeper",
+            "macos::tests::argv_probe_sleeper",
             "--ignored",
             "--exact",
             "--test-threads=1",
