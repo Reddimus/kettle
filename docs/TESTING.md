@@ -1960,7 +1960,11 @@ option can never be captured into a slot the reconnect command would drop. The
 portable proc parsers reject invalid/overflowed PIDs and preserve lossy argv;
 Linux CI additionally builds a synthetic proc tree and proves the rooted
 scanner finds the requested SSH descendant and cwd without reading an
-unrelated process.
+unrelated process. Native macOS fixtures read a live rooted process tree,
+check a large environment without confusing it with argv, and isolate an
+oversized argv to its own pane. The environment fixture launches its ignored
+sleeper with the fully qualified test name and `--exact`, so the child stays
+alive for observation rather than exiting after selecting zero tests.
 
 ### Multi-window (v2.18.0, cross-crate)
 
