@@ -669,6 +669,13 @@ compared with the image library's ordinary decode output; a truncated PNG with
 valid headers verifies release after pixel decoding fails. These are portable
 pixel/accounting tests, independent of a GPU adapter.
 
+Partial-animation admission uses a real four-by-four root and two retained
+pixel buffers in a small isolated account. A one-pixel patch fits while its
+full canvas does not: both origin and nonzero-offset requests leave the root,
+frames and accounting unchanged. Releasing the retained buffers permits the
+same request, with the full canvas dimensions, exact transparent-background
+pixels, requested gap and complete lease release.
+
 Oversized OSC and DCS tests also cover real-terminator recovery, bounded recovery when no
 terminator arrives, and an `ESC` split exactly across the recovery boundary.
 Kitty deletion fixtures cover visible, image/placement, cursor, cell,

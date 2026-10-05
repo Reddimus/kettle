@@ -744,7 +744,7 @@ impl KittyState {
                 let frame_img = if !partial {
                     patch
                 } else {
-                    let mut canvas = edit
+                    let Some(mut canvas) = edit
                         .and_then(|r| self.frame_image(fid, r))
                         .or_else(|| bg_frame.and_then(|n| self.frame_image(fid, n)))
                         .or_else(|| {
@@ -760,7 +760,9 @@ impl KittyState {
                         .or_else(|| {
                             ImageData::solid_with_budget(bw, bh, [0, 0, 0, 0], &self.budget)
                         })
-                        .unwrap_or_else(|| patch.clone());
+                    else {
+                        return KittyOut::None;
+                    };
                     if !canvas.compose(&patch, x, y, replace) {
                         return KittyOut::None;
                     }
@@ -1943,6 +1945,61 @@ mod tests {
         assert_eq!(k.frames(1).len(), 1, "r=2 edits, does not append");
         assert_eq!(k.frames(1)[0].gap_ms, 99);
         assert_eq!(&k.frames(1)[0].img.rgba[0..4], &[255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn partial_frame_refuses_a_canvas_that_cannot_fit_and_retries() {
+        let b = |v: &[u8]| base64::engine::general_purpose::STANDARD.encode(v);
+        for (x, y) in [(0, 0), (1, 1)] {
+            let limits = crate::GraphicsLimits {
+                image_bytes: 64,
+                retained_bytes: 160,
+                process_cpu_bytes: 1024,
+                ..crate::GraphicsLimits::default()
+            };
+            let budget = crate::GraphicsBudget::isolated(limits).unwrap();
+            let mut state = KittyState::new(budget.clone());
+            let base = b(&[17; 64]);
+            state.feed(&format!("a=t,i=7,f=32,s=4,v=4;{base}"));
+            let held = [
+                ImageData::solid_with_budget(10, 1, [23; 4], &budget).unwrap(),
+                ImageData::solid_with_budget(10, 1, [29; 4], &budget).unwrap(),
+            ];
+            assert_eq!(budget.usage(), (144, 144, 0, 0));
+            let patch = b(&[255, 0, 0, 255]);
+            let command = format!("a=f,i=7,f=32,s=1,v=1,x={x},y={y},X=1,z=30;{patch}");
+
+            let refused = state.feed(&command);
+            assert!(
+                state.frames(7).is_empty(),
+                "failed canvas allocation stored dimensions {:?}",
+                state
+                    .frames(7)
+                    .iter()
+                    .map(|f| (f.img.width, f.img.height))
+                    .collect::<Vec<_>>()
+            );
+            assert!(matches!(refused, KittyOut::None));
+            let root = state.image(7).unwrap();
+            assert_eq!((root.width, root.height), (4, 4));
+            assert_eq!(root.rgba.as_slice(), &[17; 64]);
+            assert_eq!(budget.usage(), (144, 144, 0, 0));
+
+            drop(held);
+            assert_eq!(budget.usage(), (64, 64, 0, 0));
+            assert!(matches!(state.feed(&command), KittyOut::Animate { id: 7 }));
+            let frames = state.frames(7);
+            assert_eq!(frames.len(), 1);
+            assert_eq!(frames[0].gap_ms, 30);
+            assert_eq!((frames[0].img.width, frames[0].img.height), (4, 4));
+            let mut expected = [0; 64];
+            let offset = ((y * 4 + x) * 4) as usize;
+            expected[offset..offset + 4].copy_from_slice(&[255, 0, 0, 255]);
+            assert_eq!(frames[0].img.rgba.as_slice(), &expected);
+            assert_eq!(budget.usage(), (128, 128, 0, 0));
+            drop(state);
+            assert_eq!(budget.usage(), (0, 0, 0, 0));
+        }
     }
 
     #[test]

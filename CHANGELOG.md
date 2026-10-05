@@ -128,6 +128,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Partial Kitty animation frames keep the full image canvas size. If the canvas
+  cannot fit in the current memory quota, the frame is refused without changing
+  the image; retrying after memory is released works normally.
+
 - Small encoded terminal images can load when the remaining image quota holds
   their decoded pixels. They no longer need room for the maximum image size.
   An already-RGBA8 decode also avoids a redundant copy of its pixels.
