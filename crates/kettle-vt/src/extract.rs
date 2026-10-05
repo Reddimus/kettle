@@ -4,7 +4,7 @@
 //! engine still sees correct cursor/scroll behavior.
 
 use crate::image::{ImageData, Placed, PlacementParams};
-use crate::kitty::{Delete, KittyOut, KittyState, PlacementKey};
+use crate::kitty::{Command, Delete, KittyOut, KittyState, PlacementKey};
 use crate::{CompletionUpdate, completion};
 use crate::{GraphicsBudget, GraphicsReservation};
 use crate::{iterm, sixel};
@@ -652,6 +652,7 @@ pub struct Extractor {
     kitty_primary: KittyState,
     kitty_alternate: KittyState,
     graphics_screen: GraphicsScreen,
+    graphics_epoch: Option<u64>,
     defer_graphics: bool,
     budget: GraphicsBudget,
     seq_reservation: Option<GraphicsReservation>,
@@ -720,6 +721,7 @@ impl Extractor {
             kitty_primary: KittyState::new(budget.clone()),
             kitty_alternate: KittyState::new(budget.clone()),
             graphics_screen: GraphicsScreen::Primary,
+            graphics_epoch: Some(0),
             defer_graphics: false,
             budget,
             seq_reservation: None,
@@ -756,6 +758,7 @@ impl Extractor {
     /// clears it before switching, and Kitty requires images to follow that
     /// text-buffer boundary while preserving primary-screen graphics.
     pub fn enter_alternate_screen(&mut self, clear: bool) {
+        self.advance_graphics_epoch();
         if clear {
             self.kitty_alternate = KittyState::new(self.budget.clone());
         }
@@ -768,6 +771,7 @@ impl Extractor {
     /// before returning to the primary buffer, while 1049 defers its clear to
     /// the next entry so its contents remain available for selection.
     pub fn leave_alternate_screen(&mut self, clear: bool) {
+        self.advance_graphics_epoch();
         if clear {
             self.kitty_alternate = KittyState::new(self.budget.clone());
         }
@@ -779,6 +783,7 @@ impl Extractor {
     /// This is the cache-clearing behavior required for ED 2. Primary and
     /// alternate stores remain isolated.
     pub fn clear_active_graphics(&mut self) {
+        self.advance_graphics_epoch();
         let replacement = KittyState::new(self.budget.clone());
         match self.graphics_screen {
             GraphicsScreen::Primary => self.kitty_primary = replacement,
@@ -788,6 +793,7 @@ impl Extractor {
 
     /// Reset graphics in both screen buffers, as required by RIS.
     pub fn reset_all_graphics(&mut self) {
+        self.advance_graphics_epoch();
         self.kitty_primary = KittyState::new(self.budget.clone());
         self.kitty_alternate = KittyState::new(self.budget.clone());
         self.graphics_screen = GraphicsScreen::Primary;
@@ -805,6 +811,10 @@ impl Extractor {
     /// buffer-local stores.
     pub fn set_graphics_deferred(&mut self, deferred: bool) {
         self.defer_graphics = deferred;
+    }
+
+    fn advance_graphics_epoch(&mut self) {
+        self.graphics_epoch = self.graphics_epoch.and_then(|epoch| epoch.checked_add(1));
     }
 
     fn kitty(&self) -> &KittyState {
@@ -909,7 +919,7 @@ impl Extractor {
                         if b == b'\\' {
                             i += 1;
                             self.term = SeqTerminator::EscSt;
-                            self.finish_seq(&mut out);
+                            self.finish_seq(&mut out, &mut handle);
                             self.handle_pending_chunks(&mut out, &mut handle);
                             continue;
                         }
@@ -1018,7 +1028,7 @@ impl Extractor {
                                     } else {
                                         SeqTerminator::C1St
                                     };
-                                    self.finish_seq(&mut out);
+                                    self.finish_seq(&mut out, &mut handle);
                                 }
                             }
                             None => {
@@ -1340,7 +1350,10 @@ impl Extractor {
         self.term = SeqTerminator::EscSt;
     }
 
-    fn finish_seq(&mut self, out: &mut Vec<Chunk>) {
+    fn finish_seq<F>(&mut self, out: &mut Vec<Chunk>, handle: &mut F)
+    where
+        F: FnMut(&mut Self, Chunk),
+    {
         if self.discarding_seq {
             self.reset_discard();
             return;
@@ -1348,6 +1361,7 @@ impl Extractor {
         let mut seq = std::mem::take(&mut self.seq);
         let _seq_reservation = self.seq_reservation.take();
         let mode = std::mem::replace(&mut self.mode, Mode::Pass);
+        let terminator = self.term;
         self.private_completion = false;
 
         // Kettle completion messages are private UI metadata. Consume every
@@ -1525,6 +1539,7 @@ impl Extractor {
             },
         }
 
+        let mut raw_emitted = false;
         let result = match mode {
             Mode::Dcs => {
                 // A Sixel DCS is `P1;P2;P3 q <data>`, where the bytes before `q`
@@ -1550,73 +1565,94 @@ impl Extractor {
                     let Some(body) = std::str::from_utf8(&seq[1..]).ok() else {
                         return;
                     };
-                    match self.kitty_mut().feed(body) {
-                        KittyOut::Query(reply) => R::Reply(reply),
-                        KittyOut::Place(p) => R::Img(p),
-                        KittyOut::Delete(delete) => R::Del(delete),
-                        // Virtual placements draw nothing at the cursor; the
-                        // stored image + box are surfaced so the renderer can
-                        // composite them where placeholder cells appear.
-                        KittyOut::Virtual { id, placement } => {
-                            match (
-                                self.kitty().image(id),
-                                self.kitty().virtual_placement(id, placement),
-                            ) {
-                                (Some(img), Some(vp)) => R::Virtual {
-                                    id,
-                                    placement,
-                                    img: img.clone(),
-                                    cols: vp.cols,
-                                    rows: vp.rows,
-                                    z: vp.z,
-                                },
-                                _ => R::None,
+                    if let Some(command) = Command::parse(body) {
+                        if !self.kitty().is_query_command(&command) {
+                            self.advance_graphics_epoch();
+                        }
+                        if let Some(delete) = self.kitty_mut().retire_retransmission(&command) {
+                            self.emit_raw_control(mode, &seq, out);
+                            raw_emitted = true;
+                            terminal_only = self.raw_tap;
+                            out.push(Chunk::DeleteImages(delete));
+                            let epoch = self.graphics_epoch;
+                            self.handle_pending_chunks(out, handle);
+                            // A reentrant reset, screen change, or newer command
+                            // supersedes this upload; never restore stale work.
+                            if epoch.is_none() || epoch != self.graphics_epoch {
+                                return;
                             }
                         }
-                        // Snapshot the full display sequence: base/root
-                        // image first, then each transmitted frame, with the
-                        // root gap from the control state.
-                        KittyOut::Animate { id } => match self.kitty().image(id) {
-                            Some(base) => {
-                                let st = self.kitty().animation(id).copied().unwrap_or_default();
-                                let mut imgs = vec![base.clone()];
-                                let mut gaps = vec![st.root_gap];
-                                for f in self.kitty().frames(id) {
-                                    imgs.push(f.img.clone());
-                                    gaps.push(f.gap_ms);
-                                }
-                                R::Anim {
-                                    id,
-                                    imgs,
-                                    gaps,
-                                    state: st,
+                        match self.kitty_mut().feed_command(command) {
+                            KittyOut::Query(reply) => R::Reply(reply),
+                            KittyOut::Place(p) => R::Img(p),
+                            KittyOut::Delete(delete) => R::Del(delete),
+                            // Virtual placements draw nothing at the cursor; the
+                            // stored image + box are surfaced so the renderer can
+                            // composite them where placeholder cells appear.
+                            KittyOut::Virtual { id, placement } => {
+                                match (
+                                    self.kitty().image(id),
+                                    self.kitty().virtual_placement(id, placement),
+                                ) {
+                                    (Some(img), Some(vp)) => R::Virtual {
+                                        id,
+                                        placement,
+                                        img: img.clone(),
+                                        cols: vp.cols,
+                                        rows: vp.rows,
+                                        z: vp.z,
+                                    },
+                                    _ => R::None,
                                 }
                             }
-                            None => R::None,
-                        },
-                        // Relative placement: surface the child image + its
-                        // parent reference; the renderer resolves the
-                        // on-screen position from the parent placement.
-                        KittyOut::Relative { id, placement } => {
-                            match (
-                                self.kitty().image(id),
-                                self.kitty().relative_placement(id, placement),
-                            ) {
-                                (Some(img), Some(rp)) => R::Rel {
-                                    id,
-                                    placement,
-                                    img: img.clone(),
-                                    parent_img: rp.parent_img,
-                                    parent_placement: rp.parent_placement,
-                                    h: rp.h,
-                                    v: rp.v,
-                                    z: rp.z,
-                                    params: rp.params,
-                                },
-                                _ => R::None,
+                            // Snapshot the full display sequence: base/root
+                            // image first, then each transmitted frame, with the
+                            // root gap from the control state.
+                            KittyOut::Animate { id } => match self.kitty().image(id) {
+                                Some(base) => {
+                                    let st =
+                                        self.kitty().animation(id).copied().unwrap_or_default();
+                                    let mut imgs = vec![base.clone()];
+                                    let mut gaps = vec![st.root_gap];
+                                    for f in self.kitty().frames(id) {
+                                        imgs.push(f.img.clone());
+                                        gaps.push(f.gap_ms);
+                                    }
+                                    R::Anim {
+                                        id,
+                                        imgs,
+                                        gaps,
+                                        state: st,
+                                    }
+                                }
+                                None => R::None,
+                            },
+                            // Relative placement: surface the child image + its
+                            // parent reference; the renderer resolves the
+                            // on-screen position from the parent placement.
+                            KittyOut::Relative { id, placement } => {
+                                match (
+                                    self.kitty().image(id),
+                                    self.kitty().relative_placement(id, placement),
+                                ) {
+                                    (Some(img), Some(rp)) => R::Rel {
+                                        id,
+                                        placement,
+                                        img: img.clone(),
+                                        parent_img: rp.parent_img,
+                                        parent_placement: rp.parent_placement,
+                                        h: rp.h,
+                                        v: rp.v,
+                                        z: rp.z,
+                                        params: rp.params,
+                                    },
+                                    _ => R::None,
+                                }
                             }
+                            KittyOut::None => R::None,
                         }
-                        KittyOut::None => R::None,
+                    } else {
+                        R::None
                     }
                 } else {
                     R::None
@@ -1642,15 +1678,21 @@ impl Extractor {
 
         match result {
             R::Reply(reply) => {
-                self.emit_raw_control(mode, &seq, out);
+                if !raw_emitted {
+                    self.emit_raw_control(mode, &seq, out);
+                }
                 out.push(Chunk::GraphicsReply(reply));
             }
             R::Img(data) => {
-                self.emit_raw_control(mode, &seq, out);
+                if !raw_emitted {
+                    self.emit_raw_control(mode, &seq, out);
+                }
                 out.push(Chunk::Image(data));
             }
             R::Del(delete) => {
-                self.emit_raw_control(mode, &seq, out);
+                if !raw_emitted {
+                    self.emit_raw_control(mode, &seq, out);
+                }
                 out.push(Chunk::DeleteImages(delete));
             }
             R::Virtual {
@@ -1661,7 +1703,9 @@ impl Extractor {
                 rows,
                 z,
             } => {
-                self.emit_raw_control(mode, &seq, out);
+                if !raw_emitted {
+                    self.emit_raw_control(mode, &seq, out);
+                }
                 out.push(Chunk::VirtualImage {
                     id,
                     placement,
@@ -1677,7 +1721,9 @@ impl Extractor {
                 gaps,
                 state,
             } => {
-                self.emit_raw_control(mode, &seq, out);
+                if !raw_emitted {
+                    self.emit_raw_control(mode, &seq, out);
+                }
                 out.push(Chunk::Animation {
                     id,
                     imgs,
@@ -1696,7 +1742,9 @@ impl Extractor {
                 z,
                 params,
             } => {
-                self.emit_raw_control(mode, &seq, out);
+                if !raw_emitted {
+                    self.emit_raw_control(mode, &seq, out);
+                }
                 out.push(Chunk::RelativePlacement {
                     id,
                     placement,
@@ -1718,8 +1766,10 @@ impl Extractor {
                 // copy differ from the wire, which raw consumers must not see:
                 // when one is listening, hand them the exact bytes and mark the
                 // normalized copy terminal-only.
-                if self.raw_tap && !terminal_only && self.term == SeqTerminator::C1St {
-                    self.emit_raw_control(mode, &seq, out);
+                if self.raw_tap && !terminal_only && terminator == SeqTerminator::C1St {
+                    if !raw_emitted {
+                        self.emit_raw_control(mode, &seq, out);
+                    }
                     terminal_only = true;
                 }
                 let Some(pass_len) = seq.len().checked_add(4) else {
@@ -1740,7 +1790,7 @@ impl Extractor {
                     Mode::Pass => b' ',
                 });
                 v.extend_from_slice(&seq);
-                if self.term_is_bel(mode) {
+                if terminator == SeqTerminator::Bel && mode == Mode::Osc {
                     v.push(0x07);
                 } else {
                     v.push(0x1b);
@@ -3603,5 +3653,121 @@ mod tests {
         });
         let img = img.expect("an Image chunk should be emitted");
         assert_eq!((img.width, img.height), (2, 2));
+    }
+    #[test]
+    fn retransmission_releases_callback_owners_before_admission_for_every_read_split() {
+        let wire =
+            b"\x1b_Ga=T,i=51,f=32,s=1,v=1;AQID/w==\x1b\\\x1b_Ga=T,i=51,f=32,s=1,v=1;BQYH/w==\x1b\\";
+        for split in 0..=wire.len() {
+            let budget = crate::GraphicsBudget::isolated(crate::GraphicsLimits {
+                image_bytes: 4,
+                retained_bytes: 4,
+                animation_bytes: 4,
+                ..crate::GraphicsLimits::default()
+            })
+            .unwrap();
+            let mut extractor = Extractor::with_budget(budget.clone());
+            let mut displayed: Option<crate::Placed> = None;
+            let mut first = None;
+            let mut events = Vec::new();
+            for part in [&wire[..split], &wire[split..]] {
+                extractor.feed_with(part, |extractor, chunk| match chunk {
+                    Chunk::Image(placed) => {
+                        if first.is_none() {
+                            first = Some(std::sync::Arc::downgrade(&placed.img.rgba));
+                        }
+                        events.push("place");
+                        displayed = Some(placed);
+                    }
+                    Chunk::DeleteImages(delete) => {
+                        assert!(matches!(
+                            delete.target,
+                            crate::kitty::DeleteTarget::Image {
+                                id: 51,
+                                placement_id: None
+                            }
+                        ));
+                        drop(displayed.take());
+                        extractor.apply_kitty_delete_result(&[], &[51]);
+                        events.push("retire");
+                    }
+                    _ => {}
+                });
+            }
+            assert_eq!(events, ["place", "retire", "place"], "split {split}");
+            assert_eq!(
+                displayed.as_ref().unwrap().img.rgba.as_slice(),
+                &[5, 6, 7, 255]
+            );
+            assert!(first.unwrap().upgrade().is_none());
+            assert_eq!(budget.usage().0, 4);
+        }
+    }
+    #[test]
+    fn replacement_raw_tap_remains_exact_for_every_result_and_terminator() {
+        for action in ["a=t", "a=T", "a=T,U=1,p=2,c=1,r=1"] {
+            for terminator in [&b"\x1b\\"[..], &b"\x9c"[..]] {
+                let mut extractor = Extractor::isolated();
+                extractor.kitty_mut().feed("a=t,i=51,f=32,s=1,v=1;AQID/w==");
+                extractor.set_raw_tap(true);
+                let mut wire = format!("\x1b_G{action},i=51,f=32,s=1,v=1;BQYH/w==").into_bytes();
+                wire.extend_from_slice(terminator);
+                let chunks = extractor.feed(&wire);
+                assert_eq!(tapped(&chunks), wire);
+                assert_eq!(
+                    chunks
+                        .iter()
+                        .filter(|c| matches!(c, Chunk::DeleteImages(_)))
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    extractor.kitty().image(51).unwrap().rgba.as_slice(),
+                    &[5, 6, 7, 255]
+                );
+            }
+        }
+        let mut extractor = Extractor::isolated();
+        extractor.set_raw_tap(true);
+        let wire = format!("\x1b_Ga=t,i=51,pad={};BQYH/w==\x1b\\", "x".repeat(4096)).into_bytes();
+        assert_eq!(tapped(&extractor.feed(&wire)), wire);
+    }
+
+    #[test]
+    fn retirement_callback_cannot_restore_work_after_reset_screen_switch_or_new_upload() {
+        for operation in 0..3 {
+            let mut extractor = Extractor::isolated();
+            extractor.feed(b"\x1b_Ga=t,i=51,f=32,s=1,v=1;AQID/w==\x1b\\");
+            let mut retirements = 0;
+            let mut images = 0;
+            extractor.feed_with(
+                b"\x1b_Ga=T,i=51,f=32,s=1,v=1;BQYH/w==\x1b\\",
+                |extractor, chunk| match chunk {
+                    Chunk::DeleteImages(_) => {
+                        retirements += 1;
+                        match operation {
+                            0 => extractor.reset_all_graphics(),
+                            1 => extractor.enter_alternate_screen(false),
+                            _ => {
+                                extractor.feed(b"\x1b_Ga=T,i=51,f=32,s=1,v=1;CQgH/w==\x1b\\");
+                            }
+                        }
+                    }
+                    Chunk::Image(_) => images += 1,
+                    _ => {}
+                },
+            );
+            assert_eq!(retirements, 1);
+            assert_eq!(images, 0);
+            if operation == 2 {
+                assert_eq!(
+                    extractor.kitty().image(51).unwrap().rgba.as_slice(),
+                    &[9, 8, 7, 255]
+                );
+            } else {
+                assert!(extractor.kitty_primary.image(51).is_none());
+                assert!(extractor.kitty_alternate.image(51).is_none());
+            }
+        }
     }
 }

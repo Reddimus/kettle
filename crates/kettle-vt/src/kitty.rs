@@ -369,8 +369,28 @@ pub enum KittyOut {
     },
 }
 
-/// Reassembles chunked transmissions and remembers transmitted images so
-/// they can be placed later by id.
+/// Parsed control metadata borrowing the sequence payload.
+pub(crate) struct Command<'a> {
+    control: &'a str,
+    payload: &'a str,
+    values: HashMap<String, String>,
+}
+
+impl<'a> Command<'a> {
+    pub(crate) fn parse(body: &'a str) -> Option<Self> {
+        let (control, payload) = body.split_once(';').unwrap_or((body, ""));
+        if control.len() > 4096 {
+            return None;
+        }
+        Some(Self {
+            control,
+            payload,
+            values: parse_control(control),
+        })
+    }
+}
+
+/// Buffer-local uploads, images, placements, and animation state.
 pub struct KittyState {
     in_flight: HashMap<u32, Acc>,
     store: HashMap<u32, ImageData>,
@@ -516,15 +536,69 @@ impl KittyState {
 
     /// Feed one APC `G` body (between `ESC _ G` and `ESC \`).
     pub fn feed(&mut self, body: &str) -> KittyOut {
-        let (control, payload) = body.split_once(';').unwrap_or((body, ""));
-        // A malformed APC `G` body with a multi-MB control prefix (no ';')
-        // would expand into a huge transient HashMap in parse_control. Kitty
-        // control keys are tiny, so reject an over-long control half outright
-        // as defense in depth.
-        if control.len() > 4096 {
+        let Some(command) = Command::parse(body) else {
             return KittyOut::None;
+        };
+        self.retire_retransmission(&command);
+        self.feed_command(command)
+    }
+
+    pub(crate) fn is_query_command(&self, command: &Command<'_>) -> bool {
+        self.is_query_control(&command.values)
+    }
+
+    pub(crate) fn retire_retransmission(&mut self, command: &Command<'_>) -> Option<Delete> {
+        let kv = &command.values;
+        if self.is_query_control(kv)
+            || !matches!(kv.get("a").map(String::as_str).unwrap_or("t"), "t" | "T")
+            || kv.contains_key("I")
+        {
+            return None;
         }
-        let kv = parse_control(control);
+        let id = kv.get("i")?.parse::<u32>().ok()?;
+        if id == 0 || !self.store.contains_key(&id) || self.in_flight.contains_key(&id) {
+            return None;
+        }
+        let cancels_frame = self
+            .frame_in_flight
+            .as_ref()
+            .is_some_and(|(frame_id, _)| *frame_id == id);
+        if ["s", "v"].into_iter().any(|key| {
+            kv.get(key)
+                .and_then(|value| value.parse::<u32>().ok())
+                .is_some_and(|dimension| dimension > crate::image::MAX_IMAGE_DIM)
+        }) {
+            return None;
+        }
+        if self.in_flight.len()
+            + usize::from(self.frame_in_flight.is_some() && !cancels_frame)
+            + usize::from(self.query_in_flight.is_some())
+            >= self.budget.limits().in_flight_slots
+            || !self.in_flight_append_fits(None, command.control, command.payload.trim())
+        {
+            return None;
+        }
+        let delete = Delete {
+            target: DeleteTarget::Image {
+                id,
+                placement_id: None,
+            },
+            free_data: true,
+            free_candidates: vec![id],
+        };
+        self.apply_nonspatial_delete(&delete);
+        if cancels_frame {
+            self.frame_in_flight = None;
+        }
+        Some(delete)
+    }
+
+    pub(crate) fn feed_command(&mut self, command: Command<'_>) -> KittyOut {
+        let Command {
+            control,
+            payload,
+            values: kv,
+        } = command;
         if self.is_query_control(&kv) {
             return self.query(control, payload, kv);
         }
@@ -782,7 +856,9 @@ impl KittyState {
             let replace = kv.get("C").map(|v| v == "1").unwrap_or(false);
             let (sx, sy) = (dim("X").unwrap_or(0), dim("Y").unwrap_or(0));
             let (dx, dy) = (dim("x").unwrap_or(0), dim("y").unwrap_or(0));
-            if let Some(patch) = src.crop(sx, sy, w, h) {
+            let patch = src.crop(sx, sy, w, h);
+            drop(src);
+            if let Some(patch) = patch {
                 if dn <= 1 {
                     if let Some(b) = self.store.get_mut(&id)
                         && !b.compose(&patch, dx, dy, replace)
@@ -2838,5 +2914,126 @@ mod tests {
         );
         assert!(state.virtual_placement(5, 0).is_some());
         assert!(state.relative_placement(6, 7).is_none());
+    }
+    #[test]
+    fn retransmission_reuses_the_released_root_quota() {
+        let limits = crate::GraphicsLimits {
+            image_bytes: 4,
+            retained_bytes: 4,
+            animation_bytes: 4,
+            ..crate::GraphicsLimits::default()
+        };
+        let budget = crate::GraphicsBudget::isolated(limits).unwrap();
+        let mut state = KittyState::new(budget.clone());
+        state.feed("a=t,i=21,f=32,s=1,v=1;AQID/w==");
+        let old = std::sync::Arc::downgrade(&state.image(21).unwrap().rgba);
+        assert_eq!(budget.usage().0, 4);
+        state.feed("a=t,i=21,f=32,s=1,v=1;BQYH/w==");
+        assert_eq!(state.image(21).unwrap().rgba.as_slice(), &[5, 6, 7, 255]);
+        assert!(old.upgrade().is_none());
+        assert_eq!(budget.usage().0, 4);
+    }
+
+    #[test]
+    fn first_retransmission_chunk_retires_old_data_and_preserves_new_partial() {
+        let mut state = KittyState::default();
+        state.feed("a=t,i=22,f=32,s=1,v=1;AQID/w==");
+        state.feed("a=p,i=22,p=1,U=1,c=1,r=1");
+        state.feed("a=p,i=22,p=2,P=22,Q=1,H=1,V=1");
+        state.feed("a=f,i=22,f=32,s=1,v=1,z=37;AQID/w==");
+        state.feed("a=a,i=22,s=3");
+        let root = std::sync::Arc::downgrade(&state.image(22).unwrap().rgba);
+        let frame = std::sync::Arc::downgrade(&state.frames(22)[0].img.rgba);
+        state.feed("a=t,i=22,m=1,f=32,s=1,v=1;BQYH");
+        assert!(state.image(22).is_none());
+        assert!(state.virtual_placement(22, 1).is_none());
+        assert!(state.relative_placement(22, 2).is_none());
+        assert!(state.frames(22).is_empty());
+        assert!(state.animation(22).is_none());
+        assert!(root.upgrade().is_none());
+        assert!(frame.upgrade().is_none());
+        assert_eq!(state.in_flight_len_for_test(), 1);
+        state.feed("m=0;/w==");
+        assert_eq!(state.image(22).unwrap().rgba.as_slice(), &[5, 6, 7, 255]);
+        assert_eq!(state.in_flight_len_for_test(), 0);
+        assert!(state.virtual_placement(22, 1).is_none());
+        assert!(state.relative_placement(22, 2).is_none());
+    }
+
+    #[test]
+    fn retransmission_with_a_retained_pixel_snapshot_refuses_without_faking_release() {
+        let limits = crate::GraphicsLimits {
+            image_bytes: 4,
+            retained_bytes: 4,
+            animation_bytes: 4,
+            ..crate::GraphicsLimits::default()
+        };
+        let budget = crate::GraphicsBudget::isolated(limits).unwrap();
+        let mut state = KittyState::new(budget.clone());
+        state.feed("a=t,i=23,f=32,s=1,v=1;AQID/w==");
+        let pixels = state.image(23).unwrap().rgba.clone();
+        state.feed("a=t,i=23,f=32,s=1,v=1;BQYH/w==");
+        assert!(state.image(23).is_none());
+        assert_eq!(pixels.as_slice(), &[1, 2, 3, 255]);
+        assert_eq!(budget.usage().0, 4);
+        drop(pixels);
+        assert_eq!(budget.usage().0, 0);
+        state.feed("a=t,i=23,f=32,s=1,v=1;BQYH/w==");
+        assert_eq!(state.image(23).unwrap().rgba.as_slice(), &[5, 6, 7, 255]);
+    }
+
+    #[test]
+    fn self_composition_drops_its_source_handle_before_destination_admission() {
+        let limits = crate::GraphicsLimits {
+            image_bytes: 8,
+            retained_bytes: 12,
+            animation_bytes: 8,
+            ..crate::GraphicsLimits::default()
+        };
+        let budget = crate::GraphicsBudget::isolated(limits).unwrap();
+        let mut state = KittyState::new(budget.clone());
+        state.feed("a=t,i=26,f=32,s=2,v=1;/wAA/wAA//8=");
+        let pointer = state.image(26).unwrap().rgba.as_ptr();
+        assert_eq!(budget.usage().0, 8);
+        let result = state.feed("a=c,i=26,r=1,c=1,w=1,h=1,X=1,x=0,C=1");
+        assert!(matches!(result, KittyOut::Animate { id: 26 }));
+        assert_eq!(
+            state.image(26).unwrap().rgba.as_slice(),
+            &[0, 0, 255, 255, 0, 0, 255, 255]
+        );
+        assert_eq!(state.image(26).unwrap().rgba.as_ptr(), pointer);
+        assert_eq!(budget.usage().0, 8);
+    }
+    #[test]
+    fn retransmission_preserves_other_partial_uploads_and_cancels_its_partial_frame() {
+        let mut state = KittyState::default();
+        state.feed("a=t,i=61,f=32,s=1,v=1;AQID/w==");
+        state.feed("a=f,i=61,f=32,s=1,v=1,m=1;AQID");
+        for id in 70..77 {
+            state.feed(&format!("a=t,i={id},f=32,s=1,v=1,m=1;"));
+        }
+        assert!(state.frame_in_flight.is_some());
+        assert_eq!(state.in_flight.len(), 7);
+        state.feed("a=t,i=61,f=32,s=1,v=1,m=1;BQYH");
+        assert!(state.image(61).is_none());
+        assert!(state.frame_in_flight.is_none());
+        assert_eq!(state.in_flight.len(), 8);
+        state.feed("i=61,m=0;/w==");
+        assert_eq!(state.image(61).unwrap().rgba.as_slice(), &[5, 6, 7, 255]);
+        for id in 70..77 {
+            state.feed(&format!("i={id},m=0;CQgH/w=="));
+            assert_eq!(state.image(id).unwrap().rgba.as_slice(), &[9, 8, 7, 255]);
+        }
+        assert!(state.in_flight.is_empty());
+    }
+
+    #[test]
+    fn oversized_replacement_dimensions_preserve_existing_pixels() {
+        let mut state = KittyState::default();
+        state.feed("a=t,i=63,f=32,s=1,v=1;AQID/w==");
+        state.feed("a=t,i=63,f=32,s=8193,v=1,m=1;BQYH");
+        assert_eq!(state.image(63).unwrap().rgba.as_slice(), &[1, 2, 3, 255]);
+        state.feed("i=63,m=0;/w==");
+        assert_eq!(state.image(63).unwrap().rgba.as_slice(), &[1, 2, 3, 255]);
     }
 }

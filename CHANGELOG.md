@@ -133,6 +133,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Kitty image-id retransmission retires old placements and animation data with
+  the first accepted chunk, releasing their pixel leases before replacement
+  decoding. Unrelated uploads and matching ids on the other screen survive.
+  Self-composition releases its temporary source handle before editing pixels.
+
 - Kitty frame composition uses the correct source and destination offsets.
   Newly appended animation frames default to 40 ms; edits with omitted or zero
   delay preserve the existing timing.
