@@ -2226,9 +2226,23 @@ During a separate Auto fixture experiment, the app appeared in the running-app
 inventory, but native
 selection by its full app path returned `cgWindowNotFound` before any input.
 The fixture and all recorded PTY groups were closed and reaped; the candidate
-was not launched, and that attempt provides no gesture acceptance. Native
-acceptance must additionally drag an Auto
-window by its caption onto the hidden target band, keep the original PTYs,
+was not launched, and that attempt provides no gesture acceptance.
+A subsequent experiment required an actual full-window rendered screenshot
+before the same full-path selector. Both the baseline and the new candidate
+were then selected successfully. Native Auto-mode tab tears retained both
+original pane ids and shell child processes, hid each single-tab bar, and
+cleared docking previews. The candidate's original and torn borders measured
+RGB `(125, 207, 255)` and `(187, 154, 247)` in separate captured frames. A native
+shell command remained visible through both accessibility and `read_cells`.
+Title-bar drag requests did not change either measured window origin, including
+a raised candidate with only one window. That check established no actual
+caption move, so it neither reproduces a caption-docking defect nor accepts
+the new caption bridge. All 14 recorded groups, including both fixtures, their
+PTYs and the controller, were gone after the original result was consumed.
+This isolated fixture did not include the sibling media worker and does not
+validate the media release package or installation. Native acceptance must
+additionally drag an Auto window by its caption onto the hidden target band,
+keep the original PTYs,
 exercise off-target drops and held-button Escape, and leave ordinary multi-tab
 caption moves and programmatic geometry changes undocked.
 
