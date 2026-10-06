@@ -56,6 +56,8 @@ pub enum Chunk {
     /// Kitty `a=d`: delete placements selected by id, number, cursor/cell,
     /// range, column, row, or z-index.
     DeleteImages(Delete),
+    /// Reclaim older Kitty storage before admitting already-decoded pixels.
+    ImageQuota(crate::quota::QuotaRequest),
     /// kitty `U=1` virtual placement: store the image + its `cols`×`rows`
     /// box by id; it is drawn later wherever `U+10EEEE` placeholder cells
     /// reference this id (not at the cursor).
@@ -813,6 +815,14 @@ impl Extractor {
         self.defer_graphics = deferred;
     }
 
+    /// Apply a metadata-only quota plan to both screen namespaces. The core
+    /// has released its selected placement/animation owners before this call.
+    pub fn apply_image_quota(&mut self, victims: &[crate::quota::QuotaKey]) {
+        let alternate = self.graphics_screen == GraphicsScreen::Alternate;
+        self.kitty_primary.reclaim_quota(victims, alternate);
+        self.kitty_alternate.reclaim_quota(victims, !alternate);
+    }
+
     fn advance_graphics_epoch(&mut self) {
         self.graphics_epoch = self.graphics_epoch.and_then(|epoch| epoch.checked_add(1));
     }
@@ -837,9 +847,16 @@ impl Extractor {
     /// reallocation per run. Stop bytes are ESC in pass-through, and ESC, raw
     /// ST, CAN, SUB, and (OSC only) BEL inside a sequence. An ESC or `ESC \`
     /// split across `feed` calls parses the same as an unsplit one.
+    /// Quota requests require synchronous registry feedback and are omitted by
+    /// this collecting form; use `feed_with` to admit images under pressure.
     pub fn feed(&mut self, input: &[u8]) -> Vec<Chunk> {
         let mut collected = Vec::new();
-        self.feed_with(input, |_, chunk| collected.push(chunk));
+        self.feed_with(input, |_, chunk| match chunk {
+            // Admission completes before `feed` returns; only a synchronous
+            // handler can act on this request.
+            Chunk::ImageQuota(_) => {}
+            chunk => collected.push(chunk),
+        });
         collected
     }
 
@@ -850,7 +867,8 @@ impl Extractor {
     /// the extractor. In particular, kitty uppercase deletion depends on the
     /// terminal core's placement registry; applying that result before the
     /// next APC preserves wire order when delete and re-place/re-transmit
-    /// commands arrive in one PTY read.
+    /// commands arrive in one PTY read. Quota feedback likewise releases the
+    /// chosen registry owners before the same APC admits its decoded pixels.
     pub fn feed_with<F>(&mut self, input: &[u8], mut handle: F)
     where
         F: FnMut(&mut Self, Chunk),
@@ -1582,7 +1600,32 @@ impl Extractor {
                                 return;
                             }
                         }
-                        match self.kitty_mut().feed_command(command) {
+                        let mut result = self.kitty_mut().feed_command(command);
+                        if let Some(pending) = self.kitty_mut().take_pending_transmit() {
+                            if let Some(mut request) = self.kitty().quota_request(&pending) {
+                                match self.graphics_screen {
+                                    GraphicsScreen::Primary => self
+                                        .kitty_alternate
+                                        .append_quota_metadata(true, &mut request),
+                                    GraphicsScreen::Alternate => {
+                                        self.kitty_primary.append_quota_metadata(true, &mut request)
+                                    }
+                                }
+                                if !raw_emitted {
+                                    self.emit_raw_control(mode, &seq, out);
+                                    raw_emitted = true;
+                                    terminal_only = self.raw_tap;
+                                }
+                                out.push(Chunk::ImageQuota(request));
+                                let epoch = self.graphics_epoch;
+                                self.handle_pending_chunks(out, handle);
+                                if epoch.is_none() || epoch != self.graphics_epoch {
+                                    return;
+                                }
+                            }
+                            result = self.kitty_mut().complete_transmit(pending);
+                        }
+                        match result {
                             KittyOut::Query(reply) => R::Reply(reply),
                             KittyOut::Place(p) => R::Img(p),
                             KittyOut::Delete(delete) => R::Del(delete),
@@ -3767,6 +3810,176 @@ mod tests {
             } else {
                 assert!(extractor.kitty_primary.image(51).is_none());
                 assert!(extractor.kitty_alternate.image(51).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn collecting_feed_does_not_return_an_expired_quota_request() {
+        let budget = crate::GraphicsBudget::isolated(crate::GraphicsLimits {
+            image_bytes: 4,
+            retained_bytes: 8,
+            animation_bytes: 4,
+            ..crate::GraphicsLimits::default()
+        })
+        .unwrap();
+        let mut extractor = Extractor::with_budget(budget.clone());
+        extractor.feed(b"\x1b_Ga=t,i=81,f=32,s=1,v=1;AQID/w==\x1b\\");
+        extractor.feed(b"\x1b_Ga=t,i=82,f=32,s=1,v=1;CQgH/w==\x1b\\");
+        let chunks = extractor.feed(b"\x1b_Ga=T,i=83,f=32,s=1,v=1;BQYH/w==\x1b\\");
+        assert!(
+            !chunks
+                .iter()
+                .any(|chunk| matches!(chunk, Chunk::ImageQuota(_))),
+            "a collected request cannot reclaim pixels for an already-refused upload"
+        );
+        assert!(extractor.kitty().image(81).is_some());
+        assert!(extractor.kitty().image(82).is_some());
+        assert!(extractor.kitty().image(83).is_none());
+        assert_eq!(budget.usage().0, 8);
+    }
+
+    #[test]
+    fn releasing_a_retired_snapshot_before_planning_preserves_existing_roots() {
+        let budget = crate::GraphicsBudget::isolated(crate::GraphicsLimits {
+            image_bytes: 4,
+            retained_bytes: 8,
+            animation_bytes: 4,
+            ..crate::GraphicsLimits::default()
+        })
+        .unwrap();
+        let mut extractor = Extractor::with_budget(budget.clone());
+        extractor.kitty_mut().feed("a=t,i=81,f=32,s=1,v=1;AQID/w==");
+        let mut snapshot = extractor.kitty().image(81).cloned();
+        extractor.kitty_mut().feed("a=d,d=I,i=81");
+        extractor.kitty_mut().feed("a=t,i=82,f=32,s=1,v=1;CQgH/w==");
+        assert_eq!(budget.usage().0, 8);
+        let mut requests = 0;
+        let mut displayed = None;
+        extractor.feed_with(
+            b"\x1b_Ga=T,i=83,f=32,s=1,v=1;BQYH/w==\x1b\\",
+            |extractor, chunk| match chunk {
+                Chunk::ImageQuota(request) => {
+                    requests += 1;
+                    drop(snapshot.take());
+                    assert_eq!(budget.usage().1, 4, "only the existing root is retained");
+                    let plan = request.plan(&[]).unwrap();
+                    assert!(plan.is_empty(), "released memory already permits admission");
+                    extractor.apply_image_quota(&plan);
+                }
+                Chunk::Image(placed) => displayed = Some(placed),
+                _ => {}
+            },
+        );
+        assert_eq!(requests, 1);
+        assert_eq!(displayed.unwrap().id, Some(83));
+        assert!(extractor.kitty().image(82).is_some());
+        assert!(extractor.kitty().image(83).is_some());
+        assert_eq!(budget.usage().0, 8);
+    }
+
+    #[test]
+    fn quota_feedback_admits_pixels_and_preserves_raw_bytes_for_every_read_split() {
+        for terminator in [&b"\x1b\\"[..], &b"\x9c"[..]] {
+            let mut wire = b"\x1b_Ga=T,i=83,f=32,s=1,v=1;BQYH/w==".to_vec();
+            wire.extend_from_slice(terminator);
+            for split in 0..=wire.len() {
+                let budget = crate::GraphicsBudget::isolated(crate::GraphicsLimits {
+                    image_bytes: 4,
+                    retained_bytes: 8,
+                    animation_bytes: 4,
+                    ..crate::GraphicsLimits::default()
+                })
+                .unwrap();
+                let mut extractor = Extractor::with_budget(budget.clone());
+                extractor.kitty_mut().feed("a=t,i=81,f=32,s=1,v=1;AQID/w==");
+                extractor.kitty_mut().feed("a=t,i=82,f=32,s=1,v=1;CQgH/w==");
+                let oldest = std::sync::Arc::downgrade(&extractor.kitty().image(81).unwrap().rgba);
+                extractor.set_raw_tap(true);
+                let mut raw = Vec::new();
+                let mut displayed = None;
+                let mut events = Vec::new();
+                for part in [&wire[..split], &wire[split..]] {
+                    extractor.feed_with(part, |extractor, chunk| match chunk {
+                        Chunk::Raw(bytes) | Chunk::Pass(bytes) => raw.extend(bytes),
+                        Chunk::ImageQuota(request) => {
+                            events.push("quota");
+                            let victims = request.plan(&[]).unwrap();
+                            assert_eq!(
+                                victims,
+                                [crate::quota::QuotaKey {
+                                    inactive: false,
+                                    image: crate::quota::QuotaIdentity::Named(81),
+                                }]
+                            );
+                            extractor.apply_image_quota(&victims);
+                        }
+                        Chunk::Image(placed) => {
+                            events.push("place");
+                            displayed = Some(placed);
+                        }
+                        _ => {}
+                    });
+                }
+                assert_eq!(raw, wire, "split {split}");
+                assert_eq!(events, ["quota", "place"]);
+                let displayed = displayed.unwrap();
+                assert_eq!(displayed.id, Some(83));
+                assert_eq!(displayed.img.rgba.as_slice(), &[5, 6, 7, 255]);
+                assert!(oldest.upgrade().is_none());
+                assert!(extractor.kitty().image(82).is_some());
+                assert_eq!(budget.usage().0, 8);
+            }
+        }
+    }
+
+    #[test]
+    fn quota_callback_cannot_restore_work_after_reset_screen_switch_or_new_upload() {
+        for operation in 0..3 {
+            let budget = crate::GraphicsBudget::isolated(crate::GraphicsLimits {
+                image_bytes: 4,
+                retained_bytes: 8,
+                animation_bytes: 4,
+                ..crate::GraphicsLimits::default()
+            })
+            .unwrap();
+            let mut extractor = Extractor::with_budget(budget);
+            extractor.kitty_mut().feed("a=t,i=81,f=32,s=1,v=1;AQID/w==");
+            extractor.kitty_mut().feed("a=t,i=82,f=32,s=1,v=1;CQgH/w==");
+            let mut requests = 0;
+            let mut images = 0;
+            extractor.feed_with(
+                b"\x1b_Ga=T,i=83,f=32,s=1,v=1;BQYH/w==\x1b\\",
+                |extractor, chunk| match chunk {
+                    Chunk::ImageQuota(_) => {
+                        requests += 1;
+                        match operation {
+                            0 => extractor.reset_all_graphics(),
+                            1 => extractor.enter_alternate_screen(false),
+                            _ => extractor.feed_with(
+                                b"\x1b_Ga=t,i=83,f=32,s=1,v=1;CQgH/w==\x1b\\",
+                                |extractor, chunk| {
+                                    if let Chunk::ImageQuota(request) = chunk {
+                                        extractor.apply_image_quota(&request.plan(&[]).unwrap());
+                                    }
+                                },
+                            ),
+                        }
+                    }
+                    Chunk::Image(_) => images += 1,
+                    _ => {}
+                },
+            );
+            assert_eq!(requests, 1);
+            assert_eq!(images, 0);
+            if operation == 2 {
+                assert_eq!(
+                    extractor.kitty().image(83).unwrap().rgba.as_slice(),
+                    &[9, 8, 7, 255]
+                );
+            } else {
+                assert!(extractor.kitty_primary.image(83).is_none());
+                assert!(extractor.kitty_alternate.image(83).is_none());
             }
         }
     }

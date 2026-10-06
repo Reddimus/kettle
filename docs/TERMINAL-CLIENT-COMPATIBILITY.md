@@ -109,6 +109,15 @@ matching numeric id remain independent. Relative children follow parent deletion
 a child with an independent placement retains its image data. Actual retained
 render snapshots remain charged and can prevent replacement admission.
 
+At retained-byte or active image-count pressure, a completed Kitty transmission
+reclaims eligible old images so the incoming id remains addressable. Unplaced
+images come first, followed by placed images, each in creation order. The two
+screens share the byte allowance, but only an active-screen root releases an
+active count slot. External pixel snapshots stay charged until their final handle
+is released; if the available victims cannot satisfy admission, existing roots
+remain intact. The new image is decoded before eviction and must fit the existing
+process-wide staging allowance as well as the final retained allowance.
+
 Kitty relative placements preserve the exact parent `(P, Q)` through physical,
 virtual, and relative chains. A nonzero `Q` never falls back to another placement
 of the same image. Rendering and spatial deletion use the same origin. With

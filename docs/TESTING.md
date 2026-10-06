@@ -1392,6 +1392,25 @@ invalidation. A preliminary VT fixture compile error was corrected before record
 the nine runtime failures. These checks do not establish foreground UI, quiet
 performance, or release artifact acceptance.
 
+Quota eviction regressions first reproduced byte/count refusal against unchanged
+production code. Further compiled regressions exposed stale external-owner counts,
+stale scope usage, an expired collecting-API request, and unnecessary inactive-screen
+retirement for an active count slot. Planning now reads live allocation witnesses
+and current retained bytes; Core holds its registry owners through planning and
+batch removal in the existing lock order. Small budgets cover root/frame aliases,
+retained snapshots, incomplete plans, active/inactive id collisions, and byte/count
+pressure together. Portable wire tests check callback invalidation and exact raw
+bytes for split ESC/C1 terminators. Real Unix PTY tests hold the child at text
+barriers and verify the newest incoming id stays addressable, directly and with
+synchronized output. The PTY setup fills roots before opening its synchronized
+pressure frame, keeping that frame within the existing 256-entry journal. Pixel
+edit tests preserve creation age both with weak-cache detachment and with a held
+snapshot requiring a copy. These checks do not establish foreground UI pixels,
+quiet performance, or release artifact acceptance.
+Shared creation-order tests also check concurrent allocation across cloned screen
+budgets and refusal at `u64::MAX`. The allocator uses a checked compare-and-swap
+loop supported by Rust 1.89 and current stable toolchains.
+
 Native vi-mode regressions drive Alacritty's own cursor and
 selection through scrollback rotation and reflow, proving the cursor remains
 bounded and evicted selections are invalidated. OSC 133 tests pin monotonic

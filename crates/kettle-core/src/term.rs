@@ -2298,6 +2298,7 @@ fn chunk_needs_graphics_gate(chunk: &Chunk) -> bool {
             | Chunk::Terminal(_)
             | Chunk::Image(_)
             | Chunk::DeleteImages(_)
+            | Chunk::ImageQuota(_)
             | Chunk::VirtualImage { .. }
             | Chunk::RelativePlacement { .. }
             | Chunk::Animation { .. }
@@ -7182,6 +7183,7 @@ impl Terminal {
                                         relatives: &relatives,
                                     },
                                     actions: GraphicsActionContext {
+                                        inactive: &inactive_graphics,
                                         images: &images,
                                         virtuals: &virtuals,
                                         anims: &anims,
@@ -7347,6 +7349,7 @@ impl Terminal {
                                                     relatives: &relatives,
                                                 },
                                                 actions: GraphicsActionContext {
+                                                    inactive: &inactive_graphics,
                                                     images: &images,
                                                     virtuals: &virtuals,
                                                     anims: &anims,
@@ -7364,6 +7367,20 @@ impl Terminal {
                                         }
                                         Chunk::DeferredGraphics(graphics) => {
                                             deferred_graphics.defer(&mut processor, graphics);
+                                        }
+                                        Chunk::ImageQuota(request) => {
+                                            apply_image_quota(
+                                                request,
+                                                GraphicsActionContext {
+                                                    inactive: &inactive_graphics,
+                                                    images: &images,
+                                                    virtuals: &virtuals,
+                                                    anims: &anims,
+                                                    relatives: &relatives,
+                                                    geometry: &shared_geometry,
+                                                },
+                                                extractor,
+                                            );
                                         }
                                         Chunk::Image(placed) => {
                                             if let Some(batch) = place_image(
@@ -7709,6 +7726,7 @@ impl Terminal {
                                                 gaps,
                                                 state,
                                                 GraphicsActionContext {
+                                                    inactive: &inactive_graphics,
                                                     images: &images,
                                                     virtuals: &virtuals,
                                                     anims: &anims,
@@ -7887,6 +7905,7 @@ impl Terminal {
                                             relatives: &relatives,
                                         },
                                         actions: GraphicsActionContext {
+                                            inactive: &inactive_graphics,
                                             images: &images,
                                             virtuals: &virtuals,
                                             anims: &anims,
@@ -10522,6 +10541,7 @@ fn placeholder_tile_placement(
 
 #[derive(Clone, Copy)]
 struct GraphicsActionContext<'a> {
+    inactive: &'a InactiveGraphics,
     images: &'a Images,
     virtuals: &'a Virtuals,
     anims: &'a Animations,
@@ -10822,6 +10842,216 @@ fn apply_animation_snapshot(
     }
 }
 
+fn quota_key(
+    inactive: bool,
+    id: Option<u32>,
+    image: &crate::ImageData,
+) -> Option<kettle_vt::quota::QuotaKey> {
+    use kettle_vt::quota::{QuotaIdentity, QuotaKey};
+    let image = match id {
+        Some(id) => QuotaIdentity::Named(id),
+        None if image.kitty_creation_order().is_some() => {
+            QuotaIdentity::Anonymous(image.allocation_key())
+        }
+        None => return None,
+    };
+    Some(QuotaKey { inactive, image })
+}
+
+fn note_quota_placements(
+    owners: &mut Vec<kettle_vt::quota::QuotaOwner>,
+    inactive: bool,
+    placements: &[Placement],
+) {
+    for placement in placements {
+        if let Some(key) = quota_key(inactive, placement.id, &placement.img) {
+            owners.push(kettle_vt::quota::QuotaOwner::new(key, &placement.img, true));
+        }
+    }
+}
+
+fn note_quota_virtuals(
+    owners: &mut Vec<kettle_vt::quota::QuotaOwner>,
+    inactive: bool,
+    virtuals: &std::collections::HashMap<(u32, u32), VirtualEntry>,
+) {
+    for (&(id, _), entry) in virtuals {
+        if let Some(key) = quota_key(inactive, Some(id), &entry.img) {
+            owners.push(kettle_vt::quota::QuotaOwner::new(key, &entry.img, true));
+        }
+    }
+}
+
+fn note_quota_relatives(
+    owners: &mut Vec<kettle_vt::quota::QuotaOwner>,
+    inactive: bool,
+    relatives: &std::collections::HashMap<(u32, u32), RelEntry>,
+) {
+    for (&(id, _), entry) in relatives {
+        if let Some(key) = quota_key(inactive, Some(id), &entry.img) {
+            owners.push(kettle_vt::quota::QuotaOwner::new(key, &entry.img, true));
+        }
+    }
+}
+
+fn note_quota_animations(
+    owners: &mut Vec<kettle_vt::quota::QuotaOwner>,
+    inactive: bool,
+    animations: &std::collections::HashMap<u32, AnimEntry>,
+) {
+    for (&id, entry) in animations {
+        for image in &entry.imgs {
+            if let Some(key) = quota_key(inactive, Some(id), image) {
+                owners.push(kettle_vt::quota::QuotaOwner::new(key, image, false));
+            }
+        }
+    }
+}
+
+fn remove_quota_placements(
+    placements: &mut Vec<Placement>,
+    inactive: bool,
+    victims: &std::collections::HashSet<kettle_vt::quota::QuotaKey>,
+    removed: &mut std::collections::HashSet<PlacementKey>,
+) {
+    placements.retain(|placement| {
+        if quota_key(inactive, placement.id, &placement.img)
+            .is_some_and(|key| victims.contains(&key))
+        {
+            if let Some(image_id) = placement.id {
+                removed.insert(PlacementKey {
+                    image_id,
+                    placement_id: placement.placement_id,
+                });
+            }
+            false
+        } else {
+            true
+        }
+    });
+}
+
+fn remove_quota_virtuals(
+    virtuals: &mut std::collections::HashMap<(u32, u32), VirtualEntry>,
+    ids: &std::collections::HashSet<u32>,
+    removed: &mut std::collections::HashSet<PlacementKey>,
+) {
+    virtuals.retain(|&(image_id, placement_id), _| {
+        if ids.contains(&image_id) {
+            removed.insert(PlacementKey {
+                image_id,
+                placement_id,
+            });
+            false
+        } else {
+            true
+        }
+    });
+}
+
+fn remove_quota_relatives(
+    relatives: &mut std::collections::HashMap<(u32, u32), RelEntry>,
+    ids: &std::collections::HashSet<u32>,
+    mut removed: std::collections::HashSet<PlacementKey>,
+) {
+    removed.extend(
+        relatives
+            .iter()
+            .filter_map(|(&(image_id, placement_id), entry)| {
+                (ids.contains(&image_id) || ids.contains(&entry.parent_img)).then_some(
+                    PlacementKey {
+                        image_id,
+                        placement_id,
+                    },
+                )
+            }),
+    );
+    let closure = kettle_vt::kitty::relative_deletion_closure(
+        relatives.iter().map(|(&(image_id, placement_id), entry)| {
+            (
+                PlacementKey {
+                    image_id,
+                    placement_id,
+                },
+                PlacementKey {
+                    image_id: entry.parent_img,
+                    placement_id: entry.parent_placement,
+                },
+            )
+        }),
+        removed,
+    );
+    relatives.retain(|&(image_id, placement_id), _| {
+        !closure.contains(&PlacementKey {
+            image_id,
+            placement_id,
+        })
+    });
+}
+
+fn apply_image_quota(
+    request: kettle_vt::quota::QuotaRequest,
+    context: GraphicsActionContext<'_>,
+    extractor: &mut Extractor,
+) {
+    // Preserve registry ownership through planning and removal, in the existing
+    // images -> virtuals -> anims -> relatives order. Render snapshots cannot
+    // appear between the live allocation count and eviction; no Term lock is
+    // acquired here.
+    let (
+        Ok(mut placements),
+        Ok(mut virtuals),
+        Ok(mut animations),
+        Ok(mut relatives),
+        Ok(mut inactive),
+    ) = (
+        context.images.lock(),
+        context.virtuals.lock(),
+        context.anims.lock(),
+        context.relatives.lock(),
+        context.inactive.lock(),
+    )
+    else {
+        return;
+    };
+    let mut owners = Vec::new();
+    note_quota_placements(&mut owners, false, &placements);
+    note_quota_virtuals(&mut owners, false, &virtuals);
+    note_quota_animations(&mut owners, false, &animations);
+    note_quota_relatives(&mut owners, false, &relatives);
+    note_quota_placements(&mut owners, true, &inactive.placements);
+    note_quota_virtuals(&mut owners, true, &inactive.virtuals);
+    note_quota_animations(&mut owners, true, &inactive.animations);
+    note_quota_relatives(&mut owners, true, &inactive.relatives);
+    let Some(plan) = request.plan(&owners) else {
+        return;
+    };
+    let victims: std::collections::HashSet<_> = plan.iter().copied().collect();
+    let ids = |inactive| {
+        plan.iter()
+            .filter_map(|key| match key.image {
+                kettle_vt::quota::QuotaIdentity::Named(id) if key.inactive == inactive => Some(id),
+                _ => None,
+            })
+            .collect::<std::collections::HashSet<_>>()
+    };
+    let active_ids = ids(false);
+    let mut removed = std::collections::HashSet::new();
+    remove_quota_placements(&mut placements, false, &victims, &mut removed);
+    remove_quota_virtuals(&mut virtuals, &active_ids, &mut removed);
+    remove_quota_relatives(&mut relatives, &active_ids, removed);
+    animations.retain(|id, _| !active_ids.contains(id));
+    let inactive_ids = ids(true);
+    let mut removed = std::collections::HashSet::new();
+    remove_quota_placements(&mut inactive.placements, true, &victims, &mut removed);
+    remove_quota_virtuals(&mut inactive.virtuals, &inactive_ids, &mut removed);
+    remove_quota_relatives(&mut inactive.relatives, &inactive_ids, removed);
+    inactive
+        .animations
+        .retain(|id, _| !inactive_ids.contains(id));
+    extractor.apply_image_quota(&plan);
+}
+
 fn apply_graphics_chunk_at(
     term: &mut Term<EventProxy>,
     chunk: Chunk,
@@ -10838,6 +11068,7 @@ fn apply_graphics_chunk_at(
             place_image_during_sync(term, context.images, geometry, placed);
         }
         Chunk::DeleteImages(delete) => apply_kitty_delete_at(term, delete, context, extractor),
+        Chunk::ImageQuota(request) => apply_image_quota(request, context, extractor),
         Chunk::RelativePlacement {
             id,
             placement,
@@ -17227,6 +17458,7 @@ mod image_lifecycle_tests {
                             relatives,
                         },
                         actions: GraphicsActionContext {
+                            inactive,
                             images,
                             virtuals,
                             anims,
@@ -17245,6 +17477,7 @@ mod image_lifecycle_tests {
                             &mut term,
                             chunk,
                             GraphicsActionContext {
+                                inactive,
                                 images,
                                 virtuals,
                                 anims,
@@ -17411,6 +17644,248 @@ mod image_lifecycle_tests {
     fn kitty_image(id: u32, placement: u32, columns: u32, rows: u32) -> Vec<u8> {
         format!("\x1b_Ga=T,i={id},p={placement},f=32,s=1,v=1,c={columns},r={rows};AQIDBA==\x1b\\")
             .into_bytes()
+    }
+
+    #[test]
+    fn count_pressure_evicts_oldest_unplaced_root_before_displayed_images() {
+        let mut harness = SyncGraphicsHarness::new();
+        let cap = u32::try_from(kettle_vt::GraphicsLimits::default().placements).unwrap();
+        for id in 1..=cap {
+            harness.feed(format!("\x1b_Ga=t,i={id},f=32,s=1,v=1;AQID/w==\x1b\\").as_bytes());
+        }
+        harness.feed(b"\x1b_Ga=p,i=1,p=1,c=1,r=1,C=1\x1b\\");
+        assert_eq!(harness.images.lock().unwrap().len(), 1);
+        harness.feed(
+            format!(
+                "\x1b_Ga=T,i={},p=2,f=32,s=1,v=1,c=1,r=1,C=1;BQYH/w==\x1b\\",
+                cap + 1
+            )
+            .as_bytes(),
+        );
+        {
+            let placements = harness.images.lock().unwrap();
+            assert_eq!(placements.len(), 2);
+            assert_eq!(placements[0].id, Some(1));
+            assert_eq!(placements[1].id, Some(cap + 1));
+            assert_eq!(placements[1].img.rgba.as_slice(), &[5, 6, 7, 255]);
+        }
+        harness.feed(b"\x1b_Ga=p,i=2,p=3,c=1,r=1,C=1\x1b\\");
+        assert_eq!(
+            harness.images.lock().unwrap().len(),
+            2,
+            "oldest unplaced root was evicted"
+        );
+        harness.feed(b"\x1b_Ga=p,i=3,p=4,c=1,r=1,C=1\x1b\\");
+        assert_eq!(
+            harness.images.lock().unwrap().len(),
+            3,
+            "younger unplaced root remains addressable"
+        );
+    }
+
+    #[test]
+    fn active_count_pressure_preserves_same_id_on_the_inactive_screen() {
+        for synchronized in [false, true] {
+            let mut harness = SyncGraphicsHarness::new();
+            harness.feed(b"\x1b_Ga=t,i=1,f=32,s=1,v=1;CQgH/w==\x1b\\\x1b[?47h");
+            let cap = u32::try_from(kettle_vt::GraphicsLimits::default().placements).unwrap();
+            for id in 1..=cap {
+                harness.feed(format!("\x1b_Ga=t,i={id},f=32,s=1,v=1;AQID/w==\x1b\\").as_bytes());
+            }
+            harness.feed(b"\x1b_Ga=p,i=1,p=1,c=1,r=1,C=1\x1b\\");
+            if synchronized {
+                harness.feed(b"\x1b[?2026h");
+            }
+            harness.feed(
+                format!(
+                    "\x1b_Ga=T,i={},p=2,f=32,s=1,v=1,c=1,r=1,C=1;BQYH/w==\x1b\\",
+                    cap + 1
+                )
+                .as_bytes(),
+            );
+            if synchronized {
+                assert_eq!(harness.active_ids(), [1]);
+                harness.feed(b"\x1b[?2026l");
+            }
+            assert_eq!(harness.active_ids(), [1, cap + 1]);
+            harness.feed(b"\x1b[?47l\x1b_Ga=p,i=1,p=3,c=1,r=1,C=1\x1b\\");
+            let placements = harness.images.lock().unwrap();
+            assert_eq!(
+                placements.len(),
+                1,
+                "active slots cannot be reclaimed from the other screen"
+            );
+            assert_eq!(placements[0].id, Some(1));
+            assert_eq!(placements[0].img.rgba.as_slice(), &[9, 8, 7, 255]);
+        }
+    }
+
+    #[test]
+    fn count_eviction_keeps_a_retired_snapshot_alive_without_hiding_the_new_id() {
+        for synchronized in [false, true] {
+            let mut harness = SyncGraphicsHarness::new();
+            let cap = u32::try_from(kettle_vt::GraphicsLimits::default().placements).unwrap();
+            for id in 1..=cap {
+                harness.feed(
+                    format!("\x1b_Ga=T,i={id},p=1,f=32,s=1,v=1,c=1,r=1,C=1;AQID/w==\x1b\\")
+                        .as_bytes(),
+                );
+            }
+            let snapshot = harness.images.lock().unwrap()[0].img.clone();
+            let retired = Arc::downgrade(&snapshot.rgba);
+            if synchronized {
+                harness.feed(b"\x1b[?2026h");
+            }
+            harness.feed(
+                format!(
+                    "\x1b_Ga=T,i={},p=2,f=32,s=1,v=1,c=1,r=1,C=1;BQYH/w==\x1b\\",
+                    cap + 1
+                )
+                .as_bytes(),
+            );
+            if synchronized {
+                assert_eq!(harness.active_ids(), (1..=cap).collect::<Vec<_>>());
+                harness.feed(b"\x1b[?2026l");
+            }
+            assert_eq!(harness.active_ids(), (2..=cap + 1).collect::<Vec<_>>());
+            assert_eq!(snapshot.rgba.as_slice(), &[1, 2, 3, 255]);
+            assert!(retired.upgrade().is_some());
+            drop(snapshot);
+            assert!(retired.upgrade().is_none());
+        }
+    }
+
+    #[test]
+    fn quota_eviction_releases_visible_virtual_relative_and_animation_owners() {
+        for synchronized in [false, true] {
+            let mut harness = SyncGraphicsHarness::new();
+            let cap = u32::try_from(kettle_vt::GraphicsLimits::default().placements).unwrap();
+            for id in 1..=cap {
+                harness.feed(
+                    format!("\x1b_Ga=T,i={id},p=1,f=32,s=1,v=1,c=1,r=1,C=1;AQID/w==\x1b\\")
+                        .as_bytes(),
+                );
+            }
+            harness.feed(b"\x1b_Ga=p,i=1,p=2,U=1,c=1,r=1\x1b\\\x1b_Ga=p,i=1,p=3,P=1,Q=1,c=1,r=1\x1b\\\x1b_Ga=f,i=1,f=32,s=1,v=1,z=37;CQgH/w==\x1b\\");
+            let root = Arc::downgrade(&harness.images.lock().unwrap()[0].img.rgba);
+            let frame = Arc::downgrade(&harness.anims.lock().unwrap()[&1].imgs[1].rgba);
+            assert_eq!(harness.images.lock().unwrap().len(), cap as usize);
+            assert!(harness.virtuals.lock().unwrap().contains_key(&(1, 2)));
+            assert!(harness.relatives.lock().unwrap().contains_key(&(1, 3)));
+            if synchronized {
+                harness.feed(b"\x1b[?2026h");
+            }
+            harness.feed(
+                format!(
+                    "\x1b_Ga=T,i={},p=4,f=32,s=1,v=1,c=1,r=1,C=1;BQYH/w==\x1b\\",
+                    cap + 1
+                )
+                .as_bytes(),
+            );
+            if synchronized {
+                assert!(root.upgrade().is_some());
+                harness.feed(b"\x1b[?2026l");
+            }
+            assert_eq!(harness.active_ids(), (2..=cap + 1).collect::<Vec<_>>());
+            assert!(harness.virtuals.lock().unwrap().is_empty());
+            assert!(harness.relatives.lock().unwrap().is_empty());
+            assert!(!harness.anims.lock().unwrap().contains_key(&1));
+            assert!(root.upgrade().is_none());
+            assert!(frame.upgrade().is_none());
+            assert_eq!(
+                harness
+                    .images
+                    .lock()
+                    .unwrap()
+                    .last()
+                    .unwrap()
+                    .img
+                    .rgba
+                    .as_slice(),
+                &[5, 6, 7, 255]
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn quota_eviction_retains_new_ids_through_a_real_pty() {
+        use super::Terminal;
+        use alacritty_terminal::vte::ansi::CursorShape;
+        use std::time::Duration;
+
+        for synchronized in [false, true] {
+            let cap = u32::try_from(kettle_vt::GraphicsLimits::default().placements).unwrap();
+            let mut wire = String::new();
+            for id in 1..=cap {
+                wire.push_str(&format!("\x1b_Ga=t,i={id},f=32,s=1,v=1;AQID/w==\x1b\\"));
+            }
+            // Fill before the synchronized frame: its existing journal has
+            // 256 entries, so only the pressure/placement operations belong in it.
+            if synchronized {
+                wire.push_str("\x1b[?2026h");
+            }
+            wire.push_str("\x1b_Ga=p,i=1,p=1,c=1,r=1,C=1\x1b\\");
+            wire.push_str(&format!(
+                "\x1b_Ga=T,i={},p=2,f=32,s=1,v=1,c=1,r=1,C=1;BQYH/w==\x1b\\",
+                cap + 1
+            ));
+            wire.push_str("\x1b_Ga=p,i=2,p=3,c=1,r=1,C=1\x1b\\\x1b_Ga=p,i=3,p=4,c=1,r=1,C=1\x1b\\");
+            if synchronized {
+                wire.push_str("\x1b[?2026l");
+            }
+            wire.push_str("\x1b[5;1HQUOTA_PLACEMENTS_READY");
+            let escaped = wire.replace('\\', "\\\\").replace('\x1b', "\\033");
+            let script = format!("printf '{escaped}'; read finish");
+            let (tx, _rx) = crossbeam_channel::unbounded();
+            let terminal = Terminal::new(
+                &["/bin/sh".into(), "-c".into(), script],
+                None,
+                1000,
+                80,
+                24,
+                8,
+                16,
+                false,
+                CursorShape::Block,
+                None,
+                tx,
+                Arc::new(|| {}),
+            )
+            .expect("native Kitty quota PTY");
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                if terminal.term.lock().is_ok_and(|term| {
+                    super::screen_text_of(&term, 0)
+                        .text
+                        .contains("QUOTA_PLACEMENTS_READY")
+                }) {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "quota result did not reach the terminal"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let actual: Vec<_> = terminal
+                .images
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|p| (p.id, p.placement_id, p.img.rgba.as_slice().to_vec()))
+                .collect();
+            assert_eq!(
+                actual,
+                [
+                    (Some(1), 1, vec![1, 2, 3, 255]),
+                    (Some(cap + 1), 2, vec![5, 6, 7, 255]),
+                    (Some(3), 4, vec![1, 2, 3, 255]),
+                ],
+                "synchronized={synchronized}"
+            );
+            terminal.write(b"continue\n");
+        }
     }
 
     #[test]
@@ -17808,6 +18283,7 @@ mod image_lifecycle_tests {
                     relatives: &reader_relatives,
                 },
                 actions: GraphicsActionContext {
+                    inactive: &reader_inactive,
                     images: &reader_images,
                     virtuals: &reader_virtuals,
                     anims: &reader_anims,
@@ -18026,6 +18502,7 @@ mod image_lifecycle_tests {
                     relatives,
                 },
                 actions: GraphicsActionContext {
+                    inactive,
                     images,
                     virtuals,
                     anims,

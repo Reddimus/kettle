@@ -38,6 +38,7 @@ pub mod image;
 pub mod iterm;
 pub mod kitty;
 pub mod placeholder;
+pub mod quota;
 pub mod sixel;
 
 pub use completion::{CompletionCandidate, CompletionKind, CompletionList, CompletionUpdate};
