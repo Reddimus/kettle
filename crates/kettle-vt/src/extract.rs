@@ -1764,7 +1764,12 @@ impl Extractor {
             Mode::Pass => R::None,
         };
 
-        let result = ordinary_reply.map_or(result, R::Reply);
+        // A completion must not replace an animation refresh.
+        let result = if matches!(result, R::None) {
+            ordinary_reply.take().map_or(result, R::Reply)
+        } else {
+            result
+        };
 
         match result {
             R::Reply(reply) => {
@@ -1896,6 +1901,9 @@ impl Extractor {
                     Chunk::Pass(v)
                 });
             }
+        }
+        if let Some(reply) = ordinary_reply {
+            out.push(Chunk::GraphicsReply(reply));
         }
     }
 
@@ -4431,5 +4439,416 @@ mod ordinary_graphics_reply_tests {
             replies(&mut extractor, b"\x1b_Ga=q,i=96,f=24,s=1,v=1;AAAA\x1b\\"),
             ["\x1b_Gi=96;OK\x1b\\"]
         );
+    }
+}
+
+#[cfg(test)]
+mod animation_graphics_reply_tests {
+    use super::{Chunk, Extractor};
+
+    fn feed(extractor: &mut Extractor, control: &str) -> (Vec<String>, usize) {
+        let mut responses = Vec::new();
+        let mut animations = 0;
+        extractor.feed_with(
+            format!("\x1b_G{control}\x1b\\").as_bytes(),
+            |_, chunk| match chunk {
+                Chunk::GraphicsReply(reply) => responses.push(reply.encode()),
+                Chunk::Animation { .. } => animations += 1,
+                _ => {}
+            },
+        );
+        (responses, animations)
+    }
+
+    fn root() -> Extractor {
+        let mut extractor = Extractor::default();
+        feed(&mut extractor, "a=t,i=401,q=2,f=32,s=2,v=1;/wAA/wAA//8=");
+        extractor
+    }
+
+    fn assert_error(response: &(Vec<String>, usize), prefix: &str) {
+        assert_eq!(response.0.len(), 1);
+        assert!(response.0[0].starts_with(prefix), "{:?}", response.0);
+        assert!(response.0[0].ends_with("\x1b\\"));
+        assert_eq!(response.1, 0);
+    }
+
+    #[test]
+    fn missing_image_composition_reports_no_entry() {
+        let mut extractor = Extractor::default();
+        assert_error(
+            &feed(&mut extractor, "a=c,i=401,r=1,c=2,q=1"),
+            "\x1b_Gi=401;ENOENT:",
+        );
+    }
+
+    #[test]
+    fn missing_composition_frame_does_not_mutate_existing_pixels() {
+        for control in ["a=c,i=401,r=99,c=1,q=1", "a=c,i=401,r=1,c=99,q=1"] {
+            let mut extractor = root();
+            let before = extractor
+                .kitty()
+                .image(401)
+                .unwrap()
+                .rgba
+                .as_slice()
+                .to_vec();
+            assert_error(&feed(&mut extractor, control), "\x1b_Gi=401;ENOENT:");
+            assert_eq!(
+                extractor.kitty().image(401).unwrap().rgba.as_slice(),
+                before
+            );
+        }
+    }
+
+    #[test]
+    fn out_of_bounds_composition_is_refused_without_clipping_or_mutation() {
+        for control in [
+            "a=c,i=401,r=1,c=1,w=2,h=1,X=1,x=0,C=1,q=1",
+            "a=c,i=401,r=1,c=1,w=2,h=1,X=0,x=1,C=1,q=1",
+            "a=c,i=401,r=1,c=1,w=1,h=1,Y=1,x=1,C=1,q=1",
+            "a=c,i=401,r=1,c=1,w=1,h=1,X=1,y=1,C=1,q=1",
+        ] {
+            let mut extractor = root();
+            let before = extractor
+                .kitty()
+                .image(401)
+                .unwrap()
+                .rgba
+                .as_slice()
+                .to_vec();
+            assert_error(&feed(&mut extractor, control), "\x1b_Gi=401;EINVAL:");
+            assert_eq!(
+                extractor.kitty().image(401).unwrap().rgba.as_slice(),
+                before
+            );
+        }
+    }
+
+    #[test]
+    fn overlapping_self_composition_is_refused_without_mutation() {
+        let mut extractor = root();
+        let before = extractor
+            .kitty()
+            .image(401)
+            .unwrap()
+            .rgba
+            .as_slice()
+            .to_vec();
+        assert_error(
+            &feed(&mut extractor, "a=c,i=401,r=1,c=1,w=2,h=1,X=0,x=0,C=1,q=1"),
+            "\x1b_Gi=401;EINVAL:",
+        );
+        assert_eq!(
+            extractor.kitty().image(401).unwrap().rgba.as_slice(),
+            before
+        );
+    }
+
+    #[test]
+    fn disjoint_self_composition_preserves_refresh_and_emits_one_reply() {
+        let mut extractor = root();
+        let (response, animations) = feed(&mut extractor, "a=c,i=401,r=1,c=1,w=1,h=1,X=1,x=0,C=1");
+        assert_eq!(response, ["\x1b_Gi=401;OK\x1b\\"]);
+        assert_eq!(animations, 1);
+        assert_eq!(
+            extractor.kitty().image(401).unwrap().rgba.as_slice(),
+            &[0, 0, 255, 255, 0, 0, 255, 255]
+        );
+    }
+
+    #[test]
+    fn frame_upload_to_a_missing_image_reports_no_entry() {
+        let mut extractor = Extractor::default();
+        assert_error(
+            &feed(&mut extractor, "a=f,i=402,q=1,f=24,s=1,v=1;AAAA"),
+            "\x1b_Gi=402;ENOENT:",
+        );
+        assert!(extractor.kitty().frames(402).is_empty());
+    }
+
+    #[test]
+    fn completed_frame_upload_reports_its_actual_frame_and_refreshes_animation() {
+        let mut extractor = root();
+        let (response, animations) = feed(&mut extractor, "a=f,i=401,f=24,s=2,v=1;AAAAAAAA");
+        assert_eq!(response, ["\x1b_Gi=401,r=2;OK\x1b\\"]);
+        assert_eq!(animations, 1);
+        assert_eq!(extractor.kitty().frames(401).len(), 1);
+        assert_eq!(extractor.kitty().frames(401)[0].gap_ms, 40);
+    }
+
+    #[test]
+    fn chunked_frame_retains_original_identity_and_final_quiet_override() {
+        let mut extractor = root();
+        let (partial, animations) = feed(&mut extractor, "a=f,i=401,q=2,f=32,s=2,v=1,m=1;/wAA");
+        assert!(partial.is_empty());
+        assert_eq!(animations, 0);
+        let (response, animations) = feed(&mut extractor, "a=f,m=0,q=1;!");
+        assert_error(&(response, animations), "\x1b_Gi=401;EINVAL:");
+        assert!(extractor.kitty().frames(401).is_empty());
+    }
+
+    #[test]
+    fn frame_quiet_success_keeps_refresh_without_reply() {
+        let mut extractor = root();
+        let (response, animations) = feed(&mut extractor, "a=f,i=401,q=1,f=24,s=2,v=1;AAAAAAAA");
+        assert!(response.is_empty());
+        assert_eq!(animations, 1);
+        assert_eq!(extractor.kitty().frames(401).len(), 1);
+    }
+
+    #[test]
+    fn suppressed_composition_failure_remains_silent() {
+        let mut extractor = root();
+        let (response, animations) = feed(&mut extractor, "a=c,i=401,r=1,c=99,q=2");
+        assert!(response.is_empty());
+        assert_eq!(animations, 0);
+    }
+
+    #[test]
+    fn frame_upload_refuses_unavailable_retained_storage_without_refresh_or_mutation() {
+        let limits = crate::GraphicsLimits {
+            image_bytes: 8,
+            retained_bytes: 16,
+            process_cpu_bytes: 64 * 1024,
+            ..crate::GraphicsLimits::default()
+        };
+        let budget = crate::GraphicsBudget::isolated(limits).expect("small valid retained limit");
+        let held = crate::ImageData::new_with_budget(2, 1, vec![0; 8], &budget)
+            .expect("external retained snapshot");
+        let mut extractor = Extractor::with_budget(budget.clone());
+        feed(&mut extractor, "a=t,i=401,q=2,f=32,s=2,v=1;/wAA/wAA//8=");
+        let before = extractor
+            .kitty()
+            .image(401)
+            .unwrap()
+            .rgba
+            .as_slice()
+            .to_vec();
+        assert_error(
+            &feed(&mut extractor, "a=f,i=401,q=1,f=24,s=2,v=1;AAAAAAAA"),
+            "\x1b_Gi=401;ENOSPC:",
+        );
+        assert!(extractor.kitty().frames(401).is_empty());
+        assert_eq!(
+            extractor.kitty().image(401).unwrap().rgba.as_slice(),
+            before
+        );
+        assert_eq!(held.rgba.as_slice(), &[0; 8]);
+        assert_eq!(budget.retained_cpu_bytes(), 16);
+    }
+
+    #[test]
+    fn numbered_frame_upload_reports_generated_id_and_actual_append_index() {
+        let mut extractor = Extractor::default();
+        let (root_response, _) = feed(&mut extractor, "a=t,I=31,f=24,s=1,v=1;AAAA");
+        let id = root_response[0]
+            .strip_prefix("\x1b_Gi=")
+            .and_then(|value| value.strip_suffix(",I=31;OK\x1b\\"))
+            .and_then(|value| value.parse::<u32>().ok())
+            .expect("generated root id");
+        let (response, animations) = feed(&mut extractor, "a=f,I=31,r=99,f=24,s=1,v=1;AAAA");
+        assert_eq!(response.len(), 1);
+        let header = response[0]
+            .strip_prefix("\x1b_G")
+            .and_then(|value| value.strip_suffix(";OK\x1b\\"))
+            .expect("successful frame response");
+        let fields: std::collections::HashMap<_, _> = header
+            .split(',')
+            .filter_map(|field| field.split_once('='))
+            .collect();
+        assert_eq!(fields.get("I"), Some(&"31"));
+        assert_eq!(fields.get("r"), Some(&"2"));
+        if let Some(response_id) = fields.get("i") {
+            assert_eq!(response_id.parse::<u32>().unwrap(), id);
+        }
+        assert_eq!(animations, 1);
+        assert_eq!(extractor.kitty().frames(id).len(), 1);
+    }
+    #[test]
+    fn successful_animation_effect_precedes_its_reply() {
+        for control in [
+            "a=f,i=401,f=24,s=2,v=1;AAAAAAAA",
+            "a=c,i=401,r=1,c=1,w=1,h=1,X=1,x=0,C=1",
+        ] {
+            let mut extractor = root();
+            let mut events = Vec::new();
+            extractor.feed_with(
+                format!("\x1b_G{control}\x1b\\").as_bytes(),
+                |_, chunk| match chunk {
+                    Chunk::Animation { .. } => events.push("animation"),
+                    Chunk::GraphicsReply(_) => events.push("reply"),
+                    _ => {}
+                },
+            );
+            assert_eq!(events, ["animation", "reply"]);
+        }
+    }
+
+    #[test]
+    fn successful_animation_with_a_reply_emits_raw_wire_bytes_once() {
+        for control in [
+            "a=f,i=401,f=24,s=2,v=1;AAAAAAAA",
+            "a=c,i=401,r=1,c=1,w=1,h=1,X=1,x=0,C=1",
+        ] {
+            let mut extractor = root();
+            extractor.set_raw_tap(true);
+            let wire = format!("\x1b_G{control}\x1b\\").into_bytes();
+            let mut raw_chunks = Vec::new();
+            let mut replies = 0;
+            extractor.feed_with(&wire, |_, chunk| match chunk {
+                Chunk::Raw(bytes) => raw_chunks.push(bytes),
+                Chunk::GraphicsReply(_) => replies += 1,
+                _ => {}
+            });
+            assert_eq!(raw_chunks, [wire]);
+            assert_eq!(replies, 1);
+        }
+    }
+    #[test]
+    fn omitted_composition_source_reports_a_missing_frame() {
+        let mut extractor = root();
+        feed(&mut extractor, "a=f,i=401,q=2,f=24,s=2,v=1;AAAAAAAA");
+        assert_error(
+            &feed(&mut extractor, "a=c,i=401,c=2,w=1,h=1,X=1,x=0,C=1"),
+            "\x1b_Gi=401;ENOENT:",
+        );
+        assert_eq!(
+            extractor.kitty().frames(401)[0].img.rgba.as_slice(),
+            &[0, 0, 0, 255, 0, 0, 0, 255],
+        );
+        assert_eq!(
+            extractor.kitty().image(401).unwrap().rgba.as_slice(),
+            &[255, 0, 0, 255, 0, 0, 255, 255],
+        );
+    }
+
+    #[test]
+    fn missing_frame_background_is_not_replaced_with_transparent_pixels() {
+        let mut extractor = root();
+        assert_error(
+            &feed(&mut extractor, "a=f,i=401,c=99,q=1,f=24,s=1,v=1;AAAA"),
+            "\x1b_Gi=401;EINVAL:",
+        );
+        assert!(extractor.kitty().frames(401).is_empty());
+    }
+
+    #[test]
+    fn zero_composition_frame_is_missing_instead_of_the_root() {
+        for control in [
+            "a=c,i=401,r=0,c=1,w=1,h=1,X=1,x=0,C=1,q=1",
+            "a=c,i=401,r=1,c=0,w=1,h=1,X=1,x=0,C=1,q=1",
+        ] {
+            let mut extractor = root();
+            assert_error(&feed(&mut extractor, control), "\x1b_Gi=401;ENOENT:");
+            assert_eq!(
+                extractor.kitty().image(401).unwrap().rgba.as_slice(),
+                &[255, 0, 0, 255, 0, 0, 255, 255],
+            );
+        }
+    }
+
+    #[test]
+    fn animation_control_before_upload_does_not_prime_future_playback() {
+        let mut extractor = Extractor::default();
+        assert_error(
+            &feed(&mut extractor, "a=a,i=401,s=3,q=1"),
+            "\x1b_Gi=401;ENOENT:",
+        );
+        assert!(extractor.kitty().animation(401).is_none());
+        feed(&mut extractor, "a=t,i=401,q=2,f=24,s=1,v=1;AAAA");
+        feed(&mut extractor, "a=f,i=401,q=2,f=24,s=1,v=1;AAAA");
+        assert!(
+            !extractor
+                .kitty()
+                .animation(401)
+                .is_some_and(|state| state.running)
+        );
+    }
+
+    #[test]
+    fn out_of_bounds_frame_patch_is_not_clipped_or_retained() {
+        let mut extractor = root();
+        assert_error(
+            &feed(&mut extractor, "a=f,i=401,x=1,q=1,f=24,s=2,v=1;AAAAAAAA"),
+            "\x1b_Gi=401;EINVAL:",
+        );
+        assert!(extractor.kitty().frames(401).is_empty());
+        assert_eq!(
+            extractor.kitty().image(401).unwrap().rgba.as_slice(),
+            &[255, 0, 0, 255, 0, 0, 255, 255],
+        );
+    }
+
+    #[test]
+    fn invalid_animation_control_selectors_preserve_current_frame_and_root_gap() {
+        let mut extractor = root();
+        feed(&mut extractor, "a=f,i=401,q=2,f=24,s=2,v=1;AAAAAAAA");
+        assert!(
+            feed(&mut extractor, "a=a,i=401,c=2,r=1,z=70,s=1")
+                .0
+                .is_empty()
+        );
+        assert!(feed(&mut extractor, "a=a,i=401,c=99,r=0,z=48").0.is_empty());
+        let state = extractor.kitty().animation(401).unwrap();
+        assert_eq!(state.current, 2);
+        assert_eq!(state.root_gap, 70);
+    }
+
+    #[test]
+    fn appended_partial_frame_does_not_implicitly_use_root_background() {
+        for selector in ["c=0", "r=0", "r=99"] {
+            let mut extractor = root();
+            let (response, animations) = feed(
+                &mut extractor,
+                &format!("a=f,i=401,{selector},x=1,X=1,f=32,s=1,v=1;AAAA/w=="),
+            );
+            assert_eq!(response, ["\x1b_Gi=401,r=2;OK\x1b\\"]);
+            assert_eq!(animations, 1);
+            assert_eq!(
+                extractor.kitty().frames(401)[0].img.rgba.as_slice(),
+                &[0, 0, 0, 0, 0, 0, 0, 255],
+            );
+            assert_eq!(
+                extractor.kitty().image(401).unwrap().rgba.as_slice(),
+                &[255, 0, 0, 255, 0, 0, 255, 255],
+            );
+        }
+    }
+
+    #[test]
+    fn zero_composition_dimensions_copy_the_full_image() {
+        let mut extractor = root();
+        feed(&mut extractor, "a=f,i=401,q=2,f=24,s=2,v=1;AAAAAAAA");
+        let (response, animations) = feed(&mut extractor, "a=c,i=401,r=1,c=2,w=0,h=0,C=1");
+        assert_eq!(response, ["\x1b_Gi=401;OK\x1b\\"]);
+        assert_eq!(animations, 1);
+        assert_eq!(
+            extractor.kitty().frames(401)[0].img.rgba.as_slice(),
+            &[255, 0, 0, 255, 0, 0, 255, 255],
+        );
+    }
+
+    #[test]
+    fn composition_scratch_does_not_require_extra_retained_storage() {
+        let budget = crate::GraphicsBudget::isolated(crate::GraphicsLimits {
+            image_bytes: 8,
+            retained_bytes: 16,
+            process_cpu_bytes: 64 * 1024,
+            ..crate::GraphicsLimits::default()
+        })
+        .expect("two retained frames fit");
+        let mut extractor = Extractor::with_budget(budget.clone());
+        feed(&mut extractor, "a=t,i=401,q=2,f=32,s=2,v=1;/wAA/wAA//8=");
+        feed(&mut extractor, "a=f,i=401,q=2,f=24,s=2,v=1;AAAAAAAA");
+        assert_eq!(budget.retained_cpu_bytes(), 16);
+        let (response, animations) = feed(&mut extractor, "a=c,i=401,r=1,c=2,w=2,h=1,C=1");
+        assert_eq!(response, ["\x1b_Gi=401;OK\x1b\\"]);
+        assert_eq!(animations, 1);
+        assert_eq!(
+            extractor.kitty().frames(401)[0].img.rgba.as_slice(),
+            &[255, 0, 0, 255, 0, 0, 255, 255],
+        );
+        assert_eq!(budget.retained_cpu_bytes(), 16);
     }
 }

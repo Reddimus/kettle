@@ -79,7 +79,13 @@ refactor. The Kitty items need protocol probes and have no current consumer.
   level. Placement success follows actual Core admission, including
   synchronized-output replay and its deadline. Capability queries retain
   their immediate wire-order replies. Frame upload (`f`) and composition
-  (`c`) replies remain incomplete.
+  (`c`) now have typed completion paths and focused regressions in the working
+  candidate. The compiled pre-fix baseline reproduced the failures. Post-fix
+  VT/Core tests, lint, builds, minimum-toolchain regressions, and four actual
+  waiting PTY children pass. Four compiled mutation checks reproduced their
+  expected runtime failures before source restoration. The full ordinary
+  workspace gate passes, including headless rendering tests and documentation
+  builds. Independent review and merge remain pending.
 - ~~**Inline-image scrolling inside partial DECSTBM margins.**~~ Done in the
   next release: the terminal engine now emits bounded, ordered scroll-region
   events with direction, margins, count, and monotonic screen-top ids. Images
@@ -944,8 +950,9 @@ destination cells, pixel offsets, aspect ratio, and cursor-movement intent.
 Exact `(image id, placement id)` `Q=` parent resolution now uses one keyed
 resolver for rendering and live/synchronized spatial deletion, including chains
 and virtual prototypes. Ordinary transmission/placement acknowledgements now
-follow actual decode/storage/placement results; frame and composition replies
-remain tracked above.
+follow actual decode/storage/placement results. Frame and composition completion
+also pass compiled regression and workspace validation; their independent
+review and merge remain tracked above.
 
 ## Deferred from the #187 review round
 

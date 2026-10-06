@@ -143,6 +143,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   treated as absent, unrecognized actions cannot become uploads, and a delete
   refused for conflicting identifiers leaves partial uploads intact.
 
+- Kitty animation frame uploads and composition return completion replies after
+  refreshing animation state. Uploads report the actual one-based frame number.
+  Missing frames and invalid composition rectangles leave existing pixels intact;
+  zero composition dimensions use the full source canvas. Partial appended frames
+  use a transparent canvas unless a background color or existing frame is selected.
+  Animation controls require an existing root and preserve the current frame
+  when given an invalid selector.
+
 - New Kitty image ids remain addressable at image-count and retained-byte limits
   by reclaiming eligible old images, with unplaced images first. Pixel snapshots
   keep their charge, and active count pressure preserves the other screen's roots.

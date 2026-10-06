@@ -247,6 +247,28 @@ impl ImageData {
     /// empty intersection yields `None`. Used to slice the tile of a kitty
     /// virtual image that a single Unicode-placeholder cell displays.
     pub fn crop(&self, x: u32, y: u32, w: u32, h: u32) -> Option<ImageData> {
+        self.crop_accounted(x, y, w, h, self.rgba.reservation.budget(), false)
+    }
+
+    /// A composition-only patch: counts against process CPU memory while
+    /// alive, without consuming retained image space. Never store this patch.
+    pub(crate) fn crop_transient(&self, x: u32, y: u32, w: u32, h: u32) -> Option<ImageData> {
+        self.crop_accounted(x, y, w, h, self.rgba.reservation.budget(), true)
+    }
+
+    pub(crate) fn copy_with_budget(&self, budget: &GraphicsBudget) -> Option<ImageData> {
+        self.crop_accounted(0, 0, self.width, self.height, budget, false)
+    }
+
+    fn crop_accounted(
+        &self,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+        budget: &GraphicsBudget,
+        transient: bool,
+    ) -> Option<ImageData> {
         if x >= self.width || y >= self.height {
             return None;
         }
@@ -256,7 +278,11 @@ impl ImageData {
             return None;
         }
         let bytes = rgba_bytes(w, h)?;
-        let reservation = self.rgba.reservation.budget().reserve_image_cpu(bytes)?;
+        let reservation = if transient {
+            budget.reserve_transient_cpu(bytes)?
+        } else {
+            budget.reserve_image_cpu(bytes)?
+        };
         let mut out = Vec::new();
         out.try_reserve_exact(bytes).ok()?;
         for row in 0..h {
@@ -906,5 +932,69 @@ mod tests {
             snapshot,
             "off-canvas origin is a no-op"
         );
+    }
+}
+
+#[cfg(test)]
+mod transient_crop_tests {
+    use super::*;
+    use crate::GraphicsLimits;
+
+    fn budget(retained_bytes: usize) -> GraphicsBudget {
+        GraphicsBudget::isolated(GraphicsLimits {
+            image_bytes: 8,
+            retained_bytes,
+            animation_bytes: 8,
+            process_cpu_bytes: 64,
+            process_gpu_bytes: 64,
+            ..GraphicsLimits::default()
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn composition_patch_counts_process_memory_without_retained_scope() {
+        let account = budget(8);
+        let root =
+            ImageData::new_with_budget(2, 1, vec![1, 2, 3, 255, 4, 5, 6, 255], &account).unwrap();
+        let patch = root
+            .crop_transient(1, 0, 1, 1)
+            .expect("temporary patch fits process space");
+        assert_eq!(patch.rgba.as_slice(), &[4, 5, 6, 255]);
+        assert_eq!(account.usage(), (12, 8, 0, 0));
+        assert!(root.crop(1, 0, 1, 1).is_none());
+        let held = patch.clone();
+        drop(patch);
+        assert_eq!(account.usage(), (12, 8, 0, 0));
+        drop(held);
+        assert_eq!(account.usage(), (8, 8, 0, 0));
+    }
+
+    #[test]
+    fn disjoint_self_composition_succeeds_at_unchanged_retained_size() {
+        let account = budget(8);
+        let mut root =
+            ImageData::new_with_budget(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255], &account)
+                .unwrap();
+        let allocation = root.rgba.as_ptr();
+        let patch = root.crop_transient(1, 0, 1, 1).unwrap();
+        assert!(root.compose(&patch, 0, 0, true));
+        assert_eq!(root.rgba.as_ptr(), allocation);
+        assert_eq!(root.rgba.as_slice(), &[0, 0, 255, 255, 0, 0, 255, 255]);
+        assert_eq!(account.usage(), (12, 8, 0, 0));
+        drop(patch);
+        assert_eq!(account.usage(), (8, 8, 0, 0));
+    }
+
+    #[test]
+    fn ordinary_crops_keep_their_retained_charge_and_clipping_contract() {
+        let account = budget(16);
+        let root =
+            ImageData::new_with_budget(2, 1, vec![1, 2, 3, 255, 4, 5, 6, 255], &account).unwrap();
+        let patch = root.crop(1, 0, 99, 99).unwrap();
+        assert_eq!((patch.width, patch.height), (1, 1));
+        assert_eq!(account.usage(), (12, 12, 0, 0));
+        drop(patch);
+        assert_eq!(account.usage(), (8, 8, 0, 0));
     }
 }
