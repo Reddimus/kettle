@@ -2194,6 +2194,44 @@ and disabled live gestures, and actual mixed-DPI monitors remain unverified by
 this check. Native window selection failed during the later cases; only the
 Auto-mode hidden bar was confirmed by its rendered capture and geometry.
 
+The subsequent saturation and native-caption candidate has separate coverage.
+Two new accent cases compiled and failed at runtime against the pre-fix
+production module, reproducing color reuse at a fully occupied palette and
+uneven reuse counts. The isolated harness only supplies the `Rgb` value type;
+whole-crate validation remains separate. The fix excludes the opener's RGB
+when another hue exists, balances saturated reuse, and preserves seeded ties,
+duplicate-color and single-hue behavior. `native_drag.rs` checks caption-event
+qualification, mismatched windows, released pointers, double clicks, non-pointer
+events, client/outside coordinates, and single-tab/config eligibility.
+`detach.rs` checks conversion between a shared desktop and different target
+scales, including negative monitor origins. On October 6, the separate candidate
+passed formatting, warnings-denied all-target UI Clippy, the application build,
+and all 885 UI tests on both stable Rust and Rust 1.89.0. The 22 named accent,
+caption and drag cases ran on both toolchains. Two private compiled mutations
+removed opener exclusion or reuse counting; each exact regression failed at
+runtime with zero passes, one failure and no ignores. Repository sources were
+unchanged throughout. This owning-crate check does not establish foreground
+gesture behavior for the new bridge. The subsequent uninterrupted ordinary
+workspace gate passed formatting, warnings-denied workspace and standalone Core
+Clippy, all-target builds, unit/integration/doc tests, both media worker feature
+configurations, and warnings-denied Rustdoc. Its 88 reports contain 3,092 passes,
+zero failures and two ignores, including nested subprocess and feature repeats;
+these are not unique-test counts. The ignored argument-probe helper ran through
+its caller; the release-mode contrast benchmark was not run. The native macOS
+video-poster check and visual bell, menu and scrollbar pixel assertions passed.
+All 93 recorded process groups and the wrapper were gone after result consumption,
+with the candidate sources unchanged. This does not establish a release,
+quiet performance, foreground caption gestures or native mixed-monitor behavior.
+During a separate Auto fixture experiment, the app appeared in the running-app
+inventory, but native
+selection by its full app path returned `cgWindowNotFound` before any input.
+The fixture and all recorded PTY groups were closed and reaped; the candidate
+was not launched, and that attempt provides no gesture acceptance. Native
+acceptance must additionally drag an Auto
+window by its caption onto the hidden target band, keep the original PTYs,
+exercise off-target drops and held-button Escape, and leave ordinary multi-tab
+caption moves and programmatic geometry changes undocked.
+
 The tab tear-off drag is a
 pure FSM (`DragState` in `kettle-ui/src/detach.rs`) tested with no
 window or GPU — idle→armed→dragging threshold, mouse-up/Esc-cancel

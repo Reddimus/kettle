@@ -120,7 +120,7 @@ impl DragState {
     }
 }
 
-/// All inputs are physical pixels in winit's desktop coordinate system.
+/// All inputs share one desktop coordinate system.
 pub(crate) fn frame_grab_offset(
     client_origin: (f64, f64),
     frame_origin: (f64, f64),
@@ -149,9 +149,42 @@ pub(crate) fn manual_drag_step(
     }
 }
 
+pub(crate) fn client_to_desktop(origin: (f64, f64), pointer: (f64, f64), scale: f64) -> (f64, f64) {
+    (origin.0 + pointer.0 / scale, origin.1 + pointer.1 / scale)
+}
+
+pub(crate) fn desktop_to_client(origin: (f64, f64), pointer: (f64, f64), scale: f64) -> (f64, f64) {
+    (
+        (pointer.0 - origin.0) * scale,
+        (pointer.1 - origin.1) * scale,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mixed_scale_docking_uses_the_target_windows_scale() {
+        let screen = client_to_desktop((500.0, 100.0), (120.0, 24.0), 2.0);
+        assert_eq!(screen, (560.0, 112.0));
+        assert_eq!(
+            desktop_to_client((500.0, 100.0), screen, 2.0),
+            (120.0, 24.0)
+        );
+        assert_eq!(desktop_to_client((540.0, 100.0), screen, 1.0), (20.0, 12.0));
+        assert_eq!(desktop_to_client((540.0, 100.0), screen, 1.5), (30.0, 18.0));
+    }
+
+    #[test]
+    fn negative_monitor_origins_and_physical_desktops_keep_their_coordinates() {
+        let screen = client_to_desktop((-900.0, -200.0), (40.0, 20.0), 1.0);
+        assert_eq!(screen, (-860.0, -180.0));
+        assert_eq!(
+            desktop_to_client((-900.0, -200.0), screen, 1.0),
+            (40.0, 20.0)
+        );
+    }
 
     #[test]
     fn lone_drag_first_motion_keeps_press_anchor_and_hits_target() {

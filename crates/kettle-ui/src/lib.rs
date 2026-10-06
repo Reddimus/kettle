@@ -57,6 +57,7 @@ mod macos_cursor_layer;
 mod macos_dock;
 mod modal_input;
 mod mux;
+mod native_drag;
 mod native_material;
 mod notifications;
 mod paste_image;

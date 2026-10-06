@@ -8088,7 +8088,8 @@ struct TornDrag {
     /// race the WM actually taking the move grab), and the native→manual
     /// demotion fires off it when the WM never takes the drag at all.
     started: std::time::Instant,
-    /// Cursor offset from the torn window's FRAME top-left in physical px,
+    /// Cursor offset from the torn window's FRAME top-left in drag coordinates
+    /// (macOS desktop points, physical pixels on Windows/X11),
     /// chosen at tear time so the pointer holds the tab. `Moved(pos) + grab`
     /// approximates the live screen cursor during the native move loop
     /// (winit's `Moved` reports the frame position on Windows — verified in
@@ -8105,6 +8106,9 @@ struct TornDrag {
     /// still holds mouse capture, repositions the torn window from its own
     /// CursorMoved stream, and its left-release is the drop.
     native: bool,
+    /// A native caption gesture is OS-owned and must never be demoted to
+    /// the manual-follow rescue used for failed tab-drag handoffs.
+    caption: bool,
     /// At least one `Moved` arrived since the handoff. Gates the
     /// pointer-event drop heuristic against the PostMessage race on
     /// Windows (a stray client mouse-move can slip in between
@@ -18839,7 +18843,15 @@ impl App {
                     return;
                 };
                 self.release_focus_report_to(ws, &dt);
-                match self.open_window(event_loop, WindowOpen::AdoptTab(dt), None, None) {
+                match self.open_window(
+                    event_loop,
+                    WindowOpen::AdoptTab {
+                        tab: dt,
+                        source_color: ws.accent.as_ref().map(|accent| accent.color),
+                    },
+                    None,
+                    None,
+                ) {
                     Ok(_) => {
                         // The tab LEFT this window, so plugins see a tab-close
                         // event.
@@ -18859,7 +18871,7 @@ impl App {
                             w.request_redraw();
                         }
                     }
-                    Err(WindowOpen::AdoptTab(dt)) => {
+                    Err(WindowOpen::AdoptTab { tab: dt, .. }) => {
                         // Window creation failed — put the live tab back
                         // exactly where it was; nothing is lost.
                         log::warn!(
@@ -27164,7 +27176,7 @@ impl ApplicationHandler<UserEvent> for App {
         // X11 tear-off frozen-drag rescue: reposition/dock from the live
         // pointer when the WM or the carrier's event stream stops delivering.
         // Returns a wait budget that keeps it ticking.
-        let torn_tick_wait = self.torn_drag_pointer_tick();
+        let torn_tick_wait = self.torn_drag_pointer_tick(event_loop);
         let now = std::time::Instant::now();
         if self
             .config_reload_deadline
@@ -27239,7 +27251,10 @@ enum WindowOpen {
     Fresh { cwd: Option<String> },
     /// Adopt a tab detached from another window — the live tab move /
     /// tear-off. PTYs keep running; nothing respawns.
-    AdoptTab(crate::mux::DetachedTab),
+    AdoptTab {
+        tab: crate::mux::DetachedTab,
+        source_color: Option<kettle_config::Rgb>,
+    },
     /// Respawn one saved window of a multi-window session (tabs + geometry)
     /// on `--restore` / `restore-session = true` startup.
     Restore(crate::session::SWindow),
@@ -27323,11 +27338,38 @@ fn cursor_screen_pos() -> Option<(f64, f64)> {
     x11_pointer_state().map(|(pos, _)| pos)
 }
 
-/// macOS: no live-cursor query wired up — manual-follow there rides the
-/// source window's own CursorMoved stream, which is exact already.
-#[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
+#[cfg(target_os = "macos")]
+fn cursor_screen_pos() -> Option<(f64, f64)> {
+    crate::native_drag::cursor_position()
+}
+
+#[cfg(not(any(target_os = "windows", unix)))]
 fn cursor_screen_pos() -> Option<(f64, f64)> {
     None
+}
+
+// AppKit's global desktop uses points; winit's physical positions multiply
+// the entire desktop origin by each window's scale. Normalize before comparing
+// windows so a Retina donor can dock onto a non-Retina target.
+fn drag_coordinate_scale(window: &Window) -> f64 {
+    if cfg!(target_os = "macos") {
+        window.scale_factor()
+    } else {
+        1.0
+    }
+}
+
+fn drag_position(window: &Window, position: winit::dpi::PhysicalPosition<i32>) -> (f64, f64) {
+    let scale = drag_coordinate_scale(window);
+    (f64::from(position.x) / scale, f64::from(position.y) / scale)
+}
+
+fn drag_native_position(position: (f64, f64)) -> winit::dpi::Position {
+    if cfg!(target_os = "macos") {
+        winit::dpi::LogicalPosition::new(position.0, position.1).into()
+    } else {
+        winit::dpi::PhysicalPosition::new(position.0 as i32, position.1 as i32).into()
+    }
 }
 
 /// Re-dock, Windows: per-window alpha for the dock-hover
@@ -27484,8 +27526,8 @@ const DOCK_HOVER_ALPHA: u8 = 150;
 /// GetAsyncKeyState reports PHYSICAL buttons, so the primary button of a
 /// left-handed mouse is VK_RBUTTON); X11 reads the button mask from the
 /// same `QueryPointer` the live-cursor path uses (the server pre-applies
-/// the pointer mapping there). False elsewhere (macOS manual-follow and
-/// Wayland never produce a release-while-held; an X11 query failure also
+/// the pointer mapping there). macOS uses the combined session button state.
+/// False elsewhere (Wayland never produces a release-while-held; an X11 query failure also
 /// degrades to false, which errs toward committing a real drop rather
 /// than dropping user data on a cancel we cannot prove).
 fn primary_button_physically_held() -> bool {
@@ -27506,7 +27548,11 @@ fn primary_button_physically_held() -> bool {
         };
         (unsafe { GetAsyncKeyState(i32::from(vk.0)) } as u16) & 0x8000 != 0
     }
-    #[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
+    #[cfg(target_os = "macos")]
+    {
+        crate::native_drag::primary_held()
+    }
+    #[cfg(not(any(target_os = "windows", unix)))]
     false
 }
 
@@ -28300,18 +28346,22 @@ impl App {
         &mut self,
         event_loop: &ActiveEventLoop,
         open: WindowOpen,
-        pos: Option<winit::dpi::PhysicalPosition<i32>>,
+        pos: Option<winit::dpi::Position>,
         size: Option<winit::dpi::PhysicalSize<u32>>,
     ) -> Result<u64, WindowOpen> {
         let Some(gpu) = self.gpu.clone() else {
             log::warn!("open_window: GPU context not ready (window 1 still initializing)");
             return Err(open);
         };
+        let source_color = match &open {
+            WindowOpen::AdoptTab { source_color, .. } => *source_color,
+            _ => None,
+        };
         // A tear-off window opens Normal (it must be visible at the drop
         // point); a fresh window honors the configured window-state except
         // Hidden (an invisible NewWindow helps nobody).
         let state = match (&open, self.cfg.window_state) {
-            (WindowOpen::AdoptTab(_), _) | (WindowOpen::Restore(_), _) => {
+            (WindowOpen::AdoptTab { .. }, _) | (WindowOpen::Restore(_), _) => {
                 kettle_config::WindowState::Normal
             }
             (_, kettle_config::WindowState::Hidden) => kettle_config::WindowState::Normal,
@@ -28402,6 +28452,10 @@ impl App {
         ws.renderer = Some(renderer);
         ws.accessibility = Some(accessibility);
         ws.window = Some(window);
+        ws.native_caption_drag = ws
+            .window
+            .as_deref()
+            .map(crate::native_drag::NativeCaptionDrag::install);
         ws.native_material = Some(native_material);
         self.sync_output_frame_budget(&mut ws, true);
         let area = self.area(&ws);
@@ -28421,7 +28475,7 @@ impl App {
                     return Err(WindowOpen::Fresh { cwd });
                 }
             }
-            WindowOpen::AdoptTab(dt) => {
+            WindowOpen::AdoptTab { tab: dt, .. } => {
                 ws.mux.attach_tab(dt, None);
             }
             WindowOpen::Restore(sw) => {
@@ -28449,6 +28503,9 @@ impl App {
                     ));
                 }
             }
+        }
+        if self.cfg.accent_auto && self.cfg.accent_color.is_none() {
+            self.assign_window_accent(&mut ws, source_color);
         }
         self.resize_all(&mut ws);
         self.sync_output_wake_gate(&ws);
@@ -28555,10 +28612,12 @@ impl App {
             } else {
                 press
             };
+            let pointer_scale = drag_coordinate_scale(&src);
+            let pointer = (pointer.0 / pointer_scale, pointer.1 / pointer_scale);
             let grab = match origins {
                 (Ok(ip), Ok(op)) => crate::detach::frame_grab_offset(
-                    (f64::from(ip.x), f64::from(ip.y)),
-                    (f64::from(op.x), f64::from(op.y)),
+                    drag_position(&src, ip),
+                    drag_position(&src, op),
                     pointer,
                 ),
                 _ => (40.0, 12.0),
@@ -28570,6 +28629,7 @@ impl App {
                 grab,
                 dock: None,
                 native,
+                caption: false,
                 saw_move: false,
                 last_signal: std::time::Instant::now(),
                 hwnd: window_hwnd(&src),
@@ -28634,6 +28694,8 @@ impl App {
                 ftc.1 + in_seg_y,
             ),
         };
+        let coordinate_scale = drag_coordinate_scale(&src);
+        let grab = (grab.0 / coordinate_scale, grab.1 / coordinate_scale);
         // Frame origin = screen cursor − grab. `inner_position` is the
         // client origin in screen coords, so client cursor + it = screen
         // cursor exactly; `outer_position` is the (rare) fallback.
@@ -28642,10 +28704,13 @@ impl App {
             .or_else(|_| src.outer_position())
             .ok()
             .map(|p| {
-                winit::dpi::PhysicalPosition::new(
-                    (f64::from(p.x) + ws.cursor.x - grab.0) as i32,
-                    (f64::from(p.y) + ws.cursor.y - grab.1) as i32,
-                )
+                let origin = drag_position(&src, p);
+                let cursor = crate::detach::client_to_desktop(
+                    origin,
+                    (ws.cursor.x, ws.cursor.y),
+                    coordinate_scale,
+                );
+                drag_native_position((cursor.0 - grab.0, cursor.1 - grab.1))
             });
         // The dragged tab is the ACTIVE tab. The drag-to-reorder gesture keeps
         // it active, while the FSM's armed index can go stale across reorders.
@@ -28660,7 +28725,15 @@ impl App {
         ws.detach_drag = crate::detach::DragState::default();
         ws.drag_press = None;
         self.release_focus_report_to(ws, &dt);
-        match self.open_window(event_loop, WindowOpen::AdoptTab(dt), pos, Some(size)) {
+        match self.open_window(
+            event_loop,
+            WindowOpen::AdoptTab {
+                tab: dt,
+                source_color: ws.accent.as_ref().map(|accent| accent.color),
+            },
+            pos,
+            Some(size),
+        ) {
             Ok(torn_seq) => {
                 self.fire_tab_close_event(ws, closing_idx);
                 self.ctl_broadcast(
@@ -28723,6 +28796,7 @@ impl App {
                     grab,
                     dock: None,
                     native,
+                    caption: false,
                     saw_move: false,
                     last_signal: std::time::Instant::now(),
                     hwnd: self
@@ -28734,7 +28808,7 @@ impl App {
                 });
                 self.follow_torn_drag(ws);
             }
-            Err(WindowOpen::AdoptTab(dt)) => {
+            Err(WindowOpen::AdoptTab { tab: dt, .. }) => {
                 log::warn!("tear-off: open_window failed; tab kept in source window");
                 ws.mux.attach_tab(dt, Some(closing_idx));
             }
@@ -28753,12 +28827,16 @@ impl App {
             return false;
         }
         let (grab, torn_seq) = (td.grab, td.seq);
-        let Some(ip) = ws.window.as_ref().and_then(|w| w.inner_position().ok()) else {
+        let Some(source_window) = ws.window.as_ref() else {
             return true;
         };
+        let Ok(ip) = source_window.inner_position() else {
+            return true;
+        };
+        let scale = drag_coordinate_scale(source_window);
         let step = crate::detach::manual_drag_step(
-            (f64::from(ip.x), f64::from(ip.y)),
-            (ws.cursor.x, ws.cursor.y),
+            drag_position(source_window, ip),
+            (ws.cursor.x / scale, ws.cursor.y / scale),
             grab,
         );
         let torn_win = if torn_seq == ws.seq {
@@ -28768,10 +28846,7 @@ impl App {
         };
         let torn_hwnd = torn_win.map(|w| w.as_ref()).and_then(window_hwnd);
         if let Some(tw) = torn_win {
-            tw.set_outer_position(winit::dpi::PhysicalPosition::new(
-                step.frame_origin.0 as i32,
-                step.frame_origin.1 as i32,
-            ));
+            tw.set_outer_position(drag_native_position(step.frame_origin));
         }
         if let Some(td) = self.torn_drag.as_mut() {
             td.saw_move = true;
@@ -28816,10 +28891,12 @@ impl App {
             return None;
         }
         let ip = win.inner_position().ok()?;
-        let (cx, cy) = (
-            (cursor.0 - f64::from(ip.x)) as f32,
-            (cursor.1 - f64::from(ip.y)) as f32,
+        let client = crate::detach::desktop_to_client(
+            drag_position(win, ip),
+            cursor,
+            drag_coordinate_scale(win),
         );
+        let (cx, cy) = (client.0 as f32, client.1 as f32);
         let band = self.dock_band(w)?;
         log::debug!(
             "dock_index_at: seq={} cursor=({:.0},{:.0}) ip=({},{}) rel=({cx:.0},{cy:.0}) band={band:?} dist={:.0}",
@@ -28976,6 +29053,14 @@ impl App {
         let Some(td) = self.torn_drag.as_ref() else {
             return false;
         };
+        if td.caption
+            && ws
+                .native_caption_drag
+                .as_ref()
+                .is_some_and(|drag| drag.cancelled())
+        {
+            return false;
+        }
         let Some((latched, _)) = td.dock else {
             // Nothing latched — commit and abandon are equivalent.
             return false;
@@ -28990,10 +29075,12 @@ impl App {
         // live when available, else the legacy frame+grab approximation
         // (macOS manual-follow keeps its original self-consistent bias).
         let cursor = cursor_screen_pos().or_else(|| {
-            ws.window
-                .as_ref()
-                .and_then(|w| w.outer_position().ok())
-                .map(|op| (f64::from(op.x) + td.grab.0, f64::from(op.y) + td.grab.1))
+            ws.window.as_ref().and_then(|w| {
+                w.outer_position().ok().map(|op| {
+                    let origin = drag_position(w, op);
+                    (origin.0 + td.grab.0, origin.1 + td.grab.1)
+                })
+            })
         });
         let Some(cursor) = cursor else {
             return true; // can't tell — trust the latch
@@ -29017,9 +29104,34 @@ impl App {
     ///
     /// Healthy native tracking (fresh `Moved` signals) is left strictly alone.
     /// Returns the wait budget (ms) that keeps the tick alive, or `None` when
-    /// there is no drag or no live-cursor source (macOS/Wayland).
-    fn torn_drag_pointer_tick(&mut self) -> Option<u64> {
+    /// there is no drag or no live-cursor source (Wayland).
+    fn torn_drag_pointer_tick(&mut self, event_loop: &ActiveEventLoop) -> Option<u64> {
         let td = self.torn_drag.as_ref()?;
+        if td.caption {
+            let seq = td.seq;
+            let cancelled = self
+                .windows
+                .get(&seq)
+                .and_then(|ws| ws.native_caption_drag.as_ref())
+                .is_some_and(|drag| drag.cancelled());
+            if cancelled || !primary_button_physically_held() {
+                if !cancelled && let Some(cursor) = cursor_screen_pos() {
+                    self.update_dock_target(cursor, None, None);
+                }
+                if let Some(mut ws) = self.windows.remove(&seq) {
+                    let commit = !cancelled && self.revalidate_dock_latch(&ws);
+                    self.finalize_torn_drag(&mut ws, commit);
+                    self.finish_window_dispatch(event_loop, seq, ws);
+                } else {
+                    self.abandon_torn_drag(None);
+                }
+                return None;
+            }
+            if let Some(cursor) = cursor_screen_pos() {
+                self.update_dock_target(cursor, None, None);
+            }
+            return Some(TORN_TICK_MS);
+        }
         let cursor = cursor_screen_pos()?;
         if td.native {
             // Demotion evidence: the pointer travelled while the WM sent
@@ -29055,10 +29167,7 @@ impl App {
         }
         let (grab, torn_seq) = (td.grab, td.seq);
         let torn_win = self.windows.get(&torn_seq).and_then(|t| t.window.clone())?;
-        torn_win.set_outer_position(winit::dpi::PhysicalPosition::new(
-            (cursor.0 - grab.0) as i32,
-            (cursor.1 - grab.1) as i32,
-        ));
+        torn_win.set_outer_position(drag_native_position((cursor.0 - grab.0, cursor.1 - grab.1)));
         let torn_hwnd = window_hwnd(&torn_win);
         if let Some(td) = self.torn_drag.as_mut() {
             td.saw_move = true;
@@ -29253,7 +29362,7 @@ impl App {
     /// pool from the cwd-seed slot, skipping hues live windows already use:
     /// in-process siblings (authoritative) plus other kettle processes via
     /// the presence registry (best-effort; see kettle-ctl/src/presence.rs).
-    fn assign_window_accent(&self, ws: &mut WindowState) {
+    fn assign_window_accent(&self, ws: &mut WindowState, avoid: Option<kettle_config::Rgb>) {
         let pool = kettle_config::peacock_pool(&self.cfg.theme);
         if pool.is_empty() {
             return;
@@ -29273,7 +29382,7 @@ impl App {
         }
         let Some((slot, local_claim)) =
             self.accent_registry
-                .claim(&pool, self.cfg.accent_seed, &in_use)
+                .claim(&pool, self.cfg.accent_seed, &in_use, avoid)
         else {
             return;
         };
@@ -29326,7 +29435,7 @@ impl App {
                     r.set_accent_override(Some(color));
                 }
             }
-            None => self.assign_window_accent(ws),
+            None => self.assign_window_accent(ws, None),
         }
     }
 
@@ -29608,6 +29717,7 @@ impl App {
             }
         };
         self.apply_post_create(&window);
+        ws.native_caption_drag = Some(crate::native_drag::NativeCaptionDrag::install(&window));
         ws.native_material = Some(crate::native_material::NativeMaterial::install(
             &window, &self.cfg,
         ));
@@ -30514,6 +30624,37 @@ impl App {
             // hit-test against every sibling window's tab band.
             WindowEvent::Moved(pos) => {
                 self.sync_output_frame_budget(ws, false);
+                if let Some(started) = ws
+                    .native_caption_drag
+                    .as_ref()
+                    .and_then(|drag| drag.take_start())
+                    && self.torn_drag.is_none()
+                    && crate::native_drag::may_dock_caption(
+                        self.cfg.detachable_tabs,
+                        !matches!(self.cfg.tab_bar, TabBarMode::Off),
+                        ws.mux.tabs.len(),
+                        self.pointer_modal_open(ws),
+                    )
+                    && let Some(cursor) = cursor_screen_pos()
+                    && let Some(window) = ws.window.as_ref()
+                    && !window.is_maximized()
+                    && window.fullscreen().is_none()
+                {
+                    let origin = drag_position(window, pos);
+                    self.torn_drag = Some(TornDrag {
+                        seq: ws.seq,
+                        carrier: ws.seq,
+                        started,
+                        grab: (cursor.0 - origin.0, cursor.1 - origin.1),
+                        dock: None,
+                        native: true,
+                        caption: true,
+                        saw_move: false,
+                        last_signal: std::time::Instant::now(),
+                        hwnd: window_hwnd(window),
+                        signal_cursor: Some(cursor),
+                    });
+                }
                 let Some(td) = self.torn_drag.as_mut() else {
                     return;
                 };
@@ -30533,7 +30674,12 @@ impl App {
                 // fallback for a failed query. Each real-cursor + `Moved`
                 // pair also refreshes `signal_cursor`, the rescue tick's
                 // travel-without-`Moved` demotion reference.
-                let approx = (f64::from(pos.x) + grab.0, f64::from(pos.y) + grab.1);
+                let origin = ws
+                    .window
+                    .as_deref()
+                    .map(|window| drag_position(window, pos))
+                    .unwrap_or((f64::from(pos.x), f64::from(pos.y)));
+                let approx = (origin.0 + grab.0, origin.1 + grab.1);
                 let real = cursor_screen_pos();
                 if let Some(cur) = real {
                     td.signal_cursor = Some(cur);
@@ -30602,6 +30748,7 @@ impl App {
                     && td.seq == ws.seq
                     && td.native
                     && td.saw_move
+                    && (!td.caption || !primary_button_physically_held())
                     && td.started.elapsed() >= std::time::Duration::from_millis(300)
                 {
                     let commit = self.revalidate_dock_latch(ws);
@@ -31442,6 +31589,7 @@ impl App {
                 {
                     if td.seq == ws.seq || !td.native {
                         let commit = !primary_button_physically_held();
+                        let commit = commit && (!td.caption || self.revalidate_dock_latch(ws));
                         self.finalize_torn_drag(ws, commit);
                         return;
                     }
@@ -31503,10 +31651,18 @@ impl App {
                                         p.x + ws.cursor.x as i32,
                                         p.y + ws.cursor.y as i32,
                                     )
+                                    .into()
                                 });
                             self.release_focus_report_to(ws, &dt);
-                            match self.open_window(event_loop, WindowOpen::AdoptTab(dt), pos, None)
-                            {
+                            match self.open_window(
+                                event_loop,
+                                WindowOpen::AdoptTab {
+                                    tab: dt,
+                                    source_color: ws.accent.as_ref().map(|accent| accent.color),
+                                },
+                                pos,
+                                None,
+                            ) {
                                 Ok(torn_seq) => {
                                     self.fire_tab_close_event(ws, closing_idx);
                                     // Agents see the tear-off too.
@@ -31524,7 +31680,7 @@ impl App {
                                         w.request_redraw();
                                     }
                                 }
-                                Err(WindowOpen::AdoptTab(dt)) => {
+                                Err(WindowOpen::AdoptTab { tab: dt, .. }) => {
                                     log::warn!(
                                         "tear-off: open_window failed; tab kept in source window"
                                     );
@@ -39637,7 +39793,7 @@ mod tests {
             }
             transfers += 1;
             let release = body.find("self.release_focus_report_to(");
-            let handoff = ["WindowOpen::AdoptTab(dt)", "self.dock_tab_into("]
+            let handoff = ["WindowOpen::AdoptTab {", "self.dock_tab_into("]
                 .iter()
                 .filter_map(|needle| body.find(needle))
                 .min()
@@ -45074,7 +45230,7 @@ mod tests {
         // 2. The torn window inherits the source size and is positioned by
         //    the grab offset (open_window's size override).
         assert!(
-            src.contains("self.open_window(event_loop, WindowOpen::AdoptTab(dt), pos, Some(size))"),
+            src.contains("WindowOpen::AdoptTab {") && src.contains("Some(size),"),
             "the tear must open the torn window at the source size"
         );
         // 3. The native handoff happens right after the insert.
@@ -45129,7 +45285,7 @@ mod tests {
         //     bounds) leaves the torn window frozen mid-air with no path to
         //     carry or dock it.
         assert!(
-            src.contains("let torn_tick_wait = self.torn_drag_pointer_tick();"),
+            src.contains("let torn_tick_wait = self.torn_drag_pointer_tick(event_loop);"),
             "about_to_wait must run the frozen-drag rescue tick"
         );
         // 11. The heuristic pointer-event commits distinguish an Esc-cancel

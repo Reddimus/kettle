@@ -153,11 +153,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 - Torn-off windows reserve automatic accent colors in process even when the
   optional presence registry is unavailable. Closing a window frees its color
-  for reuse. Pinned colors retain their configured behavior.
+  for reuse. When the palette is full, a torn window avoids the original
+  window's color if another hue exists; reuse favors the least-used hue.
+  Pinned colors retain their configured behavior.
 - On macOS, dragging a released single-tab window by its tab uses manual
   follow and keeps the original press point under the pointer. A fast drag
   processes its first movement immediately, allowing that same gesture to
   latch a sibling window's insertion target before release.
+- Native macOS caption drags of a single-tab window use the same rejoin path
+  when its automatic tab bar is hidden. Desktop-to-client docking coordinates
+  account for each target window's display scale.
 
 - New Kitty image ids remain addressable at image-count and retained-byte limits
   by reclaiming eligible old images, with unplaced images first. Pixel snapshots

@@ -874,7 +874,11 @@ putting a user path on the wire.
   entries, so selection takes linear time in the tracked claim slots and
   external entries. The claim vector reuses its peak capacity; temporary
   selection storage is linear in the surviving claims and external entries.
-  A full pool reuses the project's seed slot. Best-effort
+  A full pool reuses the least-used hue, with the project's seed breaking ties.
+  A torn window excludes its opener's actual RGB when the pool has another
+  distinct color, even at saturation. The source color travels with the live
+  tab and is claimed before the new window is revealed or first painted.
+  Best-effort
   cross-process dedupe goes through a presence registry in kettle-ctl
   (`crates/kettle-ctl/src/presence.rs`: one `<pid>-w<seq>.json` per
   window under `<runtime base>/kettle/instances`, a sibling of the ctl
@@ -2427,6 +2431,19 @@ drag walkthrough in addition to portable geometry and ownership tests:
   additional move event to complete docking. Windows/X11 retain native
   whole-window movement when available and the diagnostic manual-follow
   override is unset; an unavailable handoff falls back to manual-follow.
+- Native macOS **caption drags** of a lone-tab window join the same dock
+  tracking, including when `tab-bar = auto` hides its strip. Window-scoped
+  AppKit observers qualify the original pointer event before a `Moved` event
+  arms tracking; programmatic moves do not arm it. AppKit continues moving
+  the window. A bounded pointer tick observes release or cancellation and
+  closes an emptied donor through the normal window-dispatch funnel. These
+  gestures never enter the failed-handoff manual rescue. Multi-tab captions,
+  disabled detaching, `tab-bar = off`, and pointer-owning modals retain ordinary
+  native movement. Both the client-release and polling paths revalidate a
+  caption's final latch and cancellation before transferring its tab.
+  Drag coordinates use one logical desktop on macOS, then convert into each
+  target's physical client coordinates for the existing band hit-test.
+  Windows and X11 keep their physical desktop coordinates.
 - **Wayland** can't position windows client-side and validates move
   serials, so it keeps the tear-at-release path (the FSM's
   `DraggingOutside` + release). `xdg_toplevel_drag_v1` — the proper
