@@ -440,6 +440,8 @@ fn capped_exponential_delay(
 
 /// The Peacock accent this window resolved and claimed.
 pub(crate) struct WindowAccent {
+    /// Authoritative process-local ownership, independent of presence I/O.
+    pub(crate) local_claim: crate::window_accent::AccentClaim,
     /// The live color (recomputed from `slot` when the theme changes).
     pub(crate) color: kettle_config::Rgb,
     /// Index into `kettle_config::peacock_pool(theme)` — kept across theme

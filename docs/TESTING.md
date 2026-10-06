@@ -2147,6 +2147,53 @@ alive for observation rather than exiting after selecting zero tests.
 
 ### Multi-window (v2.18.0, cross-crate)
 
+Automatic accent ownership tests in `window_accent.rs` run without a native
+window or presence files. They cover a checked-out opener's reservation,
+expired-claim reuse and pruning, theme-color updates, external claims, and the
+full-pool fallback. `detach.rs` tests the press-to-frame anchor and first-motion
+follow geometry with a native titlebar offset and negative physical desktop
+coordinates. These geometry cases do not claim a mixed-DPI monitor run.
+Three mutations were compiled and red-checked: removing local claim collection,
+removing the theme-color update to a live claim, and omitting the client/frame
+inset from the drag anchor. Each failed its regression test at runtime. These
+pure tests do not replace the native dispatch check below.
+
+For native macOS tear-off acceptance, use an isolated config with
+`detachable-tabs = true`, `accent-color = auto`, plain fixture shells, and
+`tab-bar = always`. Add a tab, record both pane and child IDs, tear it off,
+release, then start a **new** tab drag from the lone-tab window back onto the
+original bar. Verify one window with both original panes and child processes,
+correct insertion and focus, then repeat off-target and Escape cancellation.
+Repeat color comparison with the fixture's optional presence directory
+unavailable: source and torn windows must still differ when a pool hue is free.
+Also check `tab-bar = auto` docking onto the hidden target band and disabled
+`detachable-tabs`; pinned accents may intentionally match. Capture both windows'
+rendered chrome, and verify all fixture App and PTY groups are gone on cleanup.
+Record `ui_geometry.desktop` for both windows to qualify frame/client offsets
+and the actual docking point. Unsupported native position queries return null;
+they do not establish a drop coordinate. Readiness, a successful drag call,
+and a zero fixture exit are not acceptance.
+
+The 2026-10-06 macOS candidate check exercised an actual tear, a released
+lone-tab off-target move, and a subsequent calibrated drop onto the original
+window. It restored one window with the same two panes and shell processes,
+inserted and focused the dropped tab, cleared the preview, and accepted shell
+input. With the presence directory unavailable, two separate native captures
+also showed distinct blue and green window borders. The compiled UI suite had
+875 passing tests; warnings-denied Clippy, formatting and the binary build
+passed. This is focused evidence, not the full workspace or release gate.
+
+Compare physical frame origins to qualify movement: a cropped window image
+does not show displacement. If input synthesis cannot reach a negative
+window-relative endpoint, reposition the fixture and measure a positive
+endpoint inside the target band. For full-window captures of separate windows,
+use `screenshot` with `pane` and `full_window = true`; `window` is the
+`ui_geometry` selector and does not select a screenshot target.
+Caption dragging, interactive Auto-mode docking, held-button Escape, pinned
+and disabled live gestures, and actual mixed-DPI monitors remain unverified by
+this check. Native window selection failed during the later cases; only the
+Auto-mode hidden bar was confirmed by its rendered capture and geometry.
+
 The tab tear-off drag is a
 pure FSM (`DragState` in `kettle-ui/src/detach.rs`) tested with no
 window or GPU — idle→armed→dragging threshold, mouse-up/Esc-cancel

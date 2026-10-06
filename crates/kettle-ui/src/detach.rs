@@ -120,9 +120,63 @@ impl DragState {
     }
 }
 
+/// All inputs are physical pixels in winit's desktop coordinate system.
+pub(crate) fn frame_grab_offset(
+    client_origin: (f64, f64),
+    frame_origin: (f64, f64),
+    press: (f64, f64),
+) -> (f64, f64) {
+    (
+        client_origin.0 - frame_origin.0 + press.0,
+        client_origin.1 - frame_origin.1 + press.1,
+    )
+}
+
+pub(crate) struct ManualDragStep {
+    pub(crate) cursor: (f64, f64),
+    pub(crate) frame_origin: (f64, f64),
+}
+
+pub(crate) fn manual_drag_step(
+    client_origin: (f64, f64),
+    pointer: (f64, f64),
+    grab: (f64, f64),
+) -> ManualDragStep {
+    let cursor = (client_origin.0 + pointer.0, client_origin.1 + pointer.1);
+    ManualDragStep {
+        cursor,
+        frame_origin: (cursor.0 - grab.0, cursor.1 - grab.1),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lone_drag_first_motion_keeps_press_anchor_and_hits_target() {
+        let frame = (385.0, 266.0);
+        let client = (385.0, 298.0);
+        let grab = frame_grab_offset(client, frame, (130.0, 12.0));
+        // First motion has crossed all the way to the sibling's tab band.
+        let step = manual_drag_step(client, (-200.0, -174.0), grab);
+        assert_eq!(step.cursor, (185.0, 124.0));
+        assert_eq!(step.frame_origin, (55.0, 80.0));
+        // After following, the pointer is still at the original press.
+        let next = manual_drag_step((55.0, 112.0), (130.0, 12.0), grab);
+        assert_eq!(next.cursor, step.cursor);
+        assert_eq!(next.frame_origin, step.frame_origin);
+    }
+
+    #[test]
+    fn drag_coordinates_preserve_negative_and_scaled_physical_positions() {
+        let frame = (-1800.0, -500.0);
+        let client = (-1800.0, -436.0);
+        let grab = frame_grab_offset(client, frame, (260.0, 24.0));
+        let step = manual_drag_step(client, (400.0, -150.0), grab);
+        assert_eq!(step.cursor, (-1400.0, -586.0));
+        assert_eq!(step.frame_origin, (-1660.0, -674.0));
+    }
 
     #[test]
     fn idle_to_armed_on_mouse_down() {

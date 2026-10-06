@@ -865,7 +865,16 @@ putting a user path on the wire.
   agent control plane and the session file address panes unambiguously
   across windows.
 - **Per-window accents (Peacock), on by default** — `accent-color =
-  auto` (the default) gives each window a distinct theme-pool hue;
+  auto` (the default) gives each window a distinct theme-pool hue while
+  a free hue remains. Process-local claims are authoritative: each
+  `WindowAccent` owns a live color handle, and `App` keeps weak references
+  to those handles. A checked-out window retains its reservation; closing
+  it or switching to a pinned accent releases it. Allocation prunes expired
+  handles and theme changes update the live color. The pool has at most eight
+  entries, so selection takes linear time in the tracked claim slots and
+  external entries. The claim vector reuses its peak capacity; temporary
+  selection storage is linear in the surviving claims and external entries.
+  A full pool reuses the project's seed slot. Best-effort
   cross-process dedupe goes through a presence registry in kettle-ctl
   (`crates/kettle-ctl/src/presence.rs`: one `<pid>-w<seq>.json` per
   window under `<runtime base>/kettle/instances`, a sibling of the ctl
@@ -2341,23 +2350,23 @@ Tab tear-off is a live, in-process move: the tab's panes — PTYs,
 scrollback, running programs — transfer untouched into a new window in
 the same process. The tear follows the Chromium model: it
 happens **mid-drag at a distance threshold**, the torn window appears
-instantly under the pointer, and the OS's native move loop carries it
-from there.
+instantly under the pointer, and a native move loop or manual-follow
+carries it from there.
 
 ```mermaid
 flowchart TD
     A["mouse-down on a tab"] --> B["detach::DragState FSM<br/>armed"]
     B --> C["CursorMoved drives it<br/>(distance = click-vs-drag,<br/>band distance = tear decision)"]
     C -->|"≥1.5×bar_h from the tab band"| D["Mux::detach_tab →<br/>open_window(AdoptTab)<br/>source size, cursor − grab"]
-    D --> E["drag_window(): native OS<br/>move loop carries the window<br/>(WM_NCLBUTTONDOWN / HTCAPTION,<br/>_NET_WM_MOVERESIZE, NSWindow drag)"]
-    E -->|"Moved events stream"| G["dock hit-test vs sibling<br/>tab bands (z-order-verified<br/>on Windows) → insertion<br/>marker + translucency"]
+    D --> E["Native OS move on Windows/X11;<br/>manual-follow on macOS or<br/>when native handoff is unavailable"]
+    E -->|"Moved or carrier CursorMoved"| G["dock hit-test vs sibling<br/>tab bands (z-order-verified<br/>on Windows) → insertion<br/>marker + translucency"]
     G -->|"release on a band"| H["attach_tab at the slot;<br/>emptied window closes via<br/>the pending_window_close funnel"]
     G -->|"release elsewhere"| I["independent window"]
     C -->|"Esc / focus loss<br/>before the tear"| F["cancel (tab stays put)"]
 ```
 
-Mechanics worth knowing (all verified against the winit 0.30.13 source and
-live):
+The dispatch paths use winit 0.30.13; platform acceptance includes a live
+drag walkthrough in addition to portable geometry and ownership tests:
 
 - **Tear threshold** is pure Euclidean distance from the tab *band*
   (`tear_threshold_crossed`), so the hysteresis is uniform in every
@@ -2369,9 +2378,9 @@ live):
   anchors at the *current* cursor.
 - **Drop detection**: winit synthesizes a `WM_LBUTTONUP` to the torn
   window when the Windows modal loop exits (`WM_EXITSIZEMOVE`); on
-  X11/macOS the first client pointer event after the WM's grab ends
-  serves the same role (clients receive no pointer events during the
-  move). A 120s `about_to_wait` failsafe abandons orphaned tracking.
+  X11 the first client pointer event after the WM's grab ends serves
+  the same role. Manual-follow commits on the carrier's real left release.
+  A 120s `about_to_wait` failsafe abandons orphaned tracking.
 - **Re-dock hit-testing** runs on the torn window's `Moved` stream
   (`WM_WINDOWPOSCHANGED` keeps firing inside the modal loop), preferring
   the live cursor over the frame+grab approximation everywhere a query
@@ -2406,9 +2415,18 @@ live):
   the reorder ghost's shadow/opacity escalate with `TabBar::tear_lift`
   (0→1 over the band-to-threshold distance) so the tear point is
   telegraphed instead of springing a new window unannounced.
-- A **lone-tab** window's tab drags the whole window (`drag_window()`
-  with dock tracking, no detach) — Chromium semantics, and the way a
-  torn-off window merges back.
+- A **lone-tab** window's tab drags the whole window with dock tracking,
+  without recreating its window or PTYs. On macOS both new tears and
+  subsequent lone-tab gestures use manual-follow. AppKit's
+  [`performDrag(with:)`](https://developer.apple.com/documentation/appkit/nswindow/performdrag%28with%3A%29)
+  requires the original mouse-down event; winit's handoff receives the
+  current mouseDragged event at Kettle's tear threshold. The lone-tab
+  manual anchor is computed from the original press, and the threshold-crossing
+  motion immediately moves the window and updates the insertion target.
+  A coalesced first motion followed directly by release therefore needs no
+  additional move event to complete docking. Windows/X11 retain native
+  whole-window movement when available and the diagnostic manual-follow
+  override is unset; an unavailable handoff falls back to manual-follow.
 - **Wayland** can't position windows client-side and validates move
   serials, so it keeps the tear-at-release path (the FSM's
   `DraggingOutside` + release). `xdg_toplevel_drag_v1` — the proper
