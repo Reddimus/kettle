@@ -66,6 +66,7 @@ impl Placed {
 pub struct PixelBuffer {
     pixels: Vec<u8>,
     reservation: GraphicsReservation,
+    kitty_created: Option<u64>,
 }
 
 impl std::ops::Deref for PixelBuffer {
@@ -169,6 +170,7 @@ impl ImageData {
             rgba: Arc::new(PixelBuffer {
                 pixels: rgba,
                 reservation,
+                kitty_created: None,
             }),
         })
     }
@@ -179,6 +181,24 @@ impl ImageData {
 
     pub fn allocation_key(&self) -> usize {
         Arc::as_ptr(&self.rgba) as usize
+    }
+
+    /// Creation order of a Kitty upload, retained across edits of its pixels.
+    pub fn kitty_creation_order(&self) -> Option<u64> {
+        self.rgba.kitty_created
+    }
+
+    pub(crate) fn stamp_kitty_creation(&mut self, order: u64) -> bool {
+        let Some(pixels) = Arc::get_mut(&mut self.rgba) else {
+            return false;
+        };
+        pixels.kitty_created = Some(order);
+        true
+    }
+
+    pub(crate) fn try_move_to_scope(&mut self, budget: &GraphicsBudget) -> bool {
+        Arc::get_mut(&mut self.rgba)
+            .is_some_and(|pixels| pixels.reservation.try_move_to_scope(budget))
     }
 
     /// Decode an encoded terminal-embedded image (PNG / JPEG / GIF — the
@@ -305,6 +325,7 @@ impl ImageData {
                     PixelBuffer {
                         pixels: copy,
                         reservation,
+                        kitty_created: previous.kitty_created,
                     }
                 }
             };
@@ -388,6 +409,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn staged_pixels_move_scopes_without_copying_or_double_charging() {
+        let budget = GraphicsBudget::isolated(crate::GraphicsLimits {
+            image_bytes: 4,
+            retained_bytes: 4,
+            ..crate::GraphicsLimits::default()
+        })
+        .unwrap();
+        let previous = ImageData::new_with_budget(1, 1, vec![1; 4], &budget).unwrap();
+        let temporary = budget.query_scope();
+        let mut staged = ImageData::new_with_budget(1, 1, vec![2; 4], &temporary).unwrap();
+        let data = staged.rgba.as_ptr();
+        let key = staged.allocation_key();
+        assert_eq!(budget.usage(), (8, 4, 0, 0));
+        assert!(!staged.try_move_to_scope(&budget));
+        assert_eq!(temporary.usage(), (8, 4, 0, 0));
+        drop(previous);
+        assert!(staged.try_move_to_scope(&budget));
+        assert_eq!(staged.rgba.as_ptr(), data);
+        assert_eq!(staged.allocation_key(), key);
+        assert_eq!(budget.usage(), (4, 4, 0, 0));
+        assert_eq!(temporary.usage(), (4, 0, 0, 0));
+        drop(staged);
+        assert_eq!(budget.usage(), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn staged_scope_transfer_refuses_shared_or_unrelated_allocations() {
+        let budget = GraphicsBudget::isolated(crate::GraphicsLimits::default()).unwrap();
+        let other = GraphicsBudget::isolated(crate::GraphicsLimits::default()).unwrap();
+        let temporary = budget.query_scope();
+        let mut staged = ImageData::new_with_budget(1, 1, vec![2; 4], &temporary).unwrap();
+        assert!(!staged.try_move_to_scope(&other));
+        let held = staged.clone();
+        assert!(!staged.try_move_to_scope(&budget));
+        assert_eq!(budget.usage(), (4, 0, 0, 0));
+        assert_eq!(other.usage(), (0, 0, 0, 0));
+        drop(held);
+        assert!(staged.try_move_to_scope(&budget));
+        assert_eq!(budget.usage(), (4, 4, 0, 0));
+    }
+
+    #[test]
     fn rgba_owner_keeps_the_allocation_accounted_after_image_drop() {
         let budget = GraphicsBudget::isolated(crate::GraphicsLimits {
             image_bytes: 4,
@@ -419,12 +482,14 @@ mod tests {
         })
         .unwrap();
         let mut canvas = ImageData::new_with_budget(2, 2, vec![0; 16], &budget).unwrap();
+        assert!(canvas.stamp_kitty_creation(7));
         let previous_key = canvas.allocation_key();
         let data_ptr = canvas.rgba.as_ptr();
         let cached = Arc::downgrade(&canvas.rgba);
         let patch = ImageData::new(1, 1, vec![1, 2, 3, 255]).unwrap();
         assert_eq!(Arc::strong_count(&canvas.rgba), 1);
         assert!(canvas.compose(&patch, 1, 1, true));
+        assert_eq!(canvas.kitty_creation_order(), Some(7));
         assert_eq!(canvas.rgba.as_ptr(), data_ptr);
         assert_ne!(canvas.allocation_key(), previous_key);
         assert!(cached.upgrade().is_none());
@@ -444,10 +509,12 @@ mod tests {
         })
         .unwrap();
         let mut canvas = ImageData::new_with_budget(2, 2, vec![0; 16], &budget).unwrap();
+        assert!(canvas.stamp_kitty_creation(7));
         let cached = Arc::downgrade(&canvas.rgba);
         let snapshot = cached.upgrade().unwrap();
         let patch = ImageData::new(1, 1, vec![1, 2, 3, 255]).unwrap();
         assert!(canvas.compose(&patch, 0, 0, true));
+        assert_eq!(canvas.kitty_creation_order(), Some(7));
         assert_eq!(&canvas.rgba[..4], &[1, 2, 3, 255]);
         assert_eq!(snapshot.as_slice(), &[0; 16]);
         assert_eq!(budget.usage(), (32, 32, 0, 0));

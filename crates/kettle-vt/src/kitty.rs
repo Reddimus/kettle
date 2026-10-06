@@ -390,13 +390,22 @@ impl<'a> Command<'a> {
     }
 }
 
+/// A decoded transmission staged before retained-scope admission.
+pub(crate) struct PendingTransmit {
+    id: u32,
+    first: HashMap<String, String>,
+    z: i32,
+    created: u64,
+    img: ImageData,
+}
+
 /// Buffer-local uploads, images, placements, and animation state.
 pub struct KittyState {
     in_flight: HashMap<u32, Acc>,
     store: HashMap<u32, ImageData>,
-    /// Client image number and creation serial, keyed by resolved image id.
-    image_numbers: HashMap<u32, (u32, u64)>,
-    next_image_serial: u64,
+    /// Optional client image number and creation order, keyed by stored image id.
+    image_metadata: HashMap<u32, (Option<u32>, u64)>,
+    pending_transmit: Option<PendingTransmit>,
     next_generated_id: u32,
     virtual_placements: HashMap<(u32, u32), VirtualPlacement>,
     /// The single in-flight `a=f` frame transmission (`id`, accumulator).
@@ -424,8 +433,8 @@ impl KittyState {
         Self {
             in_flight: HashMap::new(),
             store: HashMap::new(),
-            image_numbers: HashMap::new(),
-            next_image_serial: 0,
+            image_metadata: HashMap::new(),
+            pending_transmit: None,
             next_generated_id: u32::MAX,
             virtual_placements: HashMap::new(),
             frame_in_flight: None,
@@ -540,7 +549,17 @@ impl KittyState {
             return KittyOut::None;
         };
         self.retire_retransmission(&command);
-        self.feed_command(command)
+        let result = self.feed_command(command);
+        let Some(pending) = self.pending_transmit.take() else {
+            return result;
+        };
+        if let Some(request) = self.quota_request(&pending) {
+            let Some(victims) = request.plan(&[]) else {
+                return KittyOut::None;
+            };
+            self.reclaim_quota(&victims, false);
+        }
+        self.complete_transmit(pending)
     }
 
     pub(crate) fn is_query_command(&self, command: &Command<'_>) -> bool {
@@ -1140,35 +1159,169 @@ impl KittyState {
             reservation: _payload_reservation,
         } = self.in_flight.remove(&id).unwrap_or_default();
         let first = parse_control(&control);
-        let Some(img) = decode_with_budget(&control, &payload, &self.budget) else {
+        let temporary = self.budget.query_scope();
+        let Some(mut img) = decode_with_budget(&control, &payload, &temporary) else {
             return KittyOut::None;
         };
-        // Whether this id is addressable afterwards — i.e. whether `a=p,i=`
-        // finds the data and `a=d,i=` can free it. Id 0 never is (it names
-        // no slot), and neither is an id the saturated store turned away.
-        let mut addressable = false;
-        if id != 0 {
-            // Cap stored-image count. An update to an
-            // already-present id is always allowed (replaces in
-            // place — no growth); a brand-new id past saturation is
-            // refused so an attacker can't grow `store` indefinitely
-            // by completing distinct `i=` transmissions.
-            addressable =
-                self.store.contains_key(&id) || self.store.len() < self.budget.limits().placements;
-            if addressable {
-                self.store.insert(id, img.clone());
-                self.next_image_serial = self.next_image_serial.wrapping_add(1);
-                if let Some(number) = first.get("I").and_then(|v| v.parse::<u32>().ok()) {
-                    self.image_numbers
-                        .insert(id, (number, self.next_image_serial));
-                } else {
-                    self.image_numbers.remove(&id);
-                }
+        let Some(created) = self.budget.next_image_order() else {
+            return KittyOut::None;
+        };
+        if !img.stamp_kitty_creation(created) {
+            return KittyOut::None;
+        }
+        self.pending_transmit = Some(PendingTransmit {
+            id,
+            first,
+            z,
+            created,
+            img,
+        });
+        KittyOut::None
+    }
+
+    pub(crate) fn take_pending_transmit(&mut self) -> Option<PendingTransmit> {
+        self.pending_transmit.take()
+    }
+
+    pub(crate) fn quota_request(
+        &self,
+        pending: &PendingTransmit,
+    ) -> Option<crate::quota::QuotaRequest> {
+        use crate::quota::{QuotaIdentity, QuotaKey, QuotaNeed, QuotaRequest};
+        let needed_bytes = self
+            .budget
+            .retained_cpu_bytes()
+            .saturating_add(pending.img.byte_len())
+            .saturating_sub(self.budget.limits().retained_bytes);
+        let needed_slot = pending.id != 0
+            && !self.store.contains_key(&pending.id)
+            && self.store.len() >= self.budget.limits().placements;
+        if needed_bytes == 0 && !needed_slot {
+            return None;
+        }
+        let mut request = QuotaRequest {
+            images: Vec::new(),
+            owners: Vec::new(),
+            needed_bytes: QuotaNeed::Upload {
+                budget: self.budget.clone(),
+                incoming_bytes: pending.img.byte_len(),
+            },
+            needed_slot,
+            protected: QuotaKey {
+                inactive: false,
+                image: QuotaIdentity::Named(pending.id),
+            },
+        };
+        self.append_quota_metadata(false, &mut request);
+        Some(request)
+    }
+
+    pub(crate) fn append_quota_metadata(
+        &self,
+        inactive: bool,
+        request: &mut crate::quota::QuotaRequest,
+    ) {
+        use crate::quota::{QuotaIdentity, QuotaImage, QuotaKey, QuotaOwner};
+        let placed: HashSet<_> = self
+            .virtual_placements
+            .keys()
+            .chain(self.rel.keys())
+            .map(|&(id, _)| id)
+            .collect();
+        for (&id, img) in &self.store {
+            let key = QuotaKey {
+                inactive,
+                image: QuotaIdentity::Named(id),
+            };
+            if let Some(&(_, created)) = self.image_metadata.get(&id) {
+                request.images.push(QuotaImage { key, created });
             }
-            // `image_numbers` is deliberately left alone when the store
-            // refuses: it is keyed by stored id, so writing an entry for an
-            // absent image would grow a second map past the same cap that
-            // just fired.
+            request
+                .owners
+                .push(QuotaOwner::new(key, img, placed.contains(&id)));
+        }
+        for (&id, frames) in &self.frames {
+            let key = QuotaKey {
+                inactive,
+                image: QuotaIdentity::Named(id),
+            };
+            request.owners.extend(
+                frames
+                    .iter()
+                    .map(|frame| QuotaOwner::new(key, &frame.img, false)),
+            );
+        }
+    }
+
+    pub(crate) fn reclaim_quota(&mut self, victims: &[crate::quota::QuotaKey], inactive: bool) {
+        use crate::quota::QuotaIdentity;
+        let ids: HashSet<_> = victims
+            .iter()
+            .filter_map(|key| match key.image {
+                QuotaIdentity::Named(id) if key.inactive == inactive => Some(id),
+                _ => None,
+            })
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        let removed: Vec<_> = self
+            .virtual_placements
+            .keys()
+            .chain(self.rel.keys())
+            .filter_map(|&(image_id, placement_id)| {
+                ids.contains(&image_id).then_some(PlacementKey {
+                    image_id,
+                    placement_id,
+                })
+            })
+            .chain(
+                self.rel
+                    .iter()
+                    .filter_map(|(&(image_id, placement_id), relative)| {
+                        ids.contains(&relative.parent_img).then_some(PlacementKey {
+                            image_id,
+                            placement_id,
+                        })
+                    }),
+            )
+            .collect();
+        self.remove_placement_keys(&removed, true);
+        self.store.retain(|id, _| !ids.contains(id));
+        self.image_metadata.retain(|id, _| !ids.contains(id));
+        self.frames.retain(|id, _| !ids.contains(id));
+        self.anim.retain(|id, _| !ids.contains(id));
+        if self
+            .frame_in_flight
+            .as_ref()
+            .is_some_and(|(id, _)| ids.contains(id))
+        {
+            self.frame_in_flight = None;
+        }
+    }
+
+    pub(crate) fn complete_transmit(&mut self, pending: PendingTransmit) -> KittyOut {
+        let PendingTransmit {
+            id,
+            first,
+            z,
+            created,
+            mut img,
+        } = pending;
+        if (id != 0
+            && !self.store.contains_key(&id)
+            && self.store.len() >= self.budget.limits().placements)
+            || !img.try_move_to_scope(&self.budget)
+        {
+            return KittyOut::None;
+        }
+        let addressable = id != 0;
+        if addressable {
+            self.store.insert(id, img.clone());
+            self.image_metadata.insert(
+                id,
+                (first.get("I").and_then(|v| v.parse::<u32>().ok()), created),
+            );
         }
         // `U=1` (possibly combined with `a=T`): store + register a virtual
         // placement, but draw nothing at the cursor.
@@ -1215,11 +1368,6 @@ impl KittyState {
             let fz = first.get("z").and_then(|v| v.parse().ok()).unwrap_or(z);
             KittyOut::Place(Placed {
                 img,
-                // An image the store turned away still draws — refusing to
-                // draw it would make images silently stop appearing past the
-                // cap for `icat`/`timg`/`chafa`, which never delete. It just
-                // advertises no id, exactly like an `i=0` transmission, so no
-                // later `a=p,i=` or `a=d,i=` can dangle on it.
                 id: addressable.then_some(id),
                 placement_id: first
                     .get("p")
@@ -1270,10 +1418,10 @@ impl KittyState {
     }
 
     fn newest_image_with_number(&self, number: u32) -> Option<u32> {
-        self.image_numbers
+        self.image_metadata
             .iter()
             .filter_map(|(&id, &(candidate, serial))| {
-                (candidate == number && self.store.contains_key(&id)).then_some((serial, id))
+                (candidate == Some(number) && self.store.contains_key(&id)).then_some((serial, id))
             })
             .max_by_key(|&(serial, _)| serial)
             .map(|(_, id)| id)
@@ -1430,7 +1578,7 @@ impl KittyState {
 
     fn free_image_data(&mut self, id: u32) {
         self.store.remove(&id);
-        self.image_numbers.remove(&id);
+        self.image_metadata.remove(&id);
         self.frames.remove(&id);
         self.anim.remove(&id);
         self.virtual_placements
@@ -2489,13 +2637,13 @@ mod tests {
             k.feed(&format!("a=T,i={id},f=32,s=1,v=1;{PX}"));
         }
         assert_eq!(k.store_len_for_test(), cap);
-        // One more distinct id: refused; map size unchanged.
+        // One more distinct id evicts the oldest image; map size is unchanged.
         let overflow = cap as u32 + 1;
         k.feed(&format!("a=T,i={overflow},f=32,s=1,v=1;{PX}"));
         assert_eq!(
             k.store_len_for_test(),
             cap,
-            "distinct id {overflow} past saturation must be refused"
+            "distinct id {overflow} must preserve the stored-image ceiling"
         );
         // Update to an existing id: accepted (replaces in place);
         // map size still unchanged.
@@ -2507,58 +2655,31 @@ mod tests {
         );
     }
 
-    /// A transmit-and-display whose id the saturated store refuses must still
-    /// draw, but must not hand back a placement *for that id*: the client
-    /// could never address it again, since the matching `a=p,i=<id>` finds
-    /// nothing and `a=d,i=<id>` frees nothing. So the placement carries no
-    /// id, exactly like an `i=0` transmission. Dropping the image instead
-    /// would be worse than the dangling id it fixes — `icat`, `timg` and
-    /// `chafa` all send fresh ids and never delete, so a user paging through
-    /// images would watch them silently stop appearing at #257. The `U=1`
-    /// form has no such fallback (a virtual placement is resolved by id
-    /// later), so that one is declined outright.
     #[test]
-    fn kitty_stored_image_cap_places_without_an_id_it_cannot_store() {
+    fn kitty_stored_image_cap_keeps_new_images_addressable_by_evicting_oldest() {
         let mut k = KittyState::default();
         let cap = k.budget.limits().placements;
         for id in 1..=cap as u32 {
             k.feed(&format!("a=T,i={id},f=32,s=1,v=1;{PX}"));
         }
-        // Baseline: an id the store does hold still places, with its id.
-        assert!(
-            matches!(k.feed("a=p,i=1"), KittyOut::Place(p) if p.id == Some(1)),
-            "a stored id must still place"
-        );
-
+        assert!(matches!(k.feed("a=p,i=1"), KittyOut::Place(p) if p.id == Some(1)));
         let overflow = cap as u32 + 1;
         let KittyOut::Place(placed) = k.feed(&format!("a=T,i={overflow},f=32,s=1,v=1;{PX}")) else {
-            panic!("transmit+display past store saturation must still draw");
+            panic!("new image must replace an older unplaced root");
         };
-        assert_eq!(
-            placed.id, None,
-            "the placement must not advertise an id the store refused"
+        assert_eq!(placed.id, Some(overflow));
+        assert_eq!(k.store.len(), cap);
+        assert!(k.image(1).is_none());
+        assert!(k.image(2).is_some());
+        assert!(k.image(overflow).is_some());
+        assert!(
+            matches!(k.feed(&format!("a=p,i={overflow}")), KittyOut::Place(p) if p.id == Some(overflow))
         );
         assert!(
-            k.image(overflow).is_none(),
-            "the refused id must not be stored"
+            matches!(k.feed(&format!("a=T,U=1,i={overflow},c=1,r=1,f=32,s=1,v=1;{PX}")), KittyOut::Virtual { id, .. } if id == overflow)
         );
-        assert!(
-            matches!(k.feed(&format!("a=p,i={overflow}")), KittyOut::None),
-            "the follow-up place must agree that the id is unknown"
-        );
-
-        // The `U=1` form registers into a different map and must be refused
-        // outright on the same grounds: a virtual placement whose image was
-        // never stored composites nothing, and there is no id-less form of
-        // it to fall back to.
-        assert!(
-            matches!(
-                k.feed(&format!("a=T,U=1,i={overflow},c=1,r=1,f=32,s=1,v=1;{PX}")),
-                KittyOut::None
-            ),
-            "a virtual placement must not be registered for a refused image"
-        );
-        assert!(k.virtual_placement(overflow, 0).is_none());
+        assert!(k.virtual_placement(overflow, 0).is_some());
+        assert_eq!(k.store.len(), cap);
     }
 
     #[test]
@@ -2915,6 +3036,175 @@ mod tests {
         assert!(state.virtual_placement(5, 0).is_some());
         assert!(state.relative_placement(6, 7).is_none());
     }
+    #[test]
+    fn new_images_evict_oldest_unplaced_pixels_at_the_byte_quota() {
+        let limits = crate::GraphicsLimits {
+            image_bytes: 4,
+            retained_bytes: 8,
+            animation_bytes: 4,
+            ..crate::GraphicsLimits::default()
+        };
+        let budget = crate::GraphicsBudget::isolated(limits).unwrap();
+        let mut state = KittyState::new(budget.clone());
+        state.feed("a=t,i=81,f=32,s=1,v=1;AQID/w==");
+        let oldest = std::sync::Arc::downgrade(&state.image(81).unwrap().rgba);
+        state.feed("a=t,i=82,f=32,s=1,v=1;CQgH/w==");
+        let younger = std::sync::Arc::downgrade(&state.image(82).unwrap().rgba);
+        assert_eq!(budget.usage().0, 8);
+        state.feed("a=t,i=83,f=32,s=1,v=1;BQYH/w==");
+        assert_eq!(
+            state
+                .image(83)
+                .expect("new root admitted by eviction")
+                .rgba
+                .as_slice(),
+            &[5, 6, 7, 255]
+        );
+        assert!(state.image(81).is_none());
+        assert!(oldest.upgrade().is_none());
+        assert!(state.image(82).is_some());
+        assert!(younger.upgrade().is_some());
+        assert_eq!(budget.usage().0, 8);
+    }
+
+    #[test]
+    fn retained_snapshots_stay_charged_during_quota_eviction() {
+        let limits = crate::GraphicsLimits {
+            image_bytes: 4,
+            retained_bytes: 8,
+            animation_bytes: 4,
+            ..crate::GraphicsLimits::default()
+        };
+        let budget = crate::GraphicsBudget::isolated(limits).unwrap();
+        let mut state = KittyState::new(budget.clone());
+        state.feed("a=t,i=81,f=32,s=1,v=1;AQID/w==");
+        let held = state.image(81).unwrap().clone();
+        state.feed("a=t,i=82,f=32,s=1,v=1;CQgH/w==");
+        let releasable = std::sync::Arc::downgrade(&state.image(82).unwrap().rgba);
+        state.feed("a=t,i=83,f=32,s=1,v=1;BQYH/w==");
+        assert_eq!(
+            state
+                .image(83)
+                .expect("reclaim the unpinned image")
+                .rgba
+                .as_slice(),
+            &[5, 6, 7, 255]
+        );
+        assert!(releasable.upgrade().is_none());
+        assert_eq!(held.rgba.as_slice(), &[1, 2, 3, 255]);
+        assert_eq!(budget.usage().0, 8);
+        drop(held);
+        assert!(budget.usage().0 <= 8);
+    }
+
+    #[test]
+    fn invalid_new_image_does_not_evict_valid_pixels() {
+        let limits = crate::GraphicsLimits {
+            image_bytes: 4,
+            retained_bytes: 4,
+            animation_bytes: 4,
+            ..crate::GraphicsLimits::default()
+        };
+        let budget = crate::GraphicsBudget::isolated(limits).unwrap();
+        let mut state = KittyState::new(budget.clone());
+        state.feed("a=t,i=81,f=32,s=1,v=1;AQID/w==");
+        let root = std::sync::Arc::downgrade(&state.image(81).unwrap().rgba);
+        for command in ["a=t,i=82,f=32,s=1,v=1;AQID", "a=t,i=82,f=100;AQID/w=="] {
+            state.feed(command);
+            assert!(state.image(82).is_none());
+            assert_eq!(state.image(81).unwrap().rgba.as_slice(), &[1, 2, 3, 255]);
+            assert!(root.upgrade().is_some());
+            assert_eq!(budget.usage().0, 4);
+        }
+    }
+
+    #[test]
+    fn insufficient_unpinned_quota_preserves_roots_and_snapshots() {
+        let budget = crate::GraphicsBudget::isolated(crate::GraphicsLimits {
+            image_bytes: 4,
+            retained_bytes: 8,
+            animation_bytes: 4,
+            ..crate::GraphicsLimits::default()
+        })
+        .unwrap();
+        let mut state = KittyState::new(budget.clone());
+        state.feed("a=t,i=81,f=32,s=1,v=1;AQID/w==");
+        state.feed("a=t,i=82,f=32,s=1,v=1;CQgH/w==");
+        let first = state.image(81).unwrap().clone();
+        let second = state.image(82).unwrap().clone();
+        state.feed("a=t,i=83,f=32,s=1,v=1;BQYH/w==");
+        assert!(state.image(83).is_none());
+        assert_eq!(
+            state.image(81).unwrap().rgba.as_slice(),
+            first.rgba.as_slice()
+        );
+        assert_eq!(
+            state.image(82).unwrap().rgba.as_slice(),
+            second.rgba.as_slice()
+        );
+        assert_eq!(budget.usage().0, 8);
+    }
+
+    #[test]
+    fn quota_eviction_releases_animation_allocations_with_the_oldest_root() {
+        let budget = crate::GraphicsBudget::isolated(crate::GraphicsLimits {
+            image_bytes: 4,
+            retained_bytes: 12,
+            animation_bytes: 8,
+            ..crate::GraphicsLimits::default()
+        })
+        .unwrap();
+        let mut state = KittyState::new(budget.clone());
+        state.feed("a=t,i=81,f=32,s=1,v=1;AQID/w==");
+        state.feed("a=f,i=81,f=32,s=1,v=1,z=37;CQgH/w==");
+        assert_eq!(state.frames(81).len(), 1);
+        let root = std::sync::Arc::downgrade(&state.image(81).unwrap().rgba);
+        let frame = std::sync::Arc::downgrade(&state.frames(81)[0].img.rgba);
+        state.feed("a=t,i=82,f=32,s=1,v=1;AQID/w==");
+        assert_eq!(budget.usage().0, 12);
+        state.feed("a=t,i=83,f=32,s=1,v=1;BQYH/w==");
+        assert!(state.image(81).is_none());
+        assert!(state.frames(81).is_empty());
+        assert!(root.upgrade().is_none() && frame.upgrade().is_none());
+        assert!(state.image(82).is_some());
+        assert_eq!(state.image(83).unwrap().rgba.as_slice(), &[5, 6, 7, 255]);
+        assert_eq!(budget.usage().0, 8);
+    }
+
+    #[test]
+    fn quota_eviction_cancels_only_the_victims_partial_frame() {
+        let budget = crate::GraphicsBudget::isolated(crate::GraphicsLimits {
+            image_bytes: 4,
+            retained_bytes: 8,
+            animation_bytes: 4,
+            ..crate::GraphicsLimits::default()
+        })
+        .unwrap();
+        let mut state = KittyState::new(budget);
+        state.feed("a=t,i=81,f=32,s=1,v=1;AQID/w==");
+        state.feed("a=t,i=82,f=32,s=1,v=1;CQgH/w==");
+        state.feed("a=f,i=81,f=32,s=1,v=1,m=1;AQID");
+        state.feed("a=t,i=84,f=32,s=1,v=1,m=1;CQgH");
+        state.feed("a=q,i=99,f=32,s=1,v=1,m=1;AQID");
+        assert!(state.frame_in_flight.is_some());
+        state.feed("a=t,i=83,f=32,s=1,v=1;BQYH/w==");
+        assert!(state.image(81).is_none());
+        assert!(state.image(83).is_some());
+        assert!(state.frame_in_flight.is_none());
+        assert!(state.in_flight.contains_key(&84));
+        assert!(state.query_in_flight.is_some());
+        assert!(matches!(
+            state.feed("m=0;/w=="),
+            KittyOut::Query(QueryReply {
+                id: 99,
+                status: QueryStatus::Ok,
+            })
+        ));
+        state.feed("i=84,m=0;/w==");
+        assert_eq!(state.image(84).unwrap().rgba.as_slice(), &[9, 8, 7, 255]);
+        assert!(state.in_flight.is_empty() && state.query_in_flight.is_none());
+    }
+
     #[test]
     fn retransmission_reuses_the_released_root_quota() {
         let limits = crate::GraphicsLimits {

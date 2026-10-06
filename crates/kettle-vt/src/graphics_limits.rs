@@ -3,7 +3,7 @@
 //! A PTY is an untrusted byte stream. These limits are therefore enforced at
 //! allocation boundaries, not merely after a decoder has produced an image.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 const MIB: usize = 1024 * 1024;
@@ -87,6 +87,7 @@ impl GraphicsLimits {
 struct Counters {
     cpu: AtomicUsize,
     gpu: AtomicUsize,
+    image_order: AtomicU64,
 }
 
 static PROCESS_COUNTERS: OnceLock<Arc<Counters>> = OnceLock::new();
@@ -147,6 +148,20 @@ impl Default for GraphicsBudget {
 }
 
 impl GraphicsBudget {
+    pub(crate) fn next_image_order(&self) -> Option<u64> {
+        self.scope
+            .image_order
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |order| {
+                order.checked_add(1)
+            })
+            .ok()
+            .and_then(|order| order.checked_add(1))
+    }
+
+    pub(crate) fn retained_cpu_bytes(&self) -> usize {
+        self.scope.cpu.load(Ordering::Acquire)
+    }
+
     pub fn limits(&self) -> GraphicsLimits {
         self.limits
     }
@@ -161,7 +176,9 @@ impl GraphicsBudget {
         })
     }
 
-    /// Decode a capability probe without consuming the terminal's retained quota.
+    /// A temporary decode scope charged to the same process account. Capability
+    /// probes release it after decoding; uploads transfer their pixel reservation
+    /// into the terminal scope only after admission.
     pub(crate) fn query_scope(&self) -> Self {
         Self {
             limits: self.limits,
@@ -258,6 +275,30 @@ pub struct GraphicsReservation {
 }
 
 impl GraphicsReservation {
+    // The process already accounts for staged pixels. Transfer only their
+    // retained scope, after reclamation, without charging or copying them twice.
+    pub(crate) fn try_move_to_scope(&mut self, budget: &GraphicsBudget) -> bool {
+        if !self.retained
+            || !Arc::ptr_eq(&self.budget.process, &budget.process)
+            || self.budget.limits != budget.limits
+        {
+            return false;
+        }
+        if Arc::ptr_eq(&self.budget.scope, &budget.scope) {
+            return true;
+        }
+        if !try_add(
+            counter(&budget.scope, self.resource),
+            self.bytes,
+            budget.limits.retained_bytes,
+        ) {
+            return false;
+        }
+        subtract(counter(&self.budget.scope, self.resource), self.bytes);
+        self.budget = budget.clone();
+        true
+    }
+
     pub fn bytes(&self) -> usize {
         self.bytes
     }
@@ -313,6 +354,20 @@ impl Drop for GraphicsReservation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn screen_namespaces_share_a_nonwrapping_image_creation_order() {
+        let budget = GraphicsBudget::isolated(GraphicsLimits::default()).unwrap();
+        assert_eq!(budget.next_image_order(), Some(1));
+        assert_eq!(budget.clone().next_image_order(), Some(2));
+        budget
+            .scope
+            .image_order
+            .store(u64::MAX - 1, Ordering::Relaxed);
+        assert_eq!(budget.next_image_order(), Some(u64::MAX));
+        assert_eq!(budget.next_image_order(), None);
+        assert_eq!(budget.scope.image_order.load(Ordering::Relaxed), u64::MAX);
+    }
 
     fn tiny_limits() -> GraphicsLimits {
         GraphicsLimits {

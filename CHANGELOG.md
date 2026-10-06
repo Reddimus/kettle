@@ -133,6 +133,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- New Kitty image ids remain addressable at image-count and retained-byte limits
+  by reclaiming eligible old images, with unplaced images first. Pixel snapshots
+  keep their charge, and active count pressure preserves the other screen's roots.
+
 - Kitty relative placements select the exact parent named by `Q=`, including
   chained and virtual placements. Rendering and spatial deletion use the same
   origins; a missing explicit parent cannot fall back to another placement.

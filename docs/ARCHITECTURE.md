@@ -1380,11 +1380,36 @@ wire order. Queries and their continuations bypass DEC 2026 graphics deferral;
 they answer immediately even when later device attributes wait for the
 synchronized update to end. `q=1` suppresses success and `q=2` all replies.
 File, temporary-file, and shared-memory queries return unsupported; queries
-require a nonzero image id. Normal transmission/placement acknowledgements,
-replacement cleanup when new pixels reuse an
-existing image id, and exact `Q=` parent-placement selection when an image has
-multiple concrete placements are tracked in
-[AUDIT-DEFERRED.md](AUDIT-DEFERRED.md).
+require a nonzero image id. Normal transmission/placement acknowledgements remain
+tracked in [AUDIT-DEFERRED.md](AUDIT-DEFERRED.md). Retransmission retires the old
+image and its placement/animation owners before decoding replacement pixels.
+Relative rendering and spatial deletion resolve the exact `(P, Q)` parent key.
+
+Kitty transmission decodes once into a temporary scope under the existing process
+account. At retained-byte or active image-count pressure, extraction requests an
+admission plan before publishing the new image. The Core handler adds metadata
+for physical, virtual, relative, animation, and inactive-screen owners without
+cloning pixels. Weak allocation witnesses allow planning to read current strong
+owner counts without retaining pixels; current scope usage also reflects snapshots
+released after request creation. Core holds its registry guards in the existing
+images -> virtuals -> animations -> relatives -> inactive order through planning
+and removal, without acquiring Term. Candidates are ordered by unplaced status,
+then creation order; a count slot must come from the active screen. Allocation
+aliases count once, and external render snapshots keep their pixel charge. If
+eligible owners cannot release enough bytes and a slot, existing images remain
+intact. A successful plan
+removes the selected registries and relative descendants before transferring the
+staged reservation atomically into the shared terminal scope, without copying
+pixels. The process account must also have room for the staged decode; exhaustion
+there can refuse a transmission before any eviction.
+Synchronous `Extractor::feed_with` feedback releases the chosen owners before
+admission completes. The collecting `feed` API omits quota requests because they
+cannot be acted on after it returns; an upload that still lacks space is refused.
+
+For N image roots, A pixel allocations, P placement/frame owners, and E relative
+edges, metadata collection and batch removal take O(N + A + P + E) expected time,
+with O(N log N) candidate ordering and O(N + A + P + E) temporary space. This is an
+algorithmic bound, not a measured renderer or quiet-window performance result.
 
 ```mermaid
 graph LR
