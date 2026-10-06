@@ -1407,6 +1407,9 @@ pressure frame, keeping that frame within the existing 256-entry journal. Pixel
 edit tests preserve creation age both with weak-cache detachment and with a held
 snapshot requiring a copy. These checks do not establish foreground UI pixels,
 quiet performance, or release artifact acceptance.
+Shared creation-order tests also check concurrent allocation across cloned screen
+budgets and refusal at `u64::MAX`. The allocator uses a checked compare-and-swap
+loop supported by Rust 1.89 and current stable toolchains.
 
 Native vi-mode regressions drive Alacritty's own cursor and
 selection through scrollback rotation and reflow, proving the cursor remains

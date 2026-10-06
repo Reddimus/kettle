@@ -149,13 +149,16 @@ impl Default for GraphicsBudget {
 
 impl GraphicsBudget {
     pub(crate) fn next_image_order(&self) -> Option<u64> {
-        self.scope
-            .image_order
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |order| {
-                order.checked_add(1)
-            })
-            .ok()
-            .and_then(|order| order.checked_add(1))
+        let counter = &self.scope.image_order;
+        let mut current = counter.load(Ordering::Relaxed);
+        loop {
+            let next = current.checked_add(1)?;
+            match counter.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed)
+            {
+                Ok(_) => return Some(next),
+                Err(actual) => current = actual,
+            }
+        }
     }
 
     pub(crate) fn retained_cpu_bytes(&self) -> usize {
@@ -367,6 +370,30 @@ mod tests {
         assert_eq!(budget.next_image_order(), Some(u64::MAX));
         assert_eq!(budget.next_image_order(), None);
         assert_eq!(budget.scope.image_order.load(Ordering::Relaxed), u64::MAX);
+    }
+
+    #[test]
+    fn concurrent_screen_namespaces_allocate_distinct_image_creation_orders() {
+        let budget = GraphicsBudget::isolated(GraphicsLimits::default()).unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let budget = budget.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    (0..128)
+                        .map(|_| budget.next_image_order().unwrap())
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        let mut orders: Vec<_> = workers
+            .into_iter()
+            .flat_map(|worker| worker.join().unwrap())
+            .collect();
+        orders.sort_unstable();
+        assert_eq!(orders, (1..=1024).collect::<Vec<_>>());
     }
 
     fn tiny_limits() -> GraphicsLimits {
