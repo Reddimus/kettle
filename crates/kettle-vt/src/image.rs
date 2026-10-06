@@ -26,6 +26,8 @@ pub struct Placed {
     /// Kitty source/destination geometry. `None` preserves the legacy
     /// Sixel/iTerm2 placement and cursor policy.
     pub params: Option<PlacementParams>,
+    /// Pending command completion; consumed before retaining a core placement.
+    pub completion: Option<crate::kitty::PlacementCompletion>,
 }
 
 /// Raw Kitty placement geometry, resolved against live cell/pixel dimensions
@@ -57,6 +59,7 @@ impl Placed {
             placement_id: 0,
             z: 0,
             params: None,
+            completion: None,
         }
     }
 }

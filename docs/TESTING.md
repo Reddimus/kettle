@@ -1336,8 +1336,40 @@ its actual stdin before exiting successfully. Pure VT tests cover invalid data,
 unsupported file transfer, quiet settings across chunks, untouched existing
 pixels/virtual placements/animation frames and another partial image upload.
 Direct RGB/RGBA, encoded PNG and zlib probes succeed with a full small retained
-quota and return every temporary process lease. Normal transmission and
-placement acknowledgements remain separate deferred work.
+quota and return every temporary process lease. Ordinary transmission and
+placement acknowledgements use the separate coverage below.
+
+Ordinary transmission/placement reply regressions live in
+`extract::ordinary_graphics_reply_tests` and
+`term::image_lifecycle_tests::ordinary_graphics_*`. They cover completed and
+chunked transmissions, first-chunk ids/numbers/placement ids, distinct generated
+ids, latest-number selection, quiet overrides, anonymous silence, identifier
+conflicts, zero identifiers treated as absent, unsupported media, unreclaimable
+retained quota, and aborted uploads. Conflicting-identifier deletes leave a
+partial upload able to complete. Unrecognized actions cannot become uploads or
+successful replies, and cannot append to or abort a partial upload.
+Core cases distinguish accepted `C=1` placement from refused crops, preserve an
+existing physical placement on crop refusal, check virtual
+admission, exact missing-parent errors, combined relative uploads, and preservation
+of a previous relative definition on refusal. A reflow regression checks that
+refusal cannot restore a cleared definition. An accepted relative placement
+against a surviving virtual parent retains its new definition when reflow occurs
+between decoding and admission.
+
+Two `term::teardown_tests::ordinary_graphics_ack_reaches_*` tests use actual native
+PTY children. The child uploads an image and waits for the exact reply before
+exiting; the synchronized variant sends the closing marker only after that
+reply. Each asserts one reply and successful child exit. Run focused coverage
+with:
+
+```sh
+cargo test --locked -p kettle-vt ordinary_graphics_reply_tests::
+cargo test --locked -p kettle-core ordinary_graphics_ -- --test-threads=1
+```
+
+These test decoded admission and bidirectional PTY delivery. They do not prove
+GPU pixels, a foreground UI session, quiet performance, or release installation.
+Animation frame/composition replies require separate coverage.
 
 Root-frame edit regressions exercise real Kitty wire commands through the core
 extractor and graphics application path, both directly and inside synchronized
