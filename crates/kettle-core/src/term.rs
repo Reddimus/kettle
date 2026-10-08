@@ -2282,7 +2282,7 @@ impl DeferredGraphicsJournal {
     }
 }
 
-fn send_graphics_reply(proxy: &EventProxy, reply: kettle_vt::kitty::QueryReply) {
+fn send_graphics_reply(proxy: &EventProxy, reply: kettle_vt::kitty::GraphicsReply) {
     use alacritty_terminal::event::EventListener;
     proxy.send_event(TermEvent::PtyWrite(reply.encode()));
 }
@@ -7189,6 +7189,7 @@ impl Terminal {
                                         anims: &anims,
                                         relatives: &relatives,
                                         geometry: &shared_geometry,
+                                        proxy: &proxy,
                                     },
                                     extractor: &mut extractor,
                                 };
@@ -7355,6 +7356,7 @@ impl Terminal {
                                                     anims: &anims,
                                                     relatives: &relatives,
                                                     geometry: &shared_geometry,
+                                                    proxy: &proxy,
                                                 },
                                                 extractor,
                                             };
@@ -7378,18 +7380,16 @@ impl Terminal {
                                                     anims: &anims,
                                                     relatives: &relatives,
                                                     geometry: &shared_geometry,
+                                                    proxy: &proxy,
                                                 },
                                                 extractor,
                                             );
                                         }
-                                        Chunk::Image(placed) => {
-                                            if let Some(batch) = place_image(
-                                                &term,
-                                                &images,
-                                                &shared_geometry,
-                                                &mut processor,
-                                                placed,
-                                            ) {
+                                        Chunk::Image(mut placed) => {
+                                            let completion = placed.completion.take();
+                                            let result = place_image(&term, &images, &shared_geometry, &mut processor, placed);
+                                            let admission = result.as_ref().map(|_| ()).map_err(|error| *error);
+                                            if let Ok(Some(batch)) = result {
                                                 apply_graphics_batch(
                                                     batch,
                                                     &mut active_alternate,
@@ -7403,6 +7403,7 @@ impl Terminal {
                                                     extractor,
                                                 );
                                             }
+                                            finish_graphics_placement(extractor, &proxy, completion, admission);
                                         }
                                         // This arm's depth makes rustfmt reflow unrelated PTY
                                         // reader code whenever its body changes.
@@ -7657,62 +7658,22 @@ impl Terminal {
                                                 &freed_ids,
                                             );
                                         }
-                                        Chunk::RelativePlacement {
-                                            id,
-                                            placement,
-                                            img,
-                                            parent_img,
-                                            parent_placement,
-                                            h,
-                                            v,
-                                            z,
-                                            params,
-                                        } => {
-                                            if let Ok(mut rm) = relatives.lock() {
-                                                let key = (id, placement);
-                                                let limit =
-                                                    kettle_vt::GraphicsLimits::default().placements;
-                                                if rm.contains_key(&key) || rm.len() < limit {
-                                                    rm.insert(
-                                                        key,
-                                                        RelEntry {
-                                                            img,
-                                                            parent_img,
-                                                            parent_placement,
-                                                            h,
-                                                            v,
-                                                            z,
-                                                            params,
-                                                        },
-                                                    );
-                                                }
-                                            }
-                                        }
-                                        Chunk::VirtualImage {
-                                            id,
-                                            placement,
-                                            img,
-                                            cols,
-                                            rows,
-                                            z,
-                                        } => {
-                                            if let Ok(mut vm) = virtuals.lock() {
-                                                let limit =
-                                                    kettle_vt::GraphicsLimits::default().placements;
-                                                let key = (id, placement);
-                                                if vm.contains_key(&key) || vm.len() < limit {
-                                                    vm.insert(
-                                                        key,
-                                                        VirtualEntry {
-                                                            img,
-                                                            placement_id: placement,
-                                                            cols,
-                                                            rows,
-                                                            z,
-                                                        },
-                                                    );
-                                                }
-                                            }
+                                        chunk @ (Chunk::RelativePlacement { .. } | Chunk::VirtualImage { .. }) => {
+                                            let mut current = term.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                                            apply_graphics_chunk_at(
+                                                &mut current,
+                                                chunk,
+                                                GraphicsActionContext {
+                                                    inactive: &inactive_graphics,
+                                                    images: &images,
+                                                    virtuals: &virtuals,
+                                                    anims: &anims,
+                                                    relatives: &relatives,
+                                                    geometry: &shared_geometry,
+                                                    proxy: &proxy,
+                                                },
+                                                extractor,
+                                            );
                                         }
                                         Chunk::Animation {
                                             id,
@@ -7732,6 +7693,7 @@ impl Terminal {
                                                     anims: &anims,
                                                     relatives: &relatives,
                                                     geometry: &shared_geometry,
+                                                    proxy: &proxy,
                                                 },
                                             );
                                         }
@@ -7911,6 +7873,7 @@ impl Terminal {
                                             anims: &anims,
                                             relatives: &relatives,
                                             geometry: &shared_geometry,
+                                            proxy: &proxy,
                                         },
                                         extractor: &mut extractor,
                                     };
@@ -10547,6 +10510,7 @@ struct GraphicsActionContext<'a> {
     anims: &'a Animations,
     relatives: &'a Relatives,
     geometry: &'a Arc<Mutex<VersionedPtyGeometry>>,
+    proxy: &'a EventProxy,
 }
 
 fn relative_resolver<'a>(
@@ -11052,6 +11016,77 @@ fn apply_image_quota(
     extractor.apply_image_quota(&plan);
 }
 
+#[derive(Clone, Copy, Debug)]
+enum GraphicsAdmissionError {
+    InvalidGeometry,
+    Unavailable,
+    MissingParent,
+}
+
+fn finish_graphics_placement(
+    extractor: &mut Extractor,
+    proxy: &EventProxy,
+    completion: Option<kettle_vt::kitty::PlacementCompletion>,
+    result: Result<(), GraphicsAdmissionError>,
+) {
+    let Some(completion) = completion else {
+        return;
+    };
+    let status = match result {
+        Ok(()) => kettle_vt::kitty::CommandStatus::Ok,
+        Err(GraphicsAdmissionError::InvalidGeometry) => {
+            kettle_vt::kitty::CommandStatus::InvalidPlacement
+        }
+        Err(GraphicsAdmissionError::Unavailable) => kettle_vt::kitty::CommandStatus::NoSpace,
+        Err(GraphicsAdmissionError::MissingParent) => {
+            kettle_vt::kitty::CommandStatus::MissingParent
+        }
+    };
+    if let Some(reply) = extractor.finish_kitty_placement(completion, status) {
+        send_graphics_reply(proxy, reply);
+    }
+}
+
+fn contains_placement_parent<T>(placements: &HashMap<(u32, u32), T>, parent: PlacementKey) -> bool {
+    if parent.placement_id != 0 {
+        placements.contains_key(&(parent.image_id, parent.placement_id))
+    } else {
+        placements.keys().any(|&(id, _)| id == parent.image_id)
+    }
+}
+
+fn has_placement_parent(
+    context: GraphicsActionContext<'_>,
+    parent: PlacementKey,
+) -> Result<bool, GraphicsAdmissionError> {
+    if context
+        .images
+        .lock()
+        .map_err(|_| GraphicsAdmissionError::Unavailable)?
+        .iter()
+        .any(|placement| {
+            placement.id == Some(parent.image_id)
+                && (parent.placement_id == 0 || placement.placement_id == parent.placement_id)
+        })
+    {
+        return Ok(true);
+    }
+    {
+        let virtuals = context
+            .virtuals
+            .lock()
+            .map_err(|_| GraphicsAdmissionError::Unavailable)?;
+        if contains_placement_parent(&virtuals, parent) {
+            return Ok(true);
+        }
+    }
+    let relatives = context
+        .relatives
+        .lock()
+        .map_err(|_| GraphicsAdmissionError::Unavailable)?;
+    Ok(contains_placement_parent(&relatives, parent))
+}
+
 fn apply_graphics_chunk_at(
     term: &mut Term<EventProxy>,
     chunk: Chunk,
@@ -11059,13 +11094,16 @@ fn apply_graphics_chunk_at(
     extractor: &mut Extractor,
 ) -> bool {
     match chunk {
-        Chunk::Image(placed) => {
+        Chunk::GraphicsReply(reply) => send_graphics_reply(context.proxy, reply),
+        Chunk::Image(mut placed) => {
+            let completion = placed.completion.take();
             let geometry = context
                 .geometry
                 .lock()
                 .map(|geometry| geometry.geometry)
                 .unwrap_or_else(|_| PtyGeometry::new(1, 1, 1, 1));
-            place_image_during_sync(term, context.images, geometry, placed);
+            let result = place_image_during_sync(term, context.images, geometry, placed);
+            finish_graphics_placement(extractor, context.proxy, completion, result);
         }
         Chunk::DeleteImages(delete) => apply_kitty_delete_at(term, delete, context, extractor),
         Chunk::ImageQuota(request) => apply_image_quota(request, context, extractor),
@@ -11079,25 +11117,49 @@ fn apply_graphics_chunk_at(
             v,
             z,
             params,
+            completion,
         } => {
-            if let Ok(mut relative_placements) = context.relatives.lock() {
+            let result = (|| {
+                if !has_placement_parent(
+                    context,
+                    PlacementKey {
+                        image_id: parent_img,
+                        placement_id: parent_placement,
+                    },
+                )? {
+                    return Err(GraphicsAdmissionError::MissingParent);
+                }
+                let geometry = context
+                    .geometry
+                    .lock()
+                    .map_err(|_| GraphicsAdmissionError::Unavailable)?
+                    .geometry;
+                resolve_kitty_placement(&img, params, geometry)
+                    .ok_or(GraphicsAdmissionError::InvalidGeometry)?;
+                let mut relatives = context
+                    .relatives
+                    .lock()
+                    .map_err(|_| GraphicsAdmissionError::Unavailable)?;
                 let key = (id, placement);
                 let limit = kettle_vt::GraphicsLimits::default().placements;
-                if relative_placements.contains_key(&key) || relative_placements.len() < limit {
-                    relative_placements.insert(
-                        key,
-                        RelEntry {
-                            img,
-                            parent_img,
-                            parent_placement,
-                            h,
-                            v,
-                            z,
-                            params,
-                        },
-                    );
+                if !relatives.contains_key(&key) && relatives.len() >= limit {
+                    return Err(GraphicsAdmissionError::Unavailable);
                 }
-            }
+                relatives.insert(
+                    key,
+                    RelEntry {
+                        img,
+                        parent_img,
+                        parent_placement,
+                        h,
+                        v,
+                        z,
+                        params,
+                    },
+                );
+                Ok(())
+            })();
+            finish_graphics_placement(extractor, context.proxy, completion, result);
         }
         Chunk::VirtualImage {
             id,
@@ -11106,23 +11168,31 @@ fn apply_graphics_chunk_at(
             cols,
             rows,
             z,
+            completion,
         } => {
-            if let Ok(mut virtual_placements) = context.virtuals.lock() {
-                let limit = kettle_vt::GraphicsLimits::default().placements;
+            let result = (|| {
+                let mut virtuals = context
+                    .virtuals
+                    .lock()
+                    .map_err(|_| GraphicsAdmissionError::Unavailable)?;
                 let key = (id, placement);
-                if virtual_placements.contains_key(&key) || virtual_placements.len() < limit {
-                    virtual_placements.insert(
-                        key,
-                        VirtualEntry {
-                            img,
-                            placement_id: placement,
-                            cols,
-                            rows,
-                            z,
-                        },
-                    );
+                let limit = kettle_vt::GraphicsLimits::default().placements;
+                if !virtuals.contains_key(&key) && virtuals.len() >= limit {
+                    return Err(GraphicsAdmissionError::Unavailable);
                 }
-            }
+                virtuals.insert(
+                    key,
+                    VirtualEntry {
+                        img,
+                        placement_id: placement,
+                        cols,
+                        rows,
+                        z,
+                    },
+                );
+                Ok(())
+            })();
+            finish_graphics_placement(extractor, context.proxy, completion, result);
         }
         Chunk::Animation {
             id,
@@ -11145,16 +11215,18 @@ fn insert_image_at_cursor(
     images: &Images,
     geometry: PtyGeometry,
     placed: kettle_vt::Placed,
-) -> Option<(Option<PlacementParams>, usize, usize)> {
+) -> Result<(Option<PlacementParams>, usize, usize), GraphicsAdmissionError> {
     let kettle_vt::Placed {
         img: data,
         id,
         placement_id,
         z,
         params,
+        completion: _,
     } = placed;
     let resolved = if let Some(params) = params {
-        resolve_kitty_placement(&data, params, geometry)?
+        resolve_kitty_placement(&data, params, geometry)
+            .ok_or(GraphicsAdmissionError::InvalidGeometry)?
     } else {
         let cell_cols = image_cells_for_pixels(data.width, geometry.columns, geometry.pixel_width);
         let cell_rows = image_cells_for_pixels(data.height, geometry.rows, geometry.pixel_height);
@@ -11176,7 +11248,10 @@ fn insert_image_at_cursor(
         term.grid().history_size(),
         cursor.line.0,
     );
-    if let Ok(mut placements) = images.lock() {
+    {
+        let mut placements = images
+            .lock()
+            .map_err(|_| GraphicsAdmissionError::Unavailable)?;
         if let Some(id) = id
             && placement_id != 0
         {
@@ -11207,7 +11282,7 @@ fn insert_image_at_cursor(
             placements.drain(0..drop);
         }
     }
-    Some((params, cell_cols, cell_rows))
+    Ok((params, cell_cols, cell_rows))
 }
 
 fn place_image_during_sync(
@@ -11215,12 +11290,8 @@ fn place_image_during_sync(
     images: &Images,
     geometry: PtyGeometry,
     placed: kettle_vt::Placed,
-) {
-    let Some((params, cell_cols, cell_rows)) =
-        insert_image_at_cursor(term, images, geometry, placed)
-    else {
-        return;
-    };
+) -> Result<(), GraphicsAdmissionError> {
+    let (params, cell_cols, cell_rows) = insert_image_at_cursor(term, images, geometry, placed)?;
     if let Some(params) = params {
         if !params.suppress_cursor_movement {
             term.move_forward(cell_cols);
@@ -11232,6 +11303,7 @@ fn place_image_during_sync(
             term.linefeed();
         }
     }
+    Ok(())
 }
 
 fn place_image(
@@ -11240,7 +11312,7 @@ fn place_image(
     geometry: &Arc<Mutex<VersionedPtyGeometry>>,
     processor: &mut Processor,
     placed: kettle_vt::Placed,
-) -> Option<GraphicsEventBatch> {
+) -> Result<Option<GraphicsEventBatch>, GraphicsAdmissionError> {
     // Match resize's Term -> geometry lock order. Holding both through the
     // cursor snapshot and row reservation makes the grid/pixel generation one
     // atomic observation for image placement.
@@ -11262,7 +11334,7 @@ fn place_image(
         processor.advance(&mut *t, nl.as_bytes());
         advanced = true;
     }
-    advanced.then(|| t.take_graphics_events())
+    Ok(advanced.then(|| t.take_graphics_events()))
 }
 
 #[cfg(test)]
@@ -14570,6 +14642,82 @@ mod teardown_tests {
     }
 
     #[cfg(unix)]
+    fn ordinary_graphics_ack_roundtrip(synchronized: bool) {
+        use super::{CursorShape, TermEvent, Terminal};
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+        let start = if synchronized { r"\033[?2026h" } else { "" };
+        let end = if synchronized { r"\033[?2026l" } else { "" };
+        let script = format!(
+            r#"stty raw -echo; printf '{start}\033_Ga=T,i=91,f=24,s=1,v=1,C=1;AAAA\033\\'; reply=$(dd bs=1 count=12 2>/dev/null | od -An -tx1 | tr -d ' \n'); test "$reply" = 1b5f47693d39313b4f4b1b5c || exit 7; printf '{end}ACK_ROUNDTRIP_DONE'"#
+        );
+        let argv = vec!["/bin/sh".into(), "-c".into(), script];
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let terminal = Terminal::new(
+            &argv,
+            None,
+            1000,
+            80,
+            24,
+            8,
+            16,
+            false,
+            CursorShape::Block,
+            None,
+            tx,
+            Arc::new(|| {}),
+        )
+        .expect("native acknowledgement PTY");
+        let child_pid = terminal
+            .child_pid()
+            .expect("owned Unix acknowledgement child");
+        let child_group = unsafe { libc::getpgid(child_pid as libc::pid_t) };
+        assert!(child_group > 0);
+        eprintln!("ACK_PTY_OWNED_CHILD pid={child_pid} pgid={child_group}");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut replies = 0;
+        let code = loop {
+            while let Ok(event) = rx.try_recv() {
+                if let TermEvent::PtyWrite(reply) = event {
+                    assert_eq!(reply, "\x1b_Gi=91;OK\x1b\\");
+                    replies += 1;
+                    terminal.write(reply.as_bytes());
+                }
+            }
+            if let Some(code) = terminal.child_exit_code() {
+                break code;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "client waited for normal acknowledgement; synchronized={synchronized}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(code, 0, "child checked actual stdin response bytes");
+        assert_eq!(replies, 1);
+        assert_eq!(
+            terminal
+                .placements()
+                .iter()
+                .map(|placement| placement.id)
+                .collect::<Vec<_>>(),
+            [Some(91)]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ordinary_graphics_ack_reaches_a_waiting_pty_child() {
+        ordinary_graphics_ack_roundtrip(false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ordinary_graphics_ack_reaches_a_waiting_synchronized_pty_child() {
+        ordinary_graphics_ack_roundtrip(true);
+    }
+
+    #[cfg(unix)]
     #[test]
     fn kitty_query_round_trips_through_a_real_pty_child() {
         let argv = vec!["/bin/sh".into(), "-c".into(),
@@ -17464,6 +17612,7 @@ mod image_lifecycle_tests {
                             anims,
                             relatives,
                             geometry,
+                            proxy,
                         },
                         extractor,
                     };
@@ -17483,6 +17632,7 @@ mod image_lifecycle_tests {
                                 anims,
                                 relatives,
                                 geometry,
+                                proxy,
                             },
                             extractor,
                         ),
@@ -17510,6 +17660,176 @@ mod image_lifecycle_tests {
                 .filter_map(|placement| placement.id)
                 .collect()
         }
+    }
+
+    fn ordinary_reply_bytes(harness: &SyncGraphicsHarness) -> Vec<String> {
+        harness
+            .replies
+            .try_iter()
+            .filter_map(|event| match event {
+                TermEvent::PtyWrite(reply) => Some(reply),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn ordinary_graphics_no_cursor_movement_is_an_accepted_placement() {
+        for synchronized in [false, true] {
+            let mut harness = SyncGraphicsHarness::new();
+            if synchronized {
+                harness.feed(b"\x1b[?2026h");
+            }
+            harness.feed(b"\x1b_Ga=T,i=381,p=9,f=24,s=1,v=1,C=1;AAAA\x1b\\");
+            if synchronized {
+                assert!(ordinary_reply_bytes(&harness).is_empty());
+                assert!(harness.active_ids().is_empty());
+                harness.feed(b"\x1b[?2026l");
+            }
+            assert_eq!(ordinary_reply_bytes(&harness), ["\x1b_Gi=381,p=9;OK\x1b\\"]);
+            assert_eq!(harness.active_ids(), [381]);
+            assert_eq!(
+                harness.term.lock().unwrap().grid().cursor.point,
+                Point::new(Line(0), Column(0))
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_graphics_invalid_crop_is_not_acknowledged_as_placed() {
+        for synchronized in [false, true] {
+            let mut harness = SyncGraphicsHarness::new();
+            harness.feed(b"\x1b_Ga=t,i=382,q=2,f=24,s=1,v=1;AAAA\x1b\\");
+            assert!(ordinary_reply_bytes(&harness).is_empty());
+            if synchronized {
+                harness.feed(b"\x1b[?2026h");
+            }
+            harness.feed(b"\x1b_Ga=p,i=382,p=10,q=1,x=1,C=1\x1b\\");
+            if synchronized {
+                harness.feed(b"\x1b[?2026l");
+            }
+            let responses = ordinary_reply_bytes(&harness);
+            assert_eq!(responses.len(), 1);
+            assert!(responses[0].starts_with("\x1b_Gi=382,p=10;EINVAL:"));
+            assert!(responses[0].ends_with("\x1b\\"));
+            assert!(harness.active_ids().is_empty());
+        }
+    }
+
+    #[test]
+    fn ordinary_graphics_rejected_crop_preserves_an_existing_physical_placement() {
+        for synchronized in [false, true] {
+            let mut harness = SyncGraphicsHarness::new();
+            harness.feed(b"\x1b_Ga=T,i=392,p=18,q=2,f=24,s=1,v=1,c=2,r=1,C=1;AAAA\x1b\\");
+            assert!(ordinary_reply_bytes(&harness).is_empty());
+            if synchronized {
+                harness.feed(b"\x1b[?2026h");
+            }
+            harness.feed(b"\x1b_Ga=p,i=392,p=18,q=1,x=1,c=9,r=3,C=1\x1b\\");
+            if synchronized {
+                harness.feed(b"\x1b[?2026l");
+            }
+            let replies = ordinary_reply_bytes(&harness);
+            assert_eq!(replies.len(), 1);
+            assert!(replies[0].starts_with("\x1b_Gi=392,p=18;EINVAL:"));
+            assert!(replies[0].ends_with("\x1b\\"));
+            let images = harness.images.lock().unwrap();
+            assert_eq!(images.len(), 1);
+            let previous = &images[0];
+            assert_eq!((previous.id, previous.placement_id), (Some(392), 18));
+            let params = previous.kitty_params.expect("original geometry");
+            assert_eq!((params.source_x, params.columns, params.rows), (0, 2, 1));
+        }
+    }
+
+    #[test]
+    fn ordinary_graphics_virtual_acknowledgement_follows_registration() {
+        let mut harness = SyncGraphicsHarness::new();
+        harness.feed(b"\x1b[?2026h\x1b_Ga=T,i=383,p=11,U=1,c=2,r=3,f=24,s=1,v=1;AAAA\x1b\\");
+        assert!(ordinary_reply_bytes(&harness).is_empty());
+        assert!(harness.virtuals.lock().unwrap().is_empty());
+        harness.feed(b"\x1b[?2026l");
+        assert_eq!(
+            ordinary_reply_bytes(&harness),
+            ["\x1b_Gi=383,p=11;OK\x1b\\"]
+        );
+        let virtuals = harness.virtuals.lock().unwrap();
+        let placement = virtuals
+            .get(&(383, 11))
+            .expect("accepted virtual placement");
+        assert_eq!((placement.cols, placement.rows), (2, 3));
+        assert!(harness.active_ids().is_empty());
+    }
+
+    #[test]
+    fn ordinary_graphics_missing_explicit_parent_does_not_acknowledge_success() {
+        for synchronized in [false, true] {
+            let mut harness = SyncGraphicsHarness::new();
+            harness.feed(b"\x1b_Ga=T,i=384,p=12,q=2,f=24,s=1,v=1,C=1;AAAA\x1b\\");
+            harness.feed(b"\x1b_Ga=t,i=385,q=2,f=24,s=1,v=1;AAAA\x1b\\");
+            assert!(ordinary_reply_bytes(&harness).is_empty());
+            if synchronized {
+                harness.feed(b"\x1b[?2026h");
+            }
+            harness.feed(b"\x1b_Ga=p,i=385,p=13,P=384,Q=99,q=1\x1b\\");
+            if synchronized {
+                harness.feed(b"\x1b[?2026l");
+            }
+            let replies = ordinary_reply_bytes(&harness);
+            assert_eq!(replies.len(), 1);
+            assert!(replies[0].starts_with("\x1b_Gi=385,p=13;ENOPARENT:"));
+            assert!(replies[0].ends_with("\x1b\\"));
+            assert_eq!(harness.active_ids(), [384]);
+            assert!(!harness.relatives.lock().unwrap().contains_key(&(385, 13)));
+        }
+    }
+
+    #[test]
+    fn ordinary_graphics_combined_transmission_keeps_a_relative_destination() {
+        let mut harness = SyncGraphicsHarness::new();
+        harness.feed(b"\x1b_Ga=T,i=386,p=14,q=2,f=24,s=1,v=1,C=1;AAAA\x1b\\");
+        harness.feed(b"\x1b_Ga=T,i=387,p=15,P=386,Q=14,H=1,V=1,f=24,s=1,v=1;AQID\x1b\\");
+        assert_eq!(
+            ordinary_reply_bytes(&harness),
+            ["\x1b_Gi=387,p=15;OK\x1b\\"]
+        );
+        assert_eq!(harness.active_ids(), [386]);
+        let relatives = harness.relatives.lock().unwrap();
+        let relative = relatives
+            .get(&(387, 15))
+            .expect("accepted relative destination");
+        assert_eq!(
+            (
+                relative.parent_img,
+                relative.parent_placement,
+                relative.h,
+                relative.v
+            ),
+            (386, 14, 1, 1)
+        );
+    }
+
+    #[test]
+    fn ordinary_graphics_rejected_relative_update_preserves_its_previous_parent() {
+        let mut harness = SyncGraphicsHarness::new();
+        harness.feed(b"\x1b_Ga=T,i=388,p=16,q=2,f=24,s=1,v=1,C=1;AAAA\x1b\\");
+        harness.feed(b"\x1b_Ga=t,i=389,q=2,f=24,s=1,v=1;AQID\x1b\\");
+        harness.feed(b"\x1b_Ga=p,i=389,p=17,P=388,Q=16,H=1,q=2\x1b\\");
+        harness.feed(b"\x1b_Ga=p,i=389,p=17,P=388,Q=99,H=2,q=1\x1b\\");
+        let replies = ordinary_reply_bytes(&harness);
+        assert_eq!(replies.len(), 1);
+        assert!(replies[0].starts_with("\x1b_Gi=389,p=17;ENOPARENT:"));
+        let relatives = harness.relatives.lock().unwrap();
+        let previous = relatives
+            .get(&(389, 17))
+            .expect("previous accepted placement");
+        assert_eq!(
+            (previous.parent_img, previous.parent_placement, previous.h),
+            (388, 16, 1)
+        );
+        drop(relatives);
+        harness.feed(b"\x1b_Ga=d,d=i,i=388,p=16\x1b\\");
+        assert!(harness.relatives.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -18228,7 +18548,7 @@ mod image_lifecycle_tests {
                 columns: 8,
                 screen_lines: 4,
             },
-            proxy,
+            proxy.clone(),
         )));
         let mut processor = Processor::new();
         {
@@ -18258,6 +18578,7 @@ mod image_lifecycle_tests {
         let reader_geometry = geometry.clone();
         let reader_gate = graphics_gate.clone();
         let reader_order = order.clone();
+        let reader_proxy = proxy.clone();
         let reader = std::thread::spawn(move || {
             let chunk = Chunk::Pass(b"\n".to_vec());
             let mut deferred = DeferredGraphicsJournal::new();
@@ -18289,6 +18610,7 @@ mod image_lifecycle_tests {
                     anims: &reader_anims,
                     relatives: &reader_relatives,
                     geometry: &reader_geometry,
+                    proxy: &reader_proxy,
                 },
                 extractor: &mut extractor,
             };
@@ -18477,7 +18799,7 @@ mod image_lifecycle_tests {
             inactive,
             geometry,
             replies: _,
-            proxy: _,
+            proxy,
         } = &mut harness;
         let mut on_graphics = |dispatch: SyncGraphicsDispatch<'_>| {
             assert_eq!(
@@ -18508,6 +18830,7 @@ mod image_lifecycle_tests {
                     anims,
                     relatives,
                     geometry,
+                    proxy,
                 },
                 extractor,
             };

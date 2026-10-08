@@ -133,6 +133,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Kitty transmission and placement commands return completion replies after
+  actual image storage or placement admission, including synchronized output.
+  Chunked replies retain the original ids and quiet settings. Missing images,
+  missing parent placements, invalid data, and refused storage return errors.
+  Anonymous images remain silent. Refused relative replacements keep the previous
+  placement, accepted relative definitions survive reflow during admission, and
+  combined uploads preserve their relative destination. Zero identifiers are
+  treated as absent, unrecognized actions cannot become uploads, and a delete
+  refused for conflicting identifiers leaves partial uploads intact.
+
 - New Kitty image ids remain addressable at image-count and retained-byte limits
   by reclaiming eligible old images, with unplaced images first. Pixel snapshots
   keep their charge, and active count pressure preserves the other screen's roots.

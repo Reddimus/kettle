@@ -1380,10 +1380,34 @@ wire order. Queries and their continuations bypass DEC 2026 graphics deferral;
 they answer immediately even when later device attributes wait for the
 synchronized update to end. `q=1` suppresses success and `q=2` all replies.
 File, temporary-file, and shared-memory queries return unsupported; queries
-require a nonzero image id. Normal transmission/placement acknowledgements remain
-tracked in [AUDIT-DEFERRED.md](AUDIT-DEFERRED.md). Retransmission retires the old
+require a nonzero image id. Retransmission retires the old
 image and its placement/animation owners before decoding replacement pixels.
 Relative rendering and spatial deletion resolve the exact `(P, Q)` parent key.
+
+Ordinary transmit/placement commands use a typed result separating partial
+uploads, stored images, refusals, and placements awaiting Core admission. Numeric
+reply identity and effective quiet mode travel with the command accumulator and
+pending placement, never with retained pixels or renderer snapshots. First-chunk
+identity survives completion; only nonzero continuation quiet settings replace
+the previous setting. `GraphicsReply` shares the existing PTY reply transport
+with capability queries. Anonymous commands have no reply obligation.
+
+Physical placement exposes `Result<Option<GraphicsEventBatch>, ...>` so accepted
+`C=1` placement remains successful without a cursor-generated batch. Virtual and
+relative placement reply only after Core inserts the corresponding registry
+entry. A refused replacement restores the prior decoder definition only when
+the original screen/epoch and attempted definition still match; it cannot
+restore definitions cleared by reflow. Successful admission retains the new
+relative definition if reflow cleared it between decoding and admission, while
+preserving any newer definition. Explicit parent keys use direct map
+lookups, while an unspecified parent placement searches the existing bounded
+registries. Completion metadata is consumed before retaining the placement.
+
+Synchronized replay receives the required PTY reply sink and sends ordinary
+replies after actual admission. The existing synchronized-output timeout flushes
+a pending upload when a child waits for a reply before closing the update;
+capability queries still bypass deferral. Frame/composition replies remain
+tracked in [AUDIT-DEFERRED.md](AUDIT-DEFERRED.md).
 
 Kitty transmission decodes once into a temporary scope under the existing process
 account. At retained-byte or active image-count pressure, extraction requests an

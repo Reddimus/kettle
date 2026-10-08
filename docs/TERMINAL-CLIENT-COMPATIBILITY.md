@@ -48,7 +48,7 @@ image id and the latest nonzero quiet setting. `q=1` suppresses success and
 queries return `ENOTSUP`; direct transfer is supported. Replies reach the PTY
 in wire order before a following DA1 reply. A query answers immediately during
 DEC 2026 synchronized output; the engine can hold the DA1 reply until the
-update ends. Normal transmit/placement acknowledgements remain deferred work.
+update ends.
 
 What the answers change:
 
@@ -92,6 +92,32 @@ region, images wholly contained by the page margins move with text and crop
 their destination/source range at an edge; images already crossing a margin
 stay fixed, matching the Kitty graphics protocol.
 
+Kitty transmission (`a=t`, `a=T`) and placement (`a=p`) commands with a
+nonzero image id (`i`) or image number (`I`) receive one completion reply.
+Transmit-only success means the image was stored; display success follows actual
+placement admission. Replies include the image id, the original image number
+when supplied, and a nonzero placement id (`p`). Anonymous images remain silent
+and do not receive placement ids. Chunked uploads retain the first chunk's
+identity and respond only on completion. A later nonzero `q` updates suppression;
+`q=0` does not reset it. `q=1` suppresses success and `q=2` suppresses all replies.
+
+Errors distinguish invalid data or geometry (`EINVAL`), unsupported transmission
+media (`ENOTSUP`), a missing image (`ENOENT`), a missing parent placement
+(`ENOPARENT`), and unavailable image storage (`ENOSPC`). A command cannot specify
+both nonzero `i` and `I`; zero means that identifier was not supplied.
+Image-number uploads create distinct ids; later number-based commands select
+the newest image with that number. A delete refused for conflicting identifiers
+leaves partial uploads intact. Unrecognized action codes never become uploads
+or return success replies.
+
+Ordinary replies follow the same graphics ordering as placement. During DEC 2026
+synchronized output, they follow journal replay at commit or the existing 150 ms
+synchronized-output timeout. A child may wait for its reply before ending the
+update without indefinitely blocking that handshake. Capability queries retain
+the immediate path above. Animation frame and composition acknowledgements
+(`a=f`, `a=c`) remain unfinished; this is not a claim of complete response
+conformance.
+
 Kitty animation frame composition (`a=c`) reads source offsets from `X`/`Y`
 and destination offsets from `x`/`y`. Frame data (`a=f`) uses lowercase offsets
 and keeps `X=1` as its replacement flag. Newly appended frames default to
@@ -125,8 +151,10 @@ of the same image. Rendering and spatial deletion use the same origin. With
 back to the smallest relative placement id only when there is no concrete
 parent. A hidden virtual prototype does not shadow that concrete default.
 Virtual origins use only cells for the selected registered prototype; missing
-explicit parents produce no tile. Normal placement acknowledgements
-remain incomplete; this does not promise an `ENOPARENT` reply.
+explicit parents produce no tile and receive `ENOPARENT`, unless replies are
+suppressed. A refused replacement preserves the previously accepted relative
+placement. Combined transmit-and-display commands (`a=T`) retain their relative
+destination; relative placement does not move the cursor.
 
 ## Image attachment boundaries
 

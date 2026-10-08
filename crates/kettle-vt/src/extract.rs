@@ -51,8 +51,8 @@ pub enum Chunk {
     Raw(Vec<u8>),
     /// A decoded image to place at the current cursor position.
     Image(Placed),
-    /// An immediate Kitty capability-query reply for the PTY event channel.
-    GraphicsReply(crate::kitty::QueryReply),
+    /// A Kitty capability or completed command reply for the PTY event channel.
+    GraphicsReply(crate::kitty::GraphicsReply),
     /// Kitty `a=d`: delete placements selected by id, number, cursor/cell,
     /// range, column, row, or z-index.
     DeleteImages(Delete),
@@ -68,6 +68,7 @@ pub enum Chunk {
         cols: u32,
         rows: u32,
         z: i32,
+        completion: Option<crate::kitty::PlacementCompletion>,
     },
     /// kitty relative placement: child image `id`/`placement` is positioned
     /// `(h, v)` cells from its parent placement's origin (resolved against
@@ -82,6 +83,7 @@ pub enum Chunk {
         v: i32,
         z: i32,
         params: PlacementParams,
+        completion: Option<crate::kitty::PlacementCompletion>,
     },
     /// kitty animation snapshot for image `id`: the full display sequence
     /// (`imgs[0]` = base/root frame) with each frame's gap in ms and the
@@ -752,6 +754,26 @@ impl Extractor {
     pub fn apply_kitty_delete_result(&mut self, removed: &[PlacementKey], freed_image_ids: &[u32]) {
         self.kitty_mut()
             .apply_delete_result(removed, freed_image_ids);
+    }
+
+    /// Complete a Kitty effect after the core reports actual admission.
+    pub fn finish_kitty_placement(
+        &mut self,
+        completion: crate::kitty::PlacementCompletion,
+        status: crate::kitty::CommandStatus,
+    ) -> Option<crate::kitty::GraphicsReply> {
+        let Some((alternate, epoch)) = completion.scope() else {
+            return completion.reply(status);
+        };
+        if epoch.is_none() || epoch != self.graphics_epoch {
+            return completion.reply(status);
+        }
+        let kitty = if alternate {
+            &mut self.kitty_alternate
+        } else {
+            &mut self.kitty_primary
+        };
+        kitty.finish_placement(completion, status)
     }
 
     /// Enter the alternate screen, optionally clearing its stored graphics.
@@ -1527,7 +1549,7 @@ impl Extractor {
 
         enum R {
             None,
-            Reply(crate::kitty::QueryReply),
+            Reply(crate::kitty::GraphicsReply),
             Img(Placed),
             Del(Delete),
             Virtual {
@@ -1537,6 +1559,7 @@ impl Extractor {
                 cols: u32,
                 rows: u32,
                 z: i32,
+                completion: Option<crate::kitty::PlacementCompletion>,
             },
             Anim {
                 id: u32,
@@ -1554,10 +1577,13 @@ impl Extractor {
                 v: i32,
                 z: i32,
                 params: PlacementParams,
+                completion: Option<crate::kitty::PlacementCompletion>,
             },
         }
 
         let mut raw_emitted = false;
+        let mut ordinary_reply = None;
+        let mut placement_completion = None;
         let result = match mode {
             Mode::Dcs => {
                 // A Sixel DCS is `P1;P2;P3 q <data>`, where the bytes before `q`
@@ -1625,9 +1651,26 @@ impl Extractor {
                             }
                             result = self.kitty_mut().complete_transmit(pending);
                         }
-                        match result {
-                            KittyOut::Query(reply) => R::Reply(reply),
-                            KittyOut::Place(p) => R::Img(p),
+                        match result.completion {
+                            crate::kitty::CommandCompletion::Finished(reply) => {
+                                ordinary_reply = reply.map(crate::kitty::GraphicsReply::from);
+                            }
+                            crate::kitty::CommandCompletion::Placement(mut completion) => {
+                                completion.bind_scope(
+                                    self.graphics_screen == GraphicsScreen::Alternate,
+                                    self.graphics_epoch,
+                                );
+                                placement_completion = Some(completion);
+                            }
+                            crate::kitty::CommandCompletion::NoResponse
+                            | crate::kitty::CommandCompletion::Partial => {}
+                        }
+                        match result.effect {
+                            KittyOut::Query(reply) => R::Reply(reply.into()),
+                            KittyOut::Place(mut p) => {
+                                p.completion = placement_completion.take();
+                                R::Img(p)
+                            }
                             KittyOut::Delete(delete) => R::Del(delete),
                             // Virtual placements draw nothing at the cursor; the
                             // stored image + box are surfaced so the renderer can
@@ -1644,6 +1687,7 @@ impl Extractor {
                                         cols: vp.cols,
                                         rows: vp.rows,
                                         z: vp.z,
+                                        completion: placement_completion.take(),
                                     },
                                     _ => R::None,
                                 }
@@ -1688,6 +1732,7 @@ impl Extractor {
                                         v: rp.v,
                                         z: rp.z,
                                         params: rp.params,
+                                        completion: placement_completion.take(),
                                     },
                                     _ => R::None,
                                 }
@@ -1719,6 +1764,8 @@ impl Extractor {
             Mode::Pass => R::None,
         };
 
+        let result = ordinary_reply.map_or(result, R::Reply);
+
         match result {
             R::Reply(reply) => {
                 if !raw_emitted {
@@ -1745,6 +1792,7 @@ impl Extractor {
                 cols,
                 rows,
                 z,
+                completion,
             } => {
                 if !raw_emitted {
                     self.emit_raw_control(mode, &seq, out);
@@ -1756,6 +1804,7 @@ impl Extractor {
                     cols,
                     rows,
                     z,
+                    completion,
                 });
             }
             R::Anim {
@@ -1784,6 +1833,7 @@ impl Extractor {
                 v,
                 z,
                 params,
+                completion,
             } => {
                 if !raw_emitted {
                     self.emit_raw_control(mode, &seq, out);
@@ -1798,6 +1848,7 @@ impl Extractor {
                     v,
                     z,
                     params,
+                    completion,
                 });
             }
             R::None => {
@@ -3982,5 +4033,403 @@ mod tests {
                 assert!(extractor.kitty_alternate.image(83).is_none());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod ordinary_graphics_reply_tests {
+    use super::{Chunk, Extractor};
+
+    fn replies(extractor: &mut Extractor, wire: &[u8]) -> Vec<String> {
+        extractor
+            .feed(wire)
+            .into_iter()
+            .filter_map(|chunk| match chunk {
+                Chunk::GraphicsReply(reply) => Some(reply.encode()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn anonymous_images_do_not_emit_unsolicited_completion_replies() {
+        for command in [
+            b"\x1b_Ga=t,f=24,s=1,v=1;AAAA\x1b\\".as_slice(),
+            b"\x1b_Ga=T,f=24,s=1,v=1;AAAA\x1b\\".as_slice(),
+            b"\x1b_Ga=t,f=24,s=1,v=1;!\x1b\\".as_slice(),
+        ] {
+            assert!(replies(&mut Extractor::default(), command).is_empty());
+        }
+    }
+
+    #[test]
+    fn nonzero_continuation_quiet_overrides_the_first_chunk() {
+        let mut extractor = Extractor::default();
+        assert!(
+            replies(
+                &mut extractor,
+                b"\x1b_Ga=t,i=271,p=8,q=2,f=24,s=1,v=1,m=1;AAAA\x1b\\"
+            )
+            .is_empty()
+        );
+        let response = replies(&mut extractor, b"\x1b_Gm=0,q=1;!\x1b\\");
+        assert_eq!(response.len(), 1);
+        assert!(response[0].starts_with("\x1b_Gi=271,p=8;EINVAL:"));
+        assert!(response[0].ends_with("\x1b\\"));
+    }
+
+    #[test]
+    fn zero_continuation_quiet_preserves_success_suppression() {
+        let mut extractor = Extractor::default();
+        assert!(
+            replies(
+                &mut extractor,
+                b"\x1b_Ga=t,i=272,q=1,f=32,s=1,v=1,m=1;AQID\x1b\\"
+            )
+            .is_empty()
+        );
+        assert!(replies(&mut extractor, b"\x1b_Gm=0,q=0;/w==\x1b\\").is_empty());
+        assert!(extractor.kitty().image(272).is_some());
+    }
+
+    #[test]
+    fn quiet_two_on_the_final_chunk_suppresses_a_decoder_failure() {
+        let mut extractor = Extractor::default();
+        assert!(
+            replies(
+                &mut extractor,
+                b"\x1b_Ga=t,i=273,f=24,s=1,v=1,m=1;AAAA\x1b\\"
+            )
+            .is_empty()
+        );
+        assert!(replies(&mut extractor, b"\x1b_Gm=0,q=2;!\x1b\\").is_empty());
+        assert!(extractor.kitty().image(273).is_none());
+    }
+
+    #[test]
+    fn quiet_one_reports_an_unsupported_transmission_medium() {
+        let mut extractor = Extractor::default();
+        let response = replies(
+            &mut extractor,
+            b"\x1b_Ga=t,i=274,q=1,t=s,f=24,s=1,v=1;AAAA\x1b\\",
+        );
+        assert_eq!(response.len(), 1);
+        assert!(response[0].starts_with("\x1b_Gi=274;ENOTSUP:"));
+        assert!(response[0].ends_with("\x1b\\"));
+    }
+
+    #[test]
+    fn chunked_image_number_reply_retains_the_starting_number_and_placement() {
+        let mut extractor = Extractor::default();
+        assert!(
+            replies(
+                &mut extractor,
+                b"\x1b_Ga=t,I=21,p=19,f=32,s=1,v=1,m=1;AQID\x1b\\"
+            )
+            .is_empty()
+        );
+        let response = replies(&mut extractor, b"\x1b_Gm=0;/w==\x1b\\");
+        assert_eq!(response.len(), 1);
+        let id = response[0]
+            .strip_prefix("\x1b_Gi=")
+            .and_then(|value| value.strip_suffix(",I=21,p=19;OK\x1b\\"))
+            .and_then(|value| value.parse::<u32>().ok())
+            .expect("generated id and first-chunk number/placement");
+        assert_ne!(id, 0);
+        assert!(extractor.kitty().image(id).is_some());
+    }
+
+    #[test]
+    fn deleted_partial_upload_has_no_late_completion_reply() {
+        let mut extractor = Extractor::default();
+        assert!(
+            replies(
+                &mut extractor,
+                b"\x1b_Ga=t,i=275,f=32,s=1,v=1,m=1;AQID\x1b\\"
+            )
+            .is_empty()
+        );
+        assert!(replies(&mut extractor, b"\x1b_Ga=d,d=a\x1b\\").is_empty());
+        assert!(replies(&mut extractor, b"\x1b_Gm=0;/w==\x1b\\").is_empty());
+        assert!(extractor.kitty().image(275).is_none());
+    }
+
+    #[test]
+    fn ordinary_transmission_refuses_a_full_unreclaimable_retained_scope() {
+        let limits = crate::GraphicsLimits {
+            image_bytes: 4,
+            retained_bytes: 4,
+            process_cpu_bytes: 64 * 1024,
+            ..crate::GraphicsLimits::default()
+        };
+        let budget = crate::GraphicsBudget::isolated(limits).expect("small valid retained limit");
+        let held = crate::ImageData::new_with_budget(1, 1, vec![0, 0, 0, 255], &budget)
+            .expect("external retained snapshot");
+        let mut extractor = Extractor::with_budget(budget.clone());
+        let response = replies(
+            &mut extractor,
+            b"\x1b_Ga=t,i=276,q=1,f=24,s=1,v=1;AAAA\x1b\\",
+        );
+        assert_eq!(response.len(), 1);
+        assert!(response[0].starts_with("\x1b_Gi=276;ENOSPC:"));
+        assert!(response[0].ends_with("\x1b\\"));
+        assert!(extractor.kitty().image(276).is_none());
+        assert_eq!(held.rgba.as_slice(), &[0, 0, 0, 255]);
+        assert_eq!(budget.retained_cpu_bytes(), 4);
+    }
+
+    #[test]
+    fn anonymous_transmission_does_not_assign_a_placement_identifier() {
+        let mut extractor = Extractor::default();
+        let chunks = extractor.feed(b"\x1b_Ga=T,p=19,f=24,s=1,v=1,C=1;AAAA\x1b\\");
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| !matches!(chunk, Chunk::GraphicsReply(_)))
+        );
+        let placed = chunks
+            .into_iter()
+            .find_map(|chunk| match chunk {
+                Chunk::Image(placed) => Some(placed),
+                _ => None,
+            })
+            .expect("anonymous physical image");
+        assert_eq!(placed.id, None);
+        assert_eq!(placed.placement_id, 0);
+    }
+
+    #[test]
+    fn conflicting_delete_identifiers_leave_the_partial_upload_intact() {
+        let mut extractor = Extractor::default();
+        assert!(
+            replies(
+                &mut extractor,
+                b"\x1b_Ga=t,i=397,f=32,s=1,v=1,m=1;AQID\x1b\\"
+            )
+            .is_empty()
+        );
+        let refusal = replies(&mut extractor, b"\x1b_Ga=d,d=a,i=397,I=42,q=1\x1b\\");
+        assert_eq!(refusal.len(), 1);
+        assert!(refusal[0].starts_with("\x1b_Gi=397,I=42;EINVAL:"));
+        assert_eq!(
+            replies(&mut extractor, b"\x1b_Gm=0;/w==\x1b\\"),
+            ["\x1b_Gi=397;OK\x1b\\"]
+        );
+        assert_eq!(
+            extractor.kitty().image(397).unwrap().rgba.as_slice(),
+            &[1, 2, 3, 255]
+        );
+    }
+
+    #[test]
+    fn zero_identifiers_do_not_conflict_with_the_other_nonzero_identifier() {
+        let mut extractor = Extractor::default();
+        let response = replies(
+            &mut extractor,
+            b"\x1b_Ga=t,i=0,I=32,f=24,s=1,v=1;AAAA\x1b\\",
+        );
+        assert_eq!(response.len(), 1);
+        let id = response[0]
+            .strip_prefix("\x1b_Gi=")
+            .and_then(|value| value.strip_suffix(",I=32;OK\x1b\\"))
+            .and_then(|value| value.parse::<u32>().ok())
+            .expect("zero image id leaves image-number upload intact");
+        assert_ne!(id, 0);
+        assert!(extractor.kitty().image(id).is_some());
+        let placed = extractor
+            .feed(b"\x1b_Ga=p,i=0,I=32,C=1\x1b\\")
+            .into_iter()
+            .find_map(|chunk| match chunk {
+                Chunk::Image(placed) => Some(placed),
+                _ => None,
+            })
+            .expect("zero image id leaves number-based placement intact");
+        assert_eq!(placed.id, Some(id));
+        let reply = extractor
+            .finish_kitty_placement(
+                placed.completion.expect("pending placement admission"),
+                crate::kitty::CommandStatus::Ok,
+            )
+            .expect("number-based placement completion");
+        assert_eq!(reply.encode(), format!("\x1b_Gi={id},I=32;OK\x1b\\"));
+        assert_eq!(
+            replies(
+                &mut extractor,
+                b"\x1b_Ga=t,i=396,I=0,f=24,s=1,v=1;AAAA\x1b\\"
+            ),
+            ["\x1b_Gi=396;OK\x1b\\"]
+        );
+        assert!(extractor.kitty().image(396).is_some());
+        assert!(replies(&mut extractor, b"\x1b_Ga=t,i=0,I=0,f=24,s=1,v=1;AAAA\x1b\\").is_empty());
+    }
+
+    #[test]
+    fn unsupported_action_is_not_acknowledged_as_success() {
+        let mut extractor = Extractor::default();
+        let chunks = extractor.feed(b"\x1b_Ga=x,i=395,f=24,s=1,v=1;AAAA\x1b\\");
+        assert!(
+            !chunks
+                .iter()
+                .any(|chunk| matches!(chunk, Chunk::GraphicsReply(_)))
+        );
+        assert!(extractor.kitty().image(395).is_none());
+        assert!(
+            replies(
+                &mut extractor,
+                b"\x1b_Ga=t,i=395,f=32,s=1,v=1,m=1;AQID\x1b\\"
+            )
+            .is_empty()
+        );
+        assert!(replies(&mut extractor, b"\x1b_Ga=x,i=395;AAAA\x1b\\").is_empty());
+        assert_eq!(
+            replies(&mut extractor, b"\x1b_Gm=0;/w==\x1b\\"),
+            ["\x1b_Gi=395;OK\x1b\\"]
+        );
+        assert_eq!(
+            extractor.kitty().image(395).unwrap().rgba.as_slice(),
+            &[1, 2, 3, 255]
+        );
+    }
+
+    #[test]
+    fn accepted_relative_placement_after_reflow_keeps_its_new_definition() {
+        let mut extractor = Extractor::default();
+        extractor.feed(b"\x1b_Ga=T,i=393,p=18,U=1,c=1,r=1,q=2,f=24,s=1,v=1;AAAA\x1b\\");
+        extractor.feed(b"\x1b_Ga=t,i=394,q=2,f=24,s=1,v=1;AAAA\x1b\\");
+        let chunks = extractor.feed(b"\x1b_Ga=p,i=394,p=19,P=393,Q=18,H=1\x1b\\");
+        let completion = chunks
+            .into_iter()
+            .find_map(|chunk| match chunk {
+                Chunk::RelativePlacement { completion, .. } => completion,
+                _ => None,
+            })
+            .expect("pending new relative placement");
+        extractor.clear_reflowed_regular_placements();
+        assert!(extractor.kitty().virtual_placement(393, 18).is_some());
+        assert!(extractor.kitty().relative_placement(394, 19).is_none());
+        let reply = extractor
+            .finish_kitty_placement(completion, crate::kitty::CommandStatus::Ok)
+            .expect("accepted placement acknowledgement");
+        assert_eq!(reply.encode(), "\x1b_Gi=394,p=19;OK\x1b\\");
+        let relation = extractor
+            .kitty()
+            .relative_placement(394, 19)
+            .expect("retain the new definition admitted after reflow");
+        assert_eq!(
+            (relation.parent_img, relation.parent_placement, relation.h),
+            (393, 18, 1)
+        );
+    }
+
+    #[test]
+    fn rejected_relative_update_after_reflow_does_not_restore_the_old_definition() {
+        let mut extractor = Extractor::default();
+        extractor.feed(b"\x1b_Ga=t,i=390,q=2,f=24,s=1,v=1;AAAA\x1b\\");
+        extractor.feed(b"\x1b_Ga=p,i=390,p=18,P=391,Q=1,H=1,q=2\x1b\\");
+        let chunks = extractor.feed(b"\x1b_Ga=p,i=390,p=18,P=391,Q=99,H=2,q=1\x1b\\");
+        let completion = chunks
+            .into_iter()
+            .find_map(|chunk| match chunk {
+                Chunk::RelativePlacement { completion, .. } => completion,
+                _ => None,
+            })
+            .expect("pending relative update");
+        extractor.clear_reflowed_regular_placements();
+        let reply = extractor
+            .finish_kitty_placement(completion, crate::kitty::CommandStatus::MissingParent)
+            .expect("refusal acknowledgement");
+        assert!(reply.encode().starts_with("\x1b_Gi=390,p=18;ENOPARENT:"));
+        assert!(extractor.kitty().relative_placement(390, 18).is_none());
+    }
+
+    #[test]
+    fn completed_transmission_echoes_its_id() {
+        let mut extractor = Extractor::default();
+        assert_eq!(
+            replies(&mut extractor, b"\x1b_Ga=t,i=91,f=24,s=1,v=1;AAAA\x1b\\"),
+            ["\x1b_Gi=91;OK\x1b\\"]
+        );
+    }
+
+    #[test]
+    fn chunked_transmission_replies_once_using_first_chunk_identity() {
+        let mut extractor = Extractor::default();
+        assert!(
+            replies(
+                &mut extractor,
+                b"\x1b_Ga=t,i=92,p=8,f=32,s=1,v=1,m=1;AQID\x1b\\"
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            replies(&mut extractor, b"\x1b_Gm=0;/w==\x1b\\"),
+            ["\x1b_Gi=92,p=8;OK\x1b\\"]
+        );
+    }
+
+    #[test]
+    fn quiet_one_still_reports_a_missing_image_and_echoes_placement() {
+        let mut extractor = Extractor::default();
+        let replies = replies(&mut extractor, b"\x1b_Ga=p,i=93,p=9,q=1\x1b\\");
+        assert_eq!(replies.len(), 1);
+        assert!(replies[0].starts_with("\x1b_Gi=93,p=9;ENOENT:"));
+        assert!(replies[0].ends_with("\x1b\\"));
+    }
+
+    #[test]
+    fn image_numbers_report_new_ids_and_target_the_newest_image() {
+        let mut extractor = Extractor::default();
+        let mut ids = Vec::new();
+        for payload in ["AAAA", "AQID"] {
+            let response = replies(
+                &mut extractor,
+                format!("\x1b_Ga=t,I=17,f=24,s=1,v=1;{payload}\x1b\\").as_bytes(),
+            );
+            assert_eq!(response.len(), 1);
+            let id = response[0]
+                .strip_prefix("\x1b_Gi=")
+                .and_then(|body| body.strip_suffix(",I=17;OK\x1b\\"))
+                .and_then(|value| value.parse::<u32>().ok())
+                .expect("generated id and original image number");
+            assert_ne!(id, 0);
+            ids.push(id);
+        }
+        assert_ne!(ids[0], ids[1]);
+        let chunks = extractor.feed(b"\x1b_Ga=p,I=17,p=11,C=1\x1b\\");
+        assert!(chunks.into_iter().any(|chunk| matches!(chunk, Chunk::Image(placed) if placed.id == Some(ids[1]) && placed.placement_id == 11)));
+    }
+
+    #[test]
+    fn mutually_exclusive_identifiers_return_a_typed_error() {
+        let mut extractor = Extractor::default();
+        let response = replies(
+            &mut extractor,
+            b"\x1b_Ga=t,i=97,I=18,q=1,f=24,s=1,v=1;AAAA\x1b\\",
+        );
+        assert_eq!(response.len(), 1);
+        assert!(response[0].starts_with("\x1b_Gi=97,I=18;EINVAL:"));
+        assert!(response[0].ends_with("\x1b\\"));
+    }
+
+    #[test]
+    fn quiet_two_suppresses_missing_image_replies() {
+        let mut extractor = Extractor::default();
+        assert!(replies(&mut extractor, b"\x1b_Ga=p,i=94,p=10,q=2\x1b\\").is_empty());
+    }
+
+    #[test]
+    fn quiet_transmission_does_not_suppress_a_later_capability_query() {
+        let mut extractor = Extractor::default();
+        assert!(
+            replies(
+                &mut extractor,
+                b"\x1b_Ga=t,i=95,q=2,f=24,s=1,v=1;AAAA\x1b\\"
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            replies(&mut extractor, b"\x1b_Ga=q,i=96,f=24,s=1,v=1;AAAA\x1b\\"),
+            ["\x1b_Gi=96;OK\x1b\\"]
+        );
     }
 }

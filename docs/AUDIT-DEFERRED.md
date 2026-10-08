@@ -73,10 +73,13 @@ refactor. The Kitty items need protocol probes and have no current consumer.
 
 ## Terminal / protocol
 
-- **Kitty transmission and placement acknowledgements.** Capability queries
-  now decode direct data and return typed replies in wire order, including
-  during synchronized output. Normal transmission/placement success and
-  error acknowledgements remain incomplete.
+- **Kitty animation-frame and composition acknowledgements.** Ordinary
+  transmission (`t`, `T`) and placement (`p`) commands now report typed
+  success/error replies with the original identifiers and effective quiet
+  level. Placement success follows actual Core admission, including
+  synchronized-output replay and its deadline. Capability queries retain
+  their immediate wire-order replies. Frame upload (`f`) and composition
+  (`c`) replies remain incomplete.
 - ~~**Inline-image scrolling inside partial DECSTBM margins.**~~ Done in the
   next release: the terminal engine now emits bounded, ordered scroll-region
   events with direction, margins, count, and monotonic screen-top ids. Images
@@ -940,8 +943,9 @@ Physical and relative placements now retain and re-resolve source crop,
 destination cells, pixel offsets, aspect ratio, and cursor-movement intent.
 Exact `(image id, placement id)` `Q=` parent resolution now uses one keyed
 resolver for rendering and live/synchronized spatial deletion, including chains
-and virtual prototypes. These fixes do **not** close normal transmission/placement
-acknowledgements listed above.
+and virtual prototypes. Ordinary transmission/placement acknowledgements now
+follow actual decode/storage/placement results; frame and composition replies
+remain tracked above.
 
 ## Deferred from the #187 review round
 

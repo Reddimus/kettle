@@ -3,7 +3,7 @@
 //!
 //! - `a=t` transmit only (store, don't display) — later shown with `a=p`
 //! - `a=T` transmit and display
-//! - `a=p` put a previously transmitted image (by `i=` id) at the cursor
+//! - `a=p` put a previously transmitted image (by id or number) at the cursor
 //! - `a=d` delete images and placements (every `d=` selector)
 //! - `z=`  z-index ordering between images
 //! - `U=1` *virtual placement*: the image is stored and a rows×cols virtual
@@ -36,6 +36,7 @@ struct Acc {
     control: String,
     payload: String,
     reservation: Option<GraphicsReservation>,
+    reply: Option<ReplyIntent>,
 }
 
 #[derive(Default)]
@@ -342,6 +343,368 @@ impl QueryReply {
     }
 }
 
+/// A response for one command, detached from retained image data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReplyIntent {
+    id: u32,
+    image_number: Option<u32>,
+    placement_id: Option<u32>,
+    quiet: u8,
+    requested: bool,
+}
+
+impl ReplyIntent {
+    fn from_control(values: &HashMap<String, String>, id: u32) -> Self {
+        let numeric = |key: &str| {
+            values
+                .get(key)
+                .and_then(|value| value.parse::<u32>().ok())
+                .filter(|&value| value != 0)
+        };
+        Self {
+            id,
+            image_number: numeric("I"),
+            placement_id: numeric("p"),
+            requested: numeric("i").is_some() || numeric("I").is_some(),
+            quiet: values
+                .get("q")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0),
+        }
+    }
+
+    fn update_quiet(&mut self, values: &HashMap<String, String>) {
+        if let Some(quiet) = values
+            .get("q")
+            .and_then(|value| value.parse::<u8>().ok())
+            .filter(|&quiet| quiet != 0)
+        {
+            self.quiet = quiet;
+        }
+    }
+
+    fn complete(self, status: CommandStatus) -> Option<CommandReply> {
+        if !self.requested || self.quiet >= 2 || (self.quiet == 1 && status == CommandStatus::Ok) {
+            None
+        } else {
+            Some(CommandReply {
+                intent: self,
+                status,
+            })
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandStatus {
+    Ok,
+    InvalidImage,
+    InvalidIdentifiers,
+    InvalidPlacement,
+    UnsupportedMedium,
+    MissingImage,
+    MissingParent,
+    NoSpace,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandReply {
+    intent: ReplyIntent,
+    status: CommandStatus,
+}
+
+impl CommandReply {
+    fn encode(self) -> String {
+        let message = match self.status {
+            CommandStatus::Ok => "OK",
+            CommandStatus::InvalidImage => "EINVAL:Invalid image data",
+            CommandStatus::InvalidIdentifiers => {
+                "EINVAL:Image id and number are mutually exclusive"
+            }
+            CommandStatus::InvalidPlacement => "EINVAL:Invalid placement geometry",
+            CommandStatus::UnsupportedMedium => "ENOTSUP:Unsupported transmission medium",
+            CommandStatus::MissingImage => "ENOENT:Image not found",
+            CommandStatus::MissingParent => "ENOPARENT:Parent placement not found",
+            CommandStatus::NoSpace => "ENOSPC:Image storage unavailable",
+        };
+        use std::fmt::Write;
+        let mut output = String::with_capacity(128);
+        write!(&mut output, "\x1b_Gi={}", self.intent.id).expect("writing to a String");
+        if let Some(number) = self.intent.image_number {
+            write!(&mut output, ",I={number}").expect("writing to a String");
+        }
+        if let Some(placement) = self.intent.placement_id {
+            write!(&mut output, ",p={placement}").expect("writing to a String");
+        }
+        output.push(';');
+        output.push_str(message);
+        output.push_str("\x1b\\");
+        output
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphicsReply {
+    Query(QueryReply),
+    Command(CommandReply),
+}
+
+impl GraphicsReply {
+    pub fn encode(self) -> String {
+        match self {
+            Self::Query(reply) => reply.encode(),
+            Self::Command(reply) => reply.encode(),
+        }
+    }
+}
+
+impl From<QueryReply> for GraphicsReply {
+    fn from(reply: QueryReply) -> Self {
+        Self::Query(reply)
+    }
+}
+
+impl From<CommandReply> for GraphicsReply {
+    fn from(reply: CommandReply) -> Self {
+        Self::Command(reply)
+    }
+}
+
+/// Completion follows the command, never an image allocation or render snapshot.
+pub(crate) enum CommandCompletion {
+    NoResponse,
+    Partial,
+    Finished(Option<CommandReply>),
+    Placement(PlacementCompletion),
+}
+
+pub(crate) struct CommandResult {
+    pub effect: KittyOut,
+    pub completion: CommandCompletion,
+}
+
+impl CommandResult {
+    fn without_response(effect: KittyOut) -> Self {
+        Self {
+            effect,
+            completion: CommandCompletion::NoResponse,
+        }
+    }
+
+    fn partial() -> Self {
+        Self {
+            effect: KittyOut::None,
+            completion: CommandCompletion::Partial,
+        }
+    }
+
+    fn refused(intent: ReplyIntent, status: CommandStatus) -> Self {
+        Self {
+            effect: KittyOut::None,
+            completion: CommandCompletion::Finished(intent.complete(status)),
+        }
+    }
+
+    fn stored(intent: ReplyIntent) -> Self {
+        Self {
+            effect: KittyOut::None,
+            completion: CommandCompletion::Finished(intent.complete(CommandStatus::Ok)),
+        }
+    }
+
+    fn placement(effect: KittyOut, completion: PlacementCompletion) -> Self {
+        Self {
+            effect,
+            completion: CommandCompletion::Placement(completion),
+        }
+    }
+}
+
+/// Opaque pending placement result for terminal core admission.
+#[derive(Debug, Clone, Copy)]
+pub struct PlacementCompletion {
+    intent: ReplyIntent,
+    previous: PlacementPrevious,
+    scope: Option<(bool, Option<u64>)>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PlacementPrevious {
+    Physical,
+    Virtual {
+        previous: Option<VirtualPlacement>,
+        attempted: VirtualPlacement,
+    },
+    Relative {
+        previous: Option<RelativePlacement>,
+        attempted: RelativePlacement,
+    },
+}
+
+impl KittyState {
+    pub(crate) fn finish_placement(
+        &mut self,
+        completion: PlacementCompletion,
+        status: CommandStatus,
+    ) -> Option<GraphicsReply> {
+        let key = (
+            completion.intent.id,
+            completion.intent.placement_id.unwrap_or(0),
+        );
+        if status == CommandStatus::Ok {
+            if let PlacementPrevious::Relative { attempted, .. } = completion.previous
+                && self.store.contains_key(&key.0)
+            {
+                // Core can reflow between decoding and admitting this placement.
+                // Retain the newly accepted definition without replacing newer state.
+                self.rel.entry(key).or_insert(attempted);
+            }
+        } else {
+            match completion.previous {
+                PlacementPrevious::Physical => {}
+                PlacementPrevious::Virtual {
+                    previous,
+                    attempted,
+                } if self.virtual_placements.get(&key) == Some(&attempted) => {
+                    if let Some(previous) = previous {
+                        self.virtual_placements.insert(key, previous);
+                    } else {
+                        self.virtual_placements.remove(&key);
+                    }
+                }
+                PlacementPrevious::Relative {
+                    previous,
+                    attempted,
+                } if self.rel.get(&key) == Some(&attempted) => {
+                    if let Some(previous) = previous {
+                        self.rel.insert(key, previous);
+                    } else {
+                        self.rel.remove(&key);
+                    }
+                }
+                _ => {}
+            }
+        }
+        completion.intent.complete(status).map(GraphicsReply::from)
+    }
+}
+
+impl PlacementCompletion {
+    pub(crate) fn bind_scope(&mut self, alternate: bool, epoch: Option<u64>) {
+        self.scope = Some((alternate, epoch));
+    }
+
+    pub(crate) fn scope(&self) -> Option<(bool, Option<u64>)> {
+        self.scope
+    }
+
+    pub(crate) fn reply(self, status: CommandStatus) -> Option<GraphicsReply> {
+        self.intent.complete(status).map(GraphicsReply::from)
+    }
+}
+
+impl KittyState {
+    fn stage_placement(
+        &mut self,
+        id: u32,
+        img: ImageData,
+        values: &HashMap<String, String>,
+        z: i32,
+        intent: ReplyIntent,
+    ) -> CommandResult {
+        let dim = |key: &str| values.get(key).and_then(|value| value.parse::<u32>().ok());
+        let placement = if id == 0 { 0 } else { dim("p").unwrap_or(0) };
+        let virtual_placement = values.get("U").is_some_and(|value| value == "1");
+        if virtual_placement && values.contains_key("P") {
+            return CommandResult::refused(intent, CommandStatus::InvalidPlacement);
+        }
+        let key = (id, placement);
+        let z = values
+            .get("z")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(z);
+        if virtual_placement {
+            if id == 0 {
+                return CommandResult::refused(intent, CommandStatus::InvalidPlacement);
+            }
+            if !self.virtual_placements.contains_key(&key)
+                && self.placement_state_len() >= self.budget.limits().placements
+            {
+                return CommandResult::refused(intent, CommandStatus::NoSpace);
+            }
+            let attempted = VirtualPlacement {
+                placement_id: placement,
+                cols: dim("c").unwrap_or(0),
+                rows: dim("r").unwrap_or(0),
+                z,
+            };
+            let previous = self.virtual_placements.insert(key, attempted);
+            return CommandResult::placement(
+                KittyOut::Virtual { id, placement },
+                PlacementCompletion {
+                    intent,
+                    previous: PlacementPrevious::Virtual {
+                        previous,
+                        attempted,
+                    },
+                    scope: None,
+                },
+            );
+        }
+        if let Some(parent_img) = dim("P") {
+            if id == 0 {
+                return CommandResult::refused(intent, CommandStatus::MissingImage);
+            }
+            if !self.rel.contains_key(&key)
+                && self.placement_state_len() >= self.budget.limits().placements
+            {
+                return CommandResult::refused(intent, CommandStatus::NoSpace);
+            }
+            let offset = |key: &str| {
+                values
+                    .get(key)
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(0)
+            };
+            let attempted = RelativePlacement {
+                parent_img,
+                parent_placement: dim("Q").unwrap_or(0),
+                h: offset("H"),
+                v: offset("V"),
+                z,
+                params: placement_params(values),
+            };
+            let previous = self.rel.insert(key, attempted);
+            return CommandResult::placement(
+                KittyOut::Relative { id, placement },
+                PlacementCompletion {
+                    intent,
+                    previous: PlacementPrevious::Relative {
+                        previous,
+                        attempted,
+                    },
+                    scope: None,
+                },
+            );
+        }
+        CommandResult::placement(
+            KittyOut::Place(Placed {
+                img,
+                id: (id != 0).then_some(id),
+                placement_id: placement,
+                z,
+                params: Some(placement_params(values)),
+                completion: None,
+            }),
+            PlacementCompletion {
+                intent,
+                previous: PlacementPrevious::Physical,
+                scope: None,
+            },
+        )
+    }
+}
+
 /// What a kitty APC resolved to.
 pub enum KittyOut {
     None,
@@ -397,6 +760,7 @@ pub(crate) struct PendingTransmit {
     z: i32,
     created: u64,
     img: ImageData,
+    reply: ReplyIntent,
 }
 
 /// Buffer-local uploads, images, placements, and animation state.
@@ -551,7 +915,7 @@ impl KittyState {
         self.retire_retransmission(&command);
         let result = self.feed_command(command);
         let Some(pending) = self.pending_transmit.take() else {
-            return result;
+            return result.effect;
         };
         if let Some(request) = self.quota_request(&pending) {
             let Some(victims) = request.plan(&[]) else {
@@ -559,7 +923,7 @@ impl KittyState {
             };
             self.reclaim_quota(&victims, false);
         }
-        self.complete_transmit(pending)
+        self.complete_transmit(pending).effect
     }
 
     pub(crate) fn is_query_command(&self, command: &Command<'_>) -> bool {
@@ -612,17 +976,24 @@ impl KittyState {
         Some(delete)
     }
 
-    pub(crate) fn feed_command(&mut self, command: Command<'_>) -> KittyOut {
+    pub(crate) fn feed_command(&mut self, command: Command<'_>) -> CommandResult {
         let Command {
             control,
             payload,
             values: kv,
         } = command;
         if self.is_query_control(&kv) {
-            return self.query(control, payload, kv);
+            return CommandResult::without_response(self.query(control, payload, kv));
         }
-        let explicit_id = kv.get("i").and_then(|v| v.parse::<u32>().ok());
-        let image_number = kv.get("I").and_then(|v| v.parse::<u32>().ok());
+        // Zero means the identifier was not supplied.
+        let explicit_id = kv
+            .get("i")
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|&id| id != 0);
+        let image_number = kv
+            .get("I")
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|&number| number != 0);
         // Continuation chunks carry only `m` (no `a`, `i`, or `I`); route
         // them to the active frame accumulator first.
         let action = match kv.get("a") {
@@ -637,20 +1008,23 @@ impl KittyState {
         };
         let z = kv.get("z").and_then(|v| v.parse().ok()).unwrap_or(0i32);
 
-        let virt = kv.get("U").map(|v| v == "1").unwrap_or(false);
         let dim = |k: &str| kv.get(k).and_then(|v| v.parse::<u32>().ok());
+
+        // Reject conflicting identifiers before applying command side effects.
+        if explicit_id.is_some() && image_number.is_some() {
+            return CommandResult::refused(
+                ReplyIntent::from_control(&kv, explicit_id.unwrap_or(0)),
+                CommandStatus::InvalidIdentifiers,
+            );
+        }
 
         // Control-only ops are never chunked.
         if action == "d" {
-            // The protocol requires *every* delete command to abort a partial
-            // upload, even when the delete selector targets another image.
+            // Accepted delete commands abort a partial upload, even when the
+            // delete selector targets another image.
             self.in_flight.clear();
             self.frame_in_flight = None;
             self.query_in_flight = None;
-
-            if explicit_id.is_some() && image_number.is_some() {
-                return KittyOut::None;
-            }
 
             let selector = kv
                 .get("d")
@@ -662,10 +1036,10 @@ impl KittyState {
                     image_number.and_then(|number| self.newest_image_with_number(number))
                 }) else {
                     // Kitty rejects frame deletion without an image id/number.
-                    return KittyOut::None;
+                    return CommandResult::without_response(KittyOut::None);
                 };
                 if !self.store.contains_key(&id) {
-                    return KittyOut::None;
+                    return CommandResult::without_response(KittyOut::None);
                 }
                 let extra_count = self.frames.get(&id).map_or(0, Vec::len);
                 if extra_count == 0 {
@@ -681,9 +1055,9 @@ impl KittyState {
                             free_candidates: vec![id],
                         };
                         self.apply_nonspatial_delete(&delete);
-                        return KittyOut::Delete(delete);
+                        return CommandResult::without_response(KittyOut::Delete(delete));
                     }
-                    return KittyOut::None;
+                    return CommandResult::without_response(KittyOut::None);
                 }
 
                 let requested = dim("r").unwrap_or(0);
@@ -696,7 +1070,7 @@ impl KittyState {
                 if removed_index == 0 {
                     let promoted = match self.frames.get_mut(&id) {
                         Some(frames) if !frames.is_empty() => frames.remove(0),
-                        _ => return KittyOut::None,
+                        _ => return CommandResult::without_response(KittyOut::None),
                     };
                     self.store.insert(id, promoted.img);
                     self.anim.entry(id).or_default().root_gap = promoted.gap_ms;
@@ -719,7 +1093,7 @@ impl KittyState {
                     };
                     state.current = current_index as u32 + 1;
                 }
-                return KittyOut::Animate { id };
+                return CommandResult::without_response(KittyOut::Animate { id });
             }
 
             let placement_id = dim("p").filter(|&value| value != 0);
@@ -728,7 +1102,7 @@ impl KittyState {
                 b'a' => DeleteTarget::Visible,
                 b'i' => {
                     let Some(id) = explicit_id else {
-                        return KittyOut::None;
+                        return CommandResult::without_response(KittyOut::None);
                     };
                     DeleteTarget::Image { id, placement_id }
                 }
@@ -736,7 +1110,7 @@ impl KittyState {
                     let Some(id) =
                         image_number.and_then(|number| self.newest_image_with_number(number))
                     else {
-                        return KittyOut::None;
+                        return CommandResult::without_response(KittyOut::None);
                     };
                     DeleteTarget::Image { id, placement_id }
                 }
@@ -761,7 +1135,7 @@ impl KittyState {
                     y: dim("y").unwrap_or(0),
                 },
                 b'z' => DeleteTarget::ZIndex { z },
-                _ => return KittyOut::None,
+                _ => return CommandResult::without_response(KittyOut::None),
             };
 
             let free_candidates = if free_data {
@@ -784,12 +1158,7 @@ impl KittyState {
                 free_candidates,
             };
             self.apply_nonspatial_delete(&delete);
-            return KittyOut::Delete(delete);
-        }
-
-        // `i` and `I` are mutually exclusive for every graphics command.
-        if explicit_id.is_some() && image_number.is_some() {
-            return KittyOut::None;
+            return CommandResult::without_response(KittyOut::Delete(delete));
         }
 
         let id = match (explicit_id, image_number) {
@@ -816,7 +1185,7 @@ impl KittyState {
             // attacker can't grow `anim` indefinitely by sending `a=a,i=N`
             // for distinct N without ever transmitting an image.
             if !self.anim.contains_key(&id) && self.anim.len() >= self.budget.limits().placements {
-                return KittyOut::None;
+                return CommandResult::without_response(KittyOut::None);
             }
             let st = self.anim.entry(id).or_default();
             if let Some(c) = dim("c") {
@@ -860,7 +1229,7 @@ impl KittyState {
                     fr.gap_ms = z;
                 }
             }
-            return KittyOut::Animate { id };
+            return CommandResult::without_response(KittyOut::Animate { id });
         }
         if action == "c" {
             // Frame composition: copy a rectangle from source frame `r`
@@ -868,7 +1237,7 @@ impl KittyState {
             let src = dim("r").and_then(|n| self.frame_image(id, n));
             let dn = dim("c").unwrap_or(0);
             let Some(src) = src else {
-                return KittyOut::None;
+                return CommandResult::without_response(KittyOut::None);
             };
             let w = dim("w").unwrap_or(src.width);
             let h = dim("h").unwrap_or(src.height);
@@ -882,7 +1251,7 @@ impl KittyState {
                     if let Some(b) = self.store.get_mut(&id)
                         && !b.compose(&patch, dx, dy, replace)
                     {
-                        return KittyOut::None;
+                        return CommandResult::without_response(KittyOut::None);
                     }
                 } else if let Some(fr) = self
                     .frames
@@ -890,10 +1259,10 @@ impl KittyState {
                     .and_then(|f| f.get_mut(dn as usize - 2))
                     && !fr.img.compose(&patch, dx, dy, replace)
                 {
-                    return KittyOut::None;
+                    return CommandResult::without_response(KittyOut::None);
                 }
             }
-            return KittyOut::Animate { id };
+            return CommandResult::without_response(KittyOut::Animate { id });
         }
         if action == "f" {
             // Transmit animation frame data (chunked like an image). The
@@ -904,7 +1273,7 @@ impl KittyState {
                 && self.in_flight.len() + usize::from(self.query_in_flight.is_some())
                     >= self.budget.limits().in_flight_slots
             {
-                return KittyOut::None;
+                return CommandResult::without_response(KittyOut::None);
             }
             let payload = payload.trim();
             if !self.in_flight_append_fits(
@@ -913,7 +1282,7 @@ impl KittyState {
                 payload,
             ) {
                 self.frame_in_flight = None;
-                return KittyOut::None;
+                return CommandResult::without_response(KittyOut::None);
             }
             let accepted = {
                 let budget = self.budget.clone();
@@ -932,10 +1301,10 @@ impl KittyState {
             // image + animation transmissions can't sum past the ceiling.
             if !accepted || self.in_flight_bytes() > self.budget.limits().in_flight_bytes {
                 self.frame_in_flight = None;
-                return KittyOut::None;
+                return CommandResult::without_response(KittyOut::None);
             }
             if more {
-                return KittyOut::None;
+                return CommandResult::without_response(KittyOut::None);
             }
             // `get_or_insert_with` above leaves `frame_in_flight` set, so the
             // `expect` only fires if a refactor breaks that invariant.
@@ -945,6 +1314,7 @@ impl KittyState {
                     control,
                     payload,
                     reservation: _payload_reservation,
+                    reply: _,
                 },
             ) = self
                 .frame_in_flight
@@ -995,10 +1365,10 @@ impl KittyState {
                             ImageData::solid_with_budget(bw, bh, [0, 0, 0, 0], &self.budget)
                         })
                     else {
-                        return KittyOut::None;
+                        return CommandResult::without_response(KittyOut::None);
                     };
                     if !canvas.compose(&patch, x, y, replace) {
-                        return KittyOut::None;
+                        return CommandResult::without_response(KittyOut::None);
                     }
                     canvas
                 };
@@ -1047,80 +1417,28 @@ impl KittyState {
                     }
                 }
             }
-            return KittyOut::Animate { id: fid };
+            return CommandResult::without_response(KittyOut::Animate { id: fid });
         }
         if action == "p" {
-            // `a=p,U=1` registers a virtual placement (shown later via
-            // placeholder text); plain `a=p` puts the image at the cursor.
-            if virt {
-                if id == 0 || !self.store.contains_key(&id) {
-                    return KittyOut::None;
-                }
-                let placement = dim("p").unwrap_or(0);
-                let key = (id, placement);
-                // Saturation gate. Updates to an already-tracked
-                // id are always allowed (no growth); brand-new ids past the
-                // cap are dropped so an attacker can't grow the placement
-                // map by firing `a=p,U=1,i=N` for many distinct N.
-                if !self.virtual_placements.contains_key(&key)
-                    && self.placement_state_len() >= self.budget.limits().placements
-                {
-                    return KittyOut::None;
-                }
-                self.virtual_placements.insert(
-                    key,
-                    VirtualPlacement {
-                        placement_id: placement,
-                        cols: dim("c").unwrap_or(0),
-                        rows: dim("r").unwrap_or(0),
-                        z,
-                    },
-                );
-                return KittyOut::Virtual { id, placement };
-            }
-            // `P=` (parent image id) ⇒ a relative placement: recorded and
-            // positioned from the parent at render time, not at the cursor.
-            if let Some(parent_img) = dim("P") {
-                if id == 0 || !self.store.contains_key(&id) {
-                    return KittyOut::None;
-                }
-                let geti = |k: &str| kv.get(k).and_then(|v| v.parse::<i32>().ok());
-                let placement = dim("p").unwrap_or(0);
-                let key = (id, placement);
-                // Saturation gate on the `(id, placement)` key space, using
-                // the same flat placement ceiling as the other registries.
-                if !self.rel.contains_key(&key)
-                    && self.placement_state_len() >= self.budget.limits().placements
-                {
-                    return KittyOut::None;
-                }
-                self.rel.insert(
-                    key,
-                    RelativePlacement {
-                        parent_img,
-                        parent_placement: dim("Q").unwrap_or(0),
-                        h: geti("H").unwrap_or(0),
-                        v: geti("V").unwrap_or(0),
-                        z,
-                        params: placement_params(&kv),
-                    },
-                );
-                return KittyOut::Relative { id, placement };
-            }
-            return match self.store.get(&id) {
-                Some(img) => KittyOut::Place(Placed {
-                    img: img.clone(),
-                    id: Some(id),
-                    placement_id: dim("p").unwrap_or(0),
-                    z,
-                    params: Some(placement_params(&kv)),
-                }),
-                None => KittyOut::None,
+            let intent = ReplyIntent::from_control(&kv, id);
+            return match self.store.get(&id).cloned() {
+                Some(img) => self.stage_placement(id, img, &kv, z, intent),
+                None => CommandResult::refused(intent, CommandStatus::MissingImage),
             };
+        }
+
+        if !matches!(action, "t" | "T") {
+            return CommandResult::without_response(KittyOut::None);
         }
 
         // Transmit (optionally + display): only the *first* chunk carries the
         // full control; continuation chunks carry just `m` (and maybe `q`).
+        let mut intent = self
+            .in_flight
+            .get(&id)
+            .and_then(|acc| acc.reply)
+            .unwrap_or_else(|| ReplyIntent::from_control(&kv, id));
+        intent.update_quiet(&kv);
         let more = kv.get("m").map(|v| v == "1").unwrap_or(false);
         // Refuse new transmissions once the in-flight map
         // is saturated. A continuation chunk for an existing slot is
@@ -1131,16 +1449,17 @@ impl KittyState {
                 + usize::from(self.query_in_flight.is_some())
                 >= self.budget.limits().in_flight_slots
         {
-            return KittyOut::None;
+            return CommandResult::refused(intent, CommandStatus::NoSpace);
         }
         let payload = payload.trim();
         if !self.in_flight_append_fits(self.in_flight.get(&id), control, payload) {
             self.in_flight.remove(&id);
-            return KittyOut::None;
+            return CommandResult::refused(intent, CommandStatus::NoSpace);
         }
         let accepted = {
             let budget = self.budget.clone();
             let acc = self.in_flight.entry(id).or_default();
+            acc.reply = Some(intent);
             acc.append(control, payload, &budget)
         };
         // Per-slot cap. Also enforce the global cap across all slots so
@@ -1148,26 +1467,30 @@ impl KittyState {
         // Either breach drops this slot.
         if !accepted || self.in_flight_bytes() > self.budget.limits().in_flight_bytes {
             self.in_flight.remove(&id);
-            return KittyOut::None;
+            return CommandResult::refused(intent, CommandStatus::NoSpace);
         }
         if more {
-            return KittyOut::None;
+            return CommandResult::partial();
         }
         let Acc {
             control,
             payload,
             reservation: _payload_reservation,
+            reply: _,
         } = self.in_flight.remove(&id).unwrap_or_default();
         let first = parse_control(&control);
+        if first.get("t").is_some_and(|medium| medium != "d") {
+            return CommandResult::refused(intent, CommandStatus::UnsupportedMedium);
+        }
         let temporary = self.budget.query_scope();
         let Some(mut img) = decode_with_budget(&control, &payload, &temporary) else {
-            return KittyOut::None;
+            return CommandResult::refused(intent, CommandStatus::InvalidImage);
         };
         let Some(created) = self.budget.next_image_order() else {
-            return KittyOut::None;
+            return CommandResult::refused(intent, CommandStatus::NoSpace);
         };
         if !img.stamp_kitty_creation(created) {
-            return KittyOut::None;
+            return CommandResult::refused(intent, CommandStatus::NoSpace);
         }
         self.pending_transmit = Some(PendingTransmit {
             id,
@@ -1175,8 +1498,9 @@ impl KittyState {
             z,
             created,
             img,
+            reply: intent,
         });
-        KittyOut::None
+        CommandResult::partial()
     }
 
     pub(crate) fn take_pending_transmit(&mut self) -> Option<PendingTransmit> {
@@ -1300,84 +1624,36 @@ impl KittyState {
         }
     }
 
-    pub(crate) fn complete_transmit(&mut self, pending: PendingTransmit) -> KittyOut {
+    pub(crate) fn complete_transmit(&mut self, pending: PendingTransmit) -> CommandResult {
         let PendingTransmit {
             id,
             first,
             z,
             created,
             mut img,
+            reply,
         } = pending;
         if (id != 0
             && !self.store.contains_key(&id)
             && self.store.len() >= self.budget.limits().placements)
             || !img.try_move_to_scope(&self.budget)
         {
-            return KittyOut::None;
+            return CommandResult::refused(reply, CommandStatus::NoSpace);
         }
-        let addressable = id != 0;
-        if addressable {
+        if id != 0 {
             self.store.insert(id, img.clone());
-            self.image_metadata.insert(
-                id,
-                (first.get("I").and_then(|v| v.parse::<u32>().ok()), created),
-            );
+            let number = first
+                .get("I")
+                .and_then(|v| v.parse().ok())
+                .filter(|&number| number != 0);
+            self.image_metadata.insert(id, (number, created));
         }
-        // `U=1` (possibly combined with `a=T`): store + register a virtual
-        // placement, but draw nothing at the cursor.
-        if first.get("U").map(|v| v == "1").unwrap_or(false) {
-            if !addressable {
-                // A virtual placement is resolved later by looking the image up
-                // by id, so registering one that cannot be looked up leaves
-                // placeholder cells compositing nothing forever.
-                //
-                // `id == 0` is that case too, not only a store refusal: an
-                // `i=0` transmission names no slot, so a `U=1` alongside it
-                // registers a placement nothing can ever resolve.
-                return KittyOut::None;
-            }
-            let fz = first.get("z").and_then(|v| v.parse().ok()).unwrap_or(z);
-            let placement = first
-                .get("p")
-                .and_then(|v| v.parse::<u32>().ok())
-                .unwrap_or(0);
-            let key = (id, placement);
-            // Saturation gate (same shape as the standalone
-            // `a=p,U=1` path above). The store-side gate above doesn't
-            // imply this one — store and virtual_placements are independent
-            // maps, and `U=1` on an existing-id update would silently grow
-            // virtual_placements without it.
-            if !self.virtual_placements.contains_key(&key)
-                && self.placement_state_len() >= self.budget.limits().placements
-            {
-                return KittyOut::None;
-            }
-            self.virtual_placements.insert(
-                key,
-                VirtualPlacement {
-                    placement_id: placement,
-                    cols: first.get("c").and_then(|v| v.parse().ok()).unwrap_or(0),
-                    rows: first.get("r").and_then(|v| v.parse().ok()).unwrap_or(0),
-                    z: fz,
-                },
-            );
-            return KittyOut::Virtual { id, placement };
-        }
-        // `T` displays now; bare `t` only stores.
-        if first.get("a").map(|s| s.as_str()).unwrap_or("t") == "T" {
-            let fz = first.get("z").and_then(|v| v.parse().ok()).unwrap_or(z);
-            KittyOut::Place(Placed {
-                img,
-                id: addressable.then_some(id),
-                placement_id: first
-                    .get("p")
-                    .and_then(|v| v.parse::<u32>().ok())
-                    .unwrap_or(0),
-                z: fz,
-                params: Some(placement_params(&first)),
-            })
+        if first.get("U").is_some_and(|value| value == "1")
+            || first.get("a").is_some_and(|value| value == "T")
+        {
+            self.stage_placement(id, img, &first, z, reply)
         } else {
-            KittyOut::None
+            CommandResult::stored(reply)
         }
     }
 
