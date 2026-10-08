@@ -164,6 +164,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   current Claude Code. Its tool list left out the `ttlMs` and `cacheScope`
   fields that revision requires on every list result, so those clients
   rejected the list and showed Kettle's server with no tools.
+- `kettle ctl send_mouse` with `button` `back` or `forward` reaches a
+  mouse-tracking program as the physical Back and Forward buttons do. It used
+  to send xterm's button numbers 8 and 9 as report codes, which read as a
+  left or middle press with Meta held.
 
 - `kettle ctl`, `kettle mcp` and other control clients keep finding running
   servers after many Kettle sessions. Each exit used to leave its control
