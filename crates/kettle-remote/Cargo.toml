@@ -25,7 +25,7 @@ workspace = true
 # Default features turn on a lot of unused refreshers (disk, net,
 # components). We only need process enumeration; opt-out + opt-in
 # the bare minimum.
-sysinfo = { version = "0.32", default-features = false, features = ["system"] }
+sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 
 # libproc and sysctl for the pane-rooted macOS process walk in src/macos.rs.
 [target.'cfg(target_os = "macos")'.dependencies]

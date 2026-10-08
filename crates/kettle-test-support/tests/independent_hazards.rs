@@ -264,7 +264,7 @@ fn a_raw_identifier_test_is_still_recognised_as_test_only() {
 
 #[test]
 fn boolean_cfg_literals_are_evaluated_not_treated_as_unknown_atoms() {
-    // Stable since 1.79; this workspace's MSRV is 1.89.
+    // Stable since 1.79; this workspace's MSRV is 1.95.
     assert_kept(
         "cfg(false)",
         "fn keep() {}\n#[cfg(false)]\nfn never_built() {}\nfn also_keep() {}\n",

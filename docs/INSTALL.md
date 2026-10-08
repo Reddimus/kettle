@@ -120,7 +120,7 @@ cd kettle
 ./scripts/install.sh
 ```
 
-Requires Rust ≥ 1.89 (the workspace MSRV).
+Requires Rust ≥ 1.95 (the workspace MSRV).
 
 An in-tree source install is marked `local-dev`, so `kettle update` will not
 replace it with a stable binary. Rebuild and rerun `./scripts/install.sh` to
@@ -466,7 +466,7 @@ updates publish both binaries directly. An unavailable migration leaves text
 startup usable and media unavailable.
 
 macOS needs only a stable Rust toolchain (`rustup`). Minimum supported Rust
-version is **1.89** (Cargo.toml
+version is **1.95** (Cargo.toml
 `rust-version`); `rustup update stable` will always satisfy it.
 
 ## Verifying your build
