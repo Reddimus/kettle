@@ -86,13 +86,7 @@ impl Frame {
             Self::Ready(r) => r.build_id.validate(),
             Self::Rendered(r) => r.validate(),
             Self::Failure(_) => Ok(()),
-            Self::Job(j) => {
-                validate_job(j.kind, &j.fallback_fonts, j.target)?;
-                match &j.source {
-                    Source::Bytes(b) => validate_bytes(j.kind, b),
-                    Source::Path { path, .. } => validate_path(path.as_bytes()),
-                }
-            }
+            Self::Job(j) => validate_worker_job(j),
             Self::ExternalRequest(j) => {
                 validate_job(j.kind, &j.fallback_fonts, j.target)?;
                 match &j.source {
@@ -101,6 +95,13 @@ impl Frame {
                 }
             }
         }
+    }
+}
+fn validate_worker_job(j: &Job) -> Result<(), ValidationError> {
+    validate_job(j.kind, &j.fallback_fonts, j.target)?;
+    match &j.source {
+        Source::Bytes(b) => validate_bytes(j.kind, b),
+        Source::Path { path, .. } => validate_path(path.as_bytes()),
     }
 }
 fn validate_bytes(kind: JobKind, b: &[u8]) -> Result<(), ValidationError> {
@@ -180,12 +181,33 @@ pub fn encode(frame: &Frame, direction: Direction) -> Result<Vec<u8>, WireError>
         return Err(WireError::WrongDirection);
     }
     frame.validate()?;
+    encode_payload(frame.kind(), direction, |w| put_frame(w, frame))
+}
+/// A worker job frame, encoded from a borrow. Byte-for-byte what `encode`
+/// writes for `Frame::Job`, without copying the job (its source can be a
+/// multi-megabyte image or document) into a frame first.
+pub fn encode_job(job: &Job) -> Result<Vec<u8>, WireError> {
+    const JOB: u8 = 4;
+    let direction = Direction::ParentToWorker;
+    if !direction.permits(JOB) {
+        return Err(WireError::WrongDirection);
+    }
+    validate_worker_job(job)?;
+    encode_payload(JOB, direction, |w| put_job(w, job))
+}
+/// Measure the payload, then write the header and payload into one exactly
+/// sized buffer.
+fn encode_payload(
+    kind: u8,
+    direction: Direction,
+    put: impl Fn(&mut Writer) -> Result<(), WireError>,
+) -> Result<Vec<u8>, WireError> {
     let mut measure = Writer {
         bytes: None,
         len: 0,
         max: direction.max_frame_bytes() - HEADER_BYTES,
     };
-    put_frame(&mut measure, frame)?;
+    put(&mut measure)?;
     let payload_len = u32::try_from(measure.len).map_err(|_| ValidationError::TooLarge)?;
     let capacity = measure
         .len
@@ -198,9 +220,9 @@ pub fn encode(frame: &Frame, direction: Direction) -> Result<Vec<u8>, WireError>
     };
     writer.raw(&MAGIC)?;
     writer.u16(PROTOCOL_VERSION)?;
-    writer.u8(frame.kind())?;
+    writer.u8(kind)?;
     writer.u32(payload_len)?;
-    put_frame(&mut writer, frame)?;
+    put(&mut writer)?;
     Ok(writer.bytes.unwrap_or_default())
 }
 /// Typed ctl/MCP entry point. No worker job or GUI-only source can be returned.
@@ -456,6 +478,31 @@ impl Writer {
         Ok(())
     }
 }
+fn put_job(w: &mut Writer, j: &Job) -> Result<(), WireError> {
+    w.kind(j.kind)?;
+    match &j.source {
+        Source::Bytes(b) => {
+            w.u8(0)?;
+            w.blob(b)?;
+        }
+        Source::Path {
+            path,
+            authorization,
+        } => {
+            w.u8(1)?;
+            w.path(path)?;
+            match authorization {
+                Authorization::ExternalAttested(a) => {
+                    w.u8(0)?;
+                    w.u64(a.dev)?;
+                    w.u64(a.ino)?;
+                }
+                Authorization::UserPull(_) => w.u8(1)?,
+            }
+        }
+    }
+    w.job_tail(j)
+}
 fn put_frame(w: &mut Writer, frame: &Frame) -> Result<(), WireError> {
     match frame {
         Frame::Hello(h) => w.build(&h.build_id),
@@ -478,31 +525,7 @@ fn put_frame(w: &mut Writer, frame: &Frame) -> Result<(), WireError> {
             }
             w.job_tail(j)
         }
-        Frame::Job(j) => {
-            w.kind(j.kind)?;
-            match &j.source {
-                Source::Bytes(b) => {
-                    w.u8(0)?;
-                    w.blob(b)?;
-                }
-                Source::Path {
-                    path,
-                    authorization,
-                } => {
-                    w.u8(1)?;
-                    w.path(path)?;
-                    match authorization {
-                        Authorization::ExternalAttested(a) => {
-                            w.u8(0)?;
-                            w.u64(a.dev)?;
-                            w.u64(a.ino)?;
-                        }
-                        Authorization::UserPull(_) => w.u8(1)?,
-                    }
-                }
-            }
-            w.job_tail(j)
-        }
+        Frame::Job(j) => put_job(w, j),
         Frame::Rendered(r) => {
             w.u32(r.width)?;
             w.u32(r.height)?;

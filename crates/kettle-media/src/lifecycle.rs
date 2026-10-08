@@ -108,7 +108,7 @@ pub(crate) fn attempt(
     };
     let (Ok(hello_bytes), Ok(job_bytes)) = (
         wire::encode(&Frame::Hello(hello.clone()), Direction::ParentToWorker),
-        wire::encode(&Frame::Job(job.clone()), Direction::ParentToWorker),
+        wire::encode_job(job),
     ) else {
         return Ok(Err(FailureCode::BadParams));
     };
@@ -604,6 +604,16 @@ fn spawn_writer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The worker job is encoded from a borrow; the frame path would clone the
+    /// job, source and all, for every attempt.
+    #[test]
+    fn attempts_encode_the_job_without_cloning_it() {
+        let source = include_str!("lifecycle.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        assert!(production.contains("wire::encode_job(job)"));
+        assert!(!production.contains("Frame::Job(job.clone())"));
+    }
     use crate::client::{
         FileIdentity, MAX_STUCK_WORKERS, MediaAvailability, UnavailableCause, WorkerClient,
         WorkerPlatform,
