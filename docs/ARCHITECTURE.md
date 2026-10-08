@@ -2287,7 +2287,7 @@ right-click ▸ **Settings…**. `crates/kettle-ui/src/settings.rs` is the *pure
 catalogue (categories → fields, free functions over `&Config`, unit-tested
 without a window); `app.rs` owns the live `SettingsNav` state + input routing +
 persistence; `kettle-render` draws it through the **same menu pipeline**
-(render-pass steps 6 and 8 above). Every value edit writes straight to the
+(render-pass steps 7 and 9 above). Every value edit writes straight to the
 user's config via the atomic `persist_pref` → `persist_config_toggle` path and
 live-reloads, so changes take effect without hand-editing the file. The
 **Keybinds** category is a full interactive rebinder: activating a row captures
