@@ -133,6 +133,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- `kettle ctl`, `kettle mcp` and other control clients keep finding running
+  servers after many Kettle sessions. Each exit used to leave its control
+  socket behind; once more than about a thousand piled up, discovery stopped
+  before reaching live servers' entries and reported that no server was
+  running. Servers now unlink their socket on exit, pruning a dead server
+  removes its socket, and a starting server clears leftovers in the registry
+  directory, including those from earlier releases. Leftover sockets no
+  longer count toward the 1,024 entries a discovery reads, within a walk of at
+  most 8,192 directory entries.
+
 - An opaque context menu, Settings panel or paste receipt over the cursor
   cell now hides the whole cursor. The inverted glyph of a focused block
   cursor was drawn after every overlay and showed through them.
