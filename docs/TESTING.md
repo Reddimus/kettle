@@ -2264,7 +2264,14 @@ mouse-only fields; without the type check that test aborts on AppKit's
 exception. No second display was attached, so mixed-DPI docking
 was not exercised.
 
-The tab tear-off drag is a
+Paste receipts follow their tab: unit tests move a receipt's pixels without
+copying and keep its expiry, carry a pending video preview through a tear and
+a dock with its exact generation, restore only what a failed move took, keep
+another tab's receipt, and end a hover pause without resetting the hard
+expiry; a late video preview finds the window its tab moved to. A census
+requires every function that detaches a tab to take the tab's paste state
+before handing it on, every failed new-window handoff to restore it, and the
+receiving side to adopt it. The tab tear-off drag is a
 pure FSM (`DragState` in `kettle-ui/src/detach.rs`) tested with no
 window or GPU — idle→armed→dragging threshold, mouse-up/Esc-cancel
 returning the dragged tab, cursor leave/re-enter, plus an

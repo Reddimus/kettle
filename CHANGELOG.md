@@ -143,6 +143,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   longer count toward the 1,024 entries a discovery reads, within a walk of at
   most 8,192 directory entries.
 
+- A paste receipt and a pending video preview move with their tab when it is
+  torn off, moved to a new window or docked into another window, keeping
+  their pixels and remaining time. They used to stay in the old window, and a
+  video poster that finished after the move was dropped. A failed move puts
+  them back, and another tab's receipt stays where it is.
+
 - An opaque context menu, Settings panel or paste receipt over the cursor
   cell now hides the whole cursor. The inverted glyph of a focused block
   cursor was drawn after every overlay and showed through them.

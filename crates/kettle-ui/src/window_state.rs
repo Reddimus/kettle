@@ -1134,7 +1134,76 @@ pub(crate) struct WindowState {
     pub(crate) reuse_pane_snapshots_once: bool,
 }
 
+/// A paste receipt and pending video preview taken from a window with the
+/// tab that owns them, to follow that tab into another window.
+#[derive(Default)]
+pub(crate) struct MovedPasteState {
+    receipt: Option<MediaPasteReceiptState>,
+    pending: Option<PendingVideoPasteReceipt>,
+}
+
 impl WindowState {
+    /// Take the receipt and pending video preview that belong to `tab`'s
+    /// panes, leaving another tab's receipt where it is. Pixels move without
+    /// copying and the receipt keeps its lifetime; a hover pause ends because
+    /// the pointer is no longer over it.
+    pub(crate) fn take_moved_paste_state(
+        &mut self,
+        tab: &crate::mux::Tab,
+        now: std::time::Instant,
+    ) -> MovedPasteState {
+        let mut moved = MovedPasteState {
+            receipt: self
+                .media_paste_receipt
+                .take_if(|receipt| tab.root.contains(receipt.pane_id)),
+            pending: self
+                .pending_video_paste_receipt
+                .take_if(|pending| tab.root.contains(pending.pane_id)),
+        };
+        if let Some(receipt) = &mut moved.receipt {
+            receipt.set_hover(false, now);
+        }
+        if let Some(receipt) = moved
+            .pending
+            .as_mut()
+            .and_then(|pending| pending.previous_receipt.as_mut())
+        {
+            receipt.set_hover(false, now);
+        }
+        self.accessibility_pending |= moved.receipt.is_some() || moved.pending.is_some();
+        moved
+    }
+
+    /// Receive a moved tab's paste state. A window shows one receipt, so an
+    /// incoming one replaces this window's; nothing incoming keeps it.
+    pub(crate) fn adopt_moved_paste_state(&mut self, moved: MovedPasteState) {
+        if moved.receipt.is_none() && moved.pending.is_none() {
+            return;
+        }
+        self.media_paste_receipt = moved.receipt;
+        self.pending_video_paste_receipt = moved.pending;
+        self.accessibility_pending = true;
+    }
+
+    /// Put back what a failed transfer took, leaving the rest as it is.
+    pub(crate) fn restore_moved_paste_state(&mut self, moved: MovedPasteState) {
+        if let Some(receipt) = moved.receipt {
+            self.media_paste_receipt = Some(receipt);
+            self.accessibility_pending = true;
+        }
+        if let Some(pending) = moved.pending {
+            self.pending_video_paste_receipt = Some(pending);
+            self.accessibility_pending = true;
+        }
+    }
+
+    /// Whether this window waits for that pane's video preview generation.
+    pub(crate) fn expects_video_preview(&self, pane: u64, generation: u64) -> bool {
+        self.pending_video_paste_receipt
+            .as_ref()
+            .is_some_and(|pending| pending.pane_id == pane && pending.generation == generation)
+    }
+
     /// A fresh window's state, before its OS window / renderer exist
     /// (`resumed` / `open_window` fill those in). The `Mux` is built by the
     /// caller because its construction flags (`lua_output_subscribed`,
@@ -1270,6 +1339,149 @@ impl WindowState {
 mod tests {
     use super::*;
     use winit::keyboard::{KeyCode, PhysicalKey};
+
+    fn moving_tab(pane: u64) -> crate::mux::Tab {
+        crate::mux::Tab {
+            root: crate::mux::Node::Leaf(pane),
+            focus: pane,
+            title_override: None,
+            zoomed: false,
+            last_output_at: None,
+            last_seen_at: None,
+            bell: false,
+        }
+    }
+
+    fn moving_image_receipt(pane: u64, now: std::time::Instant) -> MediaPasteReceiptState {
+        MediaPasteReceiptState::new_image(
+            pane,
+            std::path::PathBuf::from("managed.png"),
+            crate::paste_image::PastedImagePreview {
+                image: kettle_core::ImageData::solid(2, 1, [255, 0, 0, 255]).unwrap(),
+                original_width: 2,
+                original_height: 1,
+            },
+            false,
+            true,
+            now,
+        )
+    }
+
+    fn moving_pending_video(pane: u64, now: std::time::Instant) -> PendingVideoPasteReceipt {
+        PendingVideoPasteReceipt {
+            pane_id: pane,
+            generation: 41,
+            request: crate::video_preview::VideoPasteRequest::from_user_paths(
+                &[std::env::current_dir().unwrap().join("missing.mp4")],
+                crate::video_preview::VideoPasteSource::Drop,
+            )
+            .unwrap(),
+            remote: false,
+            prefer_top: true,
+            created_at: now,
+            previous_receipt: None,
+        }
+    }
+
+    #[test]
+    fn moved_tab_keeps_preview_pixels_and_original_lifetime() {
+        let now = std::time::Instant::now();
+        let mut donor = WindowState::new(1, false, Mux::new());
+        let mut target = WindowState::new(2, false, Mux::new());
+        donor.media_paste_receipt = Some(moving_image_receipt(7, now));
+        let pixels = donor
+            .media_paste_receipt
+            .as_ref()
+            .unwrap()
+            .image
+            .as_ref()
+            .unwrap()
+            .rgba
+            .as_ptr();
+        let expiry = donor.media_paste_receipt.as_ref().unwrap().expires_at;
+        let state = donor.take_moved_paste_state(&moving_tab(7), now);
+        target.adopt_moved_paste_state(state);
+        assert!(donor.media_paste_receipt.is_none());
+        let receipt = target.media_paste_receipt.as_ref().unwrap();
+        assert_eq!(receipt.pane_id, 7);
+        assert_eq!(
+            receipt.expires_at, expiry,
+            "moving must not restart its lifetime"
+        );
+        assert_eq!(
+            receipt.image.as_ref().unwrap().rgba.as_ptr(),
+            pixels,
+            "pixels move without copying"
+        );
+        assert!(donor.accessibility_pending && target.accessibility_pending);
+    }
+
+    #[test]
+    fn pending_video_follows_tear_and_dock_with_its_exact_generation() {
+        let now = std::time::Instant::now();
+        let tab = moving_tab(7);
+        let mut donor = WindowState::new(1, false, Mux::new());
+        let mut torn = WindowState::new(2, false, Mux::new());
+        donor.pending_video_paste_receipt = Some(moving_pending_video(7, now));
+        let deadline = donor
+            .pending_video_paste_receipt
+            .as_ref()
+            .unwrap()
+            .deadline();
+        torn.adopt_moved_paste_state(donor.take_moved_paste_state(&tab, now));
+        assert!(!donor.expects_video_preview(7, 41));
+        assert!(torn.expects_video_preview(7, 41));
+        assert!(!torn.expects_video_preview(7, 40));
+        assert!(!torn.expects_video_preview(8, 41));
+        donor.adopt_moved_paste_state(torn.take_moved_paste_state(&tab, now));
+        assert!(!torn.expects_video_preview(7, 41));
+        assert!(donor.expects_video_preview(7, 41));
+        assert_eq!(
+            donor
+                .pending_video_paste_receipt
+                .as_ref()
+                .unwrap()
+                .deadline(),
+            deadline
+        );
+    }
+
+    #[test]
+    fn failed_transfer_restores_pending_without_discarding_another_tabs_receipt() {
+        let now = std::time::Instant::now();
+        let mut donor = WindowState::new(1, false, Mux::new());
+        donor.media_paste_receipt = Some(moving_image_receipt(8, now));
+        donor.pending_video_paste_receipt = Some(moving_pending_video(7, now));
+        let state = donor.take_moved_paste_state(&moving_tab(7), now);
+        assert_eq!(donor.media_paste_receipt.as_ref().unwrap().pane_id, 8);
+        assert!(donor.pending_video_paste_receipt.is_none());
+        donor.restore_moved_paste_state(state);
+        assert_eq!(donor.media_paste_receipt.as_ref().unwrap().pane_id, 8);
+        assert!(donor.expects_video_preview(7, 41));
+        let mut target = WindowState::new(2, false, Mux::new());
+        target.media_paste_receipt = Some(moving_image_receipt(9, now));
+        target.adopt_moved_paste_state(donor.take_moved_paste_state(&moving_tab(99), now));
+        assert_eq!(
+            target.media_paste_receipt.as_ref().unwrap().pane_id,
+            9,
+            "empty incoming state keeps existing target receipt"
+        );
+    }
+
+    #[test]
+    fn moving_receipt_releases_hover_pause_without_resetting_hard_expiry() {
+        let now = std::time::Instant::now();
+        let mut donor = WindowState::new(1, false, Mux::new());
+        let mut receipt = moving_image_receipt(7, now);
+        let hard_expiry = receipt.hard_expires_at;
+        receipt.set_hover(true, now);
+        donor.media_paste_receipt = Some(receipt);
+        let moved =
+            donor.take_moved_paste_state(&moving_tab(7), now + std::time::Duration::from_secs(2));
+        let receipt = moved.receipt.unwrap();
+        assert!(receipt.hover_started.is_none());
+        assert_eq!(receipt.hard_expires_at, hard_expiry);
+    }
 
     #[test]
     fn image_receipt_collapses_expires_and_pauses_while_hovered() {
