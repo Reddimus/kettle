@@ -256,7 +256,9 @@ socket when it shuts down. Pruning a dead server's entry also removes that
 server's socket, and a starting server removes `ctl-<pid>.sock` files left in
 the registry directory. Those two removals happen only under the registry
 lock, only when no entry names the socket's pid and that pid is not running,
-and only while the socket is still the file that was checked. A starting
+and only after confirming the socket is still the file that was checked. Unix
+cannot unlink by descriptor, so a socket replaced between that confirmation
+and the unlink would still be removed. A starting
 server holds the lock from before it binds until its entry is written; if it
 cannot get the lock within 2 seconds it starts without sweeping. Sockets on
 the long-path fallback endpoint are removed at shutdown or by pruning, but not

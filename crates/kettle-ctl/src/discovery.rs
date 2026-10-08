@@ -1092,6 +1092,10 @@ mod tests {
         let dir = scratch("unlink-unchanged");
         crate::ensure_private_dir(&dir).unwrap();
         let path = dir.join("ctl-7.sock");
+        if !crate::unix_socket_path_fits(&path) {
+            eprintln!("skipped: {} exceeds the socket path limit", path.display());
+            return;
+        }
         dead_socket(&path);
         let judged = std::fs::symlink_metadata(&path).unwrap();
         std::fs::remove_file(&path).unwrap();
@@ -1199,6 +1203,15 @@ mod tests {
         // Alive, and no entry names it.
         let running = std::os::unix::process::parent_id();
         let orphan = dir.join(format!("ctl-{}.sock", u32::MAX - 1));
+        // Direct endpoints only exist where their path fits; the sweep has
+        // nothing to find otherwise.
+        if !crate::unix_socket_path_fits(&orphan) {
+            eprintln!(
+                "skipped: {} exceeds the socket path limit",
+                orphan.display()
+            );
+            return;
+        }
         let running_pid = dir.join(format!("ctl-{running}.sock"));
         let regular = dir.join(format!("ctl-{}.sock", u32::MAX - 2));
         let entry_owned = dir.join(format!("ctl-{}.sock", u32::MAX - 3));
