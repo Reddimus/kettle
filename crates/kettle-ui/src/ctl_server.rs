@@ -32,7 +32,9 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
 use kettle_ctl::discovery::{self, RegistryEntry};
-use kettle_ctl::protocol::{Event, Execution, Method, Request, Response};
+use kettle_ctl::identity::{PeerCapture, UnverifiedReason};
+use kettle_ctl::process::ProcessIdentity;
+use kettle_ctl::protocol::{Event, Execution, Method, PeerClaim, Request, Response};
 use kettle_ctl::transport::{CtlListener, CtlStream};
 use kettle_ctl::{CtlPolicy, SharedCtlPolicy};
 
@@ -119,6 +121,102 @@ pub struct ConnState {
     pub attached_panes: HashSet<u64>,
 }
 
+/// Time a connection thread may spend checking who sent one request.
+const CALLER_CHECK_BUDGET: Duration = Duration::from_millis(250);
+
+/// What the connection thread learned about who sent a request: the
+/// caller's checked ancestry, nearest first, for the App to match against
+/// its panes. Only the connection thread makes one, and only `get_state`
+/// carries one today.
+#[derive(Debug, Clone, Default)]
+pub struct CallerEvidence {
+    checked: Option<CheckedCaller>,
+}
+
+#[derive(Debug, Clone)]
+struct CheckedCaller {
+    chain: Result<Vec<ProcessIdentity>, UnverifiedReason>,
+    hint: Option<PaneHint>,
+}
+
+/// The pane and Kettle a caller's environment names. A hint is never proof.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaneHint {
+    pub pane: u64,
+    pub kettle_pid: u32,
+}
+
+impl CallerEvidence {
+    /// The caller's ancestry, nearest first, or why it has none.
+    pub fn chain(&self) -> Option<Result<&[ProcessIdentity], UnverifiedReason>> {
+        self.checked
+            .as_ref()
+            .map(|checked| checked.chain.as_deref().map_err(|reason| *reason))
+    }
+
+    pub fn hint(&self) -> Option<PaneHint> {
+        self.checked.as_ref().and_then(|checked| checked.hint)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_tests(
+        chain: Result<Vec<ProcessIdentity>, UnverifiedReason>,
+        hint: Option<PaneHint>,
+    ) -> Self {
+        Self {
+            checked: Some(CheckedCaller { chain, hint }),
+        }
+    }
+
+    /// Check `claim` against `capture` and walk the caller's ancestry. Runs
+    /// on the connection thread, never the UI thread.
+    fn check(claim: Result<PeerClaim, UnverifiedReason>, capture: &PeerCapture) -> Self {
+        let hint = claim.ok().and_then(|claim| {
+            Some(PaneHint {
+                pane: claim.pane_hint?,
+                kettle_pid: claim.pid_hint?.get(),
+            })
+        });
+        let chain = claim.and_then(|claim| {
+            kettle_ctl::identity::verify_chain(
+                capture,
+                &claim,
+                std::process::id(),
+                Instant::now() + CALLER_CHECK_BUDGET,
+            )
+        });
+        Self {
+            checked: Some(CheckedCaller { chain, hint }),
+        }
+    }
+}
+
+/// A connection's claim, fixed by its first nonblank frame. A frame that
+/// is not a valid request fixes "invalid"; a later request claiming another
+/// process fixes "changed". Neither can be undone on that connection.
+#[derive(Debug, Default)]
+struct ClaimLatch(Option<Result<PeerClaim, UnverifiedReason>>);
+
+impl ClaimLatch {
+    fn invalid_frame(&mut self) {
+        self.0.get_or_insert(Err(UnverifiedReason::InvalidClaim));
+    }
+
+    fn frame(&mut self, caller: Option<PeerClaim>) {
+        match self.0 {
+            None => self.0 = Some(caller.ok_or(UnverifiedReason::MissingClaim)),
+            Some(Ok(first)) if caller.is_some_and(|claim| claim != first) => {
+                self.0 = Some(Err(UnverifiedReason::ClaimChanged));
+            }
+            Some(_) => {}
+        }
+    }
+
+    fn claim(&self) -> Result<PeerClaim, UnverifiedReason> {
+        self.0.unwrap_or(Err(UnverifiedReason::MissingClaim))
+    }
+}
+
 /// A request the control policy allowed. The App dispatches only these, and
 /// only the connection thread can make one: [`admit`] for a client request,
 /// [`AdmittedRequest::read_screen_probe`] for `wait_for`'s screen probes.
@@ -127,6 +225,7 @@ pub struct AdmittedRequest {
     req: Request,
     method: Method,
     internal_probe: bool,
+    caller: CallerEvidence,
 }
 
 impl AdmittedRequest {
@@ -145,6 +244,11 @@ impl AdmittedRequest {
         self.internal_probe
     }
 
+    /// Who sent this request, as far as the connection thread could check.
+    pub fn caller(&self) -> &CallerEvidence {
+        &self.caller
+    }
+
     /// One `read_screen` probe for an admitted `wait_for`. It carries the
     /// wait's authority, which is Read for both, and nothing more: the method
     /// is fixed and only the pane address varies.
@@ -161,9 +265,11 @@ impl AdmittedRequest {
                 id: self.req.id,
                 method: Method::ReadScreen.as_str().into(),
                 params: serde_json::Value::Object(params),
+                caller: None,
             },
             method: Method::ReadScreen,
             internal_probe: true,
+            caller: self.caller.clone(),
         }
     }
 }
@@ -194,6 +300,7 @@ fn admit(policy: CtlPolicy, req: Request) -> Result<AdmittedRequest, Response> {
         req,
         method,
         internal_probe: false,
+        caller: CallerEvidence::default(),
     })
 }
 
@@ -204,6 +311,8 @@ pub struct CtlServer {
     rx: Receiver<CtlServerMsg>,
     conns: HashMap<u64, ConnState>,
     registry_dir: PathBuf,
+    /// Where this server left an alias to its entry, if anywhere.
+    alias_dir: Option<PathBuf>,
     pid: u32,
     endpoint: String,
     _accept: std::thread::JoinHandle<()>,
@@ -243,6 +352,19 @@ impl CtlServer {
             return None;
         }
         drop(registration);
+        // Where the OS puts the registry, independent of this environment, so
+        // a client started with a stripped environment still finds us.
+        let alias_dir = discovery::canonical_registry_dir()
+            .filter(|alias| *alias != registry_dir)
+            .filter(
+                |alias| match discovery::publish_alias(alias, &registry_dir, pid) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        log::warn!("agent-server: cannot write discovery alias: {e}");
+                        false
+                    }
+                },
+            );
         log::info!(
             "agent-server: listening on {endpoint} (mode {:?}, display {})",
             policy.server(),
@@ -259,6 +381,9 @@ impl CtlServer {
             Ok(accept) => accept,
             Err(error) => {
                 discovery::unregister(&registry_dir, pid);
+                if let Some(alias) = &alias_dir {
+                    discovery::withdraw_alias(alias, pid);
+                }
                 log::warn!("agent-server: cannot spawn accept thread: {error}");
                 return None;
             }
@@ -269,6 +394,7 @@ impl CtlServer {
             rx,
             conns: HashMap::new(),
             registry_dir,
+            alias_dir,
             pid,
             endpoint,
             _accept: accept,
@@ -392,6 +518,9 @@ impl CtlServer {
 impl Drop for CtlServer {
     fn drop(&mut self) {
         discovery::unregister(&self.registry_dir, self.pid);
+        if let Some(alias) = &self.alias_dir {
+            discovery::withdraw_alias(alias, self.pid);
+        }
         discovery::remove_own_endpoint(&self.endpoint);
     }
 }
@@ -461,6 +590,9 @@ fn accept_loop_counting(
             drop(conn); // closes the socket / pipe handle
             continue;
         }
+        // Who connected, read before any request bytes: the identity a
+        // first-request claim must match.
+        let capture = PeerCapture::capture(&conn);
         let conn_id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         active.fetch_add(1, Ordering::Relaxed);
         let (event_tx, event_rx) = crossbeam_channel::bounded::<Event>(EVENT_CHANNEL_CAP);
@@ -477,7 +609,7 @@ fn accept_loop_counting(
                     return;
                 }
                 connection_loop(
-                    conn, conn_id, ctx, cwake, event_rx, caccess, policy, active_dec,
+                    conn, capture, conn_id, ctx, cwake, event_rx, caccess, policy, active_dec,
                 );
             });
         finish_worker_spawn(spawned, conn_id, event_tx, &tx, &wake, start_tx, &active);
@@ -542,6 +674,7 @@ impl Drop for ConnectionExit {
 #[allow(clippy::too_many_arguments)]
 fn connection_loop(
     mut conn: CtlStream,
+    capture: PeerCapture,
     conn_id: u64,
     tx: Sender<CtlServerMsg>,
     wake: Arc<dyn Fn() + Send + Sync>,
@@ -561,6 +694,7 @@ fn connection_loop(
     let mut buf = [0u8; 4096];
     let mut idle_deadline = Instant::now() + policy.request_idle;
     let mut frame_deadline: Option<Instant> = None;
+    let mut claim = ClaimLatch::default();
     'outer: loop {
         // Extract a complete line if we have one.
         if let Some(pos) = kettle_ctl::protocol::find_newline(&acc, &mut scan_offset) {
@@ -584,6 +718,7 @@ fn connection_loop(
             let trimmed = match std::str::from_utf8(&line) {
                 Ok(line) => line.trim_end(),
                 Err(error) => {
+                    claim.invalid_frame();
                     let response = Response::err(
                         0,
                         kettle_ctl::protocol::error_codes::BAD_REQUEST,
@@ -602,9 +737,18 @@ fn connection_loop(
             // Admission is the one policy gate, and it comes before every
             // dispatch: a malformed, unknown or refused request is answered
             // here, does no work, and reaches no other thread.
-            let request = match kettle_ctl::protocol::parse_request_line(trimmed)
-                .and_then(|req| admit(access.current(), req))
-            {
+            let parsed = kettle_ctl::protocol::parse_request_line(trimmed);
+            match &parsed {
+                Ok(req) => claim.frame(req.caller),
+                Err(_) => claim.invalid_frame(),
+            }
+            let request = match parsed.and_then(|req| admit(access.current(), req)) {
+                // Only `get_state` reports its caller today, so only it pays
+                // for the check.
+                Ok(mut request) if request.method() == Method::GetState => {
+                    request.caller = CallerEvidence::check(claim.claim(), &capture);
+                    request
+                }
                 Ok(request) => request,
                 Err(resp) => {
                     if write_response_line(&mut conn, &resp, policy.write).is_err() {
@@ -1437,6 +1581,7 @@ mod tests {
                 id: 9,
                 method: "wait_for".into(),
                 params: serde_json::json!({"text": "$", "pane": 3, "regex": "x"}),
+                caller: None,
             },
         )
         .expect("read-only admits wait_for");
@@ -1453,6 +1598,117 @@ mod tests {
             Method::WaitFor.capability(),
             Method::ReadScreen.capability(),
             "a probe must not carry more authority than its wait"
+        );
+    }
+
+    /// The first nonblank frame fixes the connection's claim; nothing after
+    /// it can upgrade a missing or invalid one or switch to another process.
+    #[test]
+    fn the_first_frame_fixes_the_claim() {
+        let claim = |pid: u32| PeerClaim {
+            pid: std::num::NonZeroU32::new(pid).unwrap(),
+            start_token: Some(kettle_ctl::protocol::StartToken(5)),
+            pane_hint: None,
+            pid_hint: None,
+        };
+        let mut latch = ClaimLatch::default();
+        assert_eq!(latch.claim(), Err(UnverifiedReason::MissingClaim));
+        latch.frame(Some(claim(7)));
+        latch.frame(None);
+        latch.frame(Some(claim(7)));
+        assert_eq!(latch.claim(), Ok(claim(7)), "repeats and omissions keep it");
+        latch.frame(Some(claim(8)));
+        assert_eq!(latch.claim(), Err(UnverifiedReason::ClaimChanged));
+        latch.frame(Some(claim(7)));
+        assert_eq!(
+            latch.claim(),
+            Err(UnverifiedReason::ClaimChanged),
+            "permanent"
+        );
+
+        let mut missing = ClaimLatch::default();
+        missing.frame(None);
+        missing.frame(Some(claim(7)));
+        assert_eq!(missing.claim(), Err(UnverifiedReason::MissingClaim));
+
+        let mut invalid = ClaimLatch::default();
+        invalid.invalid_frame();
+        invalid.frame(Some(claim(7)));
+        assert_eq!(invalid.claim(), Err(UnverifiedReason::InvalidClaim));
+
+        let mut late_invalid = ClaimLatch::default();
+        late_invalid.frame(Some(claim(7)));
+        late_invalid.invalid_frame();
+        assert_eq!(
+            late_invalid.claim(),
+            Ok(claim(7)),
+            "a later bad frame changes nothing"
+        );
+    }
+
+    /// Over a real connection, `get_state` reaches the App carrying the
+    /// check of the connection's own claim, and no other method pays for one.
+    #[test]
+    fn get_state_carries_the_connections_caller_check() {
+        let (endpoint, rx) = start_test_accept_loop("caller-check", quick_policy());
+        let me = kettle_ctl::process::current()
+            .expect("inspect self")
+            .identity;
+        let claimed = format!(
+            r#""caller":{{"pid":{},"start_token":"{}"}}"#,
+            me.pid(),
+            me.start()
+        );
+        let dispatched = |line: String| {
+            let mut client = kettle_ctl::transport::connect(&endpoint).expect("connect");
+            let (conn_id, _event_tx) = recv_new_conn(&rx, Duration::from_secs(2));
+            send_line(&mut client, &line);
+            loop {
+                match rx.recv_timeout(Duration::from_secs(2)) {
+                    Ok(CtlServerMsg::Request {
+                        conn_id: c,
+                        request,
+                        reply,
+                    }) if c == conn_id => {
+                        reply
+                            .send(Response::ok(request.request().id, serde_json::json!({})))
+                            .ok();
+                        let _ = read_response(&mut client, Duration::from_secs(2));
+                        // Kept open: a closed connection's Disconnect would
+                        // reach the next connection's admission first.
+                        break (request, client);
+                    }
+                    Ok(_) => {}
+                    Err(error) => panic!("not dispatched: {error}"),
+                }
+            }
+        };
+        let claim_errors = [
+            UnverifiedReason::MissingClaim,
+            UnverifiedReason::InvalidClaim,
+            UnverifiedReason::ClaimChanged,
+            UnverifiedReason::ClaimMismatch,
+        ];
+        let (state, _first) = dispatched(format!(
+            r#"{{"v":1,"id":1,"method":"get_state",{claimed}}}"#
+        ));
+        match state.caller().chain().expect("get_state is checked") {
+            // This process is its own peer, so its chain starts with itself.
+            Ok(chain) => assert_eq!(chain[0], me),
+            // Above the test runner the walk may meet another user's process.
+            Err(reason) => assert!(!claim_errors.contains(&reason), "{reason:?}"),
+        }
+        let (bare, _second) = dispatched(r#"{"v":1,"id":2,"method":"get_state"}"#.to_string());
+        assert_eq!(
+            bare.caller().chain().map(|chain| chain.err()),
+            Some(Some(UnverifiedReason::MissingClaim))
+        );
+        let (other, _third) = dispatched(format!(
+            r#"{{"v":1,"id":3,"method":"list_panes",{claimed}}}"#
+        ));
+        assert!(
+            other.caller().chain().is_none(),
+            "only get_state is checked"
         );
     }
 
@@ -1530,6 +1786,7 @@ mod tests {
             rx,
             conns: HashMap::new(),
             registry_dir: std::env::temp_dir(),
+            alias_dir: None,
             pid: 0,
             endpoint: String::new(),
             _accept: accept,

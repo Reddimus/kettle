@@ -193,77 +193,9 @@ pub fn pid_alive(pid: u32) -> bool {
 /// rarely coincide; nothing here treats the token as a durable cross-boot
 /// identity.
 pub fn process_start_token(pid: u32) -> Option<u64> {
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
-        use windows_sys::Win32::System::Threading::{
-            GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-        };
-
-        // SAFETY: the handle is closed on every path below, and all four
-        // FILETIME out-parameters are valid for the duration of the call.
-        unsafe {
-            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-            if handle.is_null() {
-                return None;
-            }
-            let mut created = FILETIME {
-                dwLowDateTime: 0,
-                dwHighDateTime: 0,
-            };
-            let (mut exited, mut kernel, mut user) = (created, created, created);
-            let ok =
-                GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) != 0;
-            CloseHandle(handle);
-            ok.then(|| (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
-        }
-    }
-    #[cfg(target_os = "linux")]
-    {
-        // Field 22 of /proc/<pid>/stat is the start time in clock ticks since
-        // boot. `comm` (field 2) is unescaped and may itself contain spaces
-        // and ')', so the fixed-position fields only begin after its LAST
-        // ')' — counting from the left would misread a process named
-        // "sh (mine)".
-        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-        let after_comm = stat.rsplit_once(')')?.1;
-        // `state` is the first field after `comm`, so starttime sits 19 fields
-        // further along.
-        after_comm.split_whitespace().nth(19)?.parse().ok()
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let pid = libc::pid_t::try_from(pid).ok()?;
-        let size = std::mem::size_of::<libc::proc_bsdinfo>();
-        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
-        // SAFETY: `info` is a live, correctly sized buffer for the
-        // PROC_PIDTBSDINFO flavor; the call writes at most `size` bytes into
-        // it and reports how many it wrote.
-        let written = unsafe {
-            libc::proc_pidinfo(
-                pid,
-                libc::PROC_PIDTBSDINFO,
-                0,
-                std::ptr::from_mut(&mut info).cast(),
-                size as libc::c_int,
-            )
-        };
-        if written != size as libc::c_int {
-            return None;
-        }
-        // Microseconds since the epoch: one value, still ordered like the
-        // wall-clock start time it came from.
-        Some(
-            info.pbi_start_tvsec
-                .saturating_mul(1_000_000)
-                .saturating_add(info.pbi_start_tvusec),
-        )
-    }
-    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
-    {
-        let _ = pid;
-        None
-    }
+    crate::process::identity(pid)
+        .ok()
+        .map(crate::process::ProcessIdentity::start)
 }
 
 /// Liveness for a record written by `pid`: the pid is running *and*, when both

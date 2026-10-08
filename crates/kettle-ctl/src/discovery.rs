@@ -1,11 +1,18 @@
 //! The server discovery registry.
 //!
 //! Each running kettle that has its control server enabled writes a
-//! `<pid>.json` entry into a registry directory; a client lists the directory,
-//! picks the newest live entry (or one named by `--pid`), and connects to its
-//! endpoint. A registry directory (not a `latest` symlink) is used because
-//! Windows symlink creation needs a privilege; per-pid files also make a
-//! two-window setup explicit.
+//! `<pid>.json` entry into a registry directory; a client lists the
+//! directories it knows, picks a live entry (see `Client::discover` for the
+//! order: the one `--pid` names, the kettle it runs inside, `KETTLE_PID`,
+//! then the newest), and connects to its endpoint. A registry directory (not
+//! a `latest` symlink) is used because Windows symlink creation needs a
+//! privilege; per-pid files also make a two-window setup explicit.
+//!
+//! The directory comes from the environment, so a server also leaves a
+//! `<pid>.alias.json` pointer where the OS puts the registry for this user
+//! ([`canonical_registry_dir`]); a client started with a stripped environment
+//! reads that location too. An alias only points: the entry it names is read
+//! and validated in its own registry.
 //!
 //! Registry dir:
 //! - Unix: `$XDG_RUNTIME_DIR/kettle/ctl` (else `$XDG_STATE_HOME/kettle/ctl`,
@@ -136,6 +143,267 @@ pub fn registry_dir() -> PathBuf {
     registry_dir_from(|k| std::env::var(k).ok())
 }
 
+/// The registry directory the OS names for this user, whatever the
+/// environment says: on Linux `/run/user/<uid>` when it exists, else the
+/// account's home from the user database; on Windows the known Local
+/// AppData folder. A server whose environment points elsewhere leaves an
+/// alias here, so a client started with a stripped environment still finds
+/// it. `None` when the OS names no such place.
+pub fn canonical_registry_dir() -> Option<PathBuf> {
+    os_registry_bases()
+        .into_iter()
+        .next()
+        .map(|base| base.join("kettle").join("ctl"))
+}
+
+/// Every registry directory a client checks, most specific first and without
+/// repeats: the one this environment names, then the ones the OS names.
+pub fn registry_locations() -> Vec<PathBuf> {
+    let mut locations = vec![registry_dir()];
+    for base in os_registry_bases() {
+        let dir = base.join("kettle").join("ctl");
+        if !locations.contains(&dir) {
+            locations.push(dir);
+        }
+    }
+    locations
+}
+
+/// Registry bases the OS names for this user, best first.
+fn os_registry_bases() -> Vec<PathBuf> {
+    let mut bases = Vec::new();
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let run_user = PathBuf::from(format!("/run/user/{}", unsafe { libc::geteuid() }));
+        if std::fs::symlink_metadata(&run_user).is_ok_and(|metadata| {
+            metadata.file_type().is_dir() && metadata.uid() == unsafe { libc::geteuid() }
+        }) {
+            bases.push(run_user);
+        }
+    }
+    #[cfg(unix)]
+    if let Some(home) = passwd_home() {
+        bases.push(home.join(".local/state"));
+    }
+    #[cfg(windows)]
+    if let Some(local) = known_local_app_data() {
+        bases.push(local);
+    }
+    bases
+}
+
+/// This user's home directory from the user database, not `$HOME`.
+#[cfg(unix)]
+fn passwd_home() -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let mut buffer = vec![0u8; 16 * 1024];
+    // SAFETY: an all-zero `passwd` is a valid value of this C struct.
+    let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut found: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: every pointer is valid for the call and `buffer` outlives the
+    // strings `entry` points into, which are read before it is dropped.
+    let rc = unsafe {
+        libc::getpwuid_r(
+            libc::geteuid(),
+            &mut entry,
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+            &mut found,
+        )
+    };
+    if rc != 0 || found.is_null() || entry.pw_dir.is_null() {
+        return None;
+    }
+    // SAFETY: `pw_dir` is a NUL-terminated string inside `buffer`.
+    let home = unsafe { std::ffi::CStr::from_ptr(entry.pw_dir) };
+    let home = PathBuf::from(std::ffi::OsStr::from_bytes(home.to_bytes()));
+    home.is_absolute().then_some(home)
+}
+
+/// The Local AppData known folder, not `%LOCALAPPDATA%`.
+#[cfg(windows)]
+fn known_local_app_data() -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt as _;
+    use windows_sys::Win32::System::Com::CoTaskMemFree;
+    use windows_sys::Win32::UI::Shell::{FOLDERID_LocalAppData, SHGetKnownFolderPath};
+    let mut path: windows_sys::core::PWSTR = std::ptr::null_mut();
+    // SAFETY: valid GUID reference and out-parameter; the returned buffer is
+    // freed below on every path.
+    let hr =
+        unsafe { SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, std::ptr::null_mut(), &mut path) };
+    if hr < 0 || path.is_null() {
+        if !path.is_null() {
+            // SAFETY: a non-null buffer from the call above.
+            unsafe { CoTaskMemFree(path.cast()) };
+        }
+        return None;
+    }
+    // SAFETY: `path` is a NUL-terminated UTF-16 string from the call above.
+    let len = (0..).take_while(|&i| unsafe { *path.add(i) } != 0).count();
+    // SAFETY: `len` UTF-16 units precede the terminator.
+    let wide = unsafe { std::slice::from_raw_parts(path, len) };
+    let folder = PathBuf::from(std::ffi::OsString::from_wide(wide));
+    // SAFETY: the buffer came from SHGetKnownFolderPath.
+    unsafe { CoTaskMemFree(path.cast()) };
+    folder.is_absolute().then_some(folder)
+}
+
+/// An alias: a pointer from one registry directory to an entry registered in
+/// another. The entry it points at stays the only authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct AliasRecord {
+    v: u32,
+    pid: u32,
+    /// The absolute registry directory holding `<pid>.json`.
+    registry: String,
+}
+
+/// Path of the `<pid>.alias.json` pointer. Older clients skip it: its stem
+/// is not a pid.
+fn alias_path(dir: &std::path::Path, pid: u32) -> PathBuf {
+    dir.join(format!("{pid}.alias.json"))
+}
+
+/// Point `alias_dir` at `pid`'s entry in `registry`. Does nothing when the two
+/// are the same directory.
+pub fn publish_alias(
+    alias_dir: &std::path::Path,
+    registry: &std::path::Path,
+    pid: u32,
+) -> std::io::Result<()> {
+    if alias_dir == registry {
+        return Ok(());
+    }
+    let registry = registry
+        .to_str()
+        .filter(|_| registry.is_absolute())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "registry path is not absolute UTF-8",
+            )
+        })?;
+    crate::ensure_private_dir(alias_dir)?;
+    let record = AliasRecord {
+        v: 1,
+        pid,
+        registry: registry.to_string(),
+    };
+    let json = crate::protocol::to_json_vec_bounded(&record, MAX_REGISTRY_ENTRY_BYTES)
+        .map_err(std::io::Error::other)?;
+    kettle_state::atomic_replace(
+        &alias_path(alias_dir, pid),
+        &json,
+        kettle_state::AtomicWriteOptions::PRIVATE,
+    )
+}
+
+/// Remove `pid`'s alias from `alias_dir` (best-effort). The aliased entry and
+/// its socket belong to the registry they name.
+pub fn withdraw_alias(alias_dir: &std::path::Path, pid: u32) {
+    let _ = std::fs::remove_file(alias_path(alias_dir, pid));
+}
+
+/// Remove `dir`'s alias to `dead` in `registry`, but only while it still is
+/// that alias and the registry still holds `dead` (or nothing): between the
+/// read that judged it and this delete, a new server that took the same pid
+/// may have replaced either, and its alias must survive.
+fn withdraw_dead_alias(dir: &std::path::Path, dead: &RegistryEntry, registry: &std::path::Path) {
+    let path = alias_path(dir, dead.pid);
+    let same_alias = read_registry_entry(&path)
+        .and_then(|text| serde_json::from_str::<AliasRecord>(&text).ok())
+        .is_some_and(|record| {
+            record.v == 1
+                && record.pid == dead.pid
+                && std::path::Path::new(&record.registry) == registry
+        });
+    let same_entry = read_registry_entry(&entry_path(registry, dead.pid))
+        .and_then(|text| serde_json::from_str::<RegistryEntry>(&text).ok())
+        .is_none_or(|current| current == *dead);
+    if same_alias && same_entry {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// The entries `dir`'s aliases point at, each read and validated in the
+/// registry it names, with that registry.
+fn list_aliased(dir: &std::path::Path) -> Vec<(RegistryEntry, PathBuf)> {
+    let mut out = Vec::new();
+    if !crate::private_dir_is_valid(dir) {
+        return out;
+    }
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for path in read
+        .flatten()
+        .map(|entry| entry.path())
+        .take(MAX_REGISTRY_DIR_WALK)
+    {
+        let Some(pid) = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_suffix(".alias.json"))
+            .and_then(|pid| pid.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Some(record) = read_registry_entry(&path)
+            .and_then(|text| serde_json::from_str::<AliasRecord>(&text).ok())
+            .filter(|record| record.v == 1 && record.pid == pid)
+        else {
+            continue;
+        };
+        let registry = PathBuf::from(&record.registry);
+        if !registry.is_absolute() || registry == dir || !crate::private_dir_is_valid(&registry) {
+            continue;
+        }
+        if let Some(entry) = read_registry_entry(&entry_path(&registry, pid))
+            .and_then(|text| serde_json::from_str::<RegistryEntry>(&text).ok())
+            .filter(|entry| registry_entry_is_valid(&registry, pid, entry))
+        {
+            out.push((entry, registry));
+        }
+        if out.len() >= MAX_REGISTRY_DIR_ENTRIES {
+            break;
+        }
+    }
+    out
+}
+
+/// Every live server registered in `locations` or aliased there, each once,
+/// with the registry that holds its entry. Dead entries are pruned where they
+/// live; a dead alias only loses its pointer.
+pub fn live_candidates(locations: &[PathBuf]) -> Vec<(RegistryEntry, PathBuf)> {
+    live_candidates_by(locations, owner_alive)
+}
+
+pub(crate) fn live_candidates_by(
+    locations: &[PathBuf],
+    owner_alive: impl Fn(&RegistryEntry) -> bool,
+) -> Vec<(RegistryEntry, PathBuf)> {
+    let mut out: Vec<(RegistryEntry, PathBuf)> = Vec::new();
+    for dir in locations {
+        for entry in list_live_by(dir, &owner_alive) {
+            if !out.iter().any(|(seen, _)| seen.pid == entry.pid) {
+                out.push((entry, dir.clone()));
+            }
+        }
+        for (entry, registry) in list_aliased(dir) {
+            if !owner_alive(&entry) {
+                withdraw_dead_alias(dir, &entry, &registry);
+                continue;
+            }
+            if !out.iter().any(|(seen, _)| seen.pid == entry.pid) {
+                out.push((entry, registry));
+            }
+        }
+    }
+    out.sort_by_key(|(entry, _)| std::cmp::Reverse(entry.started_unix));
+    out
+}
+
 /// The default transport endpoint for `pid` (matches the server's `bind`).
 ///
 /// On Unix, `sockaddr_un.sun_path` is 108 bytes on Linux (104 on BSD/macOS); a
@@ -185,6 +453,38 @@ fn fallback_ctl_endpoint(
     length_safe_unix_socket_path(&file, private_temp_dir)
 }
 
+/// Whether `endpoint` is the socket a server registered in `dir` as `pid`
+/// would bind. The direct `<dir>/ctl-<pid>.sock` must match exactly. A path
+/// too long for `sun_path` falls back to a file named from `dir` and `pid` in
+/// a private `kettle-<uid>` temporary directory, and which temporary
+/// directory depends on the server's `TMPDIR`; a client with another (or a
+/// stripped) environment accepts that name in any private, user-owned
+/// directory of that name.
+fn endpoint_is_derived(dir: &std::path::Path, pid: u32, endpoint: &str) -> bool {
+    #[cfg(windows)]
+    {
+        endpoint == default_endpoint(dir, pid)
+    }
+    #[cfg(unix)]
+    {
+        if endpoint == default_endpoint(dir, pid) {
+            return true;
+        }
+        if unix_socket_path_fits(&dir.join(format!("ctl-{pid}.sock"))) {
+            return false;
+        }
+        let expected = fallback_ctl_endpoint(dir, pid, &private_temp_socket_dir());
+        let endpoint = std::path::Path::new(endpoint);
+        let private_parent = format!("kettle-{}", unsafe { libc::geteuid() });
+        endpoint.is_absolute()
+            && endpoint.file_name() == expected.file_name()
+            && endpoint.parent().is_some_and(|parent| {
+                parent.file_name() == Some(std::ffi::OsStr::new(&private_parent))
+                    && crate::private_dir_is_valid(parent)
+            })
+    }
+}
+
 /// Path of the `<pid>.json` entry file.
 fn entry_path(dir: &std::path::Path, pid: u32) -> PathBuf {
     dir.join(format!("{pid}.json"))
@@ -194,7 +494,7 @@ fn registry_entry_is_valid(dir: &std::path::Path, file_pid: u32, entry: &Registr
     entry.v == 1
         && entry.pid == file_pid
         && matches!(entry.kind.as_str(), "gui" | "muxd")
-        && entry.endpoint == default_endpoint(dir, entry.pid)
+        && endpoint_is_derived(dir, entry.pid, &entry.endpoint)
         && !entry.version.is_empty()
         && entry.version.len() <= MAX_VERSION_BYTES
 }
@@ -380,7 +680,7 @@ pub fn prune_stale(dir: &std::path::Path, entry: &RegistryEntry) {
         let _ = std::fs::remove_file(&path);
         // Without the lock a server may be between binding and registering;
         // the socket is then left for a later prune or startup sweep.
-        if entry.endpoint == default_endpoint(dir, entry.pid)
+        if endpoint_is_derived(dir, entry.pid, &entry.endpoint)
             && let Ok(Some(_lock)) = kettle_state::ExclusiveFileLock::try_acquire(&lock_path(dir))
         {
             remove_dead_socket(dir, entry.pid, std::path::Path::new(&entry.endpoint));
@@ -998,11 +1298,102 @@ mod tests {
 
         // Deterministic: same (dir, pid) always resolves to the same fallback
         // path, so a server's `bind` and a client's registry validity check
-        // (`entry.endpoint == default_endpoint(dir, entry.pid)`) agree.
+        // (`endpoint_is_derived`) agree.
         assert_eq!(endpoint, default_endpoint(&long, 123456));
         // Distinct dirs must not collide on the same fallback socket path.
         let other_long = long.join("nested-but-still-way-too-long-for-a-unix-socket-path");
         assert_ne!(endpoint, default_endpoint(&other_long, 123456));
+    }
+
+    /// A long registry's fallback socket depends on the server's `TMPDIR`,
+    /// so a client with another environment accepts its derived name in any
+    /// private `kettle-<uid>` directory, and nothing else.
+    #[cfg(unix)]
+    #[test]
+    fn a_fallback_endpoint_is_accepted_in_any_private_kettle_temp_dir() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let long = std::path::PathBuf::from(
+            "/home/example.com/first.last/.local/state/kettle/ctl-with-a-very-long-directory-name-that-pushes-past-the-sun-path-limit",
+        );
+        let pid = 123456;
+        let expected = fallback_ctl_endpoint(&long, pid, &private_temp_socket_dir());
+        let name = expected.file_name().unwrap().to_owned();
+        let root =
+            crate::test_scratch_root().join(format!("kettle-ctl-fallback-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let uid = unsafe { libc::geteuid() };
+        let other = root.join(format!("kettle-{uid}"));
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let at = |dir: &std::path::Path, file: &std::ffi::OsStr| {
+            dir.join(file).to_string_lossy().into_owned()
+        };
+        assert!(endpoint_is_derived(&long, pid, &at(&other, &name)));
+        assert!(endpoint_is_derived(
+            &long,
+            pid,
+            &default_endpoint(&long, pid)
+        ));
+        // Another file name, a directory of another name, or one others can
+        // write, is not the server's.
+        assert!(!endpoint_is_derived(
+            &long,
+            pid,
+            &at(&other, std::ffi::OsStr::new("ctl-0.sock"))
+        ));
+        assert!(!endpoint_is_derived(&long, pid + 1, &at(&other, &name)));
+        let misnamed = root.join("not-kettle");
+        std::fs::create_dir_all(&misnamed).unwrap();
+        std::fs::set_permissions(&misnamed, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(!endpoint_is_derived(&long, pid, &at(&misnamed, &name)));
+        std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!endpoint_is_derived(&long, pid, &at(&other, &name)));
+        // A short registry admits only its direct socket.
+        let short = root.join("short");
+        assert!(!endpoint_is_derived(&short, pid, &at(&other, &name)));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A dead server's alias is withdrawn only while it still points at that
+    /// server: a new server that took the pid keeps its own alias.
+    #[test]
+    fn a_dead_alias_is_withdrawn_only_while_it_is_still_the_dead_ones() {
+        let root =
+            crate::test_scratch_root().join(format!("kettle-ctl-withdraw-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (primary, canonical, elsewhere) = (
+            root.join("primary"),
+            root.join("canonical"),
+            root.join("elsewhere"),
+        );
+        let entry = |dir: &std::path::Path, token: u64| {
+            let mut entry =
+                RegistryEntry::registering("gui", 40, default_endpoint(dir, 40), "x", 1);
+            entry.start_token = Some(token);
+            entry
+        };
+        let dead = entry(&primary, 1);
+        register(&primary, &dead).unwrap();
+        publish_alias(&canonical, &primary, 40).unwrap();
+        let alias = alias_path(&canonical, 40);
+        // A new server took pid 40 in the same registry: keep the alias.
+        register(&primary, &entry(&primary, 2)).unwrap();
+        withdraw_dead_alias(&canonical, &dead, &primary);
+        assert!(alias.exists(), "the alias now leads to a live server");
+        // A new server took pid 40 elsewhere and re-pointed the alias.
+        register(&primary, &dead).unwrap();
+        publish_alias(&canonical, &elsewhere, 40).unwrap();
+        withdraw_dead_alias(&canonical, &dead, &primary);
+        assert!(alias.exists(), "the alias now points at another registry");
+        // Still the dead server's alias: it goes, and the entry stays.
+        publish_alias(&canonical, &primary, 40).unwrap();
+        withdraw_dead_alias(&canonical, &dead, &primary);
+        assert!(!alias.exists());
+        assert!(
+            entry_path(&primary, 40).exists(),
+            "the entry belongs to its registry"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[cfg(unix)]
