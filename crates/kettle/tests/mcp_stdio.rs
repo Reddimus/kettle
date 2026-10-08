@@ -15,8 +15,16 @@ fn kettle() -> Command {
 }
 
 fn run_mcp_stdio(messages: &[Value]) -> (i32, String, String) {
+    run_mcp_stdio_with(&["mcp"], messages)
+}
+
+fn run_mcp_stdio_with(args: &[&str], messages: &[Value]) -> (i32, String, String) {
     let mut child = kettle()
-        .arg("mcp")
+        .args(args)
+        // A display server outside Kettle must not find the Kettle this test
+        // may itself run in.
+        .env_remove("KETTLE_PID")
+        .env_remove("KETTLE_PANE_ID")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -54,6 +62,70 @@ fn parse_responses(out: &str) -> Vec<Value> {
             serde_json::from_str(line).unwrap_or_else(|e| panic!("bad JSON line {line:?}: {e}"))
         })
         .collect()
+}
+
+/// `kettle mcp --display`, over real stdio in both eras, offers exactly
+/// `kettle_show` and refuses every other tool before running it.
+#[test]
+fn mcp_stdio_display_mode_offers_only_kettle_show() {
+    let (code, out, err) = run_mcp_stdio_with(
+        &["mcp", "--display"],
+        &[
+            json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2025-11-25", "capabilities": {},
+                "clientInfo": {"name": "test", "version": "1"}}}),
+            json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+            json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+            json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                "params": {"name": "kettle_run", "arguments": {"command": ["echo", "no"]}}}),
+            json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                "params": {"name": "kettle_show", "arguments": {"path": "relative.png"}}}),
+        ],
+    );
+    assert_eq!(code, 0, "stderr: {err}");
+    let responses = parse_responses(&out);
+    let by_id = |id: u64| {
+        responses
+            .iter()
+            .find(|response| response["id"] == id)
+            .unwrap_or_else(|| panic!("no response {id}: {out}"))
+    };
+    assert!(
+        by_id(1)["result"]["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("kettle_show")
+    );
+    let tools: Vec<_> = by_id(2)["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(tools, ["kettle_show"]);
+    assert_eq!(by_id(3)["error"]["code"], -32602);
+    assert_eq!(by_id(4)["result"]["isError"], true);
+    let meta = json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": {"name": "kettle-test", "version": "1"},
+        "io.modelcontextprotocol/clientCapabilities": {}
+    });
+    let modern = run_mcp_stdio_with(
+        &["mcp", "--display"],
+        &[
+            json!({"jsonrpc": "2.0", "id": 1, "method": "server/discover", "params": {"_meta": meta}}),
+            json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {"_meta": meta}}),
+        ],
+    );
+    let responses = parse_responses(&modern.1);
+    let discover = &responses[0]["result"];
+    assert_eq!(
+        (discover["cacheScope"].as_str(), discover["ttlMs"].as_u64()),
+        (Some("private"), Some(0))
+    );
+    let tools = &responses[1]["result"]["tools"];
+    assert_eq!(tools.as_array().map(Vec::len), Some(1));
+    assert_eq!(tools[0]["name"], "kettle_show");
 }
 
 #[test]

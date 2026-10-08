@@ -239,24 +239,14 @@ impl Client {
         // Enumeration drops and prunes entries with a dead owner, so only
         // endpoints whose owner is alive are probed.
         let candidates = discovery::live_candidates_by(locations, &owner_alive);
-        let named = |pid: u32| candidates.iter().find(|(entry, _)| entry.pid == pid);
-        // An inherited name is checked against a recorded start when display
-        // discovery relies on it: a pid alone may by now be another Kettle.
-        let inherited = |pid: u32| {
-            named(pid)
-                .filter(|(entry, _)| fallback == Fallback::Newest || entry.start_token.is_some())
-        };
         let chosen = match pid {
-            Some(pid) => Some(named(pid).ok_or(CtlError::NoServer)?),
-            None => ancestry
-                .iter()
-                .skip(1)
-                .find_map(|ancestor| {
-                    candidates.iter().find(|(entry, _)| {
-                        entry.pid == ancestor.pid() && entry.start_token == Some(ancestor.start())
-                    })
-                })
-                .or_else(|| kettle_pid.and_then(inherited)),
+            Some(pid) => Some(
+                candidates
+                    .iter()
+                    .find(|(entry, _)| entry.pid == pid)
+                    .ok_or(CtlError::NoServer)?,
+            ),
+            None => choose(&candidates, ancestry, kettle_pid, fallback),
         };
         let attempt = |entry: &discovery::RegistryEntry, dir: &std::path::Path| {
             connect(entry).inspect_err(|_| {
@@ -738,6 +728,48 @@ const ANCESTRY_BUDGET: Duration = Duration::from_millis(250);
 
 /// `KETTLE_PID` when it is a well-formed pid: the Kettle whose pane started
 /// this process, unless something changed it.
+/// The Kettle a client that names none uses: the nearest one it runs
+/// inside, matched by pid and start, else the one `KETTLE_PID` names. Under
+/// [`Fallback::Nothing`] that inherited name counts only when its entry
+/// records a start, since a pid alone may by now be another Kettle.
+fn choose<'a>(
+    candidates: &'a [(discovery::RegistryEntry, std::path::PathBuf)],
+    ancestry: &[crate::process::ProcessIdentity],
+    kettle_pid: Option<u32>,
+    fallback: Fallback,
+) -> Option<&'a (discovery::RegistryEntry, std::path::PathBuf)> {
+    ancestry
+        .iter()
+        .skip(1)
+        .find_map(|ancestor| {
+            candidates.iter().find(|(entry, _)| {
+                entry.pid == ancestor.pid() && entry.start_token == Some(ancestor.start())
+            })
+        })
+        .or_else(|| {
+            let pid = kettle_pid?;
+            candidates.iter().find(|(entry, _)| {
+                entry.pid == pid && (fallback == Fallback::Newest || entry.start_token.is_some())
+            })
+        })
+}
+
+/// The pid of the Kettle display discovery would use for this process,
+/// without connecting to it: whether this session runs inside a Kettle that
+/// can show media.
+pub fn display_target() -> Option<u32> {
+    let ancestry = crate::identity::current_ancestry(Instant::now() + ANCESTRY_BUDGET);
+    let candidates =
+        discovery::live_candidates_by(&discovery::registry_locations(), discovery::owner_alive);
+    choose(
+        &candidates,
+        &ancestry,
+        kettle_pid_hint(|name| std::env::var(name).ok()),
+        Fallback::Nothing,
+    )
+    .map(|(entry, _)| entry.pid)
+}
+
 /// What discovery may try when no Kettle is named and none is an ancestor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Fallback {

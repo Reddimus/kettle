@@ -25,6 +25,8 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::mcp_tools::ToolSelection;
+
 /// The "modern" revision: no handshake, every request self-describing.
 const MCP_MODERN_VERSION: &str = "2026-07-28";
 /// Newest handshake-based ("legacy") revision this server negotiates.
@@ -34,9 +36,9 @@ const MCP_COMPAT_VERSION: &str = "2025-06-18";
 /// `supported` should prefer.
 const MCP_SUPPORTED_VERSIONS: [&str; 3] =
     [MCP_MODERN_VERSION, MCP_PROTOCOL_VERSION, MCP_COMPAT_VERSION];
-/// How long a modern client may reuse `server/discover` and `tools/list`.
-/// Neither changes while this server runs, and both are the same for every
-/// caller, so they are also `public`.
+/// How long a modern client may reuse a result that never changes while this
+/// server runs and is the same for every caller, so is also `public`: every
+/// `tools/list`, and the full server's `server/discover`.
 const STATIC_RESULT_TTL_MS: u64 = 3_600_000;
 
 /// `_meta` keys a modern request carries. The prefix is reserved for MCP, and
@@ -95,6 +97,7 @@ struct ToolJob {
     id: Value,
     key: String,
     params: Value,
+    selection: ToolSelection,
     cancelled: Arc<AtomicBool>,
     /// Which era asked. Carried on the job because the worker builds the
     /// response and the era is not recoverable from the tool result.
@@ -179,9 +182,9 @@ fn wait_unless_stdout_stalled(
 }
 
 /// Run the stdio MCP server loop until stdin closes. Returns zero on clean EOF.
-pub fn run_mcp() -> i32 {
+pub fn run_mcp(selection: ToolSelection) -> i32 {
     let stdin = std::io::stdin();
-    run_mcp_with(stdin.lock(), std::io::stdout())
+    run_mcp_with(stdin.lock(), std::io::stdout(), selection)
 }
 
 /// The server proper, over any transport.
@@ -190,7 +193,11 @@ pub fn run_mcp() -> i32 {
 /// the stall behaviour above testable at all: the failure only appears when the
 /// peer stops reading, and the process's real stdout cannot be made to do that
 /// from inside a test.
-pub fn run_mcp_with(mut input: impl BufRead, output: impl Write + Send + 'static) -> i32 {
+pub fn run_mcp_with(
+    mut input: impl BufRead,
+    output: impl Write + Send + 'static,
+    selection: ToolSelection,
+) -> i32 {
     let (responses_tx, responses_rx) =
         crossbeam_channel::bounded::<Value>(TOOL_QUEUE_CAPACITY + TOOL_WORKERS + 8);
     let progress = Arc::new(WriterProgress::default());
@@ -289,7 +296,14 @@ pub fn run_mcp_with(mut input: impl BufRead, output: impl Write + Send + 'static
                 continue;
             }
         };
-        dispatch_message(message, &mut lifecycle, &jobs_tx, &responses_tx, &pending);
+        dispatch_message(
+            message,
+            selection,
+            &mut lifecycle,
+            &jobs_tx,
+            &responses_tx,
+            &pending,
+        );
         if responses_tx.peer_gone() {
             // Nothing further can be delivered, so there is nothing to be
             // gained by parsing more of stdin. Go to shutdown.
@@ -401,16 +415,48 @@ fn respond(responses: &Responder, message: Value) {
 /// What `server/discover` reports. Identity, the versions a client may pick
 /// from, and the capabilities it can use — in one round trip, so a client does
 /// not have to probe with `tools/list` to find out what is here.
-fn discover_result() -> Value {
-    json!({
-        "supportedVersions": MCP_SUPPORTED_VERSIONS,
-        "capabilities": {"tools": {}},
-        // Declared because this result is cacheable and the shape says so.
-        "ttlMs": STATIC_RESULT_TTL_MS,
-        "cacheScope": "public",
-        "instructions": "Use kettle_run for bounded one-shot PTY commands. \
-    Other tools inspect or drive a running Kettle control server.",
-    })
+fn discover_result(selection: ToolSelection) -> Value {
+    match selection {
+        ToolSelection::Full => json!({
+            "supportedVersions": MCP_SUPPORTED_VERSIONS,
+            "capabilities": {"tools": {}},
+            // Declared because this result is cacheable and the shape says so.
+            "ttlMs": STATIC_RESULT_TTL_MS,
+            "cacheScope": "public",
+            "instructions": instructions(selection),
+        }),
+        // Display instructions depend on where this server runs, so the
+        // result is this session's alone and is never reused.
+        ToolSelection::Display => json!({
+            "supportedVersions": MCP_SUPPORTED_VERSIONS,
+            "capabilities": {"tools": {}},
+            "ttlMs": 0,
+            "cacheScope": "private",
+            "instructions": instructions(selection),
+        }),
+    }
+}
+
+/// What the server tells the model to do with its tools. Display mode says
+/// whether this session runs inside a Kettle that can show media, by the
+/// same strict choice `kettle_show` makes.
+fn instructions(selection: ToolSelection) -> &'static str {
+    match selection {
+        ToolSelection::Full => {
+            "Use kettle_run for bounded one-shot PTY commands. Other tools inspect or drive a running Kettle control server."
+        }
+        ToolSelection::Display if kettle_ctl::client::display_target().is_some() => {
+            "Use kettle_show to send the user an image or SVG file in this Kettle session; it goes \
+             to the media shelf of the pane you run in, where the user can open it. Call it after \
+             making an image the user should see, with its absolute path. Reuse key to replace an \
+             item. A successful show does not mean you have seen the media. If it is unavailable, \
+             busy or Kettle needs a restart, tell the user once and do not retry. Never change \
+             Kettle configuration or install software yourself."
+        }
+        ToolSelection::Display => {
+            "kettle_show works only for a local interactive session inside Kettle. Do not call it here."
+        }
+    }
 }
 
 /// Serve one modern request. No lifecycle state is consulted, because on this
@@ -420,12 +466,16 @@ fn dispatch_modern(
     id: Value,
     method: &str,
     params: Value,
+    selection: ToolSelection,
     jobs: &crossbeam_channel::Sender<ToolJob>,
     responses: &Responder,
     pending: &Pending,
 ) {
     match method {
-        "server/discover" => respond(responses, success(id, modernize(discover_result()))),
+        "server/discover" => respond(
+            responses,
+            success(id, modernize(discover_result(selection))),
+        ),
         // 2026-07-28 requires every list result to say how long it may be
         // reused, and a client rejects a tool list that does not.
         "tools/list" => respond(
@@ -433,7 +483,7 @@ fn dispatch_modern(
             success(
                 id,
                 modernize(json!({
-                    "tools": crate::mcp_tools::tool_specs(),
+                    "tools": crate::mcp_tools::tool_specs(selection),
                     "ttlMs": STATIC_RESULT_TTL_MS,
                     "cacheScope": "public",
                 })),
@@ -441,7 +491,7 @@ fn dispatch_modern(
         ),
         // The tool path is shared with the legacy era on purpose: the tools and
         // their bounds do not differ between revisions, only the envelope does.
-        "tools/call" => schedule_tool(id, params, jobs, responses, pending, true),
+        "tools/call" => schedule_tool(id, params, selection, jobs, responses, pending, true),
         _ => respond(
             responses,
             error_response(id, -32601, &format!("method not found: {method}")),
@@ -451,6 +501,7 @@ fn dispatch_modern(
 
 fn dispatch_message(
     message: Value,
+    selection: ToolSelection,
     lifecycle: &mut Lifecycle,
     jobs: &crossbeam_channel::Sender<ToolJob>,
     responses: &Responder,
@@ -547,7 +598,7 @@ fn dispatch_message(
             );
             return;
         }
-        dispatch_modern(id, method, params, jobs, responses, pending);
+        dispatch_modern(id, method, params, selection, jobs, responses, pending);
         return;
     }
 
@@ -559,7 +610,7 @@ fn dispatch_message(
             );
             return;
         }
-        match handle_initialize(id, &params) {
+        match handle_initialize(id, &params, selection) {
             Ok(response) => {
                 *lifecycle = Lifecycle::Initializing;
                 respond(responses, response);
@@ -590,10 +641,13 @@ fn dispatch_message(
         "tools/list" => {
             respond(
                 responses,
-                success(id, json!({"tools": crate::mcp_tools::tool_specs()})),
+                success(
+                    id,
+                    json!({"tools": crate::mcp_tools::tool_specs(selection)}),
+                ),
             );
         }
-        "tools/call" => schedule_tool(id, params, jobs, responses, pending, false),
+        "tools/call" => schedule_tool(id, params, selection, jobs, responses, pending, false),
         _ => {
             respond(
                 responses,
@@ -606,6 +660,7 @@ fn dispatch_message(
 fn schedule_tool(
     id: Value,
     params: Value,
+    selection: ToolSelection,
     jobs: &crossbeam_channel::Sender<ToolJob>,
     responses: &Responder,
     pending: &Pending,
@@ -613,7 +668,7 @@ fn schedule_tool(
     // result envelope differs, and only the caller knows which era asked.
     modern: bool,
 ) {
-    if let Err(message) = crate::mcp_tools::validate_tool_call(&params) {
+    if let Err(message) = crate::mcp_tools::validate_tool_call(selection, &params) {
         respond(responses, error_response(id, -32602, &message));
         return;
     }
@@ -640,6 +695,7 @@ fn schedule_tool(
         id: id.clone(),
         key: key.clone(),
         params,
+        selection,
         cancelled,
         modern,
     };
@@ -659,7 +715,8 @@ fn tool_worker(jobs: crossbeam_channel::Receiver<ToolJob>, responses: Responder,
         let response = if job.cancelled.load(Ordering::Acquire) {
             None
         } else {
-            let result = crate::mcp_tools::call_tool_cancellable(&job.params, &job.cancelled);
+            let result =
+                crate::mcp_tools::call_tool_cancellable(job.selection, &job.params, &job.cancelled);
             if job.cancelled.load(Ordering::Acquire) {
                 None
             } else {
@@ -741,6 +798,7 @@ pub fn self_test() -> i32 {
             "capabilities": {},
             "clientInfo": {"name": "kettle-self-test", "version": env!("CARGO_PKG_VERSION")},
         }),
+        ToolSelection::Full,
     );
     let Ok(init) = init else {
         eprintln!("self-test FAIL: initialize was rejected");
@@ -754,7 +812,7 @@ pub fn self_test() -> i32 {
         eprintln!("self-test FAIL: initialize missing serverInfo");
         return 1;
     }
-    if !crate::mcp_tools::tool_specs()
+    if !crate::mcp_tools::tool_specs(ToolSelection::Full)
         .iter()
         .any(|tool| tool.get("name").and_then(Value::as_str) == Some("kettle_run"))
     {
@@ -765,10 +823,13 @@ pub fn self_test() -> i32 {
     let command = json!(["cmd", "/c", "echo", "mcp-self-test-ok"]);
     #[cfg(unix)]
     let command = json!(["echo", "mcp-self-test-ok"]);
-    let result = crate::mcp_tools::call_tool(&json!({
-        "name": "kettle_run",
-        "arguments": {"command": command},
-    }));
+    let result = crate::mcp_tools::call_tool(
+        ToolSelection::Full,
+        &json!({
+            "name": "kettle_run",
+            "arguments": {"command": command},
+        }),
+    );
     let text = result
         .pointer("/content/0/text")
         .and_then(Value::as_str)
@@ -785,7 +846,7 @@ pub fn self_test() -> i32 {
     0
 }
 
-fn handle_initialize(id: Value, params: &Value) -> Result<Value, Value> {
+fn handle_initialize(id: Value, params: &Value, selection: ToolSelection) -> Result<Value, Value> {
     let params: InitializeParams = serde_json::from_value(params.clone()).map_err(|error| {
         error_response(
             id.clone(),
@@ -816,7 +877,7 @@ fn handle_initialize(id: Value, params: &Value) -> Result<Value, Value> {
                 "title": "Kettle Terminal",
                 "version": env!("CARGO_PKG_VERSION"),
             },
-            "instructions": "Use kettle_run for bounded one-shot PTY commands. Other tools inspect or drive a running Kettle control server.",
+            "instructions": instructions(selection),
         }),
     ))
 }
@@ -1068,6 +1129,39 @@ fn read_capped_line(reader: &mut impl BufRead) -> Result<Option<Vec<u8>>, ReadLi
 mod tests {
     use super::*;
 
+    /// Display discovery is this session's alone, never reused, and offers
+    /// only kettle_show; full discovery keeps its public cache.
+    #[test]
+    fn display_discovery_is_private_and_offers_only_show() {
+        let display = discover_result(ToolSelection::Display);
+        assert_eq!(
+            (display["cacheScope"].as_str(), display["ttlMs"].as_u64()),
+            (Some("private"), Some(0))
+        );
+        assert!(
+            display["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("kettle_show")
+        );
+        let full = discover_result(ToolSelection::Full);
+        assert_eq!(full["cacheScope"], "public");
+        assert!(
+            full["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("kettle_run")
+        );
+        let init = handle_initialize(
+            json!(1),
+            &init_params(MCP_PROTOCOL_VERSION),
+            ToolSelection::Display,
+        )
+        .unwrap();
+        let instructions = init["result"]["instructions"].as_str().unwrap();
+        assert!(instructions.contains("kettle_show") && !instructions.contains("kettle_run"));
+    }
+
     /// A writer that never finishes a write, standing in for a peer that has
     /// stopped reading its end of the pipe.
     ///
@@ -1202,6 +1296,7 @@ mod tests {
                 let code = run_mcp_with(
                     std::io::Cursor::new(input.into_bytes()),
                     NeverDrains { entered },
+                    ToolSelection::Full,
                 );
                 let _ = finished.try_send(code);
             });
@@ -1240,7 +1335,8 @@ mod tests {
     #[test]
     fn initialize_negotiates_current_and_compat_versions() {
         for version in [MCP_PROTOCOL_VERSION, MCP_COMPAT_VERSION] {
-            let response = handle_initialize(json!(1), &init_params(version)).unwrap();
+            let response =
+                handle_initialize(json!(1), &init_params(version), ToolSelection::Full).unwrap();
             assert_eq!(response["result"]["protocolVersion"], version);
             assert_eq!(response["result"]["serverInfo"]["name"], "kettle");
             assert_eq!(
@@ -1252,9 +1348,12 @@ mod tests {
 
     #[test]
     fn initialize_requires_typed_required_fields() {
-        let response =
-            handle_initialize(json!(1), &json!({"protocolVersion": MCP_PROTOCOL_VERSION}))
-                .unwrap_err();
+        let response = handle_initialize(
+            json!(1),
+            &json!({"protocolVersion": MCP_PROTOCOL_VERSION}),
+            ToolSelection::Full,
+        )
+        .unwrap_err();
         assert_eq!(response["error"]["code"], -32602);
 
         for params in [
@@ -1270,7 +1369,7 @@ mod tests {
             }),
         ] {
             assert_eq!(
-                handle_initialize(json!(1), &params).unwrap_err()["error"]["code"],
+                handle_initialize(json!(1), &params, ToolSelection::Full).unwrap_err()["error"]["code"],
                 -32602
             );
         }
@@ -1285,6 +1384,7 @@ mod tests {
         let mut lifecycle = Lifecycle::Uninitialized;
         dispatch_message(
             json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":init_params(MCP_PROTOCOL_VERSION)}),
+            ToolSelection::Full,
             &mut lifecycle,
             &jobs_tx,
             &responses_tx,
@@ -1294,6 +1394,7 @@ mod tests {
         assert!(responses_rx.try_recv().is_ok());
         dispatch_message(
             json!({"jsonrpc":"2.0","id":2,"method":"ping"}),
+            ToolSelection::Full,
             &mut lifecycle,
             &jobs_tx,
             &responses_tx,
@@ -1305,6 +1406,7 @@ mod tests {
         assert_eq!(lifecycle, Lifecycle::Initializing);
         dispatch_message(
             json!({"jsonrpc":"2.0","method":"initialized"}),
+            ToolSelection::Full,
             &mut lifecycle,
             &jobs_tx,
             &responses_tx,
@@ -1317,6 +1419,7 @@ mod tests {
         );
         dispatch_message(
             json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+            ToolSelection::Full,
             &mut lifecycle,
             &jobs_tx,
             &responses_tx,
@@ -1367,6 +1470,7 @@ mod tests {
                 "name": "kettle_run",
                 "arguments": {"command": ["this-command-must-not-run"]},
             }),
+            ToolSelection::Full,
             &jobs_tx,
             &responses_tx,
             &pending,
@@ -1392,6 +1496,7 @@ mod tests {
         schedule_tool(
             json!(7),
             json!({"name":"kettle_run","arguments":{"command":["echo","queued"]}}),
+            ToolSelection::Full,
             &jobs_tx,
             &responses_tx,
             &pending,
@@ -1401,6 +1506,7 @@ mod tests {
         schedule_tool(
             json!(7),
             json!({"name":"kettle_run","arguments":{"command":["echo","queued"]}}),
+            ToolSelection::Full,
             &jobs_tx,
             &responses_tx,
             &pending,
@@ -1416,6 +1522,7 @@ mod tests {
         schedule_tool(
             json!(8),
             json!({"name":"kettle_run","arguments":{"command":["echo","queued"]}}),
+            ToolSelection::Full,
             &jobs_tx,
             &responses_tx,
             &pending,
@@ -1438,6 +1545,7 @@ mod tests {
         schedule_tool(
             json!(3),
             json!({"name":"unknown","arguments":{}}),
+            ToolSelection::Full,
             &jobs_tx,
             &responses_tx,
             &pending,
@@ -1446,6 +1554,7 @@ mod tests {
         schedule_tool(
             json!(4),
             json!({"name":"kettle_run","arguments":null}),
+            ToolSelection::Full,
             &jobs_tx,
             &responses_tx,
             &pending,
@@ -1470,6 +1579,7 @@ mod tests {
         schedule_tool(
             json!(5),
             json!({"name":"kettle_run","arguments":{"command":"not-an-array"}}),
+            ToolSelection::Full,
             &jobs_tx,
             &responses_tx,
             &pending,
@@ -1570,6 +1680,7 @@ mod tests {
         // well-formed, shallow message on the same lifecycle still works.
         dispatch_message(
             json!({"jsonrpc":"2.0","id":1,"method":"ping"}),
+            ToolSelection::Full,
             &mut lifecycle,
             &jobs_tx,
             &responses_tx,
@@ -1598,6 +1709,7 @@ mod tests {
         let mut lifecycle = Lifecycle::Ready;
         dispatch_message(
             json!({"jsonrpc":"1.0","id":3,"method":"ping"}),
+            ToolSelection::Full,
             &mut lifecycle,
             &jobs_tx,
             &responses_tx,
@@ -1606,6 +1718,7 @@ mod tests {
         assert_eq!(responses_rx.recv().unwrap()["error"]["code"], -32600);
         dispatch_message(
             json!({"jsonrpc":"2.0","id":1.5,"method":"ping"}),
+            ToolSelection::Full,
             &mut lifecycle,
             &jobs_tx,
             &responses_tx,
@@ -1616,6 +1729,7 @@ mod tests {
         assert_eq!(fractional["error"]["code"], -32600);
         dispatch_message(
             json!({"jsonrpc":"2.0","method":"unknown/notification"}),
+            ToolSelection::Full,
             &mut lifecycle,
             &jobs_tx,
             &responses_tx,

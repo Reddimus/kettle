@@ -76,7 +76,7 @@ fn read_stdin() -> Result<Vec<u8>, String> {
 
 /// The file at `path`, made absolute, attested by the device and inode it
 /// has now: Kettle refuses it if what it opens is another file.
-fn file_source(path: &Path) -> Result<ShowSource, String> {
+pub(crate) fn file_source(path: &Path) -> Result<ShowSource, String> {
     let path: PathBuf = std::path::absolute(path)
         .map_err(|_| FailureCode::FileNotFound.model_message().to_string())?;
     let metadata = std::fs::metadata(&path).map_err(|error| {
@@ -120,7 +120,7 @@ fn attestation(_metadata: &std::fs::Metadata) -> ExternalAttested {
 /// What to say when Kettle did not take the media: the fixed wording for
 /// each failure, which names no path or source and never suggests turning
 /// on full control.
-fn failure_text(error: &CtlError) -> String {
+pub(crate) fn failure_text(error: &CtlError) -> String {
     match error {
         CtlError::NotInKettle => FailureCode::NotInKettle.model_message().into(),
         CtlError::NoServer | CtlError::Io(_) => FailureCode::DisplayDisabled.model_message().into(),

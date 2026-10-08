@@ -4,6 +4,10 @@
 //! The other tools drive a running kettle via the control client; when no
 //! server is discoverable they return an `isError` result with actionable text
 //! (start `kettle --agent-server full`).
+//!
+//! `kettle mcp --display` offers `kettle_show` alone: it sends a file to the
+//! media shelf of the pane the server runs in, needs only agent previews, and
+//! never reads, types or runs anything.
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -33,8 +37,43 @@ enum ArgKind {
     Strings,
 }
 
+/// Which tools a server offers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolSelection {
+    /// Every control tool and `kettle_run`.
+    Full,
+    /// `kettle_show` alone.
+    Display,
+}
+
 /// The tool specifications for `tools/list` (name + description + JSON Schema).
-pub fn tool_specs() -> Vec<Value> {
+pub fn tool_specs(selection: ToolSelection) -> Vec<Value> {
+    match selection {
+        ToolSelection::Full => full_tool_specs(),
+        ToolSelection::Display => vec![show_tool_spec()],
+    }
+}
+
+fn show_tool_spec() -> Value {
+    json!({
+        "name": "kettle_show",
+        "description": "Send an image or SVG file to the media shelf of the Kettle pane this \
+            session runs in, where the user can open it. Returns delivery status and metadata, \
+            not the image contents.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "absolute path of the image or SVG file"},
+                "title": {"type": "string", "maxLength": kettle_ctl::show::MAX_SHOW_TITLE_BYTES, "description": "title for the shelf item (default: the file name)"},
+                "key": {"type": "string", "minLength": 1, "maxLength": kettle_ctl::show::MAX_SHOW_KEY_BYTES, "description": "replace the shelf item with this key instead of adding another (default: the file's path)"}
+            },
+            "required": ["path"],
+            "additionalProperties": false
+        }
+    })
+}
+
+fn full_tool_specs() -> Vec<Value> {
     vec![
         json!({
             "name": "kettle_run",
@@ -281,22 +320,26 @@ pub fn tool_specs() -> Vec<Value> {
 
 /// Dispatch a `tools/call`. `params` is `{name, arguments}`. Returns an
 /// MCP tool result (`{content: [...], isError?}`).
-pub fn call_tool(params: &Value) -> Value {
-    call_tool_inner(params, None)
+pub fn call_tool(selection: ToolSelection, params: &Value) -> Value {
+    call_tool_inner(selection, params, None)
 }
 
 /// Dispatch a tool while observing the owning JSON-RPC request's cancellation
 /// flag. Local runs terminate their child, while control-backed calls stop
 /// waiting and drop the connection so the server can release deferred work.
-pub fn call_tool_cancellable(params: &Value, cancelled: &std::sync::atomic::AtomicBool) -> Value {
-    call_tool_inner(params, Some(cancelled))
+pub fn call_tool_cancellable(
+    selection: ToolSelection,
+    params: &Value,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Value {
+    call_tool_inner(selection, params, Some(cancelled))
 }
 
-pub(crate) fn validate_tool_call(params: &Value) -> Result<(), String> {
-    parse_tool_call(params).map(|_| ())
+pub(crate) fn validate_tool_call(selection: ToolSelection, params: &Value) -> Result<(), String> {
+    parse_tool_call(selection, params).map(|_| ())
 }
 
-fn parse_tool_call(params: &Value) -> Result<ToolCallParams, String> {
+fn parse_tool_call(selection: ToolSelection, params: &Value) -> Result<ToolCallParams, String> {
     if params
         .get("arguments")
         .is_some_and(|arguments| !arguments.is_object())
@@ -305,13 +348,16 @@ fn parse_tool_call(params: &Value) -> Result<ToolCallParams, String> {
     }
     let call: ToolCallParams = serde_json::from_value(params.clone())
         .map_err(|error| format!("invalid tools/call params: {error}"))?;
-    if !is_known_tool(&call.name) {
+    if !is_known_tool(selection, &call.name) {
         return Err(format!("unknown tool '{}'", call.name));
     }
     Ok(call)
 }
 
-fn is_known_tool(name: &str) -> bool {
+fn is_known_tool(selection: ToolSelection, name: &str) -> bool {
+    if selection == ToolSelection::Display {
+        return name == "kettle_show";
+    }
     matches!(
         name,
         "kettle_run"
@@ -331,16 +377,26 @@ fn is_known_tool(name: &str) -> bool {
     )
 }
 
-fn call_tool_inner(params: &Value, cancelled: Option<&std::sync::atomic::AtomicBool>) -> Value {
-    let call = match parse_tool_call(params) {
+fn call_tool_inner(
+    selection: ToolSelection,
+    params: &Value,
+    cancelled: Option<&std::sync::atomic::AtomicBool>,
+) -> Value {
+    let call = match parse_tool_call(selection, params) {
         Ok(call) => call,
         Err(error) => return error_result(&error),
     };
     let args = call.arguments.unwrap_or_else(|| json!({}));
     if let Err(error) = validate_tool_arguments(&call.name, &args) {
+        // Every kettle_show failure keeps its fixed wording and says the
+        // model has not seen the media, an unknown argument included.
+        if call.name == "kettle_show" {
+            return show_failed(kettle_media::FailureCode::BadParams.model_message());
+        }
         return error_result(&error);
     }
     match call.name.as_str() {
+        "kettle_show" => tool_kettle_show(&args, cancelled),
         "kettle_run" => tool_kettle_run(&args, cancelled),
         "kettle_list_panes" => ctl_call(
             "list_panes",
@@ -468,6 +524,87 @@ fn call_tool_inner(params: &Value, cancelled: Option<&std::sync::atomic::AtomicB
         }
         other => error_result(&format!("unknown tool '{other}'")),
     }
+}
+
+/// `kettle_show`: send an absolute file path to the media shelf of the pane
+/// this server runs in, through the same strict discovery and wording as
+/// `kettle show`. The result says where it went and what it was, never what
+/// it shows.
+fn tool_kettle_show(args: &Value, cancelled: Option<&std::sync::atomic::AtomicBool>) -> Value {
+    use kettle_media::FailureCode;
+    let path = match args.get("path").and_then(Value::as_str) {
+        Some(path) if std::path::Path::new(path).is_absolute() => std::path::Path::new(path),
+        _ => return show_failed(FailureCode::BadParams.model_message()),
+    };
+    let source = match crate::show_cli::file_source(path) {
+        Ok(source) => source,
+        Err(message) => return show_failed(&message),
+    };
+    let text = |name: &str| args.get(name).and_then(Value::as_str).map(str::to_owned);
+    let params = match (kettle_ctl::show::ShowRequest {
+        source,
+        title: text("title"),
+        key: text("key"),
+        pane: None,
+    })
+    .into_params()
+    {
+        Ok(params) => params,
+        Err(failure) => return show_failed(failure.model_message()),
+    };
+    let mut client = match Client::discover_display(None) {
+        Ok(client) => client,
+        Err(error) => return show_failed(&crate::show_cli::failure_text(&error)),
+    };
+    let reply = match cancelled {
+        Some(cancelled) => client.call_cancellable("show", params, cancelled),
+        None => client.call_with_timeout("show", params, kettle_ctl::show::SHOW_CALL_TIMEOUT),
+    };
+    match reply.map(serde_json::from_value::<kettle_ctl::show::ShowResult>) {
+        Ok(Ok(result)) => show_sent(&result),
+        Ok(Err(_)) => show_failed("Kettle answered in a form this tool does not know."),
+        Err(error) => show_failed(&crate::show_cli::failure_text(&error)),
+    }
+}
+
+/// A `kettle_show` that reached the shelf: one plain line and status-only
+/// structured content, which never carry the media itself.
+fn show_sent(result: &kettle_ctl::show::ShowResult) -> Value {
+    let sender = if result.verified {
+        ""
+    } else {
+        ", from an unverified sender"
+    };
+    let text = format!(
+        "Sent to the Kettle media shelf of pane {} ({} {}x{}{sender}); the user can open it \
+         there. You have not seen its contents.",
+        result.pane, result.kind, result.width, result.height
+    );
+    json!({
+        "content": [{ "type": "text", "text": text }],
+        "structuredContent": {
+            "status": "sent",
+            "delivery": "shelf",
+            "pane": result.pane,
+            "window": result.window,
+            "item": result.item,
+            "verified": result.verified,
+            "kind": result.kind,
+            "width": result.width,
+            "height": result.height,
+            "warnings": result.warnings,
+            "model_has_seen": false,
+        },
+    })
+}
+
+/// A `kettle_show` that did not reach the shelf, in its fixed wording.
+fn show_failed(message: &str) -> Value {
+    json!({
+        "content": [{ "type": "text", "text": message }],
+        "structuredContent": {"status": "failed", "model_has_seen": false},
+        "isError": true,
+    })
 }
 
 /// `kettle_run`: run a command headlessly + capture output.
@@ -600,6 +737,11 @@ fn forwarded_ctl_arguments(name: &str, args: &Value) -> Value {
 
 fn tool_argument_fields(name: &str) -> Option<&'static [(&'static str, ArgKind)]> {
     Some(match name {
+        "kettle_show" => &[
+            ("path", ArgKind::String),
+            ("title", ArgKind::String),
+            ("key", ArgKind::String),
+        ],
         "kettle_run" => &[
             ("command", ArgKind::Strings),
             ("cols", ArgKind::Unsigned),
@@ -724,11 +866,123 @@ fn cap_tool_text(text: String) -> (String, bool) {
 mod tests {
     use super::*;
 
+    fn names(selection: ToolSelection) -> Vec<String> {
+        tool_specs(selection)
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(str::to_owned))
+            .collect()
+    }
+
+    /// Display mode offers `kettle_show` alone and takes no other call; full
+    /// mode does not offer it.
+    #[test]
+    fn display_mode_offers_exactly_kettle_show() {
+        assert_eq!(names(ToolSelection::Display), ["kettle_show"]);
+        assert!(
+            !names(ToolSelection::Full)
+                .iter()
+                .any(|name| name == "kettle_show")
+        );
+        let schema = &tool_specs(ToolSelection::Display)[0]["inputSchema"];
+        assert_eq!(schema["required"], json!(["path"]));
+        assert_eq!(schema["additionalProperties"], json!(false));
+        let properties: Vec<_> = schema["properties"].as_object().unwrap().keys().collect();
+        assert_eq!(properties, ["key", "path", "title"]);
+        for name in names(ToolSelection::Full) {
+            assert!(
+                validate_tool_call(
+                    ToolSelection::Display,
+                    &json!({"name": name, "arguments": {}})
+                )
+                .is_err(),
+                "display mode must refuse {name}"
+            );
+        }
+        assert!(
+            validate_tool_call(
+                ToolSelection::Full,
+                &json!({"name": "kettle_show", "arguments": {"path": "/x.png"}})
+            )
+            .is_err()
+        );
+    }
+
+    /// Requests Kettle would refuse are refused here in its fixed wording,
+    /// before anything is sent.
+    #[test]
+    fn kettle_show_refuses_bad_requests_in_fixed_wording() {
+        use kettle_media::FailureCode;
+        let show = |arguments: Value| {
+            call_tool(
+                ToolSelection::Display,
+                &json!({"name": "kettle_show", "arguments": arguments}),
+            )
+        };
+        let text = |result: &Value| result["content"][0]["text"].as_str().unwrap().to_owned();
+        let directory = kettle_test_support::private_tempdir("kettle-mcp-show-");
+        let file = directory.path().join("plot.png");
+        std::fs::write(&file, b"png").unwrap();
+        let file = file.to_str().unwrap();
+        for (arguments, failure) in [
+            (json!({}), FailureCode::BadParams),
+            (json!({"path": "relative/plot.png"}), FailureCode::BadParams),
+            (
+                json!({"path": directory.path().join("gone.png").to_str().unwrap()}),
+                FailureCode::FileNotFound,
+            ),
+            (
+                json!({"path": directory.path().to_str().unwrap()}),
+                FailureCode::FileNotRegular,
+            ),
+            (
+                json!({"path": file, "key": "k".repeat(kettle_ctl::show::MAX_SHOW_KEY_BYTES + 1)}),
+                FailureCode::TooLarge,
+            ),
+            (json!({"path": file, "title": ""}), FailureCode::BadParams),
+            (json!({"path": file, "pane": 3}), FailureCode::BadParams),
+            (json!({"path": file, "title": 7}), FailureCode::BadParams),
+        ] {
+            let result = show(arguments.clone());
+            assert_eq!(result["isError"], json!(true), "{arguments}");
+            assert_eq!(text(&result), failure.model_message(), "{arguments}");
+            assert_eq!(result["structuredContent"]["status"], "failed");
+            assert_eq!(result["structuredContent"]["model_has_seen"], false);
+        }
+    }
+
+    /// The model is told where the media went and that it has not seen it;
+    /// nothing of the media itself is in the result.
+    #[test]
+    fn kettle_show_results_carry_status_and_never_media() {
+        let result = kettle_ctl::show::ShowResult {
+            pane: 4,
+            verified: false,
+            window: 2,
+            item: 9,
+            kind: "svg".into(),
+            width: 640,
+            height: 480,
+            warnings: vec!["font_fallback".into()],
+        };
+        let sent = show_sent(&result);
+        let text = sent["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("pane 4") && text.contains("svg 640x480"));
+        assert!(text.contains("unverified") && text.contains("not seen"));
+        assert_eq!(sent["content"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            sent["structuredContent"],
+            json!({"status": "sent", "delivery": "shelf", "pane": 4, "window": 2, "item": 9,
+                "verified": false, "kind": "svg", "width": 640, "height": 480,
+                "warnings": ["font_fallback"], "model_has_seen": false})
+        );
+        assert!(sent.get("isError").is_none());
+    }
+
     #[test]
     fn tool_specs_have_required_shape() {
         use std::collections::BTreeSet;
 
-        let specs = tool_specs();
+        let specs = tool_specs(ToolSelection::Full);
         assert!(specs.len() >= 8, "screenshot is part of the agent plane");
         for s in &specs {
             assert!(s["name"].is_string(), "tool missing name: {s}");
@@ -785,7 +1039,10 @@ mod tests {
 
     #[test]
     fn unknown_tool_is_error_result() {
-        let r = call_tool(&json!({"name": "nope", "arguments": {}}));
+        let r = call_tool(
+            ToolSelection::Full,
+            &json!({"name": "nope", "arguments": {}}),
+        );
         assert_eq!(r["isError"], true);
         assert!(
             r["content"][0]["text"]
@@ -797,13 +1054,19 @@ mod tests {
 
     #[test]
     fn kettle_run_rejects_empty_command() {
-        let r = call_tool(&json!({"name": "kettle_run", "arguments": {"command": []}}));
+        let r = call_tool(
+            ToolSelection::Full,
+            &json!({"name": "kettle_run", "arguments": {"command": []}}),
+        );
         assert_eq!(r["isError"], true);
 
-        let r = call_tool(&json!({
-            "name": "kettle_run",
-            "arguments": {"command": ["echo", 1]},
-        }));
+        let r = call_tool(
+            ToolSelection::Full,
+            &json!({
+                "name": "kettle_run",
+                "arguments": {"command": ["echo", 1]},
+            }),
+        );
         assert_eq!(r["isError"], true);
         assert!(
             r["content"][0]["text"]
@@ -815,7 +1078,10 @@ mod tests {
 
     #[test]
     fn tools_call_requires_typed_envelope_and_object_arguments() {
-        let result = call_tool(&json!({"name":"kettle_list_panes","arguments":[],"extra":1}));
+        let result = call_tool(
+            ToolSelection::Full,
+            &json!({"name":"kettle_list_panes","arguments":[],"extra":1}),
+        );
         assert_eq!(result["isError"], true);
         assert!(
             result["content"][0]["text"]
@@ -824,7 +1090,10 @@ mod tests {
                 .contains("object")
         );
 
-        let result = call_tool(&json!({"name":"kettle_list_panes","arguments":[]}));
+        let result = call_tool(
+            ToolSelection::Full,
+            &json!({"name":"kettle_list_panes","arguments":[]}),
+        );
         assert_eq!(result["isError"], true);
         assert!(
             result["content"][0]["text"]
@@ -834,18 +1103,24 @@ mod tests {
         );
 
         assert!(
-            validate_tool_call(&json!({
-                "name":"kettle_list_panes",
-                "arguments":{},
-                "task": {"ttl": 1000},
-            }))
+            validate_tool_call(
+                ToolSelection::Full,
+                &json!({
+                    "name":"kettle_list_panes",
+                    "arguments":{},
+                    "task": {"ttl": 1000},
+                })
+            )
             .is_ok()
         );
         assert!(
-            validate_tool_call(&json!({
-                "name":"kettle_list_panes",
-                "arguments":null,
-            }))
+            validate_tool_call(
+                ToolSelection::Full,
+                &json!({
+                    "name":"kettle_list_panes",
+                    "arguments":null,
+                })
+            )
             .is_err()
         );
     }
@@ -865,18 +1140,30 @@ mod tests {
     /// running.
     #[test]
     fn send_keys_and_wait_for_validate_args_first() {
-        let r = call_tool(&json!({"name": "kettle_send_keys", "arguments": {}}));
+        let r = call_tool(
+            ToolSelection::Full,
+            &json!({"name": "kettle_send_keys", "arguments": {}}),
+        );
         assert_eq!(r["isError"], true);
         assert!(r["content"][0]["text"].as_str().unwrap().contains("keys"));
 
-        let r = call_tool(&json!({"name": "kettle_send_keys", "arguments": {"keys": []}}));
+        let r = call_tool(
+            ToolSelection::Full,
+            &json!({"name": "kettle_send_keys", "arguments": {"keys": []}}),
+        );
         assert_eq!(r["isError"], true);
 
-        let r = call_tool(&json!({"name": "kettle_perform_action", "arguments": {}}));
+        let r = call_tool(
+            ToolSelection::Full,
+            &json!({"name": "kettle_perform_action", "arguments": {}}),
+        );
         assert_eq!(r["isError"], true);
         assert!(r["content"][0]["text"].as_str().unwrap().contains("action"));
 
-        let r = call_tool(&json!({"name": "kettle_wait_for", "arguments": {"timeout_ms": 5}}));
+        let r = call_tool(
+            ToolSelection::Full,
+            &json!({"name": "kettle_wait_for", "arguments": {"timeout_ms": 5}}),
+        );
         assert_eq!(r["isError"], true);
         assert!(
             r["content"][0]["text"]
@@ -891,7 +1178,7 @@ mod tests {
                 .is_ok(),
             "the MCP wait_for surface must accept the ctl server's poll_ms parameter"
         );
-        let wait = tool_specs()
+        let wait = tool_specs(ToolSelection::Full)
             .into_iter()
             .find(|spec| spec["name"] == "kettle_wait_for")
             .expect("kettle_wait_for spec");
