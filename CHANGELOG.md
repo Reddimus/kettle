@@ -109,6 +109,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   `subscribe` that fails no longer switches the connection to the event
   stream, and a request a `read-only` server refuses reads "This connection
   cannot perform control mutations." instead of naming a config value.
+
+- Each media render attempt encodes its job without first copying the
+  source, which can be a 32 MiB image, so a render no longer holds two copies
+  of it while starting the worker.
 - Image rendering reuses retired textures for same-size replacements without
   reserving a second texture, preserves every image needed later in the frame,
   and releases decoded CPU pixels independently of the GPU cache.

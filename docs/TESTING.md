@@ -786,6 +786,13 @@ trailing payload bytes, a fence index out of range and truncation. The
 workspace commands do not build the stub, so `just media-protocol-test` (also
 in `just gauntlet` and ci.yml) runs it with `--features test-worker`.
 
+`tests/job_encoding.rs` holds `encode_job`, which encodes a worker job from a
+borrow, to the frame encoding byte for byte and refusal for refusal across
+byte, attested-path and user-pull sources with fallback fonts. A counting
+allocator, installed in that test binary only because the crate forbids unsafe
+code, shows a 2 MiB source encodes with one frame-sized allocation while the
+cloning path allocates twice, so a copy reintroduced into `encode_job` fails.
+
 The availability client's unit tests (`src/client.rs`) run it against a
 scripted platform: a missing worker is typed and never verified; an
 unsupported platform is never inspected; a worker that passes every check
