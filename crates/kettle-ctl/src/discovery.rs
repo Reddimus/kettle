@@ -447,17 +447,20 @@ fn remove_dead_socket(dir: &std::path::Path, pid: u32, path: &std::path::Path) {
     let _ = (dir, pid, path);
 }
 
-/// Unlink `path` only while it is still the file that was judged. Unix cannot
-/// unlink by descriptor, so a socket bound between this check and the unlink
-/// would still go; that takes a reused pid together with a server that
-/// started without the registry lock (an older release, or one whose lock
-/// wait timed out behind a stuck holder) in that instant.
+/// Unlink `path` only while it is still the file that was judged. Linux hands
+/// a freed inode number straight to the next file, so a replacement socket can
+/// share the old one's device and inode; its change time records when it was
+/// bound, which a leftover socket's predates. Unix cannot unlink by
+/// descriptor, so a socket bound between this check and the unlink, or within
+/// the filesystem's timestamp granularity of the judged one, would still go;
+/// that takes a reused pid together with a server that started without the
+/// registry lock (an older release, or one whose lock wait timed out behind a
+/// stuck holder) in that instant.
 #[cfg(unix)]
 fn unlink_if_unchanged(path: &std::path::Path, judged: &std::fs::Metadata) {
     use std::os::unix::fs::MetadataExt as _;
-    if std::fs::symlink_metadata(path)
-        .is_ok_and(|now| now.dev() == judged.dev() && now.ino() == judged.ino())
-    {
+    let identity = |m: &std::fs::Metadata| (m.dev(), m.ino(), m.ctime(), m.ctime_nsec());
+    if std::fs::symlink_metadata(path).is_ok_and(|now| identity(&now) == identity(judged)) {
         let _ = std::fs::remove_file(path);
     }
 }
@@ -1099,6 +1102,9 @@ mod tests {
         dead_socket(&path);
         let judged = std::fs::symlink_metadata(&path).unwrap();
         std::fs::remove_file(&path).unwrap();
+        // Linux may give the replacement the same inode number; a leftover is
+        // older than its replacement by more than the timestamp granularity.
+        std::thread::sleep(std::time::Duration::from_millis(50));
         let replacement = std::os::unix::net::UnixListener::bind(&path).unwrap();
         unlink_if_unchanged(&path, &judged);
         assert!(path.exists(), "the replacement socket stays");
