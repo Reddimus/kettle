@@ -179,6 +179,10 @@ pub struct Options {
     /// `--agent-server MODE` overrides the `agent-server` config for THIS launch
     /// (`off`|`read-only`|`full`). `None` = use the config value (default off).
     pub agent_server: Option<kettle_config::AgentServer>,
+    /// `--agent-display on|off` overrides the `agent-display` config for THIS
+    /// launch. `None` = use the config value, except that `--agent-server off`
+    /// alone also turns display off (see [`kettle_ctl::CtlOverrides`]).
+    pub agent_display: Option<bool>,
     /// One-shot session-recorder file or managed directory target from the
     /// CLI/env (`--record`/`--record-dir`/`KETTLE_RECORD*`). Writes an
     /// asciicast-compatible trace. `None` here falls back to the persistent

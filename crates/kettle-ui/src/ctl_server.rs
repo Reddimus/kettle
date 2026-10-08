@@ -17,9 +17,11 @@
 //!     client disconnects (so a streaming client uses a dedicated connection,
 //!     matching `kettle ctl events`).
 //!
-//! The server is OFF by default and gated by `AgentServer` mode; the threat
-//! model (same local user, off-by-default, logged, dev-record-annotated) is in
-//! docs/AGENT.md.
+//! The server is OFF by default. A [`CtlPolicy`] (`agent-server` plus
+//! `agent-display`) decides whether it runs and what each connection may do;
+//! the connection thread checks every request against it before any
+//! dispatch. The threat model (same local user, off-by-default, logged,
+//! dev-record-annotated) is in docs/AGENT.md.
 
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
@@ -29,10 +31,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
-use kettle_config::AgentServer;
 use kettle_ctl::discovery::{self, RegistryEntry};
 use kettle_ctl::protocol::{Event, Execution, Method, Request, Response};
 use kettle_ctl::transport::{CtlListener, CtlStream};
+use kettle_ctl::{CtlPolicy, SharedCtlPolicy};
 
 /// Max concurrent connections; excess are dropped immediately.
 const MAX_CONNECTIONS: usize = 8;
@@ -96,19 +98,14 @@ pub enum CtlServerMsg {
         conn_id: u64,
         event_tx: Sender<Event>,
     },
-    /// A parsed request; the App dispatches it and sends the [`Response`] back
-    /// over `reply` (immediately, or—for `run_command`—when it completes).
+    /// An admitted request; the App dispatches it and sends the [`Response`]
+    /// back over `reply` (immediately, or—for `run_command`—when it
+    /// completes).
     Request {
         conn_id: u64,
-        req: Request,
+        request: AdmittedRequest,
         reply: ReplyTx,
-        /// True for `wait_for`'s internal `read_screen` probes. The App skips
-        /// the per-request dev-record marker (a 300s wait at 50ms polls would
-        /// otherwise land ~6000 markers) and the post-drain redraw for them.
-        internal_probe: bool,
     },
-    /// A malformed line that parsed into a ready-to-send error response.
-    BadRequest { reply: ReplyTx, resp: Response },
     /// The connection closed.
     Disconnect { conn_id: u64 },
 }
@@ -122,10 +119,88 @@ pub struct ConnState {
     pub attached_panes: HashSet<u64>,
 }
 
+/// A request the control policy allowed. The App dispatches only these, and
+/// only the connection thread can make one: [`admit`] for a client request,
+/// [`AdmittedRequest::read_screen_probe`] for `wait_for`'s screen probes.
+#[derive(Debug)]
+pub struct AdmittedRequest {
+    req: Request,
+    method: Method,
+    internal_probe: bool,
+}
+
+impl AdmittedRequest {
+    pub fn request(&self) -> &Request {
+        &self.req
+    }
+
+    pub fn method(&self) -> Method {
+        self.method
+    }
+
+    /// True for `wait_for`'s internal `read_screen` probes. The App skips the
+    /// per-request dev-record marker (a 300s wait at 50ms polls would
+    /// otherwise land ~6000 markers) and the post-drain redraw for them.
+    pub fn internal_probe(&self) -> bool {
+        self.internal_probe
+    }
+
+    /// One `read_screen` probe for an admitted `wait_for`. It carries the
+    /// wait's authority, which is Read for both, and nothing more: the method
+    /// is fixed and only the pane address varies.
+    fn read_screen_probe(&self, pane: Option<&serde_json::Value>) -> AdmittedRequest {
+        debug_assert_eq!(self.method, Method::WaitFor);
+        debug_assert_eq!(self.method.capability(), Method::ReadScreen.capability());
+        let mut params = serde_json::Map::new();
+        if let Some(pane) = pane {
+            params.insert("pane".into(), pane.clone());
+        }
+        AdmittedRequest {
+            req: Request {
+                v: kettle_ctl::protocol::PROTOCOL_VERSION,
+                id: self.req.id,
+                method: Method::ReadScreen.as_str().into(),
+                params: serde_json::Value::Object(params),
+            },
+            method: Method::ReadScreen,
+            internal_probe: true,
+        }
+    }
+}
+
+/// Admit `req` under `policy`, or answer it. The policy gate comes first, so a
+/// refused request learns nothing about its parameters; then the parameter
+/// shape every method shares.
+fn admit(policy: CtlPolicy, req: Request) -> Result<AdmittedRequest, Response> {
+    use kettle_ctl::protocol::error_codes as ec;
+    let Some(method) = Method::from_name(&req.method) else {
+        return Err(Response::err(
+            req.id,
+            ec::UNKNOWN_METHOD,
+            format!("unknown method '{}'", req.method),
+        ));
+    };
+    if let Err(error) = policy.check(method.capability()) {
+        return Err(Response::err(req.id, &error.code, error.message));
+    }
+    if !req.params.is_null() && !req.params.is_object() {
+        return Err(Response::err(
+            req.id,
+            ec::BAD_PARAMS,
+            "params must be an object",
+        ));
+    }
+    Ok(AdmittedRequest {
+        req,
+        method,
+        internal_probe: false,
+    })
+}
+
 /// The control server: owns the connection table + the inbound channel; the
 /// accept + per-connection threads run in the background.
 pub struct CtlServer {
-    mode: AgentServer,
+    policy: SharedCtlPolicy,
     rx: Receiver<CtlServerMsg>,
     conns: HashMap<u64, ConnState>,
     registry_dir: PathBuf,
@@ -135,18 +210,19 @@ pub struct CtlServer {
 }
 
 impl CtlServer {
-    /// Start the server for `mode`. `wake` is called after every message is
-    /// enqueued so the App's event loop drains it (it sends `UserEvent::Ctl`).
-    /// Returns `None` if `mode` is `Off`, or (logged) if binding, registering
-    /// the discovery entry, or spawning the accept thread fails.
+    /// Start the server under `policy`. `wake` is called after every message
+    /// is enqueued so the App's event loop drains it (it sends
+    /// `UserEvent::Ctl`). Returns `None` if the policy allows nothing, or
+    /// (logged) if binding, registering the discovery entry, or spawning the
+    /// accept thread fails.
     pub fn start(
-        mode: AgentServer,
+        policy: CtlPolicy,
         pid: u32,
         version: &str,
         started_unix: u64,
         wake: Arc<dyn Fn() + Send + Sync>,
     ) -> Option<CtlServer> {
-        if !mode.is_enabled() {
+        if !policy.runs_server() {
             return None;
         }
         let registry_dir = discovery::registry_dir();
@@ -167,12 +243,18 @@ impl CtlServer {
             return None;
         }
         drop(registration);
-        log::info!("agent-server: listening on {endpoint} (mode {mode:?})");
+        log::info!(
+            "agent-server: listening on {endpoint} (mode {:?}, display {})",
+            policy.server(),
+            policy.display()
+        );
+        let policy = SharedCtlPolicy::new(policy);
+        let access = policy.clone();
 
         let (tx, rx) = crossbeam_channel::unbounded::<CtlServerMsg>();
         let accept = match std::thread::Builder::new()
             .name("kettle-ctl-accept".into())
-            .spawn(move || accept_loop(listener, tx, wake, DEFAULT_CONNECTION_POLICY))
+            .spawn(move || accept_loop(listener, tx, wake, access, DEFAULT_CONNECTION_POLICY))
         {
             Ok(accept) => accept,
             Err(error) => {
@@ -183,7 +265,7 @@ impl CtlServer {
         };
 
         Some(CtlServer {
-            mode,
+            policy,
             rx,
             conns: HashMap::new(),
             registry_dir,
@@ -193,9 +275,15 @@ impl CtlServer {
         })
     }
 
-    /// The server's privilege mode.
-    pub fn mode(&self) -> AgentServer {
-        self.mode
+    /// What clients may do right now.
+    pub fn policy(&self) -> CtlPolicy {
+        self.policy.current()
+    }
+
+    /// Allow display for every connection, including ones already open.
+    /// Turning display off takes effect at the next launch.
+    pub fn enable_display(&self) {
+        self.policy.enable_display();
     }
 
     /// Drain one pending message (App calls this in a loop on `UserEvent::Ctl`).
@@ -317,10 +405,11 @@ fn accept_loop(
     listener: CtlListener,
     tx: Sender<CtlServerMsg>,
     wake: Arc<dyn Fn() + Send + Sync>,
+    access: SharedCtlPolicy,
     policy: ConnectionPolicy,
 ) {
     let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    accept_loop_counting(listener, tx, wake, policy, active);
+    accept_loop_counting(listener, tx, wake, access, policy, active);
 }
 
 /// [`accept_loop`] counting its live connections in `active`, which tests
@@ -329,6 +418,7 @@ fn accept_loop_counting(
     listener: CtlListener,
     tx: Sender<CtlServerMsg>,
     wake: Arc<dyn Fn() + Send + Sync>,
+    access: SharedCtlPolicy,
     policy: ConnectionPolicy,
     active: Arc<std::sync::atomic::AtomicUsize>,
 ) {
@@ -377,6 +467,7 @@ fn accept_loop_counting(
         let ctx = tx.clone();
         let cwake = wake.clone();
         let active_dec = active.clone();
+        let caccess = access.clone();
         let (start_tx, start_rx) = std::sync::mpsc::sync_channel::<()>(0);
         let spawned = std::thread::Builder::new()
             .name(format!("kettle-ctl-{conn_id}"))
@@ -385,7 +476,9 @@ fn accept_loop_counting(
                     active_dec.fetch_sub(1, Ordering::Release);
                     return;
                 }
-                connection_loop(conn, conn_id, ctx, cwake, event_rx, policy, active_dec);
+                connection_loop(
+                    conn, conn_id, ctx, cwake, event_rx, caccess, policy, active_dec,
+                );
             });
         finish_worker_spawn(spawned, conn_id, event_tx, &tx, &wake, start_tx, &active);
     }
@@ -441,15 +534,19 @@ impl Drop for ConnectionExit {
 }
 
 /// One connection, one thread: read requests + write responses/events on the
-/// SAME handle, sequentially so frames cannot interleave. A `subscribe`
-/// request flips the connection into event-only streaming. `active` counts
-/// this connection until it ends (see [`ConnectionExit`]).
+/// SAME handle, sequentially so frames cannot interleave. Every request is
+/// checked against `access` before anything else happens for it. A
+/// `subscribe` the App accepts flips the connection into event-only
+/// streaming. `active` counts this connection until it ends (see
+/// [`ConnectionExit`]).
+#[allow(clippy::too_many_arguments)]
 fn connection_loop(
     mut conn: CtlStream,
     conn_id: u64,
     tx: Sender<CtlServerMsg>,
     wake: Arc<dyn Fn() + Send + Sync>,
     event_rx: Receiver<Event>,
+    access: SharedCtlPolicy,
     policy: ConnectionPolicy,
     active: Arc<std::sync::atomic::AtomicUsize>,
 ) {
@@ -502,40 +599,42 @@ fn connection_loop(
             if trimmed.is_empty() {
                 continue;
             }
-            // Oneshot reply channel for this request.
-            let (rtx, rrx) = crossbeam_channel::bounded::<Response>(1);
-            let is_subscribe;
-            match kettle_ctl::protocol::parse_request_line(trimmed) {
-                // `wait_for` blocks THIS connection thread, never the UI
-                // thread. It polls the screen via cheap internal `read_screen`
-                // requests (>=50ms apart) until the condition holds or the
-                // deadline passes. The UI thread only ever answers individual
-                // snapshot probes.
-                Ok(req)
-                    if Method::from_name(&req.method)
-                        .is_some_and(|method| method.execution() == Execution::Connection) =>
-                {
-                    let resp = wait_for_poll(&mut conn, &tx, &wake, conn_id, &req);
+            // Admission is the one policy gate, and it comes before every
+            // dispatch: a malformed, unknown or refused request is answered
+            // here, does no work, and reaches no other thread.
+            let request = match kettle_ctl::protocol::parse_request_line(trimmed)
+                .and_then(|req| admit(access.current(), req))
+            {
+                Ok(request) => request,
+                Err(resp) => {
                     if write_response_line(&mut conn, &resp, policy.write).is_err() {
                         break 'outer;
                     }
                     idle_deadline = Instant::now() + policy.request_idle;
                     continue;
                 }
-                Ok(req) => {
-                    is_subscribe = req.method == "subscribe";
-                    let _ = tx.send(CtlServerMsg::Request {
-                        conn_id,
-                        req,
-                        reply: rtx,
-                        internal_probe: false,
-                    });
+            };
+            // `wait_for` blocks THIS connection thread, never the UI thread.
+            // It polls the screen via cheap internal `read_screen` requests
+            // (>=50ms apart) until the condition holds or the deadline
+            // passes. The UI thread only ever answers individual snapshot
+            // probes.
+            if request.method().execution() == Execution::Connection {
+                let resp = wait_for_poll(&mut conn, &tx, &wake, conn_id, &request);
+                if write_response_line(&mut conn, &resp, policy.write).is_err() {
+                    break 'outer;
                 }
-                Err(resp) => {
-                    is_subscribe = false;
-                    let _ = tx.send(CtlServerMsg::BadRequest { reply: rtx, resp });
-                }
+                idle_deadline = Instant::now() + policy.request_idle;
+                continue;
             }
+            let is_subscribe = request.method() == Method::Subscribe;
+            // Oneshot reply channel for this request.
+            let (rtx, rrx) = crossbeam_channel::bounded::<Response>(1);
+            let _ = tx.send(CtlServerMsg::Request {
+                conn_id,
+                request,
+                reply: rtx,
+            });
             wake();
             // Block until the App replies (a deferred `run_command` can take up
             // to its full `timeout_s`, e.g. 600s), then write the response on
@@ -571,7 +670,7 @@ fn connection_loop(
                 break 'outer;
             }
             idle_deadline = Instant::now() + policy.request_idle;
-            if is_subscribe {
+            if is_subscribe && resp.ok {
                 // Switch to event-only streaming for the rest of the
                 // connection's life (no more requests read on this handle). Use
                 // a bounded recv so an IDLE subscriber whose client vanished is
@@ -733,9 +832,10 @@ fn wait_for_poll(
     tx: &Sender<CtlServerMsg>,
     wake: &Arc<dyn Fn() + Send + Sync>,
     conn_id: u64,
-    req: &Request,
+    wait: &AdmittedRequest,
 ) -> Response {
     use kettle_ctl::protocol::error_codes as ec;
+    let req = wait.request();
     let text = req
         .params
         .get("text")
@@ -788,22 +888,11 @@ fn wait_for_poll(
             return Response::err(req.id, ec::INTERNAL, "client disconnected during wait_for");
         }
         // Compose the internal probe (pinned pane addressing).
-        let mut params = serde_json::Map::new();
-        if let Some(p) = &pinned_pane {
-            params.insert("pane".into(), p.clone());
-        }
-        let probe = Request {
-            v: kettle_ctl::protocol::PROTOCOL_VERSION,
-            id: req.id,
-            method: "read_screen".into(),
-            params: serde_json::Value::Object(params),
-        };
         let (rtx, rrx) = crossbeam_channel::bounded::<Response>(1);
         let _ = tx.send(CtlServerMsg::Request {
             conn_id,
-            req: probe,
+            request: wait.read_screen_probe(pinned_pane.as_ref()),
             reply: rtx,
-            internal_probe: true,
         });
         wake();
         polls += 1;
@@ -922,15 +1011,27 @@ mod tests {
         );
     }
 
+    fn full_access() -> SharedCtlPolicy {
+        SharedCtlPolicy::new(CtlPolicy::new(kettle_config::AgentServer::Full, false))
+    }
+
     fn start_test_accept_loop(
         tag: &str,
+        policy: ConnectionPolicy,
+    ) -> (String, Receiver<CtlServerMsg>) {
+        start_test_accept_loop_with(tag, full_access(), policy)
+    }
+
+    fn start_test_accept_loop_with(
+        tag: &str,
+        access: SharedCtlPolicy,
         policy: ConnectionPolicy,
     ) -> (String, Receiver<CtlServerMsg>) {
         let endpoint = test_endpoint(tag);
         let listener = CtlListener::bind(&endpoint).expect("bind test control listener");
         let (tx, rx) = crossbeam_channel::unbounded();
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
-        std::thread::spawn(move || accept_loop(listener, tx, wake, policy));
+        std::thread::spawn(move || accept_loop(listener, tx, wake, access, policy));
         (endpoint, rx)
     }
 
@@ -960,7 +1061,9 @@ mod tests {
             Arc::new(move || seen.lock().unwrap().push(active.load(Ordering::Acquire)))
         };
         let counted = active.clone();
-        std::thread::spawn(move || accept_loop_counting(listener, tx, wake, policy, counted));
+        std::thread::spawn(move || {
+            accept_loop_counting(listener, tx, wake, full_access(), policy, counted)
+        });
 
         let mut client = kettle_ctl::transport::connect(&endpoint).expect("connect control peer");
         let (conn_id, _) = recv_new_conn(&rx, Duration::from_secs(2));
@@ -1035,11 +1138,11 @@ mod tests {
             match rx.recv_timeout(Duration::from_secs(2)) {
                 Ok(CtlServerMsg::Request {
                     conn_id: request_conn,
-                    req,
+                    request,
                     reply,
                     ..
                 }) if request_conn == conn_id => {
-                    assert_eq!(req.id, 77);
+                    assert_eq!(request.request().id, 77);
                     break reply;
                 }
                 Ok(_) => {}
@@ -1077,6 +1180,7 @@ mod tests {
 
     #[test]
     fn off_mode_is_disabled_others_enabled() {
+        use kettle_config::AgentServer;
         assert!(!AgentServer::Off.is_enabled());
         assert!(AgentServer::ReadOnly.is_enabled());
         assert!(AgentServer::Full.is_enabled());
@@ -1086,21 +1190,326 @@ mod tests {
         assert!(AgentServer::Full.allows_mutation());
     }
 
+    /// With both settings off there is nothing to serve: no socket, no
+    /// discovery entry.
+    #[test]
+    fn a_policy_that_allows_nothing_binds_nothing() {
+        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
+        assert!(
+            CtlServer::start(
+                CtlPolicy::new(kettle_config::AgentServer::Off, false),
+                std::process::id(),
+                "test",
+                0,
+                wake,
+            )
+            .is_none()
+        );
+    }
+
+    /// Read one newline-terminated response from `client`.
+    fn read_response(client: &mut CtlStream, timeout: Duration) -> Response {
+        let deadline = Instant::now() + timeout;
+        let mut line = Vec::new();
+        while !line.ends_with(b"\n") {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(
+                client.wait_readable(remaining).expect("wait for response"),
+                "no response within {timeout:?}"
+            );
+            let mut chunk = [0u8; 512];
+            let read = client.read(&mut chunk).expect("read response");
+            assert_ne!(read, 0, "connection closed before a full response");
+            line.extend_from_slice(&chunk[..read]);
+        }
+        serde_json::from_slice(&line).expect("parse response")
+    }
+
+    fn send_request(client: &mut CtlStream, id: u64, method: &str) {
+        let line = format!("{{\"v\":1,\"id\":{id},\"method\":\"{method}\",\"params\":{{}}}}\n");
+        client
+            .write_all_until(
+                line.as_bytes(),
+                Instant::now() + Duration::from_secs(1),
+                None,
+            )
+            .expect("send request");
+    }
+
+    fn quick_policy() -> ConnectionPolicy {
+        ConnectionPolicy {
+            request_idle: Duration::from_secs(5),
+            frame_assembly: Duration::from_secs(1),
+            write: Duration::from_secs(1),
+            response_wait: Duration::from_secs(2),
+            subscriber_keepalive: Duration::from_secs(5),
+        }
+    }
+
+    /// A display-only connection is refused every read and mutation on its
+    /// own thread, `wait_for` included: nothing reaches the App and no
+    /// connection-thread work starts.
+    #[test]
+    fn display_only_connection_refuses_reads_and_mutations_before_dispatch() {
+        use kettle_ctl::protocol::{Capability, error_codes};
+        let access = SharedCtlPolicy::new(CtlPolicy::new(kettle_config::AgentServer::Off, true));
+        let (endpoint, rx) = start_test_accept_loop_with("display-only", access, quick_policy());
+        let mut client = kettle_ctl::transport::connect(&endpoint).expect("connect");
+        let (conn_id, _event_tx) = recv_new_conn(&rx, Duration::from_secs(2));
+        let mut refused = 0;
+        for (index, method) in Method::ALL.iter().enumerate() {
+            let expected = match method.capability() {
+                Capability::Read => error_codes::DISPLAY_ONLY,
+                Capability::Mutate => error_codes::READ_ONLY,
+                Capability::Display => continue,
+            };
+            let id = index as u64 + 1;
+            send_request(&mut client, id, method.as_str());
+            let response = read_response(&mut client, Duration::from_secs(2));
+            assert_eq!(response.id, id);
+            assert!(!response.ok, "{method:?} was allowed");
+            assert_eq!(
+                response.error.expect("refusal").code,
+                expected,
+                "{method:?}"
+            );
+            refused += 1;
+        }
+        assert!(
+            refused >= Method::ALL.len() - 1,
+            "every existing method was tried"
+        );
+        while let Ok(message) = rx.try_recv() {
+            assert!(
+                !matches!(message, CtlServerMsg::Request { conn_id: c, .. } if c == conn_id),
+                "a refused request reached the App"
+            );
+        }
+    }
+
+    fn send_line(client: &mut CtlStream, line: &str) {
+        client
+            .write_all_until(
+                format!("{line}\n").as_bytes(),
+                Instant::now() + Duration::from_secs(1),
+                None,
+            )
+            .expect("send line");
+    }
+
+    fn assert_nothing_dispatched(rx: &Receiver<CtlServerMsg>, conn_id: u64) {
+        while let Ok(message) = rx.try_recv() {
+            assert!(
+                !matches!(message, CtlServerMsg::Request { conn_id: c, .. } if c == conn_id),
+                "a request that admission answered reached the App"
+            );
+        }
+    }
+
+    /// Under `read-only`, every mutation is refused on its connection thread
+    /// with the policy's text.
+    #[test]
+    fn read_only_connection_refuses_mutations_before_dispatch() {
+        use kettle_ctl::protocol::Capability;
+        let access =
+            SharedCtlPolicy::new(CtlPolicy::new(kettle_config::AgentServer::ReadOnly, false));
+        let (endpoint, rx) = start_test_accept_loop_with("read-only", access, quick_policy());
+        let mut client = kettle_ctl::transport::connect(&endpoint).expect("connect");
+        let (conn_id, _event_tx) = recv_new_conn(&rx, Duration::from_secs(2));
+        for (index, method) in Method::ALL
+            .iter()
+            .filter(|method| method.capability() == Capability::Mutate)
+            .enumerate()
+        {
+            let id = index as u64 + 1;
+            send_request(&mut client, id, method.as_str());
+            let response = read_response(&mut client, Duration::from_secs(2));
+            assert_eq!(response.id, id);
+            let error = response.error.expect("refusal");
+            assert_eq!(error.code, kettle_ctl::protocol::error_codes::READ_ONLY);
+            assert_eq!(error.message, kettle_ctl::policy::READ_ONLY_MESSAGE);
+        }
+        assert_nothing_dispatched(&rx, conn_id);
+    }
+
+    /// A refused request learns nothing about its parameters, and a request
+    /// the policy allows is still checked for shape before any dispatch.
+    #[test]
+    fn authorization_precedes_parameter_validation() {
+        use kettle_ctl::protocol::error_codes;
+        let display_only =
+            SharedCtlPolicy::new(CtlPolicy::new(kettle_config::AgentServer::Off, true));
+        let (endpoint, rx) =
+            start_test_accept_loop_with("refusal-first", display_only, quick_policy());
+        let mut client = kettle_ctl::transport::connect(&endpoint).expect("connect");
+        let (conn_id, _event_tx) = recv_new_conn(&rx, Duration::from_secs(2));
+        for (id, line) in [
+            (1, r#"{"v":1,"id":1,"method":"wait_for","params":5}"#),
+            (
+                2,
+                r#"{"v":1,"id":2,"method":"wait_for","params":{"regex":"("}}"#,
+            ),
+            (3, r#"{"v":1,"id":3,"method":"read_screen","params":"x"}"#),
+        ] {
+            send_line(&mut client, line);
+            let response = read_response(&mut client, Duration::from_secs(2));
+            assert_eq!(response.id, id);
+            assert_eq!(
+                response.error.expect("refusal").code,
+                error_codes::DISPLAY_ONLY
+            );
+        }
+        assert_nothing_dispatched(&rx, conn_id);
+
+        let (endpoint, rx) = start_test_accept_loop("shape-before-dispatch", quick_policy());
+        let mut client = kettle_ctl::transport::connect(&endpoint).expect("connect");
+        let (conn_id, _event_tx) = recv_new_conn(&rx, Duration::from_secs(2));
+        send_line(
+            &mut client,
+            r#"{"v":1,"id":4,"method":"read_screen","params":7}"#,
+        );
+        let response = read_response(&mut client, Duration::from_secs(2));
+        assert_eq!(response.id, 4);
+        assert_eq!(
+            response.error.expect("bad params").code,
+            error_codes::BAD_PARAMS
+        );
+        send_request(&mut client, 5, "no_such_method");
+        let response = read_response(&mut client, Duration::from_secs(2));
+        assert_eq!(response.id, 5);
+        assert_eq!(
+            response.error.expect("unknown").code,
+            error_codes::UNKNOWN_METHOD
+        );
+        assert_nothing_dispatched(&rx, conn_id);
+    }
+
+    /// A malformed `subscribe` is answered by admission and the connection
+    /// keeps answering requests.
+    #[test]
+    fn a_malformed_subscribe_never_starts_streaming() {
+        let (endpoint, rx) = start_test_accept_loop("malformed-subscribe", quick_policy());
+        let mut client = kettle_ctl::transport::connect(&endpoint).expect("connect");
+        let (conn_id, event_tx) = recv_new_conn(&rx, Duration::from_secs(2));
+        send_line(
+            &mut client,
+            r#"{"v":1,"id":1,"method":"subscribe","params":[]}"#,
+        );
+        assert!(!read_response(&mut client, Duration::from_secs(2)).ok);
+        event_tx
+            .try_send(Event::new(
+                "output",
+                None,
+                serde_json::json!({"leak": true}),
+            ))
+            .expect("queue an event");
+        send_request(&mut client, 2, "get_state");
+        let reply = loop {
+            match rx.recv_timeout(Duration::from_secs(2)) {
+                Ok(CtlServerMsg::Request {
+                    conn_id: c,
+                    request,
+                    reply,
+                }) if c == conn_id => {
+                    assert_eq!(request.method(), Method::GetState);
+                    break reply;
+                }
+                Ok(_) => {}
+                Err(error) => panic!("get_state was not dispatched: {error}"),
+            }
+        };
+        reply
+            .send(Response::ok(2, serde_json::json!({"served": true})))
+            .expect("reply");
+        let response = read_response(&mut client, Duration::from_secs(2));
+        assert_eq!(response.id, 2);
+        assert_eq!(response.result["served"], true);
+    }
+
+    /// `wait_for`'s probes are fixed `read_screen` requests under the wait's
+    /// own id, marked internal, and address only the pinned pane.
+    #[test]
+    fn wait_for_probes_carry_only_read_screen_authority() {
+        let wait = admit(
+            CtlPolicy::new(kettle_config::AgentServer::ReadOnly, false),
+            Request {
+                v: 1,
+                id: 9,
+                method: "wait_for".into(),
+                params: serde_json::json!({"text": "$", "pane": 3, "regex": "x"}),
+            },
+        )
+        .expect("read-only admits wait_for");
+        assert!(!wait.internal_probe());
+        let probe = wait.read_screen_probe(Some(&serde_json::json!(3)));
+        assert_eq!(probe.method(), Method::ReadScreen);
+        assert!(probe.internal_probe());
+        assert_eq!(probe.request().id, 9);
+        assert_eq!(probe.request().method, "read_screen");
+        assert_eq!(probe.request().params, serde_json::json!({"pane": 3}));
+        let unpinned = wait.read_screen_probe(None);
+        assert_eq!(unpinned.request().params, serde_json::json!({}));
+        assert_eq!(
+            Method::WaitFor.capability(),
+            Method::ReadScreen.capability(),
+            "a probe must not carry more authority than its wait"
+        );
+    }
+
+    /// Streaming starts only after the App accepts `subscribe`. A refused
+    /// subscribe leaves the connection answering requests, and events queued
+    /// for it are never written.
+    #[test]
+    fn a_refused_subscribe_never_starts_streaming() {
+        let (endpoint, rx) = start_test_accept_loop("refused-subscribe", quick_policy());
+        let mut client = kettle_ctl::transport::connect(&endpoint).expect("connect");
+        let (conn_id, event_tx) = recv_new_conn(&rx, Duration::from_secs(2));
+        let answer = |id: u64, response: Response| loop {
+            match rx.recv_timeout(Duration::from_secs(2)) {
+                Ok(CtlServerMsg::Request {
+                    conn_id: c,
+                    request,
+                    reply,
+                }) if c == conn_id => {
+                    assert_eq!(request.request().id, id);
+                    reply.send(response).expect("reply");
+                    break;
+                }
+                Ok(_) => {}
+                Err(error) => panic!("request {id} was not dispatched: {error}"),
+            }
+        };
+        send_request(&mut client, 1, "subscribe");
+        answer(
+            1,
+            Response::err(1, kettle_ctl::protocol::error_codes::INTERNAL, "refused"),
+        );
+        assert!(!read_response(&mut client, Duration::from_secs(2)).ok);
+        event_tx
+            .try_send(Event::new(
+                "output",
+                None,
+                serde_json::json!({"leak": true}),
+            ))
+            .expect("queue an event");
+        send_request(&mut client, 2, "get_state");
+        answer(2, Response::ok(2, serde_json::json!({"served": true})));
+        let response = read_response(&mut client, Duration::from_secs(2));
+        assert_eq!(response.id, 2);
+        assert_eq!(response.result["served"], true);
+    }
+
     /// The typed protocol table replaces parallel string allowlists. Every
     /// connection-thread method must have an explicit worker dispatch path.
+    /// Admission precedes that route, so any capability may use it.
     #[test]
     fn connection_thread_methods_have_worker_dispatch() {
         for method in Method::ALL {
             if method.execution() == Execution::Connection {
-                assert_eq!(
-                    method.capability(),
-                    kettle_ctl::protocol::Capability::Read,
-                    "connection-thread methods cannot bypass the UI mutation gate"
-                );
                 let name = method.as_str();
                 let src = production_source();
                 assert!(
-                    src.contains("method.execution() == Execution::Connection"),
+                    src.contains("if request.method().execution() == Execution::Connection {\n                let resp = wait_for_poll("),
                     "connection-thread method {name} has no connection_loop dispatch"
                 );
             }
@@ -1117,7 +1526,7 @@ mod tests {
             .spawn(|| {})
             .expect("spawn noop");
         let server = CtlServer {
-            mode: AgentServer::Full,
+            policy: full_access(),
             rx,
             conns: HashMap::new(),
             registry_dir: std::env::temp_dir(),
@@ -1293,11 +1702,11 @@ mod tests {
             match rx.recv_timeout(Duration::from_secs(2)) {
                 Ok(CtlServerMsg::Request {
                     conn_id: request_conn,
-                    req,
+                    request,
                     reply,
                     ..
                 }) if request_conn == conn_id => {
-                    assert_eq!(req.id, 1);
+                    assert_eq!(request.request().id, 1);
                     break reply;
                 }
                 Ok(CtlServerMsg::Disconnect { conn_id: gone }) if gone == conn_id => {
@@ -1328,11 +1737,15 @@ mod tests {
             match rx.recv_timeout(Duration::from_secs(2)) {
                 Ok(CtlServerMsg::Request {
                     conn_id: request_conn,
-                    req,
+                    request,
                     reply,
                     ..
                 }) if request_conn == conn_id => {
-                    assert_eq!(req.id, 2, "the pipelined request must be the one served");
+                    assert_eq!(
+                        request.request().id,
+                        2,
+                        "the pipelined request must be the one served"
+                    );
                     let _ = reply.send(Response::ok(2, serde_json::json!({"served": true})));
                     break;
                 }
@@ -1410,8 +1823,8 @@ mod tests {
             .expect("send subscribe request");
         let reply = loop {
             match rx.recv_timeout(Duration::from_secs(1)) {
-                Ok(CtlServerMsg::Request { reply, req, .. }) => {
-                    assert_eq!(req.method, "subscribe");
+                Ok(CtlServerMsg::Request { reply, request, .. }) => {
+                    assert_eq!(request.method(), Method::Subscribe);
                     break reply;
                 }
                 Ok(_) => {}
@@ -1505,20 +1918,58 @@ mod tests {
         assert_eq!(lag.data["reason"], "queue_full");
     }
 
-    /// Drift guard: every typed method has an App dispatch arm and the single
-    /// capability gate occurs before that match.
+    /// Drift guard: admission is the one policy gate and comes before every
+    /// route a request can take, and the App dispatches every typed method
+    /// without a gate of its own.
     #[test]
-    fn every_typed_method_is_dispatched_behind_capability_gate() {
-        let src = kettle_test_support::production_source(include_str!("app.rs"));
-        let start = src
-            .find("if method.capability() == Capability::Mutate")
-            .expect("typed capability gate present");
-        let dispatch = src[start..]
+    fn every_typed_method_is_dispatched_behind_the_admission_gate() {
+        let server = kettle_test_support::production_source(include_str!("ctl_server.rs"));
+        let admit = server
+            .split_once("fn admit(policy: CtlPolicy, req: Request)")
+            .expect("admit present")
+            .1;
+        let admit = &admit[..admit.find("\n}\n").expect("end of admit")];
+        let gate = admit
+            .find("policy.check(method.capability())")
+            .expect("admission checks the policy");
+        let shape = admit
+            .find("!req.params.is_object()")
+            .expect("admission checks the params shape");
+        assert!(gate < shape, "authorization must precede parameter checks");
+
+        let connection = server
+            .split_once("fn connection_loop(")
+            .expect("connection_loop present")
+            .1;
+        let admitted = connection
+            .find(".and_then(|req| admit(access.current(), req))")
+            .expect("connection_loop admits each request");
+        for route in [
+            "request.method().execution() == Execution::Connection",
+            "tx.send(CtlServerMsg::Request {",
+        ] {
+            let at = connection.find(route).unwrap_or_else(|| panic!("{route}"));
+            assert!(admitted < at, "{route} must follow admission");
+        }
+        assert_eq!(
+            server.matches("CtlServerMsg::Request {").count(),
+            2,
+            "client requests and wait_for probes are the only requests sent to the App"
+        );
+
+        let app = kettle_test_support::production_source(include_str!("app.rs"));
+        let handler = app
+            .split_once("fn handle_ctl_request(")
+            .expect("handle_ctl_request present")
+            .1;
+        let dispatch = handler
             .find("let resp = match method {")
-            .map(|offset| start + offset)
             .expect("dispatch block present");
-        assert!(start < dispatch, "authorization must precede dispatch");
-        let block = &src[dispatch..(dispatch + 3600).min(src.len())];
+        assert!(
+            !handler[..dispatch].contains(".check("),
+            "the App must not keep a second gate that can drift from admission"
+        );
+        let block = &handler[dispatch..(dispatch + 3600).min(handler.len())];
         for method in Method::ALL {
             let variant = format!("Method::{method:?}");
             assert!(

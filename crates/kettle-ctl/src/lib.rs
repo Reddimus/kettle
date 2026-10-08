@@ -16,12 +16,14 @@ pub mod client;
 pub mod discovery;
 // Cross-process window-presence registry (Peacock accent dedupe). No
 // endpoint, always on, best-effort — see the module docs.
+pub mod policy;
 pub mod presence;
 pub mod protocol;
 pub mod transport;
 
 pub use client::{Client, CtlError};
 pub use discovery::{RegistryEntry, registry_dir};
+pub use policy::{AgentServer, CtlOverrides, CtlPolicy, SharedCtlPolicy};
 pub use protocol::{Event, Request, Response, RpcError, error_codes};
 
 #[cfg(unix)]

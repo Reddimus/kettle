@@ -1015,6 +1015,9 @@ args = [{ name = "name", type = "str" }, { name = "kind", type = "str" }, { name
 [messages.settings_active_gpu_initializing]
 context = "crates/kettle-ui/src/app.rs settings_overlay_projection: Graphics note before the GPU is ready."
 
+[messages.settings_category_agents]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings category tab name. Settings for AI agents that use Kettle."
+
 [messages.settings_category_appearance]
 context = "crates/kettle-ui/src/settings.rs categories(): Settings category tab name."
 
@@ -1035,6 +1038,9 @@ context = "crates/kettle-ui/src/settings.rs categories(): Settings category tab 
 
 [messages.settings_category_tabs]
 context = "crates/kettle-ui/src/settings.rs categories(): Settings category tab name."
+
+[messages.settings_field_agent_previews]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row. Lets AI agents show images and diagrams in Kettle; it grants no screen reading or typing."
 
 [messages.settings_field_background_animation]
 context = "crates/kettle-ui/src/settings.rs categories(): Settings row label. When the animated background moves."
@@ -1222,6 +1228,21 @@ context = "crates/kettle-ui/src/settings.rs categories(): Keybinds row for the `
 
 [messages.settings_keybind_toggle_zoom]
 context = "crates/kettle-ui/src/settings.rs categories(): Keybinds row for the `toggle_zoom` action."
+
+[messages.settings_note_agent_previews]
+context = "crates/kettle-ui/src/app.rs agent_previews_note: footer note on the Agent previews row."
+
+[messages.settings_note_agent_previews_full]
+context = "crates/kettle-ui/src/app.rs agent_previews_note: footer note on the Agent previews row when agent-server = full, which already lets agents show previews."
+
+[messages.settings_note_agent_previews_launch_off]
+context = "crates/kettle-ui/src/app.rs agent_previews_note: footer note on the Agent previews row when Kettle was started with --agent-display off or --agent-server off."
+
+[messages.settings_note_agent_previews_pending_off]
+context = "crates/kettle-ui/src/app.rs agent_previews_note: footer note on the Agent previews row after it was turned off while previews are still on in this run. Infinitive in Spanish, like the other notes."
+
+[messages.settings_note_agent_previews_unavailable]
+context = "crates/kettle-ui/src/app.rs agent_previews_note: footer note on the Agent previews row when the local server agents connect to failed to start."
 
 [messages.settings_note_blur]
 context = "crates/kettle-ui/src/app.rs settings_footer_note: shown on the Window blur and Background opacity rows."

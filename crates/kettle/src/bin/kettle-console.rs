@@ -136,6 +136,7 @@ fn takes_one_value(argument: &str) -> bool {
             | "-d"
             | "--layout"
             | "--agent-server"
+            | "--agent-display"
             | "--tab-handoff"
             | "--tab-handoff-fd"
             | "--profile"
@@ -209,6 +210,20 @@ mod tests {
         assert!(!should_wait(["--new-process"]));
         assert!(!should_wait(["--new-process", "--restore"]));
         assert!(!should_wait(["--layout", "dev", "--new-process"]));
+    }
+
+    #[test]
+    fn agent_display_is_classified_as_a_gui_value_option() {
+        assert!(!should_wait(["--agent-display", "on"]));
+        assert!(!should_wait(["--agent-display=off"]));
+        assert!(!should_wait([
+            "--agent-server",
+            "off",
+            "--agent-display",
+            "on"
+        ]));
+        // Missing its value, it is a usage error the CLI reports.
+        assert!(should_wait(["--agent-display"]));
     }
 
     #[test]

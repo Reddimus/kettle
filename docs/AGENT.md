@@ -242,6 +242,53 @@ kettle --agent-server full        # this launch only
 Modes: `off` (no server), `read-only` (read the screen / list panes / subscribe),
 `full` (also send text + run commands).
 
+### Control and display policy
+
+Two settings decide what a client may do. `agent-server` grants control;
+`agent-display` (Settings → Agents → Agent previews) lets agents show media
+without granting control. Every method declares one capability:
+
+| Capability | Allowed when | Methods today |
+|---|---|---|
+| Read | `agent-server` is `read-only` or `full` | `get_state`, `list_tabs`, `list_panes`, `read_screen`, `read_cells`, `ui_geometry`, `subscribe`, `wait_for` |
+| Mutate | `agent-server = full` | `screenshot`, `send_text`, `send_keys`, `dispatch_ui_key`, `dispatch_keybind`, `send_mouse`, `resize_window`, `perform_action`, `run_command` |
+| Display | `agent-server = full`, or `agent-display` on | none yet; agent previews arrive with the `show` method |
+
+The server runs when either setting allows something, so the six
+combinations behave like this:
+
+| `agent-server` | `agent-display` | Read | Mutate | Display | Server |
+|---|---|---|---|---|---|
+| `off` | off | no | no | no | none: no socket, no registry entry |
+| `off` | on | no | no | yes | display only |
+| `read-only` | off | yes | no | no | yes |
+| `read-only` | on | yes | no | yes | yes |
+| `full` | off | yes | yes | yes | yes |
+| `full` | on | yes | yes | yes | yes |
+
+Each connection thread admits a request before anything else happens for it:
+it checks the method's capability first, then the parameter shape every method
+shares, and only then routes the request to the App or to `wait_for`. A refused
+request does no work, so a display-only client learns nothing from parameter
+errors and cannot start a wait. `wait_for`'s screen probes carry only the wait's
+own Read permission. A refused `subscribe` leaves the connection answering
+requests. The refusals are fixed texts:
+
+| Code | Message |
+|---|---|
+| `display_only` | This display-only connection cannot read terminal contents or geometry. |
+| `read_only` | This connection cannot perform control mutations. |
+| `display_disabled` | Kettle previews are off or Kettle is not running. The user can turn on Agent previews in Kettle Settings; display enables immediately. Claude integration needs a new pane/session. Do not change configuration or retry. |
+
+`--agent-server MODE` and `--agent-display on|off` override the config for one
+launch, in either order. `--agent-server off` alone also turns display off;
+pair it with `--agent-display on` for a display-only launch. `agent-server`
+applies at launch only. Turning display on, in Settings or the config file,
+applies at once, including for connections already open, and starts the server
+if none runs; a launch flag keeps its precedence over a reload. Turning display
+off applies at the next launch. `get_state` reports the policy in force as
+`policy: {server, display}`, beside the original `mode` field.
+
 The endpoint is local-only and user-private. Unix uses a `0600` domain socket;
 both accepted servers and connecting clients compare peer credentials with the
 effective uid. Windows rejects remote named-pipe clients, gives every pipe an
@@ -307,7 +354,7 @@ so press Enter with `send_keys`, not a trailing `\n`.
 
 | Method | Mode | Result |
 |---|---|---|
-| `get_state` | read-only | version, pid, mode, theme, focused pane, `windows` (count), `focused_window` (seq), `window_title`, `media` (`{availability: "checking"}` until the first check finishes, then `{availability: "available"}` or `{availability: "unavailable", reason}`; reasons: `worker_missing`, `unsafe_worker_file`, `unverified_worker`, `no_install_location`, `unsupported_platform`, `check_failed`, `not_configured`, `stuck_workers` (two killed workers would not exit; media is off until Kettle restarts)). Availability starts no worker; each render still requires the matching build handshake. Asking never waits on the check; each ask starts a fresh one in the background |
+| `get_state` | read-only | version, pid, mode, `policy` (`{server: "off"\|"read-only"\|"full", display: bool}`, the policy in force), theme, focused pane, `windows` (count), `focused_window` (seq), `window_title`, `media` (`{availability: "checking"}` until the first check finishes, then `{availability: "available"}` or `{availability: "unavailable", reason}`; reasons: `worker_missing`, `unsafe_worker_file`, `unverified_worker`, `no_install_location`, `unsupported_platform`, `check_failed`, `not_configured`, `stuck_workers` (two killed workers would not exit; media is off until Kettle restarts)). Availability starts no worker; each render still requires the matching build handshake. Asking never waits on the check; each ask starts a fresh one in the background |
 | `list_tabs` | read-only | every window's tabs: `window` (seq), index, title, active, pane ids |
 | `list_panes` | read-only | every window's panes: id, `window` (seq), tab, title, cwd, cols/rows, focused, argv, child_pid, agent_attached, read_only |
 | `read_screen` | read-only | visible viewport text + cursor + `cursor_visible` (DEC ?25) + history metadata + selection presence/range; `include_selection: true` includes selected text only when its preflight is at most 128 KiB (otherwise it is omitted and `selection_truncated` is true); with `scrollback_lines`, returns requested history plus the active screen for command-output capture (params: `pane`, `scrollback_lines`, `include_selection`, and paging fields) |
@@ -739,7 +786,8 @@ This is also desktop-local because it opens real GUI terminal windows.
 
 ## Security & threat model
 
-- **Off by default.** No server, no socket, no registry entry unless you opt in.
+- **Off by default.** No server, no socket, no registry entry unless you opt in
+  with `agent-server` or `agent-display`.
 - **Local only and mutually authenticated to the documented boundary.** The
   transport is a Unix domain socket (mode `0600`) or a Windows named pipe with
   an exact token-user owner and protected DACL. Servers verify connecting
@@ -748,8 +796,11 @@ This is also desktop-local because it opens real GUI terminal windows.
   local OS user — identical to the trust granted to that user's other
   processes.
 - **Capability split.** `read-only` cannot send keystrokes, run commands, or
-  write screenshot files; only `full` can. A single capability gate guards every
-  mutating method (a drift-guard test pins this).
+  write screenshot files; only `full` can. Display-only cannot read the screen,
+  geometry, state or events either. One admission gate on each connection
+  thread checks every request's capability before any dispatch, parameter
+  check or wait, and the App dispatches only admitted requests (drift-guard
+  tests pin both).
 - **Terminal-wide, not per-client.** Once enabled, every same-user client gets
   the selected mode across all windows in the process without an additional
   prompt, pairing token, or per-client capability grant.

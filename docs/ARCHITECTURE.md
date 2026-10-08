@@ -23,12 +23,13 @@ graph TD
     ui --> i18n
     ui --> media
     i18n["kettle-i18n<br/>typed UI text catalogue · English and Spanish<br/>generated at build time · no runtime parsing"]
-    ctl["kettle-ctl<br/>agent control-plane: NDJSON protocol · local-IPC transport<br/>(Unix socket / Windows named pipe) · discovery + presence registries · blocking client"]
+    ctl["kettle-ctl<br/>agent control-plane: NDJSON protocol · CtlPolicy · local-IPC transport<br/>(Unix socket / Windows named pipe) · discovery + presence registries · blocking client"]
     render["kettle-render<br/>wgpu · glyphon text · quad &<br/>image/overlay pipelines · --screenshot · offscreen self-test"] --> core
     render --> cfg
     render --> i18n
     core["kettle-core<br/>portable-pty · alacritty_terminal+vte · pump + parser workers<br/>regex/smart-case search · links · image/virtual/anim/relative registries"] --> vt
     cfg --> i18n
+    cfg --> ctl
     cfg["kettle-config<br/>key=value config · 500+ themes · Nerd Font · keybinds<br/>bell · ssh-host · fuzzy matcher · command palette<br/>atomic persist_config_toggle"] --> state
     vt["kettle-vt<br/>Extractor: Sixel · iTerm2 · OSC 7/133<br/>kitty: store/place/delete/z · Unicode placeholders<br/>animation (frames/control/compositing) · relative placements"]
     remote["kettle-remote<br/>SSH / Docker / Podman / kubectl / lxc detection<br/>pane-rooted process-tree walk · format_remote_title<br/>kitty-@ control protocol surface"]
@@ -409,8 +410,21 @@ reference) is owned by **kettle-ctl**, a UI-free crate that defines the
 control-plane protocol (NDJSON request/response/event), the local-IPC transport
 (a Unix domain socket or a Windows named pipe), the discovery registry, and a
 blocking client. It is **off by default**: nothing binds a socket or writes a
-registry entry unless the operator opts in (`agent-server = read-only|full`, or
-`--agent-server <mode>`).
+registry entry unless the operator opts in (`agent-server = read-only|full`,
+`agent-display = true`, or their `--agent-server`/`--agent-display` launch
+flags).
+
+kettle-ctl also owns who may do what: `AgentServer` (kettle-config re-exports
+it for the `agent-server` key), the `CtlPolicy` built from it and
+`agent-display`, and the three method capabilities (Read, Mutate, Display).
+`CtlPolicy::check` is the one authorization rule. In kettle-ui, each
+connection thread admits a request with it before any other work, so only an
+`AdmittedRequest` (private constructors, read-only accessors) can reach the App
+or `wait_for`; `wait_for`'s screen probes are fixed `read_screen` requests made
+from an admitted wait. The server and every connection share one
+`SharedCtlPolicy`: the server mode is fixed for the process and display is one
+atomic bit that can only turn on, so a live enable reaches open connections
+without any of them re-reading config.
 
 ```mermaid
 graph LR
