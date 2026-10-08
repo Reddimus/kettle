@@ -2286,7 +2286,13 @@ hit test, pinned for bottom bars above the search and bottom status bars,
 side strips above the search bar and an unchanged top band, with a guard that
 both callers use it; split drop previews and prospective split rects are
 checked against the pane an actual split creates for odd, fractional and
-cramped leaves. The tab tear-off drag is a
+cramped leaves.
+Accent claims follow palette edits that keep the theme name: unit tests reload
+Dracula with one palette color changed and with every color the same, and
+change the theme without a redraw, checking the slot, the live color, the
+local claim and that a torn window still avoids the source color; the tear-off
+guard requires each tear to read the refreshed source color. The tab tear-off
+drag is a
 pure FSM (`DragState` in `kettle-ui/src/detach.rs`) tested with no
 window or GPU — idle→armed→dragging threshold, mouse-up/Esc-cancel
 returning the dragged tab, cursor leave/re-enter, plus an

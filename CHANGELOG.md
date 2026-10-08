@@ -183,6 +183,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   puntero al escribir" replaces "ratón", since the setting also hides the
   trackpad pointer.
 
+- Automatic window accents follow a palette change that keeps the theme's
+  name, such as a config reload that edits one palette color. Accents were
+  re-resolved only when the theme name changed, so windows kept their old
+  colors and a tab torn off afterwards could take its source window's color.
+  A window whose accent changed while its renderer was being rebuilt after a
+  GPU failure also keeps the new accent once the rebuild finishes, instead of
+  going back to the old one.
+
 - An opaque context menu, Settings panel or paste receipt over the cursor
   cell now hides the whole cursor. The inverted glyph of a focused block
   cursor was drawn after every overlay and showed through them.

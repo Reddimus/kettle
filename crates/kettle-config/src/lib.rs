@@ -2883,6 +2883,21 @@ fn decode_config_text(bytes: &[u8]) -> String {
     }
 }
 
+/// Peacock: the theme colors the accent pool is built from, in pool order.
+/// A fixed array, so a per-frame "did the pool change" check allocates nothing.
+pub fn peacock_candidates(theme: &Theme) -> [crate::color::Rgb; 8] {
+    [
+        theme.accent,      // the signature (mauve on Mocha)
+        theme.palette[4],  // blue
+        theme.palette[2],  // green
+        theme.palette[3],  // yellow
+        theme.palette[1],  // red
+        theme.palette[6],  // cyan/teal
+        theme.palette[5],  // magenta/pink
+        theme.palette[13], // bright magenta
+    ]
+}
+
 /// Peacock: the theme's deduped pool of
 /// distinct accent hues — the candidate set `peacock_accent` indexes, public
 /// so the multi-window LIVE dedupe can walk it (same project → same color,
@@ -2894,16 +2909,7 @@ fn decode_config_text(bytes: &[u8]) -> String {
 /// shrink the pool; palettes that repeat hues (magenta == bright magenta)
 /// collapse too. Pure; never empty.
 pub fn peacock_pool(theme: &Theme) -> Vec<crate::color::Rgb> {
-    let raw = [
-        theme.accent,      // the signature (mauve on Mocha)
-        theme.palette[4],  // blue
-        theme.palette[2],  // green
-        theme.palette[3],  // yellow
-        theme.palette[1],  // red
-        theme.palette[6],  // cyan/teal
-        theme.palette[5],  // magenta/pink
-        theme.palette[13], // bright magenta
-    ];
+    let raw = peacock_candidates(theme);
     let mut candidates: Vec<crate::color::Rgb> = Vec::with_capacity(raw.len());
     for c in raw {
         if !candidates.contains(&c) {

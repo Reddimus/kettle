@@ -447,9 +447,11 @@ pub(crate) struct WindowAccent {
     /// Index into `kettle_config::peacock_pool(theme)` — kept across theme
     /// switches so a window holds its position in the new theme's pool.
     pub(crate) slot: usize,
-    /// Theme name the color was resolved against (cheap change detector for
-    /// the per-frame sync).
+    /// Theme name and pool inputs the color was resolved against: the
+    /// per-frame change detector. A palette edit can change the inputs while
+    /// the theme name stays the same.
     pub(crate) theme_name: String,
+    pub(crate) pool_candidates: [kettle_config::Rgb; 8],
     /// Cross-process presence claim; released when the window drops.
     pub(crate) presence: Option<kettle_ctl::presence::PresenceGuard>,
 }

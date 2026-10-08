@@ -788,11 +788,13 @@ putting a user path on the wire.
   sidechannel keeps them enabled so its bounded queue can drain, but those
   event-loop wakes do not authorize a hidden-window paint.
   Before releasing a failed device, every window retains a CPU-only recovery
-  snapshot of its live font family/size, cell scaling, resolved accent, and any
-  queued screenshot completion. The snapshot survives failed adapter
-  escalations; an all-or-nothing successful rebuild reapplies it at the
-  window's current monitor scale and size, invalidates stale pane snapshots,
-  and reflows every nonzero surface exactly once.
+  snapshot of its live font family/size, cell scaling, and any queued
+  screenshot completion. The snapshot survives failed adapter escalations; an
+  all-or-nothing successful rebuild reapplies it at the window's current
+  monitor scale and size, invalidates stale pane snapshots, and reflows every
+  nonzero surface exactly once. The window accent is not in the snapshot: the
+  App's accent claim is its only source, can change while a window has no
+  renderer, and is applied to every replacement renderer.
   Timeout and `Outdated` retain damage and enter a capped, deadline-driven
   per-window retry. Hidden, minimized, or compositor-occluded windows leave that
   repair armed without a wake deadline. wgpu 30 `Lost` recreates the affected
@@ -880,9 +882,13 @@ putting a user path on the wire.
   across windows.
 - **Per-window accents (Peacock), on by default** — `accent-color =
   auto` (the default) gives each new window a theme-pool hue that no live
-  window holds, while one remains. A theme switch keeps every window's pool
-  slot and maps it onto the new theme's pool, so windows shift together; a
-  smaller pool can map two slots to one hue until a window is reopened.
+  window holds, while one remains. A theme switch, or a palette edit that keeps
+  the theme name, keeps every window's pool slot and maps it onto the new pool,
+  so windows shift together; a smaller pool can map two slots to one hue until
+  a window is reopened. Each window records the pool's eight input colors, a
+  fixed array compared every frame without allocating, and a tab leaving a
+  window brings the source's accent up to date before the torn window avoids
+  it.
   Process-local claims are authoritative: each
   `WindowAccent` owns a live color handle, and `App` keeps weak references
   to those handles. A checked-out window retains its reservation; closing
