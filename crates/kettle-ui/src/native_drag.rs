@@ -29,6 +29,39 @@ fn is_caption_press(
         && point.1 < frame_top
 }
 
+/// Whether `event`, the current event when AppKit reports a window move, is a
+/// single left press or drag inside the caption. A move can also start from
+/// the keyboard (the Window menu or an accessibility client), and AppKit
+/// raises an exception when a mouse-only accessor such as `clickCount` is read
+/// from a key event, so the type is checked first.
+#[cfg(target_os = "macos")]
+fn caption_event_press(
+    event: &objc2_app_kit::NSEvent,
+    window_number: isize,
+    caption: (f64, f64, f64),
+) -> bool {
+    use objc2_app_kit::{NSEvent, NSEventType};
+    // SAFETY: `type` is valid for every event; the mouse-only accessors below
+    // are read only once it names a left press or drag.
+    unsafe {
+        if !matches!(
+            event.r#type(),
+            NSEventType::LeftMouseDown | NSEventType::LeftMouseDragged
+        ) {
+            return false;
+        }
+        let point = event.locationInWindow();
+        is_caption_press(
+            event.windowNumber() == window_number,
+            NSEvent::pressedMouseButtons() & 1 != 0,
+            event.clickCount() <= 1,
+            true,
+            (point.x, point.y),
+            caption,
+        )
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct NativeCaptionDrag {
     #[cfg(target_os = "macos")]
@@ -47,7 +80,7 @@ impl NativeCaptionDrag {
         {
             use block2::RcBlock;
             use objc2_app_kit::{
-                NSApplication, NSEvent, NSEventType, NSView, NSWindowDidMoveNotification,
+                NSApplication, NSEventType, NSView, NSWindowDidMoveNotification,
                 NSWindowWillMoveNotification,
             };
             use objc2_foundation::{MainThreadMarker, NSNotification, NSNotificationCenter};
@@ -82,18 +115,11 @@ impl NativeCaptionDrag {
                 // SAFETY: AppKit posts this window-scoped notification on the
                 // main thread; the window and current event are retained here.
                 let qualifies = unsafe {
-                    let point = event.locationInWindow();
                     let content = native_for_start.contentLayoutRect();
                     let frame = native_for_start.frame();
-                    is_caption_press(
-                        event.windowNumber() == native_for_start.windowNumber(),
-                        NSEvent::pressedMouseButtons() & 1 != 0,
-                        event.clickCount() <= 1,
-                        matches!(
-                            event.r#type(),
-                            NSEventType::LeftMouseDown | NSEventType::LeftMouseDragged
-                        ),
-                        (point.x, point.y),
+                    caption_event_press(
+                        &event,
+                        native_for_start.windowNumber(),
                         (
                             frame.size.width,
                             content.origin.y + content.size.height,
@@ -211,6 +237,49 @@ pub(crate) fn primary_held() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A window move started from the keyboard reports a key event as the
+    /// current event; reading its mouse-only fields would raise in AppKit.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn non_mouse_events_never_qualify_as_caption_presses() {
+        use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};
+        use objc2_foundation::{NSPoint, NSString};
+        let text = NSString::from_str("r");
+        // These event objects are never posted to AppKit or the Window Server.
+        let key = unsafe {
+            NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+                NSEventType::KeyDown,
+                NSPoint::new(120.0, 610.0),
+                NSEventModifierFlags::empty(),
+                0.0,
+                7,
+                None,
+                &text,
+                &text,
+                false,
+                15,
+            )
+        }
+        .expect("key event fixture");
+        let application = unsafe {
+            NSEvent::otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2(
+                NSEventType::ApplicationDefined,
+                NSPoint::new(120.0, 610.0),
+                NSEventModifierFlags::empty(),
+                0.0,
+                7,
+                None,
+                0,
+                0,
+                0,
+            )
+        }
+        .expect("application event fixture");
+        for event in [&*key, &*application] {
+            assert!(!caption_event_press(event, 7, (800.0, 600.0, 628.0)));
+        }
+    }
 
     #[test]
     fn caption_drag_only_docks_a_single_tab_with_detaching_enabled() {

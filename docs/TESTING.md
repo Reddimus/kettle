@@ -2254,7 +2254,10 @@ poll now reads both states. With that change, the same held Escape cleared the
 dock preview before release and both windows remained, where the previous
 build had docked on three identical attempts. A tap shorter than the 16 ms
 poll can still be missed. Programmatic geometry changes are covered by the
-caption-press unit tests. No second display was attached, so mixed-DPI docking
+caption-press unit tests. A key event and an application-defined event,
+built but never posted, are refused as caption presses without reading their
+mouse-only fields; without the type check that test aborts on AppKit's
+exception. No second display was attached, so mixed-DPI docking
 was not exercised.
 
 The tab tear-off drag is a
