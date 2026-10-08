@@ -70,8 +70,8 @@ selects `one`; 0 and every larger count use `other`.
 
 ```toml
 [confirm_close_window]
-one = "Close {count} pane?"
-other = "Close {count} panes?"
+one = "Close window with {count} pane?"
+other = "Close window with {count} panes?"
 ```
 
 English and Spanish need only these two forms. A language with more plural
