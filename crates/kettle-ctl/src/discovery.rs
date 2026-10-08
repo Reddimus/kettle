@@ -37,9 +37,12 @@ use crate::{
 const MAX_REGISTRY_ENTRY_BYTES: usize = 16 * 1024;
 const MAX_VERSION_BYTES: usize = 256;
 /// A normal desktop has only a handful of live control servers. Bound the
-/// directory walk so a corrupt or hostile same-user registry cannot make
-/// every discovery attempt enumerate an arbitrarily large directory.
+/// entries a discovery reads so a corrupt or hostile same-user registry cannot
+/// make every attempt parse an arbitrarily large directory.
 const MAX_REGISTRY_DIR_ENTRIES: usize = 1024;
+/// Each server's socket shares the directory with its entry, so the walk must
+/// look past other files to reach the entries; this still bounds the walk.
+const MAX_REGISTRY_DIR_WALK: usize = 8 * MAX_REGISTRY_DIR_ENTRIES;
 
 /// A registry entry describing one running control server.
 ///
@@ -278,18 +281,11 @@ pub fn list(dir: &std::path::Path) -> Vec<RegistryEntry> {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return out;
     };
-    for ent in rd.take(MAX_REGISTRY_DIR_ENTRIES).flatten() {
-        let path = ent.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
-        let Some(file_pid) = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .and_then(|stem| stem.parse::<u32>().ok())
-        else {
-            continue;
-        };
+    let paths = rd
+        .take(MAX_REGISTRY_DIR_WALK)
+        .flatten()
+        .map(|ent| ent.path());
+    for (path, file_pid) in registry_entry_paths(paths) {
         if let Some(s) = read_registry_entry(&path)
             && let Ok(e) = serde_json::from_str::<RegistryEntry>(&s)
             && registry_entry_is_valid(dir, file_pid, &e)
@@ -300,6 +296,23 @@ pub fn list(dir: &std::path::Path) -> Vec<RegistryEntry> {
     // Newest first.
     out.sort_by_key(|e| std::cmp::Reverse(e.started_unix));
     out
+}
+
+/// The `<pid>.json` entry paths among `paths`, at most
+/// `MAX_REGISTRY_DIR_ENTRIES` of them. Other files, each server's socket among
+/// them, do not count toward that cap.
+fn registry_entry_paths(paths: impl IntoIterator<Item = PathBuf>) -> Vec<(PathBuf, u32)> {
+    paths
+        .into_iter()
+        .filter_map(|path| {
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                return None;
+            }
+            let pid = path.file_stem()?.to_str()?.parse::<u32>().ok()?;
+            Some((path, pid))
+        })
+        .take(MAX_REGISTRY_DIR_ENTRIES)
+        .collect()
 }
 
 /// Like [`list`], but filters out entries whose owning process is no longer
@@ -368,7 +381,75 @@ pub fn prune_stale(dir: &std::path::Path, entry: &RegistryEntry) {
         .is_some_and(|current| current == *entry);
     if still_the_same {
         let _ = std::fs::remove_file(&path);
+        if entry.endpoint == default_endpoint(dir, entry.pid) {
+            remove_socket_without_listener(std::path::Path::new(&entry.endpoint));
+        }
     }
+}
+
+/// Unlink a server's socket when nothing listens on it. A server's socket
+/// outlives a crash, and leftovers would otherwise pile up in the registry
+/// directory. Only a refused connection proves there is no listener: a socket
+/// that accepts, or fails in any other way, may belong to a live server
+/// (possibly a new one that reused the pid) and stays.
+#[cfg(unix)]
+fn remove_socket_without_listener(path: &std::path::Path) {
+    use std::os::unix::fs::FileTypeExt as _;
+    let is_socket = std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_socket());
+    if is_socket
+        && matches!(
+            std::os::unix::net::UnixStream::connect(path),
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused
+        )
+    {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(not(unix))]
+fn remove_socket_without_listener(_path: &std::path::Path) {}
+
+/// Remove sockets whose servers' entries are already gone: `ctl-<pid>.sock`
+/// files with no `<pid>.json` and no listener. A starting server runs this, so
+/// it also clears sockets left by releases whose servers never unlinked them.
+pub fn sweep_orphan_endpoints(dir: &std::path::Path) {
+    if !crate::private_dir_is_valid(dir) {
+        return;
+    }
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for ent in rd.take(MAX_REGISTRY_DIR_WALK).flatten() {
+        let path = ent.path();
+        let Some(pid) = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_prefix("ctl-"))
+            .and_then(|name| name.strip_suffix(".sock"))
+            .and_then(|pid| pid.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if !entry_path(dir, pid).exists() {
+            remove_socket_without_listener(&path);
+        }
+    }
+}
+
+/// Unlink this server's own socket at shutdown. The listener lives on the
+/// accept thread, which is still blocked in `accept` when the process exits,
+/// so the listener's own cleanup never runs.
+pub fn remove_own_endpoint(endpoint: &str) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt as _;
+        let path = std::path::Path::new(endpoint);
+        if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_socket()) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = endpoint;
 }
 
 /// Owns a `PSID` produced by one of two Win32 APIs, freed the way each API
@@ -925,6 +1006,116 @@ mod tests {
             "a nonexistent path must not be treated as owned"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Sockets share the registry directory with the entries. A directory
+    /// holding more leftover sockets than the entry cap must not hide a live
+    /// server's entry behind them.
+    #[test]
+    fn entries_after_many_other_files_are_still_found() {
+        let sockets = (0..2 * MAX_REGISTRY_DIR_ENTRIES as u32)
+            .map(|pid| PathBuf::from(format!("ctl-{pid}.sock")));
+        let paths = sockets.chain(std::iter::once(PathBuf::from("4242.json")));
+        assert_eq!(
+            registry_entry_paths(paths),
+            vec![(PathBuf::from("4242.json"), 4242)]
+        );
+    }
+
+    #[test]
+    fn entries_read_per_discovery_stay_capped() {
+        let paths = (0..2 * MAX_REGISTRY_DIR_ENTRIES as u32)
+            .map(|pid| PathBuf::from(format!("{pid}.json")));
+        assert_eq!(registry_entry_paths(paths).len(), MAX_REGISTRY_DIR_ENTRIES);
+    }
+
+    /// A dead server's socket goes with its entry. A socket that still accepts
+    /// connections stays even when its entry is stale, because a new server
+    /// may have reused the pid and bound that path.
+    #[cfg(unix)]
+    #[test]
+    fn pruning_a_dead_entry_removes_its_socket_unless_something_listens() {
+        use std::os::unix::net::UnixListener;
+        let dir = crate::test_scratch_root()
+            .join(format!("kettle-ctl-prune-sock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (dead_pid, busy_pid) = (u32::MAX - 1, u32::MAX - 2);
+        let dead =
+            RegistryEntry::registering("gui", dead_pid, default_endpoint(&dir, dead_pid), "x", 100);
+        let busy =
+            RegistryEntry::registering("gui", busy_pid, default_endpoint(&dir, busy_pid), "x", 100);
+        register(&dir, &dead).unwrap();
+        register(&dir, &busy).unwrap();
+        // Dropping a std listener leaves its socket file with nothing behind it.
+        drop(UnixListener::bind(&dead.endpoint).unwrap());
+        let listener = UnixListener::bind(&busy.endpoint).unwrap();
+
+        assert!(list_live(&dir).is_empty(), "both owners are gone");
+        assert!(
+            !std::path::Path::new(&dead.endpoint).exists(),
+            "the dead server's socket is removed"
+        );
+        assert!(
+            std::path::Path::new(&busy.endpoint).exists(),
+            "a socket that accepts connections stays"
+        );
+        drop(listener);
+        let _ = std::fs::remove_file(&busy.endpoint);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A starting server clears sockets whose entries are already gone and
+    /// that nothing listens on, and leaves everything else alone.
+    #[cfg(unix)]
+    #[test]
+    fn sweep_removes_only_unlistened_sockets_without_entries() {
+        use std::os::unix::net::UnixListener;
+        let dir =
+            crate::test_scratch_root().join(format!("kettle-ctl-sweep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let me = std::process::id();
+        register(
+            &dir,
+            &RegistryEntry::registering("gui", me, default_endpoint(&dir, me), "x", 100),
+        )
+        .unwrap();
+        let orphan = dir.join("ctl-11.sock");
+        let listening = dir.join("ctl-12.sock");
+        let regular = dir.join("ctl-13.sock");
+        let entry_owned = dir.join("ctl-14.sock");
+        let other = dir.join("notes.txt");
+        drop(UnixListener::bind(&orphan).unwrap());
+        let listener = UnixListener::bind(&listening).unwrap();
+        std::fs::write(&regular, b"not a socket").unwrap();
+        drop(UnixListener::bind(&entry_owned).unwrap());
+        register(
+            &dir,
+            &RegistryEntry::registering(
+                "gui",
+                14,
+                entry_owned.to_string_lossy().into_owned(),
+                "x",
+                100,
+            ),
+        )
+        .unwrap();
+        std::fs::write(&other, b"x").unwrap();
+
+        sweep_orphan_endpoints(&dir);
+
+        assert!(
+            !orphan.exists(),
+            "an orphan socket with no listener is removed"
+        );
+        assert!(listening.exists(), "a listening socket stays");
+        assert!(regular.exists(), "only sockets are removed");
+        assert!(
+            entry_owned.exists(),
+            "a socket with an entry is left to pruning"
+        );
+        assert!(other.exists(), "unrelated files stay");
+        drop(listener);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

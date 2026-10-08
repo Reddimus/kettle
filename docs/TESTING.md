@@ -2278,7 +2278,15 @@ this instance's own record survives, and the reverse: a delete aimed at a
 record judged stale does nothing once the file on disk is a *newer* record
 that took the same name (the same two rules are pinned for the ctl discovery
 registry, once through the injected predicate and once through the real
-one); **shell detection**
+one). The discovery registry also pins its socket lifecycle against real
+Unix sockets: pruning a dead entry removes its socket unless something still
+listens, a starting server's sweep removes only unlistened sockets without
+entries (not listening sockets, regular files, entry-owned sockets or other
+files), a dropped server unlinks its own socket, and an entry listed after
+2,048 other files is still found while the entries read stay capped at 1,024.
+Each of these fails when its removal or filter is mutated away; dropping the
+socket-type check is caught only on Linux, where connecting to a regular file
+is refused like a dead socket; **shell detection**
 (`detect_shells_windows`/`_unix`,
 kettle-core) is pure over injected closures (PATH lookup, WSL
 enumeration, vswhere, Git Bash probe), so the Windows-Terminal

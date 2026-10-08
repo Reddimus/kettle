@@ -249,8 +249,12 @@ exact token-user owner plus a protected owner/SYSTEM/Administrators DACL, and
 then compares the connecting process or pipe owner with the exact current
 token-user SID. A client authenticates that server identity before sending any
 request bytes. Discovery ignores links, unsafe permissions, mismatched pids,
-and non-v1 records; registry and presence walks inspect at most 1,024 directory
-entries.
+and non-v1 records. A discovery reads at most 1,024 registry entries from a
+walk of at most 8,192 directory entries, since each server's socket sits beside
+its entry; presence walks inspect at most 1,024 entries. A server unlinks its
+socket when it shuts down. Pruning a dead server's entry also removes its
+socket, and a starting server removes leftover sockets that have no entry, in
+both cases only when connecting to the socket is refused.
 
 This is intentionally a **same-OS-user trust boundary**, not per-client
 authorization. Enabling `read-only` lets any process running as that user read
