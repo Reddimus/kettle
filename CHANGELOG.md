@@ -17,6 +17,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   `--agent-server off` alone also turns previews off. `kettle ctl get_state`
   reports the policy in force as `policy: {server, display}`.
 
+- Inline media-card rendering foundation: bounded marker capture and registered
+  card recognition, owned fallback glyphs, clipped posters, caller labels and
+  selection tint in Grid and Legacy text modes. Registrations remain test-only;
+  production display callers are introduced separately. Preview accounts are
+  separate from terminal images, and unavailable preview capacity leaves text
+  windows usable.
+
 - Kitty graphics capability queries decode the supplied image and echo its
   image id in an immediate success or error reply. They preserve stored images
   and placements, support chunked direct transfers and quiet replies, and

@@ -842,10 +842,9 @@ fn previous_context_char<T>(
         if grid_text::is_spacer(cell.flags) {
             continue;
         }
-        return cell
-            .zerowidth()
-            .and_then(|marks| marks.last().copied())
-            .or(Some(cell.c));
+        let (base, marks) =
+            crate::inline_text::text_parts(cell.c, cell.zerowidth().unwrap_or_default());
+        return marks.last().copied().or(Some(base));
     }
     None
 }
@@ -866,7 +865,9 @@ fn next_context_char<T>(
         }
         let cell = &term.grid()[Line(next)][Column(column)];
         if !grid_text::is_spacer(cell.flags) {
-            return Some(cell.c);
+            return Some(
+                crate::inline_text::text_parts(cell.c, cell.zerowidth().unwrap_or_default()).0,
+            );
         }
     }
     None
@@ -887,11 +888,12 @@ fn push_unmapped_char(
 }
 
 fn complete_cell_utf8_len(cell: &Cell, remaining: usize) -> Option<usize> {
-    let mut len = cell.c.len_utf8();
+    let (base, marks) =
+        crate::inline_text::text_parts(cell.c, cell.zerowidth().unwrap_or_default());
+    let mut len = base.len_utf8();
     if len > remaining {
         return None;
     }
-    let marks = cell.zerowidth().unwrap_or_default();
     // Every scalar takes at least one byte. Reject an enormous combining vector in O(1) before
     // walking any prefix of it; accepted cells are then bounded by the haystack byte ceiling.
     if marks.len() > remaining - len {
@@ -961,7 +963,9 @@ fn materialize_chunk<T>(
             }
             let remaining = max_bytes.saturating_sub(haystack.text.len());
             let Some(cell_len) = complete_cell_utf8_len(cell, remaining) else {
-                omitted_context = Some(cell.c);
+                omitted_context = Some(
+                    crate::inline_text::text_parts(cell.c, cell.zerowidth().unwrap_or_default()).0,
+                );
                 if byte_limit_is_work {
                     work_limited = true;
                 } else {
@@ -970,10 +974,10 @@ fn materialize_chunk<T>(
                 break 'rows;
             };
             let start_len = haystack.text.len();
-            haystack.text.push(cell.c);
-            if let Some(marks) = cell.zerowidth() {
-                haystack.text.extend(marks.iter().copied());
-            }
+            let (base, marks) =
+                crate::inline_text::text_parts(cell.c, cell.zerowidth().unwrap_or_default());
+            haystack.text.push(base);
+            haystack.text.extend(marks.iter().copied());
             debug_assert_eq!(haystack.text.len() - start_len, cell_len);
             let end_column = if cell.flags.contains(Flags::WIDE_CHAR)
                 && column < term.last_column().0
@@ -1213,6 +1217,85 @@ mod tests {
         for (offset, c) in text.chars().enumerate() {
             term.grid_mut()[Line(line)][Column(start + offset)].c = c;
         }
+    }
+
+    fn card_cell(term: &mut Term<EventProxy>, line: i32, col: usize, count: usize) {
+        let cell = &mut term.grid_mut()[Line(line)][Column(col)];
+        cell.c = kettle_vt::placeholder::PLACEHOLDER;
+        for _ in 0..count {
+            cell.push_zerowidth('\u{0305}');
+        }
+    }
+
+    #[test]
+    fn card_text_search_preserves_spaces_and_terminal_columns_in_both_directions() {
+        let mut term = empty_term(3, 1);
+        write_ascii(&mut term, 0, 0, "a b");
+        card_cell(&mut term, 0, 1, 8);
+        let bounds = SearchBounds::new(SearchPoint::new(0, 0), SearchPoint::new(0, 2));
+        for (pattern, expected) in [
+            ("a b", vec![SearchSpan::new(bounds.start, bounds.end)]),
+            (
+                " ",
+                vec![SearchSpan::new(
+                    SearchPoint::new(0, 1),
+                    SearchPoint::new(0, 1),
+                )],
+            ),
+            ("ab", vec![]),
+            ("\u{10eeee}", vec![]),
+            ("\u{0305}", vec![]),
+        ] {
+            let mut search = CompiledSearch::compile(pattern, CaseSensitivity::Always)
+                .unwrap()
+                .unwrap();
+            let forward = search.find_in_range(&term, bounds, SearchDirection::Forward, 4);
+            let reverse = search.find_in_range(
+                &term,
+                SearchBounds::new(bounds.end, bounds.start),
+                SearchDirection::Reverse,
+                4,
+            );
+            assert_eq!(forward.matches, expected, "forward {pattern:?}");
+            assert_eq!(reverse.matches, expected, "reverse {pattern:?}");
+        }
+    }
+
+    #[test]
+    fn card_text_search_normalizes_a_large_marker_without_spending_grapheme_bytes() {
+        let mut term = empty_term(3, 1);
+        write_ascii(&mut term, 0, 0, "a b");
+        card_cell(&mut term, 0, 1, MAX_SEARCH_MATERIALIZED_BYTES);
+        let mut search = CompiledSearch::compile("a b", CaseSensitivity::Always)
+            .unwrap()
+            .unwrap();
+        let bounds = SearchBounds::new(SearchPoint::new(0, 0), SearchPoint::new(0, 2));
+        let batch = search.find_in_range(&term, bounds, SearchDirection::Forward, 4);
+        assert_eq!(batch.matches, [SearchSpan::new(bounds.start, bounds.end)]);
+        assert!(!batch.accuracy_limited);
+        assert!(!batch.truncated);
+    }
+
+    #[test]
+    fn card_text_search_retains_an_ordinary_four_mark_kitty_cluster() {
+        let mut term = empty_term(1, 1);
+        card_cell(&mut term, 0, 0, 4);
+        let pattern = format!(
+            "{}{}",
+            kettle_vt::placeholder::PLACEHOLDER,
+            "\u{0305}".repeat(4)
+        );
+        let mut search = CompiledSearch::compile(&pattern, CaseSensitivity::Always)
+            .unwrap()
+            .unwrap();
+        let point = SearchPoint::new(0, 0);
+        let batch = search.find_in_range(
+            &term,
+            SearchBounds::new(point, point),
+            SearchDirection::Forward,
+            2,
+        );
+        assert_eq!(batch.matches, [SearchSpan::new(point, point)]);
     }
 
     #[test]

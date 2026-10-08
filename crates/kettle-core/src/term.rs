@@ -8770,7 +8770,9 @@ impl Terminal {
         let mut placeholder_count = 0usize;
         for ind in content.display_iter {
             let (cell, p) = (ind.cell, ind.point);
-            if placeholder::is_placeholder(cell.c) {
+            if placeholder::is_placeholder(cell.c)
+                && cell.zerowidth().is_none_or(|marks| marks.len() <= 4)
+            {
                 if placeholder_count >= placement_limit {
                     break;
                 }
@@ -14099,6 +14101,63 @@ mod conformance {
         assert!(
             !t.mode().intersects(TermMode::MOUSE_MODE),
             "all tracking off"
+        );
+    }
+
+    #[test]
+    fn inline_card_cells_do_not_consume_the_kitty_placement_scan_budget() {
+        let (mut term, mut processor) = harness(300, 2);
+        let card = "\u{10eeee}\u{0305}\u{030d}\u{030e}\u{0310}\u{0312}\u{033d}\u{033e}\u{033f}";
+        let mut text = card.repeat(260);
+        text.push('\u{10eeee}');
+        feed(&mut term, &mut processor, text.as_bytes());
+        assert_eq!(
+            term.grid()[Point::new(Line(0), Column(0))]
+                .zerowidth()
+                .unwrap()
+                .len(),
+            8
+        );
+        let cells = Terminal::placeholder_cells_from_term(&term);
+        assert_eq!(
+            cells.len(),
+            1,
+            "only the ordinary Kitty placeholder is a placement candidate"
+        );
+        assert_eq!(
+            cells[0].1, 260,
+            "cards must not starve the real image after the placement cap"
+        );
+    }
+
+    #[test]
+    fn inline_card_breaks_kitty_left_inheritance() {
+        let (mut term, mut processor) = harness(8, 2);
+        feed(&mut term, &mut processor,
+            "\u{10eeee}\u{0305}\u{030d}\u{0305}\u{10eeee}\u{0305}\u{030d}\u{030e}\u{0310}\u{0312}\u{033d}\u{033e}\u{033f}\u{10eeee}".as_bytes());
+        let cells = Terminal::placeholder_cells_from_term(&term);
+        assert_eq!(cells.len(), 2);
+        assert_eq!((cells[0].1, cells[0].2.col), (0, 1));
+        assert_eq!(
+            (cells[1].1, cells[1].2.col),
+            (2, 0),
+            "left inheritance cannot cross a card cell"
+        );
+    }
+
+    #[test]
+    fn four_marks_keep_existing_kitty_placeholder_behavior() {
+        let (mut term, mut processor) = harness(8, 2);
+        feed(
+            &mut term,
+            &mut processor,
+            "\u{10eeee}\u{0305}\u{030d}\u{030e}\u{0310}".as_bytes(),
+        );
+        let cells = Terminal::placeholder_cells_from_term(&term);
+        assert_eq!(cells.len(), 1);
+        assert_eq!(
+            (cells[0].2.row, cells[0].2.col, cells[0].2.image_id),
+            (0, 1, 2 << 24)
         );
     }
 

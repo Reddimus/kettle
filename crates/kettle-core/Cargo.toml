@@ -21,6 +21,7 @@ workspace = true
 asciicast = ["dep:serde_json", "dep:fs4"]
 
 [dependencies]
+unicode-width.workspace = true
 alacritty_terminal = "0.26.0"
 anyhow.workspace = true
 crossbeam-channel = "0.5.15"

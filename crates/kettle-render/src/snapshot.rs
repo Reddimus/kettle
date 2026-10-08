@@ -24,11 +24,14 @@ use alacritty_terminal::Term;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::selection::SelectionRange;
-use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::color::Colors as TermColors;
 use alacritty_terminal::term::{RenderableCursor, TermMode};
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape};
 use kettle_core::EventProxy;
+
+use crate::card_marks::CardMarks;
+use crate::inline_cards::MAX_CARD_ROWS;
 
 /// Max combining (zero-width) marks stored inline per [`SnapCell`]. A cell with
 /// more than this many marks (pathological) has the excess dropped at capture —
@@ -60,10 +63,36 @@ pub struct SnapCell {
     /// stripped base char. Stored inline (see [`MAX_ZEROWIDTH`]); read via
     /// [`SnapCell::zerowidth`], mirroring the grid `Cell::zerowidth`.
     zerowidth: [char; MAX_ZEROWIDTH],
+    // MAX_ZEROWIDTH + 1 records overflow without adding storage to SnapCell.
     zerowidth_len: u8,
 }
 
 impl SnapCell {
+    fn from_grid(point: Point, cell: &Cell) -> Self {
+        let mut zerowidth = ['\0'; MAX_ZEROWIDTH];
+        let mut zerowidth_len = 0u8;
+        if let Some(marks) = cell.zerowidth() {
+            for &mark in marks.iter().take(MAX_ZEROWIDTH) {
+                zerowidth[zerowidth_len as usize] = mark;
+                zerowidth_len += 1;
+            }
+            if marks.len() > MAX_ZEROWIDTH {
+                zerowidth_len = (MAX_ZEROWIDTH + 1) as u8;
+            }
+        }
+        Self {
+            line: point.line.0,
+            col: point.column.0,
+            c: cell.c,
+            fg: cell.fg,
+            bg: cell.bg,
+            flags: cell.flags,
+            underline_color: cell.underline_color(),
+            zerowidth,
+            zerowidth_len,
+        }
+    }
+
     /// Reconstruct the grid-absolute `Point` this cell was captured at
     /// (for `SelectionRange::contains`).
     #[inline]
@@ -78,7 +107,13 @@ impl SnapCell {
     /// present.
     #[inline]
     pub fn zerowidth(&self) -> &[char] {
-        &self.zerowidth[..self.zerowidth_len as usize]
+        &self.zerowidth[..usize::from(self.zerowidth_len).min(MAX_ZEROWIDTH)]
+    }
+
+    /// Long placeholder clusters belong to the card/fallback pass, even when
+    /// no active registration requires collecting their complete identity.
+    pub fn is_card_placeholder(&self) -> bool {
+        self.c == '\u{10eeee}' && usize::from(self.zerowidth_len) > MAX_ZEROWIDTH
     }
 }
 
@@ -89,6 +124,11 @@ impl SnapCell {
 pub struct PaneSnapshot {
     /// Viewport cells in `display_iter` order (row-major, all columns).
     pub cells: Vec<SnapCell>,
+    /// Full inline-card combining sequences, independent of SnapCell glyph marks.
+    pub(crate) card_marks: CardMarks,
+    pub(crate) card_marks_collected: bool,
+    // Complete rows immediately outside the viewport, for clipped card context.
+    pub(crate) card_context: Vec<SnapCell>,
     pub cursor: RenderableCursor,
     /// Whether `cursor` is alacritty_terminal's scrollback-aware vi cursor.
     pub vi_mode: bool,
@@ -112,6 +152,9 @@ impl Default for PaneSnapshot {
     fn default() -> Self {
         Self {
             cells: Vec::new(),
+            card_marks: CardMarks::default(),
+            card_marks_collected: false,
+            card_context: Vec::new(),
             cursor: RenderableCursor {
                 shape: CursorShape::Hidden,
                 point: Point::new(Line(0), Column(0)),
@@ -130,12 +173,22 @@ impl Default for PaneSnapshot {
 }
 
 impl PaneSnapshot {
+    pub fn captures_card_marks(&self) -> bool {
+        self.card_marks_collected
+    }
+
     /// Capture `term`'s renderable state into this (pooled) snapshot.
     ///
     /// Called with the Term mutex held; everything here is a flat copy —
     /// no shaping, no resolution, no allocation once `cells` has reached
     /// its high-water capacity.
     pub fn capture(&mut self, term: &Term<EventProxy>) {
+        self.capture_with_card_marks(term, false);
+    }
+
+    /// Collect complete placeholder marks and a fixed band of retained context
+    /// when the pane has cards. Decode after releasing its lock.
+    pub fn capture_with_card_marks(&mut self, term: &Term<EventProxy>, collect_cards: bool) {
         let grid = term.grid();
         self.columns = grid.columns();
         self.screen_lines = grid.screen_lines();
@@ -151,31 +204,66 @@ impl PaneSnapshot {
         self.colors = *content.colors;
 
         self.cells.clear();
+        self.card_marks.clear();
+        self.card_context.clear();
+        self.card_marks_collected = collect_cards;
         self.cells
             .reserve(self.columns.saturating_mul(self.screen_lines));
         for indexed in content.display_iter {
             let cell = indexed.cell;
-            // Copy combining marks inline (the common case is none → zero work).
-            let mut zerowidth = ['\0'; MAX_ZEROWIDTH];
-            let mut zerowidth_len = 0u8;
-            if let Some(marks) = cell.zerowidth() {
-                for &mark in marks.iter().take(MAX_ZEROWIDTH) {
-                    zerowidth[zerowidth_len as usize] = mark;
-                    zerowidth_len += 1;
+            if collect_cards {
+                self.card_marks.collect(
+                    self.cells.len(),
+                    cell.c,
+                    cell.zerowidth().unwrap_or_default(),
+                );
+            }
+            self.cells.push(SnapCell::from_grid(indexed.point, cell));
+        }
+        if collect_cards && let (Some(first), Some(last)) = (self.cells.first(), self.cells.last())
+        {
+            // A card intersects at most MAX_CARD_ROWS and owns one context row
+            // beyond its body. Capture a fixed band, never the whole history.
+            let band = i32::from(MAX_CARD_ROWS) + 1;
+            let start = first.line.saturating_sub(band).max(grid.topmost_line().0);
+            let end = last.line.saturating_add(band).min(grid.bottommost_line().0);
+            let first_line = first.line;
+            let last_line = last.line;
+            for line in (start..first_line).chain(last_line + 1..=end) {
+                for column in 0..self.columns {
+                    let point = Point::new(Line(line), Column(column));
+                    let cell = &grid[point];
+                    // Visible cells have first claim on the existing mark cap.
+                    self.card_marks.collect(
+                        self.cells.len() + self.card_context.len(),
+                        cell.c,
+                        cell.zerowidth().unwrap_or_default(),
+                    );
+                    self.card_context.push(SnapCell::from_grid(point, cell));
                 }
             }
-            self.cells.push(SnapCell {
-                line: indexed.point.line.0,
-                col: indexed.point.column.0,
-                c: cell.c,
-                fg: cell.fg,
-                bg: cell.bg,
-                flags: cell.flags,
-                underline_color: cell.underline_color(),
-                zerowidth,
-                zerowidth_len,
-            });
         }
+    }
+
+    pub(crate) fn card_cell(&self, index: usize) -> Option<&SnapCell> {
+        if index < self.cells.len() {
+            self.cells.get(index)
+        } else {
+            self.card_context.get(index - self.cells.len())
+        }
+    }
+
+    pub(crate) fn card_row(&self, line: i32) -> &[SnapCell] {
+        let cells = if self.cells.first().is_some_and(|cell| line >= cell.line)
+            && self.cells.last().is_some_and(|cell| line <= cell.line)
+        {
+            &self.cells
+        } else {
+            &self.card_context
+        };
+        let start = cells.partition_point(|cell| cell.line < line);
+        let end = cells[start..].partition_point(|cell| cell.line == line);
+        &cells[start..start + end]
     }
 }
 
@@ -269,6 +357,54 @@ mod tests {
     }
 
     #[test]
+    fn card_context_is_bounded_and_pooled_independently_of_scrollback_depth() {
+        let (mut term, mut processor) = test_term_with_history(40, 4, 5000);
+        processor.advance(&mut term, "ordinary\r\n".repeat(1000).as_bytes());
+        assert!(term.grid().history_size() > 500);
+        term.scroll_display(alacritty_terminal::grid::Scroll::Delta(200));
+        let mut snap = PaneSnapshot::default();
+        snap.capture_with_card_marks(&term, true);
+        assert_eq!(snap.cells.len(), 4 * 40);
+        assert_eq!(snap.card_context.len(), 2 * 13 * 40);
+        assert_eq!(snap.card_context[0].line, snap.cells[0].line - 13);
+        assert_eq!(
+            snap.card_context.last().unwrap().line,
+            snap.cells.last().unwrap().line + 13
+        );
+        assert!(
+            snap.card_context
+                .windows(2)
+                .all(|pair| (pair[0].line, pair[0].col) < (pair[1].line, pair[1].col))
+        );
+        let pointer = snap.card_context.as_ptr();
+        let capacity = snap.card_context.capacity();
+        snap.capture_with_card_marks(&term, true);
+        assert_eq!(snap.card_context.as_ptr(), pointer);
+        assert_eq!(snap.card_context.capacity(), capacity);
+        snap.capture_with_card_marks(&term, false);
+        assert!(snap.card_context.is_empty());
+        assert_eq!(snap.card_context.capacity(), capacity);
+        assert_eq!(snap.cells.len(), 4 * 40);
+        assert_eq!(snap.card_marks.cells().len(), 0);
+        term.scroll_display(alacritty_terminal::grid::Scroll::Top);
+        snap.capture_with_card_marks(&term, true);
+        assert_eq!(snap.card_context.len(), 13 * 40);
+        assert!(
+            snap.card_context
+                .iter()
+                .all(|cell| cell.line > snap.cells.last().unwrap().line)
+        );
+        term.scroll_display(alacritty_terminal::grid::Scroll::Bottom);
+        snap.capture_with_card_marks(&term, true);
+        assert_eq!(snap.card_context.len(), 13 * 40);
+        assert!(
+            snap.card_context
+                .iter()
+                .all(|cell| cell.line < snap.cells[0].line)
+        );
+    }
+
+    #[test]
     fn capture_carries_cursor_blink_state_for_lock_free_ui_redraws() {
         let (mut term, mut proc) = test_term(8, 2);
         let mut snap = PaneSnapshot::default();
@@ -294,5 +430,70 @@ mod tests {
 
         assert_eq!(snap.history_origin, term.grid().history_origin());
         assert_eq!(snap.history_size, 2);
+    }
+    #[test]
+    fn card_capture_preserves_full_marks_without_widening_snapcell() {
+        let (mut term, mut proc) = test_term(8, 2);
+        let marks = [
+            '\u{0305}', '\u{030d}', '\u{030e}', '\u{0310}', '\u{0312}', '\u{033d}', '\u{033e}',
+            '\u{033f}',
+        ];
+        let text: String = std::iter::once('\u{10eeee}').chain(marks).collect();
+        proc.advance(&mut term, text.as_bytes());
+        let mut snap = PaneSnapshot::default();
+        snap.capture_with_card_marks(&term, true);
+        let (snapshot_index, full_marks) = snap.card_marks.cells().next().unwrap();
+        assert_eq!(snap.cells[snapshot_index].c, '\u{10eeee}');
+        assert_eq!(snap.cells[snapshot_index].zerowidth(), &marks[..4]);
+        assert_eq!(full_marks, marks);
+        proc.advance(&mut term, b"\rX");
+        snap.capture_with_card_marks(&term, true);
+        assert!(snap.card_marks.cells().len() == 0);
+    }
+
+    #[test]
+    fn ordinary_snapshot_clears_previous_card_sequences() {
+        let (mut term, mut proc) = test_term(8, 2);
+        proc.advance(
+            &mut term,
+            "\u{10eeee}\u{0305}\u{030d}\u{030e}\u{0310}\u{0312}\u{033d}\u{033e}\u{033f}".as_bytes(),
+        );
+        let mut snap = PaneSnapshot::default();
+        snap.capture_with_card_marks(&term, true);
+        assert_eq!(snap.card_marks.cells().len(), 1);
+        snap.capture(&term);
+        assert!(snap.card_marks.cells().len() == 0);
+        assert_eq!(
+            snap.cells
+                .iter()
+                .find(|c| c.col == 0 && c.line == 0)
+                .unwrap()
+                .zerowidth()
+                .len(),
+            4
+        );
+    }
+
+    #[test]
+    fn long_card_cluster_is_identifiable_without_registration_or_full_collection() {
+        let (mut term, mut proc) = test_term(8, 2);
+        proc.advance(&mut term,
+            "\u{10eeee}\u{0305}\u{030d}\u{030e}\u{0310}\u{0312}\u{033d}\u{033e}\u{033f}e\u{0305}\u{030d}\u{030e}\u{0310}\u{0312}\u{033d}\u{033e}\u{033f}\u{10eeee}\u{0305}\u{030d}\u{030e}\u{0310}".as_bytes());
+        let mut snap = PaneSnapshot::default();
+        snap.capture(&term);
+        assert!(snap.card_marks.cells().len() == 0);
+        let row: Vec<_> = snap.cells.iter().filter(|c| c.line == 0).collect();
+        assert!(row[0].is_card_placeholder());
+        assert!(
+            !row[1].is_card_placeholder(),
+            "ordinary combining text retains its glyph path"
+        );
+        assert!(
+            !row[2].is_card_placeholder(),
+            "four-mark Kitty cells retain existing semantics"
+        );
+        assert_eq!(row[0].zerowidth().len(), 4);
+        assert_eq!(row[1].zerowidth().len(), 4);
+        assert_eq!(row[2].zerowidth().len(), 4);
     }
 }

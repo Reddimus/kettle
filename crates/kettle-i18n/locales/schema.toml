@@ -1403,3 +1403,9 @@ args = [{ name = "tag", type = "str" }, { name = "url", type = "str" }]
 
 [messages.window_title_gpu_lost]
 context = "crates/kettle-ui/src/app.rs redraw: window title while Kettle recovers from a lost GPU device (a driver reset). kettle is the product name, kept lowercase; keep the hyphen separators."
+
+[messages.inline_card_pending]
+context = "crates/kettle-render/src/card_scene.rs: status inside an owned inline media card while its poster loads."
+
+[messages.inline_card_unavailable]
+context = "crates/kettle-render/src/card_scene.rs: status inside an owned inline media card whose poster is unavailable."

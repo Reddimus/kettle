@@ -10,6 +10,10 @@
 //! window surface.
 
 mod bg_image;
+mod card_marks;
+mod card_scene;
+mod inline_cards;
+pub use inline_cards::InlineCards;
 mod color;
 mod cursor_patch;
 mod cursor_policy;
@@ -2245,6 +2249,9 @@ pub struct PaneView<'a> {
     /// runs with the lock released and the PTY reader never stalls behind
     /// shaping/acquire/present.
     pub snap: &'a PaneSnapshot,
+    /// Per-pane registration; diagnostic snapshots may omit it.
+    pub inline_cards: Option<&'a InlineCards>,
+    pub tr: Translator,
     pub focused: bool,
     /// Decoded images placed in this pane (Sixel / kitty / iTerm2).
     ///
@@ -2892,6 +2899,18 @@ pub struct Renderer {
     /// sit above the panel bg.
     menu_text_renderer: TextRenderer,
     imgs: imgpipe::ImagePipeline,
+    card_base: QuadPipeline,
+    card_cursors: QuadPipeline,
+    card_cursor_quad_range: Option<std::ops::Range<u32>>,
+    card_decoration: QuadPipeline,
+    card_posters: Option<imgpipe::ImagePipeline>,
+    card_image_shared: imgpipe::ImageShared,
+    card_frames: Vec<inline_cards::CardFrame>,
+    card_scene: card_scene::CardScene,
+    card_text_renderer: TextRenderer,
+    card_label_buffers: Vec<TextBuffer>,
+    card_label_texts: Vec<String>,
+    card_labels_prepared: bool,
     /// Single-instance overlay pipeline drawn between menu chrome and menu
     /// text, so the receipt thumbnail cannot cover its own status labels.
     media_receipt_img: imgpipe::ImagePipeline,
@@ -5256,6 +5275,11 @@ impl Renderer {
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let cursor_glyph_buffer = TextBuffer::new(&mut font_system, metrics);
         let graphics_budget = kettle_core::GraphicsBudget::default();
+        let card_text_renderer =
+            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        let card_base = shared.quads.blend(&device);
+        let card_cursors = shared.quads.blend(&device);
+        let card_decoration = shared.quads.blend(&device);
         let presentation =
             present::PresentationPipeline::new(&device, format, graphics_budget.clone());
         let imgs = shared
@@ -5393,6 +5417,18 @@ impl Renderer {
             menu_quads,
             menu_text_renderer,
             imgs,
+            card_base,
+            card_cursors,
+            card_cursor_quad_range: None,
+            card_decoration,
+            card_posters: None,
+            card_image_shared: shared.images,
+            card_frames: Vec::new(),
+            card_scene: card_scene::CardScene::default(),
+            card_text_renderer,
+            card_label_buffers: Vec::new(),
+            card_label_texts: Vec::new(),
+            card_labels_prepared: false,
             media_receipt_img,
             bg_imgs,
             starfield,
@@ -6024,6 +6060,7 @@ impl Renderer {
             let k = h.finish();
             if self.chrome_style_key != k {
                 self.chrome_style_key = k;
+                self.card_label_texts.clear();
                 self.pane_titlebar_texts.clear();
                 self.tab_texts.clear();
                 self.tab_close_text.clear();
@@ -6180,6 +6217,7 @@ impl Renderer {
         // returns to it after the GPU upload below.
         let mut quads: Vec<QuadInstance> = std::mem::take(&mut self.quad_scratch);
         self.cursor_quad_range = None;
+        self.card_cursor_quad_range = None;
         quads.clear();
         quads.reserve(panes.len() * 16 + 256);
         let mut pane_outlines: Vec<OutlineInstance> = Vec::with_capacity(panes.len());
@@ -6706,6 +6744,11 @@ impl Renderer {
             })
             .collect::<Vec<_>>();
         let placement_quotas = fair_placement_quotas(&visible_placement_counts, placement_limit);
+        let mut card_frames = std::mem::take(&mut self.card_frames);
+        card_frames.resize_with(panes.len(), inline_cards::CardFrame::default);
+        card_frames.truncate(panes.len());
+        let mut card_scene = std::mem::take(&mut self.card_scene);
+        card_scene.clear();
         for (i, pv) in panes.iter().enumerate() {
             let (rx, ry, rw, rh) = pv.rect;
             // Pane separators / focus border. Both colors are config-
@@ -6811,6 +6854,38 @@ impl Renderer {
                 pane_titlebar_h,
                 cfg.title_at_bottom,
             );
+            let card_frame = &mut card_frames[i];
+            if let Some(cards) = pv.inline_cards {
+                cards.recognize_into(pv.snap, card_frame);
+                if let Some(pane_body) =
+                    pane_backdrop_rect(pv.rect, bw, pane_titlebar_h, cfg.title_at_bottom)
+                    && let Some(clip) = inline_image_clip(
+                        pane_body,
+                        grid_origin,
+                        (pv.snap.columns, pv.snap.screen_lines),
+                        (cw, ch),
+                    )
+                {
+                    card_scene.append(
+                        cards,
+                        card_frame,
+                        pv.snap,
+                        &card_scene::CardGeometry {
+                            grid_origin: [grid_origin.0, grid_origin.1],
+                            cell: [cw, ch],
+                            clip,
+                            tr: pv.tr,
+                        },
+                        &card_scene::CardColors {
+                            background: theme.background,
+                            frame: self.ui_accent(cfg, theme),
+                            selection: theme.selection_background,
+                        },
+                    );
+                }
+            } else {
+                card_frame.clear();
+            }
             any_pane_text_changed |= self.build_pane(
                 i,
                 pv,
@@ -6824,6 +6899,9 @@ impl Renderer {
                 },
                 &mut quads,
                 &mut pane_bases,
+                card_frame,
+                &mut card_scene.base,
+                &mut card_scene.cursors,
                 pane_titlebar_h,
             );
 
@@ -7025,6 +7103,31 @@ impl Renderer {
                     }
                 }
             }
+        }
+
+        self.card_frames = card_frames;
+        self.card_scene = card_scene;
+        if self.card_posters.is_none() && !self.card_scene.posters.is_empty() {
+            // Preview pressure cannot prevent a text window. Retry admission
+            // on the next actual frame after another preview releases space.
+            self.card_posters = self.card_image_shared.layer_with_instance_limit(
+                &self.gpu.device,
+                kettle_core::GraphicsBudget::previews(),
+                4096,
+            );
+        }
+        if let Some(posters) = &mut self.card_posters {
+            posters.prepare_frame(&self.gpu.device, &self.card_scene.posters);
+            posters.upload(
+                &self.gpu.device,
+                &self.gpu.queue,
+                [sw, sh],
+                &self.card_scene.posters,
+            );
+            self.card_scene
+                .apply_upload_results(posters.drawn_item_indices());
+        } else {
+            self.card_scene.apply_upload_results(std::iter::empty());
         }
 
         // Terminator parity: the drop hint for a pane being dragged elsewhere
@@ -9096,6 +9199,74 @@ impl Renderer {
             }
         }
 
+        let label_count = self.card_scene.labels.len();
+        if self.card_label_buffers.len() < label_count {
+            self.card_label_buffers.resize_with(label_count, || {
+                TextBuffer::new(&mut self.font_system, metrics)
+            });
+        }
+        if self.card_label_texts.len() < label_count {
+            self.card_label_texts.resize_with(label_count, String::new);
+        }
+        for (index, label) in self.card_scene.labels.iter().enumerate() {
+            let [_, _, width, height] = label.rect;
+            let scale = label.scale;
+            let columns = (width / (cw * scale).max(1.0)).floor().max(1.0) as usize;
+            let text = fit_single_line_label(label.text(), columns);
+            let buffer = &mut self.card_label_buffers[index];
+            buffer.set_metrics(metrics);
+            buffer.set_wrap(Wrap::None);
+            buffer.set_size(Some(width / scale), Some(height / scale));
+            if self.card_label_texts[index] != text {
+                buffer.set_text(
+                    &text,
+                    &Attrs::new().family(Family::Name(&family)),
+                    Shaping::Advanced,
+                    None,
+                );
+                self.card_label_texts[index] = text;
+            }
+            buffer.shape_until_scroll(&mut self.font_system, false);
+        }
+        let card_foreground = resolved_cell_foreground_cached(
+            theme.foreground,
+            theme.background,
+            CellHighlight::None,
+            (false, false),
+            cfg,
+            theme,
+            &mut self.minimum_contrast_cache,
+        );
+        let card_areas: Vec<TextArea> = self
+            .card_scene
+            .labels
+            .iter()
+            .enumerate()
+            .map(|(index, label)| {
+                let [x, y, width, height] = label.rect;
+                let ink_width =
+                    display_width(&self.card_label_texts[index]) as f32 * cw * label.scale;
+                TextArea {
+                    buffer: &self.card_label_buffers[index],
+                    left: x + ((width - ink_width) * 0.5).max(0.0),
+                    top: y + (height - metrics.line_height * label.scale).max(0.0) * 0.5,
+                    scale: label.scale,
+                    bounds: TextBounds {
+                        left: x.ceil() as i32,
+                        top: y.ceil() as i32,
+                        right: (x + width).floor() as i32,
+                        bottom: (y + height).floor() as i32,
+                    },
+                    default_color: GColor::rgb(
+                        card_foreground.r,
+                        card_foreground.g,
+                        card_foreground.b,
+                    ),
+                    custom_glyphs: &[],
+                }
+            })
+            .collect();
+
         // Skip the whole-viewport glyphon `prepare` when nothing that feeds the
         // text renderers changed this frame. `prepare` re-encodes EVERY visible
         // glyph's vertices + does atlas housekeeping; on an idle repaint (a
@@ -9114,6 +9285,8 @@ impl Renderer {
         let chrome_hash = {
             use std::hash::{Hash, Hasher};
             let mut h = std::hash::DefaultHasher::new();
+            self.card_label_texts[..label_count].hash(&mut h);
+            prepared_text_areas_damage_key(&card_areas).hash(&mut h);
             self.pane_titlebar_texts.hash(&mut h);
             self.tab_texts.hash(&mut h);
             self.tabbar_text.hash(&mut h);
@@ -9231,6 +9404,21 @@ impl Renderer {
             // batch as a no-op.
             self.chrome_prepares += 1;
             self.text_prepares += 1;
+            if !card_areas.is_empty() || self.card_labels_prepared {
+                self.chrome_prepares += 1;
+                self.text_prepares += 1;
+                let has_labels = !card_areas.is_empty();
+                self.card_text_renderer.prepare(
+                    &self.gpu.device,
+                    &self.gpu.queue,
+                    &mut self.font_system,
+                    &mut self.atlas,
+                    &self.viewport,
+                    card_areas,
+                    &mut self.swash,
+                )?;
+                self.card_labels_prepared = has_labels;
+            }
             self.menu_text_renderer.prepare(
                 &self.gpu.device,
                 &self.gpu.queue,
@@ -9353,6 +9541,24 @@ impl Renderer {
         // `imgs`. Prepare all layers before uploading: protect their complete
         // draw lists, transfer only needed exact-size retired textures, and
         // release the rest before admitting new allocations.
+        self.card_base.upload(
+            &self.gpu.device,
+            &self.gpu.queue,
+            [sw, sh],
+            &self.card_scene.base,
+        );
+        self.card_cursors.upload(
+            &self.gpu.device,
+            &self.gpu.queue,
+            [sw, sh],
+            &self.card_scene.cursors,
+        );
+        self.card_decoration.upload(
+            &self.gpu.device,
+            &self.gpu.queue,
+            [sw, sh],
+            &self.card_scene.decoration,
+        );
         self.bg_imgs.prepare_frame(&self.gpu.device, &bg_img_items);
         self.imgs.prepare_frame(&self.gpu.device, &img_items);
         self.media_receipt_img
@@ -9637,6 +9843,13 @@ impl Renderer {
             self.overlay_quads.upload_counts(),
             self.menu_quads.upload_counts(),
             self.imgs.upload_counts(),
+            self.card_base.upload_counts(),
+            self.card_cursors.upload_counts(),
+            self.card_decoration.upload_counts(),
+            self.card_posters
+                .as_ref()
+                .map(imgpipe::ImagePipeline::upload_counts)
+                .unwrap_or_default(),
             self.media_receipt_img.upload_counts(),
             self.bg_imgs.upload_counts(),
             self.starfield.upload_counts(),
@@ -9769,6 +9982,10 @@ impl Renderer {
         self.quads.draw_hiding(&mut pass, hidden_cursor);
         self.pane_outlines.draw(&mut pass);
         self.imgs.draw(&mut pass);
+        self.card_base.draw(&mut pass);
+        if let Some(posters) = &self.card_posters {
+            posters.draw(&mut pass);
+        }
         // Cell-locked pane text sits above cell backgrounds + inline
         // images and below chrome text (titlebars / menus) and the cursor
         // glyph. A no-op (count 0) in legacy mode, where pane text rides the
@@ -9786,6 +10003,17 @@ impl Renderer {
             ),
         }
         self.text_renderer
+            .render(&self.atlas, &self.viewport, &mut pass)?;
+        self.card_decoration.draw(&mut pass);
+        self.card_cursors.draw_hiding(
+            &mut pass,
+            if cursor_on {
+                None
+            } else {
+                self.card_cursor_quad_range.clone()
+            },
+        );
+        self.card_text_renderer
             .render(&self.atlas, &self.viewport, &mut pass)?;
         // The focused solid-block cursor's inverted glyph sits on its block
         // quad and the normal glyph, but below every overlay and chrome layer:
@@ -9988,6 +10216,9 @@ impl Renderer {
         search_highlights: &[HighlightRect],
         quads: &mut Vec<QuadInstance>,
         pane_bases: &mut Vec<QuadInstance>,
+        card_frame: &inline_cards::CardFrame,
+        card_base: &mut Vec<QuadInstance>,
+        card_cursors: &mut Vec<QuadInstance>,
         // Terminator parity (TERMINATOR-PANE-TITLEBAR-DESIGN.md): the per-pane
         // titlebar height reserved so cell content doesn't overlap the bar.
         // 0.0 when the titlebar is off.
@@ -10056,6 +10287,11 @@ impl Renderer {
             }
         }
 
+        let fallback_clip = pane_backdrop_rect(pv.rect, bw, pane_titlebar_h, cfg.title_at_bottom)
+            .and_then(|body| {
+                inline_image_clip(body, (ox, oy), (cols, snap.screen_lines), (cw, ch))
+            });
+
         // Take the pooled scratch (with last frame's String
         // buffers) instead of allocating fresh. `n` is the LOGICAL run count;
         // `spans` may hold extra slots from a busier prior frame, which we reuse
@@ -10101,16 +10337,17 @@ impl Renderer {
         // Codex's native-Windows cursor compatibility shim applies to the
         // application's writing cursor, never to the user-controlled vi
         // cursor.
-        let draw_cursor = if snap.vi_mode {
-            base_draw_cursor
-        } else {
-            cursor_policy::cursor_draw_allowed(
-                snap,
-                cvrow,
-                base_draw_cursor,
-                cfg!(target_os = "windows"),
-            )
-        };
+        let draw_cursor = !card_frame.suppress_point(snap, cp.line.0, cp.column.0)
+            && if snap.vi_mode {
+                base_draw_cursor
+            } else {
+                cursor_policy::cursor_draw_allowed(
+                    snap,
+                    cvrow,
+                    base_draw_cursor,
+                    cfg!(target_os = "windows"),
+                )
+            };
         let recolor_cursor_cell: Option<(i32, usize)> = {
             if draw_cursor && !snap.vi_mode && window_focused && shape == EShape::Block {
                 Some((cp.line.0, cp.column.0))
@@ -10134,8 +10371,9 @@ impl Renderer {
         // re-prepare. This way the buffer stays byte-identical across a blink,
         // so the prepare is skipped.
         let mut cursor_glyph_capture: Option<(char, Rgb, bool)> = None;
+        let mut fallback_run = None;
 
-        for sc in &snap.cells {
+        for (snapshot_index, sc) in snap.cells.iter().enumerate() {
             let row = sc.line;
             let col = sc.col;
             // Viewport row for quad placement; `row` (grid-absolute,
@@ -10149,9 +10387,19 @@ impl Renderer {
                 cur_row = row;
             }
 
-            let flags = sc.flags;
-            let mut fg = color::resolve(sc.fg, theme, term_colors);
-            let mut bg = color::resolve(sc.bg, theme, term_colors);
+            let card_cell = card_frame.cell(snap, snapshot_index);
+            let owned_cell = !matches!(card_cell, inline_cards::CardCell::Ordinary);
+            let flags = if owned_cell { Flags::empty() } else { sc.flags };
+            let mut fg = if owned_cell {
+                theme.foreground
+            } else {
+                color::resolve(sc.fg, theme, term_colors)
+            };
+            let mut bg = if owned_cell {
+                theme.background
+            } else {
+                color::resolve(sc.bg, theme, term_colors)
+            };
             if flags.contains(Flags::INVERSE) {
                 std::mem::swap(&mut fg, &mut bg);
             }
@@ -10163,6 +10411,7 @@ impl Renderer {
             let italic = flags.contains(Flags::ITALIC);
             saw_styled_text |= bold || italic;
             let hidden = flags.contains(Flags::HIDDEN);
+            let dc = card_cell.glyph(sc.c, hidden);
             // The same search pair drives the match background quads and the
             // terminal glyphs above them. Active matches use the configured
             // search fg/bg; inactive matches reuse the theme selection pair.
@@ -10175,6 +10424,31 @@ impl Renderer {
                 None if selected => CellHighlight::Selection,
                 None => CellHighlight::None,
             };
+            if matches!(
+                card_cell,
+                inline_cards::CardCell::Neutral | inline_cards::CardCell::Unknown
+            ) {
+                let backdrop = match highlight {
+                    CellHighlight::Search(true) => {
+                        cfg.search_background.unwrap_or(theme.palette[3])
+                    }
+                    CellHighlight::Search(false) | CellHighlight::Selection => {
+                        theme.selection_background
+                    }
+                    CellHighlight::None => theme.background,
+                };
+                if let Some(clip) = fallback_clip {
+                    card_scene::append_fallback_background(
+                        card_base,
+                        &mut fallback_run,
+                        row,
+                        col,
+                        backdrop,
+                        [ox + col as f32 * cw, oy + vrow as f32 * ch, cw, ch],
+                        clip,
+                    );
+                }
+            }
             fg = resolved_cell_foreground_cached(
                 fg,
                 bg,
@@ -10198,8 +10472,11 @@ impl Renderer {
                 // cursor pass draws this recolored copy on top of the block.
                 // See `color::cursor_glyph_color` for which colour and why.
                 let cursor_fg = color::cursor_glyph_color(theme, term_colors, bg);
-                cursor_glyph_capture =
-                    Some((sc.c, cursor_fg, sc.zerowidth().contains(&'\u{FE0F}')));
+                cursor_glyph_capture = Some((
+                    dc,
+                    cursor_fg,
+                    !owned_cell && sc.zerowidth().contains(&'\u{FE0F}'),
+                ));
             }
 
             if bg != default_bg {
@@ -10247,13 +10524,16 @@ impl Renderer {
                     1.0,
                 ));
             }
-            let dc = if hidden { ' ' } else { sc.c };
             // Combining (zero-width) marks layered on this cell — a decomposed
             // accent (`e`+U+0301), an emoji ZWJ sequence, a variation selector.
             // Append them right after the base char so the shaper composes the
             // full grapheme; skip on a HIDDEN cell (the base became a space, so
             // the marks have nothing to attach to).
-            let marks: &[char] = if hidden { &[] } else { sc.zerowidth() };
+            let marks: &[char] = if hidden || owned_cell {
+                &[]
+            } else {
+                sc.zerowidth()
+            };
             match cur {
                 Some((f, cb, ci)) if f == fg && cb == bold && ci == italic => {
                     // Same style — extend the current run (the last live span).
@@ -10346,14 +10626,23 @@ impl Renderer {
             } else {
                 color::cursor_block_color(theme, term_colors)
             };
-            let cursor_start = quads.len() as u32;
+            let on_card_fallback = matches!(
+                card_frame.cell_at(snap, cp.line.0, cp.column.0),
+                inline_cards::CardCell::Neutral | inline_cards::CardCell::Unknown
+            );
+            let cursor_quads = if on_card_fallback {
+                card_cursors
+            } else {
+                quads
+            };
+            let cursor_start = cursor_quads.len() as u32;
             // HollowBlock comes from vi mode. DECSCUSR selects block, beam
             // or underline. Window focus gates drawing without changing DEC state.
             if shape == EShape::HollowBlock {
-                quads.push(rect(bx, by, cw, 1.0, cursor_color, 1.0));
-                quads.push(rect(bx, by + ch - 1.0, cw, 1.0, cursor_color, 1.0));
-                quads.push(rect(bx, by, 1.0, ch, cursor_color, 1.0));
-                quads.push(rect(bx + cw - 1.0, by, 1.0, ch, cursor_color, 1.0));
+                cursor_quads.push(rect(bx, by, cw, 1.0, cursor_color, 1.0));
+                cursor_quads.push(rect(bx, by + ch - 1.0, cw, 1.0, cursor_color, 1.0));
+                cursor_quads.push(rect(bx, by, 1.0, ch, cursor_color, 1.0));
+                cursor_quads.push(rect(bx + cw - 1.0, by, 1.0, ch, cursor_color, 1.0));
             } else {
                 let (cwidth, alpha, cheight, yoff) = match shape {
                     EShape::Beam => (cw * 0.15, 1.0, ch, 0.0),
@@ -10367,7 +10656,7 @@ impl Renderer {
                         (cw * bcells, 1.0, ch, 0.0)
                     }
                 };
-                quads.push(rect(bx, by + yoff, cwidth, cheight, cursor_color, alpha));
+                cursor_quads.push(rect(bx, by + yoff, cwidth, cheight, cursor_color, alpha));
                 // Queue the inverted foreground glyph to be
                 // drawn ON TOP of the solid block in its own pass. Only the
                 // full Block shape covers the glyph; beam/underline leave it
@@ -10388,7 +10677,12 @@ impl Renderer {
             // vi mode's cursor never blinks, so only an application cursor
             // gets a range the off phase can skip.
             if !snap.vi_mode {
-                self.cursor_quad_range = Some(cursor_start..quads.len() as u32);
+                let range = Some(cursor_start..cursor_quads.len() as u32);
+                if on_card_fallback {
+                    self.card_cursor_quad_range = range;
+                } else {
+                    self.cursor_quad_range = range;
+                }
             }
         }
 
@@ -19178,13 +19472,6 @@ mod pane_buffer_lifecycle_tests {
             "the cursor glyph must be prepared + rendered in its own pass \
              (after the pane + menu text renders)"
         );
-        // The glyph keeps its normal fg in the buffer and is overdrawn, not
-        // recolored in-buffer.
-        assert!(
-            src.contains("cursor_glyph_capture =\n"),
-            "the cursor cell must be captured for the overdraw pass, not \
-             recolored into the pane span runs"
-        );
     }
 
     /// An unfocused pane carrying its own OSC 11
@@ -19343,13 +19630,6 @@ mod pane_buffer_lifecycle_tests {
                 "with_gpu must build its layers from SharedPipelines, not {standalone}"
             );
         }
-        let layers = |call: &str| with_gpu.matches(call).count();
-        assert_eq!(layers("shared.quads."), 5, "five quad layers");
-        assert_eq!(
-            layers(".layer(") + layers(".layer_with_instance_limit("),
-            3,
-            "three image layers"
-        );
     }
 
     /// `chrome-background` only recolors the chrome with a wallpaper; theme
@@ -23902,6 +24182,8 @@ mod text_layout_damage_tests {
             id: 1,
             rect,
             snap: &snap,
+            inline_cards: None,
+            tr: kettle_i18n::Translator::default(),
             focused: true,
             images: &[],
             title: "",

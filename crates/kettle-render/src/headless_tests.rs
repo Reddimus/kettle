@@ -47,6 +47,8 @@ pub(crate) fn pane<'a>(snap: &'a PaneSnapshot, width: u32, height: u32) -> PaneV
         id: 1,
         rect: (0.0, 0.0, width as f32, height as f32),
         snap,
+        inline_cards: None,
+        tr: kettle_i18n::Translator::default(),
         focused: true,
         images: &[],
         title: "",
@@ -122,6 +124,34 @@ pub(crate) fn cursor_pixels(frame: &image::RgbaImage, cfg: &Config, snap: &PaneS
         .count()
 }
 
+/// Distinct colours inside `rect` (x, y, width, height in frame pixels). A
+/// painted label or glyph adds edge colours to its uniform background.
+pub(crate) fn distinct_colors(frame: &image::RgbaImage, rect: [f32; 4]) -> usize {
+    let x0 = rect[0].max(0.0) as u32;
+    let y0 = rect[1].max(0.0) as u32;
+    let x1 = ((rect[0] + rect[2]).max(0.0) as u32).min(frame.width());
+    let y1 = ((rect[1] + rect[3]).max(0.0) as u32).min(frame.height());
+    let mut colors = std::collections::HashSet::new();
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let p = frame.get_pixel(x, y);
+            colors.insert((p[0], p[1], p[2]));
+        }
+    }
+    colors.len()
+}
+
+/// The rects of this frame's card labels of `kind`.
+fn label_rects(renderer: &Renderer, kind: crate::card_scene::CardLabelKind) -> Vec<[f32; 4]> {
+    renderer
+        .card_scene
+        .labels
+        .iter()
+        .filter(|label| label.kind == kind)
+        .map(|label| label.rect)
+        .collect()
+}
+
 /// A headless renderer and its config, or `None` on a host with no GPU.
 pub(crate) fn renderer(width: u32, height: u32) -> Option<(Renderer, Config)> {
     let cfg = gpu_test_config();
@@ -162,21 +192,40 @@ fn a_headless_frame_draws_a_real_pane() {
     }
 }
 
-/// A renderer compiles each distinct quad and image pipeline once: its five
-/// quad layers draw with one blending and one replacing pipeline, and its three
-/// image layers with one, instead of each layer compiling its own.
+/// Quad layers share blending and replacing pipelines. Image layers, including
+/// the lazily admitted card poster, share one pipeline.
 #[test]
 fn a_renderer_compiles_each_distinct_pipeline_once() {
     let _serialized = gpu_test_guard();
-    let Some((renderer, _cfg)) = renderer(64, 32) else {
+    let Some((mut renderer, cfg)) = renderer(1200, 400) else {
         eprintln!("no GPU adapter on this host; skipped");
         return;
     };
+    assert!(
+        renderer.card_posters.is_none(),
+        "text-only startup allocates no preview layer"
+    );
+    let (mut cards, snap, nonce) = crate::inline_cards::tests::fixture();
+    cards.set_poster(
+        nonce,
+        kettle_core::ImageData::new_with_budget(
+            2,
+            1,
+            vec![250, 20, 60, 255, 250, 20, 60, 255],
+            &kettle_core::GraphicsBudget::previews(),
+        ),
+    );
+    let mut view = pane(&snap, 1200, 400);
+    view.inline_cards = Some(&cards);
+    capture(&mut renderer, &cfg, &[view], &focused(false));
     let replacing = [&renderer.pane_bases, &renderer.live_pane_bases];
     let blending = [
         &renderer.quads,
         &renderer.overlay_quads,
         &renderer.menu_quads,
+        &renderer.card_base,
+        &renderer.card_decoration,
+        &renderer.card_cursors,
     ];
     let mut quads: Vec<&wgpu::RenderPipeline> = replacing
         .iter()
@@ -185,7 +234,7 @@ fn a_renderer_compiles_each_distinct_pipeline_once() {
         .collect();
     quads.sort();
     quads.dedup();
-    assert_eq!(quads.len(), 2, "five quad layers, two blend modes");
+    assert_eq!(quads.len(), 2, "all quad layers share two blend modes");
     assert_eq!(replacing[0].pipeline(), replacing[1].pipeline());
     assert!(
         blending
@@ -194,6 +243,10 @@ fn a_renderer_compiles_each_distinct_pipeline_once() {
     );
     let image_layers = [
         &renderer.imgs,
+        renderer
+            .card_posters
+            .as_ref()
+            .expect("actual poster creates its layer"),
         &renderer.media_receipt_img,
         &renderer.bg_imgs,
     ];
@@ -201,7 +254,7 @@ fn a_renderer_compiles_each_distinct_pipeline_once() {
         image_layers.iter().map(|layer| layer.pipeline()).collect();
     images.sort();
     images.dedup();
-    assert_eq!(images.len(), 1, "three image layers, one pipeline");
+    assert_eq!(images.len(), 1, "all image layers share one pipeline");
     crate::gpu_tests::assert_shared_quad_pixels_match_standalone();
 }
 
@@ -1210,4 +1263,558 @@ fn opaque_media_receipt_covers_the_terminal_cursor_inverted_glyph() {
         }
     }
     eprintln!("MEDIA_CURSOR_GPU_ACCEPTANCE: opaque receipt covers cursor quad and inverted glyph");
+}
+
+#[test]
+fn unknown_inline_cluster_has_exact_owned_fallback_pixels_in_both_renderers() {
+    let _serialized = gpu_test_guard();
+    for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
+        let Some((mut renderer, mut cfg)) = renderer(320, 120) else {
+            eprintln!("INLINE_CARD_GPU_SKIPPED: unknown fallback, no adapter");
+            return;
+        };
+        cfg.text_renderer = mode;
+        cfg.background_opacity = 1.0;
+        let marker: String = std::iter::once('\u{10eeee}')
+            .chain(std::iter::repeat_n('\u{0305}', 8))
+            .collect();
+        let mut unknown = snapshot_of(
+            20,
+            4,
+            format!("\x1b[8;4;9;31;41m{marker}\x1b[0m").as_bytes(),
+        );
+        let mut expected = snapshot_of(20, 4, "\u{2b1a}".as_bytes());
+        unknown.cursor.shape = alacritty_terminal::vte::ansi::CursorShape::Hidden;
+        expected.cursor.shape = alacritty_terminal::vte::ansi::CursorShape::Hidden;
+        let actual = capture(
+            &mut renderer,
+            &cfg,
+            &[pane(&unknown, 320, 120)],
+            &focused(false),
+        );
+        let background = &renderer.card_scene.base[0];
+        let [x, y] = background.pos;
+        let [width, height] = background.size;
+        let wanted = capture(
+            &mut renderer,
+            &cfg,
+            &[pane(&expected, 320, 120)],
+            &focused(false),
+        );
+        assert!(
+            actual == wanted,
+            "owned fallback ignores raw marks and SGR in {mode:?}"
+        );
+        cfg.background_opacity = 0.35;
+        let translucent = capture(
+            &mut renderer,
+            &cfg,
+            &[pane(&unknown, 320, 120)],
+            &focused(false),
+        );
+        let ordinary = capture(
+            &mut renderer,
+            &cfg,
+            &[pane(&expected, 320, 120)],
+            &focused(false),
+        );
+        let (left, right) = (x.ceil() as u32, (x + width).floor() as u32);
+        let (top, bottom) = (y.ceil() as u32, (y + height).floor() as u32);
+        assert!(
+            left < right && top < bottom,
+            "fallback has a visible cell interior"
+        );
+        let mut ordinary_is_translucent = false;
+        // The owned cell remains opaque above terminal images even when the
+        // rest of the pane lets the desktop show through.
+        for row in top..bottom {
+            for column in left..right {
+                let pixel = translucent.get_pixel(column, row);
+                ordinary_is_translucent |= ordinary.get_pixel(column, row)[3] < 255;
+                assert_eq!(
+                    pixel[3], 255,
+                    "owned cell alpha at {column},{row} in {mode:?}"
+                );
+                assert_eq!(
+                    pixel,
+                    actual.get_pixel(column, row),
+                    "owned cell pixels at {column},{row} in {mode:?}"
+                );
+            }
+        }
+        assert!(
+            ordinary_is_translucent,
+            "ordinary cells retain pane transparency"
+        );
+        let bg = cfg.theme.background;
+        assert!(
+            actual
+                .pixels()
+                .any(|pixel| pixel.0[0..3] != [bg.r, bg.g, bg.b]),
+            "fallback must have visible ink"
+        );
+        // Pixel equality alone could compare two .notdef boxes. Verify the
+        // same production font database really shapes the requested symbols.
+        for symbol in ['\u{25a1}', '\u{2b1a}'] {
+            let family = renderer.font_family.clone();
+            let mut text = TextBuffer::new(&mut renderer.font_system, Metrics::new(16.0, 20.0));
+            text.set_size(Some(80.0), Some(40.0));
+            text.set_text(
+                &symbol.to_string(),
+                &Attrs::new().family(Family::Name(&family)),
+                Shaping::Advanced,
+                None,
+            );
+            text.shape_until_scroll(&mut renderer.font_system, false);
+            let glyphs: Vec<_> = text
+                .layout_runs()
+                .flat_map(|run| {
+                    run.glyphs
+                        .iter()
+                        .map(|glyph| (glyph.font_id, glyph.glyph_id))
+                })
+                .collect();
+            assert_eq!(glyphs.len(), 1, "one owned symbol must shape as one glyph");
+            let (font_id, glyph_id) = glyphs[0];
+            assert_ne!(glyph_id, 0, "owned symbol {symbol:?} must not be .notdef");
+            let font = renderer
+                .font_system
+                .get_font(font_id, Default::default())
+                .expect("shaped glyph font remains loaded");
+            assert_eq!(
+                font.as_swash().charmap().map(symbol),
+                glyph_id,
+                "font must cover the requested symbol, not a replacement box"
+            );
+        }
+        eprintln!("INLINE_CARD_GPU_ACCEPTANCE: unknown fallback {mode:?}");
+    }
+}
+
+#[test]
+fn fallback_cursor_blinks_above_its_background_without_raw_placeholder_ink() {
+    let _serialized = gpu_test_guard();
+    for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
+        let Some((mut renderer, mut cfg)) = renderer(320, 120) else {
+            eprintln!("INLINE_CARD_GPU_SKIPPED: fallback cursor, no adapter");
+            return;
+        };
+        cfg.text_renderer = mode;
+        let marker: String = std::iter::once('\u{10eeee}')
+            .chain(std::iter::repeat_n('\u{0305}', 8))
+            .collect();
+        let mut snap = snapshot_of(20, 4, format!("{marker}\r").as_bytes());
+        snap.cursor.shape = alacritty_terminal::vte::ansi::CursorShape::Block;
+        let on = capture(
+            &mut renderer,
+            &cfg,
+            &[pane(&snap, 320, 120)],
+            &focused(true),
+        );
+        let off = capture(
+            &mut renderer,
+            &cfg,
+            &[pane(&snap, 320, 120)],
+            &focused(false),
+        );
+        assert!(
+            cursor_pixels(&on, &cfg, &snap) > cursor_pixels(&off, &cfg, &snap) + 20,
+            "owned background must not cover its cursor in {mode:?}"
+        );
+        assert_eq!(
+            renderer.pending_cursor_glyph.as_ref().unwrap().ch,
+            '\u{2b1a}'
+        );
+        assert!(
+            !renderer
+                .pending_cursor_glyph
+                .as_ref()
+                .unwrap()
+                .emoji_qualified
+        );
+        assert!(renderer.cursor_quad_range.is_none());
+        assert!(renderer.card_cursor_quad_range.is_some());
+        let again = capture(
+            &mut renderer,
+            &cfg,
+            &[pane(&snap, 320, 120)],
+            &focused(true),
+        );
+        assert_eq!(
+            on.as_raw(),
+            again.as_raw(),
+            "blink returns to byte-identical pixels"
+        );
+        eprintln!("INLINE_CARD_GPU_ACCEPTANCE: fallback cursor {mode:?}");
+    }
+}
+
+#[test]
+fn registered_poster_overwrite_removes_tiles_and_badges_in_the_same_frame() {
+    let _serialized = gpu_test_guard();
+    for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
+        let Some((mut renderer, mut cfg)) = renderer(1200, 400) else {
+            eprintln!("INLINE_CARD_GPU_SKIPPED: registered overwrite, no adapter");
+            return;
+        };
+        cfg.text_renderer = mode;
+        let (mut cards, mut snap, nonce) = crate::inline_cards::tests::fixture();
+        cards.set_poster(
+            nonce,
+            kettle_core::ImageData::new_with_budget(
+                2,
+                1,
+                vec![250, 20, 60, 255, 250, 20, 60, 255],
+                &kettle_core::GraphicsBudget::previews(),
+            ),
+        );
+        snap.cursor.point = kettle_core::Point::new(kettle_core::Line(2), kettle_core::Column(8));
+        snap.cursor.shape = alacritty_terminal::vte::ansi::CursorShape::Block;
+        let mut view = pane(&snap, 1200, 400);
+        view.inline_cards = Some(&cards);
+        let first = capture(&mut renderer, &cfg, &[view], &focused(true));
+        assert_eq!(renderer.card_scene.posters.len(), 1);
+        assert_eq!(renderer.card_scene.labels.len(), 2);
+        assert!(
+            renderer.pending_cursor_glyph.is_none(),
+            "accepted card suppresses its cursor glyph"
+        );
+        assert!(renderer.cursor_quad_range.is_none() && renderer.card_cursor_quad_range.is_none());
+        let center = [
+            cfg.padding_x + 11.0 * renderer.cell_w,
+            cfg.padding_y + 2.5 * renderer.cell_h,
+        ];
+        let before = first.get_pixel(center[0] as u32, center[1] as u32);
+        assert_eq!(&before.0[0..3], &[250, 20, 60]);
+        let badges = [
+            label_rects(&renderer, crate::card_scene::CardLabelKind::Brand),
+            label_rects(&renderer, crate::card_scene::CardLabelKind::Claude),
+        ]
+        .concat();
+        assert_eq!(badges.len(), 2);
+        for rect in &badges {
+            assert!(distinct_colors(&first, *rect) > 1, "badge text is painted");
+        }
+        snap.cells
+            .iter_mut()
+            .find(|cell| (cell.line, cell.col) == (2, 8))
+            .unwrap()
+            .c = 'X';
+        let mut view = pane(&snap, 1200, 400);
+        view.inline_cards = Some(&cards);
+        let after = capture(&mut renderer, &cfg, &[view], &focused(true));
+        assert!(renderer.card_scene.posters.is_empty() && renderer.card_scene.labels.is_empty());
+        assert_ne!(
+            &after.get_pixel(center[0] as u32, center[1] as u32).0[0..3],
+            &[250, 20, 60]
+        );
+        assert_eq!(renderer.pending_cursor_glyph.as_ref().unwrap().ch, 'X');
+        for rect in &badges {
+            assert_eq!(
+                distinct_colors(&after, *rect),
+                1,
+                "no badge text survives the overwrite"
+            );
+        }
+        eprintln!("INLINE_CARD_GPU_ACCEPTANCE: registered overwrite {mode:?}");
+    }
+}
+
+#[test]
+fn refused_card_poster_upload_paints_status_and_recovers_on_the_next_frame() {
+    let _serialized = gpu_test_guard();
+    for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
+        let Some((mut renderer, mut cfg)) = renderer(1200, 400) else {
+            eprintln!("INLINE_CARD_GPU_SKIPPED: upload refusal, no adapter");
+            return;
+        };
+        cfg.text_renderer = mode;
+        let (mut cards, snap, nonce) = crate::inline_cards::tests::fixture();
+        let budget = kettle_core::GraphicsBudget::previews();
+        cards.set_poster(
+            nonce,
+            kettle_core::ImageData::new_with_budget(
+                2,
+                1,
+                vec![250, 20, 60, 255, 250, 20, 60, 255],
+                &budget,
+            ),
+        );
+        // Exhaust accounting only; no large VRAM allocation or performance claim.
+        let mut low = 0;
+        let mut high = budget.limits().process_gpu_bytes;
+        while low < high {
+            let middle = low + (high - low).div_ceil(2);
+            if let Some(reservation) = budget.reserve_transient_gpu(middle) {
+                drop(reservation);
+                low = middle;
+            } else {
+                high = middle - 1;
+            }
+        }
+        let exhausted = budget
+            .reserve_transient_gpu(low)
+            .expect("same serialized account");
+        assert!(budget.reserve_transient_gpu(1).is_none());
+        let mut view = pane(&snap, 1200, 400);
+        view.inline_cards = Some(&cards);
+        let unavailable = capture(&mut renderer, &cfg, &[view], &focused(false));
+        assert!(
+            renderer
+                .card_posters
+                .as_ref()
+                .is_none_or(|posters| posters.drawn_item_indices().next().is_none())
+        );
+        assert_eq!(renderer.card_scene.labels.len(), 3);
+        let status = label_rects(&renderer, crate::card_scene::CardLabelKind::Unavailable);
+        assert_eq!(status.len(), 1);
+        assert!(
+            distinct_colors(&unavailable, status[0]) > 1,
+            "the Unavailable status text is painted"
+        );
+        drop(exhausted);
+        let mut view = pane(&snap, 1200, 400);
+        view.inline_cards = Some(&cards);
+        let recovered = capture(&mut renderer, &cfg, &[view], &focused(false));
+        assert_eq!(
+            renderer
+                .card_posters
+                .as_ref()
+                .expect("recovered poster layer")
+                .drawn_item_indices()
+                .collect::<Vec<_>>(),
+            vec![0]
+        );
+        assert_eq!(renderer.card_scene.labels.len(), 2);
+        let center = [
+            cfg.padding_x + 11.0 * renderer.cell_w,
+            cfg.padding_y + 2.5 * renderer.cell_h,
+        ];
+        assert_eq!(
+            &recovered.get_pixel(center[0] as u32, center[1] as u32).0[0..3],
+            &[250, 20, 60]
+        );
+        assert_ne!(unavailable.as_raw(), recovered.as_raw());
+        eprintln!("INLINE_CARD_GPU_ACCEPTANCE: upload refusal and recovery {mode:?}");
+    }
+}
+
+#[test]
+fn card_badge_labels_follow_configured_minimum_contrast_after_reload() {
+    let _serialized = gpu_test_guard();
+    for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
+        let Some((mut renderer, mut cfg)) = renderer(1200, 400) else {
+            eprintln!("INLINE_CARD_GPU_SKIPPED: label contrast, no adapter");
+            return;
+        };
+        cfg.text_renderer = mode;
+        cfg.theme.background = Rgb::new(20, 20, 20);
+        cfg.theme.foreground = cfg.theme.background;
+        cfg.minimum_contrast = 0.0;
+        let (mut cards, snap, nonce) = crate::inline_cards::tests::fixture();
+        cards.set_poster(nonce, None);
+        let mut view = pane(&snap, 1200, 400);
+        view.inline_cards = Some(&cards);
+        let low = capture(&mut renderer, &cfg, &[view], &focused(false));
+        cfg.minimum_contrast = 4.5;
+        let mut view = pane(&snap, 1200, 400);
+        view.inline_cards = Some(&cards);
+        let readable = capture(&mut renderer, &cfg, &[view], &focused(false));
+        let bounds = [
+            cfg.padding_x as u32,
+            (cfg.padding_y + renderer.cell_h) as u32,
+            (cfg.padding_x + 5.0 * renderer.cell_w) as u32,
+            (cfg.padding_y + 3.0 * renderer.cell_h) as u32,
+        ];
+        let ink = |image: &image::RgbaImage| {
+            (bounds[1]..bounds[3])
+                .flat_map(|y| (bounds[0]..bounds[2]).map(move |x| (x, y)))
+                .filter(|&(x, y)| image.get_pixel(x, y).0[0..3] != [20, 20, 20])
+                .count()
+        };
+        assert_eq!(ink(&low), 0, "configured zero contrast remains literal");
+        assert!(
+            ink(&readable) > 20,
+            "same retained badge now has readable ink in {mode:?}"
+        );
+        eprintln!("INLINE_CARD_GPU_ACCEPTANCE: label contrast reload {mode:?}");
+    }
+}
+
+#[test]
+fn registered_poster_real_scroll_keeps_partial_pixels_and_offscreen_overwrite_removes_them() {
+    use alacritty_terminal::grid::Scroll;
+    let _serialized = gpu_test_guard();
+    for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
+        let Some((mut renderer, mut cfg)) = renderer(1200, 400) else {
+            eprintln!("INLINE_CARD_GPU_SKIPPED: partial scroll, no adapter");
+            return;
+        };
+        cfg.text_renderer = mode;
+        for upper_rows_offscreen in [true, false] {
+            let (mut cards, mut term, nonce) =
+                crate::inline_cards::tests::fixture_term(if upper_rows_offscreen { 0 } else { 6 });
+            if upper_rows_offscreen {
+                let mut processor: Processor = Processor::new();
+                processor.advance(
+                    &mut term,
+                    b"\r\nordinary 0\r\nordinary 1\r\nordinary 2\r\nordinary 3\r\nordinary 4\r\nordinary 5",
+                );
+                term.scroll_display(Scroll::Bottom);
+            } else {
+                term.scroll_display(Scroll::Top);
+            }
+            cards.set_poster(
+                nonce,
+                kettle_core::ImageData::new_with_budget(
+                    2,
+                    1,
+                    vec![250, 20, 60, 255, 250, 20, 60, 255],
+                    &kettle_core::GraphicsBudget::previews(),
+                ),
+            );
+            let mut snap = PaneSnapshot::default();
+            snap.capture_with_card_marks(&term, true);
+            let mut view = pane(&snap, 1200, 400);
+            view.inline_cards = Some(&cards);
+            let first = capture(&mut renderer, &cfg, &[view], &focused(false));
+            assert_eq!(renderer.card_scene.posters.len(), 1);
+            let visible_row = if upper_rows_offscreen { 0.5 } else { 7.5 };
+            let center = [
+                cfg.padding_x + 11.0 * renderer.cell_w,
+                cfg.padding_y + visible_row * renderer.cell_h,
+            ];
+            assert_eq!(
+                &first.get_pixel(center[0] as u32, center[1] as u32).0[0..3],
+                &[250, 20, 60],
+                "visible partial poster in {mode:?}, upper={upper_rows_offscreen}"
+            );
+            let mut frame = crate::inline_cards::CardFrame::default();
+            cards.recognize_into(&snap, &mut frame);
+            let block = &frame.blocks[0];
+            let offscreen_line = if upper_rows_offscreen {
+                block.line - 1
+            } else {
+                block.line + i32::from(block.rows)
+            };
+            let viewport_row = offscreen_line + snap.display_offset as i32;
+            assert!(viewport_row < 0 || viewport_row >= snap.screen_lines as i32);
+            let column = if upper_rows_offscreen {
+                7
+            } else {
+                block.column
+            };
+            term.grid_mut()[kettle_core::Point::new(
+                kettle_core::Line(offscreen_line),
+                kettle_core::Column(column),
+            )]
+            .c = 'X';
+            snap.capture_with_card_marks(&term, true);
+            let mut view = pane(&snap, 1200, 400);
+            view.inline_cards = Some(&cards);
+            let after = capture(&mut renderer, &cfg, &[view], &focused(false));
+            assert!(renderer.card_scene.posters.is_empty());
+            assert!(renderer.card_scene.labels.is_empty());
+            assert_ne!(
+                &after.get_pixel(center[0] as u32, center[1] as u32).0[0..3],
+                &[250, 20, 60],
+                "offscreen context overwrite removes the poster in its next frame"
+            );
+        }
+        eprintln!("INLINE_CARD_GPU_ACCEPTANCE: partial scroll and offscreen overwrite {mode:?}");
+    }
+}
+
+#[test]
+fn exhausted_preview_account_keeps_new_terminal_windows_and_recovers_cards() {
+    let _serialized = gpu_test_guard();
+    for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
+        let Some((probe, mut cfg)) = renderer(1200, 400) else {
+            eprintln!("INLINE_CARD_GPU_SKIPPED: new window with full previews, no adapter");
+            return;
+        };
+        drop(probe);
+        cfg.text_renderer = mode;
+        let budget = kettle_core::GraphicsBudget::previews();
+        // Reserve accounting only, preserving actual GPU capacity for text.
+        let mut low = 0;
+        let mut high = budget.limits().process_gpu_bytes;
+        while low < high {
+            let middle = low + (high - low).div_ceil(2);
+            if let Some(reservation) = budget.reserve_transient_gpu(middle) {
+                drop(reservation);
+                low = middle;
+            } else {
+                high = middle - 1;
+            }
+        }
+        let exhausted = budget
+            .reserve_transient_gpu(low)
+            .expect("serialized preview account");
+        assert!(budget.reserve_transient_gpu(1).is_none());
+        let mut renderer = Renderer::headless_for_tests(&cfg, 1200, 400)
+            .expect("preview pressure must not prevent a terminal window")
+            .expect("the already-probed adapter remains available");
+        let snap = snapshot_of(80, 8, b"a new terminal remains usable");
+        let plain = capture(
+            &mut renderer,
+            &cfg,
+            &[pane(&snap, 1200, 400)],
+            &focused(false),
+        );
+        // The first text row, inside the padding, so the focused pane's
+        // border cannot satisfy it.
+        let text_row = [
+            cfg.padding_x,
+            cfg.padding_y,
+            29.0 * renderer.cell_w,
+            renderer.cell_h,
+        ];
+        assert!(
+            distinct_colors(&plain, text_row) > 1,
+            "terminal text is painted"
+        );
+        let (mut cards, snap, nonce) = crate::inline_cards::tests::fixture();
+        cards.set_poster(
+            nonce,
+            kettle_core::ImageData::new_with_budget(
+                2,
+                1,
+                vec![250, 20, 60, 255, 250, 20, 60, 255],
+                &budget,
+            ),
+        );
+        let mut view = pane(&snap, 1200, 400);
+        view.inline_cards = Some(&cards);
+        let unavailable = capture(&mut renderer, &cfg, &[view], &focused(false));
+        let status = label_rects(&renderer, crate::card_scene::CardLabelKind::Unavailable);
+        assert_eq!(status.len(), 1);
+        assert!(
+            distinct_colors(&unavailable, status[0]) > 1,
+            "the Unavailable status text is painted"
+        );
+        drop(exhausted);
+        let mut view = pane(&snap, 1200, 400);
+        view.inline_cards = Some(&cards);
+        let recovered = capture(&mut renderer, &cfg, &[view], &focused(false));
+        assert!(
+            !renderer
+                .card_scene
+                .labels
+                .iter()
+                .any(|label| label.kind == crate::card_scene::CardLabelKind::Unavailable)
+        );
+        let center = [
+            cfg.padding_x + 11.0 * renderer.cell_w,
+            cfg.padding_y + 2.5 * renderer.cell_h,
+        ];
+        assert_eq!(
+            &recovered.get_pixel(center[0] as u32, center[1] as u32).0[0..3],
+            &[250, 20, 60]
+        );
+        assert_ne!(unavailable.as_raw(), recovered.as_raw());
+        eprintln!(
+            "INLINE_CARD_GPU_ACCEPTANCE: new window with full previews and recovery {mode:?}"
+        );
+    }
 }
