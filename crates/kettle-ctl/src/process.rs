@@ -89,10 +89,34 @@ pub fn identity(pid: u32) -> Result<ProcessIdentity, InspectError> {
     return imp::inspect(pid).map(|snapshot| snapshot.identity);
 }
 
+/// The executable `identity` runs, as the operating system names it, while
+/// it is still that process: the identity is read again after the path, so a
+/// pid reused meanwhile reads as unavailable. The path is the kernel's, never
+/// anything the process says about itself; display it only after sanitizing.
+pub fn executable(identity: ProcessIdentity) -> Result<std::path::PathBuf, InspectError> {
+    if identity.pid == 0 {
+        return Err(InspectError::Unavailable);
+    }
+    #[cfg(windows)]
+    return imp::executable(identity);
+    #[cfg(not(windows))]
+    {
+        let path = imp::executable(identity.pid)?;
+        if self::identity(identity.pid)? != identity {
+            return Err(InspectError::Unavailable);
+        }
+        Ok(path)
+    }
+}
+
 #[cfg(target_os = "linux")]
 mod imp {
     use super::{InspectError, ProcessIdentity, ProcessSnapshot};
     use std::io::Read as _;
+
+    pub(super) fn executable(pid: u32) -> Result<std::path::PathBuf, InspectError> {
+        std::fs::read_link(format!("/proc/{pid}/exe")).map_err(|_| InspectError::Unavailable)
+    }
 
     /// `/proc/<pid>/stat` is one short line; `comm` is at most 64 bytes.
     const MAX_STAT_BYTES: u64 = 4096;
@@ -160,6 +184,22 @@ mod imp {
     /// `pbi_status` of a process that has exited and awaits its parent.
     const SZOMB: u32 = 5;
 
+    pub(super) fn executable(pid: u32) -> Result<std::path::PathBuf, InspectError> {
+        use std::os::unix::ffi::OsStrExt as _;
+        let os_pid = libc::pid_t::try_from(pid).map_err(|_| InspectError::Unavailable)?;
+        let mut path = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        // SAFETY: `path` is a live buffer of the length passed; the call
+        // writes at most that many bytes and returns how many it wrote.
+        let written =
+            unsafe { libc::proc_pidpath(os_pid, path.as_mut_ptr().cast(), path.len() as u32) };
+        let written = usize::try_from(written).map_err(|_| InspectError::Unavailable)?;
+        if written == 0 {
+            return Err(InspectError::Unavailable);
+        }
+        path.truncate(written.min(path.len()));
+        Ok(std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&path)))
+    }
+
     pub(super) fn inspect(pid: u32) -> Result<ProcessSnapshot, InspectError> {
         let os_pid = libc::pid_t::try_from(pid).map_err(|_| InspectError::Unavailable)?;
         let size = std::mem::size_of::<libc::proc_bsdinfo>();
@@ -204,7 +244,8 @@ mod imp {
     use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, HANDLE, STILL_ACTIVE};
     use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
     use windows_sys::Win32::System::Threading::{
-        GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
     };
 
     /// Closes a handle on every path.
@@ -282,6 +323,34 @@ mod imp {
         times(&process, pid).map(|(identity, _)| identity)
     }
 
+    /// The path and the identity come from one handle, so they belong to
+    /// one process.
+    pub(super) fn executable(
+        expected: ProcessIdentity,
+    ) -> Result<std::path::PathBuf, InspectError> {
+        use std::os::windows::ffi::OsStringExt as _;
+        let process = open(expected.pid())?;
+        let (identity, exited) = times(&process, expected.pid())?;
+        if identity != expected || exited {
+            return Err(InspectError::Unavailable);
+        }
+        // Windows paths are at most 32,767 UTF-16 units.
+        let mut path = vec![0u16; 32_768];
+        let mut size = path.len() as u32;
+        // SAFETY: the handle is live, `path` holds `size` units, and the call
+        // writes at most that many and stores the count it wrote in `size`.
+        if unsafe {
+            QueryFullProcessImageNameW(process.0, PROCESS_NAME_WIN32, path.as_mut_ptr(), &mut size)
+        } == 0
+        {
+            return Err(InspectError::Unavailable);
+        }
+        path.truncate(size as usize);
+        Ok(std::path::PathBuf::from(std::ffi::OsString::from_wide(
+            &path,
+        )))
+    }
+
     /// The identity and exit state from the process's own handle.
     fn times(process: &Owned, pid: u32) -> Result<(ProcessIdentity, bool), InspectError> {
         let zero = FILETIME {
@@ -349,6 +418,10 @@ mod imp {
     pub(super) fn inspect(_pid: u32) -> Result<ProcessSnapshot, InspectError> {
         Err(InspectError::Unsupported)
     }
+
+    pub(super) fn executable(_pid: u32) -> Result<std::path::PathBuf, InspectError> {
+        Err(InspectError::Unsupported)
+    }
 }
 
 #[cfg(test)]
@@ -406,6 +479,24 @@ mod tests {
             }
         }
         child.wait().ok();
+    }
+
+    #[test]
+    fn the_executable_is_this_test_binary_and_only_for_its_own_identity() {
+        let me = current().unwrap().identity;
+        let path = executable(me).unwrap();
+        let expected = std::env::current_exe().unwrap();
+        assert_eq!(
+            std::fs::canonicalize(&path).unwrap(),
+            std::fs::canonicalize(&expected).unwrap()
+        );
+        // The same pid with another start time is another process.
+        let reused = ProcessIdentity::new(me.pid(), me.start().wrapping_add(1));
+        assert_eq!(executable(reused), Err(InspectError::Unavailable));
+        assert_eq!(
+            executable(ProcessIdentity::new(0, 0)),
+            Err(InspectError::Unavailable)
+        );
     }
 
     #[test]

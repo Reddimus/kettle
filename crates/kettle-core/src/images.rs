@@ -7,7 +7,7 @@ use std::time::Instant;
 
 pub use kettle_vt::kitty::{AnimationState, current_frame};
 use kettle_vt::kitty::{PlacementKey, relative_deletion_closure};
-pub use kettle_vt::{ImageData, PixelBuffer, Placed, PlacementParams};
+pub use kettle_vt::{ImageData, ImageRefusal, PixelBuffer, Placed, PlacementParams};
 
 /// Pixel-space sub-rectangle sampled by one image placement. The renderer
 /// validates it against the referenced image before producing UV coordinates.

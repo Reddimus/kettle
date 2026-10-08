@@ -697,6 +697,9 @@ pub struct Pane {
     /// to the PTY. Unix input policy accepts it only when its pid still matches
     /// a fresh `tcgetpgrp` snapshot; Windows combines it with OSC 133 state.
     pub foreground_process: Option<kettle_remote::ForegroundProcess>,
+    /// Media shown in this pane with `show`. It moves with the pane, into
+    /// another window too.
+    pub media_shelf: crate::media::Shelf,
     /// Agent-first: set while an agent control connection has
     /// targeted this pane (a mutating method or `subscribe`). Drives the
     /// titlebar agent badge; cleared when the last attached connection drops.
@@ -1904,6 +1907,7 @@ impl Mux {
             id,
             Pane {
                 inline_cards: kettle_render::InlineCards::default(),
+                media_shelf: crate::media::Shelf::default(),
                 term,
                 caller_root,
                 rx,

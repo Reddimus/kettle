@@ -48,6 +48,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   poster provider. Text or still-image containers named as videos no longer
   show a video card; movies renamed to another supported video suffix still
   work. Header inspection reads at most 64 KiB on the background worker.
+- `kettle show PATH` (or `-` for stdin) and the `show` control method send an
+  image or SVG to the media shelf of the pane they run in, in the Kettle they
+  run inside. They need only Agent previews, never full control. Media lands
+  in the caller's own pane by its process ancestry; a sender Kettle cannot
+  place is labeled unverified with the program the system names for it.
+  Each pane keeps its last eight items; `list_panes` reports them. A push
+  never opens anything on screen.
 - The media worker can classify a file by its content, raster or SVG,
   whatever it is called, and says what it rendered. Kettle and its worker now
   speak media protocol 2; a worker from an older build is refused until

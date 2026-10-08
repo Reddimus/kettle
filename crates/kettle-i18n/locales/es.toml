@@ -3,6 +3,7 @@
 
 inline_card_pending = "Cargando…"
 inline_card_unavailable = "No disponible"
+media_shelf_untitled = "Imagen sin título"
 a11y_pane = "Panel de terminal {id}"
 a11y_window = "Terminal Kettle"
 about_copy_version = "Copiar la información de versión"

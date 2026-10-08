@@ -126,8 +126,8 @@ const CALLER_CHECK_BUDGET: Duration = Duration::from_millis(250);
 
 /// What the connection thread learned about who sent a request: the
 /// caller's checked ancestry, nearest first, for the App to match against
-/// its panes. Only the connection thread makes one, and only `get_state`
-/// carries one today.
+/// its panes. Only the connection thread makes one, and only `get_state` and
+/// `show` carry one.
 #[derive(Debug, Clone, Default)]
 pub struct CallerEvidence {
     checked: Option<CheckedCaller>,
@@ -226,6 +226,27 @@ pub struct AdmittedRequest {
     method: Method,
     internal_probe: bool,
     caller: CallerEvidence,
+    /// When the connection thread admitted it.
+    admitted_at: Instant,
+    /// A `show`'s params, parsed on the connection thread. Boxed: only
+    /// `show` carries one, and every request crosses the App's channel.
+    show: Option<Box<ShowAdmission>>,
+}
+
+/// A `show` as its connection thread admitted it: the parsed request and the
+/// kernel's word for its sender.
+#[derive(Debug)]
+pub struct ShowAdmission {
+    pub request: kettle_ctl::show::ShowRequest,
+    pub sender: Option<SenderIdentity>,
+}
+
+/// The connecting process as the kernel names it, and the executable it ran
+/// when the request was admitted. Never anything the sender says about itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SenderIdentity {
+    pub process: ProcessIdentity,
+    pub executable: Option<PathBuf>,
 }
 
 impl AdmittedRequest {
@@ -249,6 +270,16 @@ impl AdmittedRequest {
         &self.caller
     }
 
+    /// When the connection thread admitted it; deadlines count from here.
+    pub fn admitted_at(&self) -> Instant {
+        self.admitted_at
+    }
+
+    /// A `show`'s parsed params and sender, once.
+    pub fn take_show(&mut self) -> Option<ShowAdmission> {
+        self.show.take().map(|show| *show)
+    }
+
     /// One `read_screen` probe for an admitted `wait_for`. It carries the
     /// wait's authority, which is Read for both, and nothing more: the method
     /// is fixed and only the pane address varies.
@@ -270,6 +301,8 @@ impl AdmittedRequest {
             method: Method::ReadScreen,
             internal_probe: true,
             caller: self.caller.clone(),
+            admitted_at: Instant::now(),
+            show: None,
         }
     }
 }
@@ -290,6 +323,13 @@ fn admit(policy: CtlPolicy, req: Request) -> Result<AdmittedRequest, Response> {
         return Err(Response::err(req.id, &error.code, error.message));
     }
     if !req.params.is_null() && !req.params.is_object() {
+        // `show` answers every bad request in its own fixed wording.
+        if method == Method::Show {
+            return Err(kettle_ctl::show::show_failure(
+                req.id,
+                kettle_media::FailureCode::BadParams,
+            ));
+        }
         return Err(Response::err(
             req.id,
             ec::BAD_PARAMS,
@@ -301,7 +341,38 @@ fn admit(policy: CtlPolicy, req: Request) -> Result<AdmittedRequest, Response> {
         method,
         internal_probe: false,
         caller: CallerEvidence::default(),
+        admitted_at: Instant::now(),
+        show: None,
     })
+}
+
+/// Finish an admitted request on its connection thread: check the caller of
+/// a method that reports or routes by it, and parse a `show`'s params, so a
+/// malformed one is answered here and never reaches the App.
+fn prepare(
+    mut request: AdmittedRequest,
+    claim: Result<PeerClaim, UnverifiedReason>,
+    capture: &PeerCapture,
+) -> Result<AdmittedRequest, Response> {
+    match request.method {
+        Method::GetState => request.caller = CallerEvidence::check(claim, capture),
+        Method::Show => {
+            let params = std::mem::take(&mut request.req.params);
+            let show = kettle_ctl::show::ShowRequest::parse(params)
+                .map_err(|failure| kettle_ctl::show::show_failure(request.req.id, failure))?;
+            request.caller = CallerEvidence::check(claim, capture);
+            let sender = capture.peer().map(|process| SenderIdentity {
+                process,
+                executable: kettle_ctl::process::executable(process).ok(),
+            });
+            request.show = Some(Box::new(ShowAdmission {
+                request: show,
+                sender,
+            }));
+        }
+        _ => {}
+    }
+    Ok(request)
 }
 
 /// The control server: owns the connection table + the inbound channel; the
@@ -742,13 +813,10 @@ fn connection_loop(
                 Ok(req) => claim.frame(req.caller),
                 Err(_) => claim.invalid_frame(),
             }
-            let request = match parsed.and_then(|req| admit(access.current(), req)) {
-                // Only `get_state` reports its caller today, so only it pays
-                // for the check.
-                Ok(mut request) if request.method() == Method::GetState => {
-                    request.caller = CallerEvidence::check(claim.claim(), &capture);
-                    request
-                }
+            let request = match parsed
+                .and_then(|req| admit(access.current(), req))
+                .and_then(|req| prepare(req, claim.claim(), &capture))
+            {
                 Ok(request) => request,
                 Err(resp) => {
                     if write_response_line(&mut conn, &resp, policy.write).is_err() {
@@ -1568,6 +1636,73 @@ mod tests {
         let response = read_response(&mut client, Duration::from_secs(2));
         assert_eq!(response.id, 2);
         assert_eq!(response.result["served"], true);
+    }
+
+    /// A malformed `show` is answered on its connection thread; a valid one
+    /// reaches the App already parsed, its params moved out, with its sender
+    /// named by the kernel and its caller checked.
+    #[test]
+    fn show_is_parsed_and_checked_before_it_reaches_the_app() {
+        let (endpoint, rx) = start_test_accept_loop("show-prepare", quick_policy());
+        let mut client = kettle_ctl::transport::connect(&endpoint).expect("connect");
+        let (conn_id, _events) = recv_new_conn(&rx, Duration::from_secs(2));
+        send_line(
+            &mut client,
+            r#"{"v":1,"id":1,"method":"show","params":{"svg":"<svg/>","image_b64":"AA=="}}"#,
+        );
+        let response = read_response(&mut client, Duration::from_secs(2));
+        assert_eq!(response.id, 1);
+        let error = response.error.expect("two sources are refused");
+        assert_eq!(error.code, "bad_params");
+        assert_nothing_dispatched(&rx, conn_id);
+        // Params that are not an object get `show`'s own wording too.
+        send_line(&mut client, r#"{"v":1,"id":3,"method":"show","params":[]}"#);
+        let error = read_response(&mut client, Duration::from_secs(2))
+            .error
+            .expect("refused");
+        assert_eq!(
+            (error.code.as_str(), error.message.as_str()),
+            (
+                "bad_params",
+                kettle_media::FailureCode::BadParams.model_message()
+            )
+        );
+        assert_nothing_dispatched(&rx, conn_id);
+        send_line(
+            &mut client,
+            r#"{"v":1,"id":2,"method":"show","params":{"svg":"<svg/>","title":"Plot"}}"#,
+        );
+        let mut request = loop {
+            match rx.recv_timeout(Duration::from_secs(2)) {
+                Ok(CtlServerMsg::Request {
+                    conn_id: c,
+                    request,
+                    ..
+                }) if c == conn_id => break request,
+                Ok(_) => {}
+                Err(error) => panic!("show was not dispatched: {error}"),
+            }
+        };
+        assert_eq!(request.method(), Method::Show);
+        assert!(request.request().params.is_null(), "the params moved");
+        let show = request
+            .take_show()
+            .expect("parsed on the connection thread");
+        assert!(request.take_show().is_none(), "taken once");
+        assert_eq!(show.request.title.as_deref(), Some("Plot"));
+        let sender = show
+            .sender
+            .expect("the kernel names the connecting process");
+        assert_eq!(sender.process.pid(), std::process::id());
+        assert_eq!(
+            std::fs::canonicalize(sender.executable.expect("its executable")).unwrap(),
+            std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap()
+        );
+        // This client sent no claim: checked, and unverified.
+        assert_eq!(
+            request.caller().chain().map(Result::err),
+            Some(Some(UnverifiedReason::MissingClaim))
+        );
     }
 
     /// `wait_for`'s probes are fixed `read_screen` requests under the wait's

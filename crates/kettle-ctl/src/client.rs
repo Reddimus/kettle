@@ -24,6 +24,9 @@ use crate::transport::{self, CtlStream};
 pub enum CtlError {
     /// No running server was found in the registry.
     NoServer,
+    /// Display discovery found no Kettle this process runs in, by its
+    /// ancestry or by the `KETTLE_PID` it inherited, and tries no other.
+    NotInKettle,
     /// An I/O / transport failure.
     Io(std::io::Error),
     /// The server returned an error response.
@@ -45,6 +48,10 @@ impl std::fmt::Display for CtlError {
             CtlError::NoServer => write!(
                 f,
                 "no running kettle control server found (start kettle with `agent-server = full` or `--agent-server full`)"
+            ),
+            CtlError::NotInKettle => write!(
+                f,
+                "this session is not running inside a kettle whose agent previews are on"
             ),
             CtlError::Io(e) => write!(f, "control I/O error: {e}"),
             CtlError::Server { code, message } => write!(f, "server error [{code}]: {message}"),
@@ -163,12 +170,27 @@ impl Client {
     /// owner is still alive, the entry stays and discovery surfaces the
     /// connect error instead of a blanket `NoServer`.
     pub fn discover(pid: Option<u32>) -> Result<Self, CtlError> {
+        Self::discover_with(pid, Fallback::Newest)
+    }
+
+    /// [`Client::discover`] for showing media: the Kettle `pid` names, else
+    /// the one this process runs inside, else the one `KETTLE_PID` names,
+    /// and nothing else, so media never lands in an unrelated Kettle. An
+    /// entry named by `KETTLE_PID` must record its start time, so the server
+    /// can be checked to be that instance. Finding none is
+    /// [`CtlError::NotInKettle`].
+    pub fn discover_display(pid: Option<u32>) -> Result<Self, CtlError> {
+        Self::discover_with(pid, Fallback::Nothing)
+    }
+
+    fn discover_with(pid: Option<u32>, fallback: Fallback) -> Result<Self, CtlError> {
         let ancestry = crate::identity::current_ancestry(Instant::now() + ANCESTRY_BUDGET);
         Self::discover_in(
             &discovery::registry_locations(),
             pid,
             &ancestry,
             kettle_pid_hint(|name| std::env::var(name).ok()),
+            fallback,
             Self::connect_authenticated,
             discovery::owner_alive,
         )
@@ -210,6 +232,7 @@ impl Client {
         pid: Option<u32>,
         ancestry: &[crate::process::ProcessIdentity],
         kettle_pid: Option<u32>,
+        fallback: Fallback,
         connect: impl Fn(&discovery::RegistryEntry) -> Result<Self, CtlError>,
         owner_alive: impl Fn(&discovery::RegistryEntry) -> bool,
     ) -> Result<Self, CtlError> {
@@ -217,6 +240,12 @@ impl Client {
         // endpoints whose owner is alive are probed.
         let candidates = discovery::live_candidates_by(locations, &owner_alive);
         let named = |pid: u32| candidates.iter().find(|(entry, _)| entry.pid == pid);
+        // An inherited name is checked against a recorded start when display
+        // discovery relies on it: a pid alone may by now be another Kettle.
+        let inherited = |pid: u32| {
+            named(pid)
+                .filter(|(entry, _)| fallback == Fallback::Newest || entry.start_token.is_some())
+        };
         let chosen = match pid {
             Some(pid) => Some(named(pid).ok_or(CtlError::NoServer)?),
             None => ancestry
@@ -227,7 +256,7 @@ impl Client {
                         entry.pid == ancestor.pid() && entry.start_token == Some(ancestor.start())
                     })
                 })
-                .or_else(|| kettle_pid.and_then(named)),
+                .or_else(|| kettle_pid.and_then(inherited)),
         };
         let attempt = |entry: &discovery::RegistryEntry, dir: &std::path::Path| {
             connect(entry).inspect_err(|_| {
@@ -245,6 +274,9 @@ impl Client {
         };
         if let Some((entry, dir)) = chosen {
             return attempt(entry, dir);
+        }
+        if fallback == Fallback::Nothing {
+            return Err(CtlError::NotInKettle);
         }
         let mut last_err: Option<CtlError> = None;
         for (entry, dir) in &candidates {
@@ -323,9 +355,10 @@ impl Client {
                 CtlError::Io(error) => format!("an I/O failure ({error})"),
                 // An exchange never produces these; keep the mapping total
                 // rather than assert a shape a future caller could break.
-                CtlError::NoServer | CtlError::Server { .. } | CtlError::Unusable(_) => {
-                    "an incomplete request".to_string()
-                }
+                CtlError::NoServer
+                | CtlError::NotInKettle
+                | CtlError::Server { .. }
+                | CtlError::Unusable(_) => "an incomplete request".to_string(),
             });
         }
         self.writer = None;
@@ -636,6 +669,7 @@ fn call_timeout(method: &str, params: &Value) -> Duration {
             Duration::from_millis(millis) + Duration::from_secs(12)
         }
         "screenshot" => Duration::from_secs(15),
+        "show" => crate::show::SHOW_CALL_TIMEOUT,
         _ => Duration::from_secs(15),
     }
 }
@@ -704,6 +738,15 @@ const ANCESTRY_BUDGET: Duration = Duration::from_millis(250);
 
 /// `KETTLE_PID` when it is a well-formed pid: the Kettle whose pane started
 /// this process, unless something changed it.
+/// What discovery may try when no Kettle is named and none is an ancestor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fallback {
+    /// The newest running server, for control and reads.
+    Newest,
+    /// Nothing: media must not land in an unrelated Kettle.
+    Nothing,
+}
+
 fn kettle_pid_hint(env: impl Fn(&str) -> Option<String>) -> Option<u32> {
     env("KETTLE_PID")
         .filter(|value| {
@@ -950,13 +993,55 @@ mod tests {
         ancestry: &[ProcessIdentity],
         hint: Option<u32>,
     ) -> Vec<u32> {
+        tried_with(dirs, pid, ancestry, hint, Fallback::Newest).0
+    }
+
+    /// [`tried`] under `fallback`, with whether discovery ended in
+    /// [`CtlError::NotInKettle`].
+    fn tried_with(
+        dirs: &[std::path::PathBuf],
+        pid: Option<u32>,
+        ancestry: &[ProcessIdentity],
+        hint: Option<u32>,
+        fallback: Fallback,
+    ) -> (Vec<u32>, bool) {
         let attempts = std::cell::RefCell::new(Vec::new());
         let connect = |entry: &RegistryEntry| -> Result<Client, CtlError> {
             attempts.borrow_mut().push(entry.pid);
             Err(CtlError::Io(std::io::Error::other("refused")))
         };
-        let _ = Client::discover_in(dirs, pid, ancestry, hint, connect, |_entry| true);
-        attempts.into_inner()
+        let outcome =
+            Client::discover_in(dirs, pid, ancestry, hint, fallback, connect, |_entry| true);
+        let outside = matches!(outcome, Err(CtlError::NotInKettle));
+        (attempts.into_inner(), outside)
+    }
+
+    /// Display discovery tries the Kettle named or the one a client runs in,
+    /// then the one `KETTLE_PID` names when its entry records a start, and
+    /// never another: outside every Kettle it says so and connects nowhere.
+    #[test]
+    fn display_discovery_never_uses_an_unrelated_instance() {
+        let dir = scratch_registry("display");
+        fake_server(&dir, 10, 100, 1000);
+        fake_server(&dir, 20, 200, 2000);
+        // An entry from a build without start tokens names only a pid.
+        discovery::register(&dir, &reg_entry(&dir, 30, 300)).unwrap();
+        let me = ProcessIdentity::new(1, 5000);
+        let dirs = [dir.clone()];
+        let display = |pid, ancestry: &[ProcessIdentity], hint| {
+            tried_with(&dirs, pid, ancestry, hint, Fallback::Nothing)
+        };
+        assert_eq!(display(None, &[me], None), (vec![], true));
+        assert_eq!(display(None, &[me], Some(99)), (vec![], true));
+        assert_eq!(display(None, &[me], Some(10)), (vec![10], false));
+        assert_eq!(display(None, &[me], Some(30)), (vec![], true));
+        let inside_twenty = [me, ProcessIdentity::new(20, 2000)];
+        assert_eq!(display(None, &inside_twenty, Some(10)), (vec![20], false));
+        assert_eq!(display(Some(30), &[me], None), (vec![30], false));
+        // Control discovery still falls back, and takes a pid-only entry.
+        assert_eq!(tried(&dirs, None, &[me], Some(30)), [30]);
+        assert_eq!(tried(&dirs, None, &[me], None).len(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The Kettle a client runs inside wins over a newer one, the nearest of
@@ -1048,6 +1133,7 @@ mod tests {
             None,
             &[],
             None,
+            Fallback::Newest,
             |entry: &RegistryEntry| {
                 attempts.borrow_mut().push(entry.pid);
                 Err(CtlError::NoServer)
@@ -1133,6 +1219,7 @@ mod tests {
             None,
             &[],
             None,
+            Fallback::Newest,
             connect,
             |_entry| true,
         );
@@ -1169,6 +1256,7 @@ mod tests {
             None,
             &[],
             None,
+            Fallback::Newest,
             connect,
             |_entry| false,
         );
@@ -1213,6 +1301,7 @@ mod tests {
                 None,
                 &[],
                 None,
+                Fallback::Newest,
                 connect,
                 discovery::owner_alive
             ),
@@ -1230,6 +1319,7 @@ mod tests {
                 None,
                 &[],
                 None,
+                Fallback::Newest,
                 connect,
                 discovery::owner_alive
             ),

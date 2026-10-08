@@ -252,7 +252,7 @@ without granting control. Every method declares one capability:
 |---|---|---|
 | Read | `agent-server` is `read-only` or `full` | `get_state`, `list_tabs`, `list_panes`, `read_screen`, `read_cells`, `ui_geometry`, `subscribe`, `wait_for` |
 | Mutate | `agent-server = full` | `screenshot`, `send_text`, `send_keys`, `dispatch_ui_key`, `dispatch_keybind`, `send_mouse`, `resize_window`, `perform_action`, `run_command` |
-| Display | `agent-server = full`, or `agent-display` on | none yet; agent previews arrive with the `show` method |
+| Display | `agent-server = full`, or `agent-display` on | `show` |
 
 The server runs when either setting allows something, so the six
 combinations behave like this:
@@ -288,6 +288,69 @@ applies at once, including for connections already open, and starts the server
 if none runs; a launch flag keeps its precedence over a reload. Turning display
 off applies at the next launch. `get_state` reports the policy in force as
 `policy: {server, display}`, beside the original `mode` field.
+
+### Showing media
+
+`show` sends an image or SVG to the media shelf of the pane its caller runs
+in. It needs only Display, so `agent-display` is enough; it grants no reads
+or mutations, and a display-only client learns nothing about the screen from
+it. `kettle show PATH` and `kettle show -` (bytes on stdin) send it from a
+shell.
+
+Params take exactly one source, plus optional `title` (at most 4 KiB) and
+`key` (1 to 256 bytes):
+
+| Source | Rendered as |
+|---|---|
+| `svg`: SVG text, at most 2 MiB | SVG |
+| `image_b64`: standard base64 bytes, at most 32 MiB decoded | whatever the media worker finds the bytes to be: raster or SVG |
+| `path` + `dev` + `ino`: an absolute path and the device and inode the caller saw | whatever the worker finds in the file it opens; another file at that path is refused |
+
+The whole request still fits the 1 MiB request line, so larger media goes by
+path. The file's name, and the caller's word for its type, decide nothing.
+A `pane` param is honored only for full control, for a caller Kettle cannot
+place. A malformed `show` is answered on its connection thread and never
+reaches the App.
+
+**Where it goes.** The pane whose own child process is the caller's nearest
+ancestor, in any window: that item is verified. Otherwise full control's
+`pane`, or the pane the caller's environment names when `KETTLE_PID` names
+this Kettle; those items are unverified, and the shelf names their sender by
+the executable and pid the kernel reports for it, never by anything the
+sender says. Nothing else routes: not the focused pane, and never another
+Kettle. `kettle show` finds its Kettle the same strict way: the one it runs
+inside, else the one `KETTLE_PID` names (when that entry records its start
+time), and never the newest running one.
+
+**When it is answered.** After the item is on the shelf, never on
+admission. One render runs at a time; up to three pushes wait behind it,
+each sender (a verified pane, or else the sending process) with at most one:
+a newer push takes the place of its sender's waiting one. A push has 15
+seconds from admission, queueing included; `kettle show` waits 20. A push
+that never started is `busy`; one that ran out of time is
+`render_failed` / `timeout`. A client that disconnects cancels its pushes, and
+so does closing their pane. A file's key defaults to its path, so showing a
+file again replaces its item in place, keeping the item id.
+
+The result is `{pane, verified, window, item, kind, width, height, warnings}`,
+`kind` being what the media turned out to be. Failures carry the fixed code,
+an optional fixed `reason` and wording that names no path, source or
+identifier: `not_in_kettle_pane`, `busy`, `bad_params`, `too_large`,
+`file_refused` (`not_found`, `permission`, `not_regular`, `too_large`),
+`changed`, `unsupported_media`, `unsupported_platform`, `render_failed`
+(`timeout`, `resource`, `parse`), `over_budget`, `restart_required` and
+`worker_unavailable`. `kettle show` prints the same wording, and adds
+`not_in_kettle` when no Kettle it runs in has agent previews on.
+
+**The shelf.** Each pane keeps its last eight items, newest first; a full
+shelf drops the item least recently viewed, never the one on screen. Pixels
+are charged to one process-wide preview account (128 MiB), apart from
+terminal images; when a new item does not fit, the pixels of the least
+recently viewed item not on screen go, and its details stay. A push never
+opens anything on screen. `list_panes` reports each pane's shelf as
+`media_shelf`: item, generation, title, kind, size, warnings, `verified`, the
+`sender` of an unverified item and whether its pixels are `held` or
+`released`.
 
 ### Which pane is calling
 
@@ -428,7 +491,7 @@ so press Enter with `send_keys`, not a trailing `\n`.
 |---|---|---|
 | `get_state` | read-only | version, pid, mode, `policy` (`{server: "off"\|"read-only"\|"full", display: bool}`, the policy in force), `caller` (whether the connecting process runs in one of this Kettle's panes; see [Which pane is calling](#which-pane-is-calling)), theme, focused pane, `windows` (count), `focused_window` (seq), `window_title`, `media` (`{availability: "checking"}` until the first check finishes, then `{availability: "available"}` or `{availability: "unavailable", reason}`; reasons: `worker_missing`, `unsafe_worker_file`, `unverified_worker`, `no_install_location`, `unsupported_platform`, `check_failed`, `not_configured`, `stuck_workers` (two killed workers would not exit; media is off until Kettle restarts)). Availability starts no worker; each render still requires the matching build handshake. Asking never waits on the check; each ask starts a fresh one in the background |
 | `list_tabs` | read-only | every window's tabs: `window` (seq), index, title, active, pane ids |
-| `list_panes` | read-only | every window's panes: id, `window` (seq), tab, title, cwd, cols/rows, focused, argv, child_pid, agent_attached, read_only |
+| `list_panes` | read-only | every window's panes: id, `window` (seq), tab, title, cwd, cols/rows, focused, argv, child_pid, agent_attached, read_only, `media_shelf` (see [Showing media](#showing-media)) |
 | `read_screen` | read-only | visible viewport text + cursor + `cursor_visible` (DEC ?25) + history metadata + selection presence/range; `include_selection: true` includes selected text only when its preflight is at most 128 KiB (otherwise it is omitted and `selection_truncated` is true); with `scrollback_lines`, returns requested history plus the active screen for command-output capture (params: `pane`, `scrollback_lines`, `include_selection`, and paging fields) |
 | `read_cells` | read-only | visible cell grid plus selected attributes (`any_underline`, underline variants, strikeout, underline-color presence) for renderer diagnostics without OCR |
 | `ui_geometry` | read-only | live window geometry and OS focus state: surface/content rects, renderer cell metrics, `text_presentation_face` (the monochrome face this system serves text-presentation codepoints from, or null when it has none and kettle leaves them on the platform cascade), resize-overlay grid, tab-bar segment/new-tab rects, tab segment `path`/`fitted_title` diagnostics, pane titlebar rect/title/path/`fitted_title` diagnostics, open context-menu rect/rows, cursor, tab drag armed/visible state, additive Search geometry/status/control metadata, the bounds/state of a visible pasted-media receipt, including whether its body is openable, `render_uploads` (the renderer's counts of frames presented, GPU buffer writes and bytes, texture writes, text prepares, main/menu prepares (`chrome_prepares`) and skipped writes, whether per-frame instances go through mapped buffers (`mapped_uploads`), and the mapped writes and bytes; a window that only blinks adds frames but no writes, and one printing on shared memory adds mapped writes but no buffer writes), and `cursor_blink` (who draws the blink, `gpu` or, on macOS, the window server's `layer`; the layer's device-pixel `layer_rect`; `phase_on` and `next_edge_ms` for the phase the screen shows; `handoffs`, `exits` (frames that ended a layer blink), `hides` (layer hidden without a frame on focus loss, occlusion, a size or scale change, or a renderer rebuild) and `exit_frame_us` (count, p50 and p95 of the last 64 exit frames, and the lifetime max; timing includes transaction begin, render, commit and flush); and `fallback`, why this window keeps the GPU blink, or null). Reading `ui_geometry` draws no frame, so it never ends a layer blink or forces a pending repaint. The resize performance probe must use its resize action to request the frame. Search omits its query and matched terminal text; receipts omit retained paths, extensions, and pixels; `render_uploads` and `cursor_blink` carry counts and geometry only |
@@ -443,6 +506,7 @@ so press Enter with `send_keys`, not a trailing `\n`.
 | `resize_window` | full | request a live window client-area resize (`window`, `width`, `height`) and let the normal renderer/PTY resize path process it |
 | `perform_action` | full | dispatch a named Kettle app action (`action`, for example `start_search`, `command_palette`, `open_ssh`, `hint_mode`, `edit_tab_title`). The control-only `focus_window` action shows and focuses its target without toggling visibility. Use this for app chrome that is not pane input; `send_keys` intentionally writes terminal keystrokes to the focused pane |
 | `run_command` | full | run `command` in a pane, reply with `{exit_code, duration_ms, output, output_truncated}`; capture is capped at the newest 10,000 retained lines and then 512 KiB, and `output_truncated` is true if either cap drops output |
+| `show` | display | put an image or SVG on the shelf of the caller's pane, reply with `{pane, verified, window, item, kind, width, height, warnings}` once it is there (see [Showing media](#showing-media)) |
 
 **Multi-window**: a kettle process can host several OS windows.
 `list_tabs` / `list_panes` enumerate them all, ordered by window seq;
@@ -873,6 +937,11 @@ This is also desktop-local because it opens real GUI terminal windows.
   thread checks every request's capability before any dispatch, parameter
   check or wait, and the App dispatches only admitted requests (drift-guard
   tests pin both).
+- **Media lands only where its sender runs.** `show` routes by the caller's
+  process ancestry, or for an unplaced caller by full control's pane or the
+  caller's own environment, labeled unverified with the executable and pid
+  the kernel names. Never the focused pane, never another Kettle, and never
+  anything opened on screen by a push.
 - **Terminal-wide, not per-client.** Once enabled, every same-user client gets
   the selected mode across all windows in the process without an additional
   prompt, pairing token, or per-client capability grant.

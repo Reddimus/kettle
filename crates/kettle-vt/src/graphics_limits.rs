@@ -550,6 +550,29 @@ mod tests {
         assert_eq!(account.usage(), (0, 0, 0, 0));
     }
     #[test]
+    fn a_full_account_hands_the_pixels_back_for_a_retry() {
+        let account = GraphicsBudget::independent(tiny_limits()).unwrap();
+        // Two 2x2 images fill the account's 32 retained bytes.
+        let held = crate::ImageData::new_with_budget(2, 2, vec![1; 16], &account).unwrap();
+        let _also = crate::ImageData::new_with_budget(2, 2, vec![2; 16], &account).unwrap();
+        let pixels = vec![9; 16];
+        let pointer = pixels.as_ptr();
+        let Err(crate::ImageRefusal::NoRoom(back)) =
+            crate::ImageData::try_with_budget(2, 2, pixels, &account)
+        else {
+            panic!("a full account has no room");
+        };
+        assert_eq!(back.as_ptr(), pointer);
+        drop(held);
+        let image = crate::ImageData::try_with_budget(2, 2, back, &account).unwrap();
+        assert_eq!(image.rgba.as_ptr(), pointer);
+        assert_eq!(
+            crate::ImageData::try_with_budget(2, 2, vec![0; 15], &account).err(),
+            Some(crate::ImageRefusal::Invalid)
+        );
+    }
+
+    #[test]
     fn preview_domain_survives_new_window_and_gpu_context_handles() {
         let first = GraphicsBudget::previews();
         let second = GraphicsBudget::previews();

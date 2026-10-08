@@ -60,7 +60,8 @@ pub use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedCo
 
 pub use event::{EventProxy, TermEvent, Waker};
 pub use images::{
-    ImageData, ImageSourceCrop, ImageSourceRect, Images, PixelBuffer, Placement, PlacementParams,
+    ImageData, ImageRefusal, ImageSourceCrop, ImageSourceRect, Images, PixelBuffer, Placement,
+    PlacementParams,
 };
 pub use links::{Link, links, links_with_cwd};
 pub use search::{
@@ -79,7 +80,7 @@ pub use term::{
 // OSC 9;4 taskbar-progress state, surfaced by `Terminal::progress`
 // (re-exported so the UI can name it without depending on kettle-vt directly).
 pub use kettle_vt::Progress;
-pub use kettle_vt::inline_marker::{InlineMarker, InlineNonce};
+pub use kettle_vt::inline_marker::{InlineMarker, InlineNonce, strip_placeholders};
 pub use kettle_vt::{
     CompletionCandidate, CompletionKind, CompletionList, CompletionUpdate, GraphicsBudget,
     GraphicsLimits, GraphicsReservation,

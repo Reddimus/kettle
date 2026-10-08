@@ -101,6 +101,8 @@ mod exec;
 // Agent-first: `kettle ctl` — thin control-plane client over
 // kettle-ctl (discover a running server, call a method, or stream events).
 mod ctl_cli;
+// `kettle show` — send media to the shelf of the pane it runs in.
+mod show_cli;
 // Agent-first: `kettle mcp` — stdio MCP server exposing kettle as
 // native agent tools (run a command, drive a running kettle).
 mod mcp;
@@ -551,9 +553,28 @@ enum Cmd {
     /// Run a Model Context Protocol server over stdio, exposing kettle as native
     /// agent tools. Register with Claude Code: `claude mcp add kettle -- kettle mcp`.
     Mcp(McpArgs),
+    /// Send a local image or SVG to the media shelf of the pane this runs in,
+    /// in the Kettle it runs inside. Pass - to read a small image or SVG from
+    /// stdin. The item waits on the shelf; nothing opens on screen. Agent
+    /// previews must be on; full control is never needed.
+    Show(ShowArgs),
     /// Install the latest authenticated stable release into an official
     /// installer-owned kettle layout.
     Update(UpdateArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct ShowArgs {
+    /// The image or SVG file to show, or - for bytes on stdin.
+    #[arg(value_name = "PATH", allow_hyphen_values = true)]
+    source: std::path::PathBuf,
+    /// A title for the shelf item (default: the file name).
+    #[arg(long, value_name = "TITLE")]
+    title: Option<String>,
+    /// Replace the item with this key on the same pane's shelf instead of
+    /// adding another (default: the file's path).
+    #[arg(long, value_name = "KEY")]
+    key: Option<String>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -1139,6 +1160,9 @@ fn main() -> anyhow::Result<()> {
             }
             Cmd::Ctl(args) => {
                 std::process::exit(ctl_cli::run_ctl(args));
+            }
+            Cmd::Show(args) => {
+                std::process::exit(show_cli::run_show(args));
             }
             Cmd::Mcp(args) => {
                 std::process::exit(if args.self_test {

@@ -121,6 +121,14 @@ impl PeerCapture {
         Self { peer, accepted_at }
     }
 
+    /// The connecting process, as the kernel named it at accept. `None`
+    /// when the process that pid named by the time it was read had started
+    /// after the accept: the pid was reused, and that is not the peer.
+    pub fn peer(&self) -> Option<ProcessIdentity> {
+        let accepted_at = self.accepted_at?;
+        self.peer.ok().filter(|peer| peer.start() <= accepted_at.0)
+    }
+
     #[cfg(test)]
     pub(crate) fn for_tests(peer: ProcessIdentity, accepted_at: u64) -> Self {
         Self {
@@ -322,6 +330,16 @@ mod clock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The peer is the process the kernel named at accept, never one that
+    /// started after it under a reused pid.
+    #[test]
+    fn a_peer_that_started_after_accept_is_not_the_peer() {
+        let before = PeerCapture::for_tests(ProcessIdentity::new(40, 100), 100);
+        assert_eq!(before.peer(), Some(ProcessIdentity::new(40, 100)));
+        let after = PeerCapture::for_tests(ProcessIdentity::new(40, 101), 100);
+        assert_eq!(after.peer(), None);
+    }
     use crate::protocol::StartToken;
     use std::cell::RefCell;
     use std::collections::HashMap;

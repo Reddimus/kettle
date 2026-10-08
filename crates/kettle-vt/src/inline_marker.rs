@@ -53,9 +53,49 @@ impl InlineMarker {
     }
 }
 
+/// `text` with every placeholder sequence taken out: each `U+10EEEE` and
+/// the placeholder diacritics after it, the form a card's marks or a Kitty
+/// image's take. Text from outside that Kettle shows or names never carries
+/// one; other combining marks stay.
+pub fn strip_placeholders(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains(crate::placeholder::PLACEHOLDER) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut kept = String::with_capacity(text.len());
+    let mut in_sequence = false;
+    for c in text.chars() {
+        if c == crate::placeholder::PLACEHOLDER {
+            in_sequence = true;
+        } else if !(in_sequence && diacritic_value(c).is_some()) {
+            in_sequence = false;
+            kept.push(c);
+        }
+    }
+    std::borrow::Cow::Owned(kept)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_placeholder_sequence_is_stripped_whole_and_other_marks_stay() {
+        let marker = InlineMarker {
+            row: 0,
+            column: 1,
+            nonce: InlineNonce::new([2, 3, 4, 5, 6, 7]).unwrap(),
+        }
+        .encode()
+        .unwrap();
+        assert_eq!(strip_placeholders(&format!("plot{marker} x")), "plot x");
+        assert_eq!(strip_placeholders(&format!("{marker}{marker}")), "");
+        // A mark that follows ordinary text is that text's, not a card's.
+        assert_eq!(strip_placeholders("e\u{0305}"), "e\u{0305}");
+        assert!(matches!(
+            strip_placeholders("caf\u{e9}"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
 
     #[test]
     fn independent_wire_fixture_has_all_eight_marks_and_twenty_bytes() {
