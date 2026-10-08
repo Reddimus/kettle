@@ -133,6 +133,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- An opaque context menu, Settings panel or paste receipt over the cursor
+  cell now hides the whole cursor. The inverted glyph of a focused block
+  cursor was drawn after every overlay and showed through them.
+
 - On macOS, a window move reported while Kettle is handling a key or other
   non-mouse event no longer aborts it. The caption-drag check read mouse-only
   event fields, which AppKit refuses with an exception for those events.
