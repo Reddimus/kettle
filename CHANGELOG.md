@@ -151,6 +151,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Animation controls require an existing root and preserve the current frame
   when given an invalid selector.
 
+- Torn-off windows reserve automatic accent colors in process even when the
+  optional presence registry is unavailable. Closing a window frees its color
+  for reuse. When the palette is full, a torn window avoids the original
+  window's color if another hue exists; reuse favors the least-used hue.
+  Pinned colors retain their configured behavior.
+- On macOS, dragging a released single-tab window by its tab uses manual
+  follow and keeps the original press point under the pointer. A fast drag
+  processes its first movement immediately, allowing that same gesture to
+  latch a sibling window's insertion target before release.
+- Native macOS caption drags of a single-tab window use the same rejoin path
+  when its automatic tab bar is hidden, and holding Escape before release
+  cancels the rejoin. Desktop-to-client docking coordinates account for each
+  target window's display scale.
+
 - New Kitty image ids remain addressable at image-count and retained-byte limits
   by reclaiming eligible old images, with unplaced images first. Pixel snapshots
   keep their charge, and active count pressure preserves the other screen's roots.

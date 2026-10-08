@@ -7748,6 +7748,9 @@ fn ctl_input_error(result: PaneInputResult) -> Option<(&'static str, &'static st
     }
 }
 
+#[cfg(test)]
+use crate::window_accent::pick_accent_slot;
+
 pub struct App {
     cfg: Config,
     /// The file this launch's session was read from, if any.
@@ -7765,6 +7768,7 @@ pub struct App {
     /// `&mut WindowState` borrows, then reinsert — see window_state.rs for the
     /// dispatch contract.
     windows: std::collections::BTreeMap<u64, WindowState>,
+    accent_registry: crate::window_accent::AccentRegistry,
     /// Seq of the window that has (or most recently had) OS focus. Routes
     /// window-less events (UserEvent wakeups, remote/ctl/Lua commands).
     focused_seq: u64,
@@ -8084,7 +8088,8 @@ struct TornDrag {
     /// race the WM actually taking the move grab), and the native→manual
     /// demotion fires off it when the WM never takes the drag at all.
     started: std::time::Instant,
-    /// Cursor offset from the torn window's FRAME top-left in physical px,
+    /// Cursor offset from the torn window's FRAME top-left in drag coordinates
+    /// (macOS desktop points, physical pixels on Windows/X11),
     /// chosen at tear time so the pointer holds the tab. `Moved(pos) + grab`
     /// approximates the live screen cursor during the native move loop
     /// (winit's `Moved` reports the frame position on Windows — verified in
@@ -8101,6 +8106,9 @@ struct TornDrag {
     /// still holds mouse capture, repositions the torn window from its own
     /// CursorMoved stream, and its left-release is the drop.
     native: bool,
+    /// A native caption gesture is OS-owned and must never be demoted to
+    /// the manual-follow rescue used for failed tab-drag handoffs.
+    caption: bool,
     /// At least one `Moved` arrived since the handoff. Gates the
     /// pointer-event drop heuristic against the PostMessage race on
     /// Windows (a stray client mouse-move can slip in between
@@ -8827,6 +8835,7 @@ impl App {
             // means the named layout was never loaded.
             named_layout_writable: true,
             windows,
+            accent_registry: crate::window_accent::AccentRegistry::default(),
             focused_seq: 1,
             next_window_seq: 2,
             gpu: None,
@@ -18834,7 +18843,15 @@ impl App {
                     return;
                 };
                 self.release_focus_report_to(ws, &dt);
-                match self.open_window(event_loop, WindowOpen::AdoptTab(dt), None, None) {
+                match self.open_window(
+                    event_loop,
+                    WindowOpen::AdoptTab {
+                        tab: dt,
+                        source_color: ws.accent.as_ref().map(|accent| accent.color),
+                    },
+                    None,
+                    None,
+                ) {
                     Ok(_) => {
                         // The tab LEFT this window, so plugins see a tab-close
                         // event.
@@ -18854,7 +18871,7 @@ impl App {
                             w.request_redraw();
                         }
                     }
-                    Err(WindowOpen::AdoptTab(dt)) => {
+                    Err(WindowOpen::AdoptTab { tab: dt, .. }) => {
                         // Window creation failed — put the live tab back
                         // exactly where it was; nothing is lost.
                         log::warn!(
@@ -20830,9 +20847,7 @@ impl App {
                 "focused": focused,
             })
         });
-        Response::ok(
-            req.id,
-            serde_json::json!({
+        let mut geometry = serde_json::json!({
                 "window": target.seq,
                 "window_focused": target.window_focused,
                 "scale_factor": target.window.as_ref().map_or(1.0, |w| w.scale_factor()),
@@ -20956,8 +20971,21 @@ impl App {
                 // Who draws the blink: the GPU, or the window server's layer
                 // (macOS). Timing, geometry and counts only.
                 "cursor_blink": self.cursor_blink_diagnostics(target),
-            }),
-        )
+        });
+        if let serde_json::Value::Object(fields) = &mut geometry {
+            fields.insert(
+                "desktop".into(),
+                serde_json::json!({
+                    "client_origin": target.window.as_ref()
+                        .and_then(|w| w.inner_position().ok())
+                        .map(|p| serde_json::json!({"x": p.x, "y": p.y})),
+                    "frame_origin": target.window.as_ref()
+                        .and_then(|w| w.outer_position().ok())
+                        .map(|p| serde_json::json!({"x": p.x, "y": p.y})),
+                }),
+            );
+        }
+        Response::ok(req.id, geometry)
     }
 
     /// `ui_geometry.cursor_blink`: the phase the screen shows, when it next
@@ -27148,7 +27176,7 @@ impl ApplicationHandler<UserEvent> for App {
         // X11 tear-off frozen-drag rescue: reposition/dock from the live
         // pointer when the WM or the carrier's event stream stops delivering.
         // Returns a wait budget that keeps it ticking.
-        let torn_tick_wait = self.torn_drag_pointer_tick();
+        let torn_tick_wait = self.torn_drag_pointer_tick(event_loop);
         let now = std::time::Instant::now();
         if self
             .config_reload_deadline
@@ -27223,28 +27251,13 @@ enum WindowOpen {
     Fresh { cwd: Option<String> },
     /// Adopt a tab detached from another window — the live tab move /
     /// tear-off. PTYs keep running; nothing respawns.
-    AdoptTab(crate::mux::DetachedTab),
+    AdoptTab {
+        tab: crate::mux::DetachedTab,
+        source_color: Option<kettle_config::Rgb>,
+    },
     /// Respawn one saved window of a multi-window session (tabs + geometry)
     /// on `--restore` / `restore-session = true` startup.
     Restore(crate::session::SWindow),
-}
-
-/// Peacock: pure pool-slot picker. Start at the seed's slot and advance to
-/// the first hue no live window uses; a fully-claimed pool accepts the seed
-/// slot (a rare same-color pair beats inventing off-theme colors).
-fn pick_accent_slot(
-    pool: &[kettle_config::Rgb],
-    seed: u64,
-    in_use: &[kettle_config::Rgb],
-) -> usize {
-    if pool.is_empty() {
-        return 0;
-    }
-    let start = (seed % pool.len() as u64) as usize;
-    (0..pool.len())
-        .map(|i| (start + i) % pool.len())
-        .find(|&i| !in_use.contains(&pool[i]))
-        .unwrap_or(start)
 }
 
 /// Peacock: `#rrggbb` for the presence registry's wire format.
@@ -27325,11 +27338,38 @@ fn cursor_screen_pos() -> Option<(f64, f64)> {
     x11_pointer_state().map(|(pos, _)| pos)
 }
 
-/// macOS: no live-cursor query wired up — manual-follow there rides the
-/// source window's own CursorMoved stream, which is exact already.
-#[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
+#[cfg(target_os = "macos")]
+fn cursor_screen_pos() -> Option<(f64, f64)> {
+    crate::native_drag::cursor_position()
+}
+
+#[cfg(not(any(target_os = "windows", unix)))]
 fn cursor_screen_pos() -> Option<(f64, f64)> {
     None
+}
+
+// AppKit's global desktop uses points; winit's physical positions multiply
+// the entire desktop origin by each window's scale. Normalize before comparing
+// windows so a Retina donor can dock onto a non-Retina target.
+fn drag_coordinate_scale(window: &Window) -> f64 {
+    if cfg!(target_os = "macos") {
+        window.scale_factor()
+    } else {
+        1.0
+    }
+}
+
+fn drag_position(window: &Window, position: winit::dpi::PhysicalPosition<i32>) -> (f64, f64) {
+    let scale = drag_coordinate_scale(window);
+    (f64::from(position.x) / scale, f64::from(position.y) / scale)
+}
+
+fn drag_native_position(position: (f64, f64)) -> winit::dpi::Position {
+    if cfg!(target_os = "macos") {
+        winit::dpi::LogicalPosition::new(position.0, position.1).into()
+    } else {
+        winit::dpi::PhysicalPosition::new(position.0 as i32, position.1 as i32).into()
+    }
 }
 
 /// Re-dock, Windows: per-window alpha for the dock-hover
@@ -27486,8 +27526,8 @@ const DOCK_HOVER_ALPHA: u8 = 150;
 /// GetAsyncKeyState reports PHYSICAL buttons, so the primary button of a
 /// left-handed mouse is VK_RBUTTON); X11 reads the button mask from the
 /// same `QueryPointer` the live-cursor path uses (the server pre-applies
-/// the pointer mapping there). False elsewhere (macOS manual-follow and
-/// Wayland never produce a release-while-held; an X11 query failure also
+/// the pointer mapping there). macOS uses the combined session button state.
+/// False elsewhere (Wayland never produces a release-while-held; an X11 query failure also
 /// degrades to false, which errs toward committing a real drop rather
 /// than dropping user data on a cancel we cannot prove).
 fn primary_button_physically_held() -> bool {
@@ -27508,7 +27548,11 @@ fn primary_button_physically_held() -> bool {
         };
         (unsafe { GetAsyncKeyState(i32::from(vk.0)) } as u16) & 0x8000 != 0
     }
-    #[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
+    #[cfg(target_os = "macos")]
+    {
+        crate::native_drag::primary_held()
+    }
+    #[cfg(not(any(target_os = "windows", unix)))]
     false
 }
 
@@ -28302,18 +28346,22 @@ impl App {
         &mut self,
         event_loop: &ActiveEventLoop,
         open: WindowOpen,
-        pos: Option<winit::dpi::PhysicalPosition<i32>>,
+        pos: Option<winit::dpi::Position>,
         size: Option<winit::dpi::PhysicalSize<u32>>,
     ) -> Result<u64, WindowOpen> {
         let Some(gpu) = self.gpu.clone() else {
             log::warn!("open_window: GPU context not ready (window 1 still initializing)");
             return Err(open);
         };
+        let source_color = match &open {
+            WindowOpen::AdoptTab { source_color, .. } => *source_color,
+            _ => None,
+        };
         // A tear-off window opens Normal (it must be visible at the drop
         // point); a fresh window honors the configured window-state except
         // Hidden (an invisible NewWindow helps nobody).
         let state = match (&open, self.cfg.window_state) {
-            (WindowOpen::AdoptTab(_), _) | (WindowOpen::Restore(_), _) => {
+            (WindowOpen::AdoptTab { .. }, _) | (WindowOpen::Restore(_), _) => {
                 kettle_config::WindowState::Normal
             }
             (_, kettle_config::WindowState::Hidden) => kettle_config::WindowState::Normal,
@@ -28404,6 +28452,10 @@ impl App {
         ws.renderer = Some(renderer);
         ws.accessibility = Some(accessibility);
         ws.window = Some(window);
+        ws.native_caption_drag = ws
+            .window
+            .as_deref()
+            .map(crate::native_drag::NativeCaptionDrag::install);
         ws.native_material = Some(native_material);
         self.sync_output_frame_budget(&mut ws, true);
         let area = self.area(&ws);
@@ -28423,7 +28475,7 @@ impl App {
                     return Err(WindowOpen::Fresh { cwd });
                 }
             }
-            WindowOpen::AdoptTab(dt) => {
+            WindowOpen::AdoptTab { tab: dt, .. } => {
                 ws.mux.attach_tab(dt, None);
             }
             WindowOpen::Restore(sw) => {
@@ -28451,6 +28503,13 @@ impl App {
                     ));
                 }
             }
+        }
+        // Apply a due scheduled theme switch first, as the first redraw would,
+        // so a torn window excludes its source's color from the pool it will
+        // paint with rather than from the outgoing theme's pool.
+        self.poll_theme_schedule(&mut ws);
+        if self.cfg.accent_auto && self.cfg.accent_color.is_none() {
+            self.assign_window_accent(&mut ws, source_color);
         }
         self.resize_all(&mut ws);
         self.sync_output_wake_gate(&ws);
@@ -28525,25 +28584,19 @@ impl App {
         // full re-dock path applies: this is how a previously torn-off
         // window merges back into a sibling.
         if ws.mux.tabs.len() <= 1 {
+            let press = ws
+                .drag_press
+                .map(|(x, y)| (f64::from(x), f64::from(y)))
+                .unwrap_or((ws.cursor.x, ws.cursor.y));
             ws.tab_drag_active = false;
             ws.tab_drag_press = None;
             ws.tab_pressed_idx = None;
             ws.detach_drag = crate::detach::DragState::default();
             ws.drag_press = None;
-            // Frame-relative grab = where the pointer is right now
-            // (screen cursor − frame origin), so the dock hit-test's
-            // cursor approximation tracks the real pointer.
-            let grab = match (src.inner_position(), src.outer_position()) {
-                (Ok(ip), Ok(op)) => (
-                    f64::from(ip.x - op.x) + ws.cursor.x,
-                    f64::from(ip.y - op.y) + ws.cursor.y,
-                ),
-                _ => (40.0, 12.0),
-            };
-            // Sound on macOS too: this window IS receiving the drag, so
-            // NSApp.currentEvent is its own mouseDragged (unlike the torn-
-            // window handoff below, where the event belongs to the source).
-            let native = if tear_native_handoff_disabled() {
+            let origins = (src.inner_position(), src.outer_position());
+            // AppKit requires the original mouse-down event for performDrag;
+            // winit passes currentEvent here, which is already mouseDragged.
+            let native = if cfg!(target_os = "macos") || tear_native_handoff_disabled() {
                 false
             } else {
                 match src.drag_window() {
@@ -28556,6 +28609,23 @@ impl App {
                     }
                 }
             };
+            // Manual follow keeps the original press under the pointer, even
+            // when a native handoff failed or the first motion is the drop.
+            let pointer = if native {
+                (ws.cursor.x, ws.cursor.y)
+            } else {
+                press
+            };
+            let pointer_scale = drag_coordinate_scale(&src);
+            let pointer = (pointer.0 / pointer_scale, pointer.1 / pointer_scale);
+            let grab = match origins {
+                (Ok(ip), Ok(op)) => crate::detach::frame_grab_offset(
+                    drag_position(&src, ip),
+                    drag_position(&src, op),
+                    pointer,
+                ),
+                _ => (40.0, 12.0),
+            };
             self.torn_drag = Some(TornDrag {
                 seq: ws.seq,
                 carrier: ws.seq,
@@ -28563,11 +28633,13 @@ impl App {
                 grab,
                 dock: None,
                 native,
+                caption: false,
                 saw_move: false,
                 last_signal: std::time::Instant::now(),
                 hwnd: window_hwnd(&src),
                 signal_cursor: None,
             });
+            self.follow_torn_drag(ws);
             return true;
         }
         // The torn window inherits the source dimensions (WT tear-off
@@ -28626,6 +28698,8 @@ impl App {
                 ftc.1 + in_seg_y,
             ),
         };
+        let coordinate_scale = drag_coordinate_scale(&src);
+        let grab = (grab.0 / coordinate_scale, grab.1 / coordinate_scale);
         // Frame origin = screen cursor − grab. `inner_position` is the
         // client origin in screen coords, so client cursor + it = screen
         // cursor exactly; `outer_position` is the (rare) fallback.
@@ -28634,10 +28708,13 @@ impl App {
             .or_else(|_| src.outer_position())
             .ok()
             .map(|p| {
-                winit::dpi::PhysicalPosition::new(
-                    (f64::from(p.x) + ws.cursor.x - grab.0) as i32,
-                    (f64::from(p.y) + ws.cursor.y - grab.1) as i32,
-                )
+                let origin = drag_position(&src, p);
+                let cursor = crate::detach::client_to_desktop(
+                    origin,
+                    (ws.cursor.x, ws.cursor.y),
+                    coordinate_scale,
+                );
+                drag_native_position((cursor.0 - grab.0, cursor.1 - grab.1))
             });
         // The dragged tab is the ACTIVE tab. The drag-to-reorder gesture keeps
         // it active, while the FSM's armed index can go stale across reorders.
@@ -28652,7 +28729,15 @@ impl App {
         ws.detach_drag = crate::detach::DragState::default();
         ws.drag_press = None;
         self.release_focus_report_to(ws, &dt);
-        match self.open_window(event_loop, WindowOpen::AdoptTab(dt), pos, Some(size)) {
+        match self.open_window(
+            event_loop,
+            WindowOpen::AdoptTab {
+                tab: dt,
+                source_color: ws.accent.as_ref().map(|accent| accent.color),
+            },
+            pos,
+            Some(size),
+        ) {
             Ok(torn_seq) => {
                 self.fire_tab_close_event(ws, closing_idx);
                 self.ctl_broadcast(
@@ -28688,9 +28773,9 @@ impl App {
                 // straight to manual-follow: performWindowDragWithEvent on
                 // the TORN window would consume NSApp.currentEvent — a
                 // mouseDragged belonging to the SOURCE window — which is
-                // unsound for a window that never saw the press; the
-                // lone-tab branch above keeps the native path
-                // there since it drags the window that owns the event.
+                // unsound for a window that never saw the press. A lone-tab
+                // drag uses manual-follow too: currentEvent is a mouseDragged,
+                // while AppKit requires the original mouse-down event.
                 let native = if cfg!(target_os = "macos") || tear_native_handoff_disabled() {
                     false
                 } else {
@@ -28715,6 +28800,7 @@ impl App {
                     grab,
                     dock: None,
                     native,
+                    caption: false,
                     saw_move: false,
                     last_signal: std::time::Instant::now(),
                     hwnd: self
@@ -28724,13 +28810,54 @@ impl App {
                         .and_then(window_hwnd),
                     signal_cursor: None,
                 });
+                self.follow_torn_drag(ws);
             }
-            Err(WindowOpen::AdoptTab(dt)) => {
+            Err(WindowOpen::AdoptTab { tab: dt, .. }) => {
                 log::warn!("tear-off: open_window failed; tab kept in source window");
                 ws.mux.attach_tab(dt, Some(closing_idx));
             }
             Err(_) => unreachable!("open_window returns the WindowOpen it was given"),
         }
+        true
+    }
+
+    /// Process the threshold-crossing motion too: a coalesced drag can release
+    /// before another CursorMoved arrives to move the window and latch a dock.
+    fn follow_torn_drag(&mut self, ws: &mut WindowState) -> bool {
+        let Some(td) = self.torn_drag.as_ref() else {
+            return false;
+        };
+        if td.native || td.carrier != ws.seq {
+            return false;
+        }
+        let (grab, torn_seq) = (td.grab, td.seq);
+        let Some(source_window) = ws.window.as_ref() else {
+            return true;
+        };
+        let Ok(ip) = source_window.inner_position() else {
+            return true;
+        };
+        let scale = drag_coordinate_scale(source_window);
+        let step = crate::detach::manual_drag_step(
+            drag_position(source_window, ip),
+            (ws.cursor.x / scale, ws.cursor.y / scale),
+            grab,
+        );
+        let torn_win = if torn_seq == ws.seq {
+            ws.window.as_ref()
+        } else {
+            self.windows.get(&torn_seq).and_then(|t| t.window.as_ref())
+        };
+        let torn_hwnd = torn_win.map(|w| w.as_ref()).and_then(window_hwnd);
+        if let Some(tw) = torn_win {
+            tw.set_outer_position(drag_native_position(step.frame_origin));
+        }
+        if let Some(td) = self.torn_drag.as_mut() {
+            td.saw_move = true;
+            td.last_signal = std::time::Instant::now();
+        }
+        let extra = if torn_seq == ws.seq { None } else { Some(ws) };
+        self.update_dock_target(step.cursor, torn_hwnd, extra);
         true
     }
 
@@ -28768,10 +28895,12 @@ impl App {
             return None;
         }
         let ip = win.inner_position().ok()?;
-        let (cx, cy) = (
-            (cursor.0 - f64::from(ip.x)) as f32,
-            (cursor.1 - f64::from(ip.y)) as f32,
+        let client = crate::detach::desktop_to_client(
+            drag_position(win, ip),
+            cursor,
+            drag_coordinate_scale(win),
         );
+        let (cx, cy) = (client.0 as f32, client.1 as f32);
         let band = self.dock_band(w)?;
         log::debug!(
             "dock_index_at: seq={} cursor=({:.0},{:.0}) ip=({},{}) rel=({cx:.0},{cy:.0}) band={band:?} dist={:.0}",
@@ -28928,6 +29057,14 @@ impl App {
         let Some(td) = self.torn_drag.as_ref() else {
             return false;
         };
+        if td.caption
+            && ws
+                .native_caption_drag
+                .as_ref()
+                .is_some_and(|drag| drag.cancelled())
+        {
+            return false;
+        }
         let Some((latched, _)) = td.dock else {
             // Nothing latched — commit and abandon are equivalent.
             return false;
@@ -28942,10 +29079,12 @@ impl App {
         // live when available, else the legacy frame+grab approximation
         // (macOS manual-follow keeps its original self-consistent bias).
         let cursor = cursor_screen_pos().or_else(|| {
-            ws.window
-                .as_ref()
-                .and_then(|w| w.outer_position().ok())
-                .map(|op| (f64::from(op.x) + td.grab.0, f64::from(op.y) + td.grab.1))
+            ws.window.as_ref().and_then(|w| {
+                w.outer_position().ok().map(|op| {
+                    let origin = drag_position(w, op);
+                    (origin.0 + td.grab.0, origin.1 + td.grab.1)
+                })
+            })
         });
         let Some(cursor) = cursor else {
             return true; // can't tell — trust the latch
@@ -28969,9 +29108,34 @@ impl App {
     ///
     /// Healthy native tracking (fresh `Moved` signals) is left strictly alone.
     /// Returns the wait budget (ms) that keeps the tick alive, or `None` when
-    /// there is no drag or no live-cursor source (macOS/Wayland).
-    fn torn_drag_pointer_tick(&mut self) -> Option<u64> {
+    /// there is no drag or no live-cursor source (Wayland).
+    fn torn_drag_pointer_tick(&mut self, event_loop: &ActiveEventLoop) -> Option<u64> {
         let td = self.torn_drag.as_ref()?;
+        if td.caption {
+            let seq = td.seq;
+            let cancelled = self
+                .windows
+                .get(&seq)
+                .and_then(|ws| ws.native_caption_drag.as_ref())
+                .is_some_and(|drag| drag.cancelled());
+            if cancelled || !primary_button_physically_held() {
+                if !cancelled && let Some(cursor) = cursor_screen_pos() {
+                    self.update_dock_target(cursor, None, None);
+                }
+                if let Some(mut ws) = self.windows.remove(&seq) {
+                    let commit = !cancelled && self.revalidate_dock_latch(&ws);
+                    self.finalize_torn_drag(&mut ws, commit);
+                    self.finish_window_dispatch(event_loop, seq, ws);
+                } else {
+                    self.abandon_torn_drag(None);
+                }
+                return None;
+            }
+            if let Some(cursor) = cursor_screen_pos() {
+                self.update_dock_target(cursor, None, None);
+            }
+            return Some(TORN_TICK_MS);
+        }
         let cursor = cursor_screen_pos()?;
         if td.native {
             // Demotion evidence: the pointer travelled while the WM sent
@@ -29007,10 +29171,7 @@ impl App {
         }
         let (grab, torn_seq) = (td.grab, td.seq);
         let torn_win = self.windows.get(&torn_seq).and_then(|t| t.window.clone())?;
-        torn_win.set_outer_position(winit::dpi::PhysicalPosition::new(
-            (cursor.0 - grab.0) as i32,
-            (cursor.1 - grab.1) as i32,
-        ));
+        torn_win.set_outer_position(drag_native_position((cursor.0 - grab.0, cursor.1 - grab.1)));
         let torn_hwnd = window_hwnd(&torn_win);
         if let Some(td) = self.torn_drag.as_mut() {
             td.saw_move = true;
@@ -29205,34 +29366,30 @@ impl App {
     /// pool from the cwd-seed slot, skipping hues live windows already use:
     /// in-process siblings (authoritative) plus other kettle processes via
     /// the presence registry (best-effort; see kettle-ctl/src/presence.rs).
-    fn assign_window_accent(&self, ws: &mut WindowState) {
+    fn assign_window_accent(&self, ws: &mut WindowState, avoid: Option<kettle_config::Rgb>) {
         let pool = kettle_config::peacock_pool(&self.cfg.theme);
         if pool.is_empty() {
             return;
         }
-        let mut in_use: Vec<kettle_config::Rgb> = self
-            .windows
-            .values()
-            .filter(|w| w.seq != ws.seq)
-            .filter_map(|w| w.accent.as_ref().map(|a| a.color))
-            .collect();
+        let mut in_use = Vec::new();
         let dir = kettle_ctl::presence::presence_dir();
         let me = std::process::id();
         for e in kettle_ctl::presence::live_entries(&dir) {
-            // Skip only THIS window's own (re-)claim. Own-process siblings
-            // are deliberately counted from presence too: during a window
-            // open the OPENER is checked out of `self.windows` (the
-            // take-out dispatch), so the map alone misses its claim and two
-            // windows could get the same accent. Double-counting an in-map
-            // sibling is harmless (`in_use` is a contains-set).
-            if e.pid == me && e.win == ws.seq {
+            // Own-process claims are authoritative in the local registry,
+            // including windows checked out during event dispatch.
+            if e.pid == me {
                 continue;
             }
             if let Some(c) = kettle_config::Rgb::parse(&e.rgb) {
                 in_use.push(c);
             }
         }
-        let slot = pick_accent_slot(&pool, self.cfg.accent_seed, &in_use);
+        let Some((slot, local_claim)) =
+            self.accent_registry
+                .claim(&pool, self.cfg.accent_seed, &in_use, avoid)
+        else {
+            return;
+        };
         let color = pool[slot];
         let presence = kettle_ctl::presence::claim(
             &dir,
@@ -29242,6 +29399,7 @@ impl App {
             r.set_accent_override(Some(color));
         }
         ws.accent = Some(crate::window_state::WindowAccent {
+            local_claim,
             color,
             slot,
             theme_name: self.cfg.theme_name.clone(),
@@ -29272,6 +29430,7 @@ impl App {
                 acc.theme_name = self.cfg.theme_name.clone();
                 if color != acc.color {
                     acc.color = color;
+                    acc.local_claim.set_color(color);
                     if let Some(g) = acc.presence.as_mut() {
                         g.set_rgb(&rgb_hex(color));
                     }
@@ -29280,7 +29439,7 @@ impl App {
                     r.set_accent_override(Some(color));
                 }
             }
-            None => self.assign_window_accent(ws),
+            None => self.assign_window_accent(ws, None),
         }
     }
 
@@ -29562,6 +29721,7 @@ impl App {
             }
         };
         self.apply_post_create(&window);
+        ws.native_caption_drag = Some(crate::native_drag::NativeCaptionDrag::install(&window));
         ws.native_material = Some(crate::native_material::NativeMaterial::install(
             &window, &self.cfg,
         ));
@@ -30468,6 +30628,37 @@ impl App {
             // hit-test against every sibling window's tab band.
             WindowEvent::Moved(pos) => {
                 self.sync_output_frame_budget(ws, false);
+                if let Some(started) = ws
+                    .native_caption_drag
+                    .as_ref()
+                    .and_then(|drag| drag.take_start())
+                    && self.torn_drag.is_none()
+                    && crate::native_drag::may_dock_caption(
+                        self.cfg.detachable_tabs,
+                        !matches!(self.cfg.tab_bar, TabBarMode::Off),
+                        ws.mux.tabs.len(),
+                        self.pointer_modal_open(ws),
+                    )
+                    && let Some(cursor) = cursor_screen_pos()
+                    && let Some(window) = ws.window.as_ref()
+                    && !window.is_maximized()
+                    && window.fullscreen().is_none()
+                {
+                    let origin = drag_position(window, pos);
+                    self.torn_drag = Some(TornDrag {
+                        seq: ws.seq,
+                        carrier: ws.seq,
+                        started,
+                        grab: (cursor.0 - origin.0, cursor.1 - origin.1),
+                        dock: None,
+                        native: true,
+                        caption: true,
+                        saw_move: false,
+                        last_signal: std::time::Instant::now(),
+                        hwnd: window_hwnd(window),
+                        signal_cursor: Some(cursor),
+                    });
+                }
                 let Some(td) = self.torn_drag.as_mut() else {
                     return;
                 };
@@ -30487,7 +30678,12 @@ impl App {
                 // fallback for a failed query. Each real-cursor + `Moved`
                 // pair also refreshes `signal_cursor`, the rescue tick's
                 // travel-without-`Moved` demotion reference.
-                let approx = (f64::from(pos.x) + grab.0, f64::from(pos.y) + grab.1);
+                let origin = ws
+                    .window
+                    .as_deref()
+                    .map(|window| drag_position(window, pos))
+                    .unwrap_or((f64::from(pos.x), f64::from(pos.y)));
+                let approx = (origin.0 + grab.0, origin.1 + grab.1);
                 let real = cursor_screen_pos();
                 if let Some(cur) = real {
                     td.signal_cursor = Some(cur);
@@ -30556,6 +30752,7 @@ impl App {
                     && td.seq == ws.seq
                     && td.native
                     && td.saw_move
+                    && (!td.caption || !primary_button_physically_held())
                     && td.started.elapsed() >= std::time::Duration::from_millis(300)
                 {
                     let commit = self.revalidate_dock_latch(ws);
@@ -30589,35 +30786,7 @@ impl App {
                 // capture holder's stream drives the follow. Without the gate,
                 // stale tracking would hijack every window's cursor stream and
                 // keep refreshing the failsafe forever.
-                if let Some(td) = self.torn_drag.as_ref()
-                    && !td.native
-                    && td.carrier == ws.seq
-                {
-                    let (grab, torn_seq) = (td.grab, td.seq);
-                    if let Some(ip) = ws.window.as_ref().and_then(|w| w.inner_position().ok()) {
-                        let cursor = (f64::from(ip.x) + position.x, f64::from(ip.y) + position.y);
-                        let torn_win = if torn_seq == ws.seq {
-                            ws.window.as_ref()
-                        } else {
-                            self.windows.get(&torn_seq).and_then(|t| t.window.as_ref())
-                        };
-                        let torn_hwnd = torn_win.map(|w| w.as_ref()).and_then(window_hwnd);
-                        if let Some(tw) = torn_win {
-                            tw.set_outer_position(winit::dpi::PhysicalPosition::new(
-                                (cursor.0 - grab.0) as i32,
-                                (cursor.1 - grab.1) as i32,
-                            ));
-                        }
-                        if let Some(td) = self.torn_drag.as_mut() {
-                            td.saw_move = true;
-                            td.last_signal = std::time::Instant::now();
-                        }
-                        // For a self-drag, `ws` IS the torn window — the
-                        // hit-test already excludes it by seq, so no extra
-                        // candidate is needed.
-                        let extra = if torn_seq == ws.seq { None } else { Some(ws) };
-                        self.update_dock_target(cursor, torn_hwnd, extra);
-                    }
+                if self.follow_torn_drag(ws) {
                     return;
                 }
                 // An editor drag that started inside the search bar keeps the
@@ -31424,6 +31593,7 @@ impl App {
                 {
                     if td.seq == ws.seq || !td.native {
                         let commit = !primary_button_physically_held();
+                        let commit = commit && (!td.caption || self.revalidate_dock_latch(ws));
                         self.finalize_torn_drag(ws, commit);
                         return;
                     }
@@ -31485,10 +31655,18 @@ impl App {
                                         p.x + ws.cursor.x as i32,
                                         p.y + ws.cursor.y as i32,
                                     )
+                                    .into()
                                 });
                             self.release_focus_report_to(ws, &dt);
-                            match self.open_window(event_loop, WindowOpen::AdoptTab(dt), pos, None)
-                            {
+                            match self.open_window(
+                                event_loop,
+                                WindowOpen::AdoptTab {
+                                    tab: dt,
+                                    source_color: ws.accent.as_ref().map(|accent| accent.color),
+                                },
+                                pos,
+                                None,
+                            ) {
                                 Ok(torn_seq) => {
                                     self.fire_tab_close_event(ws, closing_idx);
                                     // Agents see the tear-off too.
@@ -31506,7 +31684,7 @@ impl App {
                                         w.request_redraw();
                                     }
                                 }
-                                Err(WindowOpen::AdoptTab(dt)) => {
+                                Err(WindowOpen::AdoptTab { tab: dt, .. }) => {
                                     log::warn!(
                                         "tear-off: open_window failed; tab kept in source window"
                                     );
@@ -39619,7 +39797,7 @@ mod tests {
             }
             transfers += 1;
             let release = body.find("self.release_focus_report_to(");
-            let handoff = ["WindowOpen::AdoptTab(dt)", "self.dock_tab_into("]
+            let handoff = ["WindowOpen::AdoptTab {", "self.dock_tab_into("]
                 .iter()
                 .filter_map(|needle| body.find(needle))
                 .min()
@@ -45056,8 +45234,26 @@ mod tests {
         // 2. The torn window inherits the source size and is positioned by
         //    the grab offset (open_window's size override).
         assert!(
-            src.contains("self.open_window(event_loop, WindowOpen::AdoptTab(dt), pos, Some(size))"),
-            "the tear must open the torn window at the source size"
+            src.contains(
+                "WindowOpen::AdoptTab {\n                tab: dt,\n                source_color: ws.accent.as_ref().map(|accent| accent.color),\n            },\n            pos,\n            Some(size),"
+            ),
+            "the tear must open the torn window at the grab position and source size"
+        );
+        // 2b. A lone-tab drag follows the pointer on the same motion that
+        //     started it, so one fast gesture can latch a dock target.
+        assert!(
+            src.contains(
+                "                caption: false,\n                saw_move: false,\n                last_signal: std::time::Instant::now(),\n                hwnd: window_hwnd(&src),\n                signal_cursor: None,\n            });\n            self.follow_torn_drag(ws);\n            return true;"
+            ),
+            "the lone-tab drag must follow the pointer immediately"
+        );
+        // 2c. A new window applies a due scheduled theme before claiming its
+        //     accent, so the source exclusion uses the pool it will paint.
+        assert!(
+            src.contains(
+                "        self.poll_theme_schedule(&mut ws);\n        if self.cfg.accent_auto && self.cfg.accent_color.is_none() {\n            self.assign_window_accent(&mut ws, source_color);"
+            ),
+            "the theme schedule must run before the accent claim"
         );
         // 3. The native handoff happens right after the insert.
         assert!(
@@ -45090,7 +45286,7 @@ mod tests {
         // 7. Manual-follow listens only to the capture holder (stale
         //    tracking must not hijack every window's cursor stream).
         assert!(
-            src.contains("&& td.carrier == ws.seq\n                {"),
+            src.contains("if td.native || td.carrier != ws.seq {"),
             "manual-follow must be carrier-gated"
         );
         // 8. A window that dies mid-drag takes its tracking with it.
@@ -45111,7 +45307,7 @@ mod tests {
         //     bounds) leaves the torn window frozen mid-air with no path to
         //     carry or dock it.
         assert!(
-            src.contains("let torn_tick_wait = self.torn_drag_pointer_tick();"),
+            src.contains("let torn_tick_wait = self.torn_drag_pointer_tick(event_loop);"),
             "about_to_wait must run the frozen-drag rescue tick"
         );
         // 11. The heuristic pointer-event commits distinguish an Esc-cancel

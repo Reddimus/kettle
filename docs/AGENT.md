@@ -222,6 +222,14 @@ pane shutdown remain observable under backpressure.
 
 ## Control server + `kettle ctl`
 
+The read-only `ui_geometry` diagnostic includes `desktop.client_origin` and
+`desktop.frame_origin` as `{x, y}` positions in winit's physical desktop pixels.
+Each is `null` if the platform cannot report it (including compositor-owned
+positioning). Client origin excludes native window decorations; frame origin
+includes them. Negative coordinates are valid on monitors left of or above
+the primary display. Use the reported scale factor when converting screenshot
+or logical coordinates, and sample each target window independently.
+
 The control server lets another process inspect and drive a *running* kettle
 window. It is **off by default**; enable it per launch or in config:
 
