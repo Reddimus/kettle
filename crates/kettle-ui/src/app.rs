@@ -762,6 +762,32 @@ fn accessibility_search_control_from_id(id: NodeId) -> Option<kettle_render::Sea
     }
 }
 
+/// A sender line naming `program` and its `signer`, with where each sits in
+/// it. The line is rendered once more per part with a control character in
+/// that part's place, which no sanitized text holds, to find it in any
+/// language's word order.
+fn media_viewer_sender_line(
+    line: impl Fn(&str, Option<&str>) -> String,
+    program: &str,
+    signer: Option<&str>,
+) -> kettle_render::MediaViewerSender {
+    let text = line(program, signer);
+    let find = |marked: String, marker: char, part: &str| {
+        marked
+            .find(marker)
+            .map(|start| start..start + part.len())
+            .filter(|range| text.get(range.clone()) == Some(part))
+    };
+    let program_range = find(line("\u{1}", signer), '\u{1}', program);
+    let signer_range =
+        signer.and_then(|signer| find(line(program, Some("\u{2}")), '\u{2}', signer));
+    kettle_render::MediaViewerSender {
+        text,
+        program: program_range,
+        signer: signer_range,
+    }
+}
+
 /// What a screen reader hears for the open media viewer: its name, with the
 /// item's place on the shelf, title and detail line, and a description that
 /// says when the pixels were released and how to close or browse.
@@ -770,7 +796,8 @@ fn media_viewer_accessibility(
     tr: &kettle_i18n::Translator,
 ) -> (String, String) {
     let (index, count) = viewer.position;
-    let label = tr.media_viewer_a11y(index as u64, count as u64, &viewer.title, &viewer.detail);
+    let detail = format!("{} · {}", viewer.detail, viewer.sender.text);
+    let label = tr.media_viewer_a11y(index as u64, count as u64, &viewer.title, &detail);
     let description = if viewer.image.is_some() {
         viewer.hint.clone()
     } else {
@@ -10080,22 +10107,34 @@ impl App {
             _ => kettle_i18n::Text::MediaViewerKindMedia,
         });
         let sender = match &item.provenance {
-            crate::media::Provenance::Verified => {
-                tr.text(kettle_i18n::Text::MediaViewerFromPane).to_string()
+            crate::media::Provenance::Verified => kettle_render::MediaViewerSender {
+                text: tr.text(kettle_i18n::Text::MediaViewerFromPane).to_string(),
+                program: None,
+                signer: None,
+            },
+            crate::media::Provenance::Unverified(sender) => {
+                let pid = u64::from(sender.pid);
+                let line = |program: &str, signer: Option<&str>| match signer {
+                    Some(signer) => tr.media_viewer_unverified_signed(program, pid, signer),
+                    None => tr.media_viewer_unverified(program, pid),
+                };
+                let signer = sender.signer.as_deref();
+                match sender.executable.as_deref() {
+                    Some(path) => media_viewer_sender_line(line, path, signer),
+                    None => media_viewer_sender_line(
+                        line,
+                        tr.text(kettle_i18n::Text::MediaViewerUnknownProgram),
+                        signer,
+                    ),
+                }
             }
-            crate::media::Provenance::Unverified(sender) => tr.media_viewer_unverified(
-                sender
-                    .executable
-                    .as_deref()
-                    .unwrap_or_else(|| tr.text(kettle_i18n::Text::MediaViewerUnknownProgram)),
-                u64::from(sender.pid),
-            ),
         };
         let (width, height) = item.size;
         Some(kettle_render::MediaViewerOverlay {
             pane_rect,
             title: item.title.clone(),
-            detail: format!("{kind} · {width}×{height} · {sender}"),
+            detail: format!("{kind} · {width}×{height}"),
+            sender,
             hint: tr
                 .text(if items.len() > 1 {
                     kettle_i18n::Text::MediaViewerHint
@@ -20664,15 +20703,23 @@ impl App {
                 crate::media::Sender::Pane(route.pane),
                 crate::media::Provenance::Verified,
             ),
-            (false, Some(sender)) => (
-                crate::media::Sender::Process(sender.process),
-                crate::media::Provenance::Unverified(crate::media::UnverifiedSender {
-                    executable: sender
-                        .executable
-                        .map(|path| crate::media::display_title(&path.to_string_lossy())),
-                    pid: sender.process.pid(),
-                }),
-            ),
+            // A script that runs `kettle show` many times is one sender: the
+            // program that asked, not each command line it ran.
+            (false, Some(sender)) => {
+                let asker = sender.asker;
+                (
+                    crate::media::Sender::Process(asker.process),
+                    crate::media::Provenance::Unverified(crate::media::UnverifiedSender {
+                        executable: asker
+                            .executable
+                            .map(|path| crate::media::display_title(&path.to_string_lossy())),
+                        pid: asker.process.pid(),
+                        signer: asker.signature.as_ref().map(|signature| {
+                            crate::media::display_title(&crate::media::signer_name(signature))
+                        }),
+                    }),
+                )
+            }
             (false, None) => {
                 refuse(FailureCode::NotInKettlePane);
                 return;
@@ -39423,6 +39470,38 @@ mod tests {
         );
     }
 
+    /// The sender line knows where its program's path sits, whatever the
+    /// language's word order and whatever the path holds.
+    #[test]
+    fn the_sender_line_finds_its_program_in_any_word_order() {
+        let path = "/opt/Unverified sender/bin/tool";
+        let signer = "Example (pid 7) Corp";
+        for template in [
+            |program: &str, signer: Option<&str>| {
+                format!(
+                    "Unverified sender: {program} (pid 7), signed by {}",
+                    signer.unwrap()
+                )
+            },
+            |program: &str, signer: Option<&str>| {
+                format!("{} signed {program} (pid 7)", signer.unwrap())
+            },
+        ] {
+            let sender = super::media_viewer_sender_line(template, path, Some(signer));
+            let program = sender.program.clone().expect("the program is found");
+            let signed = sender.signer.clone().expect("the signer is found");
+            assert_eq!(&sender.text[program], path, "{}", sender.text);
+            assert_eq!(&sender.text[signed], signer, "{}", sender.text);
+        }
+        let unsigned = super::media_viewer_sender_line(
+            |program: &str, _: Option<&str>| format!("Unverified sender: {program}"),
+            path,
+            None,
+        );
+        assert_eq!(unsigned.signer, None);
+        assert!(unsigned.program.is_some());
+    }
+
     /// A screen reader hears the item's place on the shelf and, when its
     /// pixels were released, that too; the tree is republished when either
     /// changes.
@@ -39432,7 +39511,12 @@ mod tests {
         let mut viewer = kettle_render::MediaViewerOverlay {
             pane_rect: (0.0, 0.0, 800.0, 600.0),
             title: "Plot".into(),
-            detail: "Image · 64×48 · from this pane".into(),
+            detail: "Image · 64×48".into(),
+            sender: kettle_render::MediaViewerSender {
+                text: "From this pane".into(),
+                program: None,
+                signer: None,
+            },
             hint: "Esc closes".into(),
             position: (2, 3),
             image: Some(kettle_core::ImageData::new(1, 1, vec![0; 4]).unwrap()),

@@ -26,10 +26,31 @@ pub(crate) enum Provenance {
 /// never from the sender's own words.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct UnverifiedSender {
-    /// The executable the kernel names for the sender, sanitized for
-    /// display; `None` when it could not be read.
+    /// The executable the kernel names for the program that asked, sanitized
+    /// for display; `None` when it could not be read.
     pub executable: Option<String>,
     pub pid: u32,
+    /// Who signed that program's code, sanitized for display; `None` when
+    /// it is not validly signed with a certificate Apple issued, or the
+    /// platform has no code signatures.
+    pub signer: Option<String>,
+}
+
+/// How a signer reads: Apple for Apple's own code, else its certificate's
+/// name without the certificate's kind (`Developer ID Application: `), else
+/// its team, else its signing identifier.
+pub(crate) fn signer_name(signature: &kettle_ctl::signing::Signature) -> String {
+    if signature.apple {
+        return "Apple".to_owned();
+    }
+    match (signature.authority.as_deref(), &signature.team) {
+        (Some(authority), _) => authority
+            .split_once(": ")
+            .map_or(authority, |(_, name)| name)
+            .to_owned(),
+        (None, Some(team)) => team.clone(),
+        (None, None) => signature.identifier.clone(),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -217,6 +238,7 @@ pub(crate) fn report(shelf: &Shelf) -> serde_json::Value {
                 Provenance::Unverified(sender) => serde_json::json!({
                     "executable": sender.executable,
                     "pid": sender.pid,
+                    "signer": sender.signer,
                 }),
             };
             serde_json::json!({
@@ -336,6 +358,40 @@ mod tests {
     }
 
     #[test]
+    fn a_signer_reads_as_its_certificate_name_or_apple() {
+        use kettle_ctl::signing::Signature;
+        let signature = |team: Option<&str>, authority: Option<&str>, apple: bool| Signature {
+            identifier: "com.example.tool".into(),
+            team: team.map(str::to_owned),
+            authority: authority.map(str::to_owned),
+            apple,
+            executable: "/usr/local/bin/tool".into(),
+        };
+        let developer = "Developer ID Application: Anthropic PBC (Q6L2SF6YDW)";
+        assert_eq!(
+            signer_name(&signature(Some("Q6L2SF6YDW"), Some(developer), false)),
+            "Anthropic PBC (Q6L2SF6YDW)"
+        );
+        assert_eq!(
+            signer_name(&signature(None, Some("macOS Software Signing"), true)),
+            "Apple"
+        );
+        assert_eq!(
+            signer_name(&signature(None, Some(developer), false)),
+            "Anthropic PBC (Q6L2SF6YDW)",
+            "an older signature without a team is still its developer's, not Apple's"
+        );
+        assert_eq!(
+            signer_name(&signature(Some("ABCDE12345"), None, false)),
+            "ABCDE12345"
+        );
+        assert_eq!(
+            signer_name(&signature(None, None, false)),
+            "com.example.tool"
+        );
+    }
+
+    #[test]
     fn the_report_names_items_and_senders_but_holds_no_pixels() {
         let mut shelf = Shelf::default();
         shelf.publish(item(1, Some("plot")), None);
@@ -343,6 +399,7 @@ mod tests {
         unverified.provenance = Provenance::Unverified(UnverifiedSender {
             executable: Some("/usr/bin/tool".into()),
             pid: 77,
+            signer: Some("Example Corp (ABCDE12345)".into()),
         });
         unverified.warnings = vec![Warning::FontFallback];
         shelf.publish(unverified, None);
@@ -352,7 +409,8 @@ mod tests {
             serde_json::json!([
                 {"item": 2, "generation": 0, "title": "item 2", "kind": "raster",
                  "width": 1, "height": 1, "warnings": ["font_fallback"], "verified": false,
-                 "sender": {"executable": "/usr/bin/tool", "pid": 77}, "pixels": "held"},
+                 "sender": {"executable": "/usr/bin/tool", "pid": 77,
+                            "signer": "Example Corp (ABCDE12345)"}, "pixels": "held"},
                 {"item": 1, "generation": 0, "title": "item 1", "kind": "raster",
                  "width": 1, "height": 1, "warnings": [], "verified": true,
                  "sender": null, "pixels": "released"},

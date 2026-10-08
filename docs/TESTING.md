@@ -3708,7 +3708,25 @@ start, and otherwise ends in `NotInKettle` having connected nowhere, while
 control discovery still falls back. The `method` table classifies `show` as
 the one Display method. `ctl_server` answers a malformed `show`, non-object
 params included, on its connection thread in `show`'s own wording and hands the App a valid one parsed, its params moved, its
-sender named by the kernel with its executable, and its caller checked. In
+sender named by the kernel with its executable, and its caller checked. The
+program that asked is the one that ran Kettle's own command line, when the
+sender's checked ancestry starts at it; any other sender asked for itself.
+`kettle-ctl`'s `signing` tests (macOS): Apple's own `sleep` meets the
+Apple-issued requirement as `com.apple.sleep`, signed by `macOS Software
+Signing` with no team; a requirement it does not meet, a test binary's ad-hoc
+signature and another process on its pid are refused; a null reference is
+never released; an exec changes a process's audit token though its pid and
+start stay; and every requirement Kettle checks parses. A signed program's
+path is the one its signature was checked against. Apple is named only for
+Apple's own code, never for a third party's signature without a team. The
+kernel's validity flag and the code-directory match need a program whose
+signature broke after it started, which CI cannot make;
+on a Developer ID build, Claude Code (236 MB) validates as `Anthropic PBC
+(Q6L2SF6YDW)` in about 2 ms after the first check in a process, which takes
+0.2 to 0.5 s. A signer reads as its certificate's name, or Apple for Apple's
+own code. The viewer's sender line finds its program's path and signer in
+any language's word order, whatever they hold, and a line too narrow even for
+the path's last segment shortens around the signer, which stays whole. In
 `kettle-ui`'s `media` module, `route` tests: the nearest live pane ancestor
 in any window wins; a reused pid is not an ancestor; a verified caller keeps
 its pane whatever it asks for; only full control names a pane for an
@@ -3726,7 +3744,9 @@ The shelf counts unseen items, and a replaced item is unseen again unless it
 is the one on screen.
 
 The media viewer (`kettle-render`'s `media_viewer` tests) sits inside its
-pane with its controls on one header row, needs no browsing buttons for one
+pane with its controls on one header row and the sender on a line of its own
+under kind and size; a sender line too long for the viewer shortens the
+program's path from its middle, keeping its last segment and who signed it, needs no browsing buttons for one
 item, fits its image centered and never enlarged, keeps the image's shape
 within half a pixel at one scale and lands on whole pixels inside its area (a
 sweep of wide and tall sizes under whole and fractional overlay metrics; an

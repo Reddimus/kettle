@@ -23,7 +23,9 @@ use crate::ctl_server::ReplyTx;
 
 pub(crate) use queue::Sender;
 pub(crate) use route::{PaneRoot, Route, nearest_pane, route};
-pub(crate) use shelf::{Provenance, Shelf, ShelfItem, UnverifiedSender, report as shelf_report};
+pub(crate) use shelf::{
+    Provenance, Shelf, ShelfItem, UnverifiedSender, report as shelf_report, signer_name,
+};
 
 use queue::{Admitted, Queue};
 

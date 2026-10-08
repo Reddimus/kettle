@@ -444,7 +444,19 @@ connection thread builds the evidence an `AdmittedRequest` carries.
 `show` (kettle-ctl's `show` module) is parsed on that connection thread too,
 after admission, into an owned `ShowRequest`; with it the request carries its
 admission instant and the sender the kernel names, with the executable that
-process runs (`process::executable`, rechecked against the pid's start). In
+process runs (`process::executable`, rechecked against the pid's start), and
+the program that asked: the sender, or for Kettle's own command line its
+checked parent, with the code signature `kettle_ctl::signing` validates on
+macOS. Every step is bound to the process's audit token, read again at the
+end, whose pid version changes when the process runs another program: the
+kernel's status for the running code (`CS_VALID`, kept only while every
+loaded page matched its code directory) and the code directory hash it runs,
+both from `csops_audittoken`; the file's signature and certificate chain
+checked against a requirement without hashing the file again and with no
+network lookup, before any signing information is read; and that file's code
+directory hash equal to the kernel's. The program's path shown is the one read
+inside that check. Requirements are Kettle's own constants, since one that
+fails to parse makes the Security framework throw past its C interface. In
 kettle-ui the `media` module routes it (`route`: the nearest live pane whose
 child is an ancestor, else full control's pane or a hint naming this
 Kettle, unverified), queues it (`queue`: one render, three waiting, one per

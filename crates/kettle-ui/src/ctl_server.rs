@@ -241,12 +241,93 @@ pub struct ShowAdmission {
     pub sender: Option<SenderIdentity>,
 }
 
-/// The connecting process as the kernel names it, and the executable it ran
-/// when the request was admitted. Never anything the sender says about itself.
+/// The connecting process as the kernel names it, the executable it ran when
+/// the request was admitted, and the program that asked through it. Never
+/// anything the sender says about itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SenderIdentity {
     pub process: ProcessIdentity,
     pub executable: Option<PathBuf>,
+    /// The program that asked: the sender itself, or the process that ran it
+    /// when the sender is Kettle's own command line (`kettle show`, `kettle
+    /// mcp`), which only carries another program's request.
+    pub asker: ProgramIdentity,
+}
+
+/// A process as the OS describes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgramIdentity {
+    pub process: ProcessIdentity,
+    pub executable: Option<PathBuf>,
+    /// Who signed the code it runs, when that code is validly signed with a
+    /// certificate Apple issued.
+    pub signature: Option<kettle_ctl::signing::Signature>,
+}
+
+impl ProgramIdentity {
+    /// `process`, with the executable read before. A valid signature brings
+    /// the executable it was checked against, which replaces that read, so a
+    /// path never pairs with another program's signer.
+    fn read(process: ProcessIdentity, executable: Option<PathBuf>) -> Self {
+        let requirement = kettle_ctl::signing::Requirement::APPLE_ISSUED;
+        match kettle_ctl::signing::signature(process, requirement) {
+            Ok(signature) => Self {
+                process,
+                executable: Some(signature.executable.clone()),
+                signature: Some(signature),
+            },
+            Err(_) => Self {
+                process,
+                executable,
+                signature: None,
+            },
+        }
+    }
+}
+
+/// The executable this Kettle runs, as the kernel names it: the same source
+/// as a sender's, so the two compare.
+fn own_executable() -> Option<&'static std::path::Path> {
+    static OWN: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    OWN.get_or_init(|| {
+        kettle_ctl::process::current()
+            .ok()
+            .and_then(|me| kettle_ctl::process::executable(me.identity).ok())
+    })
+    .as_deref()
+}
+
+/// Which process asked through `peer`: the peer, unless it runs Kettle's own
+/// executable and its checked ancestry names the process that ran it.
+fn asking_process(
+    peer: ProcessIdentity,
+    peer_executable: Option<&std::path::Path>,
+    own_executable: Option<&std::path::Path>,
+    chain: Option<&[ProcessIdentity]>,
+) -> ProcessIdentity {
+    let runs_kettle = peer_executable.is_some() && peer_executable == own_executable;
+    match chain {
+        Some([first, parent, ..]) if runs_kettle && *first == peer => *parent,
+        _ => peer,
+    }
+}
+
+impl SenderIdentity {
+    /// Read `peer` and the program that asked through it.
+    fn read(peer: ProcessIdentity, chain: Option<&[ProcessIdentity]>) -> Self {
+        let executable = kettle_ctl::process::executable(peer).ok();
+        let asked = asking_process(peer, executable.as_deref(), own_executable(), chain);
+        let asker = if asked == peer {
+            ProgramIdentity::read(peer, executable.clone())
+        } else {
+            ProgramIdentity::read(asked, kettle_ctl::process::executable(asked).ok())
+        };
+        Self {
+            process: peer,
+            executable,
+            asker,
+        }
+    }
 }
 
 impl AdmittedRequest {
@@ -361,10 +442,10 @@ fn prepare(
             let show = kettle_ctl::show::ShowRequest::parse(params)
                 .map_err(|failure| kettle_ctl::show::show_failure(request.req.id, failure))?;
             request.caller = CallerEvidence::check(claim, capture);
-            let sender = capture.peer().map(|process| SenderIdentity {
-                process,
-                executable: kettle_ctl::process::executable(process).ok(),
-            });
+            let chain = request.caller.chain().and_then(Result::ok);
+            let sender = capture
+                .peer()
+                .map(|process| SenderIdentity::read(process, chain));
             request.show = Some(Box::new(ShowAdmission {
                 request: show,
                 sender,
@@ -1638,6 +1719,70 @@ mod tests {
         assert_eq!(response.result["served"], true);
     }
 
+    /// A signed program's path is the one its signature was checked
+    /// against, never one read earlier, which may name a program it no
+    /// longer runs.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_signed_programs_path_is_the_one_its_signature_was_checked_against() {
+        let mut sleeper = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("start /bin/sleep");
+        let process = kettle_ctl::process::identity(sleeper.id()).expect("its identity");
+        let program = super::ProgramIdentity::read(process, Some("/tmp/earlier-program".into()));
+        let _ = sleeper.kill();
+        let _ = sleeper.wait();
+        let signature = program.signature.expect("Apple signs sleep");
+        assert!(signature.apple);
+        assert_eq!(program.executable, Some(signature.executable));
+        assert_ne!(
+            program.executable.as_deref(),
+            Some(std::path::Path::new("/tmp/earlier-program"))
+        );
+    }
+
+    /// Kettle's own command line carries another program's request, so the
+    /// program that asked is the one that ran it; any other sender asked for
+    /// itself, and so does Kettle's command line with no checked parent.
+    #[test]
+    fn the_program_that_asked_is_the_one_that_ran_kettles_command_line() {
+        let id = |pid, start| ProcessIdentity::new_for_tests(pid, start);
+        let (peer, shell, launchd) = (id(30, 300), id(20, 200), id(1, 1));
+        let kettle = std::path::Path::new("/Applications/Kettle.app/Contents/MacOS/kettle");
+        let other = std::path::Path::new("/usr/local/bin/tool");
+        let chain = [peer, shell, launchd];
+        assert_eq!(
+            super::asking_process(peer, Some(kettle), Some(kettle), Some(&chain)),
+            shell
+        );
+        assert_eq!(
+            super::asking_process(peer, Some(other), Some(kettle), Some(&chain)),
+            peer,
+            "another program asked for itself"
+        );
+        assert_eq!(
+            super::asking_process(peer, Some(kettle), Some(kettle), None),
+            peer,
+            "no checked ancestry"
+        );
+        assert_eq!(
+            super::asking_process(peer, Some(kettle), Some(kettle), Some(&[peer])),
+            peer,
+            "no parent"
+        );
+        assert_eq!(
+            super::asking_process(peer, Some(kettle), Some(kettle), Some(&[shell, launchd])),
+            peer,
+            "a chain that does not start at the sender says nothing about it"
+        );
+        assert_eq!(
+            super::asking_process(peer, None, None, Some(&chain)),
+            peer,
+            "an unreadable executable is not Kettle's"
+        );
+    }
+
     /// A malformed `show` is answered on its connection thread; a valid one
     /// reaches the App already parsed, its params moved out, with its sender
     /// named by the kernel and its caller checked.
@@ -1672,8 +1817,10 @@ mod tests {
             &mut client,
             r#"{"v":1,"id":2,"method":"show","params":{"svg":"<svg/>","title":"Plot"}}"#,
         );
+        // Naming the sender checks the signature of this test's own binary,
+        // which takes about two seconds for a debug build on macOS.
         let mut request = loop {
-            match rx.recv_timeout(Duration::from_secs(2)) {
+            match rx.recv_timeout(Duration::from_secs(20)) {
                 Ok(CtlServerMsg::Request {
                     conn_id: c,
                     request,
@@ -1695,7 +1842,7 @@ mod tests {
             .expect("the kernel names the connecting process");
         assert_eq!(sender.process.pid(), std::process::id());
         assert_eq!(
-            std::fs::canonicalize(sender.executable.expect("its executable")).unwrap(),
+            std::fs::canonicalize(sender.executable.as_ref().expect("its executable")).unwrap(),
             std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap()
         );
         // This client sent no claim: checked, and unverified.
@@ -1703,6 +1850,9 @@ mod tests {
             request.caller().chain().map(Result::err),
             Some(Some(UnverifiedReason::MissingClaim))
         );
+        // With no checked ancestry, the sender is the program that asked.
+        assert_eq!(sender.asker.process, sender.process);
+        assert_eq!(sender.asker.executable, sender.executable);
     }
 
     /// `wait_for`'s probes are fixed `read_screen` requests under the wait's

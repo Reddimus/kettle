@@ -22,6 +22,7 @@ pub mod presence;
 pub mod process;
 pub mod protocol;
 pub mod show;
+pub mod signing;
 pub mod transport;
 
 pub use client::{Client, CtlError};
