@@ -3697,7 +3697,10 @@ exits, so the full batch remains available to the later paste reader. Native
 readback failures report the writer exit code, distinguishing clipboard setup
 from later receipt failures.
 
-Native CI also runs `video_preview_native`. Every platform leaves worker
+Native CI also runs `video_preview_native`. Its tests start one worker at a
+time: run in parallel, two workers asking the Windows Shell thumbnail
+provider at once could each overrun the two-second deadline on a loaded
+runner, although each passes alone. Every platform leaves worker
 stdin open and proves the child exits at its own deadline. macOS requires a
 bounded opaque poster from the checked-in MP4. Windows retries only an
 explicit first-worker timeout, matching production's cold-provider retry.

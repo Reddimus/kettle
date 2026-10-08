@@ -51,9 +51,22 @@ fn worker_input(path: &std::path::Path, identity: &str) -> Vec<u8> {
     input
 }
 
+/// One worker process at a time in this binary. Tests otherwise run in
+/// parallel, and on a loaded Windows runner two workers asking the Shell
+/// thumbnail provider at once can each overrun the production two-second
+/// deadline, twice, although each passes alone. A failed test must not block
+/// the rest, so a poisoned lock is still taken.
+fn one_worker_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+    static WORKERS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    WORKERS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Send `input` to the shipped worker and wait for it.
 fn run_worker_with(input: &[u8]) -> std::process::Output {
     use std::io::Write as _;
+    let _worker = one_worker_at_a_time();
     let mut child = Command::new(env!("CARGO_BIN_EXE_kettle"))
         .arg("__media-preview-worker")
         .stdin(Stdio::piped())
@@ -124,6 +137,7 @@ fn shipped_worker_accepts_movie_bytes_with_another_video_suffix() {
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 fn run_native_worker(video: &Path) -> std::process::Output {
+    let _worker = one_worker_at_a_time();
     let mut child = Command::new(env!("CARGO_BIN_EXE_kettle"))
         .arg("__media-preview-worker")
         .stdin(Stdio::piped())
@@ -251,6 +265,7 @@ fn shipped_worker_extracts_a_bounded_native_video_poster() {
 
 #[test]
 fn shipped_worker_exits_when_its_parent_never_finishes_input() {
+    let _worker = one_worker_at_a_time();
     let mut child = Command::new(env!("CARGO_BIN_EXE_kettle"))
         .arg("__media-preview-worker")
         .stdin(Stdio::piped())
