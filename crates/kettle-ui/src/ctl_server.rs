@@ -150,7 +150,9 @@ impl CtlServer {
             return None;
         }
         let registry_dir = discovery::registry_dir();
-        discovery::sweep_orphan_endpoints(&registry_dir);
+        // Held until the entry is written, so no other process removes this
+        // socket between its bind and its registration.
+        let registration = discovery::begin_registration(&registry_dir);
         let endpoint = discovery::default_endpoint(&registry_dir, pid);
         let listener = match CtlListener::bind(&endpoint) {
             Ok(l) => l,
@@ -164,6 +166,7 @@ impl CtlServer {
             log::warn!("agent-server: cannot write discovery entry: {e}");
             return None;
         }
+        drop(registration);
         log::info!("agent-server: listening on {endpoint} (mode {mode:?})");
 
         let (tx, rx) = crossbeam_channel::unbounded::<CtlServerMsg>();
@@ -1134,15 +1137,13 @@ mod tests {
         let path =
             std::env::temp_dir().join(format!("kettle-ctl-drop-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&path);
-        drop(std::os::unix::net::UnixListener::bind(&path).expect("bind test socket"));
-        assert!(
-            path.exists(),
-            "a dropped std listener leaves its socket file"
-        );
+        // Still listening, as the accept thread's listener is at exit.
+        let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind test socket");
         let (mut server, _tx) = test_server();
         server.endpoint = path.to_string_lossy().into_owned();
         drop(server);
         assert!(!path.exists(), "the server's socket must not outlive it");
+        drop(listener);
     }
 
     fn dummy_event_tx() -> Sender<Event> {
