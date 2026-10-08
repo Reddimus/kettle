@@ -1513,11 +1513,11 @@ flowchart LR
     quads --> imgs["2. imgs.draw<br/>sixel · kitty · iTerm2<br/>inline image overlays"]
     imgs --> glyph["3. glyph_pipeline.draw<br/>pane text, CELL-LOCKED<br/>(grid mode; v2.25.0)"]
     glyph --> text["4. text_renderer.render<br/>tab / titlebar text<br/>(+ pane text in legacy)"]
-    text --> overlay["5. overlay_quads.draw<br/>pane dimming · scrollbar<br/>(NOT menu chrome)"]
-    overlay --> menuq["6. menu_quads.draw<br/>shadow · panel bg ·<br/>border · row highlight"]
-    menuq --> receipt["7. media_receipt_img.draw<br/>bounded clipboard thumbnail<br/>(when visible)"]
-    receipt --> menut["8. menu_text_renderer.render<br/>context menu + settings overlay<br/>row labels"]
-    menut --> curg["9. cursor_glyph_renderer.render<br/>focused block cursor's<br/>inverted glyph (on top)"]
+    text --> curg["5. cursor_glyph_renderer.render<br/>focused block cursor's<br/>inverted glyph"]
+    curg --> overlay["6. overlay_quads.draw<br/>pane dimming · scrollbar<br/>(NOT menu chrome)"]
+    overlay --> menuq["7. menu_quads.draw<br/>shadow · panel bg ·<br/>border · row highlight"]
+    menuq --> receipt["8. media_receipt_img.draw<br/>bounded clipboard thumbnail<br/>(when visible)"]
+    receipt --> menut["9. menu_text_renderer.render<br/>context menu + settings overlay<br/>row labels"]
 ```
 
 **Pass 3: cell-locked pane text.** In the default `text-renderer = grid` mode,
@@ -1644,14 +1644,15 @@ tab / field row / outside; `App::settings_mouse` dispatches that into the existi
 adjust). The Background settings page edits the image path through an inline text
 prompt (`SettingsTextEdit`) and gates inapplicable rows (`settings::field_disabled`).
 
-Steps 6 and 8 own the right-click context menu so its labels land **on
+Steps 7 and 9 own the right-click context menu so its labels land **on
 top of** the panel background. If the menu's opaque panel quad drew in
-step 5 (`overlay_quads`) after its labels were rendered, it would paint
+step 6 (`overlay_quads`) after its labels were rendered, it would paint
 over them and leave the menu blank.
 
-Step 9 draws the inverted glyph **under a focused solid
+Step 5 draws the inverted glyph **under a focused solid
 block cursor** in its own 1-glyph renderer, on top of the block quad
-(step 1). Decoupling it from the pane text buffer — rather than
+(step 1) and the pane text, and below dimming, menus and the paste receipt,
+so an opaque overlay hides the whole terminal cursor. Decoupling it from the pane text buffer — rather than
 recoloring the glyph in-place — means a cursor blink leaves the pane
 buffer byte-identical, and because the cursor glyph is prepared in both blink
 phases too, a blink edge prepares no text at all. The **damage gate** can skip

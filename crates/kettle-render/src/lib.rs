@@ -9788,6 +9788,14 @@ impl Renderer {
         }
         self.text_renderer
             .render(&self.atlas, &self.viewport, &mut pass)?;
+        // The focused solid-block cursor's inverted glyph sits on its block
+        // quad and the normal glyph, but below every overlay and chrome layer:
+        // an opaque menu or receipt must cover all of the terminal cursor. The
+        // off phase shows the glyph beneath in its normal colour instead.
+        if cursor_on && self.pending_cursor_glyph.is_some() {
+            self.cursor_glyph_renderer
+                .render(&self.atlas, &self.viewport, &mut pass)?;
+        }
         // Dimming + scrollbar sit on top of glyphs.
         self.overlay_quads.draw(&mut pass);
         // Menu chrome sits above terminal content. The receipt thumbnail is
@@ -9797,13 +9805,6 @@ impl Renderer {
         self.media_receipt_img.draw(&mut pass);
         self.menu_text_renderer
             .render(&self.atlas, &self.viewport, &mut pass)?;
-        // The focused solid-block cursor's inverted glyph, drawn last so it
-        // sits on top of the block quad and normal glyph. The off phase shows
-        // the glyph beneath in its normal colour instead.
-        if cursor_on && self.pending_cursor_glyph.is_some() {
-            self.cursor_glyph_renderer
-                .render(&self.atlas, &self.viewport, &mut pass)?;
-        }
         Ok(())
     }
 

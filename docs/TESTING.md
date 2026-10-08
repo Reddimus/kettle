@@ -1867,7 +1867,11 @@ do not, that printing a line adds no queue write, that the
 quad ring draws each frame's own data (a short frame between two longer ones
 must not leave a stale tail) with only the screen uniform through the queue,
 and that the glyph ring outgrows its first buffer. The direct ring tests run
-on any adapter supporting the feature, including discrete test devices.
+on any adapter supporting the feature, including discrete test devices. A
+headless GPU test places an opaque image paste receipt over a cell that holds
+a focused block cursor and its inverted glyph, and requires every pixel inside
+the receipt to match between the two blink phases; with the cursor glyph drawn
+after the overlays it fails where the glyph shows through.
 The live-path printing test uses the production adapter policy. Blink and
 steady-frame tests run with both that policy and an explicitly featureless
 device, so shared-memory hosts also cover queue uploads. Hosts without an

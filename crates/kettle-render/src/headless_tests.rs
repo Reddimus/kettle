@@ -1131,3 +1131,83 @@ fn only_legacy_pane_text_forces_a_glyphon_prepare() {
     );
     assert!(src.contains("any_pane_text_changed && cfg.text_renderer == TextRendererMode::Legacy"));
 }
+
+/// An opaque paste receipt over the cursor cell must hide the whole terminal
+/// cursor: its block quad and its inverted glyph.
+#[test]
+fn opaque_media_receipt_covers_the_terminal_cursor_inverted_glyph() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(640, 400) else {
+        eprintln!("MEDIA_CURSOR_GPU_SKIPPED: no GPU adapter");
+        return;
+    };
+    let receipt = MediaPasteReceiptOverlay {
+        tr: kettle_i18n::Translator::default(),
+        pane_rect: (0.0, 0.0, 640.0, 400.0),
+        grid_rect: (
+            cfg.padding_x,
+            cfg.padding_y,
+            640.0 - cfg.padding_x * 2.0,
+            400.0 - cfg.padding_y * 2.0,
+        ),
+        right_gutter: 0.0,
+        image: Some(kettle_core::ImageData::solid(32, 32, [240, 70, 40, 255]).unwrap()),
+        kind: MediaPasteReceiptKind::Image {
+            original_width: 32,
+            original_height: 32,
+        },
+        openable: true,
+        remote: false,
+        expanded: true,
+        prefer_top: true,
+    };
+    let geometry = media_paste_receipt_geometry(
+        &receipt,
+        None,
+        (renderer.cell_w, renderer.cell_h),
+        renderer.overlay_text_cell_width(),
+        renderer.metrics.line_height,
+    )
+    .expect("the receipt fits");
+    let target = geometry.preview_rect.unwrap_or(geometry.rect);
+    let col = ((target.0 + target.2 * 0.5 - cfg.padding_x) / renderer.cell_w).floor() as usize;
+    let row = ((target.1 + target.3 * 0.5 - cfg.padding_y) / renderer.cell_h).floor() as usize;
+    let x = cfg.padding_x + col as f32 * renderer.cell_w;
+    let y = cfg.padding_y + row as f32 * renderer.cell_h;
+    assert!(x > geometry.rect.0 && y > geometry.rect.1);
+    assert!(x + renderer.cell_w < geometry.rect.0 + geometry.rect.2);
+    assert!(y + renderer.cell_h < geometry.rect.1 + geometry.rect.3);
+    let snap = snapshot_of(
+        80,
+        30,
+        format!(
+            "\x1b[{};{}HW\x1b[{};{}H",
+            row + 1,
+            col + 1,
+            row + 1,
+            col + 1
+        )
+        .as_bytes(),
+    );
+    let mut overlay = focused(false);
+    overlay.media_paste_receipt = Some(receipt);
+    let off = capture(&mut renderer, &cfg, &[pane(&snap, 640, 400)], &overlay);
+    overlay.cursor_visible = true;
+    let on = capture(&mut renderer, &cfg, &[pane(&snap, 640, 400)], &overlay);
+    assert_eq!(
+        renderer.pending_cursor_glyph.as_ref().map(|glyph| glyph.ch),
+        Some('W'),
+        "the hidden terminal cursor must contain an actual inverted glyph"
+    );
+    for py in geometry.rect.1.ceil() as u32..(geometry.rect.1 + geometry.rect.3).floor() as u32 {
+        for px in geometry.rect.0.ceil() as u32..(geometry.rect.0 + geometry.rect.2).floor() as u32
+        {
+            assert_eq!(
+                on.get_pixel(px, py),
+                off.get_pixel(px, py),
+                "terminal cursor leaked through opaque receipt at{px},{py}"
+            );
+        }
+    }
+    eprintln!("MEDIA_CURSOR_GPU_ACCEPTANCE: opaque receipt covers cursor quad and inverted glyph");
+}
