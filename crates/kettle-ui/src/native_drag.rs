@@ -162,8 +162,17 @@ impl NativeCaptionDrag {
         #[cfg(target_os = "macos")]
         {
             use objc2_core_graphics_03::{CGEventSource, CGEventSourceStateID};
+            // AppKit's caption move loop swallows the Escape keyDown, so a
+            // held key is the only signal. Input injected at the HID level
+            // reaches the HID system state but not the combined session state,
+            // so read both.
             self.cancelled.get()
-                || CGEventSource::key_state(CGEventSourceStateID::CombinedSessionState, 53)
+                || [
+                    CGEventSourceStateID::CombinedSessionState,
+                    CGEventSourceStateID::HIDSystemState,
+                ]
+                .into_iter()
+                .any(|state| CGEventSource::key_state(state, 53))
         }
         #[cfg(not(target_os = "macos"))]
         false

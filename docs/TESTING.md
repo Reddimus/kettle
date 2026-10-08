@@ -2235,16 +2235,27 @@ cleared docking previews. The candidate's original and torn borders measured
 RGB `(125, 207, 255)` and `(187, 154, 247)` in separate captured frames. A native
 shell command remained visible through both accessibility and `read_cells`.
 Title-bar drag requests did not change either measured window origin, including
-a raised candidate with only one window. That check established no actual
-caption move, so it neither reproduces a caption-docking defect nor accepts
-the new caption bridge. All 14 recorded groups, including both fixtures, their
-PTYs and the controller, were gone after the original result was consumed.
-This isolated fixture did not include the sibling media worker and does not
-validate the media release package or installation. Native acceptance must
-additionally drag an Auto window by its caption onto the hidden target band,
-keep the original PTYs,
-exercise off-target drops and held-button Escape, and leave ordinary multi-tab
-caption moves and programmatic geometry changes undocked.
+a raised candidate with only one window, so that check established no caption
+move. All 14 recorded groups, including both fixtures, their PTYs and the
+controller, were gone after the original result was consumed. This isolated
+fixture did not include the sibling media worker and does not validate the
+media release package or installation.
+
+On October 8, slow pointer drags through the window server moved a bundled
+candidate's windows by their captions, with Auto tab bars and ctl reading the
+results. A single-tab window dropped on a sibling's hidden band docked on
+release, kept both shell processes and closed the emptied window. An
+off-target drop only moved the window, and a two-tab window dropped on the band
+stayed undocked. Escape held during a caption drag at first left the dock
+latched: AppKit's move loop swallows the key event, and the cancel poll read
+only the combined session key state, which HID-level injected input does not
+update (a separate poller saw the held key in the HID system state only). The
+poll now reads both states. With that change, the same held Escape cleared the
+dock preview before release and both windows remained, where the previous
+build had docked on three identical attempts. A tap shorter than the 16 ms
+poll can still be missed. Programmatic geometry changes are covered by the
+caption-press unit tests. No second display was attached, so mixed-DPI docking
+was not exercised.
 
 The tab tear-off drag is a
 pure FSM (`DragState` in `kettle-ui/src/detach.rs`) tested with no

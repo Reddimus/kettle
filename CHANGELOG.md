@@ -161,8 +161,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   processes its first movement immediately, allowing that same gesture to
   latch a sibling window's insertion target before release.
 - Native macOS caption drags of a single-tab window use the same rejoin path
-  when its automatic tab bar is hidden. Desktop-to-client docking coordinates
-  account for each target window's display scale.
+  when its automatic tab bar is hidden, and Escape before release cancels the
+  rejoin. Desktop-to-client docking coordinates account for each target
+  window's display scale.
 
 - New Kitty image ids remain addressable at image-count and retained-byte limits
   by reclaiming eligible old images, with unplaced images first. Pixel snapshots
