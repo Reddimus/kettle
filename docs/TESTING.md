@@ -2273,7 +2273,13 @@ preview replies, and end a hover pause without resetting the hard expiry; a
 late video preview finds the window its tab moved to. A census
 requires every function that detaches a tab to take the tab's paste state
 before handing it on, every failed new-window handoff to restore it, and the
-receiving side to adopt it. The tab tear-off drag is a
+receiving side to adopt it.
+The docking band is one function shared by the painted tab bar and the dock
+hit test, pinned for bottom bars above the search and bottom status bars,
+side strips above the search bar and an unchanged top band, with a guard that
+both callers use it; split drop previews and prospective split rects are
+checked against the pane an actual split creates for odd, fractional and
+cramped leaves. The tab tear-off drag is a
 pure FSM (`DragState` in `kettle-ui/src/detach.rs`) tested with no
 window or GPU — idle→armed→dragging threshold, mouse-up/Esc-cancel
 returning the dragged tab, cursor leave/re-enter, plus an

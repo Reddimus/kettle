@@ -2396,6 +2396,31 @@ fn confirm_dialog_keypress(
 #[allow(dead_code)] // doc-only reference + layout-helper test fixture; production uses cfg.tab_bar_width
 pub const VERTICAL_TAB_STRIP_W: f32 = 180.0;
 
+/// The tab bar's band: where it draws and where a dragged tab docks. A bottom
+/// bar sits above the search bar and a bottom status bar, and a side strip
+/// stops above the search bar, so the docking target matches what is painted.
+fn tab_band_rect(
+    surface: (u32, u32),
+    pos: TabBarPos,
+    height: f32,
+    strip_width: f32,
+    search_height: f32,
+    bottom_status_height: f32,
+) -> Rect {
+    let (sw, sh) = (surface.0 as f32, surface.1 as f32);
+    match pos {
+        TabBarPos::Top => (0.0, 0.0, sw, height),
+        TabBarPos::Bottom => (
+            0.0,
+            sh - search_height - bottom_status_height - height,
+            sw,
+            height,
+        ),
+        TabBarPos::Left => (0.0, 0.0, strip_width, sh - search_height),
+        TabBarPos::Right => (sw - strip_width, 0.0, strip_width, sh - search_height),
+    }
+}
+
 /// Pure helper that computes the pane-content rect from the surface size, bar
 /// metrics, and the edge each bar occupies.
 ///
@@ -2407,7 +2432,8 @@ pub const VERTICAL_TAB_STRIP_W: f32 = 180.0;
 /// Pure (no `&self`, renderer, or winit) so the layout math can be unit-tested
 /// without constructing a full App. `App::area` calls
 /// [`content_rect_for_with_strip`] directly with the configured strip width.
-#[allow(dead_code)] // production callers use content_rect_for_with_strip; this wrapper drives the layout-math drift guards (app.rs:9411+)
+#[allow(dead_code)]
+// production callers use content_rect_for_with_strip; this wrapper drives the layout-math drift guards (app.rs:9411+)
 fn content_rect_for(
     surface: (u32, u32),
     tab_bar_h: f32,
@@ -10391,27 +10417,15 @@ impl App {
         if height <= 0.0 {
             return TabBar::hidden();
         }
-        let (w, h) = ws
-            .renderer
-            .as_ref()
-            .map(|r| r.surface_size())
-            .unwrap_or((800, 600));
-        let (sw, sh) = (w as f32, h as f32);
+        let band = self.tab_band(ws, height);
+        let sw = band.2;
+        let y = band.1;
         let is_vertical = self.cfg.tab_bar_pos.is_vertical();
         // Left/Right strips route through a separate vertical-stacked path;
         // Top/Bottom use the `tab_strip_layout` flow below.
         if is_vertical {
-            return self.tab_bar_vertical(ws, sw, sh - self.search_bar_h(ws), height);
+            return self.tab_bar_vertical(ws, band, height);
         }
-        let y = match self.cfg.tab_bar_pos {
-            TabBarPos::Top | TabBarPos::Left | TabBarPos::Right => 0.0,
-            TabBarPos::Bottom => {
-                let status = matches!(self.cfg.status_bar, kettle_config::StatusBarMode::Bottom)
-                    .then(|| self.status_bar_h(ws))
-                    .unwrap_or(0.0);
-                sh - self.search_bar_h(ws) - status - height
-            }
-        };
         if ws.editing_title.is_some() {
             let strip_w = if is_vertical {
                 self.cfg.tab_bar_width
@@ -10437,7 +10451,7 @@ impl App {
                 // The title-edit modal owns the bar — no drag can be live.
                 tear_lift: 0.0,
                 insert_marker: None,
-                band: (0.0, y, sw, height),
+                band,
                 scroll_left: (0.0, 0.0, 0.0, 0.0),
                 scroll_right: (0.0, 0.0, 0.0, 0.0),
             };
@@ -10575,7 +10589,7 @@ impl App {
                 (x, y, kettle_render::tab_drag::INSERT_MARKER_PX, height)
             }),
             // Tear-off UX: the dock-highlight canvas.
-            band: (0.0, y, sw, height),
+            band,
             scroll_left: to_btn(layout.arrow_left),
             scroll_right: to_btn(layout.arrow_right),
         }
@@ -10605,13 +10619,8 @@ impl App {
     /// Tab-bar layout for `TabBarPos::Left` / `Right`. Stacks segments
     /// vertically, each `cfg.tab_bar_width` × `tab_bar_h`. The new-tab `+`
     /// button follows the last tab, clamped to the bottom of the strip.
-    fn tab_bar_vertical(&self, ws: &WindowState, sw: f32, sh: f32, height: f32) -> TabBar {
-        let strip_w = self.cfg.tab_bar_width;
-        let strip_x = match self.cfg.tab_bar_pos {
-            TabBarPos::Left => 0.0,
-            TabBarPos::Right => sw - strip_w,
-            _ => 0.0, // unreachable in this branch
-        };
+    fn tab_bar_vertical(&self, ws: &WindowState, band: Rect, height: f32) -> TabBar {
+        let (strip_x, _, strip_w, sh) = band;
         let labels = ws.mux.tab_labels(&self.ui_text);
         let active = ws.mux.active;
         let now = std::time::Instant::now();
@@ -10704,7 +10713,7 @@ impl App {
                 )
             }),
             // Tear-off UX: the dock-highlight canvas is the whole vertical strip.
-            band: (strip_x, 0.0, strip_w, sh),
+            band,
             // Vertical bars don't overflow-scroll (yet), so they have no arrows.
             scroll_left: (0.0, 0.0, 0.0, 0.0),
             scroll_right: (0.0, 0.0, 0.0, 0.0),
@@ -29010,19 +29019,31 @@ impl App {
         if matches!(self.cfg.tab_bar, TabBarMode::Off) {
             return None;
         }
-        let (w, h) = ws
+        let height = ws.renderer.as_ref().map(|r| r.cell_h + 8.0).unwrap_or(24.0);
+        Some(self.tab_band(ws, height))
+    }
+
+    /// This window's tab band at `height`, shared by painting and docking.
+    fn tab_band(&self, ws: &WindowState, height: f32) -> Rect {
+        let surface = ws
             .renderer
             .as_ref()
             .map(|r| r.surface_size())
             .unwrap_or((800, 600));
-        let (sw, sh) = (w as f32, h as f32);
-        let bh = ws.renderer.as_ref().map(|r| r.cell_h + 8.0).unwrap_or(24.0);
-        Some(match self.cfg.tab_bar_pos {
-            TabBarPos::Top => (0.0, 0.0, sw, bh),
-            TabBarPos::Bottom => (0.0, sh - bh, sw, bh),
-            TabBarPos::Left => (0.0, 0.0, self.cfg.tab_bar_width, sh),
-            TabBarPos::Right => (sw - self.cfg.tab_bar_width, 0.0, self.cfg.tab_bar_width, sh),
-        })
+        let bottom_status_height =
+            if matches!(self.cfg.status_bar, kettle_config::StatusBarMode::Bottom) {
+                self.status_bar_h(ws)
+            } else {
+                0.0
+            };
+        tab_band_rect(
+            surface,
+            self.cfg.tab_bar_pos,
+            height,
+            self.cfg.tab_bar_width,
+            self.search_bar_h(ws),
+            bottom_status_height,
+        )
     }
 
     /// Insertion slot if the (approximated) screen
@@ -45375,6 +45396,59 @@ mod tests {
         assert_eq!(tear_lift_ratio(400.0, -18.0, top, 36.0), 0.5);
         // A zero threshold can never tear, so it never lifts either.
         assert_eq!(tear_lift_ratio(400.0, 500.0, top, 0.0), 0.0);
+    }
+
+    /// A bottom bar sits above the search bar and a bottom status bar; the
+    /// docking band must be where the bar is painted, not at the window edge.
+    #[test]
+    fn bottom_dock_band_follows_search_and_bottom_status_chrome() {
+        use super::{TabBarPos, dist_to_rect, tab_band_rect, tear_lift_ratio};
+        for search_height in [0.0, 26.0, 78.0] {
+            for bottom_status_height in [0.0, 22.0] {
+                let band = tab_band_rect(
+                    (800, 600),
+                    TabBarPos::Bottom,
+                    24.0,
+                    180.0,
+                    search_height,
+                    bottom_status_height,
+                );
+                let visible_center = 600.0 - search_height - bottom_status_height - 12.0;
+                assert_eq!(dist_to_rect(400.0, visible_center, band), 0.0);
+                assert_eq!(tear_lift_ratio(400.0, visible_center, band, 36.0), 0.0);
+                if search_height + bottom_status_height >= 24.0 {
+                    assert!(dist_to_rect(400.0, 588.0, band) > 0.0);
+                }
+            }
+        }
+    }
+
+    /// Side strips stop above the search bar; the top band is unaffected.
+    #[test]
+    fn side_dock_bands_exclude_search_without_moving_the_top_band() {
+        use super::{TabBarPos, dist_to_rect, tab_band_rect};
+        for pos in [TabBarPos::Left, TabBarPos::Right] {
+            let band = tab_band_rect((800, 600), pos, 24.0, 180.0, 78.0, 22.0);
+            let x = if matches!(pos, TabBarPos::Left) {
+                90.0
+            } else {
+                710.0
+            };
+            assert_eq!(dist_to_rect(x, 510.0, band), 0.0);
+            assert!(dist_to_rect(x, 560.0, band) > 0.0);
+            assert_eq!(band.3, 522.0);
+        }
+        assert_eq!(
+            tab_band_rect((800, 600), TabBarPos::Top, 24.0, 180.0, 78.0, 22.0),
+            (0.0, 0.0, 800.0, 24.0),
+        );
+    }
+
+    /// Painting and docking share one band function.
+    #[test]
+    fn painted_and_docking_tab_bands_share_one_function() {
+        let src = production_source();
+        assert_eq!(src.matches("self.tab_band(ws, height)").count(), 2);
     }
 
     /// Docking inserts BETWEEN segments, so n tabs have n+1 slots, decided by
