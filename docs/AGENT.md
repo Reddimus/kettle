@@ -629,6 +629,27 @@ Or a project-scoped `.mcp.json`:
 { "mcpServers": { "kettle": { "command": "kettle", "args": ["mcp"] } } }
 ```
 
+### Display only: `kettle mcp --display`
+
+`kettle mcp --display` offers one tool, `kettle_show`, and nothing that reads
+the screen, types, runs commands or drives Kettle. It needs agent previews,
+never full control. Its arguments are an absolute `path` (an image or SVG
+file) and an optional `title` and `key`; inline bytes go through `kettle show
+-` instead. It finds its Kettle the strict way `kettle show` does, the one the
+server runs inside, and returns one plain line and status-only structured
+content (`status`, `delivery: "shelf"`, `pane`, `window`, `item`, `verified`,
+`kind`, `width`, `height`, `warnings`, `model_has_seen: false`), never the
+media. Failures are `isError` results in the fixed wording of [Showing
+media](#showing-media). The instructions say to use `kettle_show` when the
+server runs inside a Kettle that can show media, and not to call it
+otherwise; on the 2026-07-28 revision, `server/discover` marks them
+`cacheScope: "private"` and `ttlMs: 0`, since they depend on where the server
+runs.
+
+```sh
+claude mcp add kettle-display -- kettle mcp --display
+```
+
 ### Protocol revisions
 
 The server is **dual-era**. MCP 2026-07-28 removed the `initialize` handshake

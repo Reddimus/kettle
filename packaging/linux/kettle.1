@@ -22,7 +22,7 @@ kettle \- fast GPU-accelerated terminal emulator for Linux and macOS
 .RI [ OPTIONS ]
 .br
 .B kettle mcp
-.RI [ \-\-self\-test ]
+.RI [ \-\-self\-test " | " \-\-display ]
 .br
 .B kettle show
 .IR PATH " | " \-
@@ -524,6 +524,11 @@ runs an in-process handshake +
 + one
 .B kettle_run
 and exits, for CI.
+.B \-\-display
+offers only
+.BR kettle_show ,
+which sends an image or SVG file to the media shelf of the kettle pane the
+server runs in and needs agent previews, never full control.
 .TP
 .B kettle show \fIPATH\fR|\fB\-\fR [\fB\-\-title \fITITLE\fR] [\fB\-\-key \fIKEY\fR]
 Send a local image or SVG to the media shelf of the pane this runs in, in the

@@ -3757,7 +3757,21 @@ show a PNG and an SVG, run `kettle ctl perform_action --json
 newest item with its title, kind, size and `1/2`; clicking `›` shows the
 other with its own text; `×` and a click in the margin outside close it; the
 window title counts unopened items. Real Esc and arrow presses need window
-focus, which the release's native checks cover. Titles lose control characters,
+focus, which the release's native checks cover.
+
+`kettle mcp --display`: unit tests pin that it offers exactly `kettle_show`
+(path required, no other property) and refuses every full-mode tool, that
+full mode does not offer it, that bad requests (no path, a relative path, a
+missing file, a directory, an over-long key, an empty title) are refused in
+the fixed wording before anything is sent, that a sent result is one plain
+line plus status-only structured content saying the model has not seen it,
+and that display discovery is private with no cache lifetime.
+`tests/mcp_stdio.rs` runs the real `kettle mcp --display` in both protocol
+eras: initialize's instructions name `kettle_show`, `tools/list` is exactly
+`[kettle_show]`, a `kettle_run` call is refused as an invalid tool, and
+`server/discover` is private. For a live check, run `kettle mcp --display`
+inside a pane of `kettle --agent-server off --agent-display on` and call
+`kettle_show` on an SVG: it lands verified in that pane. Titles lose control characters,
 separators and bidirectional formatting, bounded at 256 characters.
 `kettle-vt` hands a refused image's pixels back when only the account's room
 was missing. `kettle show`'s own tests pin its fixed failure wording, the

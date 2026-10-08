@@ -590,6 +590,10 @@ struct McpArgs {
     /// and exit, instead of serving stdio. Used as a CI guard.
     #[arg(long)]
     self_test: bool,
+    /// Offer only kettle_show, which sends media to the Kettle pane this runs
+    /// in and needs agent previews, never full control.
+    #[arg(long, conflicts_with = "self_test")]
+    display: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -1167,8 +1171,10 @@ fn main() -> anyhow::Result<()> {
             Cmd::Mcp(args) => {
                 std::process::exit(if args.self_test {
                     mcp::self_test()
+                } else if args.display {
+                    mcp::run_mcp(mcp_tools::ToolSelection::Display)
                 } else {
-                    mcp::run_mcp()
+                    mcp::run_mcp(mcp_tools::ToolSelection::Full)
                 });
             }
             Cmd::Update(args) => {
