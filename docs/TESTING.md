@@ -1369,7 +1369,55 @@ cargo test --locked -p kettle-core ordinary_graphics_ -- --test-threads=1
 
 These test decoded admission and bidirectional PTY delivery. They do not prove
 GPU pixels, a foreground UI session, quiet performance, or release installation.
-Animation frame/composition replies require separate coverage.
+Animation frame/composition regressions live in
+`extract::animation_graphics_reply_tests`,
+`term::image_lifecycle_tests::animation_graphics_*`, and
+`term::teardown_tests::animation_graphics_*`. They check exact completion bytes,
+actual one-based frame numbers, first-chunk identity, quiet overrides, unchanged
+pixels on errors, append/edit/background selection, strict composition geometry,
+overlapping self-copy refusal, and playback controls against existing roots.
+Animation effects precede their replies and raw command bytes appear once.
+Two native Unix PTY children wait for frame and composition replies through
+actual stdin, directly and during synchronized output. Their replies must arrive
+before the child sends its final text marker or closes the synchronized update.
+
+The pre-fix compiled baseline executed all 23 VT and three Core regressions:
+22 VT and all three Core cases failed, including both waiting PTY children.
+One VT case already passed. These counts describe overlapping coverage, not
+25 separate defects. The post-fix focused gate passed all 252 VT and 430 Core
+tests, warnings-denied Clippy, all-target builds, and formatting. The installed
+Rust 1.89.0 toolchain also passed all 23 VT and three Core animation cases.
+The full and minimum-toolchain Core runs each exercised both waiting PTY
+children, which received their replies and exited successfully.
+`image::transient_crop_tests` adds three allocation-contract cases covering
+process-only scratch pixels, disjoint in-place composition at a full retained
+quota, and unchanged ordinary crop charging and clipping semantics. Those new
+cases passed in the full VT run.
+
+Four compiled mutation checks failed at runtime when their fixes were removed:
+`successful_animation_effect_precedes_its_reply`,
+`composition_patch_counts_process_memory_without_retained_scope`,
+`disjoint_self_composition_succeeds_at_unchanged_retained_size`, and
+`overlapping_self_composition_is_refused_without_mutation`. Each exact run
+reported one failure and no ignored test; all sources were restored before
+the full ordinary workspace gate.
+
+That gate passed formatting, warnings-denied Clippy, all-target builds,
+workspace unit/integration/doc tests, media-worker feature gates, headless
+rendering tests, and Rustdoc builds. Its 86 result reports total 3,133 passes,
+zero failures, and two ignored cases, including nested and feature-run repeats;
+this is not a count of unique tests. The ignored argv sleeper is exercised by
+its subprocess caller; the other ignored case is a release-mode contrast-cache
+benchmark. Independent review and merge remain separate from these results.
+
+```sh
+cargo test --locked -p kettle-vt animation_graphics_reply_tests::
+cargo test --locked -p kettle-vt transient_crop_tests::
+cargo test --locked -p kettle-core animation_graphics_ -- --test-threads=1
+```
+
+This coverage exercises decoded pixels and bidirectional PTY delivery; foreground
+GPU rendering and quiet performance measurements require separate acceptance.
 
 Root-frame edit regressions exercise real Kitty wire commands through the core
 extractor and graphics application path, both directly and inside synchronized

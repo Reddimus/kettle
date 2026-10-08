@@ -390,6 +390,7 @@ impl ReplyIntent {
             Some(CommandReply {
                 intent: self,
                 status,
+                frame_number: None,
             })
         }
     }
@@ -403,6 +404,8 @@ pub enum CommandStatus {
     InvalidPlacement,
     UnsupportedMedium,
     MissingImage,
+    MissingFrame,
+    InvalidFrameGeometry,
     MissingParent,
     NoSpace,
 }
@@ -411,6 +414,7 @@ pub enum CommandStatus {
 pub struct CommandReply {
     intent: ReplyIntent,
     status: CommandStatus,
+    frame_number: Option<u32>,
 }
 
 impl CommandReply {
@@ -424,6 +428,8 @@ impl CommandReply {
             CommandStatus::InvalidPlacement => "EINVAL:Invalid placement geometry",
             CommandStatus::UnsupportedMedium => "ENOTSUP:Unsupported transmission medium",
             CommandStatus::MissingImage => "ENOENT:Image not found",
+            CommandStatus::MissingFrame => "ENOENT:Frame not found",
+            CommandStatus::InvalidFrameGeometry => "EINVAL:Invalid frame geometry",
             CommandStatus::MissingParent => "ENOPARENT:Parent placement not found",
             CommandStatus::NoSpace => "ENOSPC:Image storage unavailable",
         };
@@ -435,6 +441,9 @@ impl CommandReply {
         }
         if let Some(placement) = self.intent.placement_id {
             write!(&mut output, ",p={placement}").expect("writing to a String");
+        }
+        if let Some(frame) = self.frame_number {
+            write!(&mut output, ",r={frame}").expect("writing to a String");
         }
         output.push(';');
         output.push_str(message);
@@ -509,6 +518,17 @@ impl CommandResult {
         Self {
             effect: KittyOut::None,
             completion: CommandCompletion::Finished(intent.complete(CommandStatus::Ok)),
+        }
+    }
+
+    fn animated(intent: ReplyIntent, id: u32, frame_number: Option<u32>) -> Self {
+        let reply = intent.complete(CommandStatus::Ok).map(|mut reply| {
+            reply.frame_number = frame_number;
+            reply
+        });
+        Self {
+            effect: KittyOut::Animate { id },
+            completion: CommandCompletion::Finished(reply),
         }
     }
 
@@ -1178,18 +1198,22 @@ impl KittyState {
             _ => 0,
         };
         if action == "a" {
-            // Animation control. Record state for the renderer playback loop.
-            // Gate the entry on the saturation cap. Updates to an
-            // already-tracked id are always allowed (no growth); a brand-new
-            // id past saturation is a no-op for animation control so an
-            // attacker can't grow `anim` indefinitely by sending `a=a,i=N`
-            // for distinct N without ever transmitting an image.
+            let intent = ReplyIntent::from_control(&kv, id);
+            if !self.store.contains_key(&id) {
+                return CommandResult::refused(intent, CommandStatus::MissingImage);
+            }
+            let last = self
+                .frames
+                .get(&id)
+                .map_or(1, |frames| frames.len() as u32 + 1);
+            // Only existing roots acquire playback state; updates keep the
+            // existing slot when the configured image count is full.
             if !self.anim.contains_key(&id) && self.anim.len() >= self.budget.limits().placements {
                 return CommandResult::without_response(KittyOut::None);
             }
             let st = self.anim.entry(id).or_default();
-            if let Some(c) = dim("c") {
-                st.current = c.max(1);
+            if let Some(c) = dim("c").filter(|&frame| frame != 0 && frame <= last) {
+                st.current = c;
             }
             match kv.get("s").and_then(|v| v.parse::<u32>().ok()) {
                 Some(1) => {
@@ -1217,14 +1241,15 @@ impl KittyState {
             if z != 0
                 && let Some(r) = dim("r")
             {
-                if r <= 1 {
+                if r == 1 {
                     // The saturation gate above admitted `id`, so this `entry`
                     // can't grow `anim`.
                     self.anim.entry(id).or_default().root_gap = z;
-                } else if let Some(fr) = self
-                    .frames
-                    .get_mut(&id)
-                    .and_then(|f| f.get_mut(r as usize - 2))
+                } else if r >= 2
+                    && let Some(fr) = self
+                        .frames
+                        .get_mut(&id)
+                        .and_then(|f| f.get_mut(r as usize - 2))
                 {
                     fr.gap_ms = z;
                 }
@@ -1232,192 +1257,10 @@ impl KittyState {
             return CommandResult::without_response(KittyOut::Animate { id });
         }
         if action == "c" {
-            // Frame composition: copy a rectangle from source frame `r`
-            // onto destination frame `c` (both 1-based; 1 = root/base).
-            let src = dim("r").and_then(|n| self.frame_image(id, n));
-            let dn = dim("c").unwrap_or(0);
-            let Some(src) = src else {
-                return CommandResult::without_response(KittyOut::None);
-            };
-            let w = dim("w").unwrap_or(src.width);
-            let h = dim("h").unwrap_or(src.height);
-            let replace = kv.get("C").map(|v| v == "1").unwrap_or(false);
-            let (sx, sy) = (dim("X").unwrap_or(0), dim("Y").unwrap_or(0));
-            let (dx, dy) = (dim("x").unwrap_or(0), dim("y").unwrap_or(0));
-            let patch = src.crop(sx, sy, w, h);
-            drop(src);
-            if let Some(patch) = patch {
-                if dn <= 1 {
-                    if let Some(b) = self.store.get_mut(&id)
-                        && !b.compose(&patch, dx, dy, replace)
-                    {
-                        return CommandResult::without_response(KittyOut::None);
-                    }
-                } else if let Some(fr) = self
-                    .frames
-                    .get_mut(&id)
-                    .and_then(|f| f.get_mut(dn as usize - 2))
-                    && !fr.img.compose(&patch, dx, dy, replace)
-                {
-                    return CommandResult::without_response(KittyOut::None);
-                }
-            }
-            return CommandResult::without_response(KittyOut::Animate { id });
+            return self.compose_frame(id, &kv);
         }
         if action == "f" {
-            // Transmit animation frame data (chunked like an image). The
-            // first chunk carries `i=`/control; continuations carry only
-            // `m`, so the id + control come from the in-flight slot.
-            let more = kv.get("m").map(|v| v == "1").unwrap_or(false);
-            if self.frame_in_flight.is_none()
-                && self.in_flight.len() + usize::from(self.query_in_flight.is_some())
-                    >= self.budget.limits().in_flight_slots
-            {
-                return CommandResult::without_response(KittyOut::None);
-            }
-            let payload = payload.trim();
-            if !self.in_flight_append_fits(
-                self.frame_in_flight.as_ref().map(|(_, acc)| acc),
-                control,
-                payload,
-            ) {
-                self.frame_in_flight = None;
-                return CommandResult::without_response(KittyOut::None);
-            }
-            let accepted = {
-                let budget = self.budget.clone();
-                let slot = self
-                    .frame_in_flight
-                    .get_or_insert_with(|| (id, Acc::default()));
-                if slot.1.control.is_empty() {
-                    slot.0 = id;
-                }
-                slot.1.append(control, payload, &budget)
-            };
-            // Defense against an attacker chaining `m=1`
-            // continuation chunks indefinitely. Drop the slot once it
-            // crosses the per-slot cap. Also enforce the global
-            // cap (this frame slot + every in_flight slot) so concurrent
-            // image + animation transmissions can't sum past the ceiling.
-            if !accepted || self.in_flight_bytes() > self.budget.limits().in_flight_bytes {
-                self.frame_in_flight = None;
-                return CommandResult::without_response(KittyOut::None);
-            }
-            if more {
-                return CommandResult::without_response(KittyOut::None);
-            }
-            // `get_or_insert_with` above leaves `frame_in_flight` set, so the
-            // `expect` only fires if a refactor breaks that invariant.
-            let (
-                fid,
-                Acc {
-                    control,
-                    payload,
-                    reservation: _payload_reservation,
-                    reply: _,
-                },
-            ) = self
-                .frame_in_flight
-                .take()
-                .expect("frame_in_flight is Some after get_or_insert_with");
-            if let Some(patch) = decode_with_budget(&control, &payload, &self.budget) {
-                let fc = parse_control(&control);
-                let g = |k: &str| fc.get(k).and_then(|v| v.parse::<u32>().ok());
-                let gap = fc
-                    .get("z")
-                    .and_then(|v| v.parse::<i32>().ok())
-                    .filter(|&gap| gap != 0);
-                let (x, y) = (g("x").unwrap_or(0), g("y").unwrap_or(0));
-                let replace = fc.get("X").map(|v| v == "1").unwrap_or(false);
-                let edit = g("r");
-                let bg_frame = g("c");
-                let bg_color = g("Y");
-                // Base-image dimensions size the canvas (fallback: patch).
-                let (bw, bh) = self
-                    .store
-                    .get(&fid)
-                    .map(|b| (b.width, b.height))
-                    .unwrap_or((patch.width, patch.height));
-                let partial = x != 0
-                    || y != 0
-                    || bg_frame.is_some()
-                    || bg_color.is_some()
-                    || edit.is_some()
-                    || patch.width != bw
-                    || patch.height != bh;
-                let frame_img = if !partial {
-                    patch
-                } else {
-                    let Some(mut canvas) = edit
-                        .and_then(|r| self.frame_image(fid, r))
-                        .or_else(|| bg_frame.and_then(|n| self.frame_image(fid, n)))
-                        .or_else(|| {
-                            bg_color.and_then(|c| {
-                                ImageData::solid_with_budget(
-                                    bw,
-                                    bh,
-                                    [(c >> 24) as u8, (c >> 16) as u8, (c >> 8) as u8, c as u8],
-                                    &self.budget,
-                                )
-                            })
-                        })
-                        .or_else(|| {
-                            ImageData::solid_with_budget(bw, bh, [0, 0, 0, 0], &self.budget)
-                        })
-                    else {
-                        return CommandResult::without_response(KittyOut::None);
-                    };
-                    if !canvas.compose(&patch, x, y, replace) {
-                        return CommandResult::without_response(KittyOut::None);
-                    }
-                    canvas
-                };
-                // `r=1` edits the stored root; `r>=2` edits an appended frame;
-                // an omitted `r` appends a new frame.
-                let edit_index = edit.filter(|&r| r >= 2).map(|r| r as usize - 2);
-                let editing_existing = edit_index.and_then(|idx| {
-                    self.frames
-                        .get(&fid)
-                        .and_then(|f| f.get(idx))
-                        .map(|fr| (idx, fr.img.clone()))
-                });
-                if edit == Some(1) {
-                    if let Some(root) = self.store.get_mut(&fid) {
-                        *root = frame_img;
-                        if let Some(gap) = gap {
-                            self.anim.entry(fid).or_default().root_gap = gap;
-                        }
-                    }
-                } else if let Some((idx, old_img)) = editing_existing {
-                    if self.animation_replacement_fits(Some(&old_img), &frame_img)
-                        && let Some(fr) = self.frames.get_mut(&fid).and_then(|f| f.get_mut(idx))
-                    {
-                        fr.img = frame_img;
-                        if let Some(gap) = gap {
-                            fr.gap_ms = gap;
-                        }
-                    }
-                } else {
-                    // Cap total frame count and bytes before retaining the
-                    // frame. Also cap the frames-map slot count so a
-                    // hostile emitter can't grow the map keyset itself
-                    // by firing `a=f,i=N` for many distinct N. Same shape
-                    // as the `anim` / `store` / `virtual_placements`
-                    // saturation gates.
-                    if (self.frames.contains_key(&fid)
-                        || self.frames.len() < self.budget.limits().placements)
-                        && self.animation_replacement_fits(None, &frame_img)
-                        && self.animation_frame_count() < self.budget.limits().animation_frames
-                    {
-                        let frames = self.frames.entry(fid).or_default();
-                        frames.push(Frame {
-                            img: frame_img,
-                            gap_ms: gap.unwrap_or(40),
-                        });
-                    }
-                }
-            }
-            return CommandResult::without_response(KittyOut::Animate { id: fid });
+            return self.transmit_frame(id, control, payload, &kv);
         }
         if action == "p" {
             let intent = ReplyIntent::from_control(&kv, id);
@@ -1938,17 +1781,250 @@ impl KittyState {
 
     /// Test-only accessor for the anim slot cap drift guard
     /// (`kitty_anim_slot_cap_holds_against_distinct_id_flood`).
-    /// An attacker can grow `anim` with `a=a,i=N` for arbitrary N without
-    /// ever transmitting a real image.
+    /// Missing roots must not acquire playback state.
     #[cfg(test)]
     fn anim_len_for_test(&self) -> usize {
         self.anim.len()
     }
 
-    /// A clone of a 1-based frame's pixels: `n <= 1` is the root/base image,
+    fn compose_frame(&mut self, id: u32, values: &HashMap<String, String>) -> CommandResult {
+        let intent = ReplyIntent::from_control(values, id);
+        if !self.store.contains_key(&id) {
+            return CommandResult::refused(intent, CommandStatus::MissingImage);
+        }
+        let dim = |key: &str| values.get(key).and_then(|value| value.parse::<u32>().ok());
+        let source = dim("r").unwrap_or(0);
+        let destination = dim("c").unwrap_or(0);
+        let Some(src) = self.frame_image(id, source) else {
+            return CommandResult::refused(intent, CommandStatus::MissingFrame);
+        };
+        let Some(dst) = self.frame_image(id, destination) else {
+            return CommandResult::refused(intent, CommandStatus::MissingFrame);
+        };
+        let width = dim("w").filter(|&n| n != 0).unwrap_or(src.width);
+        let height = dim("h").filter(|&n| n != 0).unwrap_or(src.height);
+        let (sx, sy) = (dim("X").unwrap_or(0), dim("Y").unwrap_or(0));
+        let (dx, dy) = (dim("x").unwrap_or(0), dim("y").unwrap_or(0));
+        let fits = |image: &ImageData, x: u32, y: u32| {
+            x.checked_add(width).is_some_and(|end| end <= image.width)
+                && y.checked_add(height).is_some_and(|end| end <= image.height)
+        };
+        let overlaps = source == destination
+            && u64::from(sx) < u64::from(dx) + u64::from(width)
+            && u64::from(dx) < u64::from(sx) + u64::from(width)
+            && u64::from(sy) < u64::from(dy) + u64::from(height)
+            && u64::from(dy) < u64::from(sy) + u64::from(height);
+        if !fits(&src, sx, sy) || !fits(&dst, dx, dy) || overlaps {
+            return CommandResult::refused(intent, CommandStatus::InvalidFrameGeometry);
+        }
+        drop(dst);
+        let patch = src.crop_transient(sx, sy, width, height);
+        drop(src);
+        let Some(patch) = patch else {
+            return CommandResult::refused(intent, CommandStatus::NoSpace);
+        };
+        let replace = values.get("C").is_some_and(|value| value == "1");
+        let Some(destination) = self.frame_image_mut(id, destination) else {
+            return CommandResult::refused(intent, CommandStatus::MissingFrame);
+        };
+        if !destination.compose(&patch, dx, dy, replace) {
+            return CommandResult::refused(intent, CommandStatus::NoSpace);
+        }
+        CommandResult::animated(intent, id, None)
+    }
+
+    fn transmit_frame(
+        &mut self,
+        id: u32,
+        control: &str,
+        payload: &str,
+        values: &HashMap<String, String>,
+    ) -> CommandResult {
+        let id = self
+            .frame_in_flight
+            .as_ref()
+            .map_or(id, |(first_id, _)| *first_id);
+        let mut intent = self
+            .frame_in_flight
+            .as_ref()
+            .and_then(|(_, acc)| acc.reply)
+            .unwrap_or_else(|| ReplyIntent::from_control(values, id));
+        intent.update_quiet(values);
+        if !self.store.contains_key(&id) {
+            self.frame_in_flight = None;
+            return CommandResult::refused(intent, CommandStatus::MissingImage);
+        }
+        if self.frame_in_flight.is_none()
+            && self.in_flight.len() + usize::from(self.query_in_flight.is_some())
+                >= self.budget.limits().in_flight_slots
+        {
+            return CommandResult::refused(intent, CommandStatus::NoSpace);
+        }
+        let payload = payload.trim();
+        if !self.in_flight_append_fits(
+            self.frame_in_flight.as_ref().map(|(_, acc)| acc),
+            control,
+            payload,
+        ) {
+            self.frame_in_flight = None;
+            return CommandResult::refused(intent, CommandStatus::NoSpace);
+        }
+        let accepted = {
+            let budget = self.budget.clone();
+            let (_, acc) = self
+                .frame_in_flight
+                .get_or_insert_with(|| (id, Acc::default()));
+            acc.reply = Some(intent);
+            acc.append(control, payload, &budget)
+        };
+        if !accepted || self.in_flight_bytes() > self.budget.limits().in_flight_bytes {
+            self.frame_in_flight = None;
+            return CommandResult::refused(intent, CommandStatus::NoSpace);
+        }
+        if values.get("m").is_some_and(|value| value == "1") {
+            return CommandResult::partial();
+        }
+        let Some((id, acc)) = self.frame_in_flight.take() else {
+            return CommandResult::refused(intent, CommandStatus::InvalidImage);
+        };
+        let first = parse_control(&acc.control);
+        if first.get("t").is_some_and(|medium| medium != "d") {
+            return CommandResult::refused(intent, CommandStatus::UnsupportedMedium);
+        }
+        let staging = self.budget.query_scope();
+        let Some(patch) = decode_with_budget(&acc.control, &acc.payload, &staging) else {
+            return CommandResult::refused(intent, CommandStatus::InvalidImage);
+        };
+        let dim = |key: &str| first.get(key).and_then(|value| value.parse::<u32>().ok());
+        let gap = first
+            .get("z")
+            .and_then(|value| value.parse::<i32>().ok())
+            .filter(|&gap| gap != 0);
+        let (x, y) = (dim("x").unwrap_or(0), dim("y").unwrap_or(0));
+        let replace = first.get("X").is_some_and(|value| value == "1");
+        let Some(root) = self.store.get(&id) else {
+            return CommandResult::refused(intent, CommandStatus::MissingImage);
+        };
+        let (width, height) = (root.width, root.height);
+        if !x.checked_add(patch.width).is_some_and(|end| end <= width)
+            || !y.checked_add(patch.height).is_some_and(|end| end <= height)
+        {
+            return CommandResult::refused(intent, CommandStatus::InvalidFrameGeometry);
+        }
+        let last = self
+            .frames
+            .get(&id)
+            .map_or(1, |frames| frames.len() as u32 + 1);
+        let edit = dim("r").filter(|&frame| frame != 0 && frame <= last);
+        if let Some(frame) = edit {
+            let Some(target) = self.frame_image_mut(id, frame) else {
+                return CommandResult::refused(intent, CommandStatus::MissingFrame);
+            };
+            if !target.compose(&patch, x, y, replace) {
+                return CommandResult::refused(intent, CommandStatus::NoSpace);
+            }
+            if let Some(gap) = gap {
+                if frame == 1 {
+                    self.anim.entry(id).or_default().root_gap = gap;
+                } else if let Some(frame) = self
+                    .frames
+                    .get_mut(&id)
+                    .and_then(|frames| frames.get_mut(frame as usize - 2))
+                {
+                    frame.gap_ms = gap;
+                }
+            }
+            return CommandResult::animated(intent, id, Some(frame));
+        }
+        let background = dim("c").filter(|&frame| frame != 0);
+        let color = dim("Y");
+        let mut frame = if x == 0
+            && y == 0
+            && patch.width == width
+            && patch.height == height
+            && background.is_none()
+            && color.is_none()
+        {
+            patch
+        } else {
+            let canvas = if let Some(background) = background {
+                let Some(source) = self.frame_image(id, background) else {
+                    return CommandResult::refused(intent, CommandStatus::InvalidFrameGeometry);
+                };
+                source.copy_with_budget(&staging)
+            } else {
+                let color = color.unwrap_or(0);
+                ImageData::solid_with_budget(
+                    width,
+                    height,
+                    [
+                        (color >> 24) as u8,
+                        (color >> 16) as u8,
+                        (color >> 8) as u8,
+                        color as u8,
+                    ],
+                    &staging,
+                )
+            };
+            let Some(mut canvas) = canvas else {
+                return CommandResult::refused(intent, CommandStatus::NoSpace);
+            };
+            if !canvas.compose(&patch, x, y, replace) {
+                return CommandResult::refused(intent, CommandStatus::NoSpace);
+            }
+            canvas
+        };
+        if !self.animation_replacement_fits(None, &frame)
+            || self.animation_frame_count() >= self.budget.limits().animation_frames
+            || (!self.frames.contains_key(&id)
+                && self.frames.len() >= self.budget.limits().placements)
+        {
+            return CommandResult::refused(intent, CommandStatus::NoSpace);
+        }
+        if let Some(frames) = self.frames.get_mut(&id) {
+            if frames.try_reserve(1).is_err() || !frame.try_move_to_scope(&self.budget) {
+                return CommandResult::refused(intent, CommandStatus::NoSpace);
+            }
+            frames.push(Frame {
+                img: frame,
+                gap_ms: gap.unwrap_or(40),
+            });
+        } else {
+            let mut frames = Vec::new();
+            if frames.try_reserve(1).is_err()
+                || self.frames.try_reserve(1).is_err()
+                || !frame.try_move_to_scope(&self.budget)
+            {
+                return CommandResult::refused(intent, CommandStatus::NoSpace);
+            }
+            frames.push(Frame {
+                img: frame,
+                gap_ms: gap.unwrap_or(40),
+            });
+            self.frames.insert(id, frames);
+        }
+        CommandResult::animated(intent, id, Some(last + 1))
+    }
+
+    fn frame_image_mut(&mut self, id: u32, number: u32) -> Option<&mut ImageData> {
+        match number {
+            0 => None,
+            1 => self.store.get_mut(&id),
+            _ => self
+                .frames
+                .get_mut(&id)
+                .and_then(|frames| frames.get_mut(number as usize - 2))
+                .map(|frame| &mut frame.img),
+        }
+    }
+
+    /// A clone of a 1-based frame's pixels: `n == 1` is the root/base image,
     /// `n >= 2` is `frames[n-2]` (used as a composition background).
     fn frame_image(&self, id: u32, n: u32) -> Option<ImageData> {
-        if n <= 1 {
+        if n == 0 {
+            return None;
+        }
+        if n == 1 {
             self.store.get(&id).cloned()
         } else {
             self.frames
@@ -2871,29 +2947,38 @@ mod tests {
         assert!(limits.in_flight_bytes < limits.in_flight_slots * limits.transmission_bytes);
     }
 
-    /// Drift guard: `a=a,i=N` for many distinct N must not grow the `anim`
-    /// HashMap past the `placements` limit. Animation control needs no prior
-    /// transmission, so every `a=a` would otherwise admit a new id. Updates to
-    /// already-tracked ids still work.
+    /// Animation controls for existing roots must keep the playback map within
+    /// the placement limit while allowing updates to already-tracked ids.
     #[test]
     fn kitty_anim_slot_cap_holds_against_distinct_id_flood() {
         let mut k = KittyState::default();
         let cap = k.budget.limits().placements;
-        // Fill anim to the cap with distinct ids via `a=a`.
         for id in 1..=cap as u32 {
-            k.feed(&format!("a=a,i={id},s=2"));
+            k.feed(&format!("a=t,i={id},q=2,f=32,s=1,v=1;{PX}"));
+            assert!(matches!(
+                k.feed(&format!("a=a,i={id},s=2")),
+                KittyOut::Animate { .. }
+            ));
         }
         assert_eq!(k.anim_len_for_test(), cap);
-        // Distinct id past the cap is refused (no growth).
+        // Isolate playback admission from root eviction, which would otherwise
+        // retire an existing animation before this command reaches its limit.
         let overflow = cap as u32 + 1;
-        k.feed(&format!("a=a,i={overflow},s=2"));
+        k.store.insert(
+            overflow,
+            ImageData::solid_with_budget(1, 1, [0; 4], &k.budget).unwrap(),
+        );
+        assert!(matches!(
+            k.feed(&format!("a=a,i={overflow},s=2")),
+            KittyOut::None
+        ));
         assert_eq!(
             k.anim_len_for_test(),
             cap,
             "anim id {overflow} past saturation must be refused"
         );
-        // Update to an existing tracked id is still accepted.
-        k.feed("a=a,i=1,s=1");
+        assert!(matches!(k.feed("a=a,i=1,s=1"), KittyOut::Animate { id: 1 }));
+        assert!(!k.anim.get(&1).unwrap().running);
         assert_eq!(
             k.anim_len_for_test(),
             cap,

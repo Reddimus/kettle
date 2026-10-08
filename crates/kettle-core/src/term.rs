@@ -14139,6 +14139,100 @@ mod conformance {
 
 #[cfg(test)]
 mod teardown_tests {
+
+    #[cfg(unix)]
+    fn animation_graphics_ack_roundtrip(synchronized: bool) {
+        use super::{CursorShape, TermEvent, Terminal};
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+        let start = if synchronized { r"\033[?2026h" } else { "" };
+        let end = if synchronized { r"\033[?2026l" } else { "" };
+        let script = format!(
+            r#"stty raw -echo; printf '\033_Ga=T,i=401,q=2,f=24,s=1,v=1,C=1;AAAA\033\\'; printf '{start}\033_Ga=f,i=401,f=24,s=1,v=1;/wAA\033\\'; reply=$(dd bs=1 count=17 2>/dev/null | od -An -tx1 | tr -d ' \n'); test "$reply" = 1b5f47693d3430312c723d323b4f4b1b5c || exit 7; printf '{end}{start}\033_Ga=c,i=401,r=1,c=2,w=1,h=1,C=1\033\\'; reply=$(dd bs=1 count=13 2>/dev/null | od -An -tx1 | tr -d ' \n'); test "$reply" = 1b5f47693d3430313b4f4b1b5c || exit 8; printf '{end}ANIMATION_ACK_DONE'"#
+        );
+        let argv = vec!["/bin/sh".into(), "-c".into(), script];
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let terminal = Terminal::new(
+            &argv,
+            None,
+            1000,
+            80,
+            24,
+            8,
+            16,
+            false,
+            CursorShape::Block,
+            None,
+            tx,
+            Arc::new(|| {}),
+        )
+        .expect("native animation acknowledgement PTY");
+        let child_pid = terminal.child_pid().expect("owned Unix animation child");
+        let child_group = unsafe { libc::getpgid(child_pid as libc::pid_t) };
+        assert!(child_group > 0);
+        eprintln!("ANIMATION_ACK_PTY_OWNED_CHILD pid={child_pid} pgid={child_group}");
+        let expected = ["\x1b_Gi=401,r=2;OK\x1b\\", "\x1b_Gi=401;OK\x1b\\"];
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut replies = 0;
+        let code = loop {
+            while let Ok(event) = rx.try_recv() {
+                if let TermEvent::PtyWrite(reply) = event {
+                    assert!(replies < expected.len(), "duplicate animation reply");
+                    assert_eq!(reply, expected[replies]);
+                    {
+                        let animations = terminal.anims.lock().unwrap();
+                        let animation = animations
+                            .get(&401)
+                            .expect("animation registered before reply");
+                        assert_eq!(animation.imgs.len(), 2);
+                        assert_eq!(animation.imgs[0].rgba.as_slice(), &[0, 0, 0, 255]);
+                        let frame = if replies == 0 {
+                            [255, 0, 0, 255]
+                        } else {
+                            [0, 0, 0, 255]
+                        };
+                        assert_eq!(animation.imgs[1].rgba.as_slice(), &frame);
+                    }
+                    replies += 1;
+                    terminal.write(reply.as_bytes());
+                }
+            }
+            if let Some(code) = terminal.child_exit_code() {
+                break code;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "client waited for animation acknowledgement; synchronized={synchronized}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(
+            code, 0,
+            "child checked frame and composition response bytes"
+        );
+        assert_eq!(replies, 2);
+        assert_eq!(
+            terminal
+                .placements()
+                .iter()
+                .map(|placement| placement.id)
+                .collect::<Vec<_>>(),
+            [Some(401)]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn animation_graphics_ack_reaches_a_waiting_pty_child() {
+        animation_graphics_ack_roundtrip(false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn animation_graphics_ack_reaches_a_waiting_synchronized_pty_child() {
+        animation_graphics_ack_roundtrip(true);
+    }
+
     use super::*;
     use std::time::Duration;
 
@@ -17447,6 +17541,52 @@ mod sync_update_flush_guard {
 
 #[cfg(test)]
 mod image_lifecycle_tests {
+
+    #[test]
+    fn animation_graphics_frame_and_composition_replies_preserve_core_refresh() {
+        for synchronized in [false, true] {
+            let mut harness = SyncGraphicsHarness::new();
+            harness.feed(b"\x1b_Ga=T,i=401,q=2,f=24,s=1,v=1,C=1;AAAA\x1b\\");
+            assert!(ordinary_reply_bytes(&harness).is_empty());
+            if synchronized {
+                harness.feed(b"\x1b[?2026h");
+            }
+            harness.feed(b"\x1b_Ga=f,i=401,f=24,s=1,v=1;/wAA\x1b\\");
+            if synchronized {
+                assert!(ordinary_reply_bytes(&harness).is_empty());
+                assert!(harness.anims.lock().unwrap().get(&401).is_none());
+                harness.feed(b"\x1b[?2026l");
+            }
+            assert_eq!(ordinary_reply_bytes(&harness), ["\x1b_Gi=401,r=2;OK\x1b\\"]);
+            assert_eq!(
+                harness.anims.lock().unwrap().get(&401).unwrap().imgs[1]
+                    .rgba
+                    .as_slice(),
+                &[255, 0, 0, 255]
+            );
+            if synchronized {
+                harness.feed(b"\x1b[?2026h");
+            }
+            harness.feed(b"\x1b_Ga=c,i=401,r=1,c=2,w=1,h=1,C=1\x1b\\");
+            if synchronized {
+                assert!(ordinary_reply_bytes(&harness).is_empty());
+                assert_eq!(
+                    harness.anims.lock().unwrap().get(&401).unwrap().imgs[1]
+                        .rgba
+                        .as_slice(),
+                    &[255, 0, 0, 255]
+                );
+                harness.feed(b"\x1b[?2026l");
+            }
+            assert_eq!(ordinary_reply_bytes(&harness), ["\x1b_Gi=401;OK\x1b\\"]);
+            let animations = harness.anims.lock().unwrap();
+            let animation = animations.get(&401).unwrap();
+            assert_eq!(animation.imgs.len(), 2);
+            assert_eq!(animation.imgs[0].rgba.as_slice(), &[0, 0, 0, 255]);
+            assert_eq!(animation.imgs[1].rgba.as_slice(), &[0, 0, 0, 255]);
+        }
+    }
+
     use super::{
         Animations, BufferGraphicsState, DeferredGraphicsJournal, GraphicsActionContext,
         GraphicsEvent, GraphicsEventBatch, GraphicsRegistries, GraphicsScroll,

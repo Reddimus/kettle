@@ -1406,8 +1406,26 @@ registries. Completion metadata is consumed before retaining the placement.
 Synchronized replay receives the required PTY reply sink and sends ordinary
 replies after actual admission. The existing synchronized-output timeout flushes
 a pending upload when a child waits for a reply before closing the update;
-capability queries still bypass deferral. Frame/composition replies remain
-tracked in [AUDIT-DEFERRED.md](AUDIT-DEFERRED.md).
+capability queries still bypass deferral. Frame uploads (`f`) and composition
+(`c`) use the same typed completion transport. The extractor emits the animation
+refresh before its reply, so Core refreshes its registries before a waiting child
+receives completion, including synchronized replay. A successful frame upload
+reports its actual one-based frame number; composition replies omit that field.
+
+Frame uploads require an existing root. Edits address existing one-based frames;
+zero, omitted, or beyond-last upload selectors append a frame. An appended patch
+uses a transparent canvas unless `Y` supplies a color or `c` selects an existing
+background frame.
+Decoding and background copies use a temporary retained scope under the same
+process account, then transfer the completed frame into the terminal scope only
+after admission. Frame composition validates both rectangles before mutation;
+zero or omitted dimensions select the complete source canvas. A transient crop
+charges process memory without competing with retained pixels. In-place edits
+reuse an unshared allocation, while existing renderer snapshots trigger the
+shared copy-on-write path. Missing frames, overlapping self-copies, invalid
+rectangles, and unavailable storage return typed errors without changing pixels.
+Animation controls cannot create playback state before a root exists, and invalid
+current-frame selectors leave playback selection unchanged.
 
 Kitty transmission decodes once into a temporary scope under the existing process
 account. At retained-byte or active image-count pressure, extraction requests an

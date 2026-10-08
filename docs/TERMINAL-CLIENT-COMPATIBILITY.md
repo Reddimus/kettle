@@ -114,9 +114,20 @@ Ordinary replies follow the same graphics ordering as placement. During DEC 2026
 synchronized output, they follow journal replay at commit or the existing 150 ms
 synchronized-output timeout. A child may wait for its reply before ending the
 update without indefinitely blocking that handshake. Capability queries retain
-the immediate path above. Animation frame and composition acknowledgements
-(`a=f`, `a=c`) remain unfinished; this is not a claim of complete response
-conformance.
+the immediate path above. Animation frame and composition commands (`a=f`,
+`a=c`) likewise complete after actual admission and the animation refresh,
+including synchronized replay. Frame replies include the actual one-based
+frame number (`r`); composition replies do not include `r`. This coverage does
+not establish complete Kitty response conformance.
+
+Frame 1 is the root. Frame uploads edit an existing nonzero `r`, or append when
+`r` is omitted, zero, or beyond the last frame. An appended partial frame starts
+transparent unless a background color (`Y`) or existing background frame (`c`)
+is specified. Composition requires existing nonzero source (`r`) and destination
+(`c`) frames. Omitted or zero composition width/height selects the full source
+canvas. Both rectangles must fit; overlapping self-composition is refused.
+Missing images/frames return `ENOENT`, invalid geometry returns `EINVAL`, and
+unavailable pixel storage returns `ENOSPC`. Refused operations preserve pixels.
 
 Kitty animation frame composition (`a=c`) reads source offsets from `X`/`Y`
 and destination offsets from `x`/`y`. Frame data (`a=f`) uses lowercase offsets
