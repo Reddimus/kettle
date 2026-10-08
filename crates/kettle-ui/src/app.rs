@@ -12754,6 +12754,8 @@ impl App {
 
     fn finish_gpu_renderer_recovery(&mut self, ws: &mut WindowState) {
         ws.renderer_recovery = None;
+        // The accent claim may have changed while the window had no renderer.
+        crate::window_accent::apply_accent(ws);
         ws.frame_recovery.clear();
         ws.pending_output_gen.clear();
         ws.pane_snapshots.clear();
@@ -12827,6 +12829,7 @@ impl App {
         // backs off and tries again.
         Self::retire_cursor_layer(ws);
         ws.renderer = Some(replacement);
+        crate::window_accent::apply_accent(ws);
         self.reclamp_context_menu(ws, (size.width as f32, size.height as f32));
         if ws.dpi_resize_surface_suspended {
             return Ok(());
@@ -18886,7 +18889,7 @@ impl App {
                         event_loop,
                         WindowOpen::AdoptTab {
                             tab: dt,
-                            source_color: ws.accent.as_ref().map(|accent| accent.color),
+                            source_color: self.tear_off_source_color(ws),
                             paste: Box::new(paste),
                         },
                         None,
@@ -27401,11 +27404,6 @@ enum WindowOpen {
     Restore(crate::session::SWindow),
 }
 
-/// Peacock: `#rrggbb` for the presence registry's wire format.
-fn rgb_hex(c: kettle_config::Rgb) -> String {
-    format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b)
-}
-
 /// Is this window's backend Wayland? A runtime check, since X11 vs Wayland is
 /// a runtime choice on Linux and `cfg!` can't answer it. Wayland gets the
 /// tear-at-release fallback (no client-side window positioning, and
@@ -28877,7 +28875,7 @@ impl App {
                 event_loop,
                 WindowOpen::AdoptTab {
                     tab: dt,
-                    source_color: ws.accent.as_ref().map(|accent| accent.color),
+                    source_color: self.tear_off_source_color(ws),
                     paste: Box::new(paste),
                 },
                 pos,
@@ -29558,18 +29556,29 @@ impl App {
         let color = pool[slot];
         let presence = kettle_ctl::presence::claim(
             &dir,
-            kettle_ctl::presence::PresenceEntry::claiming(me, ws.seq, rgb_hex(color), true),
+            kettle_ctl::presence::PresenceEntry::claiming(
+                me,
+                ws.seq,
+                crate::window_accent::rgb_hex(color),
+                true,
+            ),
         );
-        if let Some(r) = ws.renderer.as_mut() {
-            r.set_accent_override(Some(color));
-        }
         ws.accent = Some(crate::window_state::WindowAccent {
             local_claim,
             color,
             slot,
             theme_name: self.cfg.theme_name.clone(),
+            pool_candidates: kettle_config::peacock_candidates(&self.cfg.theme),
             presence,
         });
+        crate::window_accent::apply_accent(ws);
+    }
+
+    /// The source window's accent for a tab leaving it, after applying any
+    /// theme or palette change made since its last redraw.
+    fn tear_off_source_color(&self, ws: &mut WindowState) -> Option<kettle_config::Rgb> {
+        self.sync_window_accent(ws);
+        ws.accent.as_ref().map(|accent| accent.color)
     }
 
     /// Peacock: keep this window's accent in sync, called once per frame
@@ -29579,32 +29588,9 @@ impl App {
     /// and reconfiguration to a pinned hex / `accent-color = theme` (drops
     /// the claim and clears the renderer override).
     fn sync_window_accent(&self, ws: &mut WindowState) {
-        if self.cfg.accent_color.is_some() || !self.cfg.accent_auto {
-            if ws.accent.take().is_some()
-                && let Some(r) = ws.renderer.as_mut()
-            {
-                r.set_accent_override(None);
-            }
-            return;
-        }
-        match &mut ws.accent {
-            Some(acc) if acc.theme_name == self.cfg.theme_name => {}
-            Some(acc) => {
-                let pool = kettle_config::peacock_pool(&self.cfg.theme);
-                let color = pool[acc.slot % pool.len()];
-                acc.theme_name = self.cfg.theme_name.clone();
-                if color != acc.color {
-                    acc.color = color;
-                    acc.local_claim.set_color(color);
-                    if let Some(g) = acc.presence.as_mut() {
-                        g.set_rgb(&rgb_hex(color));
-                    }
-                }
-                if let Some(r) = ws.renderer.as_mut() {
-                    r.set_accent_override(Some(color));
-                }
-            }
-            None => self.assign_window_accent(ws, None),
+        crate::window_accent::refresh_accent(ws, &self.cfg);
+        if ws.accent.is_none() && self.cfg.accent_auto && self.cfg.accent_color.is_none() {
+            self.assign_window_accent(ws, None);
         }
     }
 
@@ -31781,7 +31767,7 @@ impl App {
                                     event_loop,
                                     WindowOpen::AdoptTab {
                                         tab: dt,
-                                        source_color: ws.accent.as_ref().map(|accent| accent.color),
+                                        source_color: self.tear_off_source_color(ws),
                                         paste: Box::new(paste),
                                     },
                                     pos,
@@ -37172,6 +37158,46 @@ mod tests {
                     == 2,
             "GPU recovery must retain, restore, and reflow every window around the atomic rebuild"
         );
+    }
+
+    /// The App owns each window's accent and may change it while the window
+    /// has no renderer (a config reload or a tear-off during GPU recovery), so
+    /// every renderer that replaces a window's renderer must be given it. A
+    /// renderer-held copy restored from before the change would draw the old
+    /// accent until the next config change.
+    #[test]
+    fn every_replacement_renderer_receives_the_window_accent() {
+        let src = production_source();
+        let body = |name: &str| {
+            let start = src.find(name).unwrap_or_else(|| panic!("{name} present"));
+            let tail = &src[start..];
+            let end = tail[1..]
+                .find("\n    fn ")
+                .map_or(tail.len(), |end| end + 1);
+            tail[..end].to_owned()
+        };
+        let finish = body("fn finish_gpu_renderer_recovery(");
+        assert!(
+            finish.contains("crate::window_accent::apply_accent(ws);"),
+            "GPU recovery must apply each window's current accent claim"
+        );
+        let surface = body("fn try_recover_window_renderer(");
+        let installed = surface
+            .find("ws.renderer = Some(replacement);")
+            .expect("surface recovery installs its replacement");
+        assert!(
+            surface[installed..].contains("crate::window_accent::apply_accent(ws);"),
+            "surface recovery must apply the window's current accent claim"
+        );
+        // Every recovery path that installs a renderer finishes through one of
+        // the two functions above.
+        let recover = body("fn try_recover_gpu(");
+        assert_eq!(
+            recover.matches(".renderer = Some(").count(),
+            2,
+            "try_recover_gpu installs the primary and secondary renderers"
+        );
+        assert_eq!(recover.matches("finish_gpu_renderer_recovery(").count(), 2);
     }
 
     #[test]
@@ -42637,7 +42663,10 @@ mod tests {
         assert_eq!(super::pick_accent_slot(&[], 7, &[]), 0);
         // Presence wire format round-trips through Rgb::parse.
         let c = kettle_config::Rgb::new(0xcb, 0xa6, 0xf7);
-        assert_eq!(kettle_config::Rgb::parse(&super::rgb_hex(c)), Some(c));
+        assert_eq!(
+            kettle_config::Rgb::parse(&crate::window_accent::rgb_hex(c)),
+            Some(c)
+        );
     }
 
     /// Regression guard. `resumed_inner` must take ONLY the consumed-once CLI
@@ -45486,7 +45515,7 @@ mod tests {
         //    the grab offset (open_window's size override).
         assert!(
             src.contains(
-                "WindowOpen::AdoptTab {\n                    tab: dt,\n                    source_color: ws.accent.as_ref().map(|accent| accent.color),\n                    paste: Box::new(paste),\n                },\n                pos,\n                Some(size),"
+                "WindowOpen::AdoptTab {\n                    tab: dt,\n                    source_color: self.tear_off_source_color(ws),\n                    paste: Box::new(paste),\n                },\n                pos,\n                Some(size),"
             ),
             "the tear must open the torn window at the grab position and source size"
         );

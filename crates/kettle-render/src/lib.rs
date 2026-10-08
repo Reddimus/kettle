@@ -3000,14 +3000,15 @@ pub struct Renderer {
 /// snapshot: they are tied to the failed device and are rebuilt lazily. The
 /// values here are the live per-window overrides that may have diverged from
 /// [`Config`] since launch, plus a screenshot request that has not yet been
-/// submitted to the worker.
+/// submitted to the worker. The window accent is not among them: the App owns
+/// it, can change it while no renderer exists, and applies it to every
+/// replacement renderer, so a copy here could only go stale.
 #[derive(Clone, Debug)]
 pub struct RendererRecoveryState {
     font_family: Arc<str>,
     font_size: f32,
     cell_scale_w: f32,
     cell_scale_h: f32,
-    accent_override: Option<Rgb>,
     pending_screenshot: Option<ScreenshotRequest>,
 }
 
@@ -5436,7 +5437,6 @@ impl Renderer {
             font_size: self.font_size,
             cell_scale_w: self.cell_scale_w,
             cell_scale_h: self.cell_scale_h,
-            accent_override: self.accent_override,
             pending_screenshot: self.pending_screenshot.clone(),
         }
     }
@@ -5453,7 +5453,6 @@ impl Renderer {
         self.font_size = clamp_font_size(state.font_size);
         self.cell_scale_w = state.cell_scale_w.max(0.01);
         self.cell_scale_h = state.cell_scale_h.max(0.01);
-        self.accent_override = state.accent_override;
         self.pending_screenshot = state.pending_screenshot.clone();
         self.metrics = metrics_for(self.font_size, self.scale);
         self.remeasure_cell();
@@ -18197,7 +18196,6 @@ mod clamp_font_size_tests {
 #[cfg(test)]
 mod renderer_recovery_state_tests {
     use super::{RendererRecoveryState, ScreenshotOutputPolicy, ScreenshotRequest};
-    use kettle_config::Rgb;
     use std::sync::Arc;
 
     #[test]
@@ -18209,7 +18207,6 @@ mod renderer_recovery_state_tests {
             font_size: 19.5,
             cell_scale_w: 1.25,
             cell_scale_h: 1.5,
-            accent_override: Some(Rgb::new(0x12, 0x34, 0x56)),
             pending_screenshot: Some(ScreenshotRequest {
                 out_path: expected_path.clone(),
                 output_policy: ScreenshotOutputPolicy::UserSelected,
@@ -18225,7 +18222,6 @@ mod renderer_recovery_state_tests {
         assert_eq!(retained.font_family.as_ref(), "Live Runtime Font");
         assert_eq!(retained.font_size, 19.5);
         assert_eq!((retained.cell_scale_w, retained.cell_scale_h), (1.25, 1.5));
-        assert_eq!(retained.accent_override, Some(Rgb::new(0x12, 0x34, 0x56)));
         let request = retained.pending_screenshot.expect("queued screenshot");
         assert_eq!(request.out_path, expected_path);
         assert_eq!(request.output_policy, ScreenshotOutputPolicy::UserSelected);
