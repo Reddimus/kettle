@@ -133,6 +133,19 @@ that requires a restart or new window. The pending flag does not record the
 cause, so selecting Graphics does not change that wording. GPU edits require a
 full restart. The GPU picker persists the selection per application.
 
+**Agents**
+
+| Option | Config key | Notes |
+|---|---|---|
+| Agent previews | `agent-display` | On / Off — lets AI agents show media in Kettle without reading the screen or typing. Turning it on applies at once, also for agents already connected; turning it off applies when Kettle restarts |
+
+The footer explains the row's effect right now: what turning it on or off does;
+that a restart is needed to turn previews off; that a launch option
+(`--agent-display off`, or `--agent-server off` alone) keeps them off; that
+`agent-server = full` already includes previews; or that Kettle could not start
+its agent server. Agent control itself (`agent-server`) stays in the config
+file, because it grants reading and typing and applies at launch.
+
 **Keybinds** — rebind common actions interactively. Each row shows the chord
 currently bound to that action; press **Enter** on a row, then press the new
 chord you want (any modifier combination). It binds immediately (replacing the

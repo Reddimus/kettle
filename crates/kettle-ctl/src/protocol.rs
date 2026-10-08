@@ -138,6 +138,9 @@ pub enum Capability {
     Read,
     /// Requires `agent-server=full`.
     Mutate,
+    /// Showing media to the user. Requires `agent-display = true` or
+    /// `agent-server=full`; grants no reads or mutations.
+    Display,
 }
 
 /// Thread on which a method is implemented.
@@ -254,7 +257,15 @@ impl Method {
             | Self::ResizeWindow
             | Self::PerformAction
             | Self::RunCommand => Capability::Mutate,
-            _ => Capability::Read,
+            // Listed rather than defaulted, so a new method must be classified.
+            Self::GetState
+            | Self::ListTabs
+            | Self::ListPanes
+            | Self::ReadScreen
+            | Self::ReadCells
+            | Self::UiGeometry
+            | Self::Subscribe
+            | Self::WaitFor => Capability::Read,
         }
     }
 
@@ -432,6 +443,10 @@ pub mod error_codes {
     /// / `toggle_read_only`). The error message distinguishes the two; pane
     /// state is also visible as the `read_only` field in `list_panes`.
     pub const READ_ONLY: &str = "read_only";
+    /// A read was requested on a server that only allows display requests.
+    pub const DISPLAY_ONLY: &str = "display_only";
+    /// A display request was refused because agent previews are off.
+    pub const DISPLAY_DISABLED: &str = "display_disabled";
     /// A `run_command` is already pending on this pane.
     pub const BUSY: &str = "busy";
     /// Internal server error.
@@ -520,16 +535,53 @@ mod tests {
         assert_eq!(err.error.unwrap().code, error_codes::UNSUPPORTED_VERSION);
     }
 
+    /// Every method's name, capability and thread, spelled out so a change
+    /// to any of them is a deliberate edit here too.
     #[test]
     fn method_table_is_unique_and_classified() {
+        use Capability::{Mutate, Read};
+        use Execution::{Connection, Ui};
+        let table = [
+            ("get_state", Read, Ui),
+            ("list_tabs", Read, Ui),
+            ("list_panes", Read, Ui),
+            ("read_screen", Read, Ui),
+            ("read_cells", Read, Ui),
+            ("ui_geometry", Read, Ui),
+            // Writes a file, so it is a mutation.
+            ("screenshot", Mutate, Ui),
+            ("subscribe", Read, Ui),
+            ("send_text", Mutate, Ui),
+            ("send_keys", Mutate, Ui),
+            ("dispatch_ui_key", Mutate, Ui),
+            ("dispatch_keybind", Mutate, Ui),
+            ("send_mouse", Mutate, Ui),
+            ("resize_window", Mutate, Ui),
+            ("perform_action", Mutate, Ui),
+            ("run_command", Mutate, Ui),
+            ("wait_for", Read, Connection),
+        ];
+        assert_eq!(table.len(), Method::ALL.len());
         let mut names = std::collections::HashSet::new();
-        for method in Method::ALL {
+        for (method, (name, capability, execution)) in Method::ALL.into_iter().zip(table) {
             assert!(names.insert(method.as_str()));
-            assert_eq!(Method::from_name(method.as_str()), Some(method));
-            let _ = method.capability();
-            let _ = method.execution();
+            assert_eq!(method.as_str(), name);
+            assert_eq!(Method::from_name(name), Some(method));
+            assert_eq!(method.capability(), capability, "{name}");
+            assert_eq!(method.execution(), execution, "{name}");
         }
-        assert_eq!(Method::Screenshot.capability(), Capability::Mutate);
+    }
+
+    /// The Display capability arrives before any method uses it; `show`
+    /// lands with display admission.
+    #[test]
+    fn no_method_needs_display_yet() {
+        assert!(
+            Method::ALL
+                .iter()
+                .all(|method| method.capability() != Capability::Display)
+        );
+        assert_eq!(Method::from_name("show"), None);
     }
 
     #[test]

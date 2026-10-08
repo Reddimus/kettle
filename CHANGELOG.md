@@ -8,6 +8,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- Agent previews (`agent-display`, Settings → Agents → Agent previews, or
+  `--agent-display on|off`) let agents show media in Kettle without reading
+  the screen or typing. On its own it starts the control server for display
+  requests only, which refuses every read with `display_only` and every
+  mutation with `read_only`. Turning it on applies at once, also for agents
+  already connected; turning it off applies when Kettle restarts.
+  `--agent-server off` alone also turns previews off. `kettle ctl get_state`
+  reports the policy in force as `policy: {server, display}`.
+
 - Kitty graphics capability queries decode the supplied image and echo its
   image id in an immediate success or error reply. They preserve stored images
   and placements, support chunked direct transfers and quiet replies, and
@@ -94,6 +103,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- The control server checks each request's permission on its connection
+  thread before anything else, so a refused request does no work and never
+  reaches the window. A refusal now comes before parameter errors, a
+  `subscribe` that fails no longer switches the connection to the event
+  stream, and a request a `read-only` server refuses reads "This connection
+  cannot perform control mutations." instead of naming a config value.
 - Image rendering reuses retired textures for same-size replacements without
   reserving a second texture, preserves every image needed later in the frame,
   and releases decoded CPU pixels independently of the GPU cache.

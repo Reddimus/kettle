@@ -736,32 +736,8 @@ pub enum ExitAction {
     Hold,
 }
 
-/// Whether kettle exposes its agent control server,
-/// and at what privilege. OFF by default — the server is a local-IPC surface
-/// that lets another process read the screen and (in `Full`) drive the panes,
-/// so it must be opt-in. See docs/AGENT.md for the threat model.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum AgentServer {
-    /// No control server is started (default).
-    #[default]
-    Off,
-    /// Read-only methods only (`get_state`, `list_*`, `read_screen`,
-    /// `subscribe`). Mutating methods are rejected with `read_only`.
-    ReadOnly,
-    /// All methods, including `send_text` and `run_command`.
-    Full,
-}
-
-impl AgentServer {
-    /// Whether any server should be started.
-    pub fn is_enabled(self) -> bool {
-        !matches!(self, AgentServer::Off)
-    }
-    /// Whether mutating methods are permitted.
-    pub fn allows_mutation(self) -> bool {
-        matches!(self, AgentServer::Full)
-    }
-}
+/// The `agent-server` setting, owned by `kettle-ctl` with the policy it feeds.
+pub use kettle_ctl::AgentServer;
 
 /// Terminator parity (terminatorlib/config.py:79
 /// `ask_before_closing`): when to show the close-confirmation dialog.
@@ -1392,6 +1368,12 @@ pub struct Config {
     /// starts a local-IPC control server an AI agent (or `kettle ctl`/`kettle
     /// mcp`) can use to read the screen and drive panes. See docs/AGENT.md.
     pub agent_server: AgentServer,
+    /// `agent-display`: let agents show media in Kettle without granting
+    /// them reads or mutations. Default `false`. On its own it starts the
+    /// control server for display requests only; `agent-server = full`
+    /// already includes display. Turning it on applies at once; turning it
+    /// off applies at the next launch.
+    pub agent_display: bool,
     /// Terminator parity (terminatorlib/config.py:79
     /// `ask_before_closing`): when to show the close-confirmation
     /// dialog on window close.
@@ -2748,6 +2730,7 @@ impl Default for Config {
             shell_integration: true,
             exit_action: ExitAction::Close,
             agent_server: AgentServer::Off,
+            agent_display: false,
             ask_before_closing: AskBeforeClosing::MultipleTerminals,
             close_button_on_tab: true,
             new_tab_after_current_tab: false,
@@ -2963,6 +2946,11 @@ impl Config {
     pub fn cursor_blink_timeout(&self) -> Option<std::time::Duration> {
         (self.cursor_blink_timeout > 0)
             .then(|| std::time::Duration::from_secs(self.cursor_blink_timeout))
+    }
+
+    /// The control policy these settings ask for, before launch overrides.
+    pub fn ctl_policy(&self) -> kettle_ctl::CtlPolicy {
+        kettle_ctl::CtlPolicy::new(self.agent_server, self.agent_display)
     }
 
     /// The effective UI-chrome accent (focus border, active tab,
@@ -3376,6 +3364,8 @@ impl Config {
         "title_hide_sizetext",
         "title_use_system_font",
         "update-check",
+        "agent-display",
+        "agent_display",
         "restore-session",
         "restore_session",
         "urgent-bell",
@@ -5245,6 +5235,11 @@ impl Config {
                         } else {
                             UpdatePolicy::Off
                         };
+                    }
+                }
+                "agent-display" | "agent_display" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.agent_display = b;
                     }
                 }
                 // Opt IN to restoring the last session on launch
@@ -8019,6 +8014,31 @@ cell-height = 1.2\n";
         assert_eq!(
             Config::parse_text("agent-server = yolo").agent_server,
             AgentServer::Off
+        );
+    }
+
+    /// `agent-display` defaults off, parses as a boolean in both spellings,
+    /// and combines with `agent-server` into the control policy.
+    #[test]
+    fn agent_display_defaults_off_and_feeds_the_policy() {
+        use kettle_ctl::protocol::Capability;
+        let default = Config::default();
+        assert!(!default.agent_display);
+        assert!(!default.ctl_policy().runs_server());
+        assert!(Config::BOOL_KEYS.contains(&"agent-display"));
+        assert!(Config::BOOL_KEYS.contains(&"agent_display"));
+        let display = Config::parse_text("agent-display = true");
+        assert!(display.agent_display);
+        let policy = display.ctl_policy();
+        assert!(policy.runs_server());
+        assert!(policy.allows(Capability::Display));
+        assert!(!policy.allows(Capability::Read));
+        assert!(Config::parse_text("agent_display = on").agent_display);
+        // A value that is not a boolean never turns display on.
+        assert!(!Config::parse_text("agent-display = maybe").agent_display);
+        assert_eq!(
+            Config::parse_text("agent-server = read-only\nagent-display = yes").ctl_policy(),
+            kettle_ctl::CtlPolicy::new(AgentServer::ReadOnly, true)
         );
     }
 

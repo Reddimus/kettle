@@ -15,6 +15,7 @@ description = "kettle: configuration parsing, themes, key bindings, and fuzzy ma
 workspace = true
 
 [dependencies]
+kettle-ctl.workspace = true
 bitflags = "2.11.1"
 kettle-i18n.workspace = true
 kettle-state.workspace = true

@@ -306,9 +306,23 @@ The server is a local\-IPC surface over a Unix socket that
 .BR "kettle ctl" ", " "kettle mcp" ", or an AI agent can drive: list panes,"
 read the screen, and (in
 .BR full )
-send text + run commands. OFF by default. See
+send text + run commands. OFF by default.
+.B \-\-agent\-server off
+alone also turns agent previews off; add
+.B \-\-agent\-display on
+to keep them. See
 .B docs/AGENT.md
 for the threat model.
+.TP
+.BR \-\-agent\-display " " on | off
+Let agents show media in kettle for this launch, overriding the
+.B agent\-display
+config key. Display grants no screen reads or input; with
+.B agent\-server
+off, kettle runs its control server for display requests only.
+.B full
+already includes display. Turning previews on in Settings applies at once;
+turning them off applies at the next launch.
 .TP
 .BI \-\-record \ PATH
 Record this session to an asciicast-compatible trace at
@@ -452,6 +466,10 @@ to stream the event feed. The target kettle must run with
 .B agent\-server
 enabled (see
 .BR \-\-agent\-server ).
+A kettle running for agent previews only refuses every method here with
+.B display_only
+or
+.BR read_only .
 .B \-\-pane
 targets a specific pane (else the focused pane);
 .B \-\-json

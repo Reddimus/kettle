@@ -329,6 +329,12 @@ struct Cli {
     #[arg(long, value_name = "MODE", verbatim_doc_comment)]
     agent_server: Option<AgentServerArg>,
 
+    /// Let agents show media in kettle for this launch, overriding the
+    /// `agent-display` config. Display grants no screen reads or input.
+    /// `--agent-server off` also turns display off unless this flag is given.
+    #[arg(long, value_name = "on|off", verbatim_doc_comment)]
+    agent_display: Option<OnOffArg>,
+
     /// Deprecated receive-only compatibility for a JSON tab handoff written by
     /// an older Kettle process. Current tab tear-off moves the live tab,
     /// running programs, PTY, and scrollback in-process. The legacy handoff file
@@ -517,6 +523,13 @@ enum AgentServerArg {
     Off,
     ReadOnly,
     Full,
+}
+
+/// An `on|off` flag value.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum OnOffArg {
+    On,
+    Off,
 }
 
 /// Agent-first subcommands. Each is a self-contained non-GUI entry point that
@@ -1793,6 +1806,7 @@ fn main() -> anyhow::Result<()> {
             AgentServerArg::ReadOnly => kettle_config::AgentServer::ReadOnly,
             AgentServerArg::Full => kettle_config::AgentServer::Full,
         }),
+        agent_display: cli.agent_display.map(|value| value == OnOffArg::On),
         accent_override,
         window_state_override,
         borderless_override,
@@ -2380,9 +2394,46 @@ mod activation_cli_tests {
     #[test]
     fn only_an_argument_free_launch_is_bare() {
         assert!(is_bare_gui_argv(["kettle"]));
+        assert!(!is_bare_gui_argv(["kettle", "--agent-display", "on"]));
         assert!(!is_bare_gui_argv(["kettle", "--new-process"]));
         assert!(!is_bare_gui_argv(["kettle", "-d", "/tmp"]));
         assert!(!is_bare_gui_argv(["kettle", "--version"]));
+    }
+
+    /// `--agent-display` takes exactly `on` or `off`, and the two agent flags
+    /// mean the same in either order.
+    #[test]
+    fn agent_display_flag_takes_on_or_off_in_any_order() {
+        let display = |args: &[&str]| {
+            Cli::try_parse_from(args.iter().copied())
+                .map(|cli| (cli.agent_server.map(|_| ()), cli.agent_display))
+        };
+        assert_eq!(
+            display(&["kettle", "--agent-display", "on"]).unwrap(),
+            (None, Some(super::OnOffArg::On))
+        );
+        assert_eq!(
+            display(&["kettle", "--agent-display=off"]).unwrap(),
+            (None, Some(super::OnOffArg::Off))
+        );
+        assert_eq!(display(&["kettle"]).unwrap(), (None, None));
+        assert!(display(&["kettle", "--agent-display"]).is_err());
+        assert!(display(&["kettle", "--agent-display", "yes"]).is_err());
+        let forward =
+            Cli::try_parse_from(["kettle", "--agent-server", "off", "--agent-display", "on"])
+                .unwrap();
+        let backward =
+            Cli::try_parse_from(["kettle", "--agent-display", "on", "--agent-server", "off"])
+                .unwrap();
+        assert!(matches!(
+            forward.agent_server,
+            Some(super::AgentServerArg::Off)
+        ));
+        assert!(matches!(
+            backward.agent_server,
+            Some(super::AgentServerArg::Off)
+        ));
+        assert_eq!(forward.agent_display, backward.agent_display);
     }
 
     #[test]

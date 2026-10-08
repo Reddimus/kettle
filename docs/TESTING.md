@@ -3535,6 +3535,21 @@ poll the discovery registry until the entry appears before issuing `ctl`,
 and capture `kettle ctl` output via a programmatic spawn (the GUI-subsystem
 binary auto-detaches stdout from an interactive shell, so a piped invocation
 from the same console shows nothing).
+
+The control policy has unit and loopback coverage. `kettle-ctl`'s `policy`
+tests pin the six-by-three truth table, the exact refusal texts, every launch
+flag combination over every configured policy, and that display only ever
+turns on while Kettle runs. `ctl_server` tests run real connections:
+display-only refuses every read and mutation, `read-only` refuses every
+mutation, a refusal comes before parameter errors (including a `wait_for` with
+a broken regex), and none of them reaches the App; a refused or malformed
+`subscribe` never starts streaming; `wait_for` probes carry only
+`read_screen`. Drift guards pin admission before every route, no second gate in
+the App, the single server start, and the reload's latch. For a live check,
+launch `kettle --agent-server off --agent-display on` and confirm `kettle ctl
+get_state` is refused with `display_only`; then turn Agent previews on in
+Settings in a plain launch and confirm a running `kettle ctl` client is
+refused with `display_only` rather than finding no server.
 #### `kettle mcp`
 
 `kettle mcp --self-test` (in-process handshake +

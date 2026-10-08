@@ -530,6 +530,12 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
             ],
         },
         Category {
+            name: T::SettingsCategoryAgents,
+            // Display only. Agent control (`agent-server`) stays config-only:
+            // it grants reading and typing, and applies at launch.
+            fields: vec![toggle(T::SettingsFieldAgentPreviews, "agent-display")],
+        },
+        Category {
             name: T::SettingsCategoryKeybinds,
             fields: vec![
                 keybind(T::SettingsKeybindSplitRight, "split_right"),
@@ -832,6 +838,7 @@ fn read_bool(cfg: &Config, key: &str) -> bool {
         "detachable-tabs" => cfg.detachable_tabs,
         "search-wrap" => cfg.search_wrap,
         "invert-search" => cfg.invert_search,
+        "agent-display" => cfg.agent_display,
         _ => false,
     }
 }
@@ -1053,6 +1060,34 @@ mod tests {
                 0
             ),
             "true"
+        );
+    }
+
+    /// Agents → Agent previews edits `agent-display` as an ordinary toggle.
+    #[test]
+    fn agent_previews_row_round_trips() {
+        let cats = categories(&[]);
+        let agents = cats
+            .iter()
+            .find(|cat| cat.name == Text::SettingsCategoryAgents)
+            .expect("Agents category");
+        assert_eq!(agents.fields.len(), 1);
+        let field = &agents.fields[0];
+        assert_eq!(field.key, "agent-display");
+        assert_eq!(field.label, Text::SettingsFieldAgentPreviews);
+        assert!(matches!(field.kind, FieldKind::Toggle));
+        let off = Config::default();
+        assert_eq!(read(&off, field, &EN), "Off");
+        assert_eq!(next_value(&off, field, 1), "true");
+        let on = Config::parse_text(&format!("{} = {}", field.key, next_value(&off, field, 1)));
+        assert!(on.agent_display);
+        assert_eq!(read(&on, field, &EN), "On");
+        assert_eq!(next_value(&on, field, 1), "false");
+        // Agent control stays out of Settings: it grants reading and typing.
+        assert!(
+            cats.iter()
+                .flat_map(|cat| &cat.fields)
+                .all(|field| field.key != "agent-server")
         );
     }
 

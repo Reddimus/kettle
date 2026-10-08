@@ -509,9 +509,25 @@ fn modal_holds_cursor_steady(ws: &WindowState) -> bool {
 /// A control request that only reads UI state, so it needs no frame. A
 /// frame would also end the Core Animation cursor blink `ui_geometry` is
 /// there to observe.
-fn ctl_request_is_pure_read(req: &kettle_ctl::protocol::Request) -> bool {
-    kettle_ctl::protocol::Method::from_name(&req.method)
-        == Some(kettle_ctl::protocol::Method::UiGeometry)
+/// The control-server launch flags.
+fn ctl_overrides(startup: &crate::Options) -> kettle_ctl::CtlOverrides {
+    kettle_ctl::CtlOverrides {
+        server: startup.agent_server,
+        display: startup.agent_display,
+    }
+}
+
+/// Where the control server's start stands. It may start once the first pane
+/// exists, and tries at most once unless display is newly turned on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CtlStart {
+    NotReady,
+    Ready,
+    Attempted,
+}
+
+fn ctl_method_is_pure_read(method: kettle_ctl::protocol::Method) -> bool {
+    method == kettle_ctl::protocol::Method::UiGeometry
 }
 
 fn window_is_render_hidden(ws: &WindowState) -> bool {
@@ -7863,11 +7879,19 @@ pub struct App {
     remote_spool_claim_pending: bool,
     /// Deadline/backoff for a busy spool lock or backpressured target pane.
     remote_command_retry: AutomationRetry,
-    /// The in-process control server, present when
-    /// `agent-server` is enabled (config or `--agent-server`). `None` keeps the
-    /// zero-cost default path. Started in `resumed`, dropped on exit (which
-    /// unregisters the discovery entry).
+    /// The in-process control server, present when the control policy allows
+    /// anything (`agent-server`, `agent-display` or their launch flags).
+    /// `None` keeps the zero-cost default path. Started in `resumed`, or when
+    /// display is turned on later; dropped on exit (which unregisters the
+    /// discovery entry).
     ctl: Option<crate::ctl_server::CtlServer>,
+    /// The control policy in force, resolved at launch from config and the
+    /// `--agent-server`/`--agent-display` flags. `agent-server` applies only
+    /// at launch; display can only be turned on while Kettle runs (see
+    /// `reconcile_agent_display`), so this never narrows.
+    ctl_policy: kettle_ctl::CtlPolicy,
+    /// Whether the control server may start yet, and whether it has tried.
+    ctl_start: CtlStart,
     /// Pending `run_command` correlations keyed by
     /// pane id. A request writes `cmd\n`, records the start line + deadline
     /// here, and the next OSC-133 `CommandFinished` for that pane resolves it.
@@ -8828,6 +8852,7 @@ impl App {
             };
         let video_previewer = crate::video_preview::VideoPreviewer::new(proxy.clone());
         let plan = startup_plan(&startup, &initial_cfg);
+        let ctl_policy = ctl_overrides(&startup).resolve(initial_cfg.ctl_policy());
         let mut app = App {
             restore_source: None,
             cfg: initial_cfg,
@@ -8874,6 +8899,8 @@ impl App {
             // Server is started later in `resumed`
             // (needs the pid + a live event-loop proxy for the waker).
             ctl: None,
+            ctl_policy,
+            ctl_start: CtlStart::NotReady,
             pending_runs: std::collections::HashMap::new(),
             clipboard,
             pasted_images: crate::paste_image::PastedImages::new(),
@@ -16400,6 +16427,7 @@ impl App {
                     active.fields.get(fld).map(|f| f.key),
                     ws.settings_restart_pending,
                     self.language_change_pending(),
+                    Some(self.agent_previews_note()),
                 )
             },
         })
@@ -19747,6 +19775,7 @@ impl App {
         }
         let font_size_changed = (new.font_size - previous_config_font_size).abs() > f32::EPSILON;
         self.cfg = new;
+        self.reconcile_agent_display();
         crate::dev_record::apply_retention_config(&self.cfg);
         self.sync_lua_active_theme();
         font_size_changed
@@ -19858,6 +19887,69 @@ impl App {
         log::debug!("config reload applied once across {} windows", seqs.len());
     }
 
+    /// The Agent previews row's footer note for the current state.
+    fn agent_previews_note(&self) -> kettle_i18n::Text {
+        let turned_on = self.cfg.ctl_policy().with_display();
+        agent_previews_note(
+            self.cfg.agent_display,
+            self.ctl_policy,
+            ctl_overrides(&self.startup).resolve(turned_on).display(),
+            self.ctl.is_some(),
+            self.ctl_start == CtlStart::Attempted,
+        )
+    }
+
+    /// Start the control server if the policy allows anything, the first pane
+    /// exists, and no start has been tried. A failed start is logged and not
+    /// retried by unrelated reloads.
+    fn ensure_ctl_started(&mut self) {
+        if self.ctl_start != CtlStart::Ready || self.ctl.is_some() || !self.ctl_policy.runs_server()
+        {
+            return;
+        }
+        self.ctl_start = CtlStart::Attempted;
+        let proxy = self.proxy.clone();
+        let wake: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(move || {
+            let _ = proxy.send_event(UserEvent::Ctl);
+        });
+        let started_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.ctl = crate::ctl_server::CtlServer::start(
+            self.ctl_policy,
+            std::process::id(),
+            env!("CARGO_PKG_VERSION"),
+            started_unix,
+            wake,
+        );
+    }
+
+    /// Apply a reloaded `agent-display`. Turning display on takes effect at
+    /// once, for open connections too, and starts the server if none runs;
+    /// turning it off waits for the next launch. Launch flags keep their
+    /// precedence, and `agent-server` changes wait for the next launch.
+    fn reconcile_agent_display(&mut self) {
+        let requested = ctl_overrides(&self.startup).resolve(self.cfg.ctl_policy());
+        let Some(widened) = self.ctl_policy.latch_display(requested.display()) else {
+            return;
+        };
+        self.ctl_policy = widened;
+        log::info!("agent-server: agent previews turned on");
+        match &self.ctl {
+            Some(ctl) => ctl.enable_display(),
+            None => {
+                // Display is a new grant, so it earns one more start attempt
+                // even if an earlier one failed. The latch makes this happen
+                // at most once per process.
+                if self.ctl_start == CtlStart::Attempted {
+                    self.ctl_start = CtlStart::Ready;
+                }
+                self.ensure_ctl_started();
+            }
+        }
+    }
+
     /// Scan every pane's recent output for configured
     /// trigger patterns. On the first match in this tick, raise the
     /// OS window's attention indicator (taskbar flash / dock bounce
@@ -19893,22 +19985,18 @@ impl App {
                     }
                     log::info!("agent-server: connection {conn_id} opened");
                 }
-                CtlServerMsg::BadRequest { reply, resp, .. } => {
-                    let _ = reply.send(resp);
-                }
                 CtlServerMsg::Request {
                     conn_id,
-                    req,
+                    request,
                     reply,
-                    internal_probe,
                 } => {
                     // Mutations + first-time attaches change visible state
                     // (pane content, agent badge); wait_for's internal
                     // probes and `ui_geometry` reads never do.
-                    if !internal_probe && !ctl_request_is_pure_read(&req) {
+                    if !request.internal_probe() && !ctl_method_is_pure_read(request.method()) {
                         needs_redraw = true;
                     }
-                    self.handle_ctl_request(ws, event_loop, conn_id, &req, reply, internal_probe);
+                    self.handle_ctl_request(ws, event_loop, conn_id, &request, reply);
                 }
                 CtlServerMsg::Disconnect { conn_id } => {
                     let panes = self
@@ -19944,54 +20032,34 @@ impl App {
     /// Dispatch one control request against the App and reply over `reply`.
     /// Most methods reply immediately; `run_command` stores `reply` and resolves
     /// it later (OSC-133 completion or the deadline).
+    ///
+    /// The request was admitted on its connection thread: the policy allowed
+    /// its method and its params are an object or absent.
     fn handle_ctl_request(
         &mut self,
         ws: &mut WindowState,
         event_loop: &ActiveEventLoop,
         conn_id: u64,
-        req: &kettle_ctl::protocol::Request,
+        request: &crate::ctl_server::AdmittedRequest,
         reply: crate::ctl_server::ReplyTx,
-        internal_probe: bool,
     ) {
-        use kettle_ctl::protocol::{Capability, Method, Response, error_codes as ec};
-        let mode = self
-            .ctl
-            .as_ref()
-            .map(|c| c.mode())
-            .unwrap_or(kettle_config::AgentServer::Off);
+        use kettle_ctl::protocol::{Method, Response, error_codes as ec};
+        let req = request.request();
+        let method = request.method();
         // Annotate the session trace with each agent action when recording
         // (cheap; only when a recorder is active). Skip wait_for's internal
         // read_screen probes, since a 300s wait at 50ms polls would add ~6000
         // markers. The client's own calls already show the wait.
-        if !internal_probe && let Some(rec) = self.recorder.as_mut() {
-            rec.record_marker(&format!("kettle:agent {} conn={conn_id}", req.method));
-        }
-        if !req.params.is_null() && !req.params.is_object() {
-            let _ = reply.send(Response::err(
-                req.id,
-                ec::BAD_PARAMS,
-                "params must be an object",
-            ));
-            return;
-        }
-        let Some(method) = Method::from_name(&req.method) else {
-            let _ = reply.send(Response::err(
-                req.id,
-                ec::UNKNOWN_METHOD,
-                format!("unknown method '{}'", req.method),
-            ));
-            return;
-        };
-        if method.capability() == Capability::Mutate && !mode.allows_mutation() {
-            let _ = reply.send(Response::err(
-                req.id,
-                ec::READ_ONLY,
-                format!("method '{}' requires agent-server=full", method.as_str()),
-            ));
-            return;
+        if !request.internal_probe()
+            && let Some(rec) = self.recorder.as_mut()
+        {
+            rec.record_marker(&format!("kettle:agent {} conn={conn_id}", method.as_str()));
         }
         let resp = match method {
-            Method::GetState => Response::ok(req.id, self.ctl_get_state(ws, mode)),
+            Method::GetState => {
+                let policy = self.ctl.as_ref().map(|c| c.policy()).unwrap_or_default();
+                Response::ok(req.id, self.ctl_get_state(ws, policy))
+            }
             Method::ListTabs => self.ctl_list_tabs(ws, req),
             Method::ListPanes => self.ctl_list_panes(ws, req),
             Method::ReadScreen => self.ctl_read_screen(ws, req),
@@ -20027,15 +20095,17 @@ impl App {
     }
 
     /// `get_state`: version, theme, pid, server mode, focused pane.
-    fn ctl_get_state(
-        &self,
-        ws: &WindowState,
-        mode: kettle_config::AgentServer,
-    ) -> serde_json::Value {
+    fn ctl_get_state(&self, ws: &WindowState, policy: kettle_ctl::CtlPolicy) -> serde_json::Value {
         serde_json::json!({
             "version": env!("CARGO_PKG_VERSION"),
             "pid": std::process::id(),
-            "mode": format!("{mode:?}").to_lowercase(),
+            // `mode` keeps its original spelling (`readonly`); `policy` uses
+            // the config spellings and the display grant itself.
+            "mode": format!("{:?}", policy.server()).to_lowercase(),
+            "policy": {
+                "server": policy.server().config_token(),
+                "display": policy.display(),
+            },
             "theme": self.cfg.theme_name,
             // `tabs` / `focused_pane` describe the FOCUSED window (back-
             // compat); `windows` / `focused_window` add the window dimension.
@@ -26623,6 +26693,7 @@ fn settings_footer_note(
     focused_key: Option<&str>,
     restart_pending: bool,
     language_pending: bool,
+    agent_previews: Option<kettle_i18n::Text>,
 ) -> Option<String> {
     use kettle_i18n::Text;
     let mut notes = Vec::new();
@@ -26630,6 +26701,7 @@ fn settings_footer_note(
         notes.push(gpu);
     }
     match focused_key {
+        Some("agent-display") => notes.extend(agent_previews.map(|note| tr.text(note))),
         Some("window-blur" | "background-opacity") => {
             notes.push(tr.text(Text::SettingsNoteBlur));
         }
@@ -26649,6 +26721,30 @@ fn settings_footer_note(
         notes.push(tr.text(Text::SettingsNoteRestart));
     }
     (!notes.is_empty()).then(|| notes.join("\n"))
+}
+
+/// What the Agent previews row's footer says: the one fact that explains
+/// the row's effect right now, most surprising first. `launch_allows` is
+/// whether this launch's flags let the row turn display on at all.
+fn agent_previews_note(
+    saved: bool,
+    policy: kettle_ctl::CtlPolicy,
+    launch_allows: bool,
+    server_running: bool,
+    start_attempted: bool,
+) -> kettle_i18n::Text {
+    use kettle_i18n::Text;
+    if policy.runs_server() && !server_running && start_attempted {
+        Text::SettingsNoteAgentPreviewsUnavailable
+    } else if policy.server() == kettle_config::AgentServer::Full {
+        Text::SettingsNoteAgentPreviewsFull
+    } else if !launch_allows && !policy.display() {
+        Text::SettingsNoteAgentPreviewsLaunchOff
+    } else if !saved && policy.display() {
+        Text::SettingsNoteAgentPreviewsPendingOff
+    } else {
+        Text::SettingsNoteAgentPreviews
+    }
 }
 
 /// The Settings footer: each key followed by what it does. The keys are the
@@ -29954,8 +30050,6 @@ impl App {
         } else {
             None
         };
-        // The `--agent-server` override for the control-server start below.
-        let startup_agent_server = self.startup.agent_server;
         let restored = if spawned_early {
             true
         } else if has_launch_override {
@@ -30064,28 +30158,11 @@ impl App {
         // the first GPU paint, which can take several seconds on a cold shader
         // cache. The server only needs the pid + a live proxy for its waker, so
         // binding it here makes the agent surface available as soon as the
-        // window comes up. `--agent-server` overrides the `agent-server`
-        // config; gated on `is_none()` so a re-resume doesn't double-bind.
-        if self.ctl.is_none() {
-            let mode = startup_agent_server.unwrap_or(self.cfg.agent_server);
-            if mode.is_enabled() {
-                let proxy = self.proxy.clone();
-                let wake: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(move || {
-                    let _ = proxy.send_event(UserEvent::Ctl);
-                });
-                let started_unix = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                self.ctl = crate::ctl_server::CtlServer::start(
-                    mode,
-                    std::process::id(),
-                    env!("CARGO_PKG_VERSION"),
-                    started_unix,
-                    wake,
-                );
-            }
+        // window comes up. A re-resume does not start it again.
+        if self.ctl_start == CtlStart::NotReady {
+            self.ctl_start = CtlStart::Ready;
         }
+        self.ensure_ctl_started();
         // Terminator plugin parity: fire
         // LuaEvent::Startup the first time we have an alive window
         // + at least one pane. Subsequent resumed() calls (Wayland
@@ -38007,23 +38084,12 @@ mod tests {
     /// window-server blink without ending it.
     #[test]
     fn ui_geometry_reads_draw_no_frame() {
-        let request = |method: &str| kettle_ctl::protocol::Request {
-            v: 1,
-            id: 1,
-            method: method.into(),
-            params: serde_json::Value::Null,
-        };
-        assert!(super::ctl_request_is_pure_read(&request("ui_geometry")));
-        for method in [
-            "read_screen",
-            "screenshot",
-            "send_keys",
-            "perform_action",
-            "nope",
-        ] {
-            assert!(
-                !super::ctl_request_is_pure_read(&request(method)),
-                "{method}"
+        use kettle_ctl::protocol::Method;
+        for method in Method::ALL {
+            assert_eq!(
+                super::ctl_method_is_pure_read(method),
+                method == Method::UiGeometry,
+                "{method:?}"
             );
         }
         let src = super::production_source();
@@ -38036,7 +38102,9 @@ mod tests {
             .split_once("\n    fn handle_ctl_request(")
             .expect("end of drain_ctl")
             .0;
-        assert!(drain.contains("if !internal_probe && !ctl_request_is_pure_read(&req) {"));
+        assert!(drain.contains(
+            "if !request.internal_probe() && !ctl_method_is_pure_read(request.method()) {"
+        ));
         assert!(drain.contains("needs_redraw |= !panes.is_empty();"));
         assert!(!drain.contains("the agent badge may have cleared"));
     }
@@ -49676,23 +49744,172 @@ mod settings_footer_text_tests {
     #[test]
     fn notes_follow_the_ui_language() {
         assert_eq!(
-            settings_footer_note(&ES, None, Some("completion-overlay"), false, false).as_deref(),
+            settings_footer_note(&ES, None, Some("completion-overlay"), false, false, None)
+                .as_deref(),
             Some("Se aplica a las shells nuevas.")
+        );
+    }
+
+    /// The Agent previews footer names the one fact that explains the row
+    /// right now.
+    #[test]
+    fn agent_previews_note_explains_the_effective_policy() {
+        use kettle_config::AgentServer::{Full, Off, ReadOnly};
+        use kettle_ctl::CtlPolicy;
+        use kettle_i18n::Text;
+        let note = super::agent_previews_note;
+        // Off, saved off: what toggling does.
+        assert_eq!(
+            note(false, CtlPolicy::new(Off, false), true, false, false),
+            Text::SettingsNoteAgentPreviews
+        );
+        // On and running: still what toggling does.
+        assert_eq!(
+            note(true, CtlPolicy::new(ReadOnly, true), true, true, true),
+            Text::SettingsNoteAgentPreviews
+        );
+        // Saved off while this run keeps showing previews.
+        assert_eq!(
+            note(false, CtlPolicy::new(Off, true), true, true, true),
+            Text::SettingsNoteAgentPreviewsPendingOff
+        );
+        // A launch flag keeps display off, whether or not the row is saved
+        // on: turning the row on would change nothing until a restart.
+        for saved in [false, true] {
+            assert_eq!(
+                note(saved, CtlPolicy::new(Off, false), false, false, false),
+                Text::SettingsNoteAgentPreviewsLaunchOff
+            );
+            assert_eq!(
+                note(saved, CtlPolicy::new(ReadOnly, false), false, true, true),
+                Text::SettingsNoteAgentPreviewsLaunchOff
+            );
+        }
+        // Full control already shows previews, whatever the row says.
+        for saved in [false, true] {
+            assert_eq!(
+                note(saved, CtlPolicy::new(Full, saved), true, true, true),
+                Text::SettingsNoteAgentPreviewsFull
+            );
+        }
+        // A server the policy wants but could not start explains itself first.
+        assert_eq!(
+            note(true, CtlPolicy::new(Full, true), true, false, true),
+            Text::SettingsNoteAgentPreviewsUnavailable
+        );
+        assert_eq!(
+            note(true, CtlPolicy::new(Off, true), true, false, true),
+            Text::SettingsNoteAgentPreviewsUnavailable
+        );
+        // Before the first start attempt nothing has failed yet.
+        assert_eq!(
+            note(true, CtlPolicy::new(Off, true), true, false, false),
+            Text::SettingsNoteAgentPreviews
+        );
+        assert_eq!(
+            settings_footer_note(
+                &EN,
+                None,
+                Some("agent-display"),
+                false,
+                false,
+                Some(Text::SettingsNoteAgentPreviews)
+            )
+            .as_deref(),
+            Some("Turning this on applies now. Turning it off applies when Kettle restarts.")
+        );
+        // Other rows never show it.
+        assert_eq!(
+            settings_footer_note(
+                &EN,
+                None,
+                Some("font-size"),
+                false,
+                false,
+                Some(Text::SettingsNoteAgentPreviews)
+            ),
+            None
+        );
+    }
+
+    /// Display is turned on by a successful reload only, launch flags keep
+    /// precedence, and the server starts in exactly one place.
+    #[test]
+    fn agent_display_reloads_widen_the_live_policy_once() {
+        let src = super::production_source();
+        let load = src
+            .split_once("fn load_reloaded_config(&mut self) -> bool {")
+            .expect("load_reloaded_config")
+            .1
+            .split_once("\n    fn apply_reloaded_config(")
+            .expect("end of load_reloaded_config")
+            .0;
+        let assigned = load.find("self.cfg = new;").expect("config assigned");
+        let reconciled = load
+            .find("self.reconcile_agent_display();")
+            .expect("reload reconciles agent display");
+        assert!(assigned < reconciled, "reconcile the config just loaded");
+        let reconcile = src
+            .split_once("fn reconcile_agent_display(&mut self) {")
+            .expect("reconcile_agent_display")
+            .1
+            .split_once("\n    }\n")
+            .expect("end of reconcile_agent_display")
+            .0;
+        assert!(reconcile.contains("ctl_overrides(&self.startup).resolve(self.cfg.ctl_policy())"));
+        assert!(reconcile.contains("self.ctl_policy.latch_display(requested.display())"));
+        assert!(reconcile.contains("Some(ctl) => ctl.enable_display(),"));
+        assert_eq!(
+            src.matches("crate::ctl_server::CtlServer::start(").count(),
+            1,
+            "only ensure_ctl_started starts the control server"
+        );
+        let ensure = src
+            .split_once("fn ensure_ctl_started(&mut self) {")
+            .expect("ensure_ctl_started")
+            .1
+            .split_once("\n    }\n")
+            .expect("end of ensure_ctl_started")
+            .0;
+        let marked = ensure
+            .find("self.ctl_start = CtlStart::Attempted;")
+            .expect("a start is recorded");
+        let started = ensure
+            .find("crate::ctl_server::CtlServer::start(")
+            .expect("ensure starts the server");
+        assert!(
+            marked < started,
+            "a failed start must not be retried by every reload"
+        );
+        let resumed = src
+            .split_once("fn resumed_inner(")
+            .expect("resumed_inner")
+            .1;
+        assert!(resumed.contains("self.ensure_ctl_started();"));
+        // The footer asks the launch flags what turning the row on would do.
+        let note = src
+            .split_once("fn agent_previews_note(&self) -> kettle_i18n::Text {")
+            .expect("agent_previews_note")
+            .1;
+        assert!(
+            note[..note.find("\n    }\n").expect("end of agent_previews_note")]
+                .contains("ctl_overrides(&self.startup).resolve(turned_on).display()")
         );
     }
 
     #[test]
     fn ordinary_rows_have_no_note_and_dependencies_are_contextual() {
         assert_eq!(
-            settings_footer_note(&EN, None, Some("font-size"), false, false),
+            settings_footer_note(&EN, None, Some("font-size"), false, false, None),
             None
         );
         assert_eq!(
-            settings_footer_note(&EN, None, Some("completion-overlay"), false, false).as_deref(),
+            settings_footer_note(&EN, None, Some("completion-overlay"), false, false, None)
+                .as_deref(),
             Some("Applies to new shells.")
         );
         assert_eq!(
-            settings_footer_note(&EN, None, Some("window-blur"), false, false).as_deref(),
+            settings_footer_note(&EN, None, Some("window-blur"), false, false, None).as_deref(),
             Some("Blur requires background opacity below 100%. Applies to new windows.")
         );
     }
@@ -49701,7 +49918,7 @@ mod settings_footer_text_tests {
     fn pending_notice_does_not_infer_gpu_changes_from_the_current_category() {
         let pending = "Restart Kettle or open a new window to apply pending changes.";
         for key in ["window-blur", "background-opacity", "gpu", "gpu-backend"] {
-            let note = settings_footer_note(&EN, None, Some(key), true, false).unwrap();
+            let note = settings_footer_note(&EN, None, Some(key), true, false, None).unwrap();
             assert_eq!(note.lines().last(), Some(pending));
             // A blur/opacity edit followed by a switch to Graphics has the
             // same pending flag; an active adapter does not identify its cause.
@@ -49711,21 +49928,29 @@ mod settings_footer_text_tests {
                 Some(key),
                 true,
                 false,
+                None,
             )
             .unwrap();
             assert_eq!(gpu_note.lines().last(), Some(pending));
             assert!(!gpu_note.contains("GPU changes"));
         }
         assert_eq!(
-            settings_footer_note(&EN, Some("Active GPU: Test"), Some("gpu"), false, false)
-                .as_deref(),
+            settings_footer_note(
+                &EN,
+                Some("Active GPU: Test"),
+                Some("gpu"),
+                false,
+                false,
+                None
+            )
+            .as_deref(),
             Some("Active GPU: Test")
         );
     }
 
     #[test]
     fn pending_changes_are_never_hidden_by_an_appearance_hint() {
-        let note = settings_footer_note(&EN, None, Some("window-blur"), true, false).unwrap();
+        let note = settings_footer_note(&EN, None, Some("window-blur"), true, false, None).unwrap();
         assert!(note.contains("below 100%"));
         assert!(note.contains("pending changes"));
         let note = settings_footer_note(
@@ -49734,6 +49959,7 @@ mod settings_footer_text_tests {
             Some("gpu"),
             true,
             false,
+            None,
         )
         .unwrap();
         assert!(note.contains("Restart Kettle or open a new window to apply pending changes."));
@@ -49759,14 +49985,14 @@ mod settings_footer_text_tests {
     #[test]
     fn a_language_change_waits_for_a_restart() {
         assert_eq!(
-            settings_footer_note(&EN, None, Some("language"), false, false).as_deref(),
+            settings_footer_note(&EN, None, Some("language"), false, false, None).as_deref(),
             Some("Applies when Kettle restarts.")
         );
         assert_eq!(
-            settings_footer_note(&ES, None, Some("language"), false, true).as_deref(),
+            settings_footer_note(&ES, None, Some("language"), false, true, None).as_deref(),
             Some("Reiniciar Kettle para cambiar el idioma.")
         );
-        let note = settings_footer_note(&EN, None, Some("font-size"), true, true).unwrap();
+        let note = settings_footer_note(&EN, None, Some("font-size"), true, true, None).unwrap();
         assert_eq!(
             note.lines().collect::<Vec<_>>(),
             [
