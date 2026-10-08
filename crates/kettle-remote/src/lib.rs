@@ -181,6 +181,28 @@ pub trait ProcessTree {
     fn all_pids(&self) -> Vec<u32>;
 }
 
+fn process_tree_refresh_kind() -> sysinfo::ProcessRefreshKind {
+    // Newer sysinfo defaults include Linux threads. This snapshot needs
+    // process parents, argv and cwd, so task enumeration adds no useful data.
+    sysinfo::ProcessRefreshKind::nothing()
+        .without_tasks()
+        .with_cmd(sysinfo::UpdateKind::Always)
+        .with_cwd(sysinfo::UpdateKind::Always)
+}
+
+#[cfg(test)]
+mod process_refresh_policy_tests {
+    #[test]
+    fn process_snapshot_avoids_thread_enumeration_and_unused_telemetry() {
+        let refresh = super::process_tree_refresh_kind();
+        assert!(!refresh.tasks());
+        assert!(!refresh.cpu());
+        assert!(!refresh.memory());
+        assert_eq!(refresh.cmd(), sysinfo::UpdateKind::Always);
+        assert_eq!(refresh.cwd(), sysinfo::UpdateKind::Always);
+    }
+}
+
 /// The cross-platform `ProcessTree` impl. Wraps sysinfo's
 /// process refresh + `processes()` map behind the trait's u32-pid API.
 ///
@@ -190,14 +212,12 @@ pub trait ProcessTree {
 /// 200-process machine).
 impl ProcessTree for sysinfo::System {
     fn refresh(&mut self) {
-        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};
+        use sysinfo::ProcessesToUpdate;
         // Request cwd too so `cwd_of` works. It backs the native cwd fallback
         // for tab/window labels when a shell emits no OSC 7/9;9 (stock Windows
         // pwsh/cmd). On Windows sysinfo reads it from the process PEB; it
         // degrades to None for elevated/cross-arch targets.
-        let refresh_kind = ProcessRefreshKind::new()
-            .with_cmd(sysinfo::UpdateKind::Always)
-            .with_cwd(sysinfo::UpdateKind::Always);
+        let refresh_kind = process_tree_refresh_kind();
         self.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind);
     }
 

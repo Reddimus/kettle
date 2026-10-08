@@ -288,7 +288,7 @@ fn eval_predicate(contents: &[u8], cursor: usize) -> Result<(Tri, usize), ()> {
             return Ok((Tri::Unknown, cursor));
         }
         // `cfg(true)` / `cfg(false)` are boolean literals, stable since 1.79 and
-        // usable at this workspace's 1.89 MSRV. `false` means the item exists in
+        // usable at this workspace's 1.95 MSRV. `false` means the item exists in
         // no build at all, so it is safe to drop from a production slice.
         let value = match name {
             b"test" | b"false" => Tri::False,

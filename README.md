@@ -3,7 +3,7 @@
 [![CI](https://github.com/Reddimus/kettle/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Reddimus/kettle/actions/workflows/ci.yml)
 [![Audit](https://github.com/Reddimus/kettle/actions/workflows/audit.yml/badge.svg?branch=main)](https://github.com/Reddimus/kettle/actions/workflows/audit.yml)
 [![Latest release](https://img.shields.io/github/v/release/Reddimus/kettle?label=release&color=blue)](https://github.com/Reddimus/kettle/releases/latest)
-[![MSRV](https://img.shields.io/badge/MSRV-1.89-blue?logo=rust)](Cargo.toml)
+[![MSRV](https://img.shields.io/badge/MSRV-1.95-blue?logo=rust)](Cargo.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Kettle is a GPU-accelerated terminal workspace for macOS and Linux. It has
@@ -118,7 +118,7 @@ permits input and arbitrary command execution as your user. Read
 
 ## Build and test
 
-Kettle requires Rust 1.89 or newer. macOS needs a stable Rust toolchain. Linux
+Kettle requires Rust 1.95 or newer. macOS needs a stable Rust toolchain. Linux
 contributors should install the dependencies listed under
 [source builds](docs/INSTALL.md#from-source).
 

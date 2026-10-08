@@ -3487,7 +3487,7 @@ fn take_opener_slot(
     limit: usize,
 ) -> Option<OpenerSlot> {
     use std::sync::atomic::Ordering;
-    // Rust 1.99 renames fetch_update to try_update; the MSRV (1.89) predates it.
+    // Rust 1.99 renames fetch_update to try_update; the MSRV (1.95) predates it.
     #[allow(deprecated)]
     let taken = counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |taken| {
         (taken < limit).then_some(taken + 1)
