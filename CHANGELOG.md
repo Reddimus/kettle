@@ -147,7 +147,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   torn off, moved to a new window or docked into another window, keeping
   their pixels and remaining time. They used to stay in the old window, and a
   video poster that finished after the move was dropped. A failed move puts
-  them back, and another tab's receipt stays where it is.
+  them back. Docking replaces only the part that arrived, so a receipt or a
+  pending preview that belongs to another tab in the target window stays,
+  and a preview that fails no longer removes another tab's receipt.
 
 - An opaque context menu, Settings panel or paste receipt over the cursor
   cell now hides the whole cursor. The inverted glyph of a focused block

@@ -1134,6 +1134,19 @@ pub(crate) struct WindowState {
     pub(crate) reuse_pane_snapshots_once: bool,
 }
 
+/// What a video preview worker's answer did to a window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VideoPreviewOutcome {
+    /// Not this window's pending preview, or its pane is gone.
+    Ignored,
+    /// The pending preview had expired; nothing is shown.
+    Expired,
+    /// No poster; the pending preview ends and any shown receipt stays.
+    Failed,
+    /// The poster is this window's receipt now.
+    Shown,
+}
+
 /// A paste receipt and pending video preview taken from a window with the
 /// tab that owns them, to follow that tab into another window.
 #[derive(Default)]
@@ -1174,19 +1187,21 @@ impl WindowState {
         moved
     }
 
-    /// Receive a moved tab's paste state. A window shows one receipt, so an
-    /// incoming one replaces this window's; nothing incoming keeps it.
+    /// Receive a moved tab's paste state. Each part that arrived replaces
+    /// this window's: an incoming receipt is newer than the one shown, and an
+    /// incoming pending preview is the one its tab is waiting for. A part that
+    /// did not arrive stays, so another tab's pending preview still shows its
+    /// poster and another tab's receipt stays until something replaces it.
     pub(crate) fn adopt_moved_paste_state(&mut self, moved: MovedPasteState) {
-        if moved.receipt.is_none() && moved.pending.is_none() {
-            return;
-        }
-        self.media_paste_receipt = moved.receipt;
-        self.pending_video_paste_receipt = moved.pending;
-        self.accessibility_pending = true;
+        self.put_moved_paste_state(moved);
     }
 
     /// Put back what a failed transfer took, leaving the rest as it is.
     pub(crate) fn restore_moved_paste_state(&mut self, moved: MovedPasteState) {
+        self.put_moved_paste_state(moved);
+    }
+
+    fn put_moved_paste_state(&mut self, moved: MovedPasteState) {
         if let Some(receipt) = moved.receipt {
             self.media_paste_receipt = Some(receipt);
             self.accessibility_pending = true;
@@ -1195,6 +1210,59 @@ impl WindowState {
             self.pending_video_paste_receipt = Some(pending);
             self.accessibility_pending = true;
         }
+    }
+
+    /// Apply the worker's answer for `pane_id`'s video preview `generation`.
+    /// A poster becomes this window's receipt. A failed preview drops only its
+    /// own pending state: a receipt another tab brought here stays.
+    pub(crate) fn finish_pending_video_preview(
+        &mut self,
+        pane_id: u64,
+        generation: u64,
+        candidate: Option<crate::video_preview::VideoPasteCandidate>,
+        preview: Option<kettle_core::ImageData>,
+        now: std::time::Instant,
+    ) -> VideoPreviewOutcome {
+        let Some(mut pending) = self.pending_video_paste_receipt.take() else {
+            return VideoPreviewOutcome::Ignored;
+        };
+        if pending.pane_id != pane_id || pending.generation != generation {
+            self.pending_video_paste_receipt = Some(pending);
+            return VideoPreviewOutcome::Ignored;
+        }
+        // A late worker reply must not revive expired pending state.
+        if pending.expired(now) {
+            self.accessibility_pending = true;
+            return VideoPreviewOutcome::Expired;
+        }
+        let Some(mut candidate) = candidate else {
+            self.accessibility_pending = true;
+            return VideoPreviewOutcome::Failed;
+        };
+        if !self.mux.panes.contains_key(&pane_id) {
+            return VideoPreviewOutcome::Ignored;
+        }
+        candidate.count = pending.request.count;
+        let mut receipt = pending.previous_receipt.take();
+        if receipt
+            .as_mut()
+            .is_none_or(|prior| !prior.merge_drop(pane_id, &candidate, pending.created_at))
+        {
+            receipt = Some(MediaPasteReceiptState::new_video(
+                pane_id,
+                &candidate,
+                generation,
+                pending.remote,
+                pending.prefer_top,
+                pending.created_at,
+            ));
+        }
+        if let Some(receipt) = receipt.as_mut() {
+            receipt.finish_video_preview(generation, preview);
+        }
+        self.media_paste_receipt = receipt;
+        self.accessibility_pending = true;
+        VideoPreviewOutcome::Shown
     }
 
     /// Whether this window waits for that pane's video preview generation.
@@ -1466,6 +1534,69 @@ mod tests {
             9,
             "empty incoming state keeps existing target receipt"
         );
+    }
+
+    /// Each part of a moved tab's paste state replaces only its own part of
+    /// the target's, so neither tab loses what it is showing or waiting for.
+    #[test]
+    fn adopting_one_part_keeps_the_other_tabs_part() {
+        let now = std::time::Instant::now();
+        // A pending preview arrives where another tab's receipt shows.
+        let mut donor = WindowState::new(1, false, Mux::new());
+        donor.pending_video_paste_receipt = Some(moving_pending_video(7, now));
+        let mut target = WindowState::new(2, false, Mux::new());
+        target.media_paste_receipt = Some(moving_image_receipt(9, now));
+        target.adopt_moved_paste_state(donor.take_moved_paste_state(&moving_tab(7), now));
+        assert_eq!(target.media_paste_receipt.as_ref().unwrap().pane_id, 9);
+        assert!(target.expects_video_preview(7, 41));
+
+        // A receipt arrives where another tab waits for its preview.
+        let mut donor = WindowState::new(3, false, Mux::new());
+        donor.media_paste_receipt = Some(moving_image_receipt(8, now));
+        let mut target = WindowState::new(4, false, Mux::new());
+        target.pending_video_paste_receipt = Some(moving_pending_video(7, now));
+        target.adopt_moved_paste_state(donor.take_moved_paste_state(&moving_tab(8), now));
+        assert_eq!(target.media_paste_receipt.as_ref().unwrap().pane_id, 8);
+        assert!(
+            target.expects_video_preview(7, 41),
+            "the other tab's poster must still land when it completes"
+        );
+        assert!(target.accessibility_pending);
+    }
+
+    /// A failed preview ends only its own pending state; an expired one shows
+    /// nothing; a reply for another generation changes nothing.
+    #[test]
+    fn a_failed_preview_keeps_another_tabs_receipt() {
+        let now = std::time::Instant::now();
+        let mut window = WindowState::new(1, false, Mux::new());
+        window.media_paste_receipt = Some(moving_image_receipt(9, now));
+        window.pending_video_paste_receipt = Some(moving_pending_video(7, now));
+        assert_eq!(
+            window.finish_pending_video_preview(7, 40, None, None, now),
+            VideoPreviewOutcome::Ignored
+        );
+        assert!(window.expects_video_preview(7, 41));
+        assert_eq!(
+            window.finish_pending_video_preview(7, 41, None, None, now),
+            VideoPreviewOutcome::Failed
+        );
+        assert!(!window.expects_video_preview(7, 41));
+        assert_eq!(
+            window.media_paste_receipt.as_ref().unwrap().pane_id,
+            9,
+            "another tab's receipt survives this tab's failed preview"
+        );
+
+        let mut window = WindowState::new(2, false, Mux::new());
+        window.pending_video_paste_receipt = Some(moving_pending_video(7, now));
+        let late = now + crate::video_preview::PENDING_RECEIPT_TIMEOUT;
+        assert_eq!(
+            window.finish_pending_video_preview(7, 41, None, None, late),
+            VideoPreviewOutcome::Expired
+        );
+        assert!(window.media_paste_receipt.is_none());
+        assert!(window.pending_video_paste_receipt.is_none());
     }
 
     #[test]

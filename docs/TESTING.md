@@ -2267,8 +2267,10 @@ was not exercised.
 Paste receipts follow their tab: unit tests move a receipt's pixels without
 copying and keep its expiry, carry a pending video preview through a tear and
 a dock with its exact generation, restore only what a failed move took, keep
-another tab's receipt, and end a hover pause without resetting the hard
-expiry; a late video preview finds the window its tab moved to. A census
+another tab's receipt or pending preview when only the other part arrives,
+keep another tab's receipt when a preview fails, ignore expired and stale
+preview replies, and end a hover pause without resetting the hard expiry; a
+late video preview finds the window its tab moved to. A census
 requires every function that detaches a tab to take the tab's paste state
 before handing it on, every failed new-window handoff to restore it, and the
 receiving side to adopt it. The tab tear-off drag is a

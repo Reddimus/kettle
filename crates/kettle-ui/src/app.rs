@@ -30330,49 +30330,19 @@ impl App {
                 if window_seq != ws.seq {
                     return;
                 }
-                let Some(mut pending) = ws.pending_video_paste_receipt.take() else {
-                    return;
-                };
-                if pending.pane_id != pane_id || pending.generation != generation {
-                    ws.pending_video_paste_receipt = Some(pending);
-                    return;
-                }
-                if pending.expired(std::time::Instant::now()) {
-                    ws.accessibility_pending = true;
-                    return;
-                }
-                let Some(mut candidate) = candidate else {
-                    ws.media_paste_receipt = None;
-                    ws.accessibility_pending = true;
-                    if let Some(window) = &ws.window {
-                        window.request_redraw();
-                    }
-                    return;
-                };
-                if !ws.mux.panes.contains_key(&pane_id) {
-                    return;
-                }
-                candidate.count = pending.request.count;
-                let mut receipt = pending.previous_receipt.take();
-                if receipt
-                    .as_mut()
-                    .is_none_or(|prior| !prior.merge_drop(pane_id, &candidate, pending.created_at))
+                use crate::window_state::VideoPreviewOutcome;
+                let outcome = ws.finish_pending_video_preview(
+                    pane_id,
+                    generation,
+                    candidate,
+                    preview,
+                    std::time::Instant::now(),
+                );
+                if matches!(
+                    outcome,
+                    VideoPreviewOutcome::Failed | VideoPreviewOutcome::Shown
+                ) && let Some(window) = &ws.window
                 {
-                    receipt = Some(crate::window_state::MediaPasteReceiptState::new_video(
-                        pane_id,
-                        &candidate,
-                        generation,
-                        pending.remote,
-                        pending.prefer_top,
-                        pending.created_at,
-                    ));
-                }
-                if let Some(receipt) = receipt.as_mut() {
-                    receipt.finish_video_preview(generation, preview);
-                }
-                ws.media_paste_receipt = receipt;
-                ws.accessibility_pending = true;
-                if let Some(window) = &ws.window {
                     window.request_redraw();
                 }
             }
@@ -34460,8 +34430,9 @@ mod tests {
             .and_then(|rest| rest.split("UserEvent::Wakeup").next())
             .expect("video preview result handler");
         assert!(
-            ready.contains("pending.expired(std::time::Instant::now())"),
-            "a late worker reply must not revive already-expired pending state"
+            ready.contains("ws.finish_pending_video_preview(")
+                && ready.contains("std::time::Instant::now(),"),
+            "a worker reply goes through the window's expiry-checked finish"
         );
 
         let ctl_press = source
@@ -39925,15 +39896,22 @@ mod tests {
                 continue;
             }
             transfers += 1;
-            for (at, _) in body
+            // Each handoff needs its own take, after the previous handoff, so
+            // one take cannot cover a second transfer in the same function.
+            let mut handoffs: Vec<usize> = body
                 .match_indices("WindowOpen::AdoptTab {")
+                .filter(|(at, _)| !body[..*at].ends_with("Err("))
                 .chain(body.match_indices("self.dock_tab_into("))
-            {
-                let before = &body[..at];
+                .map(|(at, _)| at)
+                .collect();
+            handoffs.sort_unstable();
+            let mut since = 0;
+            for at in handoffs {
                 assert!(
-                    before.contains(".take_moved_paste_state(&dt.tab,"),
-                    "{name} hands a tab on without its paste state"
+                    body[since..at].contains(".take_moved_paste_state(&dt.tab,"),
+                    "{name} hands a tab on without its own paste state"
                 );
+                since = at;
             }
             assert_eq!(
                 body.matches("Err(WindowOpen::AdoptTab { tab: dt, paste, .. })")
