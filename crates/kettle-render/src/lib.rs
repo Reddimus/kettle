@@ -21,6 +21,7 @@ mod glyphpipe;
 #[cfg(test)]
 mod headless_tests;
 mod imgpipe;
+mod media_viewer;
 mod outline;
 mod present;
 mod quad;
@@ -394,6 +395,21 @@ mod font_reload_tests {
             .expect("end of font reload invalidation")
             .0;
         assert!(reload.contains("for label in &mut self.hint_texts"));
+    }
+
+    /// The media viewer keeps its lines shaped while their text is unchanged,
+    /// so a reload that keeps the text must reshape them in the new family.
+    #[test]
+    fn a_font_reload_reshapes_the_media_viewer() {
+        let production = production_source();
+        let reload = production
+            .split_once("if self.chrome_style_key != k {")
+            .expect("font reload invalidation")
+            .1
+            .split_once("// Ensure one text buffer per pane.")
+            .expect("end of font reload invalidation")
+            .0;
+        assert!(reload.contains("self.media_viewer_text.invalidate();"));
     }
 }
 
@@ -1096,6 +1112,8 @@ pub struct Overlay {
     pub completion: Option<CompletionOverlay>,
     /// Visual receipt for the focused pane's most recent image or video paste.
     pub media_paste_receipt: Option<MediaPasteReceiptOverlay>,
+    /// The shelf item the user opened, over its pane.
+    pub media_viewer: Option<MediaViewerOverlay>,
     /// `Some(typed)` while the SSH launcher is open.
     pub ssh_query: Option<String>,
     /// Keyboard help for the SSH input lane. Ranked hosts are projected through
@@ -1231,6 +1249,10 @@ pub struct SettingsRow {
 
 /// Pixel rectangle `(x, y, w, h)`.
 pub type Rect4 = (f32, f32, f32, f32);
+
+pub use media_viewer::{
+    MediaCanvas, MediaViewerGeometry, MediaViewerHit, MediaViewerOverlay, media_viewer_geometry,
+};
 
 /// Visible candidate rows in one completion card.
 const MAX_COMPLETION_ROWS: usize = 10;
@@ -2904,6 +2926,10 @@ pub struct Renderer {
     card_cursor_quad_range: Option<std::ops::Range<u32>>,
     card_decoration: QuadPipeline,
     card_posters: Option<imgpipe::ImagePipeline>,
+    /// The open media viewer's image, charged to the preview account like
+    /// card posters; made on first use.
+    media_viewer_img: Option<imgpipe::ImagePipeline>,
+    media_viewer_text: media_viewer::ViewerText,
     card_image_shared: imgpipe::ImageShared,
     card_frames: Vec<inline_cards::CardFrame>,
     card_scene: card_scene::CardScene,
@@ -5259,6 +5285,7 @@ impl Renderer {
             Shaping::Advanced,
             None,
         );
+        let media_viewer_text = media_viewer::ViewerText::new(&mut font_system, metrics);
         let mut ime_buffer = TextBuffer::new(&mut font_system, metrics);
         ime_buffer.set_wrap(Wrap::None);
 
@@ -5422,6 +5449,8 @@ impl Renderer {
             card_cursor_quad_range: None,
             card_decoration,
             card_posters: None,
+            media_viewer_img: None,
+            media_viewer_text,
             card_image_shared: shared.images,
             card_frames: Vec::new(),
             card_scene: card_scene::CardScene::default(),
@@ -6090,6 +6119,7 @@ impl Renderer {
                 self.completion_count_text.clear();
                 self.media_receipt_title_text.clear();
                 self.media_receipt_detail_text.clear();
+                self.media_viewer_text.invalidate();
                 self.search_buffer_text.clear();
                 self.search_segment_texts.iter_mut().for_each(String::clear);
             }
@@ -6249,6 +6279,7 @@ impl Renderer {
         let mut over: Vec<QuadInstance> = Vec::with_capacity(panes.len() * 4 + 8);
         let mut img_items: Vec<imgpipe::ImageItem> = Vec::with_capacity(16);
         let mut media_receipt_items: Vec<imgpipe::ImageItem> = Vec::with_capacity(1);
+        let mut media_viewer_items: Vec<imgpipe::ImageItem> = Vec::with_capacity(1);
         // The wallpaper is always one retained item in its own back-most pass;
         // tile mode repeats UVs in the sampler instead of rebuilding a quad per
         // tile on every frame.
@@ -8260,6 +8291,22 @@ impl Renderer {
             self.media_receipt_detail_text.clear();
         }
 
+        if let Some(viewer) = &overlay.media_viewer
+            && let Some(geometry) = media_viewer_geometry(
+                viewer,
+                (cw, ch),
+                (self.overlay_text_cell_width(), self.metrics.line_height),
+            )
+        {
+            self.media_viewer_text.shape(
+                &mut self.font_system,
+                metrics,
+                &family,
+                viewer,
+                &geometry,
+            );
+        }
+
         // Quick-select hint label glyphs (one buffer per label).
         if !overlay.hint_labels.is_empty() {
             while self.hint_buffers.len() < overlay.hint_labels.len() {
@@ -8528,6 +8575,80 @@ impl Renderer {
                 default_color: gc(palette.label),
                 custom_glyphs: &[],
             });
+        }
+        if let Some(viewer) = &overlay.media_viewer
+            && let Some(geometry) = media_viewer_geometry(
+                viewer,
+                (cw, ch),
+                (self.overlay_text_cell_width(), self.metrics.line_height),
+            )
+        {
+            let palette = completion_palette(theme, self.ui_accent(cfg, theme));
+            let (x, y, width, height) = geometry.rect;
+            for (offset, alpha) in [(1.0_f32, 0.28_f32), (2.0, 0.16), (3.0, 0.08)] {
+                menu_q.push(rect(
+                    x + offset,
+                    y + offset,
+                    width,
+                    height,
+                    Rgb::new(0, 0, 0),
+                    alpha,
+                ));
+            }
+            // Opaque: the terminal beneath must not show through the viewer.
+            menu_q.push(rect(x, y, width, height, palette.panel_bg, 1.0));
+            menu_q.push(rect(x, y, width, 1.0, palette.border, 1.0));
+            menu_q.push(rect(x, y + height - 1.0, width, 1.0, palette.border, 1.0));
+            menu_q.push(rect(x, y, 1.0, height, palette.border, 1.0));
+            menu_q.push(rect(x + width - 1.0, y, 1.0, height, palette.border, 1.0));
+            for button in [geometry.previous, geometry.next, Some(geometry.close)]
+                .into_iter()
+                .flatten()
+            {
+                menu_q.push(rect(
+                    button.0,
+                    button.1,
+                    button.2,
+                    button.3,
+                    palette.divider,
+                    1.0,
+                ));
+            }
+            if let (Some(image_rect), Some(image)) = (geometry.image, viewer.image.as_ref()) {
+                let (ix, iy, iw, ih) = image_rect;
+                match viewer.canvas {
+                    MediaCanvas::Theme => {
+                        menu_q.push(rect(ix, iy, iw, ih, theme.background, 1.0));
+                    }
+                    MediaCanvas::White => {
+                        menu_q.push(rect(ix, iy, iw, ih, Rgb::new(255, 255, 255), 1.0));
+                    }
+                    MediaCanvas::Checker => {
+                        menu_q.push(rect(ix, iy, iw, ih, Rgb::new(0xee, 0xee, 0xee), 1.0));
+                        let square = (8.0 * self.scale).round().max(4.0);
+                        for (sx, sy, sw, sh) in media_viewer::checker_squares(image_rect, square) {
+                            menu_q.push(rect(sx, sy, sw, sh, Rgb::new(0xcc, 0xcc, 0xcc), 1.0));
+                        }
+                    }
+                }
+                media_viewer_items.push(imgpipe::ImageItem::placement(
+                    [ix, iy, iw, ih],
+                    image.clone(),
+                    None,
+                    None,
+                    [x, y, width, height],
+                ));
+            }
+            menu_areas.extend(self.media_viewer_text.areas(
+                &geometry,
+                (
+                    gc(palette.label),
+                    gc(palette.description),
+                    gc(palette.emphasis),
+                ),
+                self.overlay_text_cell_width(),
+                self.metrics.line_height,
+            ));
         }
         if let Some(completion) = &overlay.completion
             && let Some(geometry) = completion_panel_geometry(completion, (cw, ch))
@@ -9314,6 +9435,9 @@ impl Renderer {
             .hash(&mut h);
             self.media_receipt_title_text.hash(&mut h);
             self.media_receipt_detail_text.hash(&mut h);
+            // Retained like the receipt's: a buffer keeps its address when
+            // the viewer moves to another item, so hash what it shows.
+            self.media_viewer_text.shaped().hash(&mut h);
             context_menu_text_damage_key(
                 overlay.context_menu.as_ref(),
                 theme.foreground,
@@ -9563,6 +9687,18 @@ impl Renderer {
         self.imgs.prepare_frame(&self.gpu.device, &img_items);
         self.media_receipt_img
             .prepare_frame(&self.gpu.device, &media_receipt_items);
+        if self.media_viewer_img.is_none() && !media_viewer_items.is_empty() {
+            // Preview pressure cannot prevent a frame: without room the viewer
+            // paints its frame and text, and tries again next frame.
+            self.media_viewer_img = self.card_image_shared.layer_with_instance_limit(
+                &self.gpu.device,
+                kettle_core::GraphicsBudget::previews(),
+                1,
+            );
+        }
+        if let Some(viewer) = &mut self.media_viewer_img {
+            viewer.prepare_frame(&self.gpu.device, &media_viewer_items);
+        }
         let wallpaper_upload_complete = self.bg_imgs.upload_retained(
             &self.gpu.device,
             &self.gpu.queue,
@@ -9591,6 +9727,14 @@ impl Renderer {
             [sw, sh],
             &media_receipt_items,
         );
+        if let Some(viewer) = &mut self.media_viewer_img {
+            viewer.upload(
+                &self.gpu.device,
+                &self.gpu.queue,
+                [sw, sh],
+                &media_viewer_items,
+            );
+        }
         self.overlay_quads
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &over);
         self.menu_quads
@@ -9851,6 +9995,10 @@ impl Renderer {
                 .map(imgpipe::ImagePipeline::upload_counts)
                 .unwrap_or_default(),
             self.media_receipt_img.upload_counts(),
+            self.media_viewer_img
+                .as_ref()
+                .map(imgpipe::ImagePipeline::upload_counts)
+                .unwrap_or_default(),
             self.bg_imgs.upload_counts(),
             self.starfield.upload_counts(),
         ]
@@ -10030,6 +10178,9 @@ impl Renderer {
         // and the context-menu labels both remain readable above images.
         self.menu_quads.draw(&mut pass);
         self.media_receipt_img.draw(&mut pass);
+        if let Some(viewer) = &self.media_viewer_img {
+            viewer.draw(&mut pass);
+        }
         self.menu_text_renderer
             .render(&self.atlas, &self.viewport, &mut pass)?;
         Ok(())
@@ -21682,6 +21833,10 @@ mod completion_panel_tests {
             .expect("retained chrome hash body");
         assert!(hash.contains("self.media_receipt_title_text.hash(&mut h);"));
         assert!(hash.contains("self.media_receipt_detail_text.hash(&mut h);"));
+        assert!(
+            hash.contains("self.media_viewer_text.shaped().hash(&mut h);"),
+            "browsing the media viewer changes its text without moving its buffers"
+        );
     }
 
     #[test]

@@ -55,6 +55,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   place is labeled unverified with the program the system names for it.
   Each pane keeps its last eight items; `list_panes` reports them. A push
   never opens anything on screen.
+- The media shelf viewer: `open_media_shelf` (palette: "Open media shelf")
+  shows the focused pane's shelf over the pane, newest first, with each
+  item's title, kind, size and sender; `←`/`→` browse and Esc closes, and so
+  does the shortcut that opened it. A screen reader hears each item's place
+  on the shelf. A pane titlebar marks unopened items as `▣N`, and the window
+  title counts them.
 - The media worker can classify a file by its content, raster or SVG,
   whatever it is called, and says what it rendered. Kettle and its worker now
   speak media protocol 2; a worker from an older build is refused until
@@ -201,6 +207,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   mouse-tracking program as the physical Back and Forward buttons do. It used
   to send xterm's button numbers 8 and 9 as report codes, which read as a
   left or middle press with Meta held.
+
+- A mouse Back or Forward release reaches a mouse-tracking program only after
+  a press it received. A press that dismissed a context menu or that a dialog
+  took used to leave the program a release with no press, and one it received
+  lost its release when a dialog opened while the button was held.
 
 - `kettle ctl`, `kettle mcp` and other control clients keep finding running
   servers after many Kettle sessions. Each exit used to leave its control

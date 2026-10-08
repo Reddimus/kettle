@@ -12,6 +12,18 @@
 inline_card_pending = "draft"
 inline_card_unavailable = "draft"
 media_shelf_untitled = "draft"
+palette_open_media_shelf = "draft"
+media_viewer_kind_image = "draft"
+media_viewer_kind_svg = "draft"
+media_viewer_kind_media = "draft"
+media_viewer_from_pane = "draft"
+media_viewer_unverified = "draft"
+media_viewer_unknown_program = "draft"
+media_viewer_hint = "draft"
+media_viewer_hint_single = "draft"
+media_viewer_released = "draft"
+media_viewer_a11y = "draft"
+window_title_new_media = "draft"
 a11y_pane = "draft"
 a11y_window = "draft"
 about_copy_version = "draft"
@@ -483,6 +495,7 @@ keys = [
     "confirm_paste",
     "confirm_rebind",
     "hint_a11y_list",
+    "media_viewer_a11y",
     "menu_a11y_terminal",
     "picker_a11y_layouts",
     "picker_a11y_palette",

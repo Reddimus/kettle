@@ -57,6 +57,8 @@ pub(crate) struct ShelfItem {
     pub pixels: ItemPixels,
     /// When the user last looked at it, on the process-wide view clock.
     viewed: u64,
+    /// Whether the user has looked at it since it arrived or was replaced.
+    seen: bool,
 }
 
 impl ShelfItem {
@@ -80,6 +82,7 @@ impl ShelfItem {
             warnings,
             pixels: ItemPixels::Ready(pixels),
             viewed: 0,
+            seen: false,
         }
     }
 
@@ -130,7 +133,7 @@ impl Shelf {
     }
 
     /// Put `item` on the shelf. `visible` is the item on screen, which a
-    /// full shelf never drops.
+    /// full shelf never drops and whose replacement is already seen.
     pub(crate) fn publish(&mut self, mut item: ShelfItem, visible: Option<u64>) -> Published {
         item.viewed = tick();
         if let Some(key) = item.key.as_deref()
@@ -141,6 +144,9 @@ impl Shelf {
         {
             item.id = slot.id;
             item.generation = slot.generation + 1;
+            // A replacement lands in front of the user when its item is the
+            // one on screen.
+            item.seen = visible == Some(slot.id);
             *slot = item;
             return Published {
                 id: slot.id,
@@ -165,11 +171,16 @@ impl Shelf {
     }
 
     /// Note that the user looked at `id`.
-    #[cfg(test)]
     pub(crate) fn viewed(&mut self, id: u64) {
         if let Some(item) = self.items.iter_mut().find(|item| item.id == id) {
             item.viewed = tick();
+            item.seen = true;
         }
+    }
+
+    /// Items the user has not looked at since they arrived or changed.
+    pub(crate) fn unseen(&self) -> usize {
+        self.items.iter().filter(|item| !item.seen).count()
     }
 
     /// The least recently viewed item still holding pixels and not on
@@ -279,6 +290,32 @@ mod tests {
         assert_eq!(shelf.len(), MAX_SHELF_ITEMS);
         assert!(shelf.get(1).is_some() && shelf.get(2).is_some() && shelf.get(3).is_none());
         assert_eq!(shelf.items()[0].id, 100);
+    }
+
+    #[test]
+    fn items_are_unseen_until_viewed_and_again_when_replaced() {
+        let mut shelf = Shelf::default();
+        shelf.publish(item(1, Some("plot")), None);
+        shelf.publish(item(2, None), None);
+        assert_eq!(shelf.unseen(), 2);
+        shelf.viewed(1);
+        assert_eq!(shelf.unseen(), 1);
+        shelf.publish(item(3, Some("plot")), None);
+        assert_eq!(shelf.unseen(), 2, "a replaced item is new again");
+    }
+
+    #[test]
+    fn replacing_the_item_on_screen_leaves_it_seen() {
+        let mut shelf = Shelf::default();
+        shelf.publish(item(1, Some("plot")), None);
+        shelf.publish(item(2, Some("log")), None);
+        shelf.viewed(1);
+        shelf.viewed(2);
+        shelf.publish(item(3, Some("plot")), Some(1));
+        assert!(shelf.get(1).is_some_and(|item| item.seen));
+        assert_eq!(shelf.unseen(), 0, "the user is looking at the replacement");
+        shelf.publish(item(4, Some("log")), Some(1));
+        assert_eq!(shelf.unseen(), 1, "a replacement off screen is new");
     }
 
     #[test]

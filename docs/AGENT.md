@@ -347,7 +347,13 @@ shelf drops the item least recently viewed, never the one on screen. Pixels
 are charged to one process-wide preview account (128 MiB), apart from
 terminal images; when a new item does not fit, the pixels of the least
 recently viewed item not on screen go, and its details stay. A push never
-opens anything on screen. `list_panes` reports each pane's shelf as
+opens anything on screen: a pane titlebar marks unopened items as `▣N`, and
+the window title starts with `[new media: N]` while the focused pane has
+some. The user opens them with `open_media_shelf` (the palette's "Open media
+shelf"): a viewer over the pane shows one item fitted, never enlarged past
+its pixels, on white for SVG and a checkerboard for raster, with its title,
+kind, size and sender, and `‹ › ×` to browse and close. Only the user opens
+it, and `kettle ctl send_keys` still writes to the pane's terminal beneath. `list_panes` reports each pane's shelf as
 `media_shelf`: item, generation, title, kind, size, warnings, `verified`, the
 `sender` of an unverified item and whether its pixels are `held` or
 `released`.
