@@ -55,6 +55,7 @@ recognition, image exclusion and both live renderer modes:
 cargo test --locked -p kettle-vt --lib inline_marker
 cargo test --locked -p kettle-vt --lib placeholder
 cargo test --locked -p kettle-core --lib inline_text
+cargo test --locked -p kettle-core --lib term::conformance::inline_card
 cargo test --locked -p kettle-render --lib inline_cards
 cargo test --locked -p kettle-render --lib card_context
 cargo test --locked -p kettle-render --lib card_scene

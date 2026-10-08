@@ -124,6 +124,34 @@ pub(crate) fn cursor_pixels(frame: &image::RgbaImage, cfg: &Config, snap: &PaneS
         .count()
 }
 
+/// Distinct colours inside `rect` (x, y, width, height in frame pixels). A
+/// painted label or glyph adds edge colours to its uniform background.
+pub(crate) fn distinct_colors(frame: &image::RgbaImage, rect: [f32; 4]) -> usize {
+    let x0 = rect[0].max(0.0) as u32;
+    let y0 = rect[1].max(0.0) as u32;
+    let x1 = ((rect[0] + rect[2]).max(0.0) as u32).min(frame.width());
+    let y1 = ((rect[1] + rect[3]).max(0.0) as u32).min(frame.height());
+    let mut colors = std::collections::HashSet::new();
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let p = frame.get_pixel(x, y);
+            colors.insert((p[0], p[1], p[2]));
+        }
+    }
+    colors.len()
+}
+
+/// The rects of this frame's card labels of `kind`.
+fn label_rects(renderer: &Renderer, kind: crate::card_scene::CardLabelKind) -> Vec<[f32; 4]> {
+    renderer
+        .card_scene
+        .labels
+        .iter()
+        .filter(|label| label.kind == kind)
+        .map(|label| label.rect)
+        .collect()
+}
+
 /// A headless renderer and its config, or `None` on a host with no GPU.
 pub(crate) fn renderer(width: u32, height: u32) -> Option<(Renderer, Config)> {
     let cfg = gpu_test_config();
@@ -1458,6 +1486,15 @@ fn registered_poster_overwrite_removes_tiles_and_badges_in_the_same_frame() {
         ];
         let before = first.get_pixel(center[0] as u32, center[1] as u32);
         assert_eq!(&before.0[0..3], &[250, 20, 60]);
+        let badges = [
+            label_rects(&renderer, crate::card_scene::CardLabelKind::Brand),
+            label_rects(&renderer, crate::card_scene::CardLabelKind::Claude),
+        ]
+        .concat();
+        assert_eq!(badges.len(), 2);
+        for rect in &badges {
+            assert!(distinct_colors(&first, *rect) > 1, "badge text is painted");
+        }
         snap.cells
             .iter_mut()
             .find(|cell| (cell.line, cell.col) == (2, 8))
@@ -1472,6 +1509,13 @@ fn registered_poster_overwrite_removes_tiles_and_badges_in_the_same_frame() {
             &[250, 20, 60]
         );
         assert_eq!(renderer.pending_cursor_glyph.as_ref().unwrap().ch, 'X');
+        for rect in &badges {
+            assert_eq!(
+                distinct_colors(&after, *rect),
+                1,
+                "no badge text survives the overwrite"
+            );
+        }
         eprintln!("INLINE_CARD_GPU_ACCEPTANCE: registered overwrite {mode:?}");
     }
 }
@@ -1522,12 +1566,11 @@ fn refused_card_poster_upload_paints_status_and_recovers_on_the_next_frame() {
                 .is_none_or(|posters| posters.drawn_item_indices().next().is_none())
         );
         assert_eq!(renderer.card_scene.labels.len(), 3);
+        let status = label_rects(&renderer, crate::card_scene::CardLabelKind::Unavailable);
+        assert_eq!(status.len(), 1);
         assert!(
-            renderer
-                .card_scene
-                .labels
-                .iter()
-                .any(|label| label.kind == crate::card_scene::CardLabelKind::Unavailable)
+            distinct_colors(&unavailable, status[0]) > 1,
+            "the Unavailable status text is painted"
         );
         drop(exhausted);
         let mut view = pane(&snap, 1200, 400);
@@ -1719,11 +1762,17 @@ fn exhausted_preview_account_keeps_new_terminal_windows_and_recovers_cards() {
             &[pane(&snap, 1200, 400)],
             &focused(false),
         );
-        let bg = cfg.theme.background;
+        // The first text row, inside the padding, so the focused pane's
+        // border cannot satisfy it.
+        let text_row = [
+            cfg.padding_x,
+            cfg.padding_y,
+            29.0 * renderer.cell_w,
+            renderer.cell_h,
+        ];
         assert!(
-            plain
-                .pixels()
-                .any(|pixel| pixel.0[0..3] != [bg.r, bg.g, bg.b])
+            distinct_colors(&plain, text_row) > 1,
+            "terminal text is painted"
         );
         let (mut cards, snap, nonce) = crate::inline_cards::tests::fixture();
         cards.set_poster(
@@ -1738,12 +1787,11 @@ fn exhausted_preview_account_keeps_new_terminal_windows_and_recovers_cards() {
         let mut view = pane(&snap, 1200, 400);
         view.inline_cards = Some(&cards);
         let unavailable = capture(&mut renderer, &cfg, &[view], &focused(false));
+        let status = label_rects(&renderer, crate::card_scene::CardLabelKind::Unavailable);
+        assert_eq!(status.len(), 1);
         assert!(
-            renderer
-                .card_scene
-                .labels
-                .iter()
-                .any(|label| label.kind == crate::card_scene::CardLabelKind::Unavailable)
+            distinct_colors(&unavailable, status[0]) > 1,
+            "the Unavailable status text is painted"
         );
         drop(exhausted);
         let mut view = pane(&snap, 1200, 400);
