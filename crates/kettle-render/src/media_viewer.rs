@@ -30,8 +30,10 @@ pub struct MediaViewerOverlay {
     pub pane_rect: Rect4,
     /// Display-ready (sanitized, bounded) title.
     pub title: String,
-    /// The kind, size and sender, in the UI language.
+    /// The kind and size, in the UI language.
     pub detail: String,
+    /// Who sent it, on a line of its own.
+    pub sender: MediaViewerSender,
     /// How to leave and browse, in the UI language.
     pub hint: String,
     /// The item's place on its shelf, 1-based, and the shelf's length.
@@ -41,6 +43,80 @@ pub struct MediaViewerOverlay {
     /// Shown in the image's place when there are no pixels.
     pub status: String,
     pub canvas: MediaCanvas,
+}
+
+/// Who sent an item, in the UI language, with where the sending program's
+/// path and its signer sit in that line: the path is what gets shortened, and
+/// the signer is kept whole.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MediaViewerSender {
+    pub text: String,
+    /// The byte range of the program's path in `text`, when it names one.
+    pub program: Option<std::ops::Range<usize>>,
+    /// The byte range of who signed the program, when it names them.
+    pub signer: Option<std::ops::Range<usize>>,
+}
+
+impl MediaViewerSender {
+    /// The line fitted to `columns`. A path that does not fit is shortened
+    /// from its middle, keeping its last segment; when even that leaves the
+    /// line too long, the text around the signer is shortened instead, so who
+    /// signed the program stays readable whenever it fits at all.
+    pub fn fitted(&self, columns: usize) -> String {
+        use crate::{display_width, middle_ellipsis};
+        let text = self.text.as_str();
+        if display_width(text) <= columns {
+            return text.to_owned();
+        }
+        let valid = |range: &Option<std::ops::Range<usize>>| {
+            range
+                .clone()
+                .filter(|range| text.get(range.clone()).is_some())
+        };
+        let mut signer = valid(&self.signer);
+        // A path that overlaps the signer is not shortened apart from it: the
+        // signer is what must stay readable.
+        let program = valid(&self.program).filter(|program| {
+            signer
+                .as_ref()
+                .is_none_or(|signer| signer.end <= program.start || program.end <= signer.start)
+        });
+        let mut line = text.to_owned();
+        if let Some(program) = program {
+            let path = &text[program.clone()];
+            let rest = display_width(text) - display_width(path);
+            let shortened = middle_ellipsis(path, columns.saturating_sub(rest).max(1));
+            line.replace_range(program.clone(), &shortened);
+            if display_width(&line) <= columns {
+                return line;
+            }
+            // A signer after the path starts where the shortened path ends
+            // plus whatever lay between them.
+            signer = signer.map(|signer| {
+                if program.end <= signer.start {
+                    let start = program.start + shortened.len() + (signer.start - program.end);
+                    start..start + signer.len()
+                } else {
+                    signer
+                }
+            });
+        }
+        // A range that no longer lands on the shortened line, as one that
+        // overlapped the path may not, keeps nothing apart.
+        if let Some(signer) = signer.filter(|signer| line.get(signer.clone()).is_some()) {
+            let kept = &line[signer.clone()];
+            let width = display_width(kept);
+            if width <= columns {
+                let (before, after) = (&line[..signer.start], &line[signer.end..]);
+                let room = columns - width;
+                let after_room = display_width(after).min(room / 2);
+                let before = middle_ellipsis(before, room - after_room);
+                let after = middle_ellipsis(after, after_room);
+                return format!("{before}{kept}{after}");
+            }
+        }
+        middle_ellipsis(&line, columns)
+    }
 }
 
 /// Exact paint and input geometry of the viewer.
@@ -53,6 +129,7 @@ pub struct MediaViewerGeometry {
     pub next: Option<Rect4>,
     pub close: Rect4,
     pub detail: Rect4,
+    pub sender: Rect4,
     pub hint: Rect4,
     /// Where the image area is: the fitted image, or the whole area when
     /// there is no image.
@@ -115,7 +192,7 @@ pub fn media_viewer_geometry(
     let (px, py, pw, ph) = viewer.pane_rect;
     let inset = cw.max(6.0).round();
     let rect = (px + inset, py + inset, pw - 2.0 * inset, ph - 2.0 * inset);
-    if rect.2 < 24.0 * tw || rect.3 < 6.0 * lh {
+    if rect.2 < 24.0 * tw || rect.3 < 7.0 * lh {
         return None;
     }
     let pad = (tw * 0.75).round().max(4.0);
@@ -135,8 +212,9 @@ pub fn media_viewer_geometry(
     let counter = (counter_right - counter_width, header_y, counter_width, lh);
     let title = (left, header_y, (counter.0 - pad - left).max(0.0), lh);
     let detail = (left, header_y + lh, right - left, lh);
+    let sender = (left, detail.1 + lh, right - left, lh);
     let hint = (left, rect.1 + rect.3 - pad - lh, right - left, lh);
-    let area_top = detail.1 + lh + pad;
+    let area_top = sender.1 + lh + pad;
     let area_bottom = hint.1 - pad;
     let image_area = (
         left,
@@ -194,24 +272,26 @@ pub fn media_viewer_geometry(
         next,
         close,
         detail,
+        sender,
         hint,
         image_area,
         image,
     })
 }
 
-/// The viewer's text, shaped once per change: its five lines and the three
+/// The viewer's text, shaped once per change: its six lines and the three
 /// control glyphs.
 pub(crate) struct ViewerText {
     title: TextBuffer,
     detail: TextBuffer,
+    sender: TextBuffer,
     counter: TextBuffer,
     hint: TextBuffer,
     status: TextBuffer,
     controls: [TextBuffer; 3],
     /// What each line buffer was last shaped with; `None` until it is, or
     /// once a font change means it must be again.
-    shaped: [Option<String>; 5],
+    shaped: [Option<String>; 6],
 }
 
 impl ViewerText {
@@ -234,6 +314,7 @@ impl ViewerText {
         Self {
             title: line(font_system),
             detail: line(font_system),
+            sender: line(font_system),
             counter: line(font_system),
             hint: line(font_system),
             status: line(font_system),
@@ -248,7 +329,7 @@ impl ViewerText {
 
     /// What each line was last shaped with, for the renderer's text damage
     /// key: buffers keep their addresses when the viewer changes item.
-    pub(crate) fn shaped(&self) -> &[Option<String>; 5] {
+    pub(crate) fn shaped(&self) -> &[Option<String>; 6] {
         &self.shaped
     }
 
@@ -258,7 +339,8 @@ impl ViewerText {
         self.shaped = Default::default();
     }
 
-    /// Shape what `viewer` shows into its rectangles.
+    /// Shape what `viewer` shows into its rectangles; `glyph_width` is the
+    /// overlay text's column width, which fits the sender line.
     pub(crate) fn shape(
         &mut self,
         font_system: &mut FontSystem,
@@ -266,6 +348,7 @@ impl ViewerText {
         family: &str,
         viewer: &MediaViewerOverlay,
         geometry: &MediaViewerGeometry,
+        glyph_width: f32,
     ) {
         let counter = media_viewer_counter(viewer.position);
         let status = if viewer.image.is_some() {
@@ -273,12 +356,15 @@ impl ViewerText {
         } else {
             viewer.status.as_str()
         };
-        let lines: [(&mut TextBuffer, &str, Rect4, bool); 5] = [
+        let columns = (geometry.sender.2 / glyph_width.max(1.0)).floor() as usize;
+        let sender = viewer.sender.fitted(columns);
+        let lines: [(&mut TextBuffer, &str, Rect4, bool); 6] = [
             (&mut self.title, &viewer.title, geometry.title, true),
             (&mut self.detail, &viewer.detail, geometry.detail, false),
             (&mut self.counter, &counter, geometry.counter, false),
             (&mut self.hint, &viewer.hint, geometry.hint, false),
             (&mut self.status, status, geometry.image_area, false),
+            (&mut self.sender, &sender, geometry.sender, false),
         ];
         for ((buffer, text, rect, bold), shaped) in lines.into_iter().zip(&mut self.shaped) {
             buffer.set_metrics(metrics);
@@ -323,6 +409,7 @@ impl ViewerText {
         let mut areas = vec![
             area(&self.title, geometry.title, label),
             area(&self.detail, geometry.detail, description),
+            area(&self.sender, geometry.sender, description),
             area(&self.counter, geometry.counter, description),
             area(&self.hint, geometry.hint, description),
         ];
@@ -391,6 +478,11 @@ mod tests {
             pane_rect: (0.0, 0.0, 800.0, 600.0),
             title: "Plot".into(),
             detail: "Raster 640×480".into(),
+            sender: MediaViewerSender {
+                text: "from this pane".into(),
+                program: None,
+                signer: None,
+            },
             hint: "Esc closes".into(),
             position,
             image: image.map(|(w, h)| {
@@ -416,7 +508,78 @@ mod tests {
             assert_eq!(row.1, geometry.title.1);
         }
         assert!(geometry.detail.1 > geometry.title.1);
+        assert!(geometry.sender.1 > geometry.detail.1);
+        assert!(geometry.image_area.1 > geometry.sender.1 + geometry.sender.3 - 1.0);
         assert!(geometry.hint.1 > geometry.image_area.1 + geometry.image_area.3);
+    }
+
+    #[test]
+    fn a_long_sender_line_shortens_the_path_and_keeps_the_signer() {
+        let path = "/Users/someone/.local/share/claude/versions/2.1.289";
+        let signer = "Anthropic PBC (Q6L2SF6YDW)";
+        let text = format!("Unverified sender: {path} (pid 56662), signed by {signer}");
+        let at = |part: &str| {
+            let start = text.find(part).unwrap();
+            Some(start..start + part.len())
+        };
+        let sender = MediaViewerSender {
+            program: at(path),
+            signer: at(signer),
+            text: text.clone(),
+        };
+        assert_eq!(sender.fitted(200), text, "a line that fits is whole");
+        let fitted = sender.fitted(85);
+        assert!(crate::display_width(&fitted) <= 85, "{fitted}");
+        assert!(fitted.starts_with("Unverified sender: /"), "{fitted}");
+        assert!(
+            fitted.ends_with("…/2.1.289 (pid 56662), signed by Anthropic PBC (Q6L2SF6YDW)"),
+            "{fitted}"
+        );
+        // Too narrow even for the path's last segment: the signer stays whole.
+        for columns in [30, 40, 50] {
+            let narrow = sender.fitted(columns);
+            assert!(crate::display_width(&narrow) <= columns, "{narrow}");
+            assert!(narrow.contains(signer), "{columns}: {narrow}");
+        }
+        // Narrower than the signer itself: the line still fits.
+        assert!(crate::display_width(&sender.fitted(12)) <= 12);
+        // A path shorter than the ellipsis, a signer exactly the width left,
+        // and ranges that overlap: each fits, keeps what it can, and never
+        // panics.
+        let short = "Unverified sender: /a (pid 7), signed by Apple";
+        let short_sender = MediaViewerSender {
+            program: Some(19..21),
+            signer: Some(short.len() - 5..short.len()),
+            text: short.into(),
+        };
+        for columns in [5, 20, 40, 45] {
+            let fitted = short_sender.fitted(columns);
+            assert!(crate::display_width(&fitted) <= columns, "{fitted}");
+            assert!(fitted.contains("Apple"), "{columns}: {fitted}");
+        }
+        let overlapping = MediaViewerSender {
+            text: "abcdef XYZ".into(),
+            program: Some(0..6),
+            signer: Some(0..10),
+        };
+        assert!(crate::display_width(&overlapping.fitted(4)) <= 4);
+        let inside = MediaViewerSender {
+            text: "abcdef XYZ".into(),
+            program: Some(0..6),
+            signer: Some(1..4),
+        };
+        assert_eq!(
+            inside.fitted(3),
+            "bcd",
+            "a signer inside the path still fits"
+        );
+        // A line without a path shortens as a whole.
+        let plain = MediaViewerSender {
+            text: "x".repeat(50),
+            program: None,
+            signer: None,
+        };
+        assert_eq!(crate::display_width(&plain.fitted(10)), 10);
     }
 
     #[test]
@@ -524,8 +687,15 @@ mod tests {
         let mut text = ViewerText::new(&mut font_system, metrics);
         let viewer = viewer((1, 2), Some((64, 48)));
         let geometry = media_viewer_geometry(&viewer, CELL, CELL).unwrap();
-        text.shape(&mut font_system, metrics, "Menlo", &viewer, &geometry);
-        text.shape(&mut font_system, metrics, "Courier", &viewer, &geometry);
+        text.shape(&mut font_system, metrics, "Menlo", &viewer, &geometry, 8.0);
+        text.shape(
+            &mut font_system,
+            metrics,
+            "Courier",
+            &viewer,
+            &geometry,
+            8.0,
+        );
         fn family(text: &ViewerText) -> Family<'_> {
             text.title.lines[0].attrs_list().defaults().family
         }
@@ -536,7 +706,14 @@ mod tests {
         );
         text.invalidate();
         assert!(text.shaped().iter().all(Option::is_none));
-        text.shape(&mut font_system, metrics, "Courier", &viewer, &geometry);
+        text.shape(
+            &mut font_system,
+            metrics,
+            "Courier",
+            &viewer,
+            &geometry,
+            8.0,
+        );
         assert_eq!(family(&text), Family::Name("Courier"));
     }
 

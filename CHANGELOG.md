@@ -52,7 +52,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   image or SVG to the media shelf of the pane they run in, in the Kettle they
   run inside. They need only Agent previews, never full control. Media lands
   in the caller's own pane by its process ancestry; a sender Kettle cannot
-  place is labeled unverified with the program the system names for it.
+  place is labeled unverified with the program the system names for it (for
+  `kettle show` and `kettle mcp`, the program that ran them) and, on macOS,
+  who signed that program's code once macOS validates it.
   Each pane keeps its last eight items; `list_panes` reports them. A push
   never opens anything on screen.
 - `kettle mcp --display` offers agents one tool, `kettle_show`, which sends

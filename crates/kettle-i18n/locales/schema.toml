@@ -1426,11 +1426,15 @@ context = "crates/kettle-ui/src/app.rs media_viewer_projection: kind of an SVG i
 context = "crates/kettle-ui/src/app.rs media_viewer_projection: kind of any other media item in the media viewer's detail line."
 
 [messages.media_viewer_from_pane]
-context = "crates/kettle-ui/src/app.rs media_viewer_projection: sender part of the media viewer's detail line (kind · size · sender) when Kettle verified the item came from a program running in this pane. Lowercase; it follows a separator."
+context = "crates/kettle-ui/src/app.rs media_viewer_projection: the media viewer's sender line, under the kind and size, when Kettle verified the item came from a program running in this pane. It starts its own line."
 
 [messages.media_viewer_unverified]
-context = "crates/kettle-ui/src/app.rs media_viewer_projection: sender part of the detail line when Kettle could not verify the sender is in this pane. program is the executable path the system reports; pid is its process id. Lowercase; it follows a separator."
+context = "crates/kettle-ui/src/app.rs media_viewer_projection: the media viewer's sender line when Kettle could not verify the sender is in this pane and macOS could not validate who signed it. program is the executable path the system reports, shortened from its middle when the line is too long; pid is its process id. It starts its own line."
 args = [{ name = "program", type = "str" }, { name = "pid", type = "u64" }]
+
+[messages.media_viewer_unverified_signed]
+context = "crates/kettle-ui/src/app.rs media_viewer_projection: the media viewer's sender line when Kettle could not verify the sender is in this pane but macOS validated who signed it. program is the executable path the system reports, shortened from its middle when the line is too long; pid is its process id; signer is the certificate's name, such as a company and its team id, or Apple. It starts its own line."
+args = [{ name = "program", type = "str" }, { name = "pid", type = "u64" }, { name = "signer", type = "str" }]
 
 [messages.media_viewer_unknown_program]
 context = "crates/kettle-ui/src/app.rs media_viewer_projection: stands in for program in media_viewer_unverified when the system did not report the sender's executable."

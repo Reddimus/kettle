@@ -1251,7 +1251,8 @@ pub struct SettingsRow {
 pub type Rect4 = (f32, f32, f32, f32);
 
 pub use media_viewer::{
-    MediaCanvas, MediaViewerGeometry, MediaViewerHit, MediaViewerOverlay, media_viewer_geometry,
+    MediaCanvas, MediaViewerGeometry, MediaViewerHit, MediaViewerOverlay, MediaViewerSender,
+    media_viewer_geometry,
 };
 
 /// Visible candidate rows in one completion card.
@@ -8298,12 +8299,14 @@ impl Renderer {
                 (self.overlay_text_cell_width(), self.metrics.line_height),
             )
         {
+            let glyph_width = self.overlay_text_cell_width();
             self.media_viewer_text.shape(
                 &mut self.font_system,
                 metrics,
                 &family,
                 viewer,
                 &geometry,
+                glyph_width,
             );
         }
 

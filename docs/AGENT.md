@@ -317,7 +317,12 @@ ancestor, in any window: that item is verified. Otherwise full control's
 `pane`, or the pane the caller's environment names when `KETTLE_PID` names
 this Kettle; those items are unverified, and the shelf names their sender by
 the executable and pid the kernel reports for it, never by anything the
-sender says. Nothing else routes: not the focused pane, and never another
+sender says. For `kettle show` and `kettle mcp`, which only carry another
+program's request, the sender named is the program that ran them. On macOS
+the shelf also names who signed that program's code, once macOS validates
+the running code as signed with a certificate Apple issued (`signed by
+Anthropic PBC (Q6L2SF6YDW)`, or `Apple` for its own); otherwise it says the
+signing identity is unavailable. Nothing else routes: not the focused pane, and never another
 Kettle. `kettle show` finds its Kettle the same strict way: the one it runs
 inside, else the one `KETTLE_PID` names (when that entry records its start
 time), and never the newest running one.
@@ -355,7 +360,8 @@ its pixels, on white for SVG and a checkerboard for raster, with its title,
 kind, size and sender, and `‹ › ×` to browse and close. Only the user opens
 it, and `kettle ctl send_keys` still writes to the pane's terminal beneath. `list_panes` reports each pane's shelf as
 `media_shelf`: item, generation, title, kind, size, warnings, `verified`, the
-`sender` of an unverified item and whether its pixels are `held` or
+`sender` of an unverified item (`executable`, `pid` and `signer`, null when
+unknown) and whether its pixels are `held` or
 `released`.
 
 ### Which pane is calling
@@ -967,7 +973,7 @@ This is also desktop-local because it opens real GUI terminal windows.
 - **Media lands only where its sender runs.** `show` routes by the caller's
   process ancestry, or for an unplaced caller by full control's pane or the
   caller's own environment, labeled unverified with the executable and pid
-  the kernel names. Never the focused pane, never another Kettle, and never
+  the kernel names and, on macOS, the signer it validates. Never the focused pane, never another Kettle, and never
   anything opened on screen by a push.
 - **Terminal-wide, not per-client.** Once enabled, every same-user client gets
   the selected mode across all windows in the process without an additional
