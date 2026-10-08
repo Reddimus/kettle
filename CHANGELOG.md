@@ -133,6 +133,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- On macOS, a window move reported while Kettle is handling a key or other
+  non-mouse event no longer aborts it. The caption-drag check read mouse-only
+  event fields, which AppKit refuses with an exception for those events.
+
 - Kitty transmission and placement commands return completion replies after
   actual image storage or placement admission, including synchronized output.
   Chunked replies retain the original ids and quiet settings. Missing images,
