@@ -597,6 +597,7 @@ pub(crate) enum PtyOutputClosePhase {
 }
 
 pub struct Pane {
+    pub inline_cards: kettle_render::InlineCards,
     pub term: Terminal,
     pub rx: Receiver<TermEvent>,
     pty_input: PtyInputQueue,
@@ -1872,6 +1873,7 @@ impl Mux {
         self.panes.insert(
             id,
             Pane {
+                inline_cards: kettle_render::InlineCards::default(),
                 term,
                 rx,
                 pty_input,

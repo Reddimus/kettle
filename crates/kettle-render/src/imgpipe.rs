@@ -1237,6 +1237,15 @@ impl ImagePipeline {
         complete
     }
 
+    /// Ordered original item slots whose instances have a drawable texture.
+    /// Card status uses actual upload admission, including buffer/texture limits.
+    pub(crate) fn drawn_item_indices(&self) -> impl Iterator<Item = usize> + '_ {
+        self.draws
+            .iter()
+            .flat_map(|(_, _, first, count)| *first..first.saturating_add(*count))
+            .map(|index| index as usize)
+    }
+
     /// Whether the last upload left anything to draw.
     pub(crate) fn has_draws(&self) -> bool {
         !self.draws.is_empty()

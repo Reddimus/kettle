@@ -35,6 +35,7 @@ pub mod completion;
 pub mod extract;
 pub mod graphics_limits;
 pub mod image;
+pub mod inline_marker;
 pub mod iterm;
 pub mod kitty;
 pub mod placeholder;

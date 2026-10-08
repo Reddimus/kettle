@@ -61,6 +61,14 @@ pub fn diacritic_value(c: char) -> Option<u16> {
     DIACRITICS.binary_search(&(c as u32)).ok().map(|i| i as u16)
 }
 
+/// Inverse of the shared Kitty table for encoders in this crate.
+pub(crate) fn diacritic(value: u16) -> Option<char> {
+    DIACRITICS
+        .get(usize::from(value))
+        .copied()
+        .and_then(char::from_u32)
+}
+
 /// Explicit diacritics on one placeholder cell, in spec order
 /// `[row, column, most-significant-id-byte]`. `None` = omitted (inherited).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]

@@ -32,6 +32,8 @@
 
 pub mod event;
 pub mod grid_text;
+mod inline_text;
+pub use inline_text::scrub_card_markers;
 pub mod hints;
 pub mod images;
 pub mod links;
@@ -77,6 +79,7 @@ pub use term::{
 // OSC 9;4 taskbar-progress state, surfaced by `Terminal::progress`
 // (re-exported so the UI can name it without depending on kettle-vt directly).
 pub use kettle_vt::Progress;
+pub use kettle_vt::inline_marker::{InlineMarker, InlineNonce};
 pub use kettle_vt::{
     CompletionCandidate, CompletionKind, CompletionList, CompletionUpdate, GraphicsBudget,
     GraphicsLimits, GraphicsReservation,

@@ -55,20 +55,17 @@ fn append_row(
         if is_spacer(cell.flags) {
             continue;
         }
-        let ch = cell.c;
+        let (ch, marks) =
+            crate::inline_text::text_parts(cell.c, cell.zerowidth().unwrap_or_default());
         for _ in 0..ch.len_utf8() {
             byte_from(c);
         }
         text.push(ch);
-        // Append this cell's combining marks, each mapped back to the base
-        // cell's column `c` so downstream offset→column translation is exact.
-        if let Some(marks) = cell.zerowidth() {
-            for &mark in marks {
-                for _ in 0..mark.len_utf8() {
-                    byte_from(c);
-                }
-                text.push(mark);
+        for &mark in marks {
+            for _ in 0..mark.len_utf8() {
+                byte_from(c);
             }
+            text.push(mark);
         }
     }
 }
@@ -144,16 +141,7 @@ pub fn logical_line_into(
 /// Combining marks are appended after each base char, identically to
 /// [`row_text_into`], so the scrape preserves accented / ZWJ graphemes.
 pub fn append_row_text(grid: &Grid<Cell>, line: i32, cols: usize, out: &mut String) {
-    for c in 0..cols {
-        let cell = &grid[Point::new(Line(line), Column(c))];
-        if is_spacer(cell.flags) {
-            continue;
-        }
-        out.push(cell.c);
-        if let Some(marks) = cell.zerowidth() {
-            out.extend(marks.iter().copied());
-        }
-    }
+    append_row(grid, line, cols, out, &mut |_| {});
 }
 
 #[cfg(test)]
@@ -281,5 +269,46 @@ mod tests {
         assert_eq!(text, "世\u{0301}");
         // '世' = 3 bytes @ col 0; U+0301 = 2 bytes also @ col 0; spacer skipped.
         assert_eq!(col_of_byte, vec![0, 0, 0, 0, 0]);
+    }
+    #[test]
+    fn long_card_cells_are_spaces_in_row_scrape_and_logical_text() {
+        let mut grid: Grid<Cell> = Grid::new(1, 3, 0);
+        grid[Point::new(Line(0), Column(0))].c = 'a';
+        grid[Point::new(Line(0), Column(2))].c = 'b';
+        let marker = &mut grid[Point::new(Line(0), Column(1))];
+        marker.c = kettle_vt::placeholder::PLACEHOLDER;
+        for _ in 0..8 {
+            marker.push_zerowidth('\u{0305}');
+        }
+        let mut text = String::new();
+        let mut columns = Vec::new();
+        row_text_into(&grid, 0, 3, &mut text, &mut columns);
+        assert_eq!(text, "a b");
+        assert_eq!(columns, [0, 1, 2]);
+        let mut scrape = String::new();
+        append_row_text(&grid, 0, 3, &mut scrape);
+        assert_eq!(scrape, text);
+        let mut positions = Vec::new();
+        logical_line_into(&grid, &[0], 0, 3, &mut text, &mut positions);
+        assert_eq!(text, "a b");
+        assert_eq!(positions, [(0, 0), (0, 1), (0, 2)]);
+    }
+
+    #[test]
+    fn four_mark_kitty_placeholder_keeps_text_and_full_byte_mapping() {
+        let mut grid: Grid<Cell> = Grid::new(1, 1, 0);
+        let cell = &mut grid[Point::new(Line(0), Column(0))];
+        cell.c = kettle_vt::placeholder::PLACEHOLDER;
+        for _ in 0..4 {
+            cell.push_zerowidth('\u{0305}');
+        }
+        let expected: String = std::iter::once(kettle_vt::placeholder::PLACEHOLDER)
+            .chain(std::iter::repeat_n('\u{0305}', 4))
+            .collect();
+        let mut text = String::new();
+        let mut columns = Vec::new();
+        row_text_into(&grid, 0, 1, &mut text, &mut columns);
+        assert_eq!(text, expected);
+        assert_eq!(columns, vec![0; expected.len()]);
     }
 }

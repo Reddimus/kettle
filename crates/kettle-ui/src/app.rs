@@ -370,6 +370,16 @@ fn osc52_clipboard_channel(target: ClipboardType) -> Osc52ClipboardChannel {
     Osc52ClipboardChannel::Clipboard
 }
 
+fn prepare_osc52_copy(
+    text: String,
+    cap: usize,
+) -> Result<String, std::collections::TryReserveError> {
+    let mut text = kettle_core::scrub_card_markers(text)?;
+    let keep = clamp_osc52(&text, cap).len();
+    text.truncate(keep);
+    Ok(text)
+}
+
 fn set_osc52_clipboard(
     clipboard: &mut arboard::Clipboard,
     target: ClipboardType,
@@ -1773,11 +1783,14 @@ fn ctl_mouse_button(params: &serde_json::Value) -> std::result::Result<u8, Strin
 /// not count it as a real copy, so the `clear_select_on_copy` follow-up is
 /// skipped (no selection existed to clear). Pure; unit-testable without a
 /// clipboard fixture.
-fn copy_clipboard_decision(selection: Option<&str>, smart_copy: bool) -> Option<String> {
+fn copy_clipboard_decision(
+    selection: Option<String>,
+    smart_copy: bool,
+) -> Result<Option<String>, std::collections::TryReserveError> {
     match (selection, smart_copy) {
-        (Some(s), _) => Some(s.to_string()),
-        (None, false) => Some(String::new()),
-        (None, true) => None,
+        (Some(s), _) => kettle_core::scrub_card_markers(s).map(Some),
+        (None, false) => Ok(Some(String::new())),
+        (None, true) => Ok(None),
     }
 }
 
@@ -10818,6 +10831,15 @@ impl App {
             Some((*id, pane.term.output_generation(), columns, screen_lines))
         });
         pane_snapshot_keys_match(&ws.pane_snapshot_keys, current)
+            && ws
+                .pane_snapshot_keys
+                .iter()
+                .zip(&ws.pane_snapshots)
+                .all(|((id, ..), snap)| {
+                    ws.mux.panes.get(id).is_some_and(|pane| {
+                        snap.captures_card_marks() == pane.inline_cards.needs_marks()
+                    })
+                })
     }
 
     fn pane_cursor_layer_eligible(ws: &WindowState) -> bool {
@@ -11790,6 +11812,13 @@ impl App {
                     .and_then(|t| t.selection_to_string())
             })
             .filter(|s| !s.is_empty());
+        let sel = match copy_clipboard_decision(sel, true) {
+            Ok(selection) => selection,
+            Err(error) => {
+                log::warn!("selection copy: could not prepare text: {error}");
+                return;
+            }
+        };
         if let (Some(s), Some(cb)) = (sel, self.clipboard.as_mut()) {
             // On Linux also write the X11 PRIMARY selection that `paste_primary`
             // reads, so the select→middle-click-paste loop works. No PRIMARY on
@@ -12214,16 +12243,21 @@ impl App {
                         }
                     }
                     TermEvent::ClipboardStore(target, s) => {
-                        // OSC 52 write — gated by policy (default: allowed).
+                        // Normalize complete card clusters before clipping so a
+                        // byte limit cannot leave a partial placeholder behind.
                         if self.cfg.osc52.can_copy()
                             && let Some(cb) = &mut self.clipboard
-                            && let Err(e) = set_osc52_clipboard(
-                                cb,
-                                target,
-                                clamp_osc52(&s, OSC52_MAX).to_string(),
-                            )
                         {
-                            log::warn!("clipboard write failed (OSC 52 {target:?} target): {e}");
+                            match prepare_osc52_copy(s, OSC52_MAX) {
+                                Ok(text) => {
+                                    if let Err(error) = set_osc52_clipboard(cb, target, text) {
+                                        log::warn!(
+                                            "clipboard write failed (OSC 52 {target:?} target): {error}"
+                                        );
+                                    }
+                                }
+                                Err(error) => log::warn!("OSC 52: could not prepare text: {error}"),
+                            }
                         }
                     }
                     TermEvent::ClipboardLoad(target, fmt) => {
@@ -14957,7 +14991,7 @@ impl App {
                     if snaps.len() <= si {
                         snaps.push(PaneSnapshot::default());
                     }
-                    snaps[si].capture(&g);
+                    snaps[si].capture_with_card_marks(&g, p.inline_cards.needs_marks());
                     drop(g); // lock released — the render below is lock-free
                     snapshot_keys.push((
                         *id,
@@ -15006,6 +15040,17 @@ impl App {
         // Vec / title String / group_name. `snap` borrows the pooled snapshot
         // the same way; both outlive `panes`, which drops before the pool
         // returns to `ws.pane_snapshots`.
+        // An on-to-off edge the scheduler marked hands the blink to the window
+        // server (macOS) if this frame still draws the off phase with nothing
+        // holding the cursor. Only a successful main present lets the renderer
+        // draw the patch into the layer's surface afterward.
+        let blink_handoff = ws.blink_layer.take_pending_handoff()
+            && self.cfg.macos_cursor_blink_layer
+            && !overlay.cursor_visible
+            && overlay.window_focused
+            && overlay.ime_preedit.is_none()
+            && Self::pane_cursor_layer_eligible(ws)
+            && Self::ensure_cursor_layer(ws);
         let panes: Vec<PaneView> = metas
             .iter()
             .zip(snaps.iter())
@@ -15020,6 +15065,8 @@ impl App {
                         snap,
                         focused: *f,
                         images: imgs.as_slice(),
+                        inline_cards: ws.mux.panes.get(id).map(|pane| &pane.inline_cards),
+                        tr: self.ui_text,
                         title_prefix: prefix.as_str(),
                         title: title.as_str(),
                         title_path: path.as_deref(),
@@ -15036,17 +15083,6 @@ impl App {
             .native_material
             .as_ref()
             .and_then(|material| material.live_opacity_floor());
-        // An on-to-off edge the scheduler marked hands the blink to the window
-        // server (macOS) if this frame still draws the off phase with nothing
-        // holding the cursor. Only a successful main present lets the renderer
-        // draw the patch into the layer's surface afterward.
-        let blink_handoff = ws.blink_layer.take_pending_handoff()
-            && self.cfg.macos_cursor_blink_layer
-            && !overlay.cursor_visible
-            && overlay.window_focused
-            && overlay.ime_preedit.is_none()
-            && Self::pane_cursor_layer_eligible(ws)
-            && Self::ensure_cursor_layer(ws);
         // Status bar and native fallback state are built BEFORE the &mut
         // renderer borrow (the helpers read other window state immutably).
         let Some(renderer) = ws.renderer.as_mut() else {
@@ -17758,21 +17794,22 @@ impl App {
                         .ok()
                         .and_then(|t| t.selection_to_string())
                 });
-                let payload =
-                    copy_clipboard_decision(selection_text.as_deref(), self.cfg.smart_copy);
+                let payload = match copy_clipboard_decision(selection_text, self.cfg.smart_copy) {
+                    Ok(payload) => payload,
+                    Err(error) => {
+                        log::warn!("copy: could not prepare selection text: {error}");
+                        return;
+                    }
+                };
                 let mut copied = false;
                 if let Some(s) = payload
                     && let Some(cb) = &mut self.clipboard
                 {
                     let had_selection = !s.is_empty();
-                    if let Err(e) = cb.set_text(s) {
-                        log::warn!("clipboard set_text failed (copy): {e}");
+                    match cb.set_text(s) {
+                        Ok(()) => copied = had_selection,
+                        Err(error) => log::warn!("clipboard set_text failed (copy): {error}"),
                     }
-                    // Only treat it as a "real" copy when something was
-                    // actually selected — the smart_copy = false
-                    // clobber path writes empty but shouldn't clear a
-                    // (nonexistent) selection.
-                    copied = had_selection;
                 }
                 // Terminator parity (terminatorlib/config.py:91
                 // `clear_select_on_copy`): if the config asked, drop the
@@ -20344,14 +20381,10 @@ impl App {
                 }
                 true
             });
-        let (selection, selection_truncated) = if include_selection && selection_fits {
-            term.selection_to_string()
-                .map(cap_ctl_selection)
-                .map(|(text, truncated)| (Some(text), truncated))
-                .unwrap_or((None, false))
-        } else {
-            (None, include_selection && range.is_some())
-        };
+        let raw_selection = (include_selection && selection_fits)
+            .then(|| term.selection_to_string())
+            .flatten();
+        let omitted_selection = include_selection && !selection_fits && range.is_some();
         let selection_present = term.selection.is_some();
         let selection_range = range.as_ref().map(|range| {
             serde_json::json!({
@@ -20404,6 +20437,19 @@ impl App {
         // output cannot race a small checked grid into an oversized snapshot.
         let s = kettle_core::term::screen_text_of(&term, scrollback);
         drop(term);
+        let (selection, selection_truncated) = match raw_selection
+            .map(kettle_core::scrub_card_markers)
+            .transpose()
+        {
+            Ok(Some(text)) => {
+                let (text, truncated) = cap_ctl_selection(text);
+                (Some(text), truncated)
+            }
+            Ok(None) => (None, omitted_selection),
+            Err(_) => {
+                return Response::err(req.id, ec::INTERNAL, "could not prepare selection text");
+            }
+        };
         let snapshot = ctl_snapshot("screen", &s.text);
         if page
             .snapshot
@@ -20521,7 +20567,7 @@ impl App {
             cells.push(serde_json::json!({
                 "row": row,
                 "col": sc.col,
-                "ch": sc.c.to_string(),
+                "ch": if sc.is_card_placeholder() { ' ' } else { sc.c }.to_string(),
                 "underline": flags & CELL_FLAG_UNDERLINE != 0,
                 "double_underline": flags & CELL_FLAG_DOUBLE_UNDERLINE != 0,
                 "undercurl": flags & CELL_FLAG_UNDERCURL != 0,
@@ -24418,23 +24464,34 @@ impl App {
                     .then(|| term.selection_to_string())
                     .flatten()
                     .unwrap_or_default();
+                drop(term);
+                let yanked = match kettle_core::scrub_card_markers(yanked) {
+                    Ok(text) => text,
+                    Err(error) => {
+                        log::warn!("vi-mode yank: could not prepare text: {error}");
+                        return;
+                    }
+                };
+                if !yanked.is_empty() {
+                    let Some(clip) = self.clipboard.as_mut() else {
+                        log::warn!(
+                            "vi-mode yank: clipboard unavailable (selection of {} bytes not copied)",
+                            yanked.len()
+                        );
+                        return;
+                    };
+                    if let Err(error) = clip.set_text(yanked) {
+                        log::warn!("vi-mode yank: clipboard set_text failed: {error}");
+                        return;
+                    }
+                }
+                let Ok(mut term) = pane.term.term.lock() else {
+                    return;
+                };
                 term.selection = None;
                 term.toggle_vi_mode();
                 drop(term);
                 ws.vi_mode = None;
-                if !yanked.is_empty() {
-                    if let Some(clip) = self.clipboard.as_mut() {
-                        if let Err(error) = clip.set_text(yanked) {
-                            log::warn!("vi-mode yank: clipboard set_text failed: {error}");
-                        }
-                    } else {
-                        log::warn!(
-                            "vi-mode yank: clipboard unavailable (selection of {} bytes not \
-                             copied — try a kettle window with DISPLAY / Wayland set)",
-                            yanked.len()
-                        );
-                    }
-                }
             }
             _ => {}
         }
@@ -36220,15 +36277,8 @@ mod tests {
     #[test]
     fn cached_cursor_blink_lookup_tracks_the_active_snapshot() {
         let keys = [(11, 1, 80, 24), (22, 2, 100, 30)];
-        let first = PaneSnapshot {
-            cursor_blinking: true,
-            ..PaneSnapshot::default()
-        };
-        let second = PaneSnapshot {
-            cursor_blinking: false,
-            ..PaneSnapshot::default()
-        };
-        let snapshots = [first, second];
+        let mut snapshots = [PaneSnapshot::default(), PaneSnapshot::default()];
+        snapshots[0].cursor_blinking = true;
 
         assert_eq!(
             cached_pane_cursor_blinking(Some(11), &keys, &snapshots),
@@ -43655,22 +43705,29 @@ mod tests {
         use super::copy_clipboard_decision;
         // Selection present + smart_copy = true: copy the selection.
         assert_eq!(
-            copy_clipboard_decision(Some("hello"), true).as_deref(),
+            copy_clipboard_decision(Some("hello".into()), true)
+                .unwrap()
+                .as_deref(),
             Some("hello")
         );
         // Selection present + smart_copy = false: still copy
         // (smart_copy only affects the no-selection branch).
         assert_eq!(
-            copy_clipboard_decision(Some("hello"), false).as_deref(),
+            copy_clipboard_decision(Some("hello".into()), false)
+                .unwrap()
+                .as_deref(),
             Some("hello")
         );
         // No selection + smart_copy = true (kettle default + Terminator
         // default): preserve existing clipboard — return None so the
         // caller skips the set_text call.
-        assert_eq!(copy_clipboard_decision(None, true), None);
+        assert_eq!(copy_clipboard_decision(None, true).unwrap(), None);
         // No selection + smart_copy = false: clobber clipboard with
         // empty string. Terminator's deliberate-UX-choice mode.
-        assert_eq!(copy_clipboard_decision(None, false).as_deref(), Some(""));
+        assert_eq!(
+            copy_clipboard_decision(None, false).unwrap().as_deref(),
+            Some("")
+        );
     }
 
     #[test]
@@ -46063,6 +46120,22 @@ mod tests {
         assert_eq!(
             tab_drag_cursor_icon(&DragState::Idle).or(super::tab_close_hover_icon(true)),
             Some(CursorIcon::Pointer)
+        );
+    }
+
+    #[test]
+    fn osc52_copy_scrubs_complete_cluster_before_its_byte_limit() {
+        let marker: String = std::iter::once('\u{10eeee}')
+            .chain(std::iter::repeat_n('\u{0305}', 8))
+            .collect();
+        assert_eq!(
+            super::prepare_osc52_copy(format!("AAAAAA{marker}Z"), 16).unwrap(),
+            "AAAAAA Z"
+        );
+        assert_eq!(super::prepare_osc52_copy("é界tail".into(), 4).unwrap(), "é");
+        assert_eq!(
+            super::prepare_osc52_copy(format!("A{marker}B"), 0).unwrap(),
+            ""
         );
     }
 

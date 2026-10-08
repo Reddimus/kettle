@@ -169,6 +169,35 @@ impl GraphicsBudget {
         self.limits
     }
 
+    /// Start an independent resource domain. Clone this account for every
+    /// preview layer and window that must share its aggregate limits.
+    /// Terminal graphics keep their default account.
+    pub fn independent(limits: GraphicsLimits) -> Result<Self, &'static str> {
+        Ok(Self {
+            limits: limits.validate()?,
+            process: Arc::new(Counters::default()),
+            scope: Arc::new(Counters::default()),
+        })
+    }
+
+    /// Process-wide card/shelf preview account. Every window and GPU rebuild
+    /// shares this domain; terminal pixels, glyphs and presentation use theirs.
+    pub fn previews() -> Self {
+        static PREVIEWS: OnceLock<GraphicsBudget> = OnceLock::new();
+        PREVIEWS
+            .get_or_init(|| Self {
+                limits: GraphicsLimits {
+                    retained_bytes: 128 * MIB,
+                    process_cpu_bytes: 128 * MIB,
+                    process_gpu_bytes: 128 * MIB,
+                    ..GraphicsLimits::default()
+                },
+                process: Arc::new(Counters::default()),
+                scope: Arc::new(Counters::default()),
+            })
+            .clone()
+    }
+
     /// An isolated account for deterministic, small-budget unit tests.
     #[cfg(test)]
     pub(crate) fn isolated(limits: GraphicsLimits) -> Result<Self, &'static str> {
@@ -476,5 +505,60 @@ mod tests {
         let _c = b.reserve_gpu(16).unwrap();
         assert!(b.reserve_gpu(1).is_none());
         assert_eq!(b.usage(), (0, 0, 32, 32));
+    }
+
+    #[test]
+    fn independent_preview_accounts_do_not_consume_each_others_cpu_space() {
+        let first = GraphicsBudget::independent(tiny_limits()).unwrap();
+        let second = GraphicsBudget::independent(tiny_limits()).unwrap();
+        let first_pixels = first.reserve_transient_cpu(64).unwrap();
+        let second_pixels = second.reserve_transient_cpu(64).unwrap();
+        assert!(first.clone().reserve_transient_cpu(1).is_none());
+        assert!(second.clone().reserve_transient_cpu(1).is_none());
+        drop(first_pixels);
+        assert!(first.reserve_transient_cpu(64).is_some());
+        assert!(second.reserve_transient_cpu(1).is_none());
+        drop(second_pixels);
+        assert!(second.reserve_transient_cpu(64).is_some());
+    }
+
+    #[test]
+    fn preview_windows_share_the_same_gpu_account_until_resources_drop() {
+        let preview = GraphicsBudget::independent(tiny_limits()).unwrap();
+        let window_a = preview.clone();
+        let window_b = preview.clone();
+        let independent = GraphicsBudget::independent(tiny_limits()).unwrap();
+        let texture = window_a.reserve_transient_gpu(64).unwrap();
+        drop(window_a);
+        assert!(window_b.reserve_transient_gpu(1).is_none());
+        let other_texture = independent.reserve_transient_gpu(64).unwrap();
+        drop(texture);
+        assert!(window_b.reserve_transient_gpu(64).is_some());
+        assert!(independent.reserve_transient_gpu(1).is_none());
+        drop(other_texture);
+    }
+
+    #[test]
+    fn preview_pixels_charge_once_and_release_after_the_last_snapshot() {
+        let account = GraphicsBudget::independent(tiny_limits()).unwrap();
+        let image = crate::ImageData::new_with_budget(2, 2, vec![7; 16], &account).unwrap();
+        let snapshot = image.clone();
+        assert_eq!(account.usage(), (16, 16, 0, 0));
+        drop(image);
+        assert_eq!(account.usage(), (16, 16, 0, 0));
+        drop(snapshot);
+        assert_eq!(account.usage(), (0, 0, 0, 0));
+    }
+    #[test]
+    fn preview_domain_survives_new_window_and_gpu_context_handles() {
+        let first = GraphicsBudget::previews();
+        let second = GraphicsBudget::previews();
+        let terminal = GraphicsBudget::default();
+        assert!(Arc::ptr_eq(&first.process, &second.process));
+        assert!(Arc::ptr_eq(&first.scope, &second.scope));
+        assert!(!Arc::ptr_eq(&first.process, &terminal.process));
+        assert_eq!(first.limits().validate(), Ok(first.limits()));
+        assert_eq!(first.limits().process_cpu_bytes, 128 * MIB);
+        assert_eq!(first.limits().process_gpu_bytes, 128 * MIB);
     }
 }

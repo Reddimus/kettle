@@ -1,0 +1,602 @@
+//! Per-pane registered-card recognition from complete lock-free snapshots.
+
+use crate::{PaneSnapshot, SnapCell};
+use kettle_core::{InlineMarker, InlineNonce};
+use std::collections::HashMap;
+
+#[cfg(test)]
+const MAX_REGISTRATIONS: usize = 64;
+const CLAUDE_LEFT: usize = 5;
+pub(crate) const MAX_CARD_ROWS: u8 = 12;
+
+struct RegisteredCard {
+    rows: u8,
+    columns: u8,
+    label: String,
+    caption: String,
+    poster: Option<kettle_core::ImageData>,
+    pending: bool,
+}
+
+/// Owned by Pane. Registration is test-only until the display caller lands.
+#[derive(Default)]
+pub struct InlineCards {
+    entries: HashMap<InlineNonce, RegisteredCard>,
+}
+
+impl InlineCards {
+    pub fn needs_marks(&self) -> bool {
+        !self.entries.is_empty()
+    }
+
+    #[cfg(test)]
+    fn register(&mut self, nonce: InlineNonce, rows: u8, columns: u8) {
+        assert!(rows > 0 && columns > 0 && rows <= MAX_CARD_ROWS && columns < 108);
+        assert!(self.entries.len() < MAX_REGISTRATIONS);
+        self.entries.insert(
+            nonce,
+            RegisteredCard {
+                rows,
+                columns,
+                label: "PostToolUse:mcp__plugin_kettle_kettle__kettle_show says:".into(),
+                caption: "diagram.png - raster 640x480".into(),
+                poster: None,
+                pending: true,
+            },
+        );
+    }
+
+    pub(crate) fn visual(&self, nonce: InlineNonce) -> Option<CardVisual<'_>> {
+        let entry = self.entries.get(&nonce)?;
+        Some(match &entry.poster {
+            Some(image) => CardVisual::Ready(image),
+            None if entry.pending => CardVisual::Pending,
+            None => CardVisual::Failed,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_poster(&mut self, nonce: InlineNonce, image: Option<kettle_core::ImageData>) {
+        let entry = self
+            .entries
+            .get_mut(&nonce)
+            .expect("test registration exists");
+        entry.poster = image;
+        entry.pending = false;
+    }
+
+    /// Recomputed every painted frame; the renderer reuses frame and scratch
+    /// storage. Grid overwrite, scroll, or changed context cannot keep old
+    /// geometry alive. This does not inspect color or acquire the Term lock.
+    pub(crate) fn recognize_into(&self, snap: &PaneSnapshot, frame: &mut CardFrame) {
+        frame.blocks.clear();
+        frame.accepted_cells.clear();
+        frame.known_cells.clear();
+        frame.groups.clear();
+        for (index, marks) in snap.card_marks.cells() {
+            if snap
+                .cells
+                .get(index)
+                .is_some_and(SnapCell::is_card_placeholder)
+                && InlineMarker::decode(marks)
+                    .is_some_and(|marker| self.entries.contains_key(&marker.nonce))
+            {
+                frame.known_cells.push(index);
+            }
+            let Some(key) = self.group_key(snap, index, marks) else {
+                continue;
+            };
+            frame.groups.entry(key).or_default().cells += 1;
+        }
+        let Ok(offset) = i32::try_from(snap.display_offset) else {
+            return;
+        };
+        for (&(nonce, line, column), group) in &mut frame.groups {
+            let entry = &self.entries[&nonce];
+            if group.cells != usize::from(entry.rows) * usize::from(entry.columns)
+                || column != CLAUDE_LEFT
+            {
+                continue;
+            }
+            let Some(view_row) = line.checked_add(offset) else {
+                continue;
+            };
+            if usize::try_from(view_row).is_ok_and(|row| row >= snap.screen_lines)
+                || view_row
+                    .checked_add(i32::from(entry.rows))
+                    .is_none_or(|end| end <= 0)
+                || column
+                    .checked_add(usize::from(entry.columns))
+                    .is_none_or(|end| end > snap.columns)
+            {
+                continue;
+            }
+            let gutter_intact = (0..i32::from(entry.rows)).all(|row| {
+                (0..column).all(|col| {
+                    cell_at(snap, line + row, col)
+                        .is_some_and(|cell| cell.c == ' ' && cell.zerowidth().is_empty())
+                })
+            });
+            if !gutter_intact {
+                continue;
+            }
+            let Some(label_line) = line.checked_sub(1) else {
+                continue;
+            };
+            let Some(caption_line) = line.checked_add(i32::from(entry.rows)) else {
+                continue;
+            };
+            let label = "\u{23bf} \u{00a0}".chars().chain(entry.label.chars());
+            if !row_matches(snap, label_line, 0, label, true)
+                || !row_matches(snap, caption_line, column, entry.caption.chars(), false)
+            {
+                continue;
+            }
+            group.accepted = true;
+            frame.blocks.push(CardBlock {
+                nonce,
+                line,
+                column,
+                rows: entry.rows,
+                columns: entry.columns,
+            });
+        }
+        // Snapshot capture supplies each complete sequence once in row-major
+        // order, so this second bounded mark walk needs no sort or index map.
+        for (index, marks) in snap.card_marks.cells() {
+            if index >= snap.cells.len() {
+                continue;
+            }
+            let Some(key) = self.group_key(snap, index, marks) else {
+                continue;
+            };
+            if frame.groups.get(&key).is_some_and(|group| group.accepted) {
+                frame.accepted_cells.push(index);
+            }
+        }
+        frame
+            .blocks
+            .sort_unstable_by_key(|block| (block.line, block.column));
+    }
+
+    fn group_key(
+        &self,
+        snap: &PaneSnapshot,
+        index: usize,
+        marks: &[char],
+    ) -> Option<(InlineNonce, i32, usize)> {
+        let cell = snap.card_cell(index)?;
+        if !cell.is_card_placeholder() {
+            return None;
+        }
+        let marker = InlineMarker::decode(marks)?;
+        let entry = self.entries.get(&marker.nonce)?;
+        if marker.row >= entry.rows || marker.column >= entry.columns {
+            return None;
+        }
+        Some((
+            marker.nonce,
+            cell.line.checked_sub(i32::from(marker.row))?,
+            cell.col.checked_sub(usize::from(marker.column))?,
+        ))
+    }
+
+    #[cfg(test)]
+    fn recognize(&self, snap: &PaneSnapshot) -> CardFrame {
+        let mut frame = CardFrame::default();
+        self.recognize_into(snap, &mut frame);
+        frame
+    }
+}
+
+pub(crate) enum CardVisual<'a> {
+    Ready(&'a kettle_core::ImageData),
+    Pending,
+    Failed,
+}
+
+#[derive(Default)]
+struct Group {
+    cells: usize,
+    accepted: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct CardFrame {
+    pub blocks: Vec<CardBlock>,
+    accepted_cells: Vec<usize>,
+    known_cells: Vec<usize>,
+    groups: HashMap<(InlineNonce, i32, usize), Group>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CardCell {
+    Ordinary,
+    Accepted,
+    Neutral,
+    Unknown,
+}
+
+impl CardCell {
+    pub fn glyph(self, raw: char, hidden: bool) -> char {
+        match self {
+            Self::Ordinary => {
+                if hidden {
+                    ' '
+                } else {
+                    raw
+                }
+            }
+            Self::Accepted => ' ',
+            Self::Neutral => '\u{25a1}',
+            Self::Unknown => '\u{2b1a}',
+        }
+    }
+}
+
+impl CardFrame {
+    pub(crate) fn clear(&mut self) {
+        self.blocks.clear();
+        self.accepted_cells.clear();
+        self.known_cells.clear();
+        self.groups.clear();
+    }
+
+    pub fn cell(&self, snap: &PaneSnapshot, index: usize) -> CardCell {
+        if !snap
+            .cells
+            .get(index)
+            .is_some_and(SnapCell::is_card_placeholder)
+        {
+            CardCell::Ordinary
+        } else if self.suppress_cell(index) {
+            CardCell::Accepted
+        } else if self.known_cells.binary_search(&index).is_ok() {
+            CardCell::Neutral
+        } else {
+            CardCell::Unknown
+        }
+    }
+
+    pub fn cell_at(&self, snap: &PaneSnapshot, line: i32, col: usize) -> CardCell {
+        snap.cells
+            .binary_search_by_key(&(line, col), |cell| (cell.line, cell.col))
+            .map(|index| self.cell(snap, index))
+            .unwrap_or(CardCell::Ordinary)
+    }
+
+    pub fn suppress_point(&self, snap: &PaneSnapshot, line: i32, col: usize) -> bool {
+        snap.cells
+            .binary_search_by_key(&(line, col), |cell| (cell.line, cell.col))
+            .is_ok_and(|index| self.suppress_cell(index))
+    }
+
+    pub fn suppress_cell(&self, snapshot_index: usize) -> bool {
+        self.accepted_cells.binary_search(&snapshot_index).is_ok()
+    }
+}
+
+pub(crate) struct CardBlock {
+    pub nonce: InlineNonce,
+    pub line: i32,
+    pub column: usize,
+    pub rows: u8,
+    pub columns: u8,
+}
+
+fn cell_at(snap: &PaneSnapshot, line: i32, column: usize) -> Option<&SnapCell> {
+    let row = snap.card_row(line);
+    row.binary_search_by_key(&column, |cell| cell.col)
+        .ok()
+        .map(|index| &row[index])
+}
+
+fn row_matches(
+    snap: &PaneSnapshot,
+    line: i32,
+    column: usize,
+    expected: impl Iterator<Item = char>,
+    trim_leading: bool,
+) -> bool {
+    let characters = snap
+        .card_row(line)
+        .iter()
+        .filter(|cell| {
+            cell.col >= column
+                && !cell.flags.intersects(
+                    kettle_core::Flags::WIDE_CHAR_SPACER
+                        | kettle_core::Flags::LEADING_WIDE_CHAR_SPACER,
+                )
+        })
+        .flat_map(|cell| std::iter::once(cell.c).chain(cell.zerowidth().iter().copied()));
+    let mut reading_prefix = trim_leading;
+    let mut actual = characters.skip_while(move |ch| {
+        if reading_prefix && ch.is_whitespace() {
+            true
+        } else {
+            reading_prefix = false;
+            false
+        }
+    });
+    for want in expected {
+        if actual.next() != Some(want) {
+            return false;
+        }
+    }
+    actual.all(char::is_whitespace)
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use alacritty_terminal::{Term, grid::Dimensions, term::Config, vte::ansi::Processor};
+    use kettle_core::EventProxy;
+
+    struct Size;
+    impl Dimensions for Size {
+        fn columns(&self) -> usize {
+            80
+        }
+        fn screen_lines(&self) -> usize {
+            8
+        }
+        fn total_lines(&self) -> usize {
+            8
+        }
+    }
+
+    pub(crate) fn fixture() -> (InlineCards, PaneSnapshot, InlineNonce) {
+        let (cards, term, nonce) = fixture_term(0);
+        let mut snap = PaneSnapshot::default();
+        snap.capture_with_card_marks(&term, true);
+        (cards, snap, nonce)
+    }
+
+    pub(crate) fn fixture_term(
+        prefix_lines: usize,
+    ) -> (InlineCards, Term<EventProxy>, InlineNonce) {
+        let nonce = InlineNonce::new([2, 3, 4, 5, 6, 7]).unwrap();
+        let mut cards = InlineCards::default();
+        cards.register(nonce, 3, 12);
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut term = Term::new(
+            Config::default(),
+            &Size,
+            EventProxy::new(tx, std::sync::Arc::new(|| {})),
+        );
+        let mut processor: Processor = Processor::new();
+        let mut output = String::new();
+        for index in 0..prefix_lines {
+            output.push_str(&format!("ordinary prefix {index}\r\n"));
+        }
+        output.push_str(
+            "  \u{23bf} \u{00a0}PostToolUse:mcp__plugin_kettle_kettle__kettle_show says:\r\n",
+        );
+        for row in 0..3 {
+            output.push_str("     ");
+            for column in 0..12 {
+                output.push_str(&InlineMarker { row, column, nonce }.encode().unwrap());
+            }
+            output.push_str("\r\n");
+        }
+        output.push_str("     diagram.png - raster 640x480");
+        processor.advance(&mut term, output.as_bytes());
+        (cards, term, nonce)
+    }
+
+    #[test]
+    fn card_survives_real_scroll_when_header_and_upper_rows_leave_viewport() {
+        use alacritty_terminal::grid::Scroll;
+        let (cards, mut term, nonce) = fixture_term(0);
+        let mut processor: Processor = Processor::new();
+        processor.advance(
+            &mut term,
+            b"\r\nordinary 0\r\nordinary 1\r\nordinary 2\r\nordinary 3\r\nordinary 4\r\nordinary 5",
+        );
+        assert_eq!(term.grid().history_size(), 3);
+        let mut snap = PaneSnapshot::default();
+        for (scroll, visible_cells, view_row) in [
+            (Scroll::Top, 36, 1),
+            (Scroll::Delta(-1), 36, 0),
+            (Scroll::Bottom, 12, -2),
+        ] {
+            term.scroll_display(scroll);
+            snap.capture_with_card_marks(&term, true);
+            let frame = cards.recognize(&snap);
+            assert_eq!(frame.blocks.len(), 1, "offset {}", snap.display_offset);
+            assert_eq!(frame.blocks[0].nonce, nonce);
+            assert_eq!(frame.blocks[0].line + snap.display_offset as i32, view_row);
+            assert_eq!(frame.accepted_cells.len(), visible_cells);
+            assert!(
+                frame
+                    .accepted_cells
+                    .iter()
+                    .all(|&index| index < snap.cells.len())
+            );
+        }
+        // The label is now above the viewport, but it still owns the visible row.
+        term.grid_mut()[alacritty_terminal::index::Point::new(
+            alacritty_terminal::index::Line(-3),
+            alacritty_terminal::index::Column(7),
+        )]
+        .c = 'X';
+        snap.capture_with_card_marks(&term, true);
+        assert!(cards.recognize(&snap).blocks.is_empty());
+    }
+
+    #[test]
+    fn card_survives_real_scroll_when_lower_rows_and_caption_are_below_viewport() {
+        use alacritty_terminal::grid::Scroll;
+        let (cards, mut term, nonce) = fixture_term(6);
+        term.scroll_display(Scroll::Top);
+        let mut snap = PaneSnapshot::default();
+        snap.capture_with_card_marks(&term, true);
+        let frame = cards.recognize(&snap);
+        assert_eq!(frame.blocks.len(), 1);
+        assert_eq!(frame.blocks[0].nonce, nonce);
+        assert_eq!(frame.blocks[0].line + snap.display_offset as i32, 7);
+        assert_eq!(frame.accepted_cells.len(), 12);
+        // The caption and final gutter are outside the visible cell vector.
+        let caption = alacritty_terminal::index::Point::new(
+            alacritty_terminal::index::Line(frame.blocks[0].line + 3),
+            alacritty_terminal::index::Column(7),
+        );
+        let original = term.grid()[caption].c;
+        term.grid_mut()[caption].c = 'X';
+        snap.capture_with_card_marks(&term, true);
+        assert!(cards.recognize(&snap).blocks.is_empty());
+        term.grid_mut()[caption].c = original;
+        let gutter = alacritty_terminal::index::Point::new(
+            alacritty_terminal::index::Line(frame.blocks[0].line + 2),
+            alacritty_terminal::index::Column(2),
+        );
+        term.grid_mut()[gutter].c = 'X';
+        snap.capture_with_card_marks(&term, true);
+        assert!(cards.recognize(&snap).blocks.is_empty());
+    }
+
+    #[test]
+    fn pane_and_cursor_share_projected_placeholder_glyphs() {
+        for hidden in [false, true] {
+            assert_eq!(CardCell::Accepted.glyph('\u{10eeee}', hidden), ' ');
+            assert_eq!(CardCell::Neutral.glyph('\u{10eeee}', hidden), '\u{25a1}');
+            assert_eq!(CardCell::Unknown.glyph('\u{10eeee}', hidden), '\u{2b1a}');
+        }
+        assert_eq!(CardCell::Ordinary.glyph('x', false), 'x');
+        assert_eq!(CardCell::Ordinary.glyph('x', true), ' ');
+    }
+
+    #[test]
+    fn full_registered_rectangle_from_real_terminal_is_recognized_without_color_input() {
+        let (cards, mut snap, nonce) = fixture();
+        assert!(cards.needs_marks());
+        let first = cards.recognize(&snap);
+        assert_eq!(first.blocks.len(), 1);
+        assert_eq!(first.blocks[0].nonce, nonce);
+        assert_eq!((first.blocks[0].line, first.blocks[0].column), (1, 5));
+        assert_eq!((first.blocks[0].rows, first.blocks[0].columns), (3, 12));
+        assert_eq!(first.accepted_cells.len(), 36);
+        for cell in &mut snap.cells {
+            cell.fg = kettle_core::AnsiColor::Named(kettle_core::NamedColor::Red);
+        }
+        assert_eq!(cards.recognize(&snap).accepted_cells, first.accepted_cells);
+    }
+
+    #[test]
+    fn unknown_registration_leaves_all_placeholder_cells_unsuppressed() {
+        let (_, snap, _) = fixture();
+        let frame = InlineCards::default().recognize(&snap);
+        assert!(frame.blocks.is_empty());
+        assert!((0..snap.cells.len()).all(|index| !frame.suppress_cell(index)));
+    }
+
+    #[test]
+    fn overwrite_on_the_next_frame_removes_the_whole_previous_poster_footprint() {
+        let (cards, mut snap, _) = fixture();
+        assert_eq!(cards.recognize(&snap).accepted_cells.len(), 36);
+        let index = snap
+            .cells
+            .iter()
+            .position(|cell| (cell.line, cell.col) == (2, 8))
+            .unwrap();
+        snap.cells[index].c = 'X';
+        assert!(cards.recognize(&snap).blocks.is_empty());
+    }
+
+    #[test]
+    fn changed_gutter_label_or_caption_never_suppresses_neighboring_text() {
+        let (cards, snap, _) = fixture();
+        for point in [(2, 0), (0, 7), (4, 7)] {
+            let mut altered = fixture().1;
+            let index = altered
+                .cells
+                .iter()
+                .position(|cell| (cell.line, cell.col) == point)
+                .unwrap();
+            altered.cells[index].c = 'X';
+            assert!(cards.recognize(&altered).blocks.is_empty());
+        }
+        assert_eq!(cards.recognize(&snap).blocks.len(), 1);
+    }
+
+    #[test]
+    fn scrolling_uses_grid_absolute_rows_and_visible_offset() {
+        let (cards, mut snap, _) = fixture();
+        for cell in &mut snap.cells {
+            cell.line -= 12;
+        }
+        snap.display_offset = 12;
+        let frame = cards.recognize(&snap);
+        assert_eq!(frame.blocks.len(), 1);
+        assert_eq!(frame.blocks[0].line, -11);
+    }
+
+    #[test]
+    fn incomplete_mark_collection_degrades_as_a_whole() {
+        let (cards, mut incomplete, _) = fixture();
+        incomplete.card_marks.clear();
+        assert!(cards.recognize(&incomplete).blocks.is_empty());
+    }
+    #[test]
+    fn pooled_frame_clears_old_acceptance_and_retains_its_storage() {
+        let (cards, mut snap, _) = fixture();
+        let mut frame = CardFrame::default();
+        cards.recognize_into(&snap, &mut frame);
+        assert_eq!(frame.blocks.len(), 1);
+        let capacity = (
+            frame.blocks.capacity(),
+            frame.accepted_cells.capacity(),
+            frame.groups.capacity(),
+        );
+        let index = snap
+            .cells
+            .iter()
+            .position(|cell| (cell.line, cell.col) == (2, 8))
+            .unwrap();
+        snap.cells[index].c = 'X';
+        cards.recognize_into(&snap, &mut frame);
+        assert!(frame.blocks.is_empty());
+        assert!(frame.accepted_cells.is_empty());
+        assert_eq!(
+            capacity,
+            (
+                frame.blocks.capacity(),
+                frame.accepted_cells.capacity(),
+                frame.groups.capacity()
+            )
+        );
+    }
+    #[test]
+    fn torn_known_card_has_neutral_cells_and_does_not_claim_overwritten_text() {
+        let (cards, mut snap, _) = fixture();
+        let index = snap
+            .cells
+            .iter()
+            .position(|cell| (cell.line, cell.col) == (2, 8))
+            .unwrap();
+        snap.cells[index].c = 'X';
+        let frame = cards.recognize(&snap);
+        assert!(frame.blocks.is_empty());
+        assert_eq!(frame.cell(&snap, index), CardCell::Ordinary);
+        let neighbor = snap
+            .cells
+            .iter()
+            .position(|cell| (cell.line, cell.col) == (2, 9))
+            .unwrap();
+        assert_eq!(frame.cell(&snap, neighbor), CardCell::Neutral);
+        assert!(!frame.suppress_point(&snap, 2, 9));
+        let unknown = InlineCards::default().recognize(&snap);
+        assert_eq!(unknown.cell(&snap, neighbor), CardCell::Unknown);
+    }
+
+    #[test]
+    fn only_complete_accepted_coordinates_suppress_a_cursor() {
+        let (cards, snap, _) = fixture();
+        let frame = cards.recognize(&snap);
+        assert!(frame.suppress_point(&snap, 1, 5));
+        assert!(frame.suppress_point(&snap, 3, 16));
+        assert!(!frame.suppress_point(&snap, 1, 4));
+        assert!(!frame.suppress_point(&snap, 4, 5));
+        assert!(!frame.suppress_point(&snap, -10, 5));
+    }
+}

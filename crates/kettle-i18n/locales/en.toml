@@ -1,5 +1,7 @@
 # English reference text. Every key in schema.toml, nothing else.
 
+inline_card_pending = "Loading…"
+inline_card_unavailable = "Unavailable"
 a11y_pane = "Terminal pane {id}"
 a11y_window = "Kettle terminal"
 about_copy_version = "Copy version info"

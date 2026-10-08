@@ -5,7 +5,9 @@ that each implementation slice must preserve. It is a design record, not a
 claim that all these features ship. The current implementation has bounded
 media frames, worker discovery/build identity, a separate resource-limited
 worker, raster/SVG rendering, paired packaging/update recovery, and internal
-availability. Cards, preview lanes, Mermaid, and audio/video playback remain
+availability. The inline-card rendering foundation has test-only registration,
+bounded scroll context, owned fallback ink and independent preview accounting.
+Production card callers, preview lanes, Mermaid, and audio/video playback remain
 later work.
 The existing poster worker also uses the shared content-based video container
 classifier; this does not add a decoder or playback.
@@ -19,13 +21,19 @@ classifier; this does not add a decoder or playback.
 | `kettle-media-render` | Held-descriptor source/font reads; content-based raster selection; SVG sanitizing and admission; rendering into straight RGBA |
 | `kettle` | Installed-worker resolution and native verification; CLI/MCP and launch integration as they land |
 | `kettle-ui` | User actions, request admission, lifetime/cancellation, fallback-font resolution and bounded requeue, preview/card/shelf/viewer state as they land |
-| `kettle-core`, `kettle-vt`, `kettle-render` | Terminal state, registered card markers, geometry and GPU presentation as they land |
+| `kettle-vt` | Shared marker codec, Kitty mark decoding and independent preview accounts |
+| `kettle-core` | Terminal state and shared plain-text projection for marker clusters |
+| `kettle-render` | Bounded card context and recognition, owned fallback glyphs, clipped geometry, independent preview GPU admission and Grid/Legacy presentation |
 | `kettle-update` | Verified packages, installation provenance, publication/recovery of the executable pair |
 
 The heavy renderer dependency belongs only to the worker. Ordinary terminal
 startup does not load worker fonts, start a worker, or create a footprint
 monitor. Existing image protocols, paste receipts and the older poster worker
 retain their own paths until an explicit migration is implemented and tested.
+Pane-owned card registrations move with detached tabs. A text-only window
+allocates no preview image layer; preview pressure leaves terminal startup and
+drawing available. See [the renderer design](ARCHITECTURE.md#registered-inline-media-cards)
+for the fixed scroll-context bounds and drawing order.
 
 ## Request and process boundary
 

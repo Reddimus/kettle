@@ -4,10 +4,13 @@
 # below) also need the second pass TRANSLATING.md describes before they count as
 # accepted. `tests/catalogue.rs` keeps this file and `es.toml` key for key.
 #
-# No fluent reviewer has been designated yet, so every message is a draft and
-# the Spanish catalogue awaits the owner's language acceptance.
+# The owner designated the implementation reviewer to verify this catalogue
+# independently. Messages remain drafts until rendered context and required
+# second-pass review are recorded; source review alone is not acceptance.
 
 [status]
+inline_card_pending = "draft"
+inline_card_unavailable = "draft"
 a11y_pane = "draft"
 a11y_window = "draft"
 about_copy_version = "draft"

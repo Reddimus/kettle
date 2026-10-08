@@ -980,7 +980,14 @@ impl Renderer {
                 })
             })
         };
-        any_rect_touches(self.imgs.drawn_rects())
+        self.card_scene.labels.iter().any(|label| {
+            let rect = label.rect;
+            PixelBox::bounding([rect[0], rect[1]], [rect[2], rect[3]]).intersects(near)
+        }) || self
+            .card_posters
+            .as_ref()
+            .is_some_and(|posters| any_rect_touches(posters.drawn_rects()))
+            || any_rect_touches(self.imgs.drawn_rects())
             || any_rect_touches(self.media_receipt_img.drawn_rects())
             || self
                 .pane_outlines
@@ -999,13 +1006,20 @@ impl Renderer {
         self.quad_scratch
             .iter()
             .all(|quad| quad_is_snap_stable_near(quad, near))
-            && [bases, &self.overlay_quads, &self.menu_quads]
-                .into_iter()
-                .all(|pipeline| {
-                    pipeline.uploaded().is_some_and(|mut quads| {
-                        quads.all(|quad| quad_is_snap_stable_near(&quad, near))
-                    })
+            && [
+                bases,
+                &self.card_base,
+                &self.card_cursors,
+                &self.card_decoration,
+                &self.overlay_quads,
+                &self.menu_quads,
+            ]
+            .into_iter()
+            .all(|pipeline| {
+                pipeline.uploaded().is_some_and(|mut quads| {
+                    quads.all(|quad| quad_is_snap_stable_near(&quad, near))
                 })
+            })
     }
 
     /// Encode the on and off passes and the combine into `target`, a

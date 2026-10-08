@@ -1,6 +1,8 @@
-# Neutral Latin American Spanish. Model-drafted first drafts: a fluent
-# reviewer must accept them before Spanish can be selected.
+# Neutral Latin American Spanish. The owner designated an independent reviewer.
+# Rendered context and required second-pass acceptance remain pending for 5.0.
 
+inline_card_pending = "Cargando…"
+inline_card_unavailable = "No disponible"
 a11y_pane = "Panel de terminal {id}"
 a11y_window = "Terminal Kettle"
 about_copy_version = "Copiar la información de versión"

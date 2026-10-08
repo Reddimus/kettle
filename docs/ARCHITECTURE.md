@@ -1504,6 +1504,56 @@ graph LR
     place & ph & rt & clk --> draw["render_frame: shared texture + per-instance UVs"]
 ```
 
+## Registered inline media cards
+
+The inline-card renderer is a foundation for later display callers. Registration
+is currently available only to tests; ordinary tool output cannot create a
+registration. A pane owns its `InlineCards` registry, so moving a tab preserves
+its terminal, registrations and poster pixels together. No media worker starts
+while opening an ordinary terminal window.
+
+`kettle-vt` owns the shared marker codec and Kitty combining-mark table.
+`kettle-core` projects long placeholder clusters to spaces in text reads,
+search and terminal copy paths. Four-mark Kitty placeholders retain their
+existing meaning. `kettle-render` collects complete marks separately from the
+four-mark terminal cell copy, recognizes a registered footprint and paints its
+geometry. Unregistered clusters use an owned fallback glyph and background;
+a registered cluster with incomplete context uses a neutral glyph. Accepted
+cells suppress raw placeholder ink, terminal decoration and cursor ink.
+
+Capture copies the viewport first and, only for a pane with registrations,
+at most 13 retained terminal rows above and below it. This band covers a
+12-row card and its label and caption without scanning scrollback. Offscreen
+label, caption, gutter and marker cells still participate in recognition when
+a card intersects the viewport. An overwrite invalidates the footprint in the
+same captured frame. Only viewport cells are suppressed or painted. The
+context vector and mark vectors retain their capacity between captures.
+
+The additional context cost is O(columns) with a fixed 26-row bound,
+independent of scrollback depth. Viewport collection takes priority under the
+shared 4,096-cell and 32,768-mark caps. Registries are capped at 64 entries;
+recognition groups collected marks once, rather than walking terminal history
+for every registration. Adjacent fallback cells with the same background
+share a quad, clipped to their pane and terminal grid.
+
+Preview pixels use independent process-wide 128 MiB CPU and GPU accounts;
+ordinary terminal image accounts retain their existing limits. The renderer
+admits a preview image layer when the first poster needs it. A refused preview
+allocation leaves terminal drawing available and paints a typed unavailable
+status; a later frame can retry after capacity returns. It never retains a
+stale poster in place of the current card state. Per-frame card scene buffers,
+label buffers and shaping keys are pooled. Pending cards use static skeleton
+bars and a localized loading label, without animation deadlines.
+
+Cards have an opaque base, a letterboxed poster, selection tint, a frame and
+owned Kettle and caller labels. The Kettle badge follows the first visible
+gutter row; a secondary caller label appears when another complete row fits.
+Pending and unavailable status labels stay within the visible card body,
+including a one-row intersection. Their rectangles are recomputed from the
+current grid snapshot and clipped to the pane. Terminal selection and scrolling
+remain terminal operations; card interaction and production registration are
+later slices.
+
 ## Render pass order
 
 The renderer's per-pane text buffers, per-row shaping keys, style keys, and
@@ -1521,26 +1571,27 @@ shaping sees the complete family. Headless screenshot paths still load the full
 family because they render a single static image and do not benefit from a later
 warm-up frame.
 
-Each frame the renderer issues ten passes (grid mode; nine in legacy) against
-the same wgpu render-pass encoder, in this order. The order matters: a quad pass
-paints over text drawn before it, and text drawn after a quad covers
-that quad's pixels.
+Each frame uses the same wgpu render-pass encoder. Quads cover earlier
+text; later text covers their pixels. Card layers therefore precede terminal
+text, with owned card labels and fallback cursors afterward:
 
 ```mermaid
 flowchart LR
-    clear["Clear color<br/>(theme bg + opacity)"] --> bgimg["0. bg_imgs.draw<br/>background image<br/>(wallpaper, at the back)"]
-    bgimg --> quads["1. quads.draw<br/>pane bg, tab bar,<br/>chrome quads + cursor block"]
-    quads --> imgs["2. imgs.draw<br/>sixel · kitty · iTerm2<br/>inline image overlays"]
-    imgs --> glyph["3. glyph_pipeline.draw<br/>pane text, CELL-LOCKED<br/>(grid mode; v2.25.0)"]
-    glyph --> text["4. text_renderer.render<br/>tab / titlebar text<br/>(+ pane text in legacy)"]
-    text --> curg["5. cursor_glyph_renderer.render<br/>focused block cursor's<br/>inverted glyph"]
-    curg --> overlay["6. overlay_quads.draw<br/>pane dimming · scrollbar<br/>(NOT menu chrome)"]
-    overlay --> menuq["7. menu_quads.draw<br/>shadow · panel bg ·<br/>border · row highlight"]
-    menuq --> receipt["8. media_receipt_img.draw<br/>bounded clipboard thumbnail<br/>(when visible)"]
-    receipt --> menut["9. menu_text_renderer.render<br/>context menu + settings overlay<br/>row labels"]
+    clear["Clear color"] --> wallpaper["Wallpaper"]
+    wallpaper --> base["Pane bases and terminal/chrome quads"]
+    base --> outlines["Pane outlines"]
+    outlines --> images["PTY images: sixel, Kitty, iTerm2"]
+    images --> cards["Card bases and letterboxed posters"]
+    cards --> glyphs["Cell-locked pane glyphs in Grid mode"]
+    glyphs --> text["Chrome text and Legacy pane text"]
+    text --> owned["Card decoration, fallback cursors and labels"]
+    owned --> cursor["Focused block cursor's inverted glyph"]
+    cursor --> overlay["Pane dimming and scrollbar"]
+    overlay --> menu["Menu chrome and receipt image"]
+    menu --> labels["Menu and settings text"]
 ```
 
-**Pass 3: cell-locked pane text.** In the default `text-renderer = grid` mode,
+**Cell-locked pane text.** In the default `text-renderer = grid` mode,
 pane cell text is drawn by `glyph_pipeline`
 (`crates/kettle-render/src/glyphpipe.rs`), an instanced glyph renderer that pins
 every glyph to its grid cell (`pane_origin + col × cell_w`), the
@@ -1664,15 +1715,15 @@ tab / field row / outside; `App::settings_mouse` dispatches that into the existi
 adjust). The Background settings page edits the image path through an inline text
 prompt (`SettingsTextEdit`) and gates inapplicable rows (`settings::field_disabled`).
 
-Steps 7 and 9 own the right-click context menu so its labels land **on
-top of** the panel background. If the menu's opaque panel quad drew in
-step 6 (`overlay_quads`) after its labels were rendered, it would paint
-over them and leave the menu blank.
+The menu chrome and menu text passes own the right-click context menu so its
+labels land **on top of** the panel background. If the menu's opaque panel
+quad drew in the dimming pass (`overlay_quads`) after its labels were
+rendered, it would paint over them and leave the menu blank.
 
-Step 5 draws the inverted glyph **under a focused solid
-block cursor** in its own 1-glyph renderer, on top of the block quad
-(step 1) and the pane text, and below dimming, menus and the paste receipt,
-so an opaque overlay hides the whole terminal cursor. Decoupling it from the pane text buffer — rather than
+The cursor pass draws the inverted glyph **under a focused solid
+block cursor** in its own 1-glyph renderer, on top of the block quad and the
+pane text and card layers, and below dimming, menus and the paste receipt, so
+an opaque overlay hides the whole terminal cursor. Decoupling it from the pane text buffer — rather than
 recoloring the glyph in-place — means a cursor blink leaves the pane
 buffer byte-identical, and because the cursor glyph is prepared in both blink
 phases too, a blink edge prepares no text at all. The **damage gate** can skip
@@ -1975,7 +2026,8 @@ no context reads, clock queries, formatting or writes.
 - **Context-menu redraws are terminal-lock-free when safe.** Pointer/keyboard
   highlight changes arm a one-shot snapshot-reuse hint. Before taking the fast
   path, the UI compares every visible pane's stable id, atomic output
-  generation, columns, rows, and order with the pooled snapshot keys. Any
+  generation, columns, rows, order and required card-mark collection with the
+  pooled snapshot keys. Any
   intervening input/user event clears the hint, active pointer gestures disable
   reuse, and any key mismatch falls back to the full drain/snapshot path.
   Opening a menu also ends selection/scrollbar/split/tab gestures so
@@ -2307,7 +2359,7 @@ right-click ▸ **Settings…**. `crates/kettle-ui/src/settings.rs` is the *pure
 catalogue (categories → fields, free functions over `&Config`, unit-tested
 without a window); `app.rs` owns the live `SettingsNav` state + input routing +
 persistence; `kettle-render` draws it through the **same menu pipeline**
-(render-pass steps 7 and 9 above). Every value edit writes straight to the
+(the menu chrome and menu text passes above). Every value edit writes straight to the
 user's config via the atomic `persist_pref` → `persist_config_toggle` path and
 live-reloads, so changes take effect without hand-editing the file. The
 **Keybinds** category is a full interactive rebinder: activating a row captures

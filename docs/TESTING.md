@@ -45,6 +45,55 @@ stubs. It prints other-OS legs as explicitly not applicable and claims only a
 current-OS pass; cross-platform release evidence still requires the native CI
 matrix.
 
+### Inline-card rendering foundation
+
+The registration API is test-only until a production display caller lands.
+Exercise the shared marker and text projection, real terminal scroll capture,
+recognition, image exclusion and both live renderer modes:
+
+```sh
+cargo test --locked -p kettle-vt --lib inline_marker
+cargo test --locked -p kettle-vt --lib placeholder
+cargo test --locked -p kettle-core --lib inline_text
+cargo test --locked -p kettle-render --lib inline_cards
+cargo test --locked -p kettle-render --lib card_context
+cargo test --locked -p kettle-render --lib card_scene
+cargo test --locked -p kettle-render --lib card_with_only_
+cargo test --locked -p kettle-render --lib unknown_inline_cluster -- --nocapture
+cargo test --locked -p kettle-render --lib fallback_cursor_blinks -- --nocapture
+cargo test --locked -p kettle-render --lib registered_poster -- --nocapture
+cargo test --locked -p kettle-render --lib refused_card_poster -- --nocapture
+cargo test --locked -p kettle-render --lib exhausted_preview_account -- --nocapture
+cargo test --locked -p kettle-render --lib card_badge_labels -- --nocapture
+```
+
+GPU acceptance requires the `INLINE_CARD_GPU_ACCEPTANCE` record for both
+`Grid` and `Legacy` in every targeted case. An `INLINE_CARD_GPU_SKIPPED`
+record means the host did not exercise those pixels, even if Cargo reports a
+passing test. The headless frame tests use the live renderer's upload and draw
+path and read back a PNG; they do not prove native input or installed-package
+acceptance.
+
+The scroll regressions feed actual terminals, scroll their retained grid and
+require the card to survive when its upper or lower rows leave the viewport.
+Changing an offscreen label, caption or gutter must invalidate it on the next
+capture. A separate long-scrollback test verifies the 26-row context bound and
+retained allocation capacity. GPU readbacks verify partial-card pixels and
+same-frame removal after an offscreen overwrite. Test-only preview-account
+reservations exercise upload refusal, text-only window creation under a full
+preview account and recovery after capacity returns, without allocating a
+budget-sized GPU texture. Pure clipped-row tests require a visible Kettle
+badge and typed pending/unavailable label for the first or last visible row,
+including a Ready poster whose upload is refused.
+
+Plain-text tests cover reads, copy projection and search while retaining
+ordinary Unicode and four-mark Kitty clusters. Kitty exclusion tests put more
+than the ordinary placeholder admission limit of long clusters before a valid
+Kitty cell. Fallback tests verify real glyph coverage, owned colors and cursor
+blink behavior. The glyph-reference comparison uses equal opaque backgrounds;
+a separate translucent-pane readback requires the owned cell to stay opaque
+and pixel-identical while ordinary pane text retains translucency.
+
 ### macOS appearance and icon gates
 
 The macOS AppIcon gate runs twice on pull requests. The normal `macos-latest`
