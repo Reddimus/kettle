@@ -456,8 +456,8 @@ one = "Close tab with {count} pane?"
 other = "Close tab with {count} panes?"
 
 [confirm_close_window]
-one = "Close {count} pane?"
-other = "Close {count} panes?"
+one = "Close window with {count} pane?"
+other = "Close window with {count} panes?"
 
 [confirm_paste]
 one = "Paste {count} line into a shell-like target?"

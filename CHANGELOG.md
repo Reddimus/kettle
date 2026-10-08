@@ -172,6 +172,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   preview while dragging a pane now matches the pane the split creates,
   rounded the same way.
 
+- The window close confirmation names the window: "Close window with 3
+  panes?" rather than "Close 3 panes?". In Spanish, the pasted-path receipt
+  titles said "pasted image" and "pasted video" where the card shows a pasted
+  path; they now say "Ruta de imagen" and "Ruta de video". "Ocultar el
+  puntero al escribir" replaces "ratón", since the setting also hides the
+  trackpad pointer.
+
 - An opaque context menu, Settings panel or paste receipt over the cursor
   cell now hides the whole cursor. The inverted glyph of a focused block
   cursor was drawn after every overlay and showed through them.
