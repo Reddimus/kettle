@@ -4,6 +4,8 @@
 //! unsafe code.
 use kettle_media::wire::{Direction, Frame, WireError, encode, encode_job};
 use kettle_media::*;
+
+mod common;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
@@ -76,13 +78,14 @@ fn frame_encoding(job: &Job) -> Result<Vec<u8>, WireError> {
 
 #[test]
 fn borrowed_job_encoding_matches_the_frame_encoding() {
-    let path = NativePath::new(b"/tmp/diagram.svg".to_vec()).unwrap();
+    // Platform-native absolute paths: UTF-16LE on Windows.
+    let path = common::path();
     let mut with_fonts = job(
         JobKind::Svg,
         Source::user_pull(path.clone(), GuiActionWitness::from_explicit_gui_action()),
     );
     with_fonts.fallback_fonts = vec![FallbackFont {
-        path: NativePath::new(b"/fonts/fallback.ttc".to_vec()).unwrap(),
+        path: common::path(),
         face_index: 3,
     }];
     for job in [
