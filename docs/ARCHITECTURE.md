@@ -865,8 +865,11 @@ putting a user path on the wire.
   agent control plane and the session file address panes unambiguously
   across windows.
 - **Per-window accents (Peacock), on by default** — `accent-color =
-  auto` (the default) gives each window a distinct theme-pool hue while
-  a free hue remains. Process-local claims are authoritative: each
+  auto` (the default) gives each new window a theme-pool hue that no live
+  window holds, while one remains. A theme switch keeps every window's pool
+  slot and maps it onto the new theme's pool, so windows shift together; a
+  smaller pool can map two slots to one hue until a window is reopened.
+  Process-local claims are authoritative: each
   `WindowAccent` owns a live color handle, and `App` keeps weak references
   to those handles. A checked-out window retains its reservation; closing
   it or switching to a pinned accent releases it. Allocation prunes expired

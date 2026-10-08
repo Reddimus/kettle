@@ -28504,6 +28504,10 @@ impl App {
                 }
             }
         }
+        // Apply a due scheduled theme switch first, as the first redraw would,
+        // so a torn window excludes its source's color from the pool it will
+        // paint with rather than from the outgoing theme's pool.
+        self.poll_theme_schedule(&mut ws);
         if self.cfg.accent_auto && self.cfg.accent_color.is_none() {
             self.assign_window_accent(&mut ws, source_color);
         }
@@ -45230,8 +45234,26 @@ mod tests {
         // 2. The torn window inherits the source size and is positioned by
         //    the grab offset (open_window's size override).
         assert!(
-            src.contains("WindowOpen::AdoptTab {") && src.contains("Some(size),"),
-            "the tear must open the torn window at the source size"
+            src.contains(
+                "WindowOpen::AdoptTab {\n                tab: dt,\n                source_color: ws.accent.as_ref().map(|accent| accent.color),\n            },\n            pos,\n            Some(size),"
+            ),
+            "the tear must open the torn window at the grab position and source size"
+        );
+        // 2b. A lone-tab drag follows the pointer on the same motion that
+        //     started it, so one fast gesture can latch a dock target.
+        assert!(
+            src.contains(
+                "                caption: false,\n                saw_move: false,\n                last_signal: std::time::Instant::now(),\n                hwnd: window_hwnd(&src),\n                signal_cursor: None,\n            });\n            self.follow_torn_drag(ws);\n            return true;"
+            ),
+            "the lone-tab drag must follow the pointer immediately"
+        );
+        // 2c. A new window applies a due scheduled theme before claiming its
+        //     accent, so the source exclusion uses the pool it will paint.
+        assert!(
+            src.contains(
+                "        self.poll_theme_schedule(&mut ws);\n        if self.cfg.accent_auto && self.cfg.accent_color.is_none() {\n            self.assign_window_accent(&mut ws, source_color);"
+            ),
+            "the theme schedule must run before the accent claim"
         );
         // 3. The native handoff happens right after the insert.
         assert!(
