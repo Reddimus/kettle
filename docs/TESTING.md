@@ -2284,10 +2284,12 @@ pid now belongs to a running process keeps the socket; while a starting server
 holds the registry lock, pruning removes the entry but no socket; a starting
 server's sweep removes a dead server's leftover socket but keeps a socket whose
 pid runs, a regular file, an entry-owned socket and other files; and a server
-dropped while its listener is still open unlinks its socket. The entry walk is
-pinned as a pure function: an entry after 2,048 other files is found, an entry
-past the 8,192-entry walk is not read, and at most 1,024 entries are read. Each
-of these fails when its removal, guard or bound is mutated away;
+dropped while its listener is still open unlinks its socket; a socket replaced
+after it was judged dead is not the one unlinked. The entry walk is pinned as a
+pure function: an entry after 2,048 other files is found, an entry past the
+8,192-entry walk is not read, and at most 1,024 entries are read; the two
+limits are pinned to their documented values. Each of these fails when its
+removal, guard or bound is mutated away;
 **shell detection**
 (`detect_shells_windows`/`_unix`,
 kettle-core) is pure over injected closures (PATH lookup, WSL

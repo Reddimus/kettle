@@ -433,15 +433,33 @@ fn remove_dead_socket(dir: &std::path::Path, pid: u32, path: &std::path::Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::FileTypeExt as _;
-        if !entry_path(dir, pid).exists()
+        let Ok(judged) = std::fs::symlink_metadata(path) else {
+            return;
+        };
+        if judged.file_type().is_socket()
+            && !entry_path(dir, pid).exists()
             && !crate::presence::pid_alive(pid)
-            && std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_socket())
         {
-            let _ = std::fs::remove_file(path);
+            unlink_if_unchanged(path, &judged);
         }
     }
     #[cfg(not(unix))]
     let _ = (dir, pid, path);
+}
+
+/// Unlink `path` only while it is still the file that was judged. Unix cannot
+/// unlink by descriptor, so a socket bound between this check and the unlink
+/// would still go; that takes a reused pid together with a server that
+/// started without the registry lock (an older release, or one whose lock
+/// wait timed out behind a stuck holder) in that instant.
+#[cfg(unix)]
+fn unlink_if_unchanged(path: &std::path::Path, judged: &std::fs::Metadata) {
+    use std::os::unix::fs::MetadataExt as _;
+    if std::fs::symlink_metadata(path)
+        .is_ok_and(|now| now.dev() == judged.dev() && now.ino() == judged.ino())
+    {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// Remove `ctl-<pid>.sock` files in the registry directory whose servers are
@@ -1060,6 +1078,30 @@ mod tests {
         assert_eq!(registry_entry_paths(paths).len(), MAX_REGISTRY_DIR_ENTRIES);
     }
 
+    /// The documented limits (docs/AGENT.md).
+    #[test]
+    fn registry_limits_match_the_documentation() {
+        assert_eq!(MAX_REGISTRY_DIR_ENTRIES, 1024);
+        assert_eq!(MAX_REGISTRY_DIR_WALK, 8192);
+    }
+
+    /// A socket replaced after it was judged dead is not the one unlinked.
+    #[cfg(unix)]
+    #[test]
+    fn a_socket_replaced_after_judgement_is_kept() {
+        let dir = scratch("unlink-unchanged");
+        crate::ensure_private_dir(&dir).unwrap();
+        let path = dir.join("ctl-7.sock");
+        dead_socket(&path);
+        let judged = std::fs::symlink_metadata(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let replacement = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        unlink_if_unchanged(&path, &judged);
+        assert!(path.exists(), "the replacement socket stays");
+        drop(replacement);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The walk itself stays bounded: an entry past the walk bound is not read.
     #[test]
     fn the_directory_walk_stays_bounded() {
@@ -1077,9 +1119,12 @@ mod tests {
         dir
     }
 
-    /// A socket file with nothing behind it, as a crashed server leaves.
+    /// A socket file with nothing behind it, as a crashed server leaves. The
+    /// endpoint may be the long-path fallback, whose directory `register`
+    /// does not create.
     #[cfg(unix)]
     fn dead_socket(path: &std::path::Path) {
+        crate::ensure_owned_dir(path.parent().unwrap()).unwrap();
         drop(std::os::unix::net::UnixListener::bind(path).unwrap());
         assert!(path.exists());
     }
