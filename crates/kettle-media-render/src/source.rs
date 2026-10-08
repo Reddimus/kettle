@@ -28,6 +28,18 @@ pub struct Snapshot<'a> {
     pub identity: Option<PathIdentity>,
 }
 
+impl Snapshot<'_> {
+    /// Refuse this snapshot over `cap` as [`load`] would have: a file's is
+    /// `FileTooLarge`, inline bytes' `TooLarge`.
+    pub fn within(&self, cap: usize) -> Result<(), FailureCode> {
+        match (self.bytes.len() <= cap, self.identity) {
+            (true, _) => Ok(()),
+            (false, Some(_)) => Err(FailureCode::FileTooLarge),
+            (false, None) => Err(FailureCode::TooLarge),
+        }
+    }
+}
+
 /// Read `source`, refusing more than `cap` bytes.
 pub fn load(source: &Source, cap: usize) -> Result<Snapshot<'_>, FailureCode> {
     match source {

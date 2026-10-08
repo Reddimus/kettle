@@ -13,15 +13,19 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::client::{
-    MAX_STUCK_WORKERS, Shared, SpawnedWorker, UnavailableCause, WorkerExit, WorkerProcess,
+    MAX_STUCK_WORKERS, RenderControl, Shared, SpawnedWorker, UnavailableCause, WorkerExit,
+    WorkerProcess,
 };
 use crate::wire::{self, Direction, Frame, MAX_READY_FRAME_BYTES, WireError};
-use crate::{BuildId, FailureCode, HandshakeOutcome, Hello, Job, JobKind, Rendered, check_ready};
+use crate::{
+    BuildId, FailureCode, HandshakeOutcome, Hello, Job, JobKind, MediaKind, RenderOutput, Rendered,
+    check_ready,
+};
 
 /// How often the caller's thread looks at the worker while it waits for the
 /// reader: an exit can come with no frame, when something the worker started
 /// still holds its stdout.
-const TICK: Duration = Duration::from_millis(25);
+pub(crate) const TICK: Duration = Duration::from_millis(25);
 
 /// The signal a kill sends. A worker reaped with any other status ended by
 /// itself before the kill landed.
@@ -51,10 +55,7 @@ impl Budgets {
     };
 
     fn render_deadline(&self, kind: JobKind) -> Duration {
-        self.render.unwrap_or(match kind {
-            JobKind::Raster => Duration::from_secs(2),
-            _ => Duration::from_secs(3),
-        })
+        self.render.unwrap_or_else(|| kind.render_deadline())
     }
 }
 
@@ -72,6 +73,8 @@ enum Event {
 
 /// Why waiting for the reader brought no event.
 enum Wait {
+    /// Cancellation or the admission deadline; never a cold-start retry.
+    Interrupted,
     /// The deadline passed, or the worker exited and the reader had nothing
     /// more within the cleanup budget.
     Timeout,
@@ -102,7 +105,11 @@ pub(crate) fn attempt(
     build_id: &BuildId,
     job: &Job,
     budgets: Budgets,
-) -> Result<Result<Rendered, FailureCode>, NeverReady> {
+    control: Option<&RenderControl>,
+) -> Result<Result<RenderOutput, FailureCode>, NeverReady> {
+    if control.is_some_and(|control| control.interrupted(Instant::now())) {
+        return Ok(Err(FailureCode::RenderTimeout));
+    }
     let hello = Hello {
         build_id: build_id.clone(),
     };
@@ -113,15 +120,16 @@ pub(crate) fn attempt(
         return Ok(Err(FailureCode::BadParams));
     };
     let ready_until = Instant::now() + budgets.ready;
+    let ready_until = control.map_or(ready_until, |control| control.limit(ready_until));
     let SpawnedWorker {
         process,
         stdin,
         stdout,
-    } = match spawn_within(shared, ready_until, budgets) {
+    } = match spawn_within(shared, ready_until, budgets, control) {
         Ok(spawned) => spawned,
         Err(code) => return Ok(Err(code)),
     };
-    let mut worker = Running::new(process, shared, budgets);
+    let mut worker = Running::new(process, shared, budgets).interruptible(control);
     let (events, received) = mpsc::channel();
     let (go, job_ready) = mpsc::channel();
     if spawn_reader(stdout, events).is_err()
@@ -131,7 +139,11 @@ pub(crate) fn attempt(
         return Ok(Err(FailureCode::WorkerUnavailable));
     }
 
-    match worker.next(&received, ready_until) {
+    match worker.next(&received, ready_until, control) {
+        Err(Wait::Interrupted) => {
+            worker.kill();
+            return Ok(Err(FailureCode::RenderTimeout));
+        }
         Err(Wait::Timeout) => {
             // An exit with nothing said, even one just before the kill, is
             // not a cold start: it is not retried.
@@ -179,10 +191,19 @@ pub(crate) fn attempt(
 
     // The job's deadline starts before the job is written.
     let reply_until = Instant::now() + budgets.render_deadline(job.kind);
+    let reply_until = control.map_or(reply_until, |control| control.limit(reply_until));
+    if control.is_some_and(|control| control.interrupted(Instant::now())) {
+        worker.kill();
+        return Ok(Err(FailureCode::RenderTimeout));
+    }
     if go.send(job_bytes).is_err() {
         return Ok(Err(worker.stop_failure()));
     }
-    Ok(match worker.next(&received, reply_until) {
+    Ok(match worker.next(&received, reply_until, control) {
+        Err(Wait::Interrupted) => {
+            worker.kill();
+            Err(FailureCode::RenderTimeout)
+        }
         Err(Wait::Timeout) => match worker.own_exit() {
             Some(exit) => Err(exit_failure(exit)),
             None => match worker.kill() {
@@ -193,13 +214,13 @@ pub(crate) fn attempt(
                 Stopped::Killed | Stopped::Stuck => Err(FailureCode::RenderTimeout),
             },
         },
-        Ok(Event::Reply(Ok(Some(Frame::Rendered(rendered))), true)) => match worker.stop() {
-            Stopped::Exited(WorkerExit::Code(0)) if rendered.validate().is_ok() => Ok(rendered),
-            Stopped::Exited(WorkerExit::Code(0)) => Err(FailureCode::WorkerUnavailable),
-            Stopped::Exited(exit) => Err(exit_failure(exit)),
-            Stopped::OverFootprint => Err(FailureCode::RenderResource),
-            Stopped::Killed | Stopped::Stuck => Err(FailureCode::WorkerUnavailable),
-        },
+        Ok(Event::Reply(Ok(Some(Frame::Rendered(rendered))), true)) => {
+            stop_rendered(&mut worker, MediaKind::for_job(job.kind), rendered)
+        }
+        Ok(Event::Reply(Ok(Some(Frame::DetectedRendered { kind, rendered })), true)) => {
+            let accepted = job.kind == JobKind::Auto || MediaKind::for_job(job.kind) == Some(kind);
+            stop_rendered(&mut worker, accepted.then_some(kind), rendered)
+        }
         Ok(Event::Reply(Ok(Some(Frame::Failure(failure))), true)) => match worker.stop() {
             Stopped::Exited(WorkerExit::Code(0)) => Err(refusal(failure.code)),
             Stopped::Exited(exit) => Err(exit_failure(exit)),
@@ -220,6 +241,22 @@ pub(crate) fn attempt(
     })
 }
 
+fn stop_rendered(
+    worker: &mut Running<'_>,
+    kind: Option<MediaKind>,
+    rendered: Rendered,
+) -> Result<RenderOutput, FailureCode> {
+    match worker.stop() {
+        Stopped::Exited(WorkerExit::Code(0)) if rendered.validate().is_ok() => kind
+            .map(|kind| RenderOutput { kind, rendered })
+            .ok_or(FailureCode::WorkerUnavailable),
+        Stopped::Exited(WorkerExit::Code(0)) => Err(FailureCode::WorkerUnavailable),
+        Stopped::Exited(exit) => Err(exit_failure(exit)),
+        Stopped::OverFootprint => Err(FailureCode::RenderResource),
+        Stopped::Killed | Stopped::Stuck => Err(FailureCode::WorkerUnavailable),
+    }
+}
+
 enum SpawnSlot {
     Waiting,
     Done(Result<SpawnedWorker, FailureCode>),
@@ -236,7 +273,11 @@ fn spawn_within(
     shared: &Arc<Shared>,
     until: Instant,
     budgets: Budgets,
+    control: Option<&RenderControl>,
 ) -> Result<SpawnedWorker, FailureCode> {
+    if control.is_some_and(|control| control.interrupted(Instant::now())) {
+        return Err(FailureCode::RenderTimeout);
+    }
     // A start that hung once would hang again: while one is outstanding, no
     // other begins, so hung starts cannot pile up.
     if shared.late_spawns.load(Ordering::Acquire) > 0 {
@@ -251,10 +292,35 @@ fn spawn_within(
     let slot = Arc::new((Mutex::new(SpawnSlot::Waiting), Condvar::new()));
     let helper_slot = Arc::clone(&slot);
     let helper_shared = Arc::clone(shared);
+    let helper_control = control.cloned();
     let started = std::thread::Builder::new()
         .name("kettle-media-spawn".into())
         .spawn(move || {
-            let spawned = match helper_shared.checked_path() {
+            let checked = helper_shared.checked_path();
+            let (state, changed) = &*helper_slot;
+            if checked.is_ok() {
+                // A job interrupted during the check gets no worker, whether
+                // or not its caller has looked yet: one that gave up has
+                // counted this start as late, and one still waiting hears
+                // the job is out of time.
+                let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
+                if matches!(*state, SpawnSlot::Abandoned) {
+                    drop(state);
+                    helper_shared.late_spawns.fetch_sub(1, Ordering::AcqRel);
+                    return;
+                }
+                let now = Instant::now();
+                if now >= until
+                    || helper_control
+                        .as_ref()
+                        .is_some_and(|control| control.interrupted(now))
+                {
+                    *state = SpawnSlot::Done(Err(FailureCode::RenderTimeout));
+                    changed.notify_one();
+                    return;
+                }
+            }
+            let spawned = match checked {
                 Ok(path) => helper_shared
                     .platform()
                     .spawn(path)
@@ -262,7 +328,6 @@ fn spawn_within(
                 Err(UnavailableCause::UnsupportedPlatform) => Err(FailureCode::UnsupportedPlatform),
                 Err(_) => Err(FailureCode::WorkerUnavailable),
             };
-            let (state, changed) = &*helper_slot;
             let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
             if matches!(*state, SpawnSlot::Abandoned) {
                 drop(state);
@@ -286,13 +351,13 @@ fn spawn_within(
             SpawnSlot::Waiting | SpawnSlot::Abandoned => {}
         }
         let now = Instant::now();
-        if now >= until {
+        if now >= until || control.is_some_and(|control| control.interrupted(now)) {
             *state = SpawnSlot::Abandoned;
             shared.late_spawns.fetch_add(1, Ordering::AcqRel);
             return Err(FailureCode::RenderTimeout);
         }
         state = changed
-            .wait_timeout(state, until - now)
+            .wait_timeout(state, (until - now).min(TICK))
             .unwrap_or_else(PoisonError::into_inner)
             .0;
     }
@@ -333,6 +398,9 @@ struct Running<'a> {
     next_sample: Instant,
     shared: &'a Arc<Shared>,
     budgets: Budgets,
+    /// The job owner's cancellation and deadline, which also cut short the
+    /// wait for a worker to exit by itself.
+    control: Option<RenderControl>,
 }
 
 impl<'a> Running<'a> {
@@ -343,7 +411,13 @@ impl<'a> Running<'a> {
             next_sample: Instant::now() + TICK,
             shared,
             budgets,
+            control: None,
         }
+    }
+
+    fn interruptible(mut self, control: Option<&RenderControl>) -> Self {
+        self.control = control.cloned();
+        self
     }
 
     fn own_exit(&self) -> Option<WorkerExit> {
@@ -353,8 +427,16 @@ impl<'a> Running<'a> {
     /// The next thing the reader says before `until`, looking at the worker
     /// and measuring its memory meanwhile. Once it has exited, the reader
     /// gets the cleanup budget to pass on what the pipe still held.
-    fn next(&mut self, received: &Receiver<Event>, until: Instant) -> Result<Event, Wait> {
+    fn next(
+        &mut self,
+        received: &Receiver<Event>,
+        until: Instant,
+        control: Option<&RenderControl>,
+    ) -> Result<Event, Wait> {
         loop {
+            if control.is_some_and(|control| control.interrupted(Instant::now())) {
+                return Err(Wait::Interrupted);
+            }
             let limit = match self.exited {
                 Some((_, seen)) => until.min(seen + self.budgets.cleanup),
                 None => until,
@@ -420,7 +502,8 @@ impl<'a> Running<'a> {
     }
 
     /// Let the worker exit by itself within the cleanup budget, as it does
-    /// after a reply or a refusal, and kill it if it does not.
+    /// after a reply or a refusal, and kill it if it does not, or at once
+    /// when its job is cancelled or out of time meanwhile.
     fn stop(&mut self) -> Stopped {
         if let Some(exit) = self.own_exit() {
             return Stopped::Exited(exit);
@@ -446,6 +529,13 @@ impl<'a> Running<'a> {
                 Err(_) => break,
             }
             let now = Instant::now();
+            if self
+                .control
+                .as_ref()
+                .is_some_and(|control| control.interrupted(now))
+            {
+                break;
+            }
             if now >= self.next_sample {
                 match self.measure() {
                     Err(Wait::OverFootprint) => {
@@ -816,7 +906,10 @@ mod tests {
         /// begun.
         spawn_delay: Mutex<Duration>,
         inspect_delay: Mutex<Duration>,
+        /// Cancelled as the file check ends, before its caller can look.
+        cancel_on_inspect: Mutex<Option<RenderControl>>,
         spawn_calls: AtomicUsize,
+        observed_jobs: Arc<AtomicUsize>,
         released: Arc<std::sync::atomic::AtomicBool>,
         reaped: Arc<AtomicUsize>,
         /// Threads that guarded their pipe writes, and writes from any other.
@@ -865,6 +958,9 @@ mod tests {
         fn inspect(&self, _: &Path) -> Result<FileIdentity, UnavailableCause> {
             let delay = *self.inspect_delay.lock().unwrap();
             std::thread::sleep(delay);
+            if let Some(control) = self.cancel_on_inspect.lock().unwrap().take() {
+                control.cancel();
+            }
             Ok(FileIdentity {
                 dev: 1,
                 ino: 2,
@@ -906,6 +1002,7 @@ mod tests {
                 stdout_writer,
                 Arc::clone(&done),
                 Arc::clone(&killed),
+                Arc::clone(&self.observed_jobs),
             );
             Ok(SpawnedWorker {
                 process: Box::new(FakeProcess {
@@ -939,6 +1036,7 @@ mod tests {
         mut stdout: PipeWriter,
         done: Arc<Mutex<bool>>,
         killed: Arc<(Mutex<bool>, std::sync::Condvar)>,
+        observed_jobs: Arc<AtomicUsize>,
     ) {
         std::thread::spawn(move || {
             let hello = wire::read_frame(&mut stdin, Direction::ParentToWorker);
@@ -946,7 +1044,12 @@ mod tests {
                 let _ = stdout.write_all(&script.output);
             }
             std::thread::spawn(move || {
-                let _ = std::io::copy(&mut stdin, &mut std::io::sink());
+                while let Ok(Some(frame)) = wire::read_frame(&mut stdin, Direction::ParentToWorker)
+                {
+                    if matches!(frame, Frame::Job(_)) {
+                        observed_jobs.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
             });
             if script.closes {
                 drop(stdout);
@@ -972,6 +1075,62 @@ mod tests {
 
     fn reply(parts: &[Vec<u8>]) -> Vec<u8> {
         parts.concat()
+    }
+
+    #[test]
+    fn auto_completion_returns_actual_content_kind_after_clean_worker_exit() {
+        for kind in [MediaKind::Raster, MediaKind::Svg] {
+            let output = reply(&[
+                ready(build_id()),
+                frame(&Frame::DetectedRendered {
+                    kind,
+                    rendered: rendered(),
+                }),
+            ]);
+            let fake = Fake::new(vec![Script::replies(output, WorkerExit::Code(0))]);
+            let mut job = job(1);
+            job.kind = JobKind::Auto;
+            let output = client(&fake)
+                .render_media_with_control(
+                    &job,
+                    &RenderControl::with_deadline(Instant::now() + Duration::from_secs(1)),
+                )
+                .unwrap();
+            assert_eq!(output.kind, kind);
+            assert_eq!(output.rendered, rendered());
+            assert_eq!(fake.spawns.load(Ordering::SeqCst), 1);
+            assert!(fake.reaped.load(Ordering::SeqCst) >= 1);
+        }
+    }
+
+    #[test]
+    fn auto_cannot_succeed_with_an_untyped_legacy_reply() {
+        let output = reply(&[ready(build_id()), frame(&Frame::Rendered(rendered()))]);
+        let fake = Fake::new(vec![Script::replies(output, WorkerExit::Code(0))]);
+        let mut job = job(1);
+        job.kind = JobKind::Auto;
+        assert_eq!(
+            client(&fake).render(&job),
+            Err(FailureCode::WorkerUnavailable)
+        );
+        assert_eq!(fake.spawns.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_typed_reply_cannot_change_an_explicitly_requested_kind() {
+        let output = reply(&[
+            ready(build_id()),
+            frame(&Frame::DetectedRendered {
+                kind: MediaKind::Svg,
+                rendered: rendered(),
+            }),
+        ]);
+        let fake = Fake::new(vec![Script::replies(output, WorkerExit::Code(0))]);
+        assert_eq!(
+            client(&fake).render(&job(1)),
+            Err(FailureCode::WorkerUnavailable)
+        );
+        assert_eq!(fake.spawns.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -1263,7 +1422,7 @@ mod tests {
             .stuck
             .store(MAX_STUCK_WORKERS, Ordering::SeqCst);
         assert_eq!(
-            spawn_within(&client.shared, Instant::now() + FAST.ready, FAST).err(),
+            spawn_within(&client.shared, Instant::now() + FAST.ready, FAST, None).err(),
             Some(FailureCode::WorkerUnavailable)
         );
         assert_eq!(fake.spawn_calls.load(Ordering::SeqCst), 0);
@@ -1560,9 +1719,278 @@ mod tests {
             budgets.render_deadline(JobKind::Svg),
             Duration::from_secs(3)
         );
+        // An Auto job may turn out to be SVG, so the parent waits as long.
+        assert_eq!(
+            budgets.render_deadline(JobKind::Auto),
+            Duration::from_secs(3)
+        );
         assert_eq!(budgets.cleanup, Duration::from_millis(250));
         assert_eq!(budgets.footprint_limit, 768 * 1024 * 1024);
         let _ = PROTOCOL_VERSION;
+    }
+
+    /// Budgets no test waits out: a job that ends while a test runs ended
+    /// because it was cancelled, not because a deadline passed.
+    const PATIENT: Budgets = Budgets {
+        ready: Duration::from_secs(60),
+        render: Some(Duration::from_secs(60)),
+        ..FAST
+    };
+
+    fn patient(fake: &Arc<Fake>) -> WorkerClient {
+        WorkerClient::with(build_id(), Box::new(Arc::clone(fake)), PATIENT)
+    }
+
+    /// `rendering`'s result, which cancellation must bring within seconds.
+    fn promptly<T>(rendering: std::thread::ScopedJoinHandle<'_, T>) -> T {
+        let until = Instant::now() + Duration::from_secs(5);
+        while !rendering.is_finished() {
+            assert!(Instant::now() < until, "cancelling did not end the job");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        rendering.join().unwrap()
+    }
+
+    fn wait_for_count(counter: &AtomicUsize, count: usize) {
+        let until = Instant::now() + Duration::from_secs(10);
+        while counter.load(Ordering::SeqCst) < count {
+            assert!(
+                Instant::now() < until,
+                "worker fixture did not reach count {count}"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn cancelled_or_expired_before_admission_never_starts_a_worker() {
+        use crate::client::RenderError;
+        let fake = Fake::new(vec![Script::silent()]);
+        let client = client(&fake);
+        let cancelled = RenderControl::default();
+        cancelled.cancel();
+        assert_eq!(
+            client.render_with_control(&job(1), &cancelled),
+            Err(RenderError::Cancelled)
+        );
+        let expired = RenderControl::with_deadline(Instant::now());
+        assert_eq!(
+            client.render_with_control(&job(1), &expired),
+            Err(RenderError::Failure(FailureCode::RenderTimeout))
+        );
+        assert_eq!(fake.spawn_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn cancellation_before_ready_kills_reaps_and_does_not_retry() {
+        use crate::client::RenderError;
+        let fake = Fake::new(vec![Script::silent()]);
+        let client = patient(&fake);
+        let control = RenderControl::default();
+        std::thread::scope(|scope| {
+            let rendering = scope.spawn(|| client.render_with_control(&job(1), &control));
+            wait_for_count(&fake.spawns, 1);
+            control.cancel();
+            assert_eq!(promptly(rendering), Err(RenderError::Cancelled));
+        });
+        assert_eq!(fake.spawns.load(Ordering::SeqCst), 1);
+        assert_eq!(fake.observed_jobs.load(Ordering::SeqCst), 0);
+        assert_eq!(fake.kills.load(Ordering::SeqCst), 1);
+        assert_eq!(fake.reaped.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn cancellation_after_ready_kills_and_reaps_the_running_job() {
+        use crate::client::RenderError;
+        let fake = Fake::new(vec![Script::silent_with(ready(build_id()))]);
+        let client = patient(&fake);
+        let control = RenderControl::default();
+        std::thread::scope(|scope| {
+            let rendering = scope.spawn(|| client.render_with_control(&job(1), &control));
+            wait_for_count(&fake.observed_jobs, 1);
+            control.cancel();
+            assert_eq!(promptly(rendering), Err(RenderError::Cancelled));
+        });
+        assert_eq!(fake.spawns.load(Ordering::SeqCst), 1);
+        assert_eq!(fake.kills.load(Ordering::SeqCst), 1);
+        assert_eq!(fake.reaped.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn admission_deadline_includes_waiting_for_another_render() {
+        use crate::client::RenderError;
+        let fake = Fake::new(vec![Script::silent_with(ready(build_id()))]);
+        let client = client(&fake);
+        std::thread::scope(|scope| {
+            let rendering = scope.spawn(|| client.render(&job(1)));
+            wait_for_count(&fake.observed_jobs, 1);
+            let control = RenderControl::with_deadline(Instant::now() + Duration::from_millis(50));
+            assert_eq!(
+                client.render_with_control(&job(1), &control),
+                Err(RenderError::Failure(FailureCode::RenderTimeout))
+            );
+            assert!(
+                !rendering.is_finished(),
+                "mutex waiter outlived the rendering job"
+            );
+            assert_eq!(fake.spawn_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(rendering.join().unwrap(), Err(FailureCode::RenderTimeout));
+        });
+    }
+
+    #[test]
+    fn one_admission_deadline_covers_the_cold_retry() {
+        use crate::client::RenderError;
+        let fake = Fake::new(vec![Script::silent(), Script::silent()]);
+        let client = client(&fake);
+        let started = Instant::now();
+        let control =
+            RenderControl::with_deadline(started + FAST.ready + Duration::from_millis(75));
+        assert_eq!(
+            client.render_with_control(&job(1), &control),
+            Err(RenderError::Failure(FailureCode::RenderTimeout))
+        );
+        assert_eq!(fake.spawns.load(Ordering::SeqCst), 2);
+        assert_eq!(fake.kills.load(Ordering::SeqCst), 2);
+        assert_eq!(fake.reaped.load(Ordering::SeqCst), 2);
+        assert!(
+            started.elapsed() < FAST.ready * 2,
+            "retry reset the admission deadline"
+        );
+    }
+
+    #[test]
+    fn admission_deadline_also_covers_the_final_clean_exit() {
+        use crate::client::RenderError;
+        let output = reply(&[ready(build_id()), frame(&Frame::Rendered(rendered()))]);
+        let fake = Fake::new(vec![Script {
+            exit_delay: Duration::from_millis(40),
+            ..Script::replies(output, WorkerExit::Code(0))
+        }]);
+        let client = client(&fake);
+        let control = RenderControl::with_deadline(Instant::now() + Duration::from_millis(20));
+        assert_eq!(
+            client.render_with_control(&job(1), &control),
+            Err(RenderError::Failure(FailureCode::RenderTimeout))
+        );
+        assert_eq!(fake.spawns.load(Ordering::SeqCst), 1);
+        assert_eq!(fake.reaped.load(Ordering::SeqCst), 1);
+    }
+
+    /// A worker that replied but lingers is killed when its job runs out of
+    /// time, not after the whole cleanup budget.
+    #[test]
+    fn interruption_cuts_short_the_wait_for_a_clean_exit() {
+        use crate::client::RenderError;
+        let output = reply(&[ready(build_id()), frame(&Frame::Rendered(rendered()))]);
+        let fake = Fake::new(vec![Script {
+            exit_delay: Duration::from_secs(10),
+            ..Script::replies(output, WorkerExit::Code(0))
+        }]);
+        let client = WorkerClient::with(
+            build_id(),
+            Box::new(Arc::clone(&fake)),
+            Budgets {
+                cleanup: Duration::from_secs(5),
+                ..PATIENT
+            },
+        );
+        let started = Instant::now();
+        let control = RenderControl::with_deadline(started + Duration::from_millis(300));
+        assert_eq!(
+            client.render_with_control(&job(1), &control),
+            Err(RenderError::Failure(FailureCode::RenderTimeout))
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "waited out the cleanup budget"
+        );
+        assert_eq!(fake.kills.load(Ordering::SeqCst), 1);
+        assert_eq!(fake.reaped.load(Ordering::SeqCst), 1);
+    }
+
+    /// A job interrupted while the worker file is being checked starts no
+    /// worker once the check ends.
+    #[test]
+    fn interruption_during_the_file_check_starts_no_worker() {
+        use crate::client::RenderError;
+        let fake = Fake::new(vec![Script::silent()]);
+        *fake.inspect_delay.lock().unwrap() = Duration::from_millis(300);
+        let client = patient(&fake);
+        let control = RenderControl::with_deadline(Instant::now() + Duration::from_millis(50));
+        assert_eq!(
+            client.render_with_control(&job(1), &control),
+            Err(RenderError::Failure(FailureCode::RenderTimeout))
+        );
+        let until = Instant::now() + Duration::from_secs(10);
+        while client.shared.late_spawns.load(Ordering::SeqCst) > 0 {
+            assert!(Instant::now() < until, "the check never finished");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(fake.spawn_calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// Cancelled as the check ends, while its caller still sleeps between
+    /// looks: the helper itself sees it and starts nothing.
+    #[test]
+    fn cancellation_as_the_file_check_ends_starts_no_worker() {
+        use crate::client::RenderError;
+        let fake = Fake::new(vec![Script::silent()]);
+        let client = patient(&fake);
+        let control = RenderControl::default();
+        *fake.cancel_on_inspect.lock().unwrap() = Some(control.clone());
+        assert_eq!(
+            client.render_with_control(&job(1), &control),
+            Err(RenderError::Cancelled)
+        );
+        let until = Instant::now() + Duration::from_secs(10);
+        while client.shared.late_spawns.load(Ordering::SeqCst) > 0 {
+            assert!(Instant::now() < until, "the check never finished");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(fake.spawn_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn cancelled_late_spawn_is_reaped_before_new_start_is_admitted() {
+        use crate::client::RenderError;
+        let fake = Fake::new(vec![Script::silent()]);
+        *fake.spawn_delay.lock().unwrap() = FAST.ready * 2;
+        let client = patient(&fake);
+        let control = RenderControl::default();
+        std::thread::scope(|scope| {
+            let rendering = scope.spawn(|| client.render_with_control(&job(1), &control));
+            wait_for_count(&fake.spawn_calls, 1);
+            control.cancel();
+            assert_eq!(promptly(rendering), Err(RenderError::Cancelled));
+        });
+        assert_eq!(client.render(&job(1)), Err(FailureCode::WorkerUnavailable));
+        assert_eq!(fake.spawn_calls.load(Ordering::SeqCst), 1);
+        wait_for_count(&fake.reaped, 1);
+        assert_eq!(fake.kills.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn cancellation_preserves_abandoned_worker_accounting() {
+        use crate::client::RenderError;
+        let fake = Fake::new(vec![Script {
+            killable: false,
+            ..Script::silent()
+        }]);
+        let client = patient(&fake);
+        let control = RenderControl::default();
+        std::thread::scope(|scope| {
+            let rendering = scope.spawn(|| client.render_with_control(&job(1), &control));
+            wait_for_count(&fake.spawns, 1);
+            control.cancel();
+            assert_eq!(promptly(rendering), Err(RenderError::Cancelled));
+        });
+        assert_eq!(client.shared.abandoned_count(), 1);
+        assert_eq!(fake.kills.load(Ordering::SeqCst), 1);
+        fake.released.store(true, Ordering::SeqCst);
+        client.availability();
+        assert_eq!(client.shared.abandoned_count(), 0);
+        assert_eq!(fake.reaped.load(Ordering::SeqCst), 1);
     }
 
     impl Script {

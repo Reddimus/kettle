@@ -30,6 +30,14 @@ use crate::{container, source};
 
 pub(crate) fn render(job: &Job) -> Result<Rendered, FailureCode> {
     let snapshot = source::load(&job.source, job.kind.input_cap())?;
+    render_loaded(job, &snapshot)
+}
+
+/// Render a snapshot already loaded within the raster input cap.
+pub(crate) fn render_loaded(
+    job: &Job,
+    snapshot: &source::Snapshot<'_>,
+) -> Result<Rendered, FailureCode> {
     let image = crate::guarded(FailureCode::RenderParse, || decode(&snapshot.bytes))?;
     let (width, height, rgba) = fit(image, job.target)?;
     let digest =

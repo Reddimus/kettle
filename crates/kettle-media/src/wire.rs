@@ -56,7 +56,7 @@ impl Direction {
         match self {
             Self::ExternalToParent => kind == 3,
             Self::ParentToWorker => matches!(kind, 1 | 4),
-            Self::WorkerToParent => matches!(kind, 2 | 5 | 6),
+            Self::WorkerToParent => matches!(kind, 2 | 5 | 6 | 7),
         }
     }
 }
@@ -67,6 +67,7 @@ pub enum Frame {
     ExternalRequest(ExternalRequest),
     Job(Job),
     Rendered(Rendered),
+    DetectedRendered { kind: MediaKind, rendered: Rendered },
     Failure(Failure),
 }
 impl Frame {
@@ -78,13 +79,14 @@ impl Frame {
             Self::Job(_) => 4,
             Self::Rendered(_) => 5,
             Self::Failure(_) => 6,
+            Self::DetectedRendered { .. } => 7,
         }
     }
     pub fn validate(&self) -> Result<(), ValidationError> {
         match self {
             Self::Hello(h) => h.build_id.validate(),
             Self::Ready(r) => r.build_id.validate(),
-            Self::Rendered(r) => r.validate(),
+            Self::Rendered(r) | Self::DetectedRendered { rendered: r, .. } => r.validate(),
             Self::Failure(_) => Ok(()),
             Self::Job(j) => validate_worker_job(j),
             Self::ExternalRequest(j) => {
@@ -295,7 +297,15 @@ fn header_prefix(bytes: &[u8], direction: Direction) -> Result<(u8, usize), Wire
         return Err(WireError::RestartRequired);
     }
     let kind = bytes[6];
-    if !(1..=6).contains(&kind) {
+    // Recognize tags from the same table that owns their permitted directions.
+    if ![
+        Direction::ExternalToParent,
+        Direction::ParentToWorker,
+        Direction::WorkerToParent,
+    ]
+    .into_iter()
+    .any(|candidate| candidate.permits(kind))
+    {
         return Err(WireError::UnknownEnum);
     }
     if !direction.permits(kind) {
@@ -318,7 +328,7 @@ pub fn read_frame(
 }
 /// [`read_frame`] for a stage that expects a small frame: a header claiming more than
 /// `max_frame_bytes` in all (header included) is refused before any payload buffer is
-/// allocated. Ready is about 150 bytes, so it is not read under the 74 MiB reply cap.
+/// allocated. Ready is about 150 bytes, so it is not read under the full rendered-reply cap.
 pub fn read_frame_within(
     reader: &mut impl Read,
     direction: Direction,
@@ -422,6 +432,7 @@ impl Writer {
     }
     fn kind(&mut self, k: JobKind) -> Result<(), WireError> {
         match k {
+            JobKind::Auto => self.u8(6),
             JobKind::Mermaid => self.u8(0),
             JobKind::Svg => self.u8(1),
             JobKind::Raster => self.u8(2),
@@ -526,34 +537,50 @@ fn put_frame(w: &mut Writer, frame: &Frame) -> Result<(), WireError> {
             w.job_tail(j)
         }
         Frame::Job(j) => put_job(w, j),
-        Frame::Rendered(r) => {
-            w.u32(r.width)?;
-            w.u32(r.height)?;
-            w.blob(&r.rgba)?;
-            w.raw(&r.digest.sha256)?;
-            w.u8(u8::from(r.digest.path_identity.is_some()))?;
-            if let Some(p) = r.digest.path_identity {
-                w.u64(p.dev)?;
-                w.u64(p.ino)?;
-                w.u64(p.size)?;
-                w.u64(p.mtime_seconds as u64)?;
-                w.u32(p.mtime_nanos)?;
-            }
-            w.strings(&r.source_text)?;
-            w.u8(r.fence_count)?;
-            w.u8(u8::from(r.fence_index.is_some()))?;
-            if let Some(i) = r.fence_index {
-                w.u8(i)?;
-            }
-            w.strings(&r.fence_sources)?;
-            w.strings(&r.uncovered_scripts)?;
-            w.count(r.warnings.len())?;
-            for c in &r.warnings {
-                w.u8(*c as u8)?;
-            }
-            Ok(())
+        Frame::Rendered(rendered) => put_rendered(w, rendered),
+        Frame::DetectedRendered { kind, rendered } => {
+            w.u8(media_kind_tag(*kind))?;
+            put_rendered(w, rendered)
         }
     }
+}
+
+fn media_kind_tag(kind: MediaKind) -> u8 {
+    match kind {
+        MediaKind::Raster => 0,
+        MediaKind::Svg => 1,
+        MediaKind::Mermaid => 2,
+        MediaKind::Markdown => 3,
+        MediaKind::Video => 4,
+    }
+}
+
+fn put_rendered(w: &mut Writer, r: &Rendered) -> Result<(), WireError> {
+    w.u32(r.width)?;
+    w.u32(r.height)?;
+    w.blob(&r.rgba)?;
+    w.raw(&r.digest.sha256)?;
+    w.u8(u8::from(r.digest.path_identity.is_some()))?;
+    if let Some(p) = r.digest.path_identity {
+        w.u64(p.dev)?;
+        w.u64(p.ino)?;
+        w.u64(p.size)?;
+        w.u64(p.mtime_seconds as u64)?;
+        w.u32(p.mtime_nanos)?;
+    }
+    w.strings(&r.source_text)?;
+    w.u8(r.fence_count)?;
+    w.u8(u8::from(r.fence_index.is_some()))?;
+    if let Some(i) = r.fence_index {
+        w.u8(i)?;
+    }
+    w.strings(&r.fence_sources)?;
+    w.strings(&r.uncovered_scripts)?;
+    w.count(r.warnings.len())?;
+    for c in &r.warnings {
+        w.u8(*c as u8)?;
+    }
+    Ok(())
 }
 
 struct Reader<'a> {
@@ -676,6 +703,16 @@ impl<'a> Reader<'a> {
             protocol_version: self.u16()?,
         })
     }
+    fn media_kind(&mut self) -> Result<MediaKind, WireError> {
+        match self.u8()? {
+            0 => Ok(MediaKind::Raster),
+            1 => Ok(MediaKind::Svg),
+            2 => Ok(MediaKind::Mermaid),
+            3 => Ok(MediaKind::Markdown),
+            4 => Ok(MediaKind::Video),
+            _ => Err(WireError::UnknownEnum),
+        }
+    }
     fn kind(&mut self) -> Result<JobKind, WireError> {
         let k = match self.u8()? {
             0 => JobKind::Mermaid,
@@ -690,6 +727,7 @@ impl<'a> Reader<'a> {
                 end_s: self.opt_f64()?,
                 at_s: self.opt_f64()?,
             }),
+            6 => JobKind::Auto,
             _ => return Err(WireError::UnknownEnum),
         };
         k.validate()?;
@@ -899,6 +937,10 @@ fn parse_frame(r: &mut Reader<'_>, kind: u8) -> Result<Frame, WireError> {
             Frame::Job(r.job_tail(kind, source)?)
         }
         5 => Frame::Rendered(r.rendered()?),
+        7 => Frame::DetectedRendered {
+            kind: r.media_kind()?,
+            rendered: r.rendered()?,
+        },
         6 => Frame::Failure(Failure {
             code: failure_code(r.u8()?)?,
         }),

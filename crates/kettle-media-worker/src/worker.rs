@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use kettle_media::wire::{Direction, Frame, WireError, read_frame, write_frame};
 use kettle_media::{
-    BuildId, Failure, FailureCode, HandshakeOutcome, Job, Ready, Rendered, ValidationError,
-    check_ready,
+    BuildId, Failure, FailureCode, HandshakeOutcome, Job, JobKind, MediaKind, Ready, Rendered,
+    ValidationError, check_ready,
 };
 
 /// Exit codes. 4, 8 and 9 mean what they mean for the video-preview worker.
@@ -23,9 +23,10 @@ pub(crate) const EXIT_PROTOCOL: i32 = 2;
 pub(crate) const READY_DEADLINE: Duration = Duration::from_secs(5);
 /// From Ready until the job has arrived.
 const JOB_ARRIVAL_DEADLINE: Duration = Duration::from_secs(5);
-/// From the job's arrival until its reply is written, blocked output included.
-/// The client's own deadline is shorter for most kinds.
-const JOB_DEADLINE: Duration = Duration::from_secs(3);
+// From the job's arrival until its reply is written, blocked output
+// included, the job has its kind's `JobKind::render_deadline`, the one the
+// client waits too. An Auto job narrows it once its kind is known, still
+// counted from its arrival.
 
 /// The panic report: one fixed line, never the message, its payload, a
 /// location or a backtrace, and no crash file.
@@ -72,6 +73,16 @@ impl Watchdog {
         *at.lock().unwrap_or_else(PoisonError::into_inner) = Instant::now() + budget;
         changed.notify_one();
     }
+
+    /// End the current phase by `until` at the latest; never extends it.
+    fn narrow(&self, until: Instant) {
+        let (at, changed) = &*self.deadline;
+        let mut at = at.lock().unwrap_or_else(PoisonError::into_inner);
+        if until < *at {
+            *at = until;
+            changed.notify_one();
+        }
+    }
 }
 
 /// Serve one job read from `input`, answering on `output`, and return the
@@ -103,10 +114,22 @@ pub(crate) fn serve(input: &mut impl Read, output: &mut impl Write, watchdog: &W
         Ok(None) => return 0,
         other => return refuse(output, other),
     };
-    watchdog.arm(JOB_DEADLINE);
-    match answer(&job) {
-        Ok(rendered) => {
-            let frame = Frame::Rendered(rendered);
+    let arrived = Instant::now();
+    watchdog.arm(job.kind.render_deadline());
+    let classified = |kind: MediaKind| {
+        if job.kind == JobKind::Auto {
+            watchdog.narrow(arrived + kind.render_deadline());
+        }
+    };
+    match answer(&job, classified) {
+        Ok((kind, rendered)) => {
+            // Only an Auto job's reply says what it was; an explicit kind's
+            // reply stays the plain frame, so it cannot claim another kind.
+            let frame = if job.kind == JobKind::Auto {
+                Frame::DetectedRendered { kind, rendered }
+            } else {
+                Frame::Rendered(rendered)
+            };
             match write_frame(output, &frame, Direction::WorkerToParent) {
                 Ok(()) => 0,
                 Err(_) => EXIT_PROTOCOL,
@@ -116,11 +139,19 @@ pub(crate) fn serve(input: &mut impl Read, output: &mut impl Write, watchdog: &W
     }
 }
 
-/// Render the job, or say why not.
-fn answer(job: &Job) -> Result<Rendered, FailureCode> {
+/// Render the job and say what it was, or say why not. `classified` hears
+/// the kind before it is rendered.
+fn answer(
+    job: &Job,
+    mut classified: impl FnMut(MediaKind),
+) -> Result<(MediaKind, Rendered), FailureCode> {
     #[cfg(feature = "test-faults")]
     faults::inject(job);
-    kettle_media_render::render(job)
+    kettle_media_render::render_with_kind(job, |kind| {
+        classified(kind);
+        #[cfg(feature = "test-faults")]
+        faults::after_classification(job);
+    })
 }
 
 /// Answer a frame other than the one expected, or one that could not be read.
@@ -146,18 +177,36 @@ fn reply(output: &mut impl Write, code: FailureCode, exit: i32) -> i32 {
 
 /// Test fixture only (feature `test-faults`): a raster job whose bytes start
 /// with [`faults::PANIC`] panics with the rest as its message, so a test can
-/// show the message never reaches stderr.
+/// show the message never reaches stderr; and a job whose theme accent is
+/// `[b'K', b'T', before, after]` pauses `before` tenths of a second before it
+/// is classified and `after` tenths once it is, so a test can show which
+/// deadline governs each stretch.
 #[cfg(feature = "test-faults")]
 mod faults {
+    use std::time::Duration;
+
     use kettle_media::{Job, Source};
 
     const PANIC: &[u8] = b"kettle-media-worker-test-panic:";
+    const PAUSE: [u8; 2] = *b"KT";
 
     pub(super) fn inject(job: &Job) {
         if let Source::Bytes(bytes) = &job.source
             && let Some(message) = bytes.strip_prefix(PANIC)
         {
             panic!("{}", String::from_utf8_lossy(message));
+        }
+        pause(job, 2);
+    }
+
+    pub(super) fn after_classification(job: &Job) {
+        pause(job, 3);
+    }
+
+    fn pause(job: &Job, which: usize) {
+        let accent = job.theme.accent;
+        if accent[..2] == PAUSE {
+            std::thread::sleep(Duration::from_millis(100) * u32::from(accent[which]));
         }
     }
 }

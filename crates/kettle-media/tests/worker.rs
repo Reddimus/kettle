@@ -83,7 +83,9 @@ fn handshake_mismatch() {
 #[test]
 fn oversize_frame() {
     let mut input = prefix();
-    let mut header = b"KMED\x01\x00\x04".to_vec();
+    let mut header = MAGIC.to_vec();
+    header.extend(PROTOCOL_VERSION.to_le_bytes());
+    header.push(4);
     header.extend(u32::MAX.to_le_bytes());
     input.extend(header);
     assert_eq!(exchange(&input), expected_reply(FailureCode::TooLarge));
@@ -116,6 +118,7 @@ fn index_out_of_range() {
 #[test]
 fn malformed_truncation() {
     let mut input = prefix();
-    input.extend(b"KMED\x01");
+    input.extend(MAGIC);
+    input.push(PROTOCOL_VERSION.to_le_bytes()[0]);
     assert_eq!(exchange(&input), expected_reply(FailureCode::BadParams));
 }

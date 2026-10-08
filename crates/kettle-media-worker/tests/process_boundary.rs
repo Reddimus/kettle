@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use kettle_media::wire::{Direction, Frame, encode, read_frame, write_frame};
 use kettle_media::{
-    BuildId, Canvas, Failure, FailureCode, FallbackFont, Hello, Job, JobKind, NativePath, Ready,
-    Source, Target, Theme, Warning,
+    BuildId, Canvas, Failure, FailureCode, FallbackFont, Hello, Job, JobKind, MediaKind,
+    NativePath, Ready, Source, Target, Theme, Warning,
 };
 
 #[path = "../../kettle-media-render/tests/support/fonts.rs"]
@@ -175,6 +175,52 @@ fn an_svg_job_is_rendered() {
     assert_eq!(receive(&mut child), None);
     assert_eq!(exit_code(&mut child, Duration::from_secs(10)), 0);
     assert_eq!(finish(&mut child), "");
+}
+
+const SVG_1X1: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><rect width="1" height="1" fill="rgb(10,20,30)"/></svg>"#;
+
+/// One job's whole exchange: its reply, then a clean exit with nothing else
+/// said.
+fn only_reply(frame: &Frame) -> Option<Frame> {
+    let mut child = worker();
+    handshake(&mut child);
+    send(&mut child, frame);
+    let reply = receive(&mut child);
+    drop(child.stdin.take());
+    assert_eq!(receive(&mut child), None);
+    assert_eq!(exit_code(&mut child, Duration::from_secs(10)), 0);
+    assert_eq!(finish(&mut child), "");
+    reply
+}
+
+#[test]
+fn an_auto_job_replies_with_the_kind_it_turned_out_to_be() {
+    for (bytes, expected) in [
+        (png([10, 20, 30, 255]), MediaKind::Raster),
+        (SVG_1X1.to_vec(), MediaKind::Svg),
+    ] {
+        let Some(Frame::DetectedRendered { kind, rendered }) =
+            only_reply(&job_of(JobKind::Auto, &bytes))
+        else {
+            panic!("no typed reply to an Auto job");
+        };
+        assert_eq!(kind, expected);
+        assert_eq!(
+            (rendered.width, rendered.height, rendered.rgba),
+            (1, 1, vec![10, 20, 30, 255])
+        );
+    }
+    assert_eq!(
+        only_reply(&job_of(JobKind::Auto, b"ordinary prose")),
+        failure(FailureCode::UnsupportedMedia)
+    );
+}
+
+#[test]
+fn an_explicit_kind_gets_the_plain_reply() {
+    for frame in [job(&png([10, 20, 30, 255])), job_of(JobKind::Svg, SVG_1X1)] {
+        assert!(matches!(only_reply(&frame), Some(Frame::Rendered(_))));
+    }
 }
 
 #[test]
@@ -529,4 +575,70 @@ fn worker_panic_does_not_echo_payload() {
     assert_eq!(receive(&mut child), None);
     assert_ne!(exit_code(&mut child, Duration::from_secs(10)), 0);
     assert_eq!(finish(&mut child), "media worker panic\n");
+}
+
+/// `kind` over `bytes`, pausing `before` and `after` tenths of a second
+/// either side of its classification (the `test-faults` worker's hook).
+#[cfg(feature = "test-faults")]
+fn paused(kind: JobKind, bytes: &[u8], before: u8, after: u8) -> Frame {
+    let Frame::Job(mut paused) = job_of(kind, bytes) else {
+        unreachable!()
+    };
+    paused.theme.accent = [b'K', b'T', before, after];
+    Frame::Job(paused)
+}
+
+/// The job's reply, or `None` when the worker's watchdog ended it first.
+#[cfg(feature = "test-faults")]
+fn reply_or_timeout(frame: &Frame) -> Option<Frame> {
+    let mut child = worker();
+    handshake(&mut child);
+    send(&mut child, frame);
+    drop(child.stdin.take());
+    let reply = receive(&mut child);
+    let code = exit_code(&mut child, Duration::from_secs(10));
+    assert_eq!(code, if reply.is_some() { 0 } else { EXIT_TIMEOUT });
+    assert_eq!(finish(&mut child), "");
+    reply
+}
+
+/// Raster gets two seconds and SVG three, whether the kind was asked for or
+/// found by classification.
+#[cfg(feature = "test-faults")]
+#[test]
+fn each_kind_keeps_its_own_render_deadline() {
+    let png = png([10, 20, 30, 255]);
+    assert_eq!(
+        reply_or_timeout(&paused(JobKind::Raster, &png, 0, 22)),
+        None
+    );
+    assert_eq!(reply_or_timeout(&paused(JobKind::Auto, &png, 0, 22)), None);
+    assert!(matches!(
+        reply_or_timeout(&paused(JobKind::Svg, SVG_1X1, 0, 22)),
+        Some(Frame::Rendered(_))
+    ));
+    assert!(matches!(
+        reply_or_timeout(&paused(JobKind::Auto, SVG_1X1, 0, 22)),
+        Some(Frame::DetectedRendered {
+            kind: MediaKind::Svg,
+            ..
+        })
+    ));
+}
+
+/// Learning an Auto job's kind narrows its deadline from the job's arrival:
+/// it does not start a new one. Each pause alone is within the raster
+/// deadline; together they are not.
+#[cfg(feature = "test-faults")]
+#[test]
+fn classification_does_not_restart_the_render_clock() {
+    let png = png([10, 20, 30, 255]);
+    assert!(matches!(
+        reply_or_timeout(&paused(JobKind::Auto, &png, 0, 12)),
+        Some(Frame::DetectedRendered {
+            kind: MediaKind::Raster,
+            ..
+        })
+    ));
+    assert_eq!(reply_or_timeout(&paused(JobKind::Auto, &png, 12, 12)), None);
 }
