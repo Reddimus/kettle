@@ -8,6 +8,21 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- `kettle ctl get_state` reports `caller`: whether the connecting process runs
+  in one of this Kettle's panes, from the process tree rather than anything
+  the caller says. A client's first request claims its own pid and start time;
+  Kettle believes it only when the kernel agrees, then walks at most 64
+  parents looking for a pane's own child process. Every pane now starts with
+  `KETTLE_PANE_ID` and `KETTLE_PID`, set after your `env` entries; they are
+  reported as hints and never count as proof.
+- `kettle ctl` and `kettle mcp` now pick the Kettle they run inside, matched
+  by process ancestry, before a newer one; then the one `KETTLE_PID` names;
+  then the newest, as before. A Kettle chosen by `--pid` or ancestry is the
+  only one tried. Before sending anything, a client checks that the server it
+  reached is the process its registry entry names. A server also leaves a
+  pointer to its entry where the OS keeps the registry for your account, so a
+  client started with a stripped environment still finds it.
+
 - Agent previews (`agent-display`, Settings → Agents → Agent previews, or
   `--agent-display on|off`) let agents show media in Kettle without reading
   the screen or typing. On its own it starts the control server for display

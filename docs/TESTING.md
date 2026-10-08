@@ -3619,6 +3619,33 @@ launch `kettle --agent-server off --agent-display on` and confirm `kettle ctl
 get_state` is refused with `display_only`; then turn Agent previews on in
 Settings in a plain launch and confirm a running `kettle ctl` client is
 refused with `display_only` rather than finding no server.
+
+Caller verification has scripted and real-process coverage. `kettle-ctl`'s
+`identity` tests walk a scripted process table: a matching claim reaches the
+server; equal start ticks pass; a pid alone, a different start, or a pid reused
+before accept (S4's failure) never verifies; a peer that exits or is replaced
+after accept, a younger parent, a reparented child, a cycle, a spent deadline
+and a 65th link all fail closed; an unreadable parent ends the chain. Two real
+tests connect over the actual transport: the test process to itself, and a
+shell-started grandchild that the server verifies through the shell up to
+itself. `process` tests read this process and a child, a killed child before it
+is reaped, and Linux `stat` lines with hostile command names. `ctl_server`
+tests pin the claim latch and that `get_state` alone carries the check over a
+real connection; App tests pin the nearest-pane match and that hints never
+verify; `mux` tests pin that the pane id exists before the child and that
+config cannot override `KETTLE_PANE_ID`/`KETTLE_PID`. For a live check, run
+`kettle ctl get_state --pid $KETTLE_PID` inside a pane and confirm `caller`
+names it, then run it outside Kettle and confirm `no_pane`.
+
+Client selection is tested over scripted registries: the Kettle a client runs
+inside beats a newer one, the nearer of nested ones wins, a reused pid with
+another start is not an ancestor, its failure never falls through to another
+instance, `KETTLE_PID` is a fallback behind the ancestry and only when well
+formed, and an explicit `--pid` is exact. An alias leads a client that knows
+only the OS location to the real entry once, an alias to a missing entry leads
+nowhere, and a dead server's alias is withdrawn while its entry is left to its
+own registry. A real connection is accepted only when the kernel names the
+entry's pid and the live start matches its token.
 #### `kettle mcp`
 
 `kettle mcp --self-test` (in-process handshake +

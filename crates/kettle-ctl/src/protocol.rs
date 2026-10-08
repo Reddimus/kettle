@@ -346,6 +346,66 @@ pub struct Request {
     /// Method parameters; shape is method-specific. Absent → `Null`.
     #[serde(default)]
     pub params: Value,
+    /// Who the client says it is. A connection's first request fixes it; the
+    /// server believes it only where it matches the kernel's view of the
+    /// connection. Absent from older clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller: Option<PeerClaim>,
+}
+
+/// A client's claim about its own process, sent with its first request.
+/// Untrusted: it can only confirm what the server observes, never replace it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerClaim {
+    /// The client's own pid.
+    pub pid: std::num::NonZeroU32,
+    /// When the client started, in its platform's start unit. Without it a
+    /// pid alone never verifies anything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_token: Option<StartToken>,
+    /// `KETTLE_PANE_ID` from the client's environment: a hint, never proof.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_hint: Option<u64>,
+    /// `KETTLE_PID` from the client's environment: a hint, never proof.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid_hint: Option<std::num::NonZeroU32>,
+}
+
+/// A process start instant on the wire. Always a decimal string: Windows
+/// `FILETIME` values exceed the integers a JSON number carries exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StartToken(pub u64);
+
+impl Serialize for StartToken {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for StartToken {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Decimal;
+        impl serde::de::Visitor<'_> for Decimal {
+            type Value = StartToken;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a decimal start token string")
+            }
+            fn visit_str<E: serde::de::Error>(self, text: &str) -> Result<StartToken, E> {
+                // Canonical decimal only: no sign, no padding, no leading zero.
+                let canonical = !text.is_empty()
+                    && text.len() <= 20
+                    && text.bytes().all(|byte| byte.is_ascii_digit())
+                    && (text == "0" || !text.starts_with('0'));
+                if !canonical {
+                    return Err(E::custom("start token must be a canonical decimal string"));
+                }
+                text.parse()
+                    .map(StartToken)
+                    .map_err(|_| E::custom("start token is out of range"))
+            }
+        }
+        deserializer.deserialize_str(Decimal)
+    }
 }
 
 /// A server→client response (correlated to a `Request` by `id`).
@@ -504,6 +564,72 @@ pub fn parse_request_line(line: &str) -> Result<Request, Response> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn caller_claims_round_trip_and_keep_every_start_token_bit() {
+        let line = r#"{"v":1,"id":1,"method":"get_state","caller":{"pid":4201,"start_token":"18446744073709551615","pane_hint":7,"pid_hint":4000}}"#;
+        let req = parse_request_line(line).expect("valid");
+        let claim = req.caller.expect("claim");
+        assert_eq!(claim.pid.get(), 4201);
+        assert_eq!(claim.start_token, Some(StartToken(u64::MAX)));
+        assert_eq!(claim.pane_hint, Some(7));
+        assert_eq!(claim.pid_hint.map(std::num::NonZeroU32::get), Some(4000));
+        let written = serde_json::to_string(&Request {
+            v: 1,
+            id: 1,
+            method: "get_state".into(),
+            params: Value::Null,
+            caller: Some(claim),
+        })
+        .unwrap();
+        assert!(written.contains(r#""start_token":"18446744073709551615""#));
+        assert_eq!(parse_request_line(&written).unwrap().caller, Some(claim));
+    }
+
+    #[test]
+    fn a_request_without_a_claim_still_parses_and_writes_none() {
+        let req = parse_request_line(r#"{"v":1,"id":2,"method":"get_state"}"#).expect("valid");
+        assert_eq!(req.caller, None);
+        assert!(!serde_json::to_string(&req).unwrap().contains("caller"));
+        // Fields a newer client adds are ignored, as for every request field.
+        let req = parse_request_line(
+            r#"{"v":1,"id":3,"method":"get_state","caller":{"pid":9,"later":true}}"#,
+        )
+        .expect("unknown claim fields are ignored");
+        assert_eq!(req.caller.unwrap().start_token, None);
+    }
+
+    #[test]
+    fn malformed_claims_are_bad_requests() {
+        for caller in [
+            r#"{"pid":0,"start_token":"1"}"#,
+            r#"{"pid":-1,"start_token":"1"}"#,
+            r#"{"pid":5,"start_token":12}"#,
+            r#"{"pid":5,"start_token":""}"#,
+            r#"{"pid":5,"start_token":"+1"}"#,
+            r#"{"pid":5,"start_token":"01"}"#,
+            r#"{"pid":5,"start_token":"1e3"}"#,
+            r#"{"pid":5,"start_token":"18446744073709551616"}"#,
+            r#"{"pid":5,"pid_hint":0}"#,
+            r#"{"start_token":"1"}"#,
+            r#""me""#,
+        ] {
+            let line = format!(r#"{{"v":1,"id":4,"method":"get_state","caller":{caller}}}"#);
+            let err = parse_request_line(&line).expect_err(caller);
+            assert_eq!(err.id, 4, "{caller}");
+            assert_eq!(
+                err.error.unwrap().code,
+                error_codes::BAD_REQUEST,
+                "{caller}"
+            );
+        }
+        assert!(
+            parse_request_line(r#"{"v":1,"id":5,"method":"get_state","caller":null}"#)
+                .unwrap()
+                .caller
+                .is_none()
+        );
+    }
 
     #[test]
     fn request_round_trips() {

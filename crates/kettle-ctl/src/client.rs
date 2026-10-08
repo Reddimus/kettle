@@ -14,8 +14,8 @@ use serde_json::Value;
 
 use crate::discovery;
 use crate::protocol::{
-    BoundedJsonError, Event, MAX_LINE_BYTES, MAX_RESPONSE_LINE_BYTES, PROTOCOL_VERSION, Request,
-    Response,
+    BoundedJsonError, Event, MAX_LINE_BYTES, MAX_RESPONSE_LINE_BYTES, PROTOCOL_VERSION, PeerClaim,
+    Request, Response, StartToken,
 };
 use crate::transport::{self, CtlStream};
 
@@ -100,6 +100,13 @@ pub struct Client {
     next_id: u64,
     /// Why this connection was retired, once it has been.
     abandoned: Option<String>,
+    /// What this process says about itself, sent once with the first request
+    /// that reaches the wire. Taken when the connection opened.
+    claim: Option<PeerClaim>,
+    claim_sent: bool,
+    /// The process that opened the connection. A child that inherited this
+    /// value across `fork()` must not speak with the parent's identity.
+    owner_pid: u32,
 }
 
 enum ServerFrame {
@@ -113,6 +120,9 @@ const MAX_QUEUED_EVENT_BYTES: usize = 8 * 1024 * 1024;
 impl Client {
     /// Connect to a specific endpoint (socket path / pipe name).
     pub fn connect_endpoint(endpoint: &str) -> Result<Self, CtlError> {
+        // Taken before connecting, so the claim names the process that opens
+        // the connection.
+        let claim = own_claim(|name| std::env::var(name).ok());
         let stream = transport::connect(endpoint)?;
         let reader = stream.try_clone()?;
         Ok(Self {
@@ -124,72 +134,127 @@ impl Client {
             queued_event_bytes: 0,
             next_id: 1,
             abandoned: None,
+            claim,
+            claim_sent: false,
+            owner_pid: std::process::id(),
         })
     }
 
-    /// Discover a running server and connect. If `pid` is `Some`, connect to
-    /// that pid's server; otherwise pick the newest live entry.
+    /// Discover a running server and connect.
+    ///
+    /// The server is, in order: the one `pid` names; else the nearest Kettle
+    /// this process runs inside, matched by pid and start time against its
+    /// own ancestors; else the one `KETTLE_PID` names; else, for a caller in
+    /// none, the newest live one. A server chosen by name or ancestry is the
+    /// only one tried: its failure never falls through to another instance.
+    /// Every registry location is read, including an alias the server left
+    /// where the OS (not the environment) puts the registry, so a client with
+    /// a stripped environment still finds it. Each connection is checked
+    /// before any request is written: the kernel must name the entry's pid at
+    /// the other end, and that process must still be the instance the entry
+    /// recorded.
     ///
     /// An entry is only *pruned* when `presence::owner_alive` says its owning
     /// process is gone (dead, or its pid since handed to a stranger). A
-    /// `connect_endpoint` failure can also come from a client-side `try_clone`
-    /// error or a transient transport error while the server is alive. Pruning
-    /// on those would permanently delete a healthy server's entry, since the
+    /// connect failure can also come from a client-side `try_clone` error or
+    /// a transient transport error while the server is alive. Pruning on
+    /// those would permanently delete a healthy server's entry, since the
     /// server `register`s exactly once at start (no heartbeat). So when the
-    /// owner is still alive, the entry stays and discovery surfaces the connect
-    /// error instead of a blanket `NoServer`.
+    /// owner is still alive, the entry stays and discovery surfaces the
+    /// connect error instead of a blanket `NoServer`.
     pub fn discover(pid: Option<u32>) -> Result<Self, CtlError> {
-        let dir = discovery::registry_dir();
-        Self::discover_in(&dir, pid, Self::connect_endpoint, discovery::owner_alive)
+        let ancestry = crate::identity::current_ancestry(Instant::now() + ANCESTRY_BUDGET);
+        Self::discover_in(
+            &discovery::registry_locations(),
+            pid,
+            &ancestry,
+            kettle_pid_hint(|name| std::env::var(name).ok()),
+            Self::connect_authenticated,
+            discovery::owner_alive,
+        )
     }
 
-    /// The dependency-injected core of [`discover`], split out so the
+    /// Connect to `entry`'s endpoint and check, before writing anything, that
+    /// the server there is the process the entry names.
+    fn connect_authenticated(entry: &discovery::RegistryEntry) -> Result<Self, CtlError> {
+        let client = Self::connect_endpoint(&entry.endpoint)?;
+        let server = client
+            .writer
+            .as_ref()
+            .ok_or_else(Self::retired)?
+            .peer_pid()?;
+        let instance = match entry.start_token {
+            // An entry from a build that predates start tokens names only a
+            // pid; the kernel's peer pid is all there is to check.
+            None => true,
+            Some(token) => crate::process::identity(server).is_ok_and(|live| live.start() == token),
+        };
+        if server != entry.pid || !instance {
+            return Err(CtlError::Protocol(format!(
+                "the server at {} is not the kettle its registry entry names",
+                entry.endpoint
+            )));
+        }
+        Ok(client)
+    }
+
+    /// The dependency-injected core of [`discover`], so selection and the
     /// prune-gating invariant (a connect failure against a *live* owner must
-    /// NOT prune the entry) is unit-testable without the real
-    /// registry/transport. `connect` opens an endpoint; `owner_alive` reports
-    /// whether the process instance that wrote an entry is still running — the
-    /// entry, not just its pid, because a recycled pid is a stranger.
+    /// NOT prune the entry) are testable without the real registry, process
+    /// table or transport. `ancestry` is this process's, nearest first;
+    /// `owner_alive` reports whether the process instance that wrote an entry
+    /// is still running — the entry, not just its pid, because a recycled pid
+    /// is a stranger.
     fn discover_in(
-        dir: &std::path::Path,
+        locations: &[std::path::PathBuf],
         pid: Option<u32>,
-        connect: impl Fn(&str) -> Result<Self, CtlError>,
+        ancestry: &[crate::process::ProcessIdentity],
+        kettle_pid: Option<u32>,
+        connect: impl Fn(&discovery::RegistryEntry) -> Result<Self, CtlError>,
         owner_alive: impl Fn(&discovery::RegistryEntry) -> bool,
     ) -> Result<Self, CtlError> {
-        // The same enumeration `list_live` performs — it drops and prunes
-        // entries with a dead owner — so the loop only probes endpoints whose
-        // owner is alive at enumeration time.
-        let entries = discovery::list_live_by(dir, &owner_alive);
-        if entries.is_empty() {
-            return Err(CtlError::NoServer);
-        }
-        let candidates: Vec<_> = match pid {
-            Some(p) => entries.into_iter().filter(|e| e.pid == p).collect(),
-            None => entries,
+        // Enumeration drops and prunes entries with a dead owner, so only
+        // endpoints whose owner is alive are probed.
+        let candidates = discovery::live_candidates_by(locations, &owner_alive);
+        let named = |pid: u32| candidates.iter().find(|(entry, _)| entry.pid == pid);
+        let chosen = match pid {
+            Some(pid) => Some(named(pid).ok_or(CtlError::NoServer)?),
+            None => ancestry
+                .iter()
+                .skip(1)
+                .find_map(|ancestor| {
+                    candidates.iter().find(|(entry, _)| {
+                        entry.pid == ancestor.pid() && entry.start_token == Some(ancestor.start())
+                    })
+                })
+                .or_else(|| kettle_pid.and_then(named)),
         };
-        if candidates.is_empty() {
-            return Err(CtlError::NoServer);
+        let attempt = |entry: &discovery::RegistryEntry, dir: &std::path::Path| {
+            connect(entry).inspect_err(|_| {
+                // Only prune a TRULY dead server. If the owning process is
+                // still alive the failure is client-side (a `try_clone`
+                // hiccup) or a transient transport error, so do NOT delete a
+                // healthy entry. Even for a dead owner the delete is
+                // conditional, since the connect attempt takes real time and
+                // this entry's pid may by now belong to a new kettle that
+                // registered at the same path.
+                if !owner_alive(entry) {
+                    discovery::prune_stale(dir, entry);
+                }
+            })
+        };
+        if let Some((entry, dir)) = chosen {
+            return attempt(entry, dir);
         }
         let mut last_err: Option<CtlError> = None;
-        for e in candidates {
-            match connect(&e.endpoint) {
-                Ok(c) => return Ok(c),
-                Err(err) => {
-                    // Only prune a TRULY dead server. If the owning process is
-                    // still alive the failure is client-side (a `try_clone`
-                    // hiccup) or a transient transport error, so do NOT delete a
-                    // healthy entry; remember the error instead. Even for a dead
-                    // owner the delete is conditional, since the connect attempts
-                    // above take real time and this entry's pid may by now belong
-                    // to a new kettle that registered at the same path.
-                    if !owner_alive(&e) {
-                        discovery::prune_stale(dir, &e);
-                    }
-                    last_err = Some(err);
-                }
+        for (entry, dir) in &candidates {
+            match attempt(entry, dir) {
+                Ok(client) => return Ok(client),
+                Err(error) => last_err = Some(error),
             }
         }
         // Surface the real reason we couldn't connect rather than a blanket
-        // NoServer, unless every candidate vanished without an error.
+        // NoServer, unless there was no candidate at all.
         Err(last_err.unwrap_or(CtlError::NoServer))
     }
 
@@ -286,6 +351,11 @@ impl Client {
         cancelled: Option<&AtomicBool>,
     ) -> Result<Value, CtlError> {
         self.usable()?;
+        if std::process::id() != self.owner_pid {
+            return Err(CtlError::Unusable(
+                "a connection inherited from another process".to_string(),
+            ));
+        }
         if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
             return Err(CtlError::Cancelled);
         }
@@ -305,6 +375,7 @@ impl Client {
             id,
             method: method.to_string(),
             params,
+            caller: if self.claim_sent { None } else { self.claim },
         };
         let mut frame = match crate::protocol::to_json_vec_bounded(&req, MAX_LINE_BYTES) {
             Ok(frame) => frame,
@@ -325,6 +396,9 @@ impl Client {
         // stays in step only if this request's response is read.
         let writer = self.writer.as_mut().ok_or_else(Self::retired)?;
         let (written, write) = writer.write_all_until_counted(&frame, deadline, cancelled);
+        // The server fixes a connection's claim from its first frame, so once
+        // any byte of this one is out the claim is spent.
+        self.claim_sent |= written > 0;
         if let Err(error) = write {
             let error = map_write_error(error);
             if written > 0 {
@@ -625,6 +699,45 @@ fn line_too_large() -> CtlError {
     ))
 }
 
+/// Time a client may spend reading its own ancestry to find its Kettle.
+const ANCESTRY_BUDGET: Duration = Duration::from_millis(250);
+
+/// `KETTLE_PID` when it is a well-formed pid: the Kettle whose pane started
+/// this process, unless something changed it.
+fn kettle_pid_hint(env: impl Fn(&str) -> Option<String>) -> Option<u32> {
+    env("KETTLE_PID")
+        .filter(|value| {
+            !value.is_empty()
+                && value.bytes().all(|byte| byte.is_ascii_digit())
+                && !value.starts_with('0')
+        })
+        .and_then(|value| value.parse().ok())
+}
+
+/// This process's claim: its own pid and start token, plus the pane and
+/// Kettle it was started in when its environment names them. `None` when the
+/// OS will not describe this process, in which case requests carry no claim
+/// and the server treats the caller as unverified.
+fn own_claim(env: impl Fn(&str) -> Option<String>) -> Option<PeerClaim> {
+    let me = crate::process::current().ok()?;
+    let pid = std::num::NonZeroU32::new(me.identity.pid())?;
+    // Strict parses: a malformed hint is no hint.
+    let decimal = |name: &str| {
+        env(name).filter(|value| {
+            !value.is_empty()
+                && value.len() <= 20
+                && value.bytes().all(|byte| byte.is_ascii_digit())
+                && !value.starts_with('0')
+        })
+    };
+    Some(PeerClaim {
+        pid,
+        start_token: Some(StartToken(me.identity.start())),
+        pane_hint: decimal("KETTLE_PANE_ID").and_then(|value| value.parse().ok()),
+        pid_hint: decimal("KETTLE_PID").and_then(|value| value.parse().ok()),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -730,7 +843,261 @@ mod tests {
         client
     }
 
+    /// A server that answers every request with `ok` and reports each
+    /// request line it received.
+    fn client_recorded() -> (Client, std::sync::mpsc::Receiver<String>) {
+        let (listener, endpoint) = test_listener("recorded");
+        let (lines_tx, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::BufRead as _;
+            let mut conn = listener.accept().expect("accept");
+            let mut reader = std::io::BufReader::new(conn.try_clone().expect("clone"));
+            loop {
+                let mut request = String::new();
+                if reader.read_line(&mut request).unwrap_or(0) == 0 {
+                    return;
+                }
+                let id = serde_json::from_str::<Value>(&request).unwrap()["id"].clone();
+                lines_tx.send(request).ok();
+                let reply = format!(r#"{{"v":1,"id":{id},"ok":true,"result":{{}}}}"#);
+                if conn.write_all(reply.as_bytes()).is_err() || conn.write_all(b"\n").is_err() {
+                    return;
+                }
+            }
+        });
+        (Client::connect_endpoint(&endpoint).expect("connect"), lines)
+    }
+
+    /// The claim rides only the first request that reaches the wire.
+    #[test]
+    fn only_the_first_written_request_carries_the_claim() {
+        let (mut client, lines) = client_recorded();
+        let me = crate::process::current().unwrap().identity;
+        // A call that fails before writing anything keeps the claim.
+        assert!(matches!(
+            client.call_with_timeout("get_state", Value::Null, Duration::ZERO),
+            Err(CtlError::TimedOut)
+        ));
+        client.call("get_state", Value::Null).expect("first call");
+        client.call("list_panes", Value::Null).expect("second call");
+        let first: Value = serde_json::from_str(&lines.recv().unwrap()).unwrap();
+        let second: Value = serde_json::from_str(&lines.recv().unwrap()).unwrap();
+        assert_eq!(first["id"], 1, "the failed call sent nothing");
+        assert_eq!(first["caller"]["pid"], me.pid());
+        assert_eq!(first["caller"]["start_token"], me.start().to_string());
+        assert!(second.get("caller").is_none(), "{second}");
+    }
+
+    /// A client inherited by another process must not speak as its parent.
+    #[test]
+    fn a_client_owned_by_another_process_refuses_to_write() {
+        let (mut client, lines) = client_recorded();
+        client.owner_pid = client.owner_pid.wrapping_add(1);
+        assert!(matches!(
+            client.call("get_state", Value::Null),
+            Err(CtlError::Unusable(_))
+        ));
+        assert!(
+            lines.recv_timeout(Duration::from_millis(200)).is_err(),
+            "nothing reached the server"
+        );
+    }
+
+    #[test]
+    fn claim_hints_come_only_from_well_formed_environment_values() {
+        let claim = |pane: Option<&str>, pid: Option<&str>| {
+            own_claim(|name| match name {
+                "KETTLE_PANE_ID" => pane.map(str::to_string),
+                "KETTLE_PID" => pid.map(str::to_string),
+                _ => None,
+            })
+            .expect("this process can describe itself")
+        };
+        let both = claim(Some("7"), Some("4242"));
+        assert_eq!(both.pane_hint, Some(7));
+        assert_eq!(both.pid_hint.map(std::num::NonZeroU32::get), Some(4242));
+        assert_eq!(both.pid.get(), std::process::id());
+        for bad in ["", "07", "-1", "7 ", "x", "0", "99999999999999999999999"] {
+            let parsed = claim(Some(bad), Some(bad));
+            assert_eq!(parsed.pane_hint, None, "{bad:?}");
+            assert_eq!(parsed.pid_hint, None, "{bad:?}");
+        }
+        assert_eq!(claim(None, None).pane_hint, None);
+    }
+
     use crate::discovery::{self, RegistryEntry};
+    use crate::process::ProcessIdentity;
+
+    fn scratch_registry(tag: &str) -> std::path::PathBuf {
+        let dir = crate::test_scratch_root()
+            .join(format!("kettle-ctl-select-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// Register a fake server `pid` started at `started` with `token`.
+    fn fake_server(dir: &std::path::Path, pid: u32, started: u64, token: u64) {
+        let mut entry = reg_entry(dir, pid, started);
+        entry.start_token = Some(token);
+        discovery::register(dir, &entry).unwrap();
+    }
+
+    /// Run discovery over `dirs`, recording which servers it tried. Every
+    /// connect fails, so the result names the last one tried.
+    fn tried(
+        dirs: &[std::path::PathBuf],
+        pid: Option<u32>,
+        ancestry: &[ProcessIdentity],
+        hint: Option<u32>,
+    ) -> Vec<u32> {
+        let attempts = std::cell::RefCell::new(Vec::new());
+        let connect = |entry: &RegistryEntry| -> Result<Client, CtlError> {
+            attempts.borrow_mut().push(entry.pid);
+            Err(CtlError::Io(std::io::Error::other("refused")))
+        };
+        let _ = Client::discover_in(dirs, pid, ancestry, hint, connect, |_entry| true);
+        attempts.into_inner()
+    }
+
+    /// The Kettle a client runs inside wins over a newer one, the nearest of
+    /// nested ones wins, and its failure never falls through to another.
+    #[test]
+    fn the_enclosing_kettle_is_chosen_and_never_swapped() {
+        let dir = scratch_registry("ancestor");
+        fake_server(&dir, 10, 100, 1000);
+        fake_server(&dir, 20, 200, 2000);
+        let me = ProcessIdentity::new(1, 5000);
+        let dirs = [dir.clone()];
+        // Outside any Kettle: newest first, then the rest.
+        assert_eq!(tried(&dirs, None, &[me], None), [20, 10]);
+        // Inside 10 (older): only 10, even though it fails.
+        let inside_ten = [
+            me,
+            ProcessIdentity::new(7, 4000),
+            ProcessIdentity::new(10, 1000),
+        ];
+        assert_eq!(tried(&dirs, None, &inside_ten, None), [10]);
+        // Nested: 20's pane inside 10's pane. The nearer one wins.
+        let nested = [
+            me,
+            ProcessIdentity::new(20, 2000),
+            ProcessIdentity::new(10, 1000),
+        ];
+        assert_eq!(tried(&dirs, None, &nested, None), [20]);
+        // A matching pid with another start is a stranger that reused it.
+        let reused = [me, ProcessIdentity::new(10, 1001)];
+        assert_eq!(tried(&dirs, None, &reused, None), [20, 10]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kettle_pid_is_a_fallback_and_an_explicit_pid_is_exact() {
+        let dir = scratch_registry("hint");
+        fake_server(&dir, 10, 100, 1000);
+        fake_server(&dir, 20, 200, 2000);
+        let me = ProcessIdentity::new(1, 5000);
+        let dirs = [dir.clone()];
+        assert_eq!(tried(&dirs, None, &[me], Some(10)), [10]);
+        // The ancestry beats the hint.
+        let inside_twenty = [me, ProcessIdentity::new(20, 2000)];
+        assert_eq!(tried(&dirs, None, &inside_twenty, Some(10)), [20]);
+        // A hint naming no live server is ignored.
+        assert_eq!(tried(&dirs, None, &[me], Some(99)), [20, 10]);
+        // An explicit pid is the only one tried, and an unknown one is none.
+        assert_eq!(tried(&dirs, Some(10), &inside_twenty, None), [10]);
+        assert_eq!(tried(&dirs, Some(99), &[me], None), Vec::<u32>::new());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(kettle_pid_hint(|_| Some("4242".into())), Some(4242));
+        for bad in ["", "0", "042", "-1", "x", "4242 "] {
+            assert_eq!(kettle_pid_hint(|_| Some(bad.into())), None, "{bad:?}");
+        }
+    }
+
+    /// A client whose environment points nowhere still finds a server through
+    /// the alias left where the OS puts the registry; the alias only points,
+    /// and a dead server's alias goes while its entry stays for its own
+    /// registry to prune.
+    #[test]
+    fn an_alias_leads_a_stripped_client_to_the_real_entry() {
+        let primary = scratch_registry("alias-primary");
+        let canonical = scratch_registry("alias-canonical");
+        fake_server(&primary, 30, 300, 3000);
+        discovery::publish_alias(&canonical, &primary, 30).unwrap();
+        assert_eq!(
+            tried(std::slice::from_ref(&canonical), None, &[], None),
+            [30]
+        );
+        // Both locations, in either order: one candidate, not two.
+        assert_eq!(
+            tried(&[canonical.clone(), primary.clone()], None, &[], None),
+            [30]
+        );
+        assert_eq!(
+            tried(&[primary.clone(), canonical.clone()], None, &[], None),
+            [30]
+        );
+        // An alias to a registry without that entry leads nowhere.
+        discovery::publish_alias(&canonical, &primary, 31).unwrap();
+        assert_eq!(
+            tried(std::slice::from_ref(&canonical), None, &[], None),
+            [30]
+        );
+        let attempts = std::cell::RefCell::new(Vec::new());
+        let _ = Client::discover_in(
+            std::slice::from_ref(&canonical),
+            None,
+            &[],
+            None,
+            |entry: &RegistryEntry| {
+                attempts.borrow_mut().push(entry.pid);
+                Err(CtlError::NoServer)
+            },
+            |_entry| false,
+        );
+        assert!(attempts.into_inner().is_empty());
+        assert!(
+            !canonical.join("30.alias.json").exists(),
+            "a dead server's alias is withdrawn"
+        );
+        assert!(
+            primary.join("30.json").exists(),
+            "the entry belongs to its own registry"
+        );
+        let _ = std::fs::remove_dir_all(&primary);
+        let _ = std::fs::remove_dir_all(&canonical);
+    }
+
+    /// Before any request bytes, the server at an entry's endpoint must be
+    /// the process the entry names.
+    #[test]
+    fn a_connection_must_reach_the_process_its_entry_names() {
+        let (listener, endpoint) = test_listener("authenticate");
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            while let Ok(conn) = listener.accept() {
+                held.push(conn);
+            }
+        });
+        let me = crate::process::current().unwrap().identity;
+        let entry = |pid: u32, token: Option<u64>| {
+            let dir = std::path::Path::new(&endpoint).parent().unwrap();
+            let mut entry = reg_entry(dir, pid, 1);
+            entry.endpoint = endpoint.clone();
+            entry.start_token = token;
+            entry
+        };
+        assert!(Client::connect_authenticated(&entry(me.pid(), Some(me.start()))).is_ok());
+        assert!(Client::connect_authenticated(&entry(me.pid(), None)).is_ok());
+        for wrong in [
+            entry(me.pid(), Some(me.start() + 1)),
+            entry(me.pid().wrapping_add(1), Some(me.start())),
+        ] {
+            assert!(matches!(
+                Client::connect_authenticated(&wrong),
+                Err(CtlError::Protocol(_))
+            ));
+        }
+    }
 
     fn reg_entry(dir: &std::path::Path, pid: u32, started: u64) -> RegistryEntry {
         RegistryEntry::registering(
@@ -756,12 +1123,19 @@ mod tests {
         discovery::register(&dir, &reg_entry(&dir, pid, 100)).unwrap();
 
         // Connect always fails with a transport error; pid is reported alive.
-        let connect = |_ep: &str| -> Result<Client, CtlError> {
+        let connect = |_entry: &RegistryEntry| -> Result<Client, CtlError> {
             Err(CtlError::Io(std::io::Error::other(
                 "transient transport hiccup",
             )))
         };
-        let res = Client::discover_in(&dir, None, connect, |_entry| true);
+        let res = Client::discover_in(
+            std::slice::from_ref(&dir),
+            None,
+            &[],
+            None,
+            connect,
+            |_entry| true,
+        );
 
         match res {
             Err(CtlError::Io(_)) => {}
@@ -785,12 +1159,19 @@ mod tests {
         let pid = 4243;
         discovery::register(&dir, &reg_entry(&dir, pid, 100)).unwrap();
 
-        let connect = |_ep: &str| -> Result<Client, CtlError> {
+        let connect = |_entry: &RegistryEntry| -> Result<Client, CtlError> {
             Err(CtlError::Io(std::io::Error::other("x")))
         };
         // owner reported dead → enumeration filter prunes it before any
         // connect, so discovery yields NoServer and the entry is gone.
-        let res = Client::discover_in(&dir, None, connect, |_entry| false);
+        let res = Client::discover_in(
+            std::slice::from_ref(&dir),
+            None,
+            &[],
+            None,
+            connect,
+            |_entry| false,
+        );
         assert!(matches!(res, Err(CtlError::NoServer)));
         assert!(
             !discovery::list(&dir).iter().any(|e| e.pid == pid),
@@ -812,7 +1193,7 @@ mod tests {
             crate::test_scratch_root().join(format!("kettle-ctl-disc-real-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let me = std::process::id();
-        let connect = |_ep: &str| -> Result<Client, CtlError> {
+        let connect = |_entry: &RegistryEntry| -> Result<Client, CtlError> {
             Err(CtlError::Io(std::io::Error::other(
                 "transient transport hiccup",
             )))
@@ -827,7 +1208,14 @@ mod tests {
         );
         discovery::register(&dir, &recycled).unwrap();
         assert!(matches!(
-            Client::discover_in(&dir, None, connect, discovery::owner_alive),
+            Client::discover_in(
+                std::slice::from_ref(&dir),
+                None,
+                &[],
+                None,
+                connect,
+                discovery::owner_alive
+            ),
             Err(CtlError::NoServer)
         ));
         assert!(
@@ -837,7 +1225,14 @@ mod tests {
 
         discovery::register(&dir, &reg_entry(&dir, me, 200)).unwrap();
         assert!(matches!(
-            Client::discover_in(&dir, None, connect, discovery::owner_alive),
+            Client::discover_in(
+                std::slice::from_ref(&dir),
+                None,
+                &[],
+                None,
+                connect,
+                discovery::owner_alive
+            ),
             Err(CtlError::Io(_)),
         ));
         assert!(

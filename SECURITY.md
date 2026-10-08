@@ -55,6 +55,15 @@ Reports that fit any of these are welcome:
   exceptions are deliberate for OSC 7: a local WSL share
   (`//wsl.localhost/Ubuntu/…`) stays a working directory, and on POSIX a
   backslash (`%5C`) is part of a name, not a separator.
+- **Control-caller verification** — a process that `kettle ctl get_state`
+  reports as `verified` in a pane although that pane's own child process is
+  not one of its ancestors, for example through a reused pid, a claim that
+  does not match the kernel's view of the connection, or a parent link read
+  while it changed. The connecting process's claim, the accept-time kernel
+  identity and the ancestry walk live in `kettle-ctl`'s `identity` and
+  `process` modules; pane child identities are read at spawn
+  (`Pane::caller_root`). The control server itself is a same-user surface:
+  a process running as you can already drive it when it is enabled.
 - **Bracketed-paste injection** — a paste payload that escapes the
   `\e[200~ … \e[201~` wrapper and runs as input.
 - **Resource exhaustion via a single PTY frame** — a parser path that

@@ -426,6 +426,17 @@ from an admitted wait. The server and every connection share one
 atomic bit that can only turn on, so a live enable reaches open connections
 without any of them re-reading config.
 
+kettle-ctl also answers who is calling. `process` reads a process's pid,
+parent, start instant and exit state from the OS (bounded `/proc/<pid>/stat`
+on Linux, `proc_bsdinfo` on macOS, the process handle and a run-time
+`NtQueryInformationProcess` on Windows). `identity` captures a connection's
+peer from the kernel at accept, checks the client's first-request claim
+against it, and walks at most 64 parent links on the connection thread. In
+kettle-ui each pane records its child's identity right after spawning it,
+before anything on the UI thread can reap that child, and the App matches a
+checked chain against those identities across all windows. Only the
+connection thread builds the evidence an `AdmittedRequest` carries.
+
 ```mermaid
 graph LR
     bin2["kettle (bin)"] --> exec["kettle exec<br/>headless one-shot<br/>(real PTY, no window)"]

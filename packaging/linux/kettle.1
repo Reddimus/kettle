@@ -490,7 +490,10 @@ or
 is an alternative or additional regular expression for
 .BR wait_for ;
 .B \-\-pid
-selects a specific kettle (else the newest running server); and
+selects a specific kettle (else the kettle this command runs inside, then the
+one
+.B KETTLE_PID
+names, then the newest running server); and
 .B \-\-raw
 prints the raw JSON result instead of a pretty summary.
 Large list, screen, and cell reads return
@@ -827,6 +830,14 @@ failures on stderr.
 also prints how long each startup phase took, from the start of
 .B main
 to the first frame.
+.TP
+.BR KETTLE_PANE_ID " / " KETTLE_PID
+Set in every pane: its pane id and the kettle process id, after any
+.B env
+config entries so config cannot change them. Control clients send them as
+hints;
+.B kettle ctl get_state
+reports whether the caller really runs in a pane from the process tree.
 .TP
 .B XDG_CONFIG_HOME
 Linux/Unix config root (default
