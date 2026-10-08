@@ -158,6 +158,35 @@ impl NativePath {
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
+    /// A display-only basename. Lossy conversion never changes the native
+    /// path used by the worker and performs no filesystem access.
+    pub fn file_name_lossy(&self) -> Option<String> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt as _;
+            std::path::Path::new(std::ffi::OsStr::from_bytes(self.as_bytes()))
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStringExt as _;
+            let units: Vec<u16> = self
+                .as_bytes()
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|unit| u16::from_le_bytes(*unit))
+                .collect();
+            std::path::PathBuf::from(std::ffi::OsString::from_wide(&units))
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            None
+        }
+    }
 }
 pub(crate) fn validate_path(bytes: &[u8]) -> Result<(), ValidationError> {
     cap(bytes.len(), MAX_PATH_BYTES)?;
@@ -211,6 +240,47 @@ mod native_path_tests {
     fn wide(s: &str) -> Vec<u8> {
         s.encode_utf16().flat_map(u16::to_le_bytes).collect()
     }
+    #[test]
+    fn display_basename_preserves_unicode_and_never_exposes_parent_directories() {
+        let base = if cfg!(windows) { "C:\\media" } else { "/media" };
+        let path =
+            NativePath::from_path(&std::path::Path::new(base).join("caf\u{e9}.svg")).unwrap();
+        assert_eq!(path.file_name_lossy().as_deref(), Some("caf\u{e9}.svg"));
+        let root = if cfg!(windows) { "C:\\" } else { "/" };
+        assert_eq!(
+            NativePath::from_path(std::path::Path::new(root))
+                .unwrap()
+                .file_name_lossy(),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn display_basename_does_not_modify_non_utf8_native_bytes() {
+        let bytes = b"/media/diagram-\xff.svg".to_vec();
+        let path = NativePath::new(bytes.clone()).unwrap();
+        assert_eq!(
+            path.file_name_lossy().as_deref(),
+            Some("diagram-\u{fffd}.svg")
+        );
+        assert_eq!(path.as_bytes(), bytes);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn display_basename_does_not_modify_unpaired_native_surrogates() {
+        let mut bytes = wide("C:\\media\\diagram-");
+        bytes.extend(0xd800u16.to_le_bytes());
+        bytes.extend(wide(".svg"));
+        let path = NativePath::new(bytes.clone()).unwrap();
+        assert_eq!(
+            path.file_name_lossy().as_deref(),
+            Some("diagram-\u{fffd}.svg")
+        );
+        assert_eq!(path.as_bytes(), bytes);
+    }
+
     #[test]
     fn from_path_is_the_native_encoding() {
         let path = if cfg!(windows) {
@@ -428,6 +498,17 @@ impl MediaKind {
             JobKind::Mermaid => Some(Self::Mermaid),
             JobKind::MarkdownDiagrams { .. } => Some(Self::Markdown),
             JobKind::VideoProbe | JobKind::VideoStills(_) => Some(Self::Video),
+        }
+    }
+
+    /// The kind's wire word in control replies.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Raster => "raster",
+            Self::Svg => "svg",
+            Self::Mermaid => "mermaid",
+            Self::Markdown => "markdown",
+            Self::Video => "video",
         }
     }
 
@@ -745,6 +826,17 @@ pub enum Warning {
     MissingGlyphs = 1,
     FontFallback = 2,
     SilentVideo = 3,
+}
+impl Warning {
+    /// The warning's wire word in control replies.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SourceDisplayClipped => "source_display_clipped",
+            Self::MissingGlyphs => "missing_glyphs",
+            Self::FontFallback => "font_fallback",
+            Self::SilentVideo => "silent_video",
+        }
+    }
 }
 /// Open-file identity included in content digests. Timestamps are seconds + nanoseconds
 /// relative to the Unix epoch; callers provide metadata from the held source descriptor.

@@ -3674,8 +3674,8 @@ tests connect over the actual transport: the test process to itself, and a
 shell-started grandchild that the server verifies through the shell up to
 itself. `process` tests read this process and a child, a killed child before it
 is reaped, and Linux `stat` lines with hostile command names. `ctl_server`
-tests pin the claim latch and that `get_state` alone carries the check over a
-real connection; App tests pin the nearest-pane match and that hints never
+tests pin the claim latch and that `get_state` and `show` alone carry the
+check over a real connection; App tests pin the nearest-pane match and that hints never
 verify; `mux` tests pin that the pane id exists before the child and that
 config cannot override `KETTLE_PANE_ID`/`KETTLE_PID`. For a live check, run
 `kettle ctl get_state --pid $KETTLE_PID` inside a pane and confirm `caller`
@@ -3690,6 +3690,49 @@ only the OS location to the real entry once, an alias to a missing entry leads
 nowhere, and a dead server's alias is withdrawn while its entry is left to its
 own registry. A real connection is accepted only when the kernel names the
 entry's pid and the live start matches its token.
+
+Showing media. `kettle-ctl`'s `show` tests: exactly one nonempty source;
+bounded, typed options (a key or title one byte over its cap is
+`too_large`); inline SVG moves rather than copies and is refused over 2 MiB;
+image bytes are standard base64, sized from their length and padding before
+anything is decoded, and classified by the worker; a path must be absolute
+and attested by device and inode; params round-trip through the one parser
+for every source, and a request built in code that the parser would refuse
+is refused before it is sent; failures carry fixed codes, reasons and wording that
+never mentions full control; results name kinds and warnings by their wire
+words. `process` reads this test binary's executable and refuses the same pid
+under another start; `identity` refuses as the peer a process that started
+after the accept under a reused pid. Display discovery over scripted registries tries only
+the Kettle named or enclosing, then a `KETTLE_PID` entry that records its
+start, and otherwise ends in `NotInKettle` having connected nowhere, while
+control discovery still falls back. The `method` table classifies `show` as
+the one Display method. `ctl_server` answers a malformed `show`, non-object
+params included, on its connection thread in `show`'s own wording and hands the App a valid one parsed, its params moved, its
+sender named by the kernel with its executable, and its caller checked. In
+`kettle-ui`'s `media` module, `route` tests: the nearest live pane ancestor
+in any window wins; a reused pid is not an ancestor; a verified caller keeps
+its pane whatever it asks for; only full control names a pane for an
+unplaced caller; a hint routes, unverified, only when it names this Kettle
+and a live pane; nothing else routes. `queue` tests: one render at a time in
+arrival order; one waiting push per sender, the newest keeping its place;
+senders are panes or processes (pid and start), never connections; a full
+queue is busy; a push past its deadline never starts. `shelf` tests: newest
+first, a key replacing in place with its id; a full shelf drops the least
+recently viewed item, never the visible one; evicted pixels keep the item;
+the `list_panes` report holds no pixels. A push cancelled after its render
+finished stays cancelled and publishes nothing, and a lane thread that ends,
+by a return or a panic, closes its result channel before it wakes the App. Titles lose control characters,
+separators and bidirectional formatting, bounded at 256 characters.
+`kettle-vt` hands a refused image's pixels back when only the account's room
+was missing. `kettle show`'s own tests pin its fixed failure wording, the
+absolute attested path and its confirmation. For a live check on macOS, the
+worker must carry Kettle's Developer ID signature: inside a pane of
+`kettle --agent-server off --agent-display on`, `kettle show plot.png` and
+`kettle show diagram.svg` are confirmed as raster and svg, verified; a text
+file is `unsupported_media`; with `KETTLE_PID` and `KETTLE_PANE_ID` stripped
+the pane is still found by ancestry; outside Kettle the command says it is
+not in Kettle, and naming this Kettle and pane through the environment from
+outside lands unverified.
 #### `kettle mcp`
 
 `kettle mcp --self-test` (in-process handshake +

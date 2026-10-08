@@ -441,6 +441,20 @@ before anything on the UI thread can reap that child, and the App matches a
 checked chain against those identities across all windows. Only the
 connection thread builds the evidence an `AdmittedRequest` carries.
 
+`show` (kettle-ctl's `show` module) is parsed on that connection thread too,
+after admission, into an owned `ShowRequest`; with it the request carries its
+admission instant and the sender the kernel names, with the executable that
+process runs (`process::executable`, rechecked against the pid's start). In
+kettle-ui the `media` module routes it (`route`: the nearest live pane whose
+child is an ancestor, else full control's pane or a hint naming this
+Kettle, unverified), queues it (`queue`: one render, three waiting, one per
+sender, a deadline from admission), and renders it on the lane, one thread
+started on first use that drives `WorkerClient::render_media_with_control`.
+Each `Pane` owns its `Shelf`, so a shelf travels with its tab; completions
+come back through `UserEvent::MediaRendered`, the item's pixels are charged
+to the process preview account (releasing the least recently viewed off-screen
+pixels when it is full), and only then is the push answered.
+
 ```mermaid
 graph LR
     bin2["kettle (bin)"] --> exec["kettle exec<br/>headless one-shot<br/>(real PTY, no window)"]

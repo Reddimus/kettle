@@ -525,7 +525,7 @@ fn modal_holds_cursor_steady(ws: &WindowState) -> bool {
 /// environment is reported separately and never makes it verified.
 fn ctl_caller_report(
     caller: &crate::ctl_server::CallerEvidence,
-    roots: &[(kettle_ctl::process::ProcessIdentity, u64, u64)],
+    roots: &[crate::media::PaneRoot],
     panes: &[(u64, u64)],
     kettle_pid: u32,
 ) -> serde_json::Value {
@@ -541,14 +541,7 @@ fn ctl_caller_report(
         // Not checked: only requests that report their caller are.
         None => (None, Some(UnverifiedReason::MissingClaim)),
     };
-    let found = chain.and_then(|chain| {
-        chain.iter().find_map(|identity| {
-            roots
-                .iter()
-                .find(|(root, _, _)| root == identity)
-                .map(|&(_, pane, window)| (pane, window))
-        })
-    });
+    let found = chain.and_then(|chain| crate::media::nearest_pane(chain, roots));
     let reason = reason.or_else(|| found.is_none().then_some(UnverifiedReason::NoPane));
     let peer = chain.and_then(|chain| chain.first()).map(|peer| {
         serde_json::json!({
@@ -1569,6 +1562,62 @@ fn ctl_page_values(
 
 /// `get_state`'s `media` field: whether media previews are available, and a
 /// fixed reason code when they are not. Asking never waits on a check.
+/// Why `show` cannot render now, if it cannot: no worker, or one that
+/// failed its checks. A worker still being checked is waited for.
+fn media_unavailable(
+    media: Option<&kettle_media::client::WorkerClient>,
+) -> Option<kettle_media::FailureCode> {
+    use kettle_media::FailureCode;
+    use kettle_media::client::{MediaAvailability, UnavailableCause};
+    match media.map(kettle_media::client::WorkerClient::availability) {
+        None => Some(FailureCode::WorkerUnavailable),
+        Some(MediaAvailability::Checking | MediaAvailability::Available) => None,
+        Some(MediaAvailability::Unavailable(UnavailableCause::UnsupportedPlatform)) => {
+            Some(FailureCode::UnsupportedPlatform)
+        }
+        Some(MediaAvailability::Unavailable(_)) => Some(FailureCode::WorkerUnavailable),
+    }
+}
+
+/// A file's default shelf key: its path, as text.
+fn media_path_key(path: &kettle_media::NativePath) -> String {
+    #[cfg(windows)]
+    {
+        let (units, _) = path.as_bytes().as_chunks::<2>();
+        String::from_utf16_lossy(
+            &units
+                .iter()
+                .map(|unit| u16::from_le_bytes(*unit))
+                .collect::<Vec<_>>(),
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        String::from_utf8_lossy(path.as_bytes()).into_owned()
+    }
+}
+
+/// The shelf items on screen in any window, which eviction spares.
+fn media_visible_items<'a>(windows: impl Iterator<Item = &'a WindowState>) -> Vec<u64> {
+    windows
+        .filter_map(|window| window.media_viewer.as_ref().map(|viewer| viewer.item))
+        .collect()
+}
+
+/// The window holding `pane`: `ws` or one of `windows`.
+fn window_with_pane<'a>(
+    ws: &'a mut WindowState,
+    windows: &'a mut std::collections::BTreeMap<u64, WindowState>,
+    pane: u64,
+) -> Option<&'a mut WindowState> {
+    if ws.mux.panes.contains_key(&pane) {
+        return Some(ws);
+    }
+    windows
+        .values_mut()
+        .find(|window| window.mux.panes.contains_key(&pane))
+}
+
 fn ctl_media_state(media: Option<&kettle_media::client::WorkerClient>) -> serde_json::Value {
     use kettle_media::client::MediaAvailability;
     match media.map(kettle_media::client::WorkerClient::availability) {
@@ -1656,6 +1705,9 @@ pub enum UserEvent {
     /// (new connection / request / disconnect). The main thread drains the
     /// server channel and dispatches each request against `ws.mux`.
     Ctl,
+    /// The media lane finished a `show` render; publish it and start the
+    /// next.
+    MediaRendered,
     /// The background update-check thread found a newer GitHub
     /// release. Carries the tag (e.g. `v2.6.0`) + the release-page URL so the
     /// UI can show a passive bottom banner. The banner is mouse-driven
@@ -3700,7 +3752,7 @@ fn is_private_use_char(c: char) -> bool {
 /// Unicode bidirectional formatting / override code points. These are NOT
 /// `char::is_control()` (they are general category Cf) but enable right-to-left
 /// titlebar / Alt-Tab spoofing, so a sanitized title must neutralize them too.
-fn is_bidi_format_char(c: char) -> bool {
+pub(crate) fn is_bidi_format_char(c: char) -> bool {
     matches!(
         c,
         '\u{202A}'..='\u{202E}'      // LRE RLE PDF LRO RLO
@@ -7989,6 +8041,8 @@ pub struct App {
     /// pane id. A request writes `cmd\n`, records the start line + deadline
     /// here, and the next OSC-133 `CommandFinished` for that pane resolves it.
     pending_runs: std::collections::HashMap<u64, PendingRun>,
+    /// `show` pushes: their render queue and the thread that renders them.
+    media: crate::media::MediaService,
     clipboard: Option<arboard::Clipboard>,
     /// Temporary PNGs materialized from clipboard bitmaps. Owner-only, bounded,
     /// and removed on exit — see [`crate::paste_image`].
@@ -8995,6 +9049,7 @@ impl App {
             ctl_policy,
             ctl_start: CtlStart::NotReady,
             pending_runs: std::collections::HashMap::new(),
+            media: crate::media::MediaService::default(),
             clipboard,
             pasted_images: crate::paste_image::PastedImages::new(),
             video_previewer,
@@ -20099,7 +20154,7 @@ impl App {
                     if !request.internal_probe() && !ctl_method_is_pure_read(request.method()) {
                         needs_redraw = true;
                     }
-                    self.handle_ctl_request(ws, event_loop, conn_id, &request, reply);
+                    self.handle_ctl_request(ws, event_loop, conn_id, request, reply);
                 }
                 CtlServerMsg::Disconnect { conn_id } => {
                     let panes = self
@@ -20123,6 +20178,8 @@ impl App {
                     // Drop any pending run owned by this connection.
                     self.pending_runs
                         .retain(|_, p: &mut PendingRun| p.conn_id != conn_id);
+                    // Its `show` pushes are no longer wanted.
+                    self.media.disconnected(conn_id);
                     log::info!("agent-server: connection {conn_id} closed");
                 }
             }
@@ -20143,7 +20200,7 @@ impl App {
         ws: &mut WindowState,
         event_loop: &ActiveEventLoop,
         conn_id: u64,
-        request: &crate::ctl_server::AdmittedRequest,
+        mut request: crate::ctl_server::AdmittedRequest,
         reply: crate::ctl_server::ReplyTx,
     ) {
         use kettle_ctl::protocol::{Method, Response, error_codes as ec};
@@ -20193,19 +20250,350 @@ impl App {
             Method::WaitFor => {
                 Response::err(req.id, ec::INTERNAL, "wait_for was routed to the UI thread")
             }
+            Method::Show => {
+                // Deferred: answered once the item is on its shelf.
+                self.ctl_show(ws, conn_id, &mut request, reply);
+                return;
+            }
         };
         let _ = reply.send(resp);
     }
 
-    /// `get_state`: version, theme, pid, server mode, focused pane.
-    fn ctl_get_state(
+    /// `show`: route the push to its caller's pane, queue its render, and
+    /// answer once its item is on that pane's shelf (see [`crate::media`]).
+    fn ctl_show(
+        &mut self,
+        ws: &mut WindowState,
+        conn_id: u64,
+        request: &mut crate::ctl_server::AdmittedRequest,
+        reply: crate::ctl_server::ReplyTx,
+    ) {
+        use kettle_media::FailureCode;
+        let id = request.request().id;
+        let refuse = |failure: FailureCode| {
+            let _ = reply.send(kettle_ctl::show::show_failure(id, failure));
+        };
+        let Some(crate::ctl_server::ShowAdmission {
+            request: show,
+            sender,
+        }) = request.take_show()
+        else {
+            refuse(FailureCode::BadParams);
+            return;
+        };
+        if let Some(failure) = media_unavailable(self.startup.media.as_deref()) {
+            refuse(failure);
+            return;
+        }
+        let full_control = self.ctl.as_ref().is_some_and(|ctl| {
+            ctl.policy()
+                .allows(kettle_ctl::protocol::Capability::Mutate)
+        });
+        let (roots, _) = self.caller_roots(ws);
+        let live: Vec<(u64, u64)> = self
+            .all_windows(ws)
+            .flat_map(|window| {
+                window
+                    .mux
+                    .panes
+                    .iter()
+                    .filter(|(_, pane)| !pane.closed && !pane.held)
+                    .map(move |(&pane, _)| (pane, window.seq))
+            })
+            .collect();
+        let route = match crate::media::route(
+            request.caller(),
+            show.pane,
+            full_control,
+            &roots,
+            &live,
+            std::process::id(),
+        ) {
+            Ok(route) => route,
+            Err(failure) => {
+                refuse(failure);
+                return;
+            }
+        };
+        // An unverified push counts against its sending process; one whose
+        // sender the kernel could not name has no one to count against or
+        // to show as its sender.
+        let (sender, provenance) = match (route.verified, sender) {
+            (true, _) => (
+                crate::media::Sender::Pane(route.pane),
+                crate::media::Provenance::Verified,
+            ),
+            (false, Some(sender)) => (
+                crate::media::Sender::Process(sender.process),
+                crate::media::Provenance::Unverified(crate::media::UnverifiedSender {
+                    executable: sender
+                        .executable
+                        .map(|path| crate::media::display_title(&path.to_string_lossy())),
+                    pid: sender.process.pid(),
+                }),
+            ),
+            (false, None) => {
+                refuse(FailureCode::NotInKettlePane);
+                return;
+            }
+        };
+        let Some((theme, target)) = self.media_surface(ws, route.pane) else {
+            refuse(FailureCode::NotInKettlePane);
+            return;
+        };
+        let kettle_ctl::show::ShowRequest {
+            source, title, key, ..
+        } = show;
+        let kind = source.job_kind();
+        let (source, file_name) = match source {
+            kettle_ctl::show::ShowSource::Svg(text) => {
+                (kettle_media::Source::Bytes(text.into_bytes()), None)
+            }
+            kettle_ctl::show::ShowSource::Image(bytes) => {
+                (kettle_media::Source::Bytes(bytes), None)
+            }
+            kettle_ctl::show::ShowSource::File { path, attestation } => {
+                let name = path.file_name_lossy();
+                (
+                    kettle_media::Source::Path {
+                        path,
+                        authorization: kettle_media::Authorization::ExternalAttested(attestation),
+                    },
+                    name,
+                )
+            }
+        };
+        // A file's key defaults to the file, so showing it again replaces it.
+        let key = key.or_else(|| match &source {
+            kettle_media::Source::Path { path, .. } => Some(media_path_key(path)),
+            kettle_media::Source::Bytes(_) => None,
+        });
+        let title = title
+            .or(file_name)
+            .map(|title| crate::media::display_title(&title))
+            .filter(|title| !title.is_empty())
+            .unwrap_or_else(|| {
+                self.ui_text
+                    .text(kettle_i18n::Text::MediaShelfUntitled)
+                    .into()
+            });
+        let job = kettle_media::Job {
+            kind,
+            source,
+            theme,
+            canvas: kettle_media::Canvas::Theme,
+            target,
+            fallback_fonts: Vec::new(),
+        };
+        let deadline = request.admitted_at() + kettle_ctl::show::SHOW_SERVER_DEADLINE;
+        let push = crate::media::Push::new(
+            crate::media::Origin {
+                conn_id,
+                request_id: id,
+                reply,
+            },
+            route,
+            crate::media::Draft {
+                key,
+                title,
+                provenance,
+            },
+            job,
+            kettle_media::client::RenderControl::with_deadline(deadline),
+        );
+        self.media.admit(sender, deadline, push);
+        self.media_tick(ws);
+    }
+
+    /// The theme and render target for media shown in `pane`: the pane's
+    /// effective colors, and its window's size in device pixels.
+    fn media_surface(
         &self,
         ws: &WindowState,
-        policy: kettle_ctl::CtlPolicy,
-        caller: &crate::ctl_server::CallerEvidence,
-    ) -> serde_json::Value {
-        // Live panes only: a closed or held pane's child no longer hosts
-        // anyone who could be calling.
+        pane: u64,
+    ) -> Option<(kettle_media::Theme, kettle_media::Target)> {
+        let window = self
+            .all_windows(ws)
+            .find(|window| window.mux.panes.contains_key(&pane))?;
+        let pane = window.mux.panes.get(&pane)?;
+        let colors = pane.term.term.lock().ok().map(|term| *term.colors());
+        let theme = &self.cfg.theme;
+        let pick = |index: usize| {
+            colors
+                .as_ref()
+                .and_then(|colors| kettle_render::resolve_query(index, theme, colors))
+                .unwrap_or(match index {
+                    256 => theme.foreground,
+                    257 => theme.background,
+                    _ => theme.palette[index.min(15)],
+                })
+        };
+        let rgba = |color: kettle_config::Rgb| [color.r, color.g, color.b, 255];
+        let background = pick(257);
+        let media_theme = kettle_media::Theme {
+            background: rgba(background),
+            foreground: rgba(pick(256)),
+            palette: std::array::from_fn(|index| rgba(pick(index))),
+            accent: rgba(theme.accent),
+            is_dark: kettle_render::relative_luminance(background) < 0.5,
+        };
+        let (width, height, scale) = window
+            .window
+            .as_ref()
+            .map(|window| {
+                let size = window.inner_size();
+                (size.width, size.height, window.scale_factor())
+            })
+            .unwrap_or((1024, 768, 1.0));
+        let edge = |value: u32| value.clamp(64, kettle_media::MAX_SVG_RENDERED_EDGE);
+        let target = kettle_media::Target {
+            width: edge(width),
+            height: edge(height),
+            scale: if scale.is_finite() && scale > 0.0 {
+                scale
+            } else {
+                1.0
+            },
+            crop: None,
+        };
+        Some((media_theme, target))
+    }
+
+    /// Advance `show`: drop pushes whose pane is gone, publish finished
+    /// renders, and start the next one.
+    fn media_tick(&mut self, ws: &mut WindowState) {
+        if self.media.is_idle() {
+            return;
+        }
+        let live: std::collections::HashSet<u64> = self
+            .all_windows(ws)
+            .flat_map(|window| {
+                window
+                    .mux
+                    .panes
+                    .iter()
+                    .filter(|(_, pane)| !pane.closed && !pane.held)
+                    .map(|(&pane, _)| pane)
+            })
+            .collect();
+        self.media.retain_panes(|pane| live.contains(&pane));
+        while let Some(finished) = self.media.take_finished() {
+            self.finish_show(ws, finished);
+        }
+        let proxy = self.proxy.clone();
+        self.media.pump(self.startup.media.as_ref(), move || {
+            std::sync::Arc::new(move || {
+                let _ = proxy.send_event(UserEvent::MediaRendered);
+            })
+        });
+    }
+
+    /// Publish a finished render to its pane's shelf and answer its push.
+    fn finish_show(&mut self, ws: &mut WindowState, finished: crate::media::Finished) {
+        use kettle_media::FailureCode;
+        use kettle_media::client::RenderError;
+        let crate::media::Finished { push, result } = finished;
+        let (origin, route, draft) = push.into_parts();
+        let output = match result {
+            Ok(output) => output,
+            // Cancelled because its pane went, or its client left.
+            Err(RenderError::Cancelled) => return origin.refuse(FailureCode::NotInKettlePane),
+            Err(RenderError::Failure(failure)) => return origin.refuse(failure),
+        };
+        let kettle_media::RenderOutput { kind, rendered } = output;
+        let (width, height) = (rendered.width, rendered.height);
+        let warnings = rendered.warnings;
+        let visible = media_visible_items(self.all_windows(ws));
+        let mut pixels = rendered.rgba;
+        let image = loop {
+            match kettle_core::ImageData::try_with_budget(
+                width,
+                height,
+                pixels,
+                &kettle_core::GraphicsBudget::previews(),
+            ) {
+                Ok(image) => break image,
+                Err(kettle_core::ImageRefusal::Invalid) => {
+                    return origin.refuse(FailureCode::RenderResource);
+                }
+                Err(kettle_core::ImageRefusal::NoRoom(back)) => {
+                    if !self.evict_media_pixels(ws, &visible) {
+                        return origin.refuse(FailureCode::OverBudget);
+                    }
+                    pixels = back;
+                }
+            }
+        };
+        let item_id = self.media.next_item();
+        let item = crate::media::ShelfItem::new(
+            item_id,
+            draft.key,
+            draft.title,
+            draft.provenance,
+            kind,
+            warnings.clone(),
+            image,
+        );
+        let Some(window) = window_with_pane(ws, &mut self.windows, route.pane) else {
+            return origin.refuse(FailureCode::NotInKettlePane);
+        };
+        let Some(pane) = window
+            .mux
+            .panes
+            .get_mut(&route.pane)
+            .filter(|pane| !pane.closed && !pane.held)
+        else {
+            return origin.refuse(FailureCode::NotInKettlePane);
+        };
+        let shown = window
+            .media_viewer
+            .as_ref()
+            .filter(|viewer| viewer.pane == route.pane)
+            .map(|viewer| viewer.item);
+        let published = pane.media_shelf.publish(item, shown);
+        let seq = window.seq;
+        if let Some(handle) = &window.window {
+            handle.request_redraw();
+        }
+        let result = kettle_ctl::show::ShowResult::new(
+            (route.pane, route.verified, seq),
+            published.id,
+            kind,
+            (width, height),
+            &warnings,
+        );
+        let id = origin.request_id;
+        origin.answer(kettle_ctl::protocol::Response::ok(
+            id,
+            serde_json::to_value(result).unwrap_or_default(),
+        ));
+    }
+
+    /// Release the pixels of the least recently viewed shelf item in any
+    /// window that is not on screen. False when there is none.
+    fn evict_media_pixels(&mut self, ws: &mut WindowState, visible: &[u64]) -> bool {
+        let oldest = self
+            .all_windows(ws)
+            .flat_map(|window| window.mux.panes.iter())
+            .filter_map(|(&pane, state)| {
+                state
+                    .media_shelf
+                    .eviction_candidate(visible)
+                    .map(|(viewed, item)| (viewed, pane, item))
+            })
+            .min();
+        let Some((_, pane, item)) = oldest else {
+            return false;
+        };
+        window_with_pane(ws, &mut self.windows, pane)
+            .and_then(|window| window.mux.panes.get_mut(&pane))
+            .is_some_and(|pane| pane.media_shelf.evict_pixels(item))
+    }
+
+    /// Every pane as `(pane, window)`, and the live ones' own children that
+    /// a caller can descend from. A closed or held pane's child no longer
+    /// hosts anyone who could be calling.
+    fn caller_roots(&self, ws: &WindowState) -> (Vec<crate::media::PaneRoot>, Vec<(u64, u64)>) {
         let mut roots = Vec::new();
         let mut panes = Vec::new();
         for window in self.all_windows(ws) {
@@ -20215,10 +20603,25 @@ impl App {
                     && !pane.closed
                     && !pane.held
                 {
-                    roots.push((root, id, window.seq));
+                    roots.push(crate::media::PaneRoot {
+                        root,
+                        pane: id,
+                        window: window.seq,
+                    });
                 }
             }
         }
+        (roots, panes)
+    }
+
+    /// `get_state`: version, theme, pid, server mode, focused pane.
+    fn ctl_get_state(
+        &self,
+        ws: &WindowState,
+        policy: kettle_ctl::CtlPolicy,
+        caller: &crate::ctl_server::CallerEvidence,
+    ) -> serde_json::Value {
+        let (roots, panes) = self.caller_roots(ws);
         serde_json::json!({
             "caller": ctl_caller_report(caller, &roots, &panes, std::process::id()),
             "version": env!("CARGO_PKG_VERSION"),
@@ -20348,6 +20751,8 @@ impl App {
                     // read-only lock before a send_text/run_command bounces
                     // with the `read_only` error code.
                     "read_only": pane.read_only,
+                    // What `show` put on this pane's shelf, newest first.
+                    "media_shelf": crate::media::shelf_report(&pane.media_shelf),
                 }));
             }
         }
@@ -27252,6 +27657,20 @@ impl ApplicationHandler<UserEvent> for App {
                 self.config_reload_deadline
                     .get_or_insert_with(|| std::time::Instant::now() + CONFIG_RELOAD_DEBOUNCE);
             }
+            UserEvent::MediaRendered => {
+                let seq = if self.windows.contains_key(&self.focused_seq) {
+                    self.focused_seq
+                } else if let Some(seq) = self.windows.keys().next().copied() {
+                    seq
+                } else {
+                    return;
+                };
+                let Some(mut ws) = self.windows.remove(&seq) else {
+                    return;
+                };
+                self.media_tick(&mut ws);
+                self.finish_window_dispatch(el, seq, ws);
+            }
             UserEvent::RemoteScanReady => {
                 let seq = if self.windows.contains_key(&self.focused_seq) {
                     self.focused_seq
@@ -30532,7 +30951,7 @@ impl App {
         match ev {
             // Consumed by the outer window-less dispatch before a WindowState
             // is checked out.
-            UserEvent::Activation | UserEvent::RemoteScanReady => {}
+            UserEvent::Activation | UserEvent::RemoteScanReady | UserEvent::MediaRendered => {}
             UserEvent::AccessibilityAction { request, .. } => {
                 self.handle_accessibility_action(ws, request, _el);
             }
@@ -33274,6 +33693,16 @@ impl App {
         // schedule a wake at the soonest deadline so a fully-silent command
         // (no output to wake us) still times out on time.
         self.check_pending_run_deadlines(ws);
+        // `show` pushes waiting past their deadline are answered, and those
+        // whose pane closed are dropped, even when nothing else wakes us.
+        self.media_tick(ws);
+        if let Some(soonest) = self.media.next_deadline() {
+            let next = soonest.saturating_duration_since(now).clamp(
+                std::time::Duration::from_millis(1),
+                std::time::Duration::from_millis(500),
+            );
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
         if let Some(soonest) = self.pending_runs.values().map(|p| p.deadline).min() {
             let next = soonest.saturating_duration_since(now).clamp(
                 std::time::Duration::from_millis(1),
@@ -38318,7 +38747,8 @@ mod tests {
         let id = |pid, start| ProcessIdentity::new_for_tests(pid, start);
         // caller 30 → tool 31 → inner pane's shell 20 → outer pane's shell 10.
         let chain = vec![id(30, 300), id(31, 290), id(20, 200), id(10, 100)];
-        let roots = [(id(10, 100), 1, 1), (id(20, 200), 7, 2)];
+        let root = |root, pane, window| crate::media::PaneRoot { root, pane, window };
+        let roots = [root(id(10, 100), 1, 1), root(id(20, 200), 7, 2)];
         let panes = [(1, 1), (7, 2), (9, 2)];
         let report = |caller| super::ctl_caller_report(&caller, &roots, &panes, 4242);
 

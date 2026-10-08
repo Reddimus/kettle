@@ -24,6 +24,13 @@ kettle \- fast GPU-accelerated terminal emulator for Linux and macOS
 .B kettle mcp
 .RI [ \-\-self\-test ]
 .br
+.B kettle show
+.IR PATH " | " \-
+.RI [ \-\-title
+.IR TITLE ]
+.RI [ \-\-key
+.IR KEY ]
+.br
 .B kettle update
 .RI [ \-\-yes ]
 .
@@ -517,6 +524,20 @@ runs an in-process handshake +
 + one
 .B kettle_run
 and exits, for CI.
+.TP
+.B kettle show \fIPATH\fR|\fB\-\fR [\fB\-\-title \fITITLE\fR] [\fB\-\-key \fIKEY\fR]
+Send a local image or SVG to the media shelf of the pane this runs in, in the
+kettle it runs inside; never another kettle. Pass
+.B \-
+for a small image or SVG on stdin; larger media goes by path. The media worker
+decides what the bytes are, not the file name. A later
+.B show
+with the same
+.B \-\-key
+(default: the file's path) replaces the item. Nothing opens on screen. Needs
+agent previews
+.RB ( agent\-display ),
+never full control. Exits 0 once the item is on the shelf, 1 otherwise.
 .TP
 .B kettle update \fR[\fB\-\-yes\fR]
 Download and install the latest authenticated stable release. Supported for

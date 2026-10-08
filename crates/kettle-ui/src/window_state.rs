@@ -698,6 +698,13 @@ pub(crate) struct ThemePickerState {
     pub(crate) opened_on: String,
 }
 
+/// The shelf item open in a window's media viewer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MediaViewer {
+    pub(crate) pane: u64,
+    pub(crate) item: u64,
+}
+
 pub(crate) struct WindowState {
     /// Stable per-window sequence number (1-based, process-lifetime unique).
     /// Exposed to agents via the ctl API and used as the map key. Never
@@ -888,6 +895,9 @@ pub(crate) struct WindowState {
     /// one (`commit_theme`) clears it first. Reverted by the single post-event
     /// chokepoint in `window_event` (`theme_preview_change`).
     pub(crate) theme_preview: Option<(String, kettle_config::Theme)>,
+    /// The shelf item the user opened in this window, if any. Only a user
+    /// action opens it; a push never does.
+    pub(crate) media_viewer: Option<MediaViewer>,
     /// When `Some`, the user is editing a window/tab/pane title via
     /// an inline overlay.
     pub(crate) editing_title: Option<TitleEditState>,
@@ -1342,6 +1352,7 @@ impl WindowState {
             hint_state: None,
             context_menu: None,
             theme_preview: None,
+            media_viewer: None,
             editing_title: None,
             pending_resize: false,
             confirm_dialog: None,

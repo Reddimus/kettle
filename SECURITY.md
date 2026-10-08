@@ -64,6 +64,12 @@ Reports that fit any of these are welcome:
   `process` modules; pane child identities are read at spawn
   (`Pane::caller_root`). The control server itself is a same-user surface:
   a process running as you can already drive it when it is enabled.
+- **Media routing** — a `show` push landing on a pane other than its
+  sender's without being labeled unverified, reaching a Kettle the sender
+  does not run in, naming a sender by anything but the kernel's view of the
+  connection, or opening anything on screen. Routing lives in `kettle-ui`'s
+  `media::route`; display discovery is `kettle-ctl`'s
+  `Client::discover_display`.
 - **Bracketed-paste injection** — a paste payload that escapes the
   `\e[200~ … \e[201~` wrapper and runs as input.
 - **Resource exhaustion via a single PTY frame** — a parser path that

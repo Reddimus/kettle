@@ -117,6 +117,7 @@ impl CtlPolicy {
         Err(RpcError {
             code: code.to_string(),
             message: message.to_string(),
+            reason: None,
         })
     }
 }

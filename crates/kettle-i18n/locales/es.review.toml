@@ -11,6 +11,7 @@
 [status]
 inline_card_pending = "draft"
 inline_card_unavailable = "draft"
+media_shelf_untitled = "draft"
 a11y_pane = "draft"
 a11y_window = "draft"
 about_copy_version = "draft"

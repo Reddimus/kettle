@@ -80,6 +80,15 @@ impl std::ops::Deref for PixelBuffer {
     }
 }
 
+/// Why an image could not be made.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ImageRefusal {
+    /// Its size or pixel count is not one an image may have.
+    Invalid,
+    /// Its account has no room for it now; here are its pixels back.
+    NoRoom(Vec<u8>),
+}
+
 /// An RGBA8 image ready to upload as a GPU texture.
 #[derive(Clone)]
 pub struct ImageData {
@@ -112,6 +121,18 @@ impl ImageData {
         rgba: Vec<u8>,
         budget: &GraphicsBudget,
     ) -> Option<ImageData> {
+        Self::try_with_budget(width, height, rgba, budget).ok()
+    }
+
+    /// [`ImageData::new_with_budget`] that says why it refused, handing the
+    /// pixels back when only the account's room was missing, so a caller can
+    /// release other images and try again without copying them.
+    pub fn try_with_budget(
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+        budget: &GraphicsBudget,
+    ) -> Result<ImageData, ImageRefusal> {
         // Checked arithmetic. The previous unchecked
         // `width as usize * height as usize * 4` would panic on debug
         // and silently wrap on release for adversarial header values
@@ -124,7 +145,7 @@ impl ImageData {
         // this guard covers the *raw* `ImageData::new` surface for any
         // future caller.
         if width == 0 || height == 0 {
-            return None;
+            return Err(ImageRefusal::Invalid);
         }
         // Cap per-axis dimensions at the same `MAX_IMAGE_DIM`
         // the `from_encoded` decoder already enforces — but here, at the single
@@ -138,17 +159,16 @@ impl ImageData {
         // into a panic = (panic=abort) a whole-process abort killing every tab.
         // Rejecting oversized dims here closes that remote DoS for every caller.
         if width > MAX_IMAGE_DIM || height > MAX_IMAGE_DIM {
-            return None;
+            return Err(ImageRefusal::Invalid);
         }
-        let expected = rgba_bytes(width, height)?;
-        if expected > budget.limits().image_bytes {
-            return None;
+        let expected = rgba_bytes(width, height).ok_or(ImageRefusal::Invalid)?;
+        if expected > budget.limits().image_bytes || rgba.len() != expected {
+            return Err(ImageRefusal::Invalid);
         }
-        if rgba.len() != expected {
-            return None;
-        }
-        let reservation = budget.reserve_image_cpu(expected)?;
-        Self::from_reserved(width, height, rgba, reservation)
+        let Some(reservation) = budget.reserve_image_cpu(expected) else {
+            return Err(ImageRefusal::NoRoom(rgba));
+        };
+        Self::from_reserved(width, height, rgba, reservation).ok_or(ImageRefusal::Invalid)
     }
 
     pub(crate) fn from_reserved(
