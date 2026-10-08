@@ -455,6 +455,18 @@ come back through `UserEvent::MediaRendered`, the item's pixels are charged
 to the process preview account (releasing the least recently viewed off-screen
 pixels when it is full), and only then is the push answered.
 
+The user opens a shelf with `open_media_shelf`. `WindowState::media_viewer`
+names the pane and item; the App projects it into a
+`kettle_render::MediaViewerOverlay` (display text and pixels, never a path)
+and closes it when its pane leaves the active tab or becomes too small to
+hold it, the item leaves the shelf, or another modal opens. While it is open it takes every press and the
+wheel over it, ahead of the tab bar, and the paste receipt is not projected.
+kettle-render's `media_viewer` lays it out (`media_viewer_geometry`, shared
+with the App's hit testing), paints it into the menu layer, and draws its
+image through a lazily made image layer charged to the preview account, like
+card posters; its shaped text enters the retained chrome damage key and is
+reshaped when the font changes.
+
 ```mermaid
 graph LR
     bin2["kettle (bin)"] --> exec["kettle exec<br/>headless one-shot<br/>(real PTY, no window)"]

@@ -315,6 +315,9 @@ pub enum Action {
     /// them by look with the arrows (each previews live), Enter keeps one and
     /// Esc restores the theme it opened on.
     OpenThemePicker,
+    /// Open the focused pane's media shelf in the viewer, on its newest
+    /// item, or close the viewer when it is already open there.
+    OpenMediaShelf,
     /// Terminator parity (`key_send_newline`). Writes a literal `\n` to the focused
     /// pane's PTY. Mostly useful for inserting a newline into a
     /// shell line-editor that's otherwise consuming Enter
@@ -710,6 +713,7 @@ pub fn action_names() -> Vec<&'static str> {
         "layout_launcher",
         "open_layout_picker",
         "open_theme_picker",
+        "open_media_shelf",
         "preferences",
         "edit_config",
         "settings",
@@ -1000,6 +1004,7 @@ impl Action {
             "layout_launcher" | "layout-launcher" | "open_layout_picker" | "open-layout-picker"
             | "layout_picker" | "layout-picker" => OpenLayoutPicker,
             "open_theme_picker" | "open-theme-picker" => OpenThemePicker,
+            "open_media_shelf" | "open-media-shelf" => OpenMediaShelf,
             "preferences"
             | "preferences_keybindings"
             | "preferences-keybindings"

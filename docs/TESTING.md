@@ -3721,7 +3721,43 @@ first, a key replacing in place with its id; a full shelf drops the least
 recently viewed item, never the visible one; evicted pixels keep the item;
 the `list_panes` report holds no pixels. A push cancelled after its render
 finished stays cancelled and publishes nothing, and a lane thread that ends,
-by a return or a panic, closes its result channel before it wakes the App. Titles lose control characters,
+by a return or a panic, closes its result channel before it wakes the App.
+The shelf counts unseen items, and a replaced item is unseen again unless it
+is the one on screen.
+
+The media viewer (`kettle-render`'s `media_viewer` tests) sits inside its
+pane with its controls on one header row, needs no browsing buttons for one
+item, fits its image centered and never enlarged, keeps the image's shape
+within half a pixel at one scale and lands on whole pixels inside its area (a
+sweep of wide and tall sizes under whole and fractional overlay metrics; an
+image too thin to fit keeps one pixel),
+maps presses to previous, next, close,
+inside and outside, has no geometry in a pane too small or with a degenerate
+cell, and bounds and clips its checkerboard. Drift tests keep the viewer's
+shaped text in the retained chrome damage key, so browsing repaints its
+labels, and reshape it on a font reload; a font-system test shows an
+invalidated line takes the new family though its text is unchanged.
+`kettle-ui` tests pin that the viewer takes only Esc and the arrows, that the
+titlebar badge counts unseen items only, and that both the native and the
+ctl press paths reach the viewer before the tab bar, the update banner, the
+receipt or the terminal, and only the primary button acts. A Back or
+Forward press stops at the viewer, a modal or a context menu, and a release
+reaches the terminal only after a press it wrote (one the search bar kept back
+does not count), once. Wheel motion over
+the viewer is dropped before the accumulator banks it. A confirmation, a
+context menu, or any other modal closes it, as does a resize that leaves its
+pane too small to draw it, and the receipt is hidden under it. The shelf's
+shortcut closes any open viewer whatever key it is bound to, ahead of Esc and
+the arrows, a bare modifier leaves the viewer open, and the shortcut runs
+once per press. Its accessibility
+node says the item's place on the shelf and a release, and enters the
+accessibility key so browsing republishes it. For a live check (macOS, worker signed),
+show a PNG and an SVG, run `kettle ctl perform_action --json
+'{"action":"open_media_shelf"}'` and take screenshots: the viewer shows the
+newest item with its title, kind, size and `1/2`; clicking `›` shows the
+other with its own text; `×` and a click in the margin outside close it; the
+window title counts unopened items. Real Esc and arrow presses need window
+focus, which the release's native checks cover. Titles lose control characters,
 separators and bidirectional formatting, bounded at 256 characters.
 `kettle-vt` hands a refused image's pixels back when only the account's room
 was missing. `kettle show`'s own tests pin its fixed failure wording, the

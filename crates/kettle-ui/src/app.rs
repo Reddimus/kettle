@@ -500,6 +500,15 @@ fn until_next_wall_minute() -> std::time::Duration {
     std::time::Duration::from_millis(60_000 - into_minute)
 }
 
+/// The keys the open media viewer takes for itself: Esc and the arrows
+/// that browse. Any other key closes it and reaches the terminal.
+fn media_viewer_takes_key(key: &Key) -> bool {
+    matches!(
+        key,
+        Key::Named(NamedKey::Escape | NamedKey::ArrowLeft | NamedKey::ArrowRight)
+    )
+}
+
 /// A modal whose input bar is an active text surface keeps the terminal
 /// cursor steady, never mid-blink-off, while it is open.
 fn modal_holds_cursor_steady(ws: &WindowState) -> bool {
@@ -751,6 +760,23 @@ fn accessibility_search_control_from_id(id: NodeId) -> Option<kettle_render::Sea
         }
         _ => None,
     }
+}
+
+/// What a screen reader hears for the open media viewer: its name, with the
+/// item's place on the shelf, title and detail line, and a description that
+/// says when the pixels were released and how to close or browse.
+fn media_viewer_accessibility(
+    viewer: &kettle_render::MediaViewerOverlay,
+    tr: &kettle_i18n::Translator,
+) -> (String, String) {
+    let (index, count) = viewer.position;
+    let label = tr.media_viewer_a11y(index as u64, count as u64, &viewer.title, &viewer.detail);
+    let description = if viewer.image.is_some() {
+        viewer.hint.clone()
+    } else {
+        format!("{} {}", viewer.status, viewer.hint)
+    };
+    (label, description)
 }
 
 fn accessibility_modal_id(kind: u64, index: usize) -> NodeId {
@@ -1022,6 +1048,26 @@ fn modal_accessibility_projection(
         projection.nodes.push((container_id, dialog));
         if projection.focus.is_none() {
             projection.focus = Some(input_id);
+        }
+    }
+
+    if let Some(viewer) = overlay.media_viewer.as_ref() {
+        let id = accessibility_modal_id(10, 0);
+        let mut node = Node::new(Role::Dialog);
+        let (label, description) = media_viewer_accessibility(viewer, tr);
+        node.set_label(label);
+        node.set_description(description);
+        let (x, y, width, height) = viewer.pane_rect;
+        node.set_bounds(accesskit::Rect::new(
+            f64::from(x),
+            f64::from(y),
+            f64::from(x + width),
+            f64::from(y + height),
+        ));
+        projection.roots.push(id);
+        projection.nodes.push((id, node));
+        if projection.focus.is_none() {
+            projection.focus = Some(id);
         }
     }
 
@@ -3363,6 +3409,49 @@ const MOUSE_BACK: u8 = 128;
 /// The report code of xterm's button 9, the Forward button.
 const MOUSE_FORWARD: u8 = 129;
 
+/// The bit a side button's SGR code (128 or 129) has in
+/// `WindowState::reported_side_buttons`.
+fn side_button_bit(sgr: u8) -> u8 {
+    1 << (sgr & 1)
+}
+
+/// Note whether the terminal received a side-button press. Each press
+/// replaces what the last one of that button left, so a release that never
+/// arrived cannot pair with a later press.
+fn note_side_button_press(reported: &mut u8, sgr: u8, delivered: bool) {
+    if delivered {
+        *reported |= side_button_bit(sgr);
+    } else {
+        *reported &= !side_button_bit(sgr);
+    }
+}
+
+/// What a mouse event did on its way to a pane's terminal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MouseReport {
+    /// A report went to the terminal.
+    Written,
+    /// Kettle kept the event from the terminal, and nothing else handles it.
+    Swallowed,
+    /// No report was due; Kettle handles the event itself.
+    Declined,
+}
+
+impl MouseReport {
+    /// Whether nothing else should handle the event.
+    fn consumed(self) -> bool {
+        self != Self::Declined
+    }
+}
+
+/// Whether a side-button release goes to the terminal: only after a press it
+/// received, once.
+fn take_side_button_release(reported: &mut u8, sgr: u8) -> bool {
+    let held = *reported & side_button_bit(sgr) != 0;
+    *reported &= !side_button_bit(sgr);
+    held
+}
+
 /// Whether an OSC 7 working directory is safe to turn into a `file://` URL and
 /// hand to the OS opener.
 ///
@@ -4688,6 +4777,16 @@ struct PaneTitleParts {
     prefix: String,
     title: String,
     path: Option<String>,
+}
+
+/// The pane titlebar's mark for media on the pane's shelf that the user has
+/// not looked at yet: `▣` and how many, or nothing.
+fn media_shelf_badge(unseen: usize) -> String {
+    if unseen == 0 {
+        String::new()
+    } else {
+        format!("▣{unseen} ")
+    }
 }
 
 fn pane_title_prefix(badge: &str, attached: bool, read_only: bool) -> String {
@@ -9871,6 +9970,200 @@ impl App {
         true
     }
 
+    /// Open the focused pane's media shelf in the viewer, on its newest
+    /// item, or close the viewer if one is open. Only a user action opens
+    /// it; a push never does.
+    fn open_media_shelf(&mut self, ws: &mut WindowState) {
+        if ws.media_viewer.is_some() {
+            self.close_media_viewer(ws);
+            return;
+        }
+        let Some(pane) = ws.mux.active_focus() else {
+            return;
+        };
+        let Some(item) = ws
+            .mux
+            .panes
+            .get(&pane)
+            .and_then(|state| state.media_shelf.items().first())
+            .map(|item| item.id)
+        else {
+            return;
+        };
+        self.close_all_modals(ws);
+        self.show_media_item(ws, pane, item);
+    }
+
+    /// Show `item` of `pane`'s shelf in the viewer and note it was viewed.
+    fn show_media_item(&self, ws: &mut WindowState, pane: u64, item: u64) {
+        ws.media_viewer = Some(crate::window_state::MediaViewer { pane, item });
+        if let Some(state) = ws.mux.panes.get_mut(&pane) {
+            state.media_shelf.viewed(item);
+        }
+        ws.accessibility_pending = true;
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+    }
+
+    fn close_media_viewer(&self, ws: &mut WindowState) {
+        if ws.media_viewer.take().is_some() {
+            ws.accessibility_pending = true;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        }
+    }
+
+    /// Show the shelf item `step` places along from the open one, stopping
+    /// at either end.
+    fn step_media_viewer(&self, ws: &mut WindowState, step: isize) {
+        let Some(viewer) = ws.media_viewer else {
+            return;
+        };
+        let Some(items) = ws
+            .mux
+            .panes
+            .get(&viewer.pane)
+            .map(|pane| pane.media_shelf.items())
+        else {
+            return;
+        };
+        let Some(at) = items.iter().position(|item| item.id == viewer.item) else {
+            return;
+        };
+        let Some(next) = at
+            .checked_add_signed(step)
+            .and_then(|index| items.get(index))
+            .map(|item| item.id)
+        else {
+            return;
+        };
+        self.show_media_item(ws, viewer.pane, next);
+    }
+
+    /// Close a viewer that is not on screen: its pane closed, left this
+    /// window or its tab is not the active one, its item left the shelf, or
+    /// the pane is too small to hold it. It also closes under any other
+    /// modal, which every opener already ensures; this keeps that true for
+    /// one added later.
+    fn prune_media_viewer(&self, ws: &mut WindowState) {
+        let Some(viewer) = ws.media_viewer else {
+            return;
+        };
+        let shown = !self.any_modal_open(ws)
+            && ws
+                .mux
+                .panes
+                .get(&viewer.pane)
+                .is_some_and(|pane| !pane.closed)
+            && self.media_viewer_geometry(ws).is_some();
+        if !shown {
+            self.close_media_viewer(ws);
+        }
+    }
+
+    /// The open shelf item, projected for painting over its pane.
+    fn media_viewer_projection(
+        &self,
+        ws: &WindowState,
+    ) -> Option<kettle_render::MediaViewerOverlay> {
+        let viewer = ws.media_viewer?;
+        let pane_rect = self.pane_rect(ws, self.area(ws), viewer.pane)?;
+        let items = ws.mux.panes.get(&viewer.pane)?.media_shelf.items();
+        let index = items.iter().position(|item| item.id == viewer.item)?;
+        let item = &items[index];
+        let tr = &self.ui_text;
+        let kind = tr.text(match item.kind {
+            kettle_media::MediaKind::Raster => kettle_i18n::Text::MediaViewerKindImage,
+            kettle_media::MediaKind::Svg => kettle_i18n::Text::MediaViewerKindSvg,
+            _ => kettle_i18n::Text::MediaViewerKindMedia,
+        });
+        let sender = match &item.provenance {
+            crate::media::Provenance::Verified => {
+                tr.text(kettle_i18n::Text::MediaViewerFromPane).to_string()
+            }
+            crate::media::Provenance::Unverified(sender) => tr.media_viewer_unverified(
+                sender
+                    .executable
+                    .as_deref()
+                    .unwrap_or_else(|| tr.text(kettle_i18n::Text::MediaViewerUnknownProgram)),
+                u64::from(sender.pid),
+            ),
+        };
+        let (width, height) = item.size;
+        Some(kettle_render::MediaViewerOverlay {
+            pane_rect,
+            title: item.title.clone(),
+            detail: format!("{kind} · {width}×{height} · {sender}"),
+            hint: tr
+                .text(if items.len() > 1 {
+                    kettle_i18n::Text::MediaViewerHint
+                } else {
+                    kettle_i18n::Text::MediaViewerHintSingle
+                })
+                .to_string(),
+            position: (index + 1, items.len()),
+            image: item.image().cloned(),
+            status: tr.text(kettle_i18n::Text::MediaViewerReleased).to_string(),
+            canvas: match item.kind {
+                kettle_media::MediaKind::Svg => kettle_render::MediaCanvas::White,
+                kettle_media::MediaKind::Raster => kettle_render::MediaCanvas::Checker,
+                _ => kettle_render::MediaCanvas::Theme,
+            },
+        })
+    }
+
+    fn media_viewer_geometry(
+        &self,
+        ws: &WindowState,
+    ) -> Option<kettle_render::MediaViewerGeometry> {
+        let viewer = self.media_viewer_projection(ws)?;
+        kettle_render::media_viewer_geometry(
+            &viewer,
+            self.menu_cell(ws),
+            (
+                self.overlay_text_cell_width(ws),
+                self.overlay_text_line_height(ws),
+            ),
+        )
+    }
+
+    /// Whether the open media viewer covers the pointer. It then owns the
+    /// wheel there, so nothing it hides scrolls.
+    fn media_viewer_under_pointer(&self, ws: &WindowState) -> bool {
+        ws.media_viewer.is_some()
+            && self.media_viewer_geometry(ws).is_some_and(|geometry| {
+                geometry.hit_test(ws.cursor.x as f32, ws.cursor.y as f32)
+                    != kettle_render::MediaViewerHit::Outside
+            })
+    }
+
+    /// A press while the viewer is open belongs to it, whichever button and
+    /// wherever it lands, so nothing the viewer hides receives it. The
+    /// primary button acts: close, browse, or close from outside. Shared by
+    /// native and ctl mouse input.
+    fn activate_media_viewer_at(&self, ws: &mut WindowState, x: f32, y: f32, bcode: u8) -> bool {
+        if ws.media_viewer.is_none() {
+            return false;
+        }
+        let Some(geometry) = self.media_viewer_geometry(ws) else {
+            self.close_media_viewer(ws);
+            return false;
+        };
+        if bcode == 0 {
+            match geometry.hit_test(x, y) {
+                kettle_render::MediaViewerHit::Close | kettle_render::MediaViewerHit::Outside => {
+                    self.close_media_viewer(ws);
+                }
+                kettle_render::MediaViewerHit::Previous => self.step_media_viewer(ws, -1),
+                kettle_render::MediaViewerHit::Next => self.step_media_viewer(ws, 1),
+                kettle_render::MediaViewerHit::Inside => {}
+            }
+        }
+        true
+    }
+
     /// Open Kettle's retained private image after rechecking its pane and file
     /// identity. Video cards are informational: platform launch APIs accept a
     /// path rather than the validated handle, so they deliberately have no
@@ -10138,6 +10431,8 @@ impl App {
         if ws.context_menu.is_some() || ws.vi_mode.is_some() || ws.hint_state.is_some() {
             return;
         }
+        // Committed text closes the media viewer and goes on as typed.
+        self.close_media_viewer(ws);
         // The modal handlers below filter typed text by the modifiers that
         // produced it. A committed composition has none: the input method
         // decides when to commit, and whatever is latched at that instant did
@@ -11970,6 +12265,9 @@ impl App {
         // otherwise the visible highlight survives while copy-on-select is
         // silently lost.
         self.finish_selection_gesture(ws);
+        // The question replaces the media viewer rather than sitting over it,
+        // so cancelling it does not bring back a viewer the user moved past.
+        self.close_media_viewer(ws);
         ws.confirm_dialog = Some(dialog);
     }
 
@@ -12135,6 +12433,9 @@ impl App {
         }
         ws.pty_resize_retry
             .record_result(std::time::Instant::now(), native_resize_failed);
+        // A pane too small to hold the media viewer closes it at once, so no
+        // key or press goes to a viewer that is not drawn.
+        self.prune_media_viewer(ws);
     }
 
     /// Shared zoom transition for `Action::ToggleZoom` and
@@ -12855,6 +13156,17 @@ impl App {
         // title fonts do not reliably carry symbol glyphs.
         let raw = self.recorder.as_ref().is_some_and(|rec| rec.raw_input());
         let want = recording_window_title(want, self.recording_status(), raw);
+        // New media on the focused pane's shelf, in ASCII like the
+        // recording mark, until the user opens it.
+        let unseen = pane.map_or(0, |pane| pane.media_shelf.unseen());
+        let want = if unseen > 0 {
+            format!(
+                "{} {want}",
+                self.ui_text.window_title_new_media(unseen as u64)
+            )
+        } else {
+            want
+        };
         let want = sanitize_native_window_title(&want);
         if self.gpu_software_fallback {
             format!("{want} - software rendering (GPU unavailable)")
@@ -14123,11 +14435,22 @@ impl App {
     }
 
     fn send_mouse(&mut self, ws: &mut WindowState, btn: u8, pressed: bool, motion: bool) -> bool {
+        self.report_mouse(ws, btn, pressed, motion).consumed()
+    }
+
+    /// Send a mouse event to the focused pane's terminal and say what it did.
+    fn report_mouse(
+        &mut self,
+        ws: &mut WindowState,
+        btn: u8,
+        pressed: bool,
+        motion: bool,
+    ) -> MouseReport {
         let Some(pane_id) = ws.mux.active_focus() else {
-            return false;
+            return MouseReport::Declined;
         };
         let Some(rect) = self.focused_rect(ws, self.area(ws)) else {
-            return false;
+            return MouseReport::Declined;
         };
         self.send_mouse_to(ws, pane_id, rect, btn, pressed, motion)
     }
@@ -14140,7 +14463,7 @@ impl App {
         btn: u8,
         pressed: bool,
         motion: bool,
-    ) -> bool {
+    ) -> MouseReport {
         self.sync_pane_focus_reports(ws);
         if search_bar_blocks_mouse_report(
             self.cursor_in_search_bar(ws),
@@ -14148,7 +14471,7 @@ impl App {
             motion,
             ws.mouse_btn.is_some(),
         ) {
-            return true;
+            return MouseReport::Swallowed;
         }
         // Shift bypasses mouse tracking so kettle handles the event locally
         // (the xterm convention). Without it, a TUI in mouse mode (htop, vim,
@@ -14156,21 +14479,21 @@ impl App {
         // Returning `false` lets the caller run selection, scrollbar, and
         // extend logic as if tracking were off.
         if ws.mods.shift_key() {
-            return false;
+            return MouseReport::Declined;
         }
         // VTE input-enabled parity: a read-only pane gets
         // no mouse-tracking reports either. Returning false falls through to
         // kettle-local handling, so selection / scrollback still work for the
         // user — the same degradation VTE applies when input is disabled.
         if ws.mux.panes.get(&pane_id).is_some_and(|p| p.read_only) {
-            return false;
+            return MouseReport::Declined;
         }
         let mode = self
             .pane_mode(ws, pane_id)
             .unwrap_or(kettle_core::TermMode::empty());
         let (track, sgr) = input::mouse_tracking(mode);
         if track == input::MouseTracking::Off {
-            return false;
+            return MouseReport::Declined;
         }
         // `motion_is_reported` owns the per-mode rule; see its comment for why
         // it is stated positively.
@@ -14181,7 +14504,11 @@ impl App {
                 // consume it. With no button held the pointer is only
                 // hovering, and kettle's own hover, scrollbar-drag and
                 // link-hover handling must still run.
-                return ws.mouse_btn.is_some();
+                return if ws.mouse_btn.is_some() {
+                    MouseReport::Swallowed
+                } else {
+                    MouseReport::Declined
+                };
             }
         }
         let (row, col) = self.cursor_cell_in_rect(ws, rect);
@@ -14195,7 +14522,7 @@ impl App {
             .last_mouse_cell
             .and_then(|(pane, row, col)| (pane == pane_id).then_some((row, col)));
         if !Self::motion_should_report(motion, last, (row, col)) {
-            return true;
+            return MouseReport::Swallowed;
         }
         let seq = input::mouse_encode(sgr, btn, pressed, motion, col, row, ws.mods);
         if let Some(pane) = ws.mux.panes.get(&pane_id) {
@@ -14206,7 +14533,7 @@ impl App {
             Self::dismiss_media_paste_receipt_after_input(ws, pane_id, result);
         }
         ws.last_mouse_cell = Some((pane_id, row, col));
-        true
+        MouseReport::Written
     }
 
     fn completion_overlay_projection(
@@ -14287,7 +14614,10 @@ impl App {
         terminal_surface: bool,
         now: std::time::Instant,
     ) -> Option<kettle_render::MediaPasteReceiptOverlay> {
-        if !terminal_surface || !ws.window_focused {
+        // The open media viewer hides the receipt until it closes: the viewer
+        // owns every press, and the receipt's thumbnail and labels would
+        // otherwise paint over it.
+        if !terminal_surface || !ws.window_focused || ws.media_viewer.is_some() {
             return None;
         }
         let receipt = ws.media_paste_receipt.as_ref()?;
@@ -14517,6 +14847,9 @@ impl App {
             terminal_surface,
             std::time::Instant::now(),
         );
+        let media_viewer = terminal_surface
+            .then(|| self.media_viewer_projection(ws))
+            .flatten();
         let ime_preedit = preedit.filter(|_| terminal_surface).and_then(|text| {
             let (row, col) = self.terminal_cursor_cell(ws)?;
             Some(ImePreedit {
@@ -14648,6 +14981,7 @@ impl App {
                 ime_preedit,
                 completion,
                 media_paste_receipt,
+                media_viewer,
                 window_focused,
                 scrollbar_active,
                 cursor_visible,
@@ -14765,6 +15099,7 @@ impl App {
             ime_preedit,
             completion: None,
             media_paste_receipt: None,
+            media_viewer: None,
             window_focused,
             scrollbar_active,
             cursor_visible,
@@ -15112,7 +15447,7 @@ impl App {
                 };
                 if snapshot_ready {
                     let cwd = p.term.current_dir_or_native();
-                    let title_parts = pane_title_parts(
+                    let mut title_parts = pane_title_parts(
                         &self.cfg.agent_badge,
                         p.agent_attached,
                         p.read_only,
@@ -15121,6 +15456,9 @@ impl App {
                         cwd.as_deref(),
                         home.as_deref(),
                     );
+                    title_parts
+                        .prefix
+                        .push_str(&media_shelf_badge(p.media_shelf.unseen()));
                     metas.push((
                         *id,
                         *r,
@@ -15558,6 +15896,7 @@ impl App {
         ws.ssh_input = None;
         ws.context_menu = None;
         ws.editing_title = None;
+        ws.media_viewer = None;
         // Vi mode is backed by per-terminal engine state, so closing the modal
         // must clear both the UI owner and TermMode::VI.
         self.exit_vi_mode(ws);
@@ -16382,6 +16721,7 @@ impl App {
         // hint, so leaving one of these armed would make the cached snapshot
         // stale without changing output_generation.
         self.finish_selection_gesture(ws);
+        self.close_media_viewer(ws);
         ws.scrollbar_drag_offset = None;
         ws.dragging_split = None;
         ws.mouse_btn = None;
@@ -18371,6 +18711,7 @@ impl App {
                 ws.layout_picker_input = Some((String::new(), 0));
             }
             Action::OpenThemePicker => self.open_theme_picker(ws),
+            Action::OpenMediaShelf => self.open_media_shelf(ws),
             Action::HintMode => {
                 let targets = self.collect_hints(ws);
                 if !targets.is_empty() {
@@ -21197,7 +21538,7 @@ impl App {
                 .filter_map(|(pane_id, rect)| {
                     let pane = target.mux.panes.get(pane_id)?;
                     let cwd = pane.term.current_dir_or_native();
-                    let title_parts = pane_title_parts(
+                    let mut title_parts = pane_title_parts(
                         &self.cfg.agent_badge,
                         pane.agent_attached,
                         pane.read_only,
@@ -21206,6 +21547,9 @@ impl App {
                         cwd.as_deref(),
                         home.as_deref(),
                     );
+                    title_parts
+                        .prefix
+                        .push_str(&media_shelf_badge(pane.media_shelf.unseen()));
                     let (cols, rows) = self.grid_of_inset(target, *rect, pane_titlebar_h);
                     let size_text =
                         (!self.cfg.title_hide_sizetext).then(|| format!("{}x{}", cols, rows));
@@ -22378,6 +22722,9 @@ impl App {
         if modal_swallows_pointer(self.pointer_modal_open(ws), ws.context_menu.is_some()) {
             return true;
         }
+        if self.activate_media_viewer_at(ws, px, py, bcode) {
+            return true;
+        }
         if tab_bar_pointer_region_contains(&bar, px, py) && (bcode == 0 || bcode == 1) {
             if bcode == 0 && bar.new_tab_menu.2 > 0.0 && rect_contains(bar.new_tab_menu, px, py) {
                 let (ax, ay, _, ah) = bar.new_tab_menu;
@@ -22544,6 +22891,10 @@ impl App {
     /// (a stream of ~0.08-detent events). The integer `wheel_lines` form cannot,
     /// because it enters downstream of quantization.
     fn ctl_mouse_wheel_delta(&mut self, ws: &mut WindowState, notches: f64) -> bool {
+        if self.media_viewer_under_pointer(ws) {
+            ws.wheel.reset();
+            return true;
+        }
         let steps = ws.wheel.feed(
             &winit::event::MouseScrollDelta::LineDelta(0.0, notches as f32),
             self.cfg.scroll_multiplier,
@@ -22578,6 +22929,11 @@ impl App {
                 // offset; wheel down = notches < 0 = scroll down.
                 self.scroll_context_menu(ws, -(steps.notches as isize));
             }
+            return true;
+        }
+        // The open media viewer covers its pane: a wheel over it reaches
+        // nothing it hides.
+        if self.media_viewer_under_pointer(ws) {
             return true;
         }
         // Wheel over a settings field adjusts it (up = forward, down = backward).
@@ -22690,13 +23046,17 @@ impl App {
             if steps.lines != 0 {
                 let btn = if steps.lines > 0 { 64 } else { 65 };
                 for _ in 0..steps.lines.unsigned_abs().min(8) {
-                    reported |= self.send_mouse_to(ws, wheel_pane, wheel_rect, btn, true, false);
+                    reported |= self
+                        .send_mouse_to(ws, wheel_pane, wheel_rect, btn, true, false)
+                        .consumed();
                 }
             }
             if steps.cols != 0 {
                 let btn = if steps.cols > 0 { 66 } else { 67 };
                 for _ in 0..steps.cols.unsigned_abs().min(8) {
-                    reported |= self.send_mouse_to(ws, wheel_pane, wheel_rect, btn, true, false);
+                    reported |= self
+                        .send_mouse_to(ws, wheel_pane, wheel_rect, btn, true, false)
+                        .consumed();
                 }
             }
             if reported {
@@ -26728,6 +27088,7 @@ fn toggles_once_per_press(action: &Action) -> bool {
             | Action::ToggleGroupTab
             | Action::ToggleGroupWindow
             | Action::ToggleWindowVisibility
+            | Action::OpenMediaShelf
     )
 }
 
@@ -26743,6 +27104,39 @@ fn is_vi_mode_toggle_chord(
     matches!(
         resolve_keybind_action(bindings, Some(logical_key), Some(physical_key), mods),
         Some((_, Action::ToggleViMode))
+    )
+}
+
+/// Whether a key press is bound to opening the media shelf. Any other key
+/// closes the viewer before the keybind table is consulted, so without this
+/// check the shortcut that opened it would reopen it instead of closing it.
+fn is_media_shelf_chord(
+    bindings: &Bindings,
+    logical_key: &Key,
+    physical_key: &PhysicalKey,
+    mods: ModifiersState,
+) -> bool {
+    matches!(
+        resolve_keybind_action(bindings, Some(logical_key), Some(physical_key), mods),
+        Some((_, Action::OpenMediaShelf))
+    )
+}
+
+/// Whether `key` is a modifier pressed on its own, which types nothing and may
+/// begin a shortcut.
+fn is_bare_modifier(key: &Key) -> bool {
+    matches!(
+        key,
+        Key::Named(
+            NamedKey::Shift
+                | NamedKey::Control
+                | NamedKey::Alt
+                | NamedKey::AltGraph
+                | NamedKey::Super
+                | NamedKey::Meta
+                | NamedKey::Hyper
+                | NamedKey::Fn
+        )
     )
 }
 
@@ -28947,6 +29341,15 @@ impl App {
                 ] {
                     component.to_bits().hash(&mut hasher);
                 }
+            }
+        }
+        let projected_viewer = overlay.media_viewer.as_ref();
+        projected_viewer.is_some().hash(&mut hasher);
+        if let Some(viewer) = projected_viewer {
+            media_viewer_accessibility(viewer, &self.ui_text).hash(&mut hasher);
+            let (x, y, width, height) = viewer.pane_rect;
+            for component in [x, y, width, height] {
+                component.to_bits().hash(&mut hasher);
             }
         }
         let mut layout = ws.mux.layout(ws.mux.active, self.area(ws));
@@ -31720,17 +32123,22 @@ impl App {
                     // open (every other button dismisses it).
                     if ws.context_menu.is_some() {
                         ws.context_menu = None;
+                        note_side_button_press(&mut ws.reported_side_buttons, sgr, false);
                         if let Some(w) = &ws.window {
                             w.request_redraw();
                         }
                         return;
                     }
-                    if !modal_swallows_pointer(
-                        self.pointer_modal_open(ws),
-                        ws.context_menu.is_some(),
-                    ) {
-                        self.send_mouse(ws, sgr, true, false);
-                    }
+                    // The media viewer owns every press while it is open; a
+                    // side button does nothing there.
+                    let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
+                    let reported = !self.activate_media_viewer_at(ws, px, py, sgr)
+                        && !modal_swallows_pointer(
+                            self.pointer_modal_open(ws),
+                            ws.context_menu.is_some(),
+                        )
+                        && self.report_mouse(ws, sgr, true, false) == MouseReport::Written;
+                    note_side_button_press(&mut ws.reported_side_buttons, sgr, reported);
                     return;
                 }
                 let bcode = match button {
@@ -31833,10 +32241,15 @@ impl App {
                 if modal_swallows_pointer(self.pointer_modal_open(ws), ws.context_menu.is_some()) {
                     return;
                 }
+                let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
+                // The media viewer owns every press while it is open, the tab
+                // bar and update banner included: one outside closes it.
+                if self.activate_media_viewer_at(ws, px, py, bcode) {
+                    return;
+                }
                 // Tab-bar interactions (left = switch / close-✕ / new-+;
                 // middle = close that tab).
                 let bar = self.tab_bar(ws);
-                let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
                 // The update banner is the bottom bar when shown.
                 // Left-click opens the release page (+ records the dismissal so
                 // it won't re-nag); right-click dismisses without opening. Only
@@ -32153,20 +32566,13 @@ impl App {
                 button,
                 ..
             } => {
-                // Release report for the side buttons, so a
-                // tracking app sees the matching button-up after the press.
-                // Gated behind an open modal, matching Pressed.
+                // Release report for the side buttons, so a tracking app sees
+                // the matching button-up after the press. Only a press the
+                // app saw gets one: a press that a context menu, a modal or
+                // the media viewer took leaves no release behind, even when
+                // that surface closed while the button was held.
                 if let Some(sgr) = extra_mouse_sgr(button) {
-                    // Symmetry with the Pressed path — a lone
-                    // context menu swallows the side-button release too (its
-                    // press was swallowed above, so no up-report should leak).
-                    if ws.context_menu.is_some() {
-                        return;
-                    }
-                    if !modal_swallows_pointer(
-                        self.pointer_modal_open(ws),
-                        ws.context_menu.is_some(),
-                    ) {
+                    if take_side_button_release(&mut ws.reported_side_buttons, sgr) {
                         self.send_mouse(ws, sgr, false, false);
                     }
                     return;
@@ -32367,6 +32773,13 @@ impl App {
                     winit::event::TouchPhase::Ended | winit::event::TouchPhase::Cancelled
                 ) {
                     ws.wheel.reset();
+                }
+                // The open media viewer owns the wheel over it. Its motion is
+                // dropped rather than banked, so no part of it reaches the
+                // terminal once the viewer closes.
+                if self.media_viewer_under_pointer(ws) {
+                    ws.wheel.reset();
+                    return;
                 }
                 let steps = ws.wheel.feed(&delta, self.cfg.scroll_multiplier);
                 // Numbers only — never terminal content. Makes the
@@ -32622,7 +33035,8 @@ impl App {
                     || ws.confirm_dialog.is_some()
                     || ws.editing_title.is_some()
                     || ws.search.open
-                    || ws.ime_preedit.is_some();
+                    || ws.ime_preedit.is_some()
+                    || (ws.media_viewer.is_some() && media_viewer_takes_key(&event.logical_key));
                 // The modal that gets this press, if any; a press after which
                 // it is no longer the top modal closed or replaced it.
                 let key_modal = top_modal(ws);
@@ -32763,6 +33177,38 @@ impl App {
                 // every modern terminal). Re-shown on the next CursorMoved.
                 self.hide_mouse_cursor(ws);
                 let text = event.text.as_ref().map(|s| s.as_str());
+
+                // The media viewer takes Esc (close) and the arrows (browse).
+                // Any other key closes it and goes on where it was going, so
+                // nothing typed while it is open is lost. The shelf's own
+                // shortcut, whatever key it is bound to, goes on to the
+                // keybind table, which closes the viewer; a modifier alone
+                // leaves it open, since it may begin that shortcut.
+                if ws.media_viewer.is_some() && ws.confirm_dialog.is_none() {
+                    match &event.logical_key {
+                        _ if is_media_shelf_chord(
+                            &self.cfg.keybinds,
+                            &event.logical_key,
+                            &event.physical_key,
+                            ws.mods,
+                        ) => {}
+                        Key::Named(NamedKey::Escape) => {
+                            self.close_media_viewer(ws);
+                            ws.closing_keys.insert(event.physical_key);
+                            return;
+                        }
+                        Key::Named(NamedKey::ArrowLeft) => {
+                            self.step_media_viewer(ws, -1);
+                            return;
+                        }
+                        Key::Named(NamedKey::ArrowRight) => {
+                            self.step_media_viewer(ws, 1);
+                            return;
+                        }
+                        key if is_bare_modifier(key) => {}
+                        _ => self.close_media_viewer(ws),
+                    }
+                }
 
                 // Phase 5 of TERMINATOR-CONFIRM-DIALOG-DESIGN.md:
                 // confirm-modal key handler. Tab/Shift+Tab/←→ move focus,
@@ -33696,6 +34142,7 @@ impl App {
         // `show` pushes waiting past their deadline are answered, and those
         // whose pane closed are dropped, even when nothing else wakes us.
         self.media_tick(ws);
+        self.prune_media_viewer(ws);
         if let Some(soonest) = self.media.next_deadline() {
             let next = soonest.saturating_duration_since(now).clamp(
                 std::time::Duration::from_millis(1),
@@ -38737,6 +39184,282 @@ mod tests {
         assert!(capped.is_char_boundary(capped.len()));
     }
 
+    /// The media viewer takes only Esc and the browsing arrows; every other
+    /// key goes on to the terminal, so nothing typed while it is open is lost.
+    #[test]
+    fn the_media_viewer_takes_only_esc_and_the_arrows() {
+        use winit::keyboard::{Key, NamedKey};
+        for key in [
+            Key::Named(NamedKey::Escape),
+            Key::Named(NamedKey::ArrowLeft),
+            Key::Named(NamedKey::ArrowRight),
+        ] {
+            assert!(super::media_viewer_takes_key(&key), "{key:?}");
+        }
+        for key in [
+            Key::Named(NamedKey::Enter),
+            Key::Named(NamedKey::ArrowUp),
+            Key::Character("q".into()),
+        ] {
+            assert!(!super::media_viewer_takes_key(&key), "{key:?}");
+        }
+    }
+
+    #[test]
+    fn the_shelf_badge_counts_unseen_items_only() {
+        assert_eq!(super::media_shelf_badge(0), "");
+        assert_eq!(super::media_shelf_badge(3), "▣3 ");
+    }
+
+    /// The viewer owns every press and wheel over it, on the native and the
+    /// ctl paths alike, ahead of the receipt and the terminal; and opening
+    /// another modal closes it.
+    #[test]
+    fn the_media_viewer_owns_presses_and_wheels_over_it() {
+        let source = include_str!("app.rs");
+        let body = |name: &str| {
+            source
+                .split(&format!("fn {name}("))
+                .nth(1)
+                .and_then(|rest| rest.split("\n    fn ").next())
+                .unwrap_or_else(|| panic!("{name} present"))
+        };
+        for name in ["ctl_mouse_press", "window_event_inner"] {
+            let press = body(name);
+            let viewer = press
+                .find("self.activate_media_viewer_at(ws, px, py, bcode)")
+                .unwrap_or_else(|| panic!("{name} asks the viewer"));
+            let receipt = press
+                .find("self.activate_media_paste_receipt_at(ws, px, py, bcode)")
+                .unwrap_or_else(|| panic!("{name} asks the receipt"));
+            assert!(viewer < receipt, "{name}: the viewer is above the receipt");
+        }
+        let under = body("media_viewer_under_pointer");
+        assert!(under.contains("kettle_render::MediaViewerHit::Outside"));
+        assert!(body("dispatch_wheel").contains("if self.media_viewer_under_pointer(ws) {"));
+        assert!(body("close_all_modals").contains("ws.media_viewer = None;"));
+        let activate = body("activate_media_viewer_at");
+        assert!(
+            activate.contains("if bcode == 0 {") && activate.contains("        true\n    }"),
+            "every press over an open viewer is consumed; only the primary button acts"
+        );
+    }
+
+    /// A press anywhere closes the viewer before the tab bar or the update
+    /// banner can act on it, on the native and the ctl paths alike.
+    #[test]
+    fn the_media_viewer_takes_presses_before_the_tab_bar() {
+        let source = super::production_source();
+        let body = |name: &str| {
+            source
+                .split(&format!("fn {name}("))
+                .nth(1)
+                .and_then(|rest| rest.split("\n    fn ").next())
+                .unwrap_or_else(|| panic!("{name} present"))
+        };
+        for name in ["ctl_mouse_press", "window_event_inner"] {
+            let press = body(name);
+            let viewer = press
+                .find("if self.activate_media_viewer_at(ws, px, py, bcode) {")
+                .unwrap_or_else(|| panic!("{name} asks the viewer"));
+            let bar = press
+                .find("if tab_bar_pointer_region_contains(&bar, px, py)")
+                .unwrap_or_else(|| panic!("{name} has a tab bar"));
+            assert!(
+                viewer < bar,
+                "{name}: the viewer is asked before the tab bar"
+            );
+        }
+        let native = body("window_event_inner");
+        let viewer = native
+            .find("if self.activate_media_viewer_at(ws, px, py, bcode) {")
+            .expect("the native path asks the viewer");
+        let banner = native
+            .find("self.update_banner_rect(ws)")
+            .expect("the native path has an update banner");
+        assert!(
+            viewer < banner,
+            "the viewer is asked before the update banner"
+        );
+    }
+
+    /// Wheel motion over the viewer is dropped before it is banked, so no
+    /// part of it scrolls the terminal after the viewer closes.
+    #[test]
+    fn the_media_viewer_drops_wheel_motion_before_it_is_banked() {
+        let source = super::production_source();
+        let ctl = source
+            .split("fn ctl_mouse_wheel_delta(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("ctl_mouse_wheel_delta");
+        let native = source
+            .split("WindowEvent::MouseWheel { delta, phase, .. } => {")
+            .nth(1)
+            .expect("native wheel");
+        for (path, body) in [("ctl", ctl), ("native", native)] {
+            let gate = body
+                .find("if self.media_viewer_under_pointer(ws) {\n")
+                .unwrap_or_else(|| panic!("{path} asks the viewer"));
+            let feed = body
+                .find("ws.wheel.feed(")
+                .unwrap_or_else(|| panic!("{path} banks motion"));
+            assert!(gate < feed, "{path}: the viewer is asked before banking");
+            assert!(
+                body[gate..feed].contains("ws.wheel.reset();"),
+                "{path}: the residue is dropped"
+            );
+        }
+    }
+
+    /// Another modal never sits over or under the viewer: a confirmation or
+    /// a context menu closes it, as `close_all_modals` does for the rest, and
+    /// the tick closes it under any modal opened another way.
+    #[test]
+    fn another_modal_closes_the_media_viewer() {
+        let source = super::production_source();
+        let body = |name: &str| {
+            source
+                .split(&format!("fn {name}("))
+                .nth(1)
+                .and_then(|rest| rest.split("\n    fn ").next())
+                .unwrap_or_else(|| panic!("{name} present"))
+        };
+        let confirm = body("install_confirm_dialog");
+        let closed = confirm
+            .find("self.close_media_viewer(ws);")
+            .expect("a confirmation closes the viewer");
+        let shown = confirm
+            .find("ws.confirm_dialog = Some(dialog);")
+            .expect("the confirmation is installed");
+        assert!(closed < shown);
+        assert!(body("show_context_menu").contains("self.close_media_viewer(ws);"));
+        let prune = body("prune_media_viewer");
+        assert!(prune.contains("let shown = !self.any_modal_open(ws)"));
+        assert!(
+            prune.contains("&& self.media_viewer_geometry(ws).is_some();"),
+            "a viewer its pane is too small to draw is closed, not kept unseen"
+        );
+        assert!(
+            body("resize_all").contains("self.prune_media_viewer(ws);"),
+            "a resize closes a viewer that no longer fits before the next key"
+        );
+        assert!(
+            body("media_paste_receipt_overlay_projection")
+                .contains("|| ws.media_viewer.is_some() {\n            return None;"),
+            "the viewer hides the receipt, which would paint over it"
+        );
+    }
+
+    /// The shelf's own shortcut closes the viewer it opened instead of
+    /// reopening it, once per press.
+    #[test]
+    fn the_shelf_shortcut_toggles_the_media_viewer() {
+        use super::is_media_shelf_chord;
+        use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
+
+        let mut bindings = kettle_config::keybinds::defaults();
+        kettle_config::keybinds::apply_keybind(&mut bindings, "f8=open_media_shelf")
+            .expect("binding parses");
+        let f8 = PhysicalKey::Code(KeyCode::F8);
+        assert!(is_media_shelf_chord(
+            &bindings,
+            &Key::Named(NamedKey::F8),
+            &f8,
+            ModifiersState::empty()
+        ));
+        assert!(!is_media_shelf_chord(
+            &bindings,
+            &Key::Character("q".into()),
+            &PhysicalKey::Code(KeyCode::KeyQ),
+            ModifiersState::empty()
+        ));
+        assert!(super::toggles_once_per_press(
+            &kettle_config::keybinds::Action::OpenMediaShelf
+        ));
+        let source = super::production_source();
+        let branch = source
+            .split("if ws.media_viewer.is_some() && ws.confirm_dialog.is_none() {")
+            .nth(1)
+            .and_then(|rest| rest.split("_ => self.close_media_viewer(ws),").next())
+            .expect("the viewer's key branch");
+        let chord = branch
+            .find("_ if is_media_shelf_chord(")
+            .expect("the shortcut is let through before any other key closes the viewer");
+        let escape = branch
+            .find("Key::Named(NamedKey::Escape) =>")
+            .expect("Esc closes");
+        let arrows = branch
+            .find("Key::Named(NamedKey::ArrowLeft) =>")
+            .expect("the arrows browse");
+        assert!(
+            chord < escape && chord < arrows,
+            "the shortcut wins over Esc and the arrows, whatever key it is bound to"
+        );
+        assert!(
+            branch.contains("key if is_bare_modifier(key) => {}"),
+            "a modifier alone leaves the viewer open, since it may begin the shortcut"
+        );
+        for key in [
+            NamedKey::Control,
+            NamedKey::Shift,
+            NamedKey::Alt,
+            NamedKey::Super,
+        ] {
+            assert!(super::is_bare_modifier(&Key::Named(key)), "{key:?}");
+        }
+        for key in [Key::Named(NamedKey::F8), Key::Character("q".into())] {
+            assert!(!super::is_bare_modifier(&key), "{key:?}");
+        }
+        let open = source
+            .split("fn open_media_shelf(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("open_media_shelf");
+        assert!(
+            open.trim_start_matches(|c| c != '{')
+                .starts_with("{\n        if ws.media_viewer.is_some() {\n            self.close_media_viewer(ws);\n            return;"),
+            "the shortcut closes any open viewer, whichever pane has focus"
+        );
+    }
+
+    /// A screen reader hears the item's place on the shelf and, when its
+    /// pixels were released, that too; the tree is republished when either
+    /// changes.
+    #[test]
+    fn the_media_viewer_speaks_its_place_and_republishes_on_change() {
+        let tr = kettle_i18n::Translator::new(kettle_i18n::Language::En);
+        let mut viewer = kettle_render::MediaViewerOverlay {
+            pane_rect: (0.0, 0.0, 800.0, 600.0),
+            title: "Plot".into(),
+            detail: "Image · 64×48 · from this pane".into(),
+            hint: "Esc closes".into(),
+            position: (2, 3),
+            image: Some(kettle_core::ImageData::new(1, 1, vec![0; 4]).unwrap()),
+            status: "Released.".into(),
+            canvas: kettle_render::MediaCanvas::Theme,
+        };
+        let (label, description) = super::media_viewer_accessibility(&viewer, &tr);
+        assert!(
+            label.contains("2 of 3") && label.contains("Plot"),
+            "{label}"
+        );
+        assert_eq!(description, "Esc closes");
+        viewer.image = None;
+        let (_, description) = super::media_viewer_accessibility(&viewer, &tr);
+        assert!(description.starts_with("Released."), "{description}");
+        let source = super::production_source();
+        let key = source
+            .split("fn accessibility_key(&self, ws: &WindowState, overlay: &Overlay) -> u64")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("accessibility_key");
+        assert!(
+            key.contains("media_viewer_accessibility(viewer, &self.ui_text).hash(&mut hasher);")
+        );
+        assert!(key.contains("viewer.pane_rect"));
+    }
+
     /// `get_state`'s caller is verified in the nearest live pane whose child
     /// is one of its ancestors. Hints and failures never verify.
     #[test]
@@ -41921,13 +42644,13 @@ mod tests {
         assert!(
             src.contains("if drop_closing_key_repeat(\n                    &mut ws.closing_keys,")
         );
-        // The Escape that cancels a pane, tab or torn-window drag is consumed
-        // the same way.
+        // The Escape that cancels a pane, tab or torn-window drag, or closes
+        // the media viewer, is consumed the same way.
         assert_eq!(
             src.matches("ws.closing_keys.insert(event.physical_key);")
                 .count(),
-            3,
-            "pane drag, tab drag and torn-window drag cancels"
+            4,
+            "pane drag, tab drag and torn-window drag cancels, and the media viewer's close"
         );
     }
 
@@ -43452,8 +44175,11 @@ mod tests {
         assert!(pending.is_empty());
     }
 
+    /// A side-button press reaches the terminal only past every surface that
+    /// owns the pointer, and its release only when the press did, once.
     #[test]
-    fn side_button_forward_is_modal_gated() {
+    fn side_button_forward_is_modal_gated_and_releases_pair_with_presses() {
+        use super::{note_side_button_press, take_side_button_release};
         // Collapse all whitespace before scanning. rustfmt wraps the call
         // across lines, and the match must also survive a CRLF working tree
         // (which `.gitattributes eol=lf` normally prevents).
@@ -43461,12 +44187,60 @@ mod tests {
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ");
-        let gated = src
-            .matches("if !modal_swallows_pointer( self.pointer_modal_open(ws), ws.context_menu.is_some(), ) { self.send_mouse(ws, sgr,")
-            .count();
         assert!(
-            gated >= 2,
-            "both Pressed and Released side-button forwards must be modal-gated (found {gated})"
+            src.contains(
+                "let reported = !self.activate_media_viewer_at(ws, px, py, sgr) \
+                 && !modal_swallows_pointer( self.pointer_modal_open(ws), ws.context_menu.is_some(), ) \
+                 && self.report_mouse(ws, sgr, true, false) == MouseReport::Written; \
+                 note_side_button_press(&mut ws.reported_side_buttons, sgr, reported);"
+            ),
+            "a side-button press is forwarded past the viewer and modals, and noted"
+        );
+        assert!(src.contains(
+            "if take_side_button_release(&mut ws.reported_side_buttons, sgr) { \
+             self.send_mouse(ws, sgr, false, false); }"
+        ));
+        assert!(
+            src.contains(
+                "ws.context_menu = None; \
+                 note_side_button_press(&mut ws.reported_side_buttons, sgr, false);"
+            ),
+            "a press that only dismisses the context menu is noted as taken"
+        );
+        // A press the search bar keeps from the terminal is not one it saw.
+        let send = production_source();
+        let send_to = send
+            .split("fn send_mouse_to(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("send_mouse_to");
+        assert!(send_to.contains(
+            "ws.mouse_btn.is_some(),\n        ) {\n            return MouseReport::Swallowed;"
+        ));
+        assert_eq!(send_to.matches("MouseReport::Written").count(), 1);
+        assert!(
+            super::MouseReport::Swallowed.consumed() && !super::MouseReport::Declined.consumed()
+        );
+
+        let mut reported = 0;
+        note_side_button_press(&mut reported, 128, false);
+        assert!(
+            !take_side_button_release(&mut reported, 128),
+            "a taken press"
+        );
+        note_side_button_press(&mut reported, 128, true);
+        note_side_button_press(&mut reported, 129, false);
+        assert!(
+            !take_side_button_release(&mut reported, 129),
+            "buttons are apart"
+        );
+        assert!(take_side_button_release(&mut reported, 128));
+        assert!(!take_side_button_release(&mut reported, 128), "once");
+        note_side_button_press(&mut reported, 129, true);
+        note_side_button_press(&mut reported, 129, false);
+        assert!(
+            !take_side_button_release(&mut reported, 129),
+            "a lost release does not pair with a later taken press"
         );
     }
 
