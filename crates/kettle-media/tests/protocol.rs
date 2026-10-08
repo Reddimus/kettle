@@ -216,9 +216,9 @@ fn handshake_and_reverse_skew_are_distinct() {
     for field in 0..3 {
         r = common::ready();
         match field {
-            0 => r.build_id.crate_version = "5.0.1".into(),
+            0 => r.build_id.crate_version = format!("{}-skew", h.build_id.crate_version),
             1 => r.build_id.source_hash = "cafe".into(),
-            _ => r.build_id.protocol_version = 2,
+            _ => r.build_id.protocol_version = PROTOCOL_VERSION.wrapping_add(1),
         }
         assert_eq!(check_ready(&h, &r), HandshakeOutcome::RestartRequired);
     }
@@ -311,7 +311,7 @@ fn strict_lengths_truncation_trailing_enums_utf8() {
         unknown[6] = 255;
         assert_eq!(decode(&unknown, d), Err(WireError::UnknownEnum));
         let mut skew = b.clone();
-        skew[4] = 2;
+        skew[4..6].copy_from_slice(&PROTOCOL_VERSION.wrapping_add(1).to_le_bytes());
         assert_eq!(decode(&skew, d), Err(WireError::RestartRequired));
         let mut magic = b.clone();
         magic[0] = 0;
@@ -349,7 +349,8 @@ fn frame_cap_before_payload_allocation() {
             Direction::ExternalToParent => 3,
             Direction::WorkerToParent => 5,
         };
-        let mut b = b"KMED\x01\x00".to_vec();
+        let mut b = MAGIC.to_vec();
+        b.extend(PROTOCOL_VERSION.to_le_bytes());
         b.push(k);
         b.extend(u32::MAX.to_le_bytes());
         let report = decode_with_stats(&b, d);
@@ -736,4 +737,126 @@ fn streaming_exact_boundaries_and_interrupted_reads() {
     )
     .unwrap();
     assert_eq!(output, bytes(include_str!("golden/rendered.hex")));
+}
+
+#[test]
+fn streamed_auto_reply_keeps_ready_pixels_and_actual_kind() {
+    for kind in [
+        MediaKind::Raster,
+        MediaKind::Svg,
+        MediaKind::Mermaid,
+        MediaKind::Markdown,
+        MediaKind::Video,
+    ] {
+        let ready = Frame::Ready(common::ready());
+        let rendered = Frame::DetectedRendered {
+            kind,
+            rendered: common::rendered(),
+        };
+        let mut stream = Vec::new();
+        write_frame(&mut stream, &ready, Direction::WorkerToParent).unwrap();
+        write_frame(&mut stream, &rendered, Direction::WorkerToParent).unwrap();
+        let mut reader = stream.as_slice();
+        assert_eq!(
+            read_frame(&mut reader, Direction::WorkerToParent).unwrap(),
+            Some(ready)
+        );
+        assert_eq!(
+            read_frame(&mut reader, Direction::WorkerToParent).unwrap(),
+            Some(rendered)
+        );
+        assert_eq!(
+            read_frame(&mut reader, Direction::WorkerToParent).unwrap(),
+            None
+        );
+    }
+}
+
+#[test]
+fn auto_job_has_its_own_tag() {
+    let mut job = common::job();
+    job.kind = JobKind::Auto;
+    let frame = Frame::Job(job);
+    let encoded = encode(&frame, Direction::ParentToWorker).unwrap();
+    assert_eq!(encoded[HEADER_BYTES], 6);
+    assert_eq!(decode(&encoded, Direction::ParentToWorker).unwrap(), frame);
+}
+
+/// A typed reply is the kind's tag and then exactly the plain reply's
+/// payload.
+#[test]
+fn typed_reply_is_the_kind_then_the_plain_payload() {
+    let original = bytes(include_str!("golden/rendered.hex"));
+    let mut expected = original[..HEADER_BYTES].to_vec();
+    expected[6] = 7;
+    let size = u32::from_le_bytes(expected[7..11].try_into().unwrap()) + 1;
+    expected[7..11].copy_from_slice(&size.to_le_bytes());
+    expected.push(1); // SVG
+    expected.extend_from_slice(&original[HEADER_BYTES..]);
+    let frame = Frame::DetectedRendered {
+        kind: MediaKind::Svg,
+        rendered: common::rendered(),
+    };
+    assert_eq!(encode(&frame, Direction::WorkerToParent).unwrap(), expected);
+    assert_eq!(decode(&expected, Direction::WorkerToParent).unwrap(), frame);
+}
+
+#[test]
+fn typed_reply_refuses_unknown_kinds_and_other_directions() {
+    let frame = Frame::DetectedRendered {
+        kind: MediaKind::Raster,
+        rendered: common::rendered(),
+    };
+    let mut encoded = encode(&frame, Direction::WorkerToParent).unwrap();
+    for direction in [Direction::ParentToWorker, Direction::ExternalToParent] {
+        assert_eq!(
+            encode(&frame, direction).unwrap_err(),
+            WireError::WrongDirection
+        );
+        assert_eq!(
+            decode(&encoded, direction).unwrap_err(),
+            WireError::WrongDirection
+        );
+    }
+    encoded[HEADER_BYTES] = 5;
+    assert_eq!(
+        decode(&encoded, Direction::WorkerToParent).unwrap_err(),
+        WireError::UnknownEnum
+    );
+}
+
+#[test]
+fn actual_kind_roundtrips_without_altering_pixels_or_source() {
+    for kind in [
+        MediaKind::Raster,
+        MediaKind::Svg,
+        MediaKind::Mermaid,
+        MediaKind::Markdown,
+        MediaKind::Video,
+    ] {
+        roundtrip(
+            Frame::DetectedRendered {
+                kind,
+                rendered: common::rendered(),
+            },
+            Direction::WorkerToParent,
+        );
+    }
+}
+
+/// Neither end reads the other version's frames: a version 1 worker or
+/// parent is restarted, never half understood, and so is a newer one.
+#[test]
+fn version_skew_either_way_is_restart_required() {
+    assert_eq!(PROTOCOL_VERSION, 2);
+    for (_, direction, golden) in vectors() {
+        for version in [1u16, 3] {
+            let mut skewed = bytes(golden);
+            skewed[4..6].copy_from_slice(&version.to_le_bytes());
+            assert_eq!(
+                decode(&skewed, direction).unwrap_err(),
+                WireError::RestartRequired
+            );
+        }
+    }
 }

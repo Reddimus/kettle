@@ -828,8 +828,12 @@ and unknown nested enums are refused before any payload allocation; fence
 indices and every metadata bound; input caps, fonts and video options; the
 content digest changes with the content and each identity field (its framing
 is pinned against a value computed independently); build ID bounds and wire
-direction; the largest reply and its allocation budget; and streaming at exact
-boundaries and through interrupted reads. `tests/worker.rs` drives a
+direction; the largest reply and its allocation budget; streaming at exact
+boundaries and through interrupted reads; version 1 and version 3 frames of
+every kind are `RestartRequired`; an Auto job has tag 6; a typed reply is its
+media-kind byte followed by exactly the plain reply's payload, round-trips
+for every kind and streams after Ready, and an unknown kind or a typed reply
+in another direction is refused. `tests/worker.rs` drives a
 feature-gated stub worker (`media-test-worker`, a fixture, never shipped)
 through exact replies and reaping, handshake mismatch, an oversize frame,
 trailing payload bytes, a fence index out of range and truncation. The
@@ -901,7 +905,20 @@ the limit for a whole deadline does not; a worker over the limit while it
 exits after a complete reply is `RenderResource`, not a success, while one
 that exits 0 just as a measurement runs keeps its reply, as does any stop
 that ends after its own exit was seen; a footprint that cannot be measured
-fails closed; and exit codes map as documented. `tests/client.rs` (with `--features test-worker`) runs the
+fails closed; and exit codes map as documented. Typed replies: an Auto job
+returns the kind its worker reports, raster or SVG, after a clean exit; a
+plain reply cannot satisfy an Auto job, and a typed reply cannot change an
+explicitly requested kind (both `WorkerUnavailable`). `RenderControl`: a job
+cancelled or expired before it starts never starts a worker; cancelling
+before Ready or after the job is written kills and reaps the worker and
+retries nothing; the deadline covers waiting for another job's slot, both
+cold starts and the final clean exit; a worker that replied but lingers is
+killed at the deadline rather than after a five-second cleanup budget; a job
+interrupted while the worker file is still being checked starts no worker
+once the check ends, nor does one cancelled just as the check ends, before
+its caller looks again; a cancelled late start is reaped before another is
+admitted; and a cancelled worker that will not die is still counted as
+abandoned. `tests/client.rs` (with `--features test-worker`) runs the
 stub worker as a real process, copied under a name that picks its behavior: a
 job rendered; a worker that never answers tried twice within bounds; a 4 MiB
 job to a worker that never reads it, ended by the deadline; a reply followed
@@ -950,7 +967,14 @@ Ready arrives. On Linux, `/proc/<pid>/limits` shows the CPU, file-size, core,
 address-space and descriptor limits, and the worker's `/proc` entries are
 owned by root, so it is not dumpable (checked when not running as root). With
 `--features test-faults`, a job that panics leaves exactly
-`media worker panic` on stderr and no reply. The workspace commands do not
+`media worker panic` on stderr and no reply. An Auto job's reply names what
+it rendered, a PNG as raster and an SVG as SVG, prose is
+`UnsupportedMedia`, and an explicit kind's reply stays the plain frame. With
+`test-faults`, a job can pause either side of its classification: a 2.2 s
+pause after it ends a raster job, explicit or Auto, at the watchdog (exit 4)
+while an SVG job of either kind answers; and two 1.2 s pauses either side of
+an Auto raster job's classification end it too, while one alone does not, so
+learning the kind does not restart the clock. The workspace commands do not
 enable that feature, so `just media-protocol-test` and ci.yml run it.
 
 Red checks: no sweep, a sweep after the hook or not first in its function,
@@ -977,7 +1001,27 @@ keeps it pure blue. An 8x8 box fits a 4x2 image at 8x4; a crop in box
 coordinates is transparent where the centered image does not reach; a box
 over the rendered edge or a crop outside it is `BadParams`. A file's digest
 covers its bytes and the open file's identity, the same bytes inline carry
-none, and kinds other than raster and SVG are `UnsupportedMedia` for now.
+none, and kinds other than raster, SVG and Auto are `UnsupportedMedia` for
+now.
+
+Unit tests in `src/auto.rs` classify Auto jobs: a PNG is raster whatever the
+file is called (`.svg`, `.bin`, no suffix), and a declared SVG with a
+byte-order mark, an XML declaration and a comment is SVG named `.png`; each
+reports its kind once. Replacing the file after it is loaded changes
+nothing: the loaded snapshot is classified and rendered, its digest and
+identity included. Prose, Mermaid source, an HTML page, bytes that are not
+UTF-8 and an empty file are `UnsupportedMedia` with no kind reported. SVG
+content one byte over the SVG cap is refused before it is parsed, as an
+explicit SVG job's is (`FileTooLarge` from a file, `TooLarge` inline), and a
+byte less renders; a file over the Auto cap is never read whole. The root
+decides first: an HTML page over the SVG cap, one with 257 attributes (past
+the parser's limit) and one whose comment mentions `<svg/>` are all
+`UnsupportedMedia`, and an SVG behind a document type declaration is SVG,
+refused as `RenderParse` as an explicit SVG job is. `src/svg/mod.rs` pins the
+root scan: byte-order mark and XML whitespace, namespace prefixes, comments,
+declarations with quoted `>` and internal subsets (whose comments,
+instructions and literals cannot fake the root, in either direction), and a
+prolog that never ends.
 
 `tests/hostile.rs` renders under a global allocator that records the largest
 single allocation each thread makes. A WebP whose 1x1 canvas holds a bitstream

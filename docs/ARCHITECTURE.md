@@ -69,10 +69,14 @@ named regular files; only the requested collection face is inserted, with its
 index preserved and bounded metadata. The worker does no host font discovery
 and refuses embedded SVG/color/bitmap glyph formats. Actual shaped glyphs
 produce fallback and missing-script warnings; databases are isolated across
-jobs. Raster images and SVG are rendered; every other kind
-is refused as unsupported until its renderer lands. The client's `render` runs one job in a
+jobs. Raster images and SVG are rendered, and so is an Auto job: one held
+snapshot of a file, classified by its bytes as raster or SVG and rendered as
+that, with a typed reply that says which. Every other kind is refused as
+unsupported until its renderer lands. The client's `render` runs one job in a
 fresh worker under startup and job deadlines, with the worker in its own
-process group, killed before it is reaped; nothing in the GUI calls it yet. The byte layouts, digest
+process group, killed before it is reaped; `render_with_control` adds
+cancellation and one absolute deadline its caller owns. Nothing in the GUI
+calls them yet. The byte layouts, digest
 framing, availability codes and decisions are in
 [MEDIA-PROTOCOL.md](MEDIA-PROTOCOL.md).
 The campaign's ownership, distribution decisions and remaining acceptance

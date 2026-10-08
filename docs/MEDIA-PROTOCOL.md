@@ -4,7 +4,7 @@
 
 `kettle-media` is a leaf crate whose only dependency is `sha2`. It opens no files and starts no process
 itself: its client reaches the filesystem and the worker only through a platform its caller supplies.
-The public model uses six job kinds. Input limits apply when validating or encoding a job
+The public model uses seven job kinds. Input limits apply when validating or encoding a job
 and when decoding its frame. For paths, the worker later checks the opened object's size and
 permissions using the job kind's input cap. External attestations are declarations from the
 caller, not proof established by this crate.
@@ -20,9 +20,9 @@ protocol version, requiring the local protocol too. It returns RestartRequired o
 helper retries. State sequencing and verification of which spawned worker supplied a reply
 belong to P2.
 
-## Wire version 1
+## Wire version 2
 
-The header is 11 bytes: `KMED`, u16 LE protocol version 1, a frame kind, then u32 LE payload
+The header is 11 bytes: `KMED`, u16 LE protocol version 2, a frame kind, then u32 LE payload
 length. No padding or compression is permitted. Binary data and UTF-8 strings have u32 LE
 byte lengths. Lists have u32 LE counts. Integers and f64 bit patterns use LE. Boolean and
 optional-value discriminants are exactly 0 or 1. Floats must satisfy the field validators.
@@ -37,9 +37,12 @@ platform refuses the other encoding.
 | 4 Job | Parent to worker | Kind, worker source, theme, canvas, target, fonts |
 | 5 Rendered | Worker to parent | Width, height, RGBA blob, 32 digest bytes, optional path identity, display lines, fence count, optional index, fence sources, script names, warning codes |
 | 6 Failure | Worker to parent | One fixed error-code byte |
+| 7 DetectedRendered | Worker to parent | One media-kind byte, then exactly the Rendered payload |
 
-Job-kind tags 0 through 5 are Mermaid, Svg, Raster, MarkdownDiagrams, VideoProbe and
-VideoStills. Markdown adds one index byte. Stills adds count u8, edge u32, start f64, optional
+Job-kind tags 0 through 6 are Mermaid, Svg, Raster, MarkdownDiagrams, VideoProbe,
+VideoStills and Auto. An Auto job asks the worker to classify the source by its bytes.
+Media-kind tags 0 through 4 are Raster, Svg, Mermaid, Markdown and Video: what a
+DetectedRendered reply actually rendered. Markdown adds one index byte. Stills adds count u8, edge u32, start f64, optional
 end f64 and optional single-frame time f64. Single-frame time requires count 1, start 0 and
 no end time. Interval times must be finite, nonnegative and ordered. The still-count cap is
 16 and the requested edge cap is 2560, as in the video-frame contract.
@@ -100,6 +103,11 @@ fixed variants. Native path length is a byte limit on both supported encodings. 
 names and hashes are refused; hex letter case is preserved, and exact build equality is
 intentional. Changing tags, layouts or acceptance rules requires a protocol version decision
 and updated golden fixtures.
+
+Version 2 adds the Auto job tag and the DetectedRendered frame to version 1 and changes
+nothing else; no version negotiates, so a version 1 peer is `RestartRequired` either way.
+Neither frame carries the source text a file preview was rendered from: retaining it
+would be another version.
 
 ## Build identity and worker availability
 
@@ -216,13 +224,19 @@ file. The caller's thread watches the clock:
   another build is `RestartRequired`, never retried. Before a job, only a
   handshake refusal (`RestartRequired`, `UnknownMethod`) counts, and only with
   end of file after it and an exit rather than a crash.
-- **The reply within the job's deadline**, 2 s for a raster and 3 s for other
-  kinds, counted from before the job is written. A missed deadline kills the
+- **The reply within the job's deadline** (`JobKind::render_deadline`), 2 s
+  for a raster and 3 s for other kinds and for Auto, which may turn out to be
+  SVG, counted from before the job is written. A missed deadline kills the
   worker: `RenderTimeout`, unless it ended by itself as the deadline passed,
   when its exit says why. Nothing is retried after Ready.
 - **A reply counts only** when end of file follows it with nothing between,
   and the worker then exits 0 by itself. A reply followed by more bytes, a
   second frame, a crash or a non-zero exit is discarded.
+- **An Auto job needs a typed reply.** Only DetectedRendered says what an Auto
+  job turned out to be, so a plain Rendered reply to one is
+  `WorkerUnavailable`. A job of an explicit kind accepts a plain reply, or a
+  typed one of that same kind; a typed reply naming another kind is
+  `WorkerUnavailable` too.
 - **A refusal** keeps the worker's code only when a worker can mean it (input,
   file, render, skew and unavailability codes); a code naming GUI or agent
   state becomes `WorkerUnavailable`.
@@ -232,6 +246,20 @@ file. The caller's thread watches the clock:
   protocol violation, is `WorkerUnavailable`. While it waits, the caller's
   thread also looks at the worker every 25 ms, so an exit is seen even when
   something the worker started still holds its stdout and no frame comes.
+
+`render_media_with_control(job, control)` returns the actual kind beside the
+pixels, and `render_with_control` the pixels alone. Their `RenderControl`
+carries a cancellation flag and an optional absolute deadline, shared with
+whoever owns the job. The deadline covers everything: waiting for the job
+before it, checking and starting the worker, both startup attempts, and the
+reply; it only ever shortens the budgets above. A cancelled or expired job
+never starts a worker or a cold-start retry, not even one whose file check
+was still running when the job was interrupted, and a running one is killed
+and reaped as a missed deadline is, holding the one-at-a-time slot until
+then. That includes a worker that has replied but not yet exited: the wait
+for its clean exit ends at the interruption, not after the cleanup budget.
+Cancellation is `RenderError::Cancelled`, which no rendering failure is; an
+expired deadline is `RenderTimeout`.
 
 Stopping a worker gives it 250 ms to exit by itself, then kills its process
 group and gives it 250 ms more. A worker reaped after the kill with any status
@@ -307,13 +335,17 @@ both binaries of one source answer with one `BuildId`. On Linux and macOS:
    one). Failure exits 8.
 4. **A watchdog thread** that exits 4 when the current phase's deadline
    passes, whatever the main thread is blocked on: 5 s from start until Ready
-   is written, 5 s from Ready until the job arrives, and 3 s from the job until
-   its reply is written. A parent that stalls or dies cannot keep the worker
-   alive. A watchdog that cannot start exits 8.
+   is written, 5 s from Ready until the job arrives, and the job kind's
+   deadline from the job until its reply is written: 2 s for a raster and 3 s
+   for any other kind. An Auto job starts with 3 s and, once classified,
+   narrows to its kind's deadline, still counted from its arrival, so learning
+   the kind never restarts the clock. A parent that stalls or dies cannot keep
+   the worker alive. A watchdog that cannot start exits 8.
 5. **One job.** Hello must carry this build's identity. A different build, or
    a frame header of another protocol version, is answered
    `RestartRequired` and exits 9. Ready follows, then one Job and one reply,
-   then exit 0. A frame out of order, cut short or that does not decode is
+   then exit 0. The reply to an Auto job is DetectedRendered; to any other,
+   Rendered. A frame out of order, cut short or that does not decode is
    answered `BadParams` (or `TooLarge`) and exits 2; a parent that closes stdin
    between frames ends the worker quietly with 0. stdout carries frames only, through one writer.
 
@@ -322,7 +354,8 @@ failure. Exit codes 4, 8 and 9 mean what they mean for the video-preview worker.
 other platforms the binary exits 8 at once, and nothing starts it there. The
 worker is built with the workspace but not packaged or started yet; the
 release profile pins it at `opt-level = 3`. The feature `test-faults` lets a
-test job make it panic, for the panic test; no shipped build enables it.
+test job make it panic, for the panic test, or pause either side of its
+classification, for the deadline tests; no shipped build enables it.
 
 ## Rendering a job
 
@@ -334,12 +367,28 @@ of 0 backs it up. Every size is checked before the work it would cost, so the
 worker's limits and the client's deadlines and memory limit are a second
 bound, not the only one. An empty target box, one over 4096 pixels on an
 edge, a scale that is not a positive finite number, or a crop that is empty or
-leaves the box, is `BadParams`. Raster and SVG jobs are rendered; every other
-kind is `UnsupportedMedia` until its renderer lands. On Windows, where no
+leaves the box, is `BadParams`. Raster, SVG and Auto jobs are rendered; every
+other kind is `UnsupportedMedia` until its renderer lands. On Windows, where no
 worker runs, every job is `UnsupportedPlatform`.
 
+**Auto jobs.** The source is read once, under the larger of the raster and
+SVG caps, and that one snapshot is both classified and rendered, so a file
+replaced in between cannot be classified as one thing and rendered as
+another. Content with a raster signature is a raster, whatever the file is
+called. Otherwise UTF-8 markup whose first element, past an optional
+byte-order mark and the prolog (the XML declaration, processing
+instructions, comments and a document type declaration), is `svg` is SVG.
+That root is found by one scan, before the SVG cap applies or the parser
+runs, so other markup is `UnsupportedMedia` however large it is or however
+hard it would be to parse. Anything else, Mermaid and Markdown included for
+now, is `UnsupportedMedia` too. The actual kind's own cap applies before
+anything decodes the snapshot, so SVG content over 2 MiB is refused as an
+explicit SVG job's would be: `FileTooLarge` from a file and `TooLarge`
+inline. SVG behind a document type declaration is classified as SVG and then
+refused by the parser (`RenderParse`), as an explicit SVG job is.
+
 **The source.** Inline bytes over the job kind's input cap (32 MiB for a
-raster, 2 MiB for an SVG) are `TooLarge`. A path is opened once, read-only, non-blocking and
+raster or an Auto job, 2 MiB for an SVG) are `TooLarge`. A path is opened once, read-only, non-blocking and
 without becoming a controlling terminal, and everything after that is decided
 from the open descriptor, never the path:
 

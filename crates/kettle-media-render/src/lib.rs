@@ -5,12 +5,15 @@
 //! nothing here trusts those to be the only bound, so every size is checked
 //! before the work it would cost.
 //!
-//! Raster and SVG jobs are rendered. Other kinds answer `UnsupportedMedia` until
-//! their renderers land, and on Windows, where no worker runs, every job answers
-//! `UnsupportedPlatform`.
+//! Raster and SVG jobs are rendered, and Auto jobs, which are classified by
+//! their bytes as one or the other. Other kinds answer `UnsupportedMedia`
+//! until their renderers land, and on Windows, where no worker runs, every job
+//! answers `UnsupportedPlatform`.
 
-use kettle_media::{FailureCode, Job, Rendered};
+use kettle_media::{FailureCode, Job, MediaKind, Rendered};
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod auto;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod container;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -44,18 +47,40 @@ pub fn prepare() {
 
 /// Render one job.
 pub fn render(job: &Job) -> Result<Rendered, FailureCode> {
+    render_with_kind(job, |_| {}).map(|(_, rendered)| rendered)
+}
+
+/// Render one job and say what it turned out to be. `on_kind` hears the kind
+/// once it is known and before it is decoded or rendered: at once for an
+/// explicit kind, and after classification for an Auto job, so the worker
+/// can narrow its deadline to that kind's.
+pub fn render_with_kind(
+    job: &Job,
+    mut on_kind: impl FnMut(MediaKind),
+) -> Result<(MediaKind, Rendered), FailureCode> {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
+        use kettle_media::JobKind;
         job.target.validate().map_err(|_| FailureCode::BadParams)?;
         match job.kind {
-            kettle_media::JobKind::Raster => raster::render(job),
-            kettle_media::JobKind::Svg => svg::render(job),
-            _ => Err(FailureCode::UnsupportedMedia),
+            JobKind::Auto => auto::render(job, &mut on_kind),
+            JobKind::Raster => {
+                on_kind(MediaKind::Raster);
+                raster::render(job).map(|rendered| (MediaKind::Raster, rendered))
+            }
+            JobKind::Svg => {
+                on_kind(MediaKind::Svg);
+                svg::render(job).map(|rendered| (MediaKind::Svg, rendered))
+            }
+            JobKind::Mermaid
+            | JobKind::MarkdownDiagrams { .. }
+            | JobKind::VideoProbe
+            | JobKind::VideoStills(_) => Err(FailureCode::UnsupportedMedia),
         }
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        let _ = job;
+        let _ = (job, &mut on_kind);
         Err(FailureCode::UnsupportedPlatform)
     }
 }
@@ -87,6 +112,7 @@ mod tests {
     fn media_loader_never_writes() {
         for (name, source) in [
             ("lib", include_str!("lib.rs")),
+            ("auto", include_str!("auto.rs")),
             ("source", include_str!("source.rs")),
             ("container", include_str!("container.rs")),
             ("svg", include_str!("svg/mod.rs")),
