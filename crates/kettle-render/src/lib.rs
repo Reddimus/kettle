@@ -21086,7 +21086,7 @@ mod completion_panel_tests {
         let geometry = media_paste_receipt_geometry(&compact, None, CELL, CELL.0, CELL.1).unwrap();
         assert_eq!(
             media_paste_receipt_text(&compact, &geometry, CELL.0).0,
-            "Imagen pegada"
+            "Ruta de imagen"
         );
         compact.remote = true;
         let geometry = media_paste_receipt_geometry(&compact, None, CELL, CELL.0, CELL.1).unwrap();
@@ -21100,7 +21100,7 @@ mod completion_panel_tests {
         let geometry = media_paste_receipt_geometry(&batch, None, CELL, CELL.0, CELL.1).unwrap();
         assert_eq!(
             media_paste_receipt_text(&batch, &geometry, CELL.0).0,
-            "3 videos pegados"
+            "3 rutas de video"
         );
 
         // Every compact title shows whole, in each language and the
@@ -21133,7 +21133,7 @@ mod completion_panel_tests {
         pending.tr = es;
         let geometry = media_paste_receipt_geometry(&pending, None, CELL, CELL.0, CELL.1).unwrap();
         let (title, detail) = media_paste_receipt_text(&pending, &geometry, CELL.0);
-        assert_eq!(title, "Video pegado");
+        assert_eq!(title, "Ruta de video");
         assert!(detail.contains("1 de 3 · MP4 · 35.7 MB"), "{detail}");
         assert!(detail.contains("Preparando portada"), "{detail}");
 

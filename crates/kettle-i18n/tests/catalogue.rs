@@ -75,7 +75,23 @@ fn integer_plural_boundaries() {
         en.confirm_paste(1),
         "Paste 1 line into a shell-like target?"
     );
-    assert_eq!(es.confirm_close_window(1), "¿Cerrar 1 panel?");
+    for count in [0, 1, 2, 1000, 1_000_000, u64::MAX] {
+        let one = count == 1;
+        assert_eq!(
+            en.confirm_close_window(count),
+            format!(
+                "Close window with {count} {}?",
+                if one { "pane" } else { "panes" }
+            )
+        );
+        assert_eq!(
+            es.confirm_close_window(count),
+            format!(
+                "¿Cerrar la ventana con {count} {}?",
+                if one { "panel" } else { "paneles" }
+            )
+        );
+    }
 }
 
 /// Config lines, paths and line breaks pass through every language unchanged.

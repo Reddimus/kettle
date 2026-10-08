@@ -143,7 +143,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   to follow the themes' names or the popular list's order, flipping between
   light and dark palettes. `toggle_light_dark` still switches appearance.
 - Close confirmations count in words that match the number: "Close tab with 1
-  pane?", "Close 3 panes?". The paste prompt says "1 line" or "2 lines". They
+  pane?", "Close window with 3 panes?". The paste prompt says "1 line" or "2 lines". They
   used to say "pane(s)" and "lines" whatever the count.
 
 ### Fixed
@@ -171,6 +171,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   status bar, and a side strip's band ran under the search bar. The split
   preview while dragging a pane now matches the pane the split creates,
   rounded the same way.
+
+- The window close confirmation names the window: "Close window with 3
+  panes?" rather than "Close 3 panes?". In Spanish, the pasted-path receipt
+  titles said "pasted image" and "pasted video" where the card shows a pasted
+  path; they now say "Ruta de imagen" and "Ruta de video". "Ocultar el
+  puntero al escribir" replaces "ratón", since the setting also hides the
+  trackpad pointer.
 
 - An opaque context menu, Settings panel or paste receipt over the cursor
   cell now hides the whole cursor. The inverted glyph of a focused block

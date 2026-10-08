@@ -20,7 +20,7 @@ End-state UX in kettle:
 - A user has 4 panes open (1 tab, 4-way split). They press
   `Ctrl+Shift+Q` (CloseWindow).
 - With `ask-before-closing = multiple_terminals` (default), a modal
-  overlay appears asking "Close 4 panes?" with two buttons:
+  overlay appears asking "Close window with 4 panes?" with two buttons:
   `[Cancel]` / `[Close]`. Default focus is Cancel (safe default).
 - Click Close or focus Close and press Enter → window closes.
 - Click Cancel, focus Cancel and press Enter, or press Escape → modal closes,
@@ -179,7 +179,7 @@ ask-before-closing = multiple_terminals
 $ kettle
 # split 4 ways with Ctrl+Shift+E
 # press Ctrl+Shift+Q (CloseWindow)
-# verify: modal opens with "Close 4 panes?" + Cancel/Close buttons
+# verify: modal opens with "Close window with 4 panes?" + Cancel/Close buttons
 # verify: Cancel has focus (the safe default)
 # press Esc → modal closes, window stays open
 # press Ctrl+Shift+Q again, Tab to focus Close, press Enter
