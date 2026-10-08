@@ -1382,11 +1382,24 @@ pub fn pane_drop_zone(rect: Rect, px: f32, py: f32) -> Option<(Dir, bool)> {
 /// rather than a decorative stripe.
 pub fn pane_drop_preview(rect: Rect, dir: Dir, before: bool) -> Rect {
     let (x, y, w, h) = rect;
-    match (dir, before) {
-        (Dir::Horizontal, true) => (x, y, w / 2.0, h),
-        (Dir::Horizontal, false) => (x + w / 2.0, y, w / 2.0, h),
-        (Dir::Vertical, true) => (x, y, w, h / 2.0),
-        (Dir::Vertical, false) => (x, y + h / 2.0, w, h / 2.0),
+    // Round as the split itself does, so the preview is the pane it creates.
+    match dir {
+        Dir::Horizontal => {
+            let first = split_extent_px(w, 0.5);
+            if before {
+                (x, y, first, h)
+            } else {
+                (x + first, y, w - first, h)
+            }
+        }
+        Dir::Vertical => {
+            let first = split_extent_px(h, 0.5);
+            if before {
+                (x, y, w, first)
+            } else {
+                (x, y + first, w, h - first)
+            }
+        }
     }
 }
 
@@ -2514,19 +2527,8 @@ impl Mux {
         let tab = self.tabs.get(self.active)?;
         let mut layout = Vec::new();
         tab.root.layout(area, &mut layout);
-        let (_, (x, y, width, height)) = layout.into_iter().find(|(id, _)| *id == tab.focus)?;
-        Some(match (dir, new_first) {
-            (Dir::Horizontal, false) => {
-                let first_width = (width * 0.5).round();
-                (x + first_width, y, width - first_width, height)
-            }
-            (Dir::Horizontal, true) => (x, y, (width * 0.5).round(), height),
-            (Dir::Vertical, false) => {
-                let first_height = (height * 0.5).round();
-                (x, y + first_height, width, height - first_height)
-            }
-            (Dir::Vertical, true) => (x, y, width, (height * 0.5).round()),
-        })
+        let (_, leaf) = layout.into_iter().find(|(id, _)| *id == tab.focus)?;
+        Some(pane_drop_preview(leaf, dir, new_first))
     }
 
     /// The divider seams of `tab` laid out over `area`,
@@ -4900,6 +4902,37 @@ mod node_tests {
             }
         }
     }
+    /// The drop preview and the prospective split rect are the pane an
+    /// actual split creates, including odd, fractional and cramped leaves.
+    #[test]
+    fn split_previews_match_actual_grafts_for_odd_fractional_and_cramped_leaves() {
+        for size in [(101.0, 51.0), (100.5, 50.5), (31.0, 17.0), (1.0, 0.5)] {
+            for dir in [Dir::Horizontal, Dir::Vertical] {
+                for new_first in [false, true] {
+                    let area = (-3.5, 7.25, size.0, size.1);
+                    let mut mux = Mux::new();
+                    push_tab(&mut mux, Node::Leaf(7), 7);
+                    mux.tabs[0].zoomed = true;
+                    let preview = pane_drop_preview(area, dir, new_first);
+                    let predicted = mux.prospective_split_rect(dir, new_first, area);
+                    assert!(super::insert_split(&mut mux.tabs[0], 8, dir, new_first));
+                    let actual = mux
+                        .layout(0, area)
+                        .into_iter()
+                        .find(|(id, _)| *id == 8)
+                        .map(|(_, rect)| rect)
+                        .unwrap();
+                    assert_eq!(
+                        preview, actual,
+                        "size={size:?} {dir:?} new_first={new_first}"
+                    );
+                    assert_eq!(predicted, Some(actual));
+                    assert!(actual.2 > 0.0 && actual.3 > 0.0);
+                }
+            }
+        }
+    }
+
     fn hsplit(ratio: f32, a: Node, b: Node) -> Node {
         Node::Split {
             dir: Dir::Horizontal,

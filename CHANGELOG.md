@@ -166,6 +166,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   pending preview that belongs to another tab in the target window stays,
   and a preview that fails no longer removes another tab's receipt.
 
+- Dragging a tab onto another window docks where that window's tab bar is
+  painted. A bottom bar's docking band ignored the search bar and a bottom
+  status bar, and a side strip's band ran under the search bar. The split
+  preview while dragging a pane now matches the pane the split creates,
+  rounded the same way.
+
 - An opaque context menu, Settings panel or paste receipt over the cursor
   cell now hides the whole cursor. The inverted glyph of a focused block
   cursor was drawn after every overlay and showed through them.
