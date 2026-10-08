@@ -18843,15 +18843,20 @@ impl App {
                     return;
                 };
                 self.release_focus_report_to(ws, &dt);
-                match self.open_window(
-                    event_loop,
-                    WindowOpen::AdoptTab {
-                        tab: dt,
-                        source_color: ws.accent.as_ref().map(|accent| accent.color),
-                    },
-                    None,
-                    None,
-                ) {
+                let paste = ws.take_moved_paste_state(&dt.tab, std::time::Instant::now());
+                match self
+                    .open_window(
+                        event_loop,
+                        WindowOpen::AdoptTab {
+                            tab: dt,
+                            source_color: ws.accent.as_ref().map(|accent| accent.color),
+                            paste: Box::new(paste),
+                        },
+                        None,
+                        None,
+                    )
+                    .map_err(|open| *open)
+                {
                     Ok(_) => {
                         // The tab LEFT this window, so plugins see a tab-close
                         // event.
@@ -18871,13 +18876,14 @@ impl App {
                             w.request_redraw();
                         }
                     }
-                    Err(WindowOpen::AdoptTab { tab: dt, .. }) => {
+                    Err(WindowOpen::AdoptTab { tab: dt, paste, .. }) => {
                         // Window creation failed — put the live tab back
                         // exactly where it was; nothing is lost.
                         log::warn!(
                             "MoveTabToNewWindow: open_window failed; tab kept in source window"
                         );
                         ws.mux.attach_tab(dt, Some(closing_idx));
+                        ws.restore_moved_paste_state(*paste);
                     }
                     Err(_) => unreachable!("open_window returns the WindowOpen it was given"),
                 }
@@ -27064,6 +27070,13 @@ impl ApplicationHandler<UserEvent> for App {
                 candidate,
                 preview,
             } => {
+                // The pane's tab may have moved to another window since the
+                // preview was requested.
+                let Some(window_seq) =
+                    video_preview_target_window(&self.windows, window_seq, pane_id, generation)
+                else {
+                    return;
+                };
                 let Some(mut ws) = self.windows.remove(&window_seq) else {
                     return;
                 };
@@ -27245,6 +27258,27 @@ impl ApplicationHandler<UserEvent> for App {
     // C1-DISPATCH-END
 }
 
+/// The window waiting for this pane's video preview generation: the window
+/// that requested it, or the one its tab has moved to since.
+fn video_preview_target_window(
+    windows: &std::collections::BTreeMap<u64, WindowState>,
+    hint: u64,
+    pane: u64,
+    generation: u64,
+) -> Option<u64> {
+    if windows
+        .get(&hint)
+        .is_some_and(|window| window.expects_video_preview(pane, generation))
+    {
+        return Some(hint);
+    }
+    windows.iter().find_map(|(&seq, window)| {
+        window
+            .expects_video_preview(pane, generation)
+            .then_some(seq)
+    })
+}
+
 /// How a new in-process window starts life.
 enum WindowOpen {
     /// A fresh window with one shell tab (`Action::NewWindow`).
@@ -27254,6 +27288,8 @@ enum WindowOpen {
     AdoptTab {
         tab: crate::mux::DetachedTab,
         source_color: Option<kettle_config::Rgb>,
+        /// The moved tab's paste receipt and pending video preview.
+        paste: Box<crate::window_state::MovedPasteState>,
     },
     /// Respawn one saved window of a multi-window session (tabs + geometry)
     /// on `--restore` / `restore-session = true` startup.
@@ -28348,10 +28384,10 @@ impl App {
         open: WindowOpen,
         pos: Option<winit::dpi::Position>,
         size: Option<winit::dpi::PhysicalSize<u32>>,
-    ) -> Result<u64, WindowOpen> {
+    ) -> Result<u64, Box<WindowOpen>> {
         let Some(gpu) = self.gpu.clone() else {
             log::warn!("open_window: GPU context not ready (window 1 still initializing)");
-            return Err(open);
+            return Err(Box::new(open));
         };
         let source_color = match &open {
             WindowOpen::AdoptTab { source_color, .. } => *source_color,
@@ -28405,7 +28441,7 @@ impl App {
             Ok(w) => Arc::new(w),
             Err(e) => {
                 log::error!("open_window: window creation failed: {e}");
-                return Err(open);
+                return Err(Box::new(open));
             }
         };
         self.apply_post_create(&window);
@@ -28426,7 +28462,7 @@ impl App {
             Ok(r) => r,
             Err(e) => {
                 log::error!("open_window: renderer init failed: {e}");
-                return Err(open);
+                return Err(Box::new(open));
             }
         };
         let seq = self.next_window_seq;
@@ -28472,11 +28508,12 @@ impl App {
                 ) {
                     // `ws` (and its OS window) drop here; nothing was adopted.
                     log::error!("open_window: shell spawn failed: {e}");
-                    return Err(WindowOpen::Fresh { cwd });
+                    return Err(Box::new(WindowOpen::Fresh { cwd }));
                 }
             }
-            WindowOpen::AdoptTab { tab: dt, .. } => {
+            WindowOpen::AdoptTab { tab: dt, paste, .. } => {
                 ws.mux.attach_tab(dt, None);
+                ws.adopt_moved_paste_state(*paste);
             }
             WindowOpen::Restore(sw) => {
                 let sess = crate::session::Session {
@@ -28494,7 +28531,7 @@ impl App {
                 if !outcome.restored_any {
                     // `ws` (and its OS window) drop here; nothing restored.
                     log::error!("open_window: saved-window restore failed");
-                    return Err(WindowOpen::Restore(sw));
+                    return Err(Box::new(WindowOpen::Restore(sw)));
                 }
                 if outcome.skipped > 0 {
                     self.stash_unrestorable_session(&format!(
@@ -28729,15 +28766,20 @@ impl App {
         ws.detach_drag = crate::detach::DragState::default();
         ws.drag_press = None;
         self.release_focus_report_to(ws, &dt);
-        match self.open_window(
-            event_loop,
-            WindowOpen::AdoptTab {
-                tab: dt,
-                source_color: ws.accent.as_ref().map(|accent| accent.color),
-            },
-            pos,
-            Some(size),
-        ) {
+        let paste = ws.take_moved_paste_state(&dt.tab, std::time::Instant::now());
+        match self
+            .open_window(
+                event_loop,
+                WindowOpen::AdoptTab {
+                    tab: dt,
+                    source_color: ws.accent.as_ref().map(|accent| accent.color),
+                    paste: Box::new(paste),
+                },
+                pos,
+                Some(size),
+            )
+            .map_err(|open| *open)
+        {
             Ok(torn_seq) => {
                 self.fire_tab_close_event(ws, closing_idx);
                 self.ctl_broadcast(
@@ -28812,9 +28854,10 @@ impl App {
                 });
                 self.follow_torn_drag(ws);
             }
-            Err(WindowOpen::AdoptTab { tab: dt, .. }) => {
+            Err(WindowOpen::AdoptTab { tab: dt, paste, .. }) => {
                 log::warn!("tear-off: open_window failed; tab kept in source window");
                 ws.mux.attach_tab(dt, Some(closing_idx));
+                ws.restore_moved_paste_state(*paste);
             }
             Err(_) => unreachable!("open_window returns the WindowOpen it was given"),
         }
@@ -29267,7 +29310,8 @@ impl App {
                 return;
             };
             self.release_focus_report_to(ws, &dt);
-            self.dock_tab_into(&mut target, dt, idx, td.seq);
+            let paste = ws.take_moved_paste_state(&dt.tab, std::time::Instant::now());
+            self.dock_tab_into(&mut target, dt, paste, idx, td.seq);
             // The docked tab becomes the target's active tab; report it now,
             // since an already focused target gets no new focus event.
             self.sync_pane_focus_reports(&mut target);
@@ -29298,10 +29342,12 @@ impl App {
             };
             if target_seq == ws.seq {
                 self.release_focus_report_to(&mut torn, &dt);
-                self.dock_tab_into(ws, dt, idx, td.seq);
+                let paste = torn.take_moved_paste_state(&dt.tab, std::time::Instant::now());
+                self.dock_tab_into(ws, dt, paste, idx, td.seq);
             } else if let Some(mut target) = self.windows.remove(&target_seq) {
                 self.release_focus_report_to(&mut torn, &dt);
-                self.dock_tab_into(&mut target, dt, idx, td.seq);
+                let paste = torn.take_moved_paste_state(&dt.tab, std::time::Instant::now());
+                self.dock_tab_into(&mut target, dt, paste, idx, td.seq);
                 self.sync_pane_focus_reports(&mut target);
                 self.windows.insert(target_seq, target);
             } else {
@@ -29341,10 +29387,12 @@ impl App {
         &mut self,
         target: &mut WindowState,
         dt: crate::mux::DetachedTab,
+        paste: crate::window_state::MovedPasteState,
         idx: usize,
         from_seq: u64,
     ) {
         let landed = target.mux.attach_tab(dt, Some(idx));
+        target.adopt_moved_paste_state(paste);
         target.dock_preview = None;
         self.resize_all(target);
         if let Some(w) = &target.window {
@@ -30282,49 +30330,19 @@ impl App {
                 if window_seq != ws.seq {
                     return;
                 }
-                let Some(mut pending) = ws.pending_video_paste_receipt.take() else {
-                    return;
-                };
-                if pending.pane_id != pane_id || pending.generation != generation {
-                    ws.pending_video_paste_receipt = Some(pending);
-                    return;
-                }
-                if pending.expired(std::time::Instant::now()) {
-                    ws.accessibility_pending = true;
-                    return;
-                }
-                let Some(mut candidate) = candidate else {
-                    ws.media_paste_receipt = None;
-                    ws.accessibility_pending = true;
-                    if let Some(window) = &ws.window {
-                        window.request_redraw();
-                    }
-                    return;
-                };
-                if !ws.mux.panes.contains_key(&pane_id) {
-                    return;
-                }
-                candidate.count = pending.request.count;
-                let mut receipt = pending.previous_receipt.take();
-                if receipt
-                    .as_mut()
-                    .is_none_or(|prior| !prior.merge_drop(pane_id, &candidate, pending.created_at))
+                use crate::window_state::VideoPreviewOutcome;
+                let outcome = ws.finish_pending_video_preview(
+                    pane_id,
+                    generation,
+                    candidate,
+                    preview,
+                    std::time::Instant::now(),
+                );
+                if matches!(
+                    outcome,
+                    VideoPreviewOutcome::Failed | VideoPreviewOutcome::Shown
+                ) && let Some(window) = &ws.window
                 {
-                    receipt = Some(crate::window_state::MediaPasteReceiptState::new_video(
-                        pane_id,
-                        &candidate,
-                        generation,
-                        pending.remote,
-                        pending.prefer_top,
-                        pending.created_at,
-                    ));
-                }
-                if let Some(receipt) = receipt.as_mut() {
-                    receipt.finish_video_preview(generation, preview);
-                }
-                ws.media_paste_receipt = receipt;
-                ws.accessibility_pending = true;
-                if let Some(window) = &ws.window {
                     window.request_redraw();
                 }
             }
@@ -31658,15 +31676,21 @@ impl App {
                                     .into()
                                 });
                             self.release_focus_report_to(ws, &dt);
-                            match self.open_window(
-                                event_loop,
-                                WindowOpen::AdoptTab {
-                                    tab: dt,
-                                    source_color: ws.accent.as_ref().map(|accent| accent.color),
-                                },
-                                pos,
-                                None,
-                            ) {
+                            let paste =
+                                ws.take_moved_paste_state(&dt.tab, std::time::Instant::now());
+                            match self
+                                .open_window(
+                                    event_loop,
+                                    WindowOpen::AdoptTab {
+                                        tab: dt,
+                                        source_color: ws.accent.as_ref().map(|accent| accent.color),
+                                        paste: Box::new(paste),
+                                    },
+                                    pos,
+                                    None,
+                                )
+                                .map_err(|open| *open)
+                            {
                                 Ok(torn_seq) => {
                                     self.fire_tab_close_event(ws, closing_idx);
                                     // Agents see the tear-off too.
@@ -31684,11 +31708,12 @@ impl App {
                                         w.request_redraw();
                                     }
                                 }
-                                Err(WindowOpen::AdoptTab { tab: dt, .. }) => {
+                                Err(WindowOpen::AdoptTab { tab: dt, paste, .. }) => {
                                     log::warn!(
                                         "tear-off: open_window failed; tab kept in source window"
                                     );
                                     ws.mux.attach_tab(dt, Some(closing_idx));
+                                    ws.restore_moved_paste_state(*paste);
                                 }
                                 Err(_) => {
                                     unreachable!("open_window returns the WindowOpen it was given")
@@ -34405,8 +34430,9 @@ mod tests {
             .and_then(|rest| rest.split("UserEvent::Wakeup").next())
             .expect("video preview result handler");
         assert!(
-            ready.contains("pending.expired(std::time::Instant::now())"),
-            "a late worker reply must not revive already-expired pending state"
+            ready.contains("ws.finish_pending_video_preview(")
+                && ready.contains("std::time::Instant::now(),"),
+            "a worker reply goes through the window's expiry-checked finish"
         );
 
         let ctl_press = source
@@ -39811,19 +39837,102 @@ mod tests {
         // A target window docked into outside the dispatch funnel is
         // reconciled before it goes back into the window map.
         let docks = source
-            .matches("self.dock_tab_into(&mut target, dt, idx, td.seq);")
+            .matches("self.dock_tab_into(&mut target, dt, paste, idx, td.seq);")
             .count();
         let reconciled = source
             .matches(
-                "self.dock_tab_into(&mut target, dt, idx, td.seq);\n            // The docked tab becomes the target's active tab; report it now,\n            // since an already focused target gets no new focus event.\n            self.sync_pane_focus_reports(&mut target);",
+                "self.dock_tab_into(&mut target, dt, paste, idx, td.seq);\n            // The docked tab becomes the target's active tab; report it now,\n            // since an already focused target gets no new focus event.\n            self.sync_pane_focus_reports(&mut target);",
             )
             .count()
             + source
                 .matches(
-                    "self.dock_tab_into(&mut target, dt, idx, td.seq);\n                self.sync_pane_focus_reports(&mut target);",
+                    "self.dock_tab_into(&mut target, dt, paste, idx, td.seq);\n                self.sync_pane_focus_reports(&mut target);",
                 )
                 .count();
+        assert_eq!(docks, 2, "both cross-window docks are counted");
         assert_eq!(docks, reconciled, "every docked target is reconciled");
+    }
+
+    /// A video preview requested before its tab moved reaches the window the
+    /// tab is in now, and only for the exact pane and generation.
+    #[test]
+    fn video_preview_completion_finds_the_window_its_tab_moved_to() {
+        use super::video_preview_target_window;
+        let pending = |pane| crate::window_state::PendingVideoPasteReceipt {
+            pane_id: pane,
+            generation: 41,
+            request: crate::video_preview::VideoPasteRequest::from_user_paths(
+                &[std::env::current_dir().unwrap().join("missing.mp4")],
+                crate::video_preview::VideoPasteSource::Drop,
+            )
+            .unwrap(),
+            remote: false,
+            prefer_top: true,
+            created_at: std::time::Instant::now(),
+            previous_receipt: None,
+        };
+        let mut windows = std::collections::BTreeMap::new();
+        windows.insert(1, WindowState::new(1, false, crate::mux::Mux::new()));
+        let mut torn = WindowState::new(2, false, crate::mux::Mux::new());
+        torn.pending_video_paste_receipt = Some(pending(7));
+        windows.insert(2, torn);
+        assert_eq!(video_preview_target_window(&windows, 1, 7, 41), Some(2));
+        assert_eq!(video_preview_target_window(&windows, 2, 7, 41), Some(2));
+        assert_eq!(video_preview_target_window(&windows, 1, 7, 40), None);
+        assert_eq!(video_preview_target_window(&windows, 1, 8, 41), None);
+    }
+
+    /// Census: a paste receipt follows its tab. Every function that detaches a
+    /// tab takes the tab's paste state before handing the tab on, and every
+    /// failed new-window handoff puts it back.
+    #[test]
+    fn every_tab_transfer_moves_its_paste_state() {
+        let source = production_source();
+        let mut transfers = 0;
+        for chunk in source.split("\n    fn ").skip(1) {
+            let name = chunk.split('(').next().unwrap_or_default().to_string();
+            let body = chunk.split("\n    }\n").next().unwrap_or(chunk);
+            if !body.contains(".mux.detach_tab(") {
+                continue;
+            }
+            transfers += 1;
+            // Each handoff needs its own take, after the previous handoff, so
+            // one take cannot cover a second transfer in the same function.
+            let mut handoffs: Vec<usize> = body
+                .match_indices("WindowOpen::AdoptTab {")
+                .filter(|(at, _)| !body[..*at].ends_with("Err("))
+                .chain(body.match_indices("self.dock_tab_into("))
+                .map(|(at, _)| at)
+                .collect();
+            handoffs.sort_unstable();
+            let mut since = 0;
+            for at in handoffs {
+                assert!(
+                    body[since..at].contains(".take_moved_paste_state(&dt.tab,"),
+                    "{name} hands a tab on without its own paste state"
+                );
+                since = at;
+            }
+            assert_eq!(
+                body.matches("Err(WindowOpen::AdoptTab { tab: dt, paste, .. })")
+                    .count(),
+                body.matches(".restore_moved_paste_state(*paste);").count(),
+                "{name} drops paste state on a failed handoff"
+            );
+            assert!(
+                !body.contains("Err(WindowOpen::AdoptTab { tab: dt, .. })"),
+                "{name} ignores paste state on a failed handoff"
+            );
+        }
+        assert!(transfers >= 4, "census found only {transfers} transfers");
+        // The receiving side adopts it, and a late video preview follows it.
+        for needle in [
+            "ws.mux.attach_tab(dt, None);\n                ws.adopt_moved_paste_state(*paste);",
+            "let landed = target.mux.attach_tab(dt, Some(idx));\n        target.adopt_moved_paste_state(paste);",
+            "video_preview_target_window(&self.windows, window_seq, pane_id, generation)",
+        ] {
+            assert!(source.contains(needle), "missing: {needle}");
+        }
     }
 
     #[test]
@@ -45235,7 +45344,7 @@ mod tests {
         //    the grab offset (open_window's size override).
         assert!(
             src.contains(
-                "WindowOpen::AdoptTab {\n                tab: dt,\n                source_color: ws.accent.as_ref().map(|accent| accent.color),\n            },\n            pos,\n            Some(size),"
+                "WindowOpen::AdoptTab {\n                    tab: dt,\n                    source_color: ws.accent.as_ref().map(|accent| accent.color),\n                    paste: Box::new(paste),\n                },\n                pos,\n                Some(size),"
             ),
             "the tear must open the torn window at the grab position and source size"
         );

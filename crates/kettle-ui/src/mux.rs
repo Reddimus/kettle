@@ -979,7 +979,7 @@ impl Node {
         }
     }
 
-    fn contains(&self, id: u64) -> bool {
+    pub(crate) fn contains(&self, id: u64) -> bool {
         match self {
             Node::Leaf(x) => *x == id,
             Node::Split { a, b, .. } => a.contains(id) || b.contains(id),
