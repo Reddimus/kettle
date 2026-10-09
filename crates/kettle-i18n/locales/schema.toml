@@ -137,6 +137,27 @@ context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row.
 [messages.menu_new_window]
 context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row."
 
+[messages.menu_open_in_kettle]
+context = "crates/kettle-ui/src/app.rs card menu: right-click menu row on an inline media card that opens its item in Kettle's own media viewer."
+
+[messages.menu_open_in_preview]
+context = "crates/kettle-ui/src/media/external.rs: right-click menu row on an inline media card or in the media viewer, macOS only, that opens a copy of the image in Apple's Preview app. 'Preview' is the app's name; Spanish macOS calls it 'Vista Previa'."
+
+[messages.menu_open_in_image_viewer]
+context = "crates/kettle-ui/src/media/external.rs: right-click menu row on an inline media card or in the media viewer, Linux only, that opens a copy of the image in GNOME's image viewer."
+
+[messages.notify_title_open_image]
+context = "crates/kettle-ui/src/app.rs act_on_media: desktop notification title when opening a copy of a media item in the image viewer did not work."
+
+[messages.notify_body_open_image_busy]
+context = "crates/kettle-ui/src/app.rs act_on_media: desktop notification body when too many opens are already running."
+
+[messages.notify_body_open_image_copy]
+context = "crates/kettle-ui/src/app.rs act_on_media: desktop notification body when the private PNG copy could not be written, or the item's pixels are no longer held."
+
+[messages.notify_body_open_image_viewer]
+context = "crates/kettle-ui/src/app.rs act_on_media: desktop notification body when the permitted image viewer (Preview on macOS, Eye of GNOME on Linux) is missing or failed its check."
+
 [messages.menu_open_link]
 context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row. Shown when the right-click lands on a link."
 

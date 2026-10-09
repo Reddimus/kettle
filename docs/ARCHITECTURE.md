@@ -299,12 +299,30 @@ owner, mode, `Thumb::URI`, and `Thumb::MTime`, then decodes that same descriptor
 A missing or untrusted cache entry leaves the generic poster visible. No
 platform path runs a video codec inside the Kettle process.
 
+The same store, as a second `PastedImages` of kind `paste_image::OPENED`,
+holds the PNG copies a card menu hands to the image viewer: prefix
+`kettle-open-`, 32 files and 128 MiB, and, since the viewer reads its copy
+when it opens it, it drops its oldest copies to make room (`drop_oldest`, for
+as much as the new PNG can take) instead of refusing, numbering on past its
+file count. A copy stays at least a minute (`StoreKind::min_age`) so its
+viewer can read it; a store full of newer copies refuses another, which the
+user hears as busy. A copy it cannot delete stays counted against the bounds
+(`StuckImage`) and cleanup tries it again. At exit the App closes the store
+(`PastedImages::close`), so an open still on its way cannot leave a copy
+behind. The App holds it behind a mutex so `media::external` can write
+off the window thread; `hand_over` checks the viewer, writes the copy, marks
+it downloaded through the held handle (`mark_downloaded`), checks it is still
+the file Kettle wrote (`path_still_matches`) and starts the viewer, all under
+that lock, and at most two opens are prepared at once.
+
 Crash cleanup recognizes only
-`kettle-paste-<canonical-pid>-<canonical-u128-nonce>` directories and canonical
-zero-padded `0001.png` through `0064.png` children. Cleanup runs on a background
+`kettle-paste-<canonical-pid>-<canonical-u128-nonce>` and
+`kettle-open-<canonical-pid>-<canonical-u128-nonce>` directories, with
+canonical zero-padded children from `0001.png` through `0064.png` for pasted
+images or `999999.png` for viewer copies. Cleanup runs on a background
 thread so a damaged namespace cannot delay event-loop/window creation. It stops
-after 250 ms, 8,192 root entries, 64 stale attempts, or 32 successful sessions;
-each session is capped at 64 files. A candidate must be older than 24 hours,
+after 250 ms, 8,192 root entries, 64 stale attempts, or 32 successful sessions
+per kind; each session is capped at its kind's file count (64 or 32). A candidate must be older than 24 hours,
 its creator must be definitively dead (`ESRCH` on Unix; queryable
 non-`STILL_ACTIVE`/invalid PID on Windows), and every child must open relative
 to the held directory as a current-user/private, non-reparse, single-link

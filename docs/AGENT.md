@@ -375,6 +375,14 @@ opened; `ui-tips.json` beside the config file records that it showed, so it
 never shows again, and of two Kettles running at once only one shows it. It
 waits for a card whose image is on screen with no dialog, menu or viewer
 over it.
+A right-press on a settled card opens the card's menu instead of the
+terminal's: Open, as a click does, and, where this platform permits one
+viewer, Open in Preview (macOS) or Open in Image Viewer (Linux, Eye of
+GNOME at `/usr/bin/eog`). That row hands the viewer a fresh PNG of the pixels
+Kettle shows, from a private store that keeps the newest 32 copies and
+128 MiB and is deleted on exit; a row acts only while the card still shows
+the item, at the generation, the menu named. Nothing a program prints opens
+another app.
 `kettle ctl send_mouse` clicks a card the same way. Quick select (`hint_mode`) labels each card on screen in the
 focused pane, and picking its label opens it; text in a card's rows is its
 marks, so it gets no label of its own. Screen readers see each card as a

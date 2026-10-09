@@ -24,6 +24,13 @@
 //! access; other platforms use the OS temp directory. A bounded startup sweep
 //! reclaims an exact, old session only after its creator PID is definitively
 //! dead, so a long-running sibling is never deleted merely because it is old.
+//!
+//! **Copies for an image viewer.** A second store of the same kind, under its
+//! own prefix ([`OPENED`]), holds the PNG copies Kettle hands to the permitted
+//! image viewer when the user opens a shelf item outside Kettle. A viewer has
+//! read its copy once it opens, so that store drops its oldest copies to take
+//! a new one instead of refusing it; it is marked downloaded on macOS before
+//! any viewer sees it, deleted on exit, and swept with the pasted sessions.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, OpenOptions};
@@ -31,21 +38,57 @@ use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// Directory-name prefix inside the platform scratch root. Also the sweep key,
-/// so it must stay stable across versions or old directories become
-/// unreclaimable.
-const DIR_PREFIX: &str = "kettle-paste-";
+/// What a store keeps, how much of it, and what it does when full.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StoreKind {
+    /// Directory-name prefix inside the platform scratch root. Also the sweep
+    /// key, so it must stay stable across versions or old directories become
+    /// unreclaimable.
+    prefix: &'static str,
+    /// Per-session ceilings. The byte ceiling also bounds the source buffer:
+    /// the caller already materialized it, but refusing a larger value keeps
+    /// a malformed provider from driving an unbounded encode.
+    max_files: usize,
+    max_bytes: u64,
+    /// The highest image number a session names. A store that refuses when
+    /// full never passes its file count; one that drops its oldest keeps
+    /// counting.
+    max_sequence: usize,
+    /// Whether a full store drops its oldest images for a new one rather than
+    /// refusing it.
+    evicts: bool,
+    /// How long an image stays before it may be dropped for a newer one, so
+    /// whoever was handed it has time to read it.
+    min_age: Duration,
+}
 
-/// Per-session ceilings. A paste is a deliberate user action, so these are
-/// generous — they exist to bound a stuck key or a hostile automation loop, not
-/// to ration normal use.
-const MAX_FILES: usize = 64;
-const MAX_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
+/// Screenshots pasted as paths. A program may still read any of them, so a
+/// full session refuses more. A paste is a deliberate user action, so the
+/// ceilings are generous: they bound a stuck key or a hostile automation
+/// loop, not normal use.
+pub(crate) const PASTED: StoreKind = StoreKind {
+    prefix: "kettle-paste-",
+    max_files: 64,
+    max_bytes: 256 * 1024 * 1024,
+    max_sequence: 64,
+    evicts: false,
+    min_age: Duration::ZERO,
+};
 
-/// Bound the source buffer as well as the stored aggregate. The clipboard
-/// backend already materialized this buffer before calling us, but refusing a
-/// larger value prevents a malformed provider from driving an unbounded encode.
-const MAX_RGBA_BYTES: u64 = MAX_TOTAL_BYTES;
+/// Copies handed to the image viewer. The viewer reads its copy when it
+/// opens it, so the oldest go first when the store is full, once they have
+/// been there a minute; a store full of newer copies refuses another.
+pub(crate) const OPENED: StoreKind = StoreKind {
+    prefix: "kettle-open-",
+    max_files: 32,
+    max_bytes: 128 * 1024 * 1024,
+    max_sequence: 999_999,
+    evicts: true,
+    min_age: Duration::from_secs(60),
+};
+
+/// Every store, for the crash sweep.
+const KINDS: [StoreKind; 2] = [PASTED, OPENED];
 
 /// Reject absurd dimensions before allocating. 16384² RGBA is ~1 GiB, already
 /// far past any real screenshot; beyond this a malformed clipboard descriptor is
@@ -62,7 +105,8 @@ const PREVIEW_MAX_HEIGHT: u32 = 160;
 const STALE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Startup cleanup is deliberately bounded even if the scratch root is hostile
-/// or damaged. A valid session contains at most `MAX_FILES` regular PNGs.
+/// or damaged. A valid session contains at most its kind's `max_files`
+/// regular PNGs.
 const MAX_SWEEP_ENTRIES: usize = 8_192;
 const MAX_SWEEP_ATTEMPTS: usize = 64;
 const MAX_SWEEP_SESSIONS: usize = 32;
@@ -72,7 +116,16 @@ struct LiveImage {
     path: PathBuf,
     name: OsString,
     file: File,
+    /// Its length, counted against the session's bytes.
+    bytes: u64,
+    created: Instant,
     preview: Option<PastedImagePreview>,
+}
+
+/// An image the store dropped but could not delete. It still counts against
+/// the store's bounds, its bytes included, and cleanup tries it again.
+struct StuckImage {
+    name: OsString,
 }
 
 /// Bounded renderer projection retained only beside the private PNG whose path
@@ -99,24 +152,31 @@ struct SessionDirectory {
 /// preflight, so a session that never attempts an image paste touches the
 /// filesystem not at all.
 pub(crate) struct PastedImages {
+    kind: StoreKind,
     dir: PathBuf,
     seq: usize,
     directory: Option<SessionDirectory>,
     files: Vec<LiveImage>,
+    stuck: Vec<StuckImage>,
     bytes: u64,
+    /// Closed for good: it takes no more images.
+    closed: bool,
 }
 
 impl PastedImages {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(kind: StoreKind) -> Self {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |duration| duration.as_nanos());
         Self {
-            dir: scratch_root().join(format!("{DIR_PREFIX}{}-{nonce}", std::process::id())),
+            kind,
+            dir: scratch_root().join(format!("{}{}-{nonce}", kind.prefix, std::process::id())),
             seq: 0,
             directory: None,
             files: Vec::new(),
+            stuck: Vec::new(),
             bytes: 0,
+            closed: false,
         }
     }
 
@@ -151,12 +211,12 @@ impl PastedImages {
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidData, "clipboard image size overflows")
             })?;
-        if u64::try_from(expected).unwrap_or(u64::MAX) > MAX_RGBA_BYTES {
+        if u64::try_from(expected).unwrap_or(u64::MAX) > self.kind.max_bytes {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
                     "clipboard RGBA buffer exceeds the {} byte limit",
-                    MAX_RGBA_BYTES
+                    self.kind.max_bytes
                 ),
             ));
         }
@@ -169,8 +229,27 @@ impl PastedImages {
                 ),
             ));
         }
-        let remaining = MAX_TOTAL_BYTES.saturating_sub(self.bytes);
-        if self.files.len() >= MAX_FILES || remaining == 0 {
+        if self.closed {
+            return Err(io::Error::other("the image store is closed"));
+        }
+        if self.kind.evicts {
+            // Make room oldest first, for as much as the PNG can take: its
+            // filtered rows, deflated no larger than stored, plus framing.
+            let bound = u64::try_from(expected + height)
+                .unwrap_or(u64::MAX)
+                .saturating_mul(9)
+                / 8
+                + 4096;
+            while self.held() >= self.kind.max_files
+                || self.kind.max_bytes.saturating_sub(self.bytes) < bound
+            {
+                if !self.drop_oldest() {
+                    break;
+                }
+            }
+        }
+        let remaining = self.kind.max_bytes.saturating_sub(self.bytes);
+        if self.held() >= self.kind.max_files || remaining == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::QuotaExceeded,
                 format!(
@@ -189,12 +268,16 @@ impl PastedImages {
             .expect("the session directory was established above");
         verify_session_directory_path(directory)?;
 
-        let sequence = self.seq.checked_add(1).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::QuotaExceeded,
-                "pasted-image sequence overflowed",
-            )
-        })?;
+        let sequence = self
+            .seq
+            .checked_add(1)
+            .filter(|sequence| *sequence <= self.kind.max_sequence)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::QuotaExceeded,
+                    "pasted-image sequence overflowed",
+                )
+            })?;
         let leaf = format!("{sequence:04}.png");
         let path = self.dir.join(&leaf);
         let name = OsStr::new(&leaf);
@@ -311,9 +394,93 @@ impl PastedImages {
             path: path.clone(),
             name: name.to_os_string(),
             file: retained,
+            bytes: actual,
+            created: Instant::now(),
             preview,
         });
         Ok(path)
+    }
+
+    /// The images on disk this store counts: those it holds and those it
+    /// could not delete.
+    fn held(&self) -> usize {
+        self.files.len() + self.stuck.len()
+    }
+
+    /// Delete the oldest image, through the held directory, and stop counting
+    /// it. False when there is none old enough to drop. One that cannot be
+    /// deleted is still counted, for cleanup to try again, and the next
+    /// oldest goes instead.
+    fn drop_oldest(&mut self) -> bool {
+        let Some(directory) = self.directory.as_ref() else {
+            return false;
+        };
+        while self
+            .files
+            .first()
+            .is_some_and(|image| image.created.elapsed() >= self.kind.min_age)
+        {
+            let image = self.files.remove(0);
+            match remove_open_private_file_in_session(directory, image.file, &image.name) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    log::debug!(
+                        "image store left {} unchanged: {error}",
+                        image.path.display()
+                    );
+                    self.stuck.push(StuckImage { name: image.name });
+                    continue;
+                }
+            }
+            self.bytes = self.bytes.saturating_sub(image.bytes);
+            return true;
+        }
+        false
+    }
+
+    /// Clean up and take no more images, for good: a worker still holding
+    /// the store after exit cleanup cannot leave a new copy behind.
+    pub(crate) fn close(&mut self) {
+        self.closed = true;
+        self.cleanup();
+    }
+
+    /// Mark the image at `path`, through the handle this store holds, as
+    /// downloaded, so macOS treats it as from outside. Elsewhere it does
+    /// nothing.
+    pub(crate) fn mark_downloaded(&self, path: &Path) -> io::Result<()> {
+        let image = self
+            .files
+            .iter()
+            .find(|image| image.path == path)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::fd::AsRawFd as _;
+            let seconds = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |since| since.as_secs());
+            let value = format!("0081;{seconds:x};Kettle;");
+            // SAFETY: the name is NUL-terminated and static, `value` is valid
+            // for its length, and the descriptor is the store's own.
+            let status = unsafe {
+                libc::fsetxattr(
+                    image.file.as_raw_fd(),
+                    c"com.apple.quarantine".as_ptr(),
+                    value.as_ptr().cast(),
+                    value.len(),
+                    0,
+                    0,
+                )
+            };
+            if status != 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = image;
+        Ok(())
     }
 
     /// Move out the preview attached to this exact retained PNG. File-list
@@ -379,6 +546,22 @@ impl PastedImages {
                 );
             }
         }
+        // Images an eviction could not delete get another try, through a
+        // fresh handle on the same held directory.
+        for image in self.stuck.drain(..) {
+            let Some(directory) = self.directory.as_ref() else {
+                break;
+            };
+            if let Err(error) = open_existing_private_file_in_session(directory, &image.name)
+                .and_then(|file| remove_open_private_file_in_session(directory, file, &image.name))
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                log::debug!(
+                    "image store cleanup left {} unchanged: {error}",
+                    directory.path.join(&image.name).display()
+                );
+            }
+        }
         if let Some(directory) = self.directory.take()
             && let Err(error) = remove_session_directory(directory)
             && error.kind() != io::ErrorKind::NotFound
@@ -394,12 +577,20 @@ impl PastedImages {
 
     #[cfg(test)]
     pub(crate) fn with_dir(dir: PathBuf) -> Self {
+        Self::of_kind_in(PASTED, dir)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn of_kind_in(kind: StoreKind, dir: PathBuf) -> Self {
         Self {
+            kind,
             dir,
             seq: 0,
             directory: None,
             files: Vec::new(),
+            stuck: Vec::new(),
             bytes: 0,
+            closed: false,
         }
     }
 }
@@ -453,8 +644,8 @@ impl Drop for PastedImages {
     }
 }
 
-/// Remove pasted-image directories left by a process that died before its own
-/// cleanup ran.
+/// Remove pasted-image and viewer-copy directories left by a process that
+/// died before its own cleanup ran.
 ///
 /// Age alone is never authority to delete. The directory name must have the
 /// exact creator/session grammar, its creator PID must be definitively dead,
@@ -464,18 +655,26 @@ pub(crate) fn sweep_stale() {
     if let Err(error) = std::thread::Builder::new()
         .name("kettle-paste-sweep".into())
         .spawn(|| {
-            sweep_stale_in(
-                &scratch_root(),
-                SystemTime::now(),
-                process_is_definitely_dead,
-            );
+            for kind in KINDS {
+                sweep_stale_in(
+                    &scratch_root(),
+                    SystemTime::now(),
+                    kind,
+                    process_is_definitely_dead,
+                );
+            }
         })
     {
         log::debug!("could not start pasted-image crash cleanup: {error}");
     }
 }
 
-fn sweep_stale_in(root: &Path, now: SystemTime, mut process_is_dead: impl FnMut(u32) -> bool) {
+fn sweep_stale_in(
+    root: &Path,
+    now: SystemTime,
+    kind: StoreKind,
+    mut process_is_dead: impl FnMut(u32) -> bool,
+) {
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
     };
@@ -494,7 +693,7 @@ fn sweep_stale_in(root: &Path, now: SystemTime, mut process_is_dead: impl FnMut(
         let Some(SessionName {
             pid,
             nonce: _session_nonce,
-        }) = parse_session_name(name)
+        }) = parse_session_name(name, kind.prefix)
         else {
             continue;
         };
@@ -511,7 +710,7 @@ fn sweep_stale_in(root: &Path, now: SystemTime, mut process_is_dead: impl FnMut(
         if !process_is_dead(pid) {
             continue;
         }
-        if reap_stale_session(&entry.path(), now).is_ok() {
+        if reap_stale_session(&entry.path(), now, kind).is_ok() {
             reaped += 1;
         }
     }
@@ -529,8 +728,8 @@ fn canonical_decimal(value: &str) -> bool {
         && (value == "0" || !value.starts_with('0'))
 }
 
-fn parse_session_name(name: &str) -> Option<SessionName> {
-    let suffix = name.strip_prefix(DIR_PREFIX)?;
+fn parse_session_name(name: &str, prefix: &str) -> Option<SessionName> {
+    let suffix = name.strip_prefix(prefix)?;
     let (pid, nonce) = suffix.split_once('-')?;
     if nonce.contains('-') || !canonical_decimal(pid) || !canonical_decimal(nonce) {
         return None;
@@ -540,7 +739,7 @@ fn parse_session_name(name: &str) -> Option<SessionName> {
     Some(SessionName { pid, nonce })
 }
 
-fn parse_image_name(name: &str) -> Option<usize> {
+fn parse_image_name(name: &str, max_sequence: usize) -> Option<usize> {
     let sequence = name.strip_suffix(".png")?;
     if sequence.len() < 4 || !sequence.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
@@ -548,11 +747,11 @@ fn parse_image_name(name: &str) -> Option<usize> {
     let value = sequence
         .parse::<usize>()
         .ok()
-        .filter(|value| (1..=MAX_FILES).contains(value))?;
+        .filter(|value| (1..=max_sequence).contains(value))?;
     (format!("{value:04}.png") == name).then_some(value)
 }
 
-fn reap_stale_session(path: &Path, now: SystemTime) -> io::Result<()> {
+fn reap_stale_session(path: &Path, now: SystemTime, kind: StoreKind) -> io::Result<()> {
     let directory = open_session_directory(path)?;
     verify_session_directory_path(&directory)?;
     let modified = directory.file.metadata()?.modified()?;
@@ -567,8 +766,8 @@ fn reap_stale_session(path: &Path, now: SystemTime) -> io::Result<()> {
         ));
     }
 
-    let entries = session_directory_entry_names(&directory, MAX_FILES + 1)?;
-    if entries.len() > MAX_FILES {
+    let entries = session_directory_entry_names(&directory, kind.max_files + 1)?;
+    if entries.len() > kind.max_files {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "pasted-image session exceeds its file-count bound",
@@ -582,7 +781,7 @@ fn reap_stale_session(path: &Path, now: SystemTime) -> io::Result<()> {
                 "pasted-image session contains a non-UTF-8 name",
             ));
         };
-        if parse_image_name(name).is_none() {
+        if parse_image_name(name, kind.max_sequence).is_none() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("pasted-image session contains an unknown entry: {name}"),
@@ -932,7 +1131,7 @@ fn session_directory_entry_names(
         }
     }
     let stream = DirectoryStream(stream);
-    let mut names = Vec::with_capacity(limit.min(MAX_FILES + 1));
+    let mut names = Vec::with_capacity(limit);
     while names.len() < limit {
         set_errno(Errno(0));
         // SAFETY: the stream remains live, and the returned entry is borrowed
@@ -1406,7 +1605,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .map_or(0, |duration| duration.as_nanos())
             .saturating_add(u128::from(TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)));
-        let directory = root.join(format!("{DIR_PREFIX}{pid}-{nonce}"));
+        let directory = root.join(format!("{}{pid}-{nonce}", PASTED.prefix));
         let image = directory.join("0001.png");
         let mut file = create_private_file(&image).expect("create stale image");
         file.write_all(b"private image bytes")
@@ -1536,7 +1735,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn default_windows_scratch_directory_uses_local_app_data() {
-        let images = PastedImages::new();
+        let images = PastedImages::new(PASTED);
         assert_eq!(
             images.dir.parent(),
             Some(scratch_root().as_path()),
@@ -1577,7 +1776,7 @@ mod tests {
         let dir = scratch("budget");
         let mut images = PastedImages::with_dir(dir.clone());
         let rgba = vec![0u8, 0, 0, 255];
-        for i in 0..MAX_FILES {
+        for i in 0..PASTED.max_files {
             images.save_rgba(1, 1, &rgba, true).unwrap_or_else(|e| {
                 panic!("save {i} within budget failed: {e}");
             });
@@ -1594,12 +1793,12 @@ mod tests {
     fn final_encoded_png_cannot_cross_the_aggregate_byte_budget() {
         let dir = scratch("encoded-budget");
         let mut images = PastedImages::with_dir(dir.clone());
-        images.bytes = MAX_TOTAL_BYTES - 1;
+        images.bytes = PASTED.max_bytes - 1;
         let error = images
             .save_rgba(1, 1, &[0, 0, 0, 255], true)
             .expect_err("a PNG cannot fit in one remaining byte");
         assert_eq!(error.kind(), io::ErrorKind::QuotaExceeded);
-        assert_eq!(images.bytes, MAX_TOTAL_BYTES - 1);
+        assert_eq!(images.bytes, PASTED.max_bytes - 1);
         assert_eq!(images.seq, 0, "failed encodes do not consume a sequence");
         assert!(
             images.files.is_empty(),
@@ -1660,7 +1859,7 @@ mod tests {
     #[test]
     fn session_and_image_names_require_the_exact_creator_grammar() {
         assert_eq!(
-            parse_session_name("kettle-paste-42-0"),
+            parse_session_name("kettle-paste-42-0", PASTED.prefix),
             Some(SessionName { pid: 42, nonce: 0 })
         );
         for near_miss in [
@@ -1673,10 +1872,15 @@ mod tests {
             "kettle-paste-42-340282366920938463463374607431768211456",
             "other-42-1",
         ] {
-            assert_eq!(parse_session_name(near_miss), None, "{near_miss}");
+            assert_eq!(
+                parse_session_name(near_miss, PASTED.prefix),
+                None,
+                "{near_miss}"
+            );
         }
-        assert_eq!(parse_image_name("0001.png"), Some(1));
-        assert_eq!(parse_image_name("0064.png"), Some(64));
+        let pasted = |name| parse_image_name(name, PASTED.max_sequence);
+        assert_eq!(pasted("0001.png"), Some(1));
+        assert_eq!(pasted("0064.png"), Some(64));
         for near_miss in [
             "1.png",
             "0000.png",
@@ -1689,7 +1893,20 @@ mod tests {
             "18446744073709551616.png",
             "note.txt",
         ] {
-            assert_eq!(parse_image_name(near_miss), None, "{near_miss}");
+            assert_eq!(pasted(near_miss), None, "{near_miss}");
+        }
+        // A viewer-copy session keeps counting past its file count, in the
+        // same grammar, under its own prefix.
+        assert_eq!(
+            parse_session_name("kettle-open-42-0", OPENED.prefix),
+            Some(SessionName { pid: 42, nonce: 0 })
+        );
+        assert_eq!(parse_session_name("kettle-open-42-0", PASTED.prefix), None);
+        let opened = |name| parse_image_name(name, OPENED.max_sequence);
+        assert_eq!(opened("0065.png"), Some(65));
+        assert_eq!(opened("999999.png"), Some(999_999));
+        for near_miss in ["0000.png", "00065.png", "1000000.png"] {
+            assert_eq!(opened(near_miss), None, "{near_miss}");
         }
     }
 
@@ -1700,13 +1917,13 @@ mod tests {
         let (directory, image) = stale_session(&root, pid);
         let future = SystemTime::now() + STALE_AFTER + Duration::from_secs(1);
 
-        sweep_stale_in(&root, future, |candidate| {
+        sweep_stale_in(&root, future, PASTED, |candidate| {
             assert_eq!(candidate, pid);
             false
         });
         assert!(image.exists(), "age is never sufficient deletion authority");
 
-        sweep_stale_in(&root, future, |candidate| {
+        sweep_stale_in(&root, future, PASTED, |candidate| {
             assert_eq!(candidate, pid);
             true
         });
@@ -1727,7 +1944,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .map_or(0, |duration| duration.as_nanos())
             .saturating_add(10_000);
-        let linked_dir = root.join(format!("{DIR_PREFIX}{pid}-{nonce}"));
+        let linked_dir = root.join(format!("{}{pid}-{nonce}", PASTED.prefix));
         let linked_image = linked_dir.join("0001.png");
         let linked = create_private_file(&linked_image).expect("linked image");
         drop(linked);
@@ -1735,7 +1952,7 @@ mod tests {
         std::fs::hard_link(&linked_image, &outside_link).expect("create hard-link sentinel");
 
         let future = SystemTime::now() + STALE_AFTER + Duration::from_secs(1);
-        sweep_stale_in(&root, future, |_| true);
+        sweep_stale_in(&root, future, PASTED, |_| true);
         assert!(unknown_image.exists() && unknown.exists());
         assert!(linked_image.exists() && outside_link.exists());
 
@@ -1835,10 +2052,166 @@ mod tests {
         std::fs::remove_dir(dir).expect("remove test directory");
     }
 
+    /// A full viewer-copy store drops its oldest copies, by count and by
+    /// bytes, and keeps counting; its sessions are swept under their own
+    /// prefix, past the pasted store's numbering, and the pasted sweep
+    /// leaves them alone.
+    #[test]
+    fn a_full_viewer_copy_store_drops_its_oldest() {
+        // Copies old enough to drop, for the eviction itself.
+        let aged = StoreKind {
+            min_age: Duration::ZERO,
+            ..OPENED
+        };
+        let dir = scratch("opened");
+        let mut images = PastedImages::of_kind_in(aged, dir.clone());
+        let pixel = [0u8, 0, 0, 255];
+        let mut paths = Vec::new();
+        for _ in 0..OPENED.max_files + 2 {
+            paths.push(images.save_rgba(1, 1, &pixel, false).expect("save"));
+        }
+        assert_eq!(images.files.len(), OPENED.max_files);
+        assert!(
+            !paths[0].exists() && !paths[1].exists(),
+            "oldest went first"
+        );
+        assert!(paths[2].exists() && paths.last().unwrap().exists());
+        assert_eq!(images.seq, OPENED.max_files + 2, "numbers are not reused");
+        let counted: u64 = images.files.iter().map(|image| image.bytes).sum();
+        assert_eq!(images.bytes, counted);
+        images.cleanup();
+        assert!(!dir.exists());
+
+        // By bytes: with one copy in it, the store has less room left than
+        // a second copy's bound, however well the first compressed.
+        let small = StoreKind {
+            max_bytes: 8 * 1024,
+            ..aged
+        };
+        let dir = scratch("opened-bytes");
+        let mut images = PastedImages::of_kind_in(small, dir.clone());
+        let mut state = 1u32;
+        let noise: Vec<u8> = (0..32 * 32 * 4)
+            .map(|_| {
+                state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                (state >> 16) as u8
+            })
+            .collect();
+        let first = images.save_rgba(32, 32, &noise, false).expect("first");
+        let second = images.save_rgba(32, 32, &noise, false).expect("second");
+        assert!(!first.exists(), "the first made room for the second");
+        assert!(second.exists() && images.files.len() == 1);
+        assert!(images.bytes <= small.max_bytes);
+        images.cleanup();
+
+        // The crash sweep covers both stores.
+        assert_eq!(KINDS, [PASTED, OPENED]);
+        let root = scratch("opened-sweep");
+        let pid = std::process::id();
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        let directory = root.join(format!("{}{pid}-{nonce}", OPENED.prefix));
+        let image = directory.join("0100.png");
+        drop(create_private_file(&image).expect("stale copy"));
+        let future = SystemTime::now() + STALE_AFTER + Duration::from_secs(1);
+        sweep_stale_in(&root, future, PASTED, |_| true);
+        assert!(image.exists(), "not the pasted sweep's to take");
+        sweep_stale_in(&root, future, OPENED, |_| true);
+        assert!(!directory.exists(), "a dead viewer-copy session goes");
+        let _ = std::fs::remove_dir(&root);
+    }
+
+    /// A copy is never dropped before its viewer has had a minute to read
+    /// it: a store full of newer copies refuses another, as over quota, and
+    /// keeps every one.
+    #[test]
+    fn a_viewer_copy_stays_its_minute() {
+        let dir = scratch("opened-young");
+        let mut images = PastedImages::of_kind_in(OPENED, dir.clone());
+        let pixel = [0u8, 0, 0, 255];
+        let paths: Vec<_> = (0..OPENED.max_files)
+            .map(|_| images.save_rgba(1, 1, &pixel, false).expect("save"))
+            .collect();
+        let refused = images
+            .save_rgba(1, 1, &pixel, false)
+            .expect_err("every copy is too new to drop");
+        assert_eq!(refused.kind(), io::ErrorKind::QuotaExceeded);
+        assert!(paths.iter().all(|path| path.exists()));
+        images.cleanup();
+        assert!(!dir.exists());
+    }
+
+    /// A copy the store cannot delete still counts against its bounds, so
+    /// the store never holds more than it may, and cleanup deletes it once
+    /// it can. A closed store takes nothing more.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_that_will_not_go_still_counts_until_cleanup() {
+        use std::os::unix::fs::PermissionsExt as _;
+        // SAFETY: `geteuid` has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("root deletes whatever a directory's mode says; skipped");
+            return;
+        }
+        let aged = StoreKind {
+            max_files: 3,
+            min_age: Duration::ZERO,
+            ..OPENED
+        };
+        let dir = scratch("opened-stuck");
+        let mut images = PastedImages::of_kind_in(aged, dir.clone());
+        let pixel = [0u8, 0, 0, 255];
+        for _ in 0..aged.max_files {
+            images.save_rgba(1, 1, &pixel, false).expect("save");
+        }
+        let held = images.bytes;
+        // Nothing in the directory can be deleted, or created.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        assert!(images.save_rgba(1, 1, &pixel, false).is_err());
+        assert_eq!(images.files.len() + images.stuck.len(), aged.max_files);
+        assert_eq!(images.bytes, held, "still counted");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), aged.max_files);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        images.close();
+        assert!(!dir.exists(), "cleanup deleted the stuck copies too");
+        assert!(images.save_rgba(1, 1, &pixel, false).is_err(), "closed");
+        assert!(!dir.exists());
+    }
+
+    /// A copy is marked downloaded on macOS through the store's own handle;
+    /// a path the store does not hold is refused.
+    #[test]
+    fn a_viewer_copy_is_marked_downloaded() {
+        let dir = scratch("quarantine");
+        let mut images = PastedImages::of_kind_in(OPENED, dir.clone());
+        let path = images
+            .save_rgba(1, 1, &[0, 0, 0, 255], false)
+            .expect("save");
+        images.mark_downloaded(&path).expect("mark");
+        assert_eq!(
+            images
+                .mark_downloaded(&dir.join("0099.png"))
+                .map_err(|error| error.kind()),
+            Err(io::ErrorKind::NotFound)
+        );
+        #[cfg(target_os = "macos")]
+        {
+            let out = std::process::Command::new("/usr/bin/xattr")
+                .arg("-p")
+                .arg("com.apple.quarantine")
+                .arg(&path)
+                .output()
+                .expect("xattr");
+            assert!(String::from_utf8_lossy(&out.stdout).contains(";Kettle;"));
+        }
+        images.cleanup();
+    }
+
     #[test]
     fn sweep_leaves_this_process_directory_alone() {
         // The production liveness probe independently protects this process.
-        let mut images = PastedImages::new();
+        let mut images = PastedImages::new(PASTED);
         let own = images.dir.clone();
         images.save_rgba(1, 1, &[1u8, 2, 3, 4], true).expect("save");
         sweep_stale();
