@@ -2021,3 +2021,67 @@ fn a_hovered_card_is_outlined_in_the_accent() {
         assert!(lit < all, "no outline for {stale:?}");
     }
 }
+
+/// The viewer's open-outside button is drawn where its geometry puts it, a
+/// button cell with its glyph like the close button beside it, and is not
+/// there when the viewer does not offer it.
+#[test]
+fn the_viewer_draws_its_open_outside_button_only_when_offered() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(800, 600) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let snap = snapshot_of(80, 30, b"");
+    let viewer = |open_outside| MediaViewerOverlay {
+        pane_rect: (0.0, 0.0, 800.0, 600.0),
+        title: "Plot".into(),
+        detail: "Image · 4×4".into(),
+        sender: MediaViewerSender {
+            text: "From this pane".into(),
+            program: None,
+            signer: None,
+        },
+        hint: "Esc closes".into(),
+        position: (1, 1),
+        image: Some(kettle_core::ImageData::new(4, 4, vec![200; 64]).unwrap()),
+        status: String::new(),
+        canvas: MediaCanvas::Theme,
+        open_outside,
+    };
+    let geometry = media_viewer_geometry(
+        &viewer(true),
+        (renderer.cell_w, renderer.cell_h),
+        (
+            renderer.overlay_text_cell_width(),
+            renderer.metrics.line_height,
+        ),
+    )
+    .expect("the viewer fits");
+    let open = geometry.open_outside.expect("offered");
+    let corner = |frame: &image::RgbaImage, rect: (f32, f32, f32, f32)| {
+        let p = frame.get_pixel(rect.0.ceil() as u32 + 1, rect.1.ceil() as u32 + 1);
+        (p[0], p[1], p[2])
+    };
+    let mut overlay = focused(false);
+    overlay.media_viewer = Some(viewer(true));
+    let offered = capture(&mut renderer, &cfg, &[pane(&snap, 800, 600)], &overlay);
+    assert_eq!(
+        corner(&offered, open),
+        corner(&offered, geometry.close),
+        "a button cell like close"
+    );
+    assert!(
+        distinct_colors(&offered, [open.0, open.1, open.2, open.3]) > 1,
+        "its glyph is drawn"
+    );
+    let mut overlay = focused(false);
+    overlay.media_viewer = Some(viewer(false));
+    let plain = capture(&mut renderer, &cfg, &[pane(&snap, 800, 600)], &overlay);
+    assert_ne!(
+        corner(&plain, open),
+        corner(&plain, geometry.close),
+        "no button where none is offered"
+    );
+    eprintln!("MEDIA_VIEWER_GPU_ACCEPTANCE: open-outside button");
+}

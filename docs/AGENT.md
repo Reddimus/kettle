@@ -357,7 +357,10 @@ the window title starts with `[new media: N]` while the focused pane has
 some. The user opens them with `open_media_shelf` (the palette's "Open media
 shelf"): a viewer over the pane shows one item fitted, never enlarged past
 its pixels, on white for SVG and a checkerboard for raster, with its title,
-kind, size and sender, and `‹ › ×` to browse and close. Clicking an inline
+kind, size and sender, and `‹ › ×` to browse and close. Where this platform
+permits an image viewer and the item still holds its pixels, the header also
+has `↗` and the footer says that O opens it there (Preview on macOS, Eye of
+GNOME on Linux), the same hand-off as a card menu's row. Clicking an inline
 card opens the viewer on that card's item. A card takes a primary press,
 and its release, before anything else in the window except open dialogs and
 the viewer, so the program behind it sees neither. The release opens the

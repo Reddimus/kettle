@@ -1490,6 +1490,12 @@ context = "crates/kettle-render/src/media_viewer.rs: footer of the media viewer 
 [messages.media_viewer_hint_single]
 context = "crates/kettle-render/src/media_viewer.rs: footer of the media viewer when the shelf has one item. Esc is the key name."
 
+[messages.media_viewer_hint_open_preview]
+context = "crates/kettle-ui/src/media/external.rs Viewer::hint: appended to the media viewer's footer after ' · ' on macOS. O is the letter key that opens the item in Apple's Preview app; 'Preview' is the app's name, which Spanish macOS calls 'Vista Previa'."
+
+[messages.media_viewer_hint_open_image_viewer]
+context = "crates/kettle-ui/src/media/external.rs Viewer::hint: appended to the media viewer's footer after ' · ' on Linux. O is the letter key that opens the item in GNOME's image viewer."
+
 [messages.media_viewer_released]
 context = "crates/kettle-ui/src/app.rs media_viewer_projection: shown in the media viewer in place of an image whose pixels Kettle released to stay within its memory budget."
 

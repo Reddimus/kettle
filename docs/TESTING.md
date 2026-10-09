@@ -3878,7 +3878,14 @@ another while full of newer ones (`a_full_store_of_new_copies_is_busy` turns
 that into the busy notice), and still counts a copy it could not delete,
 deleting it at cleanup, and takes nothing once closed
 (`a_copy_that_will_not_go_still_counts_until_cleanup`, skipped as root), and `signing::only_preview_passes_for_preview`
-that nothing else passes for Preview. The tip: `media::tip` tests it shows once on the first card
+that nothing else passes for Preview. In the viewer,
+`the_open_outside_button_sits_before_close` places the `↗` button between
+browsing and close and hit-tests it,
+`the_viewer_draws_its_open_outside_button_only_when_offered` renders it on
+the GPU as a button cell with its glyph only when offered, and
+`the_media_viewer_takes_only_esc_the_arrows_and_its_open_key` checks a bare O
+(Shift allowed, no Ctrl, Alt or Cmd) is taken only when offered and that the
+key, the button and the footer all reach the same hand-off. The tip: `media::tip` tests it shows once on the first card
 and is remembered, that of two Kettles that loaded before either showed it
 only the first to record it shows it, that a corrupt, oversized or empty
 record is left alone and stops the tip, and that only a regular file is read,

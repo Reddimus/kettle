@@ -103,7 +103,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Apple's own Preview, or a root-owned `/usr/bin/eog`, first. Copies are
   private to you, marked as downloaded on macOS, kept to the newest 32 and
   128 MiB (each for at least a minute, so its viewer can read it), and
-  deleted when Kettle quits.
+  deleted when Kettle quits. The media viewer offers the same
+  from a `↗` button in its header and the O key.
 - The first inline card you see with its image shown says "Click to open"
   along its foot for ten seconds, or until you open a card, and then never
   again: Kettle records that it showed in `ui-tips.json` beside the config
