@@ -1960,6 +1960,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "toml",
  "tracing-subscriber",
  "windows-sys 0.61.2",
  "winresource",

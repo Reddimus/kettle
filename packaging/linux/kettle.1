@@ -31,6 +31,10 @@ kettle \- fast GPU-accelerated terminal emulator for Linux and macOS
 .RI [ \-\-key
 .IR KEY ]
 .br
+.B kettle agent\-setup
+.RB ( \-\-print " [" \-\-shell
+.IR SHELL "] | " \-\-status " | " \-\-uninstall )
+.br
 .B kettle update
 .RI [ \-\-yes ]
 .
@@ -543,6 +547,31 @@ with the same
 agent previews
 .RB ( agent\-display ),
 never full control. Exits 0 once the item is on the shelf, 1 otherwise.
+.TP
+.B kettle agent\-setup \fR(\fB\-\-print\fR [\fB\-\-shell \fISHELL\fR] | \fB\-\-status\fR | \fB\-\-uninstall\fR)
+Set up Codex to start with kettle's display server.
+.B \-\-print
+prints a
+.B codex
+shell function for bash, zsh or fish on macOS and Linux (default: the shell
+.B SHELL
+names; choose with
+.BR \-\-shell ).
+Review it and add it to your shell's startup file; kettle edits no file and
+none of Codex's configuration. In a kettle pane, the function starts a fresh,
+resumed or forked interactive Codex session with this kettle's
+.B mcp \-\-display
+server for that launch only, forwarding
+.B KETTLE_PANE_ID
+and
+.B KETTLE_PID
+and enabling
+.B kettle_show
+alone, without approving it; every other Codex command runs unchanged.
+.B \-\-status
+reports whether Codex launched from this shell would get the server.
+.B \-\-uninstall
+prints how to remove the function.
 .TP
 .B kettle update \fR[\fB\-\-yes\fR]
 Download and install the latest authenticated stable release. Supported for

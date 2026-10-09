@@ -1,0 +1,920 @@
+//! `kettle agent-setup`: Codex's opt-in route to Kettle's display server.
+//!
+//! Kettle edits no shell startup file and none of Codex's configuration.
+//! `--print` prints a shell function named `codex` for the user to review and
+//! add to their shell's startup file. The function hands each launch, as its
+//! arguments, to the hidden `--launch-codex`, which decides from those
+//! arguments alone, with no shell evaluation, whether it starts an
+//! interactive session: a fresh one, `codex resume` or `codex fork`. Only
+//! those get Kettle's display server, as per-launch `-c` overrides that run
+//! this Kettle's `mcp --display`, forward the pane's `KETTLE_PANE_ID` and
+//! `KETTLE_PID`, and enable `kettle_show` alone. Every other command, and any
+//! form not fully understood, runs with its arguments unchanged.
+//!
+//! It is Unix-only for now; elsewhere `agent-setup` says so.
+#![cfg_attr(not(unix), allow(dead_code))]
+
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+/// What a Codex invocation starts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Session {
+    Fresh,
+    Resume,
+    Fork,
+    /// Anything else, which runs with its arguments unchanged.
+    PassThrough,
+}
+
+/// A classified invocation: what it starts, where Kettle's options go
+/// (right after the subcommand that starts the session, or first for a fresh
+/// one, so they never follow a prompt or `--`), and whether it already runs
+/// without the background server.
+struct Classified {
+    session: Session,
+    insert_at: usize,
+    no_daemon: bool,
+}
+
+/// Codex options that take a value in the next argument, in every form an
+/// interactive launch accepts (Codex CLI 0.162.0).
+fn takes_value(option: &str) -> bool {
+    matches!(
+        option,
+        "-c" | "--config"
+            | "-C"
+            | "--cd"
+            | "-m"
+            | "--model"
+            | "-p"
+            | "--profile"
+            | "-s"
+            | "--sandbox"
+            | "-a"
+            | "--ask-for-approval"
+            | "--enable"
+            | "--disable"
+            | "--local-provider"
+            | "--add-dir"
+    )
+}
+
+/// Classify a complete invocation. An option's value never becomes a
+/// subcommand or a prompt. Help, version, a remote session, images (whose
+/// list takes any number of values), a value that looks like an option, and
+/// anything unknown pass through, as does any argument that is not Unicode,
+/// before `--` or after it.
+fn classify(args: &[OsString]) -> Classified {
+    let pass_through = Classified {
+        session: Session::PassThrough,
+        insert_at: 0,
+        no_daemon: false,
+    };
+    let mut session = Session::Fresh;
+    let mut insert_at = 0;
+    let mut no_daemon = false;
+    let mut positionals = 0;
+    // A fresh session takes one prompt, a resumed or forked one an id and a
+    // prompt.
+    let most = |session: Session| if session == Session::Fresh { 1 } else { 2 };
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        let Some(arg) = arg.to_str() else {
+            return pass_through;
+        };
+        if arg == "--" {
+            // What follows is the session's id and prompt, as they are.
+            let rest = &args[index + 1..];
+            if rest.iter().any(|arg| arg.to_str().is_none())
+                || positionals + rest.len() > most(session)
+            {
+                return pass_through;
+            }
+            break;
+        }
+        if takes_value(arg) {
+            if args
+                .get(index + 1)
+                .and_then(|value| value.to_str())
+                .is_none_or(|value| value.starts_with('-'))
+            {
+                return pass_through;
+            }
+            index += 2;
+            continue;
+        }
+        if let Some((option, value)) = arg.split_once('=')
+            && option.starts_with("--")
+            && takes_value(option)
+            && !value.is_empty()
+        {
+            index += 1;
+            continue;
+        }
+        match arg {
+            "--no-daemon" => no_daemon = true,
+            "--no-alt-screen"
+            | "--oss"
+            | "--search"
+            | "--strict-config"
+            | "--approve-for-me"
+            | "--dangerously-bypass-approvals-and-sandbox"
+            | "--dangerously-bypass-hook-trust"
+            | "--worktree" => {}
+            "--last" | "--all" if session != Session::Fresh => {}
+            "--include-non-interactive" if session == Session::Resume => {}
+            "resume" | "fork" if session == Session::Fresh && positionals == 0 => {
+                session = if arg == "resume" {
+                    Session::Resume
+                } else {
+                    Session::Fork
+                };
+                insert_at = index + 1;
+            }
+            _ if arg.starts_with('-') => return pass_through,
+            _ => {
+                // Any other first word is a subcommand or a prompt; only a
+                // prompt is known not to be one, by its position after a
+                // session's id. A fresh session takes one prompt, a resumed
+                // or forked one an id and a prompt.
+                if session == Session::Fresh && positionals == 0 && is_subcommand(arg) {
+                    return pass_through;
+                }
+                positionals += 1;
+                if positionals > most(session) {
+                    return pass_through;
+                }
+            }
+        }
+        index += 1;
+    }
+    Classified {
+        session,
+        insert_at,
+        no_daemon,
+    }
+}
+
+/// Codex's subcommands other than `resume` and `fork` (Codex CLI 0.162.0).
+fn is_subcommand(word: &str) -> bool {
+    matches!(
+        word,
+        "agents"
+            | "exec"
+            | "e"
+            | "review"
+            | "login"
+            | "logout"
+            | "mcp"
+            | "plugin"
+            | "app-server"
+            | "remote-control"
+            | "app"
+            | "completion"
+            | "update"
+            | "doctor"
+            | "sandbox"
+            | "debug"
+            | "apply"
+            | "a"
+            | "queue"
+            | "archive"
+            | "delete"
+            | "migrate-rollouts"
+            | "unarchive"
+            | "cloud"
+            | "exec-server"
+            | "features"
+            | "help"
+    )
+}
+
+/// `text` as a TOML basic string.
+fn toml_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", u32::from(c))),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// The server table Codex gets for this launch: this Kettle's display
+/// server, the pane's two variables, and `kettle_show` alone. It sets no
+/// approval, so Codex asks as its own policy says.
+fn server_table(kettle: &str) -> String {
+    let list = |items: &[&str]| {
+        items
+            .iter()
+            .map(|item| toml_string(item))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "{{command = {}, args = [{}], enabled = true, env_vars = [{}], enabled_tools = [{}]}}",
+        toml_string(kettle),
+        list(&["mcp", "--display"]),
+        list(&["KETTLE_PANE_ID", "KETTLE_PID"]),
+        list(&["kettle_show"]),
+    )
+}
+
+/// The arguments Codex runs with: Kettle's options added to an interactive
+/// session's, anything else unchanged.
+fn launch_args(original: &[OsString], kettle: &Path) -> Result<Vec<OsString>, SetupError> {
+    let classified = classify(original);
+    if classified.session == Session::PassThrough {
+        return Ok(original.to_vec());
+    }
+    let kettle = kettle_path(kettle)?;
+    let mut injected: Vec<OsString> = Vec::with_capacity(3);
+    // A session on the shared background server would not get this launch's
+    // server. Codex refuses the flag twice.
+    if !classified.no_daemon {
+        injected.push("--no-daemon".into());
+    }
+    injected.push("-c".into());
+    injected.push(format!("mcp_servers.kettle={}", server_table(kettle)).into());
+    let mut launch = Vec::with_capacity(original.len() + injected.len());
+    launch.extend_from_slice(&original[..classified.insert_at]);
+    launch.extend(injected);
+    launch.extend_from_slice(&original[classified.insert_at..]);
+    Ok(launch)
+}
+
+/// Why a setup step cannot go ahead.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SetupError {
+    /// Kettle's path is relative or not UTF-8.
+    UnnamedKettle,
+    /// Kettle runs from a translocated copy, whose path does not last.
+    Translocated,
+    /// No shell was named and `SHELL` names none Kettle prints for.
+    UnknownShell,
+}
+
+impl SetupError {
+    fn message(self) -> &'static str {
+        match self {
+            Self::UnnamedKettle => "Kettle's path cannot be named in a shell function.",
+            Self::Translocated => {
+                "Kettle is running from a temporary copy. Move it to Applications, open it from there, and run this again."
+            }
+            Self::UnknownShell => "Choose a shell with --shell bash, zsh or fish.",
+        }
+    }
+}
+
+/// Kettle's path as a launch can name it: absolute, UTF-8 and lasting.
+fn kettle_path(kettle: &Path) -> Result<&str, SetupError> {
+    let path = kettle
+        .to_str()
+        .filter(|_| kettle.is_absolute())
+        .ok_or(SetupError::UnnamedKettle)?;
+    if path.contains("/AppTranslocation/") {
+        return Err(SetupError::Translocated);
+    }
+    Ok(path)
+}
+
+/// The running Kettle's own path, links resolved.
+fn this_kettle() -> Result<PathBuf, SetupError> {
+    std::env::current_exe()
+        .and_then(std::fs::canonicalize)
+        .map_err(|_| SetupError::UnnamedKettle)
+}
+
+/// A shell `--print` can write the function for. PowerShell is not one: its
+/// parameter binder drops a bare `--` before a function sees its arguments,
+/// so no function there could hand them on exactly.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SetupShell {
+    Bash,
+    Zsh,
+    Fish,
+}
+
+impl SetupShell {
+    fn from_program(program: &Path) -> Option<Self> {
+        match program.file_stem()?.to_str()? {
+            "bash" => Some(Self::Bash),
+            "zsh" => Some(Self::Zsh),
+            "fish" => Some(Self::Fish),
+            _ => None,
+        }
+    }
+
+    /// `name` or else the shell `SHELL` names.
+    fn chosen(name: Option<Self>) -> Result<Self, SetupError> {
+        name.or_else(|| {
+            std::env::var_os("SHELL").and_then(|program| Self::from_program(Path::new(&program)))
+        })
+        .ok_or(SetupError::UnknownShell)
+    }
+}
+
+/// The function `--print` writes: `codex`, handing its arguments to this
+/// Kettle as they are. The shell expands nothing in them.
+fn print_function(kettle: &Path, shell: SetupShell) -> Result<String, SetupError> {
+    let path = kettle_path(kettle)?;
+    Ok(match shell {
+        SetupShell::Bash | SetupShell::Zsh => {
+            let path = path.replace('\'', "'\\''");
+            format!("codex() {{\n  command '{path}' agent-setup --launch-codex -- \"$@\"\n}}\n")
+        }
+        SetupShell::Fish => {
+            let path = path.replace('\\', "\\\\").replace('\'', "\\'");
+            format!("function codex\n  command '{path}' agent-setup --launch-codex -- $argv\nend\n")
+        }
+    })
+}
+
+/// How to take the function out again.
+fn uninstall_text(shell: SetupShell) -> &'static str {
+    match shell {
+        SetupShell::Bash | SetupShell::Zsh => {
+            "Remove the codex function from your shell's startup file, then run: unset -f codex"
+        }
+        SetupShell::Fish => {
+            "Remove the codex function from your fish configuration, then run: functions --erase codex"
+        }
+    }
+}
+
+/// The oldest Codex CLI whose launch options Kettle's are known to fit:
+/// `--no-daemon` arrived by 0.159.0. A 1.x or later is not assumed to.
+const OLDEST_CODEX_MINOR: u64 = 159;
+
+/// Whether `codex --version` printed a Codex CLI Kettle can add its options
+/// to.
+fn supported_version(output: &str) -> bool {
+    let Some(version) = output.trim().strip_prefix("codex-cli ") else {
+        return false;
+    };
+    let parts: Vec<Option<u64>> = version.split('.').map(|part| part.parse().ok()).collect();
+    matches!(parts.as_slice(), [Some(0), Some(minor), Some(_)] if *minor >= OLDEST_CODEX_MINOR)
+}
+
+/// The first line `codex --version` prints, if it answers within three
+/// seconds. The line is read apart from the wait, since a program that hands
+/// its output to one that outlives it would hold a read open.
+fn installed_version() -> Option<String> {
+    version_of(Path::new("codex"))
+}
+
+fn version_of(program: &Path) -> Option<String> {
+    use std::io::BufRead as _;
+    use std::io::Read as _;
+    let mut child = std::process::Command::new(program)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let stdout = child.stdout.take()?;
+    let (sender, line) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut output = String::new();
+        let read = std::io::BufReader::new(stdout.take(256))
+            .read_line(&mut output)
+            .map(|_| output);
+        let _ = sender.send(read);
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    let output = line
+        .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+        .ok()?
+        .ok()?;
+    status.success().then_some(output)
+}
+
+/// Whether this shell runs in a Kettle pane: both variables Kettle sets
+/// there, each a positive number.
+fn in_kettle_pane(pid: Option<&OsStr>, pane: Option<&OsStr>) -> bool {
+    let positive = |value: Option<&OsStr>| {
+        value
+            .and_then(OsStr::to_str)
+            .and_then(|value| value.parse::<u64>().ok())
+            .is_some_and(|value| value > 0)
+    };
+    positive(pid) && positive(pane)
+}
+
+fn this_shell_in_kettle() -> bool {
+    in_kettle_pane(
+        std::env::var_os("KETTLE_PID").as_deref(),
+        std::env::var_os("KETTLE_PANE_ID").as_deref(),
+    )
+}
+
+/// Replace this process with `codex` and `args`, or run it and pass on its
+/// exit status where a process cannot be replaced.
+fn run_codex(args: Vec<OsString>) -> i32 {
+    let mut command = std::process::Command::new("codex");
+    command.args(args);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        let error = command.exec();
+        eprintln!("kettle agent-setup: cannot start codex: {error}");
+        127
+    }
+    #[cfg(not(unix))]
+    {
+        match command.status() {
+            Ok(status) => status.code().unwrap_or(1),
+            Err(error) => {
+                eprintln!("kettle agent-setup: cannot start codex: {error}");
+                127
+            }
+        }
+    }
+}
+
+#[derive(clap::Args, Debug)]
+#[command(group(clap::ArgGroup::new("action").args(["print", "status", "uninstall"])))]
+pub(crate) struct SetupArgs {
+    /// Print a `codex` shell function that starts Codex with Kettle's display
+    /// server. Review it, then add it to your shell's startup file; Kettle
+    /// edits no file.
+    #[arg(long)]
+    print: bool,
+    /// Report whether Codex launched from this shell would get Kettle's
+    /// display server, and how it delivers media.
+    #[arg(long)]
+    status: bool,
+    /// Print how to remove the `codex` function.
+    #[arg(long)]
+    uninstall: bool,
+    /// Run by the printed function: start Codex with these arguments.
+    #[arg(long, hide = true, conflicts_with = "action")]
+    launch_codex: bool,
+    /// The shell to print for (default: the one `SHELL` names).
+    #[arg(long, value_enum, conflicts_with_all = ["status", "launch_codex"])]
+    shell: Option<SetupShell>,
+    /// Codex's own arguments, after `--`.
+    #[arg(last = true, allow_hyphen_values = true, requires = "launch_codex")]
+    argv: Vec<OsString>,
+}
+
+/// The function and its launcher are Unix-only for now: on Windows Codex
+/// installs as a `.cmd` launcher that a process cannot start by name.
+#[cfg(not(unix))]
+pub(crate) fn run(_: SetupArgs) -> i32 {
+    eprintln!("kettle agent-setup: not available on this system yet.");
+    2
+}
+
+#[cfg(unix)]
+pub(crate) fn run(args: SetupArgs) -> i32 {
+    if args.launch_codex {
+        return launch(args.argv);
+    }
+    if args.status {
+        print_status();
+        return 0;
+    }
+    if !(args.print || args.uninstall) {
+        eprintln!("kettle agent-setup: choose --print, --status or --uninstall.");
+        return 2;
+    }
+    let shell = match SetupShell::chosen(args.shell) {
+        Ok(shell) => shell,
+        Err(error) => {
+            eprintln!("kettle agent-setup: {}", error.message());
+            return 2;
+        }
+    };
+    if args.uninstall {
+        println!("{}", uninstall_text(shell));
+        return 0;
+    }
+    match this_kettle().and_then(|kettle| print_function(&kettle, shell)) {
+        Ok(function) => {
+            print!("{function}");
+            0
+        }
+        Err(error) => {
+            eprintln!("kettle agent-setup: {}", error.message());
+            2
+        }
+    }
+}
+
+/// Start Codex: with Kettle's display server for an interactive session in
+/// a Kettle pane under a Codex CLI Kettle knows, otherwise as asked.
+fn launch(argv: Vec<OsString>) -> i32 {
+    if !this_shell_in_kettle() || classify(&argv).session == Session::PassThrough {
+        return run_codex(argv);
+    }
+    if !installed_version().is_some_and(|version| supported_version(&version)) {
+        eprintln!(
+            "kettle agent-setup: this Codex CLI is not one Kettle knows; starting it without Kettle's display server."
+        );
+        return run_codex(argv);
+    }
+    match this_kettle().and_then(|kettle| launch_args(&argv, &kettle)) {
+        Ok(launch) => run_codex(launch),
+        Err(error) => {
+            eprintln!(
+                "kettle agent-setup: {} Starting Codex without Kettle's display server.",
+                error.message()
+            );
+            run_codex(argv)
+        }
+    }
+}
+
+fn print_status() {
+    let version = installed_version().map(|version| version.trim().to_owned());
+    let codex = match &version {
+        None => "not found".to_owned(),
+        Some(version) if supported_version(version) => format!("{version}, supported"),
+        Some(version) => format!("{version}, not one Kettle knows"),
+    };
+    println!("Codex: {codex}");
+    println!(
+        "This shell: {}",
+        if this_shell_in_kettle() {
+            "in a Kettle pane"
+        } else {
+            "not in a Kettle pane, so Codex starts without Kettle's display server"
+        }
+    );
+    println!("Delivery: the media shelf of the pane Codex runs in");
+    println!("Needs: agent previews on in Kettle (Settings, Agents, Agent previews)");
+    println!(
+        "Interactive sessions get Kettle's display server for that launch only. Codex's \
+         configuration and your shell's startup files are left as they are."
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture(name: &str) -> PathBuf {
+        #[cfg(windows)]
+        let root = Path::new(r"C:\fixture");
+        #[cfg(not(windows))]
+        let root = Path::new("/fixture");
+        root.join(name)
+    }
+
+    fn argv(args: &[&str]) -> Vec<OsString> {
+        args.iter().map(OsString::from).collect()
+    }
+
+    fn session(args: &[&str]) -> Session {
+        classify(&argv(args)).session
+    }
+
+    #[test]
+    fn interactive_sessions_are_told_apart_from_other_commands() {
+        assert_eq!(session(&[]), Session::Fresh);
+        assert_eq!(session(&["explain this code"]), Session::Fresh);
+        assert_eq!(session(&["-m", "o3", "--search", "hi"]), Session::Fresh);
+        assert_eq!(session(&["resume", "--last"]), Session::Resume);
+        assert_eq!(session(&["resume", "id", "a prompt"]), Session::Resume);
+        assert_eq!(session(&["fork", "--last", "--all"]), Session::Fork);
+        assert_eq!(session(&["-C", "/tmp", "resume"]), Session::Resume);
+        for args in [
+            vec!["exec", "prompt"],
+            vec!["e", "prompt"],
+            vec!["queue", "id", "hello"],
+            vec!["mcp", "list"],
+            vec!["review", "--uncommitted"],
+            vec!["help"],
+            vec!["--help"],
+            vec!["-V"],
+            vec!["resume", "--help"],
+            vec!["fork", "--version"],
+            vec!["a prompt", "--help"],
+        ] {
+            assert_eq!(session(&args), Session::PassThrough, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn option_values_never_become_commands_or_prompts() {
+        assert_eq!(
+            session(&["-c", "model='exec'", "resume", "--last"]),
+            Session::Resume
+        );
+        assert_eq!(session(&["--profile", "exec", "fork"]), Session::Fork);
+        assert_eq!(session(&["--model=exec", "describe this"]), Session::Fresh);
+        assert_eq!(session(&["--", "exec"]), Session::Fresh);
+        assert_eq!(session(&["resume", "exec", "prompt"]), Session::Resume);
+    }
+
+    #[test]
+    fn forms_kettle_does_not_fully_know_pass_through() {
+        for args in [
+            vec!["--remote", "unix://socket"],
+            vec!["resume", "--remote", "unix:///server"],
+            vec!["fork", "id", "--remote=wss://server"],
+            vec!["resume", "--remote-auth-token-env", "TOKEN"],
+            vec!["--image", "a.png", "describe"],
+            vec!["-i", "a.png"],
+            vec!["--new-option", "resume"],
+            vec!["resume", "--last", "--new-option"],
+            vec!["-c"],
+            vec!["one", "two"],
+            vec!["resume", "id", "prompt", "extra"],
+            vec!["--include-non-interactive"],
+            vec!["fork", "--include-non-interactive"],
+            // After `--` too: one prompt for a fresh session, an id and a
+            // prompt for a resumed one.
+            vec!["--", "one", "two"],
+            vec!["resume", "--", "id", "prompt", "extra"],
+            // A value that looks like an option, `--` included.
+            vec!["--model", "--", "resume", "--last"],
+            vec!["-c", "-x"],
+        ] {
+            let original = argv(&args);
+            assert_eq!(
+                launch_args(&original, &fixture("kettle")).unwrap(),
+                original,
+                "{args:?}"
+            );
+        }
+        // An argument that is not Unicode passes everything through, after
+        // `--` as well.
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt as _;
+            for original in [
+                vec![OsString::from_vec(vec![0xff])],
+                vec![OsString::from("--"), OsString::from_vec(vec![0xff])],
+            ] {
+                assert_eq!(
+                    launch_args(&original, &fixture("kettle")).unwrap(),
+                    original
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn kettles_options_come_right_after_the_session_command() {
+        let kettle = fixture("kettle");
+        let expect = |args: &[&str], before: usize| {
+            let original = argv(args);
+            let launch = launch_args(&original, &kettle).unwrap();
+            assert_eq!(&launch[..before], &original[..before], "{args:?}");
+            assert_eq!(launch[before], "--no-daemon", "{args:?}");
+            assert_eq!(launch[before + 1], "-c", "{args:?}");
+            assert!(
+                launch[before + 2]
+                    .to_str()
+                    .unwrap()
+                    .starts_with("mcp_servers.kettle="),
+                "{args:?}"
+            );
+            assert_eq!(&launch[before + 3..], &original[before..], "{args:?}");
+        };
+        expect(&["a prompt"], 0);
+        expect(&["--", "one prompt"], 0);
+        expect(&["resume", "--", "id", "prompt"], 1);
+        expect(&["--", "-starts with a dash"], 0);
+        expect(&["resume", "--last"], 1);
+        expect(&["-C", "/tmp", "fork", "id", "--", "prompt"], 3);
+    }
+
+    #[test]
+    fn a_launch_already_off_the_background_server_keeps_its_one_flag() {
+        for args in [vec!["--no-daemon"], vec!["resume", "--no-daemon", "--last"]] {
+            let launch = launch_args(&argv(&args), &fixture("kettle")).unwrap();
+            assert_eq!(
+                launch.iter().filter(|arg| *arg == "--no-daemon").count(),
+                1,
+                "{args:?}"
+            );
+            assert!(launch.iter().any(|arg| arg == "-c"), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn the_server_table_is_toml_codex_reads_as_written() {
+        let kettle = fixture("a space")
+            .join("'quote'")
+            .join("\"double\"")
+            .join("$dollar")
+            .join("`tick`")
+            .join("back\\slash")
+            .join("kettle");
+        let launch = launch_args(&[], &kettle).unwrap();
+        let table = launch[2]
+            .to_str()
+            .unwrap()
+            .strip_prefix("mcp_servers.kettle=")
+            .unwrap();
+        let parsed: toml::Table = toml::from_str(&format!("server = {table}")).unwrap();
+        let server = parsed["server"].as_table().unwrap();
+        assert_eq!(server["command"].as_str(), kettle.to_str());
+        let strings = |key: &str| {
+            server[key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_str().unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(strings("args"), ["mcp", "--display"]);
+        assert_eq!(strings("env_vars"), ["KETTLE_PANE_ID", "KETTLE_PID"]);
+        assert_eq!(strings("enabled_tools"), ["kettle_show"]);
+        assert_eq!(server["enabled"].as_bool(), Some(true));
+        // No approval: Codex asks as its own policy says.
+        let mut keys: Vec<_> = server.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["args", "command", "enabled", "enabled_tools", "env_vars"]
+        );
+        // A control character is escaped, never written raw.
+        assert_eq!(toml_string("a\u{1}b\n"), "\"a\\u0001b\\u000A\"");
+    }
+
+    #[test]
+    fn a_path_that_cannot_last_or_be_named_is_refused() {
+        assert_eq!(
+            launch_args(&[], Path::new("relative/kettle")),
+            Err(SetupError::UnnamedKettle)
+        );
+        assert_eq!(
+            print_function(
+                Path::new("/private/var/folders/x/AppTranslocation/y/kettle.app/kettle"),
+                SetupShell::Zsh
+            ),
+            Err(SetupError::Translocated)
+        );
+        // Passing through needs no path at all.
+        assert_eq!(
+            launch_args(&argv(&["exec", "x"]), Path::new("relative")),
+            Ok(argv(&["exec", "x"]))
+        );
+    }
+
+    #[test]
+    fn only_a_0_x_codex_from_0_159_is_known() {
+        for version in [
+            "codex-cli 0.159.0",
+            "codex-cli 0.162.0\n",
+            "codex-cli 0.200.3",
+        ] {
+            assert!(supported_version(version), "{version}");
+        }
+        for version in [
+            "",
+            "codex-cli 0.158.9",
+            "codex-cli 1.0.0",
+            "codex-cli 0.162",
+            "codex-cli 0.162.0-alpha",
+            "0.162.0",
+            "codex-cli 0.162.0 extra",
+        ] {
+            assert!(!supported_version(version), "{version}");
+        }
+    }
+
+    /// The version is read from the first line, within the deadline, even
+    /// when the output stays open, and a program that never answers is not
+    /// waited on past it.
+    #[cfg(unix)]
+    #[test]
+    fn the_version_probe_is_bounded() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tempfile::tempdir().unwrap();
+        let script = |name: &str, body: &str| {
+            let path = directory.path().join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            path
+        };
+        // Hands its output to a child that outlives it.
+        let lingering = script("lingering", "echo 'codex-cli 0.162.0'\nsleep 5 &\nexit 0");
+        let started = std::time::Instant::now();
+        assert_eq!(
+            version_of(&lingering).as_deref(),
+            Some("codex-cli 0.162.0\n")
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let silent = script("silent", "exec sleep 30");
+        let started = std::time::Instant::now();
+        assert_eq!(version_of(&silent), None);
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_kettle_pane_has_both_positive_variables() {
+        fn os(value: &str) -> Option<&OsStr> {
+            Some(OsStr::new(value))
+        }
+        assert!(in_kettle_pane(os("7"), os("18446744073709551615")));
+        for (pid, pane) in [
+            (None, os("1")),
+            (os("1"), None),
+            (os("0"), os("1")),
+            (os("1"), os("0")),
+            (os("x"), os("1")),
+            (os("1"), os("18446744073709551616")),
+        ] {
+            assert!(!in_kettle_pane(pid, pane), "{pid:?} {pane:?}");
+        }
+    }
+
+    #[test]
+    fn shells_are_chosen_by_their_program_name() {
+        assert_eq!(
+            SetupShell::from_program(Path::new("/bin/zsh")),
+            Some(SetupShell::Zsh)
+        );
+        assert_eq!(
+            SetupShell::from_program(Path::new("/opt/homebrew/bin/fish")),
+            Some(SetupShell::Fish)
+        );
+        assert_eq!(
+            SetupShell::from_program(Path::new("/usr/local/bin/pwsh")),
+            None
+        );
+        assert_eq!(SetupShell::from_program(Path::new("/bin/tcsh")), None);
+    }
+
+    /// The printed function, run by the shell it was printed for, hands
+    /// every argument to Kettle exactly as given, expanding nothing.
+    #[cfg(unix)]
+    #[test]
+    fn the_printed_function_passes_arguments_untouched() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tempfile::tempdir().unwrap();
+        // A stand-in Kettle at an awkward path that prints each argument on
+        // a line of its own.
+        let stand_in = directory.path().join("it's a $HOME `x` dir").join("kettle");
+        std::fs::create_dir_all(stand_in.parent().unwrap()).unwrap();
+        std::fs::write(
+            &stand_in,
+            "#!/bin/sh\nfor a in \"$@\"; do printf '[%s]\\n' \"$a\"; done\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&stand_in, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let arguments = [
+            "two words",
+            "$HOME",
+            "`date`",
+            "'single'",
+            "\"double\"",
+            "-c",
+        ];
+        let expected: String = ["agent-setup", "--launch-codex", "--"]
+            .iter()
+            .chain(arguments.iter())
+            .map(|arg| format!("[{arg}]\n"))
+            .collect();
+        for (shell, program) in [(SetupShell::Bash, "bash"), (SetupShell::Zsh, "zsh")] {
+            let Ok(found) = std::process::Command::new(program)
+                .arg("-c")
+                .arg("exit 0")
+                .status()
+            else {
+                continue;
+            };
+            assert!(found.success());
+            let function = print_function(&stand_in, shell).unwrap();
+            let output = std::process::Command::new(program)
+                .arg("-c")
+                .arg(format!("{function}codex \"$@\""))
+                .arg(program)
+                .args(arguments)
+                .output()
+                .unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout),
+                expected,
+                "{program}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+}
