@@ -143,6 +143,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   screen reader hears each lane, its item's place on the shelf and each of
   its buttons. A pane titlebar marks unopened items as `▣N`, and the window
   title counts them.
+- Preview a file without an agent: `preview_link` (palette: "Preview a file
+  in Kettle") labels the image, SVG and Mermaid files in the focused pane,
+  and typing a label renders that file in its pane's lane; right-clicking a
+  link to one offers "Preview in Kettle". A link from another machine's pane is
+  refused and one from behind tmux, screen or zellij is asked about first,
+  as opening it is. Your preview goes ahead of anything agents are
+  showing, and a notification says why when one cannot open. In English
+  and Spanish.
 - The media worker can classify a file by its content, raster or SVG,
   whatever it is called, and says what it rendered. Kettle and its worker now
   speak media protocol 2; a worker from an older build is refused until

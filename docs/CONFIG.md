@@ -620,6 +620,19 @@ lane (`▾`/`▴`) and closes it (`×`). A press or the wheel over a lane never
 reaches the terminal, and menus and dialogs open over it without closing it.
 The command palette lists it as "Open media shelf". On macOS its default
 chord is `Ctrl+Shift+Cmd+I`; elsewhere it has no default binding.
+`preview_link` (`preview-link`) is quick select for previews: it labels the
+image (PNG, JPEG, WebP, BMP, GIF), SVG and Mermaid (`.mmd`, `.mermaid`)
+files the focused pane names, by their extension, as a whole path (not on
+Windows, where path hints are never resolved) or a local `file://` link.
+Type a label to render that file in its pane's lane, which opens when it is
+ready; a link from another machine's pane is refused, and behind tmux,
+screen or zellij Kettle asks first, as `hint_mode` does for a path it opens.
+A control client can open this quick select but not pick from it: only your
+own key press or click reads a file. With nothing to label it says so; a
+file that cannot be previewed (gone, unreadable, too large, not an image, or
+previews unavailable) is explained in a notification. The right-click menu
+offers the same as "Preview in Kettle" on a link to such a file. The command
+palette lists it as "Preview a file in Kettle"; it has no default binding.
 
 **Modals + UI**: `command_palette` (`palette`), `hint_mode` (`hints` /
 `quick_select`; labels the URLs, paths (a quoted or backticked path may hold

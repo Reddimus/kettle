@@ -44,6 +44,10 @@ use queue::{Admitted, Queue};
 /// Longest title shown, in characters, after sanitizing.
 const MAX_TITLE_CHARS: usize = 256;
 
+/// Most failed previews kept for the user between two looks: the user has
+/// one request waiting at a time, so a few is plenty.
+const MAX_USER_FAILURES: usize = 8;
+
 /// Who is waiting for a push's answer.
 pub(crate) struct Origin {
     pub conn_id: u64,
@@ -60,6 +64,28 @@ impl Origin {
     pub(crate) fn refuse(self, failure: FailureCode) {
         let id = self.request_id;
         self.answer(kettle_ctl::show::show_failure(id, failure));
+    }
+}
+
+/// Who a push answers: a control client waiting on its connection, or the
+/// user, whose preview opens in the pane's lane when it is ready and who is
+/// told when it cannot be.
+pub(crate) enum Requester {
+    Ctl(Origin),
+    User,
+}
+
+impl Requester {
+    /// Answer a control client with `failure`; for the user, hand it back to
+    /// be shown.
+    pub(crate) fn refuse(self, failure: FailureCode) -> Option<FailureCode> {
+        match self {
+            Self::Ctl(origin) => {
+                origin.refuse(failure);
+                None
+            }
+            Self::User => Some(failure),
+        }
     }
 }
 
@@ -87,14 +113,14 @@ pub(crate) struct Push {
     pub route: Route,
     pub draft: Draft,
     pub control: RenderControl,
-    origin: Origin,
+    requester: Requester,
     /// The job, until the lane takes it.
     job: Option<Job>,
 }
 
 impl Push {
     pub(crate) fn new(
-        origin: Origin,
+        requester: Requester,
         route: Route,
         draft: Draft,
         job: Job,
@@ -104,18 +130,27 @@ impl Push {
             route,
             draft,
             control,
-            origin,
+            requester,
             job: Some(job),
         }
     }
 
-    pub(crate) fn refuse(self, failure: FailureCode) {
-        self.origin.refuse(failure);
+    /// Whether the user asked for it.
+    pub(crate) fn is_users(&self) -> bool {
+        matches!(self.requester, Requester::User)
+    }
+
+    /// The control client it answers, if one does.
+    fn conn_id(&self) -> Option<u64> {
+        match &self.requester {
+            Requester::Ctl(origin) => Some(origin.conn_id),
+            Requester::User => None,
+        }
     }
 
     /// Who waits for it, where it goes, and what its item will say.
-    pub(crate) fn into_parts(self) -> (Origin, Route, Draft) {
-        (self.origin, self.route, self.draft)
+    pub(crate) fn into_parts(self) -> (Requester, Route, Draft) {
+        (self.requester, self.route, self.draft)
     }
 }
 
@@ -186,6 +221,9 @@ impl Drop for LaneExit {
 #[derive(Default)]
 pub(crate) struct MediaService {
     queue: Queue<Push>,
+    /// What the user asked to preview and could not have, by pane, for the
+    /// App to tell them; bounded, as each failure comes from one request.
+    user_failures: Vec<(u64, FailureCode)>,
     lane: Option<Lane>,
     /// The push being rendered.
     active: Option<Push>,
@@ -203,12 +241,33 @@ impl MediaService {
     }
 
     /// Queue `push` for `sender`. A push it displaces, or the push itself
-    /// when there is no room, is answered as busy.
+    /// when there is no room, is answered as busy. A preview the user asked
+    /// for and then replaced with another goes without a word.
     pub(crate) fn admit(&mut self, sender: Sender, deadline: Instant, push: Push) {
         match self.queue.admit(sender, deadline, push) {
             Admitted::Queued => {}
-            Admitted::Displaced(push) | Admitted::Busy(push) => push.refuse(FailureCode::Busy),
+            Admitted::Displaced(push) if push.is_users() => {}
+            Admitted::Displaced(push) | Admitted::Busy(push) => {
+                self.refuse(push, FailureCode::Busy);
+            }
         }
+    }
+
+    /// End `push` with `failure`, answering its client or keeping it for
+    /// the user.
+    fn refuse(&mut self, push: Push, failure: FailureCode) {
+        let pane = push.route.pane;
+        if let Some(failure) = push.requester.refuse(failure)
+            && self.user_failures.len() < MAX_USER_FAILURES
+        {
+            self.user_failures.push((pane, failure));
+        }
+    }
+
+    /// The previews the user asked for that failed before rendering, by
+    /// pane, since this was last asked.
+    pub(crate) fn take_user_failures(&mut self) -> Vec<(u64, FailureCode)> {
+        std::mem::take(&mut self.user_failures)
     }
 
     /// Answer every push that waited past its deadline as busy, then hand
@@ -221,7 +280,7 @@ impl MediaService {
     ) {
         let now = Instant::now();
         for push in self.queue.expire(now) {
-            push.refuse(FailureCode::Busy);
+            self.refuse(push, FailureCode::Busy);
         }
         if self.queue.is_rendering() {
             return;
@@ -231,7 +290,7 @@ impl MediaService {
         };
         let Some(job) = push.job.take() else {
             self.queue.finished();
-            push.refuse(FailureCode::WorkerUnavailable);
+            self.refuse(push, FailureCode::WorkerUnavailable);
             return;
         };
         if self.lane.is_none() {
@@ -246,7 +305,7 @@ impl MediaService {
         } else {
             self.lane = None;
             self.queue.finished();
-            push.refuse(FailureCode::WorkerUnavailable);
+            self.refuse(push, FailureCode::WorkerUnavailable);
         }
     }
 
@@ -280,11 +339,11 @@ impl MediaService {
 
     /// A connection closed: nothing it sent is rendered or answered.
     pub(crate) fn disconnected(&mut self, conn_id: u64) {
-        drop(self.queue.cancel(|push| push.origin.conn_id == conn_id));
+        drop(self.queue.cancel(|push| push.conn_id() == Some(conn_id)));
         if let Some(active) = self
             .active
             .as_ref()
-            .filter(|push| push.origin.conn_id == conn_id)
+            .filter(|push| push.conn_id() == Some(conn_id))
         {
             active.control.cancel();
         }
@@ -293,8 +352,11 @@ impl MediaService {
     /// Pushes to panes `live` no longer lists are answered as having no
     /// pane, and one rendering is cancelled.
     pub(crate) fn retain_panes(&mut self, live: impl Fn(u64) -> bool) {
+        // The user's own request for a pane that went needs no word.
         for push in self.queue.cancel(|push| !live(push.route.pane)) {
-            push.refuse(FailureCode::NotInKettlePane);
+            if !push.is_users() {
+                self.refuse(push, FailureCode::NotInKettlePane);
+            }
         }
         if let Some(active) = self.active.as_ref().filter(|push| !live(push.route.pane)) {
             active.control.cancel();
@@ -355,12 +417,17 @@ mod tests {
 
     fn push(conn_id: u64) -> (Push, crossbeam_channel::Receiver<Response>) {
         let (reply, answers) = crossbeam_channel::bounded(1);
-        let push = Push::new(
-            Origin {
-                conn_id,
-                request_id: 1,
-                reply,
-            },
+        let push = push_for(Requester::Ctl(Origin {
+            conn_id,
+            request_id: 1,
+            reply,
+        }));
+        (push, answers)
+    }
+
+    fn push_for(requester: Requester) -> Push {
+        Push::new(
+            requester,
             Route {
                 pane: 3,
                 window: 1,
@@ -392,8 +459,11 @@ mod tests {
                 fallback_fonts: Vec::new(),
             },
             RenderControl::default(),
-        );
-        (push, answers)
+        )
+    }
+
+    fn no_wake() -> Arc<dyn Fn() + Send + Sync> {
+        Arc::new(|| {})
     }
 
     fn output() -> RenderOutput {
@@ -428,6 +498,45 @@ mod tests {
         service.active = Some(active);
         let finished = service.finish(Ok(output())).expect("the active push");
         assert!(finished.result.is_ok(), "an uncancelled render stands");
+    }
+
+    /// What the user asked to preview and could not have is kept, by pane,
+    /// for the App to tell them; a control client is answered instead. A
+    /// request the user replaced, or whose pane went, ends without a word,
+    /// and a client leaving never touches the user's.
+    #[test]
+    fn the_users_failed_previews_are_kept_to_be_told() {
+        let mut service = MediaService::default();
+        let later = Instant::now() + std::time::Duration::from_secs(60);
+        service.admit(Sender::User, Instant::now(), push_for(Requester::User));
+        let (client, answers) = push(1);
+        service.admit(Sender::Pane(3), Instant::now(), client);
+        service.pump(None, no_wake);
+        assert_eq!(service.take_user_failures(), vec![(3, FailureCode::Busy)]);
+        assert!(answers.try_recv().is_ok(), "the client is answered");
+        assert!(service.take_user_failures().is_empty(), "told once");
+
+        service.admit(Sender::User, later, push_for(Requester::User));
+        service.admit(Sender::User, later, push_for(Requester::User));
+        service.disconnected(1);
+        assert_eq!(service.next_deadline(), Some(later));
+        service.retain_panes(|_| false);
+        assert_eq!(service.next_deadline(), None);
+        assert!(service.take_user_failures().is_empty());
+
+        // No worker to render it: the user hears so.
+        service.admit(Sender::User, later, push_for(Requester::User));
+        service.pump(None, no_wake);
+        assert_eq!(
+            service.take_user_failures(),
+            vec![(3, FailureCode::WorkerUnavailable)]
+        );
+
+        for _ in 0..MAX_USER_FAILURES + 2 {
+            service.admit(Sender::User, Instant::now(), push_for(Requester::User));
+            service.pump(None, no_wake);
+        }
+        assert_eq!(service.take_user_failures().len(), MAX_USER_FAILURES);
     }
 
     /// The lane's end of the channel closes before the App is woken, by a

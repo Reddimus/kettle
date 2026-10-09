@@ -2709,6 +2709,27 @@ impl Mux {
             .collect()
     }
 
+    /// `pane`'s partition in its own tab, shown or not: where it is, or,
+    /// behind another pane's zoom, where it will be once the zoom ends. A
+    /// lane asked for while its pane is out of sight is measured here.
+    pub(crate) fn partition_of(
+        &self,
+        pane: u64,
+        area: Rect,
+        style: LayoutStyle,
+    ) -> Option<PanePartition> {
+        let tab = &self.tabs[self.tab_of(pane)?];
+        let mut leaves = Vec::new();
+        if tab.zoomed && tab.focus == pane {
+            leaves.push((pane, area));
+        } else {
+            tab.root.layout(area, &mut leaves);
+        }
+        let metrics = style.metrics(leaves.len());
+        let (_, leaf) = leaves.into_iter().find(|(id, _)| *id == pane)?;
+        Some(partition_leaf(leaf, metrics, tab.lanes.get(&pane).copied()))
+    }
+
     /// The tab holding `pane`, if any.
     fn tab_of(&self, pane: u64) -> Option<usize> {
         self.tabs
@@ -5264,7 +5285,20 @@ mod node_tests {
         assert_eq!(zoomed[0].1.leaf, area);
         assert!(matches!(zoomed[0].1.lane, Some(LaneShare::Expanded(_))));
         assert!(m.lane(2).is_some(), "the hidden pane keeps its lane");
+        // A hidden pane is measured where it will show once the zoom ends.
+        let hidden = m.partition_of(2, area, style).expect("pane 2's partition");
+        assert!(
+            matches!(hidden.lane, Some(LaneShare::Expanded(_))),
+            "{hidden:?}"
+        );
+        assert_eq!(m.partition_of(1, area, style), Some(zoomed[0].1));
+        assert_eq!(m.partition_of(9, area, style), None);
         m.tabs[0].zoomed = false;
+        let unzoomed = m.layout(0, area, style);
+        assert_eq!(
+            unzoomed.iter().find(|(id, _)| *id == 2).map(|(_, p)| *p),
+            Some(hidden)
+        );
         assert!(super::insert_split(&mut m.tabs[0], 3, Dir::Vertical, false));
         let split = m.layout(0, area, style);
         let lane = |pane| split.iter().find(|(id, _)| *id == pane).unwrap().1.lane;

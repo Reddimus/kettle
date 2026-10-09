@@ -888,6 +888,9 @@ pub(crate) struct WindowState {
     pub(crate) theme_picker_input: Option<ThemePickerState>,
     /// Active quick-select hint mode: detected targets + typed prefix.
     pub(crate) hint_state: Option<(Vec<HintTarget>, String)>,
+    /// Whether that quick select is for previews (`preview_link`): it labels
+    /// only files a lane can show, and a pick previews the file.
+    pub(crate) hint_preview: bool,
     /// Right-click context menu state (`Some` while open). Lives next
     /// to the other modal overlays — same close-all-modals discipline,
     /// same Esc-to-dismiss key route.
@@ -1383,6 +1386,7 @@ impl WindowState {
             layout_picker_entries: Vec::new(),
             theme_picker_input: None,
             hint_state: None,
+            hint_preview: false,
             context_menu: None,
             theme_preview: None,
             preview_panels: std::collections::HashMap::new(),

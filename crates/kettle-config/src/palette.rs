@@ -38,6 +38,7 @@ pub fn commands() -> Vec<(Text, Action)> {
         (T::PaletteOpenLayoutPicker, OpenLayoutPicker),
         (T::PaletteOpenThemePicker, OpenThemePicker),
         (T::PaletteOpenMediaShelf, OpenMediaShelf),
+        (T::PalettePreviewLink, PreviewLink),
         (T::PaletteOpenSettings, OpenSettings),
         (T::PaletteAbout, About),
         (T::PaletteEditConfig, EditConfig),
@@ -263,6 +264,7 @@ mod tests {
             OpenLayoutPicker,
             OpenThemePicker,
             OpenMediaShelf,
+            PreviewLink,
             EditConfig,
             SetScrollbarAlways,
             SetScrollbarAuto,
@@ -403,6 +405,7 @@ mod tests {
                 | OpenLayoutPicker
                 | OpenThemePicker
                 | OpenMediaShelf
+                | PreviewLink
                 | EditConfig
                 | SetScrollbarAlways
                 | SetScrollbarAuto
