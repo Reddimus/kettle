@@ -153,9 +153,15 @@ impl Shelf {
         self.items.iter().find(|item| item.id == id)
     }
 
-    /// Put `item` on the shelf. `visible` is the item on screen, which a
-    /// full shelf never drops and whose replacement is already seen.
-    pub(crate) fn publish(&mut self, mut item: ShelfItem, visible: Option<u64>) -> Published {
+    /// Put `item` on the shelf. `visible` is the item the viewer shows,
+    /// whose replacement is already seen; a full shelf never drops it, nor
+    /// any item in `protected`, which are on screen elsewhere.
+    pub(crate) fn publish(
+        &mut self,
+        mut item: ShelfItem,
+        visible: Option<u64>,
+        protected: &[u64],
+    ) -> Published {
         item.viewed = tick();
         if let Some(key) = item.key.as_deref()
             && let Some(slot) = self
@@ -177,14 +183,24 @@ impl Shelf {
         let id = item.id;
         self.items.insert(0, item);
         let dropped = if self.items.len() > MAX_SHELF_ITEMS {
-            let oldest = self
-                .items
-                .iter()
-                .enumerate()
-                .filter(|(_, item)| Some(item.id) != visible && item.id != id)
-                .min_by_key(|(_, item)| item.viewed)
-                .map(|(index, _)| index);
-            oldest.map(|index| self.items.remove(index).id)
+            // The least recently viewed item goes, never the new one or the
+            // viewer's. One on screen elsewhere is spared while another can
+            // go instead; the shelf keeps its bound either way.
+            let oldest = |spare_protected: bool| {
+                self.items
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, item)| {
+                        Some(item.id) != visible
+                            && item.id != id
+                            && !(spare_protected && protected.contains(&item.id))
+                    })
+                    .min_by_key(|(_, item)| item.viewed)
+                    .map(|(index, _)| index)
+            };
+            oldest(true)
+                .or_else(|| oldest(false))
+                .map(|index| self.items.remove(index).id)
         } else {
             None
         };
@@ -280,9 +296,9 @@ mod tests {
     #[test]
     fn newest_first_and_a_key_replaces_in_place_keeping_its_id() {
         let mut shelf = Shelf::default();
-        assert_eq!(shelf.publish(item(1, Some("plot")), None).id, 1);
-        shelf.publish(item(2, None), None);
-        let replaced = shelf.publish(item(3, Some("plot")), None);
+        assert_eq!(shelf.publish(item(1, Some("plot")), None, &[]).id, 1);
+        shelf.publish(item(2, None), None, &[]);
+        let replaced = shelf.publish(item(3, Some("plot")), None, &[]);
         assert_eq!(
             replaced,
             Published {
@@ -294,8 +310,8 @@ mod tests {
         let plot = shelf.get(1).unwrap();
         assert_eq!((plot.generation, plot.title.as_str()), (1, "item 3"));
         // Keyless items never replace each other.
-        shelf.publish(item(4, None), None);
-        shelf.publish(item(5, None), None);
+        shelf.publish(item(4, None), None, &[]);
+        shelf.publish(item(5, None), None, &[]);
         assert_eq!(ids(&shelf), [5, 4, 2, 1]);
     }
 
@@ -303,11 +319,11 @@ mod tests {
     fn a_full_shelf_drops_the_least_recently_viewed_never_the_visible_one() {
         let mut shelf = Shelf::default();
         for id in 1..=MAX_SHELF_ITEMS as u64 {
-            assert_eq!(shelf.publish(item(id, None), None).dropped, None);
+            assert_eq!(shelf.publish(item(id, None), None, &[]).dropped, None);
         }
         // 1 is the oldest, but on screen; 2 was looked at just now.
         shelf.viewed(2);
-        let published = shelf.publish(item(100, None), Some(1));
+        let published = shelf.publish(item(100, None), Some(1), &[]);
         assert_eq!(published.dropped, Some(3));
         assert_eq!(shelf.len(), MAX_SHELF_ITEMS);
         assert!(shelf.get(1).is_some() && shelf.get(2).is_some() && shelf.get(3).is_none());
@@ -315,28 +331,52 @@ mod tests {
     }
 
     #[test]
+    fn a_full_shelf_never_drops_an_item_whose_card_is_on_screen() {
+        let mut shelf = Shelf::default();
+        for id in 1..=MAX_SHELF_ITEMS as u64 {
+            shelf.publish(item(id, None), None, &[]);
+        }
+        // Item 1 is the least recently viewed, but its card is painted.
+        let published = shelf.publish(item(100, None), None, &[1]);
+        assert_eq!(published.dropped, Some(2));
+        assert!(shelf.get(1).is_some());
+        // With every other item on screen, the shelf still keeps its bound:
+        // the least recently viewed goes, never the viewer's item.
+        let everything: Vec<u64> = shelf.items().iter().map(|item| item.id).collect();
+        let viewer = everything[everything.len() - 1];
+        let published = shelf.publish(item(101, None), Some(viewer), &everything);
+        assert_eq!(shelf.len(), MAX_SHELF_ITEMS);
+        assert!(
+            published
+                .dropped
+                .is_some_and(|dropped| dropped != viewer && dropped != 101)
+        );
+        assert!(shelf.get(viewer).is_some());
+    }
+
+    #[test]
     fn items_are_unseen_until_viewed_and_again_when_replaced() {
         let mut shelf = Shelf::default();
-        shelf.publish(item(1, Some("plot")), None);
-        shelf.publish(item(2, None), None);
+        shelf.publish(item(1, Some("plot")), None, &[]);
+        shelf.publish(item(2, None), None, &[]);
         assert_eq!(shelf.unseen(), 2);
         shelf.viewed(1);
         assert_eq!(shelf.unseen(), 1);
-        shelf.publish(item(3, Some("plot")), None);
+        shelf.publish(item(3, Some("plot")), None, &[]);
         assert_eq!(shelf.unseen(), 2, "a replaced item is new again");
     }
 
     #[test]
     fn replacing_the_item_on_screen_leaves_it_seen() {
         let mut shelf = Shelf::default();
-        shelf.publish(item(1, Some("plot")), None);
-        shelf.publish(item(2, Some("log")), None);
+        shelf.publish(item(1, Some("plot")), None, &[]);
+        shelf.publish(item(2, Some("log")), None, &[]);
         shelf.viewed(1);
         shelf.viewed(2);
-        shelf.publish(item(3, Some("plot")), Some(1));
+        shelf.publish(item(3, Some("plot")), Some(1), &[]);
         assert!(shelf.get(1).is_some_and(|item| item.seen));
         assert_eq!(shelf.unseen(), 0, "the user is looking at the replacement");
-        shelf.publish(item(4, Some("log")), Some(1));
+        shelf.publish(item(4, Some("log")), Some(1), &[]);
         assert_eq!(shelf.unseen(), 1, "a replacement off screen is new");
     }
 
@@ -344,7 +384,7 @@ mod tests {
     fn evicted_pixels_keep_the_item_and_spare_the_visible_one() {
         let mut shelf = Shelf::default();
         for id in 1..=3 {
-            shelf.publish(item(id, None), None);
+            shelf.publish(item(id, None), None, &[]);
         }
         shelf.viewed(1);
         assert_eq!(shelf.eviction_candidate(&[2]).map(|(_, id)| id), Some(3));
@@ -394,7 +434,7 @@ mod tests {
     #[test]
     fn the_report_names_items_and_senders_but_holds_no_pixels() {
         let mut shelf = Shelf::default();
-        shelf.publish(item(1, Some("plot")), None);
+        shelf.publish(item(1, Some("plot")), None, &[]);
         let mut unverified = item(2, None);
         unverified.provenance = Provenance::Unverified(UnverifiedSender {
             executable: Some("/usr/bin/tool".into()),
@@ -402,7 +442,7 @@ mod tests {
             signer: Some("Example Corp (ABCDE12345)".into()),
         });
         unverified.warnings = vec![Warning::FontFallback];
-        shelf.publish(unverified, None);
+        shelf.publish(unverified, None, &[]);
         shelf.evict_pixels(1);
         assert_eq!(
             report(&shelf),

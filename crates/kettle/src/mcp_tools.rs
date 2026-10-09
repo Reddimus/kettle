@@ -356,7 +356,8 @@ fn parse_tool_call(selection: ToolSelection, params: &Value) -> Result<ToolCallP
 
 fn is_known_tool(selection: ToolSelection, name: &str) -> bool {
     if selection == ToolSelection::Display {
-        return name == "kettle_show";
+        // `kettle_card` is the hook's retrieval, never listed for the model.
+        return matches!(name, "kettle_show" | "kettle_card");
     }
     matches!(
         name,
@@ -396,7 +397,8 @@ fn call_tool_inner(
         return error_result(&error);
     }
     match call.name.as_str() {
-        "kettle_show" => tool_kettle_show(&args, cancelled),
+        "kettle_show" => tool_kettle_show(&args, params, cancelled, crate::mcp_display::session()),
+        "kettle_card" => tool_kettle_card(&args, params, crate::mcp_display::session()),
         "kettle_run" => tool_kettle_run(&args, cancelled),
         "kettle_list_panes" => ctl_call(
             "list_panes",
@@ -530,8 +532,16 @@ fn call_tool_inner(
 /// this server runs in, through the same strict discovery and wording as
 /// `kettle show`. The result says where it went and what it was, never what
 /// it shows.
-fn tool_kettle_show(args: &Value, cancelled: Option<&std::sync::atomic::AtomicBool>) -> Value {
+fn tool_kettle_show(
+    args: &Value,
+    params: &Value,
+    cancelled: Option<&std::sync::atomic::AtomicBool>,
+    session: &crate::mcp_display::DisplaySession,
+) -> Value {
     use kettle_media::FailureCode;
+    // A card only where this call's hook can collect it; Kettle decides
+    // whether the caller may have one.
+    let card = session.card_for(params, std::time::Instant::now());
     let path = match args.get("path").and_then(Value::as_str) {
         Some(path) if std::path::Path::new(path).is_absolute() => std::path::Path::new(path),
         _ => return show_failed(FailureCode::BadParams.model_message()),
@@ -546,6 +556,9 @@ fn tool_kettle_show(args: &Value, cancelled: Option<&std::sync::atomic::AtomicBo
         title: text("title"),
         key: text("key"),
         pane: None,
+        inline: card
+            .as_ref()
+            .map(|_| kettle_ctl::show::InlineTarget::ClaudeHook),
     })
     .into_params()
     {
@@ -561,7 +574,20 @@ fn tool_kettle_show(args: &Value, cancelled: Option<&std::sync::atomic::AtomicBo
         None => client.call_with_timeout("show", params, kettle_ctl::show::SHOW_CALL_TIMEOUT),
     };
     match reply.map(serde_json::from_value::<kettle_ctl::show::ShowResult>) {
-        Ok(Ok(result)) => show_sent(&result),
+        Ok(Ok(result)) => {
+            let stored = match (card, &result.inline) {
+                (Some(id), Some(delivery)) if delivery.fits() => {
+                    session.store(id, delivery.message.clone(), std::time::Instant::now())
+                }
+                _ => false,
+            };
+            if stored {
+                let name = path.file_name().map(|name| name.to_string_lossy());
+                show_sent_card(&result, name.as_deref().unwrap_or("media"))
+            } else {
+                show_sent(&result)
+            }
+        }
         Ok(Err(_)) => show_failed("Kettle answered in a form this tool does not know."),
         Err(error) => show_failed(&crate::show_cli::failure_text(&error)),
     }
@@ -596,6 +622,47 @@ fn show_sent(result: &kettle_ctl::show::ShowResult) -> Value {
             "model_has_seen": false,
         },
     })
+}
+
+/// A `kettle_show` whose card waits for this call's hook: the line says it
+/// shows below the call, and neither the line nor the structured content
+/// carries the card's text.
+fn show_sent_card(result: &kettle_ctl::show::ShowResult, name: &str) -> Value {
+    let mut sent = show_sent(result);
+    let text = format!(
+        "Sent to Kettle for display below this call: {name} ({} {}x{}). You have not seen its \
+         contents.",
+        result.kind, result.width, result.height
+    );
+    sent["content"][0]["text"] = Value::String(text);
+    sent["structuredContent"]["delivery"] = Value::String("card".into());
+    sent
+}
+
+/// `kettle_card`: the hook's one-time retrieval of a card's message, as hook
+/// output. Hidden from `tools/list`. A model's own call carries its tool-use
+/// id in its metadata, so it is refused before anything is looked up.
+fn tool_kettle_card(
+    args: &Value,
+    params: &Value,
+    session: &crate::mcp_display::DisplaySession,
+) -> Value {
+    let from_model = params
+        .get("_meta")
+        .and_then(|meta| meta.get(crate::mcp_display::TOOL_USE_ID_META))
+        .is_some();
+    if from_model {
+        return error_result("kettle_card is for Kettle's hook; the model does not call it.");
+    }
+    let Some(id) = args.get("tool_use_id").and_then(Value::as_str) else {
+        return error_result("kettle_card requires a 'tool_use_id' string");
+    };
+    let message = session.take(id, std::time::Instant::now());
+    let output = match message {
+        Some(message) => json!({ "systemMessage": message }),
+        None => json!({}),
+    };
+    json!({ "content": [{ "type": "text", "text": output.to_string() }] })
 }
 
 /// A `kettle_show` that did not reach the shelf, in its fixed wording.
@@ -742,6 +809,7 @@ fn tool_argument_fields(name: &str) -> Option<&'static [(&'static str, ArgKind)]
             ("title", ArgKind::String),
             ("key", ArgKind::String),
         ],
+        "kettle_card" => &[("tool_use_id", ArgKind::String)],
         "kettle_run" => &[
             ("command", ArgKind::Strings),
             ("cols", ArgKind::Unsigned),
@@ -950,6 +1018,66 @@ mod tests {
         }
     }
 
+    /// `kettle_card` is the hook's: known only to a display server, never
+    /// listed, refused to a model's own call, and answered once.
+    #[test]
+    fn kettle_card_is_the_hooks_alone_and_answers_once() {
+        use crate::mcp_display::{DisplaySession, TOOL_USE_ID_META};
+        let listed = tool_specs(ToolSelection::Display);
+        assert!(listed.iter().all(|spec| spec["name"] != "kettle_card"));
+        let call = |meta: Value| json!({"name": "kettle_card", "arguments": {"tool_use_id": "toolu_1"}, "_meta": meta});
+        assert!(validate_tool_call(ToolSelection::Display, &call(json!({}))).is_ok());
+        assert!(validate_tool_call(ToolSelection::Full, &call(json!({}))).is_err());
+        assert!(
+            validate_tool_call(
+                ToolSelection::Display,
+                &json!({"name": "kettle_card", "arguments": {"tool_use_id": "toolu_1", "extra": 1}})
+            )
+            .is_ok(),
+            "the envelope passes; the arguments are checked when it runs"
+        );
+        let session = DisplaySession::new(true);
+        let now = std::time::Instant::now();
+        assert!(session.store("toolu_1".into(), "\nrows\ncaption".into(), now));
+        let args = json!({"tool_use_id": "toolu_1"});
+        let refused =
+            tool_kettle_card(&args, &call(json!({TOOL_USE_ID_META: "toolu_9"})), &session);
+        assert_eq!(refused["isError"], json!(true));
+        let hook = tool_kettle_card(&args, &call(json!({})), &session);
+        let output: Value =
+            serde_json::from_str(hook["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(output, json!({"systemMessage": "\nrows\ncaption"}));
+        let again = tool_kettle_card(&args, &call(json!({})), &session);
+        assert_eq!(again["content"][0]["text"], "{}", "taken once");
+        let missing = tool_kettle_card(&json!({}), &call(json!({})), &session);
+        assert_eq!(missing["isError"], json!(true), "the id is required");
+    }
+
+    /// A card's text is the hook's, never the model's: the line says where
+    /// the media shows, and nothing of the card is in the result.
+    #[test]
+    fn a_card_result_carries_none_of_the_cards_text() {
+        let mut result = kettle_ctl::show::ShowResult::new(
+            (4, true, 2),
+            9,
+            kettle_media::MediaKind::Raster,
+            (640, 480),
+            &[],
+        );
+        result.inline = Some(kettle_ctl::show::InlineDelivery {
+            message: "\n\u{10eeee}SECRET-ROWS\nplot.png - raster 640x480".into(),
+        });
+        let sent = show_sent_card(&result, "plot.png");
+        let encoded = sent.to_string();
+        assert!(!encoded.contains("SECRET-ROWS") && !encoded.contains('\u{10eeee}'));
+        let text = sent["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("below this call") && text.contains("plot.png"));
+        assert!(text.contains("not seen"));
+        assert_eq!(sent["structuredContent"]["delivery"], "card");
+        assert_eq!(sent["structuredContent"]["model_has_seen"], false);
+        assert!(!show_sent(&result).to_string().contains("SECRET-ROWS"));
+    }
+
     /// The model is told where the media went and that it has not seen it;
     /// nothing of the media itself is in the result.
     #[test]
@@ -963,6 +1091,7 @@ mod tests {
             width: 640,
             height: 480,
             warnings: vec!["font_fallback".into()],
+            inline: None,
         };
         let sent = show_sent(&result);
         let text = sent["content"][0]["text"].as_str().unwrap();

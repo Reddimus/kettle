@@ -13,7 +13,9 @@ mod bg_image;
 mod card_marks;
 mod card_scene;
 mod inline_cards;
-pub use inline_cards::InlineCards;
+pub use inline_cards::{
+    CardHarness, CardPoster, CardRefusal, CardSpec, InlineCards, MAX_CARD_COLUMNS, MAX_PANE_CARDS,
+};
 mod color;
 mod cursor_patch;
 mod cursor_policy;
@@ -2934,6 +2936,9 @@ pub struct Renderer {
     card_image_shared: imgpipe::ImageShared,
     card_frames: Vec<inline_cards::CardFrame>,
     card_scene: card_scene::CardScene,
+    /// The cards the last frame accepted, by pane id and nonce: their shelf
+    /// items are on screen, so their pixels must stay.
+    painted_cards: Vec<(u64, kettle_core::InlineNonce)>,
     card_text_renderer: TextRenderer,
     card_label_buffers: Vec<TextBuffer>,
     card_label_texts: Vec<String>,
@@ -5455,6 +5460,7 @@ impl Renderer {
             card_image_shared: shared.images,
             card_frames: Vec::new(),
             card_scene: card_scene::CardScene::default(),
+            painted_cards: Vec::new(),
             card_text_renderer,
             card_label_buffers: Vec::new(),
             card_label_texts: Vec::new(),
@@ -5623,6 +5629,11 @@ impl Renderer {
     /// Line height used by chrome text buffers. Terminal rows may be shorter
     /// or taller via `cell-height`, so overlay geometry must not infer this
     /// value from `cell_h` when budgeting safety text.
+    /// The cards the last frame accepted, by pane id and nonce.
+    pub fn painted_cards(&self) -> &[(u64, kettle_core::InlineNonce)] {
+        &self.painted_cards
+    }
+
     pub fn overlay_text_line_height(&self) -> f32 {
         self.metrics.line_height
     }
@@ -6781,6 +6792,8 @@ impl Renderer {
         card_frames.truncate(panes.len());
         let mut card_scene = std::mem::take(&mut self.card_scene);
         card_scene.clear();
+        let mut painted_cards = std::mem::take(&mut self.painted_cards);
+        painted_cards.clear();
         for (i, pv) in panes.iter().enumerate() {
             let (rx, ry, rw, rh) = pv.rect;
             // Pane separators / focus border. Both colors are config-
@@ -6889,6 +6902,7 @@ impl Renderer {
             let card_frame = &mut card_frames[i];
             if let Some(cards) = pv.inline_cards {
                 cards.recognize_into(pv.snap, card_frame);
+                painted_cards.extend(card_frame.blocks.iter().map(|block| (pv.id, block.nonce)));
                 if let Some(pane_body) =
                     pane_backdrop_rect(pv.rect, bw, pane_titlebar_h, cfg.title_at_bottom)
                     && let Some(clip) = inline_image_clip(
@@ -7138,6 +7152,7 @@ impl Renderer {
         }
 
         self.card_frames = card_frames;
+        self.painted_cards = painted_cards;
         self.card_scene = card_scene;
         if self.card_posters.is_none() && !self.card_scene.posters.is_empty() {
             // Preview pressure cannot prevent a text window. Retry admission

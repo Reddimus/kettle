@@ -8,6 +8,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- Inline media cards for Claude Code: `kettle mcp --display`, launched by
+  Kettle's Claude Code plugin, asks for a card under the `kettle_show` call,
+  and Kettle registers one only for Claude Code under Anthropic's signature
+  running in the pane the item lands in. Kettle builds the card's cells and
+  caption; the plugin's hook collects them once and prints them under the
+  call, where Kettle paints the image. The model is told only that the media
+  shows below the call.
 - `kettle ctl get_state` reports `caller`: whether the connecting process runs
   in one of this Kettle's panes, from the process tree rather than anything
   the caller says. A client's first request claims its own pid and start time;

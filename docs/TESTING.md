@@ -3724,7 +3724,32 @@ signature broke after it started, which CI cannot make;
 on a Developer ID build, Claude Code (236 MB) validates as `Anthropic PBC
 (Q6L2SF6YDW)` in about 2 ms after the first check in a process, which takes
 0.2 to 0.5 s. A signer reads as its certificate's name, or Apple for Apple's
-own code. The viewer's sender line finds its program's path and signer in
+own code. Inline cards: `kettle-render`'s `inline_cards` tests refuse a card
+of no or too many rows or columns, a duplicate nonce and a 65th card in a pane,
+and show that a card keeps no strong reference to its poster (released pixels
+paint as failed, a card without a poster as pending); a headless frame reports
+the card it accepted. `kettle-ui`'s `media::cards` tests bound a harness to 32
+live cards across panes and four a second, mint unbiased digits that never
+repeat a live card's nonce, and retire each card once; `media::inline` tests
+size a card at a quarter of the pane's lines and the image's shape within the
+width Claude Code prints, build its rows and caption, keep the widest card
+under Claude Code's message limit, and strip a file name of anything that
+could forge marks or break the caption's line, give media sent as bytes a
+caption of kind and size alone, and refuse a pane too narrow for the hook's
+61-column label. A full shelf drops an item whose card is on screen only when
+every other item is on screen too, and never grows past eight.
+`register_card` registers a
+card with the message its harness prints and nothing when the pane is too
+small or the harness past its rate; only Claude Code that ran Kettle's own
+command line is a harness, and source guards keep cards to verified routes,
+retirement on the tick and painted items' pixels. In `kettle`, `mcp_display`
+tests ask for a card only from an interactive session that Kettle's plugin
+launched, with a plain bounded tool-use id from the call's metadata, keep a
+delivery for one hook for five seconds, and bound the waiting deliveries;
+`kettle_card` is never listed, refuses the model's own call, needs its
+`tool_use_id`, refuses an in-flight request id before it can take a delivery,
+and answers once, even while the tool queue is full; a card's result carries
+none of its text; and `kettle ctl` never asks for a card. The viewer's sender line finds its program's path and signer in
 any language's word order, whatever they hold, and a line too narrow even for
 the path's last segment shortens around the signer, which stays whole. In
 `kettle-ui`'s `media` module, `route` tests: the nearest live pane ancestor

@@ -4,21 +4,99 @@ use crate::{PaneSnapshot, SnapCell};
 use kettle_core::{InlineMarker, InlineNonce};
 use std::collections::HashMap;
 
-#[cfg(test)]
-const MAX_REGISTRATIONS: usize = 64;
+/// Most cards one pane holds at once.
+pub const MAX_PANE_CARDS: usize = 64;
+/// Most columns a card spans; a wider block would wrap in the harness.
+pub const MAX_CARD_COLUMNS: u8 = 107;
 const CLAUDE_LEFT: usize = 5;
 pub(crate) const MAX_CARD_ROWS: u8 = 12;
+
+/// Which harness prints a card, which fixes the label recognition expects
+/// above its rows and where its rows start.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CardHarness {
+    /// Claude Code's synchronous hook message under the tool call.
+    ClaudeHook,
+}
+
+impl CardHarness {
+    fn label(self) -> &'static str {
+        match self {
+            Self::ClaudeHook => "PostToolUse:mcp__plugin_kettle_kettle__kettle_show says:",
+        }
+    }
+
+    /// The columns the harness's label line takes as it prints it: Claude
+    /// Code's two-column indent, `⎿` with its spacing, then the label. A
+    /// narrower pane wraps the label, and the card under it is never found.
+    pub fn label_columns(self) -> usize {
+        match self {
+            Self::ClaudeHook => 2 + 3 + self.label().chars().count(),
+        }
+    }
+}
+
+/// A card's poster, held weakly. Its pixels belong to the shelf item, so a
+/// card never keeps them charged to the preview account after the shelf
+/// lets them go.
+#[derive(Clone, Debug)]
+pub struct CardPoster {
+    width: u32,
+    height: u32,
+    rgba: std::sync::Weak<kettle_core::PixelBuffer>,
+}
+
+impl CardPoster {
+    pub fn new(image: &kettle_core::ImageData) -> Self {
+        Self {
+            width: image.width,
+            height: image.height,
+            rgba: std::sync::Arc::downgrade(&image.rgba),
+        }
+    }
+
+    fn upgrade(&self) -> Option<kettle_core::ImageData> {
+        Some(kettle_core::ImageData {
+            width: self.width,
+            height: self.height,
+            rgba: self.rgba.upgrade()?,
+        })
+    }
+}
+
+/// A card to register: its block's size, who prints it, its caption and its
+/// poster. Kettle builds every part; nothing comes from the harness.
+#[derive(Clone, Debug)]
+pub struct CardSpec {
+    pub rows: u8,
+    pub columns: u8,
+    pub harness: CardHarness,
+    pub caption: String,
+    pub poster: Option<CardPoster>,
+}
+
+/// Why a card was not registered.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CardRefusal {
+    /// Its block has no rows or columns, or more than a card may have.
+    BadSize,
+    /// The pane already holds as many cards as it may.
+    Full,
+    /// Another card in the pane has its nonce.
+    Duplicate,
+}
 
 struct RegisteredCard {
     rows: u8,
     columns: u8,
-    label: String,
+    label: &'static str,
     caption: String,
-    poster: Option<kettle_core::ImageData>,
+    poster: Option<CardPoster>,
     pending: bool,
 }
 
-/// Owned by Pane. Registration is test-only until the display caller lands.
+/// Owned by Pane: the cards the UI registered for it, as the renderer paints
+/// them. The UI decides who may register and when a card expires.
 #[derive(Default)]
 pub struct InlineCards {
     entries: HashMap<InlineNonce, RegisteredCard>,
@@ -29,16 +107,62 @@ impl InlineCards {
         !self.entries.is_empty()
     }
 
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn contains(&self, nonce: InlineNonce) -> bool {
+        self.entries.contains_key(&nonce)
+    }
+
+    /// Register a card under `nonce`.
+    pub fn insert(&mut self, nonce: InlineNonce, spec: CardSpec) -> Result<(), CardRefusal> {
+        if spec.rows == 0
+            || spec.columns == 0
+            || spec.rows > MAX_CARD_ROWS
+            || spec.columns > MAX_CARD_COLUMNS
+        {
+            return Err(CardRefusal::BadSize);
+        }
+        if self.entries.contains_key(&nonce) {
+            return Err(CardRefusal::Duplicate);
+        }
+        if self.entries.len() >= MAX_PANE_CARDS {
+            return Err(CardRefusal::Full);
+        }
+        let pending = spec.poster.is_none();
+        self.entries.insert(
+            nonce,
+            RegisteredCard {
+                rows: spec.rows,
+                columns: spec.columns,
+                label: spec.harness.label(),
+                caption: spec.caption,
+                poster: spec.poster,
+                pending,
+            },
+        );
+        Ok(())
+    }
+
+    /// Forget the card under `nonce`; its text stays in the transcript and
+    /// paints as an unknown card from the next frame.
+    pub fn remove(&mut self, nonce: InlineNonce) -> bool {
+        self.entries.remove(&nonce).is_some()
+    }
+
     #[cfg(test)]
     fn register(&mut self, nonce: InlineNonce, rows: u8, columns: u8) {
-        assert!(rows > 0 && columns > 0 && rows <= MAX_CARD_ROWS && columns < 108);
-        assert!(self.entries.len() < MAX_REGISTRATIONS);
         self.entries.insert(
             nonce,
             RegisteredCard {
                 rows,
                 columns,
-                label: "PostToolUse:mcp__plugin_kettle_kettle__kettle_show says:".into(),
+                label: CardHarness::ClaudeHook.label(),
                 caption: "diagram.png - raster 640x480".into(),
                 poster: None,
                 pending: true,
@@ -46,22 +170,29 @@ impl InlineCards {
         );
     }
 
-    pub(crate) fn visual(&self, nonce: InlineNonce) -> Option<CardVisual<'_>> {
+    pub(crate) fn visual(&self, nonce: InlineNonce) -> Option<CardVisual> {
         let entry = self.entries.get(&nonce)?;
-        Some(match &entry.poster {
-            Some(image) => CardVisual::Ready(image),
+        Some(match entry.poster.as_ref().map(CardPoster::upgrade) {
+            Some(Some(image)) => CardVisual::Ready(image),
+            // The shelf released the pixels.
+            Some(None) => CardVisual::Failed,
             None if entry.pending => CardVisual::Pending,
             None => CardVisual::Failed,
         })
     }
 
+    /// The poster stays only while the caller, like a shelf, holds `image`.
     #[cfg(test)]
-    pub(crate) fn set_poster(&mut self, nonce: InlineNonce, image: Option<kettle_core::ImageData>) {
+    pub(crate) fn set_poster(
+        &mut self,
+        nonce: InlineNonce,
+        image: Option<&kettle_core::ImageData>,
+    ) {
         let entry = self
             .entries
             .get_mut(&nonce)
             .expect("test registration exists");
-        entry.poster = image;
+        entry.poster = image.map(CardPoster::new);
         entry.pending = false;
     }
 
@@ -189,8 +320,8 @@ impl InlineCards {
     }
 }
 
-pub(crate) enum CardVisual<'a> {
-    Ready(&'a kettle_core::ImageData),
+pub(crate) enum CardVisual {
+    Ready(kettle_core::ImageData),
     Pending,
     Failed,
 }
@@ -382,6 +513,76 @@ pub(crate) mod tests {
         output.push_str("     diagram.png - raster 640x480");
         processor.advance(&mut term, output.as_bytes());
         (cards, term, nonce)
+    }
+
+    fn spec(rows: u8, columns: u8, poster: Option<CardPoster>) -> CardSpec {
+        CardSpec {
+            rows,
+            columns,
+            harness: CardHarness::ClaudeHook,
+            caption: "plot.png - raster 64x48".into(),
+            poster,
+        }
+    }
+
+    #[test]
+    fn registration_refuses_bad_sizes_duplicates_and_a_full_pane() {
+        let nonce = |n: u8| InlineNonce::new([0, 0, 0, 0, 0, n]).unwrap();
+        let mut cards = InlineCards::default();
+        for (rows, columns) in [
+            (0, 12),
+            (3, 0),
+            (MAX_CARD_ROWS + 1, 12),
+            (3, MAX_CARD_COLUMNS + 1),
+        ] {
+            assert_eq!(
+                cards.insert(nonce(1), spec(rows, columns, None)),
+                Err(CardRefusal::BadSize),
+                "{rows}x{columns}"
+            );
+        }
+        assert_eq!(
+            cards.insert(nonce(1), spec(3, MAX_CARD_COLUMNS, None)),
+            Ok(())
+        );
+        assert_eq!(
+            cards.insert(nonce(1), spec(3, 12, None)),
+            Err(CardRefusal::Duplicate)
+        );
+        for n in 2..=MAX_PANE_CARDS as u8 {
+            assert_eq!(cards.insert(nonce(n), spec(3, 12, None)), Ok(()));
+        }
+        assert_eq!(cards.len(), MAX_PANE_CARDS);
+        assert_eq!(
+            cards.insert(nonce(MAX_PANE_CARDS as u8 + 1), spec(3, 12, None)),
+            Err(CardRefusal::Full)
+        );
+        assert!(cards.remove(nonce(1)));
+        assert!(!cards.remove(nonce(1)));
+        assert!(!cards.contains(nonce(1)));
+        assert_eq!(cards.insert(nonce(1), spec(3, 12, None)), Ok(()));
+    }
+
+    #[test]
+    fn a_card_never_keeps_its_posters_pixels_once_the_shelf_lets_go() {
+        let nonce = InlineNonce::new([1, 2, 3, 4, 5, 6]).unwrap();
+        let shelf = kettle_core::ImageData::new(2, 1, vec![255; 8]).unwrap();
+        let mut cards = InlineCards::default();
+        cards
+            .insert(nonce, spec(3, 12, Some(CardPoster::new(&shelf))))
+            .unwrap();
+        assert!(matches!(cards.visual(nonce), Some(CardVisual::Ready(_))));
+        let pixels = std::sync::Arc::downgrade(&shelf.rgba);
+        drop(shelf);
+        assert!(
+            pixels.upgrade().is_none(),
+            "the card held no strong reference"
+        );
+        assert!(matches!(cards.visual(nonce), Some(CardVisual::Failed)));
+        // A card registered before its poster is pending, not failed.
+        let other = InlineNonce::new([6, 5, 4, 3, 2, 1]).unwrap();
+        cards.insert(other, spec(3, 12, None)).unwrap();
+        assert!(matches!(cards.visual(other), Some(CardVisual::Pending)));
     }
 
     #[test]

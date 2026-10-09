@@ -2132,6 +2132,7 @@ dependencies = [
  "block2 0.6.2",
  "crossbeam-channel",
  "errno",
+ "getrandom 0.4.3",
  "image",
  "kettle-config",
  "kettle-core",

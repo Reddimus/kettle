@@ -24,13 +24,14 @@ pub fn run_ctl(args: CtlArgs) -> i32 {
         return stream_events(&mut client, args.pane);
     }
 
-    let params = match build_params(&args) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("kettle ctl: {e}");
-            return 1;
-        }
-    };
+    let params =
+        match build_params(&args).and_then(|params| refuse_inline_cards(&args.method, params)) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("kettle ctl: {e}");
+                return 1;
+            }
+        };
 
     match client.call(&args.method, params.clone()) {
         Ok(result) => {
@@ -46,6 +47,17 @@ pub fn run_ctl(args: CtlArgs) -> i32 {
             1
         }
     }
+}
+
+/// An inline card's text is for its harness's hook, never for whoever reads
+/// this command's output, which may be a model. Kettle gives cards only to
+/// Kettle's own executable, so this command, which prints every reply, never
+/// asks for one.
+fn refuse_inline_cards(method: &str, params: Value) -> Result<Value, String> {
+    if method == "show" && params.get("inline").is_some() {
+        return Err("inline cards are for Kettle's MCP adapter; use kettle show".into());
+    }
+    Ok(params)
 }
 
 /// Subscribe, then print each event line as it arrives until EOF / Ctrl+C.
@@ -280,6 +292,19 @@ fn page_notice(request_params: &Value, result: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn this_command_never_asks_for_an_inline_card() {
+        let show = serde_json::json!({"svg": "<svg/>", "inline": "claude_hook"});
+        assert!(refuse_inline_cards("show", show).is_err());
+        let plain = serde_json::json!({"svg": "<svg/>"});
+        assert_eq!(
+            refuse_inline_cards("show", plain.clone()),
+            Ok(plain.clone())
+        );
+        let other = serde_json::json!({"inline": 1});
+        assert_eq!(refuse_inline_cards("list_panes", other.clone()), Ok(other));
+    }
 
     #[test]
     fn paged_pretty_output_explains_continuation() {

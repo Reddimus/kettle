@@ -467,6 +467,25 @@ come back through `UserEvent::MediaRendered`, the item's pixels are charged
 to the process preview account (releasing the least recently viewed off-screen
 pixels when it is full), and only then is the push answered.
 
+A push that asks for an inline card (`ShowRequest::inline`, sent only by
+`kettle mcp --display --claude-card-hook`) gets one only when its connection
+thread found the program that asked to be Claude Code under Anthropic's
+signature (`Requirement::CLAUDE_CODE`) and the route is verified. After the
+item is published, `register_card` admits the harness against the
+`media::CardLedger` (32 live cards per harness, four a second), mints a nonce
+from the OS random source with unbiased digits and no live collision, sizes
+the card (`claude_card_size`), builds its rows and caption
+(`claude_card_message`, `card_caption`, whose file name drops control,
+format, private-use and zero-width characters), and registers it in the
+pane's `kettle_render::InlineCards` (64 per pane) with a `CardPoster`: a weak
+reference to the shelf item's pixels, so a card never holds the preview
+account. The message rides back to the adapter in `ShowResult::inline`; the
+MCP server keeps it in its `DisplaySession` for the hook's one-time
+`kettle_card`, which is answered outside the tool queue. The renderer reports
+each frame's accepted cards (`Renderer::painted_cards`), and their items count
+as visible when pixels are released. The tick retires cards whose harness
+exited, whose pane closed, or whose item left the shelf or was replaced.
+
 The user opens a shelf with `open_media_shelf`. `WindowState::media_viewer`
 names the pane and item; the App projects it into a
 `kettle_render::MediaViewerOverlay` (display text and pixels, never a path)

@@ -206,18 +206,22 @@ fn a_renderer_compiles_each_distinct_pipeline_once() {
         "text-only startup allocates no preview layer"
     );
     let (mut cards, snap, nonce) = crate::inline_cards::tests::fixture();
-    cards.set_poster(
-        nonce,
-        kettle_core::ImageData::new_with_budget(
-            2,
-            1,
-            vec![250, 20, 60, 255, 250, 20, 60, 255],
-            &kettle_core::GraphicsBudget::previews(),
-        ),
+    let poster = kettle_core::ImageData::new_with_budget(
+        2,
+        1,
+        vec![250, 20, 60, 255, 250, 20, 60, 255],
+        &kettle_core::GraphicsBudget::previews(),
     );
+    cards.set_poster(nonce, poster.as_ref());
     let mut view = pane(&snap, 1200, 400);
     view.inline_cards = Some(&cards);
+    let pane_id = view.id;
     capture(&mut renderer, &cfg, &[view], &focused(false));
+    assert_eq!(
+        renderer.painted_cards(),
+        &[(pane_id, nonce)],
+        "the frame reports the card it accepted"
+    );
     let replacing = [&renderer.pane_bases, &renderer.live_pane_bases];
     let blending = [
         &renderer.quads,
@@ -1459,15 +1463,13 @@ fn registered_poster_overwrite_removes_tiles_and_badges_in_the_same_frame() {
         };
         cfg.text_renderer = mode;
         let (mut cards, mut snap, nonce) = crate::inline_cards::tests::fixture();
-        cards.set_poster(
-            nonce,
-            kettle_core::ImageData::new_with_budget(
-                2,
-                1,
-                vec![250, 20, 60, 255, 250, 20, 60, 255],
-                &kettle_core::GraphicsBudget::previews(),
-            ),
+        let poster = kettle_core::ImageData::new_with_budget(
+            2,
+            1,
+            vec![250, 20, 60, 255, 250, 20, 60, 255],
+            &kettle_core::GraphicsBudget::previews(),
         );
+        cards.set_poster(nonce, poster.as_ref());
         snap.cursor.point = kettle_core::Point::new(kettle_core::Line(2), kettle_core::Column(8));
         snap.cursor.shape = alacritty_terminal::vte::ansi::CursorShape::Block;
         let mut view = pane(&snap, 1200, 400);
@@ -1531,15 +1533,13 @@ fn refused_card_poster_upload_paints_status_and_recovers_on_the_next_frame() {
         cfg.text_renderer = mode;
         let (mut cards, snap, nonce) = crate::inline_cards::tests::fixture();
         let budget = kettle_core::GraphicsBudget::previews();
-        cards.set_poster(
-            nonce,
-            kettle_core::ImageData::new_with_budget(
-                2,
-                1,
-                vec![250, 20, 60, 255, 250, 20, 60, 255],
-                &budget,
-            ),
+        let poster = kettle_core::ImageData::new_with_budget(
+            2,
+            1,
+            vec![250, 20, 60, 255, 250, 20, 60, 255],
+            &budget,
         );
+        cards.set_poster(nonce, poster.as_ref());
         // Exhaust accounting only; no large VRAM allocation or performance claim.
         let mut low = 0;
         let mut high = budget.limits().process_gpu_bytes;
@@ -1664,15 +1664,13 @@ fn registered_poster_real_scroll_keeps_partial_pixels_and_offscreen_overwrite_re
             } else {
                 term.scroll_display(Scroll::Top);
             }
-            cards.set_poster(
-                nonce,
-                kettle_core::ImageData::new_with_budget(
-                    2,
-                    1,
-                    vec![250, 20, 60, 255, 250, 20, 60, 255],
-                    &kettle_core::GraphicsBudget::previews(),
-                ),
+            let poster = kettle_core::ImageData::new_with_budget(
+                2,
+                1,
+                vec![250, 20, 60, 255, 250, 20, 60, 255],
+                &kettle_core::GraphicsBudget::previews(),
             );
+            cards.set_poster(nonce, poster.as_ref());
             let mut snap = PaneSnapshot::default();
             snap.capture_with_card_marks(&term, true);
             let mut view = pane(&snap, 1200, 400);
@@ -1775,15 +1773,13 @@ fn exhausted_preview_account_keeps_new_terminal_windows_and_recovers_cards() {
             "terminal text is painted"
         );
         let (mut cards, snap, nonce) = crate::inline_cards::tests::fixture();
-        cards.set_poster(
-            nonce,
-            kettle_core::ImageData::new_with_budget(
-                2,
-                1,
-                vec![250, 20, 60, 255, 250, 20, 60, 255],
-                &budget,
-            ),
+        let poster = kettle_core::ImageData::new_with_budget(
+            2,
+            1,
+            vec![250, 20, 60, 255, 250, 20, 60, 255],
+            &budget,
         );
+        cards.set_poster(nonce, poster.as_ref());
         let mut view = pane(&snap, 1200, 400);
         view.inline_cards = Some(&cards);
         let unavailable = capture(&mut renderer, &cfg, &[view], &focused(false));

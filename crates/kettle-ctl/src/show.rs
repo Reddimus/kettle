@@ -30,6 +30,46 @@ pub const SHOW_CALL_TIMEOUT: Duration = Duration::from_secs(20);
 pub const MAX_SHOW_KEY_BYTES: usize = 256;
 /// Longest title, before it is sanitized and fitted for display.
 pub const MAX_SHOW_TITLE_BYTES: usize = 4 * 1024;
+/// Longest inline card message, in UTF-16 units: Claude Code turns a longer
+/// hook message into a stub instead of printing it.
+pub const MAX_INLINE_MESSAGE_UTF16: usize = 9_900;
+
+/// An inline card a harness's adapter asks for along with the shelf item.
+/// Kettle decides whether the caller may have one; asking grants nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InlineTarget {
+    /// Claude Code: a card printed by a synchronous hook under the call.
+    ClaudeHook,
+}
+
+impl InlineTarget {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ClaudeHook => "claude_hook",
+        }
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            "claude_hook" => Some(Self::ClaudeHook),
+            _ => None,
+        }
+    }
+}
+
+/// An inline card's delivery, for the adapter that asked and never for the
+/// model: the message its harness prints once, as Kettle wrote it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InlineDelivery {
+    pub message: String,
+}
+
+impl InlineDelivery {
+    /// Whether the message fits what its harness prints whole.
+    pub fn fits(&self) -> bool {
+        self.message.encode_utf16().count() <= MAX_INLINE_MESSAGE_UTF16
+    }
+}
 
 /// What to show.
 #[derive(Debug, Clone, PartialEq)]
@@ -68,6 +108,8 @@ pub struct ShowRequest {
     /// The pane to show it in. Honored only for full control; any other
     /// caller's pane comes from its process ancestry.
     pub pane: Option<u64>,
+    /// An inline card asked for by a harness's adapter.
+    pub inline: Option<InlineTarget>,
 }
 
 impl ShowRequest {
@@ -136,11 +178,19 @@ impl ShowRequest {
             Some(0) => return Err(FailureCode::BadParams),
             pane => pane,
         };
+        let inline = match fields.remove("inline") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(text)) => {
+                Some(InlineTarget::parse(&text).ok_or(FailureCode::BadParams)?)
+            }
+            Some(_) => return Err(FailureCode::BadParams),
+        };
         Ok(Self {
             source,
             title,
             key,
             pane,
+            inline,
         })
     }
 
@@ -173,6 +223,9 @@ impl ShowRequest {
         }
         if let Some(pane) = self.pane {
             fields.insert("pane".into(), pane.into());
+        }
+        if let Some(inline) = self.inline {
+            fields.insert("inline".into(), inline.as_str().into());
         }
         Ok(Value::Object(fields))
     }
@@ -276,6 +329,10 @@ pub struct ShowResult {
     pub width: u32,
     pub height: u32,
     pub warnings: Vec<String>,
+    /// The inline card's delivery, when the adapter asked for one and Kettle
+    /// registered it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inline: Option<InlineDelivery>,
 }
 
 impl ShowResult {
@@ -299,6 +356,7 @@ impl ShowResult {
                 .iter()
                 .map(|warning| warning.as_str().into())
                 .collect(),
+            inline: None,
         }
     }
 }
@@ -515,12 +573,14 @@ mod tests {
                 title: Some("Plot".into()),
                 key: Some("plot".into()),
                 pane: Some(9),
+                inline: Some(InlineTarget::ClaudeHook),
             },
             ShowRequest {
                 source: ShowSource::Image(vec![0, 1, 254, 255]),
                 title: None,
                 key: None,
                 pane: None,
+                inline: None,
             },
             ShowRequest {
                 source: ShowSource::File {
@@ -533,11 +593,52 @@ mod tests {
                 title: None,
                 key: Some(path.clone()),
                 pane: None,
+                inline: None,
             },
         ] {
             let params = request.clone().into_params().unwrap();
             assert_eq!(ShowRequest::parse(params).unwrap(), request);
         }
+    }
+
+    /// An inline card is asked for by name; any other value is refused.
+    #[test]
+    fn an_inline_card_is_asked_for_by_name() {
+        let parse = |inline: Value| {
+            ShowRequest::parse(serde_json::json!({"svg": "<svg/>", "inline": inline}))
+                .map(|request| request.inline)
+        };
+        assert_eq!(parse(Value::Null), Ok(None));
+        assert_eq!(
+            parse("claude_hook".into()),
+            Ok(Some(InlineTarget::ClaudeHook))
+        );
+        assert_eq!(parse("codex".into()), Err(FailureCode::BadParams));
+        assert_eq!(
+            parse(serde_json::json!({"target": "claude_hook"})),
+            Err(FailureCode::BadParams)
+        );
+    }
+
+    /// A result carries an inline delivery only when there is one, so an
+    /// ordinary reply is unchanged, and the delivery keeps to what its
+    /// harness prints whole.
+    #[test]
+    fn an_inline_delivery_is_private_to_the_reply_that_has_one() {
+        let result = ShowResult::new((1, true, 1), 2, MediaKind::Raster, (64, 48), &[]);
+        let plain = serde_json::to_value(&result).unwrap();
+        assert!(plain.get("inline").is_none());
+        let parsed: ShowResult = serde_json::from_value(plain).unwrap();
+        assert_eq!(parsed.inline, None);
+        let delivery = InlineDelivery {
+            message: "x".repeat(MAX_INLINE_MESSAGE_UTF16),
+        };
+        assert!(delivery.fits());
+        // A cell's placeholder is two UTF-16 units.
+        let over = InlineDelivery {
+            message: "\u{10eeee}".repeat(MAX_INLINE_MESSAGE_UTF16 / 2 + 1),
+        };
+        assert!(!over.fits());
     }
 
     /// A request built in code is checked as a parsed one is.
@@ -548,6 +649,7 @@ mod tests {
             title: None,
             key: None,
             pane: None,
+            inline: None,
         };
         for (request, failure) in [
             (

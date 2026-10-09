@@ -7,6 +7,8 @@
 //! moves with its tab into another window. A push is answered only after its
 //! item is on the shelf; nothing a push does opens anything on screen.
 
+mod cards;
+mod inline;
 mod queue;
 mod route;
 mod shelf;
@@ -21,6 +23,10 @@ use kettle_media::{FailureCode, Job, RenderOutput};
 
 use crate::ctl_server::ReplyTx;
 
+#[cfg(test)]
+pub(crate) use cards::HARNESS_CARDS_PER_SECOND;
+pub(crate) use cards::{CardLedger, CardRecord};
+pub(crate) use inline::{CLAUDE_INDENT, card_caption, claude_card_message, claude_card_size};
 pub(crate) use queue::Sender;
 pub(crate) use route::{PaneRoot, Route, nearest_pane, route};
 pub(crate) use shelf::{
@@ -57,6 +63,15 @@ pub(crate) struct Draft {
     /// Display-ready (see [`display_title`]).
     pub title: String,
     pub provenance: Provenance,
+    /// The inline card to register once the item is on the shelf.
+    pub inline: Option<InlineDraft>,
+}
+
+/// An inline card a verified harness may have: who owns it and, when the
+/// media came from a file, the name its caption shows.
+pub(crate) struct InlineDraft {
+    pub owner: kettle_ctl::process::ProcessIdentity,
+    pub name: Option<String>,
 }
 
 /// One admitted `show`, from admission until it is answered.
@@ -168,6 +183,8 @@ pub(crate) struct MediaService {
     active: Option<Push>,
     /// The last item id handed out; ids are unique for the process's life.
     last_item: u64,
+    /// Every registered inline card.
+    pub(crate) cards: CardLedger,
 }
 
 impl MediaService {
@@ -345,6 +362,7 @@ mod tests {
                 key: None,
                 title: "t".into(),
                 provenance: Provenance::Verified,
+                inline: None,
             },
             Job {
                 kind: kettle_media::JobKind::Svg,

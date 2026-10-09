@@ -689,6 +689,17 @@ fn schedule_tool(
             );
             return;
         }
+        // The hook's card retrieval reads memory only and has a few seconds
+        // to finish, so it is answered here, after the duplicate-id check,
+        // rather than waiting behind renders in the tool queue.
+        if selection == ToolSelection::Display
+            && params.get("name").and_then(Value::as_str) == Some("kettle_card")
+        {
+            drop(requests);
+            let result = crate::mcp_tools::call_tool(selection, &params);
+            respond(responses, bounded_tool_success(id, result, modern));
+            return;
+        }
         requests.insert(key.clone(), cancelled.clone());
     }
     let job = ToolJob {
@@ -1456,6 +1467,53 @@ mod tests {
             .insert("n:8".into(), completed.clone());
         assert!(finish_pending_request(&pending, "n:8", &completed));
         assert!(pending.lock().unwrap().is_empty());
+    }
+
+    /// The hook's card retrieval never waits behind renders: with the tool
+    /// queue full, it is still answered at once.
+    #[test]
+    fn card_retrieval_is_answered_while_the_tool_queue_is_full() {
+        let (jobs_tx, _jobs_rx) = crossbeam_channel::bounded(1);
+        let (responses_tx, responses_rx) = crossbeam_channel::bounded(4);
+        let responses_tx = Responder::new(responses_tx);
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+        // A show fills the only queue slot; no worker drains it.
+        schedule_tool(
+            json!(1),
+            json!({"name": "kettle_show", "arguments": {"path": "/no/such/plot.png"}}),
+            ToolSelection::Display,
+            &jobs_tx,
+            &responses_tx,
+            &pending,
+            false,
+        );
+        schedule_tool(
+            json!(2),
+            json!({"name": "kettle_card", "arguments": {"tool_use_id": "toolu_none"}}),
+            ToolSelection::Display,
+            &jobs_tx,
+            &responses_tx,
+            &pending,
+            false,
+        );
+        let answer = responses_rx.try_recv().expect("answered at once");
+        assert_eq!(answer["id"], json!(2));
+        assert_eq!(answer["result"]["content"][0]["text"], "{}");
+        assert!(!pending.lock().unwrap().contains_key("n:2"), "never queued");
+        // A retrieval reusing an in-flight id is refused like any request,
+        // before it can take a delivery.
+        schedule_tool(
+            json!(1),
+            json!({"name": "kettle_card", "arguments": {"tool_use_id": "toolu_none"}}),
+            ToolSelection::Display,
+            &jobs_tx,
+            &responses_tx,
+            &pending,
+            false,
+        );
+        let duplicate = responses_rx.try_recv().expect("answered");
+        assert_eq!(duplicate["id"], json!(1));
+        assert_eq!(duplicate["error"]["code"], json!(-32600));
     }
 
     #[test]
