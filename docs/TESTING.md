@@ -3858,7 +3858,21 @@ while the pointer is outside the window)
 `media::sightings` tests `settles_at`. The shelf test pins that a
 replacement by key, kept in its place, is still `latest()`, and on macOS
 `macos_opens_the_media_viewer_with_ctrl_shift_cmd_i` pins the default
-chord. Checked live with Codex CLI 0.162.0: a
+chord. The tip: `media::tip` tests it shows once on the first card
+and is remembered, that of two Kettles that loaded before either showed it
+only the first to record it shows it, that a corrupt, oversized or empty
+record is left alone and stops the tip, and that only a regular file is read,
+never a link to a record or a pipe, and no tip is recorded over a link; its tests record only into a private
+temporary directory. `refused_card_poster_upload_paints_status_and_recovers_on_the_next_frame`
+checks that a card whose poster the GPU refused is on screen but not among
+`shown_cards`, and is once the upload recovers;
+`the_tip_shows_on_its_ready_card_only` places it on its card's foot only once
+the image is ready and only on a registered card, and
+`the_first_card_shows_the_tip_until_opened_or_timed_out` guards its start
+on a presented frame's first shown card with no dialog, menu or viewer over
+the cards (checked every presented frame while it waits, so a card that
+loads in place or is uncovered qualifies) and its end on an open or at its
+deadline. Checked live with Codex CLI 0.162.0: a
 `send_mouse` click on a Codex card opened the viewer on its item, and a
 press on the card released after Settings opened left Settings up and
 opened nothing. Held buttons in general:

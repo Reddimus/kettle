@@ -11,6 +11,7 @@
 [status]
 inline_card_pending = "draft"
 inline_card_unavailable = "draft"
+inline_card_tip = "draft"
 media_shelf_untitled = "draft"
 palette_open_media_shelf = "draft"
 media_viewer_kind_image = "draft"

@@ -127,6 +127,8 @@ struct RegisteredCard {
 #[derive(Default)]
 pub struct InlineCards {
     entries: HashMap<InlineNonce, RegisteredCard>,
+    /// The card that says a click opens it, while the UI shows that tip.
+    tip: Option<InlineNonce>,
 }
 
 impl InlineCards {
@@ -179,7 +181,21 @@ impl InlineCards {
     /// Forget the card under `nonce`; its text stays in the transcript and
     /// paints as an unknown card from the next frame.
     pub fn remove(&mut self, nonce: InlineNonce) -> bool {
+        if self.tip == Some(nonce) {
+            self.tip = None;
+        }
         self.entries.remove(&nonce).is_some()
+    }
+
+    /// Show, on the registered card `nonce`, the tip that a click opens it,
+    /// or no tip with `None`.
+    pub fn set_tip(&mut self, nonce: Option<InlineNonce>) {
+        self.tip = nonce.filter(|nonce| self.entries.contains_key(nonce));
+    }
+
+    /// The card showing the tip, if any.
+    pub(crate) fn tip(&self) -> Option<InlineNonce> {
+        self.tip
     }
 
     #[cfg(test)]

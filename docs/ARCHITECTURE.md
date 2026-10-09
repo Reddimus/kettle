@@ -553,7 +553,20 @@ window, `sync_cursor_icon` sets nothing at all. A card that has not settled leav
 `card_settle_wake`, which `about_to_wait` folds into its deadline so a still
 pointer gets the hand when the card settles, and a presented frame whose
 cards changed marks the hover stale for the same recheck. The user opens a shelf with `open_media_shelf`, on `Shelf::latest()`, the item
-published last (a replacement by key keeps its place in the list). `WindowState::media_viewer`
+published last (a replacement by key keeps its place in the list).
+`media::CardsTip` puts the one-time tip on the first card a presented frame
+showed with its image (`Renderer::shown_cards`: the card's poster reached
+the GPU, which `CardScene::apply_upload_results` records beside each drawn
+card) while no dialog, menu or viewer covers the cards. `InlineCards::set_tip`
+names the card and `CardScene` draws the tip on a strip along its foot. At
+that moment it creates `ui-tips.json` with `kettle_state::atomic_create_new`,
+which writes the whole record to a staged file and publishes it by an
+exclusive link, so of two Kettles running at once only the first to create
+it shows the tip and neither ever sees it half written. Any entry already
+there, a record or not, means no tip and is left alone. At start a record it
+can read (through `kettle_state::open_trusted_file_read`: a regular file
+only, no link followed, no blocking open) marks the tip done. It ends when
+`open_card` runs or `TIP_TIME` passes, a deadline `about_to_wait` folds in. `WindowState::media_viewer`
 names the pane and item; the App projects it into a
 `kettle_render::MediaViewerOverlay` (display text and pixels, never a path)
 and closes it when its pane leaves the active tab or becomes too small to

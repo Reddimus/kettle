@@ -369,7 +369,13 @@ half a second is ordinary input, so one that scrolls under the pointer
 cannot take a click meant for text. The pointer turns into a hand over a
 card a click would open and the card is outlined in the accent, so it is
 clear which press the card will take; a still pointer gets them as the card
-settles. `kettle ctl send_mouse` clicks a card the same way. Quick select (`hint_mode`) labels each card on screen in the
+settles. The first card a user ever sees with its image shown says "Click
+to open" on a strip along its foot for ten seconds, or until a card is
+opened; `ui-tips.json` beside the config file records that it showed, so it
+never shows again, and of two Kettles running at once only one shows it. It
+waits for a card whose image is on screen with no dialog, menu or viewer
+over it.
+`kettle ctl send_mouse` clicks a card the same way. Quick select (`hint_mode`) labels each card on screen in the
 focused pane, and picking its label opens it; text in a card's rows is its
 marks, so it gets no label of its own. Screen readers see each card as a
 button named for its item's title, kind, size and sender, as the viewer

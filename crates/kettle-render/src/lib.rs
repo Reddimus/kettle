@@ -2963,6 +2963,8 @@ pub struct Renderer {
     /// The cards on screen: those of the last frame presented. A press there
     /// is the card's, so a frame that never reached the screen leaves them.
     painted_cards: Vec<PaintedCard>,
+    /// For each of `painted_cards`, whether that frame showed its image.
+    painted_shown: Vec<bool>,
     card_text_renderer: TextRenderer,
     card_label_buffers: Vec<TextBuffer>,
     card_label_texts: Vec<String>,
@@ -4155,7 +4157,7 @@ mod live_screenshot_tests {
             .and_then(|rest| rest.split("\n    fn ").next())
             .expect("render_frame_with_status_and_pre_present body");
         let normalized = body.split_whitespace().collect::<Vec<_>>().join(" ");
-        let commit = "self.painted_cards.clone_from(&self.drawn_cards);";
+        let commit = "self.commit_painted_cards();";
         let present = normalized
             .find("self.gpu.queue.present(frame);")
             .expect("presentation");
@@ -4176,9 +4178,16 @@ mod live_screenshot_tests {
             present < commits[1],
             "only a presented frame shows its cards"
         );
-        assert_eq!(src.matches("self.painted_cards =").count(), 0);
-        assert_eq!(src.matches("painted_cards.extend(").count(), 0);
-        assert_eq!(src.matches("painted_cards.push(").count(), 0);
+        for field in ["painted_cards", "painted_shown"] {
+            assert_eq!(src.matches(&format!("self.{field} =")).count(), 0);
+            assert_eq!(src.matches(&format!("{field}.extend(")).count(), 0);
+            assert_eq!(src.matches(&format!("{field}.push(")).count(), 0);
+            assert_eq!(
+                src.matches(&format!("self.{field}.clone_from(")).count(),
+                1,
+                "only commit_painted_cards puts {field} on screen"
+            );
+        }
     }
 
     /// Metal returns `SurfaceError::Occluded` before it vends a drawable. The
@@ -5525,6 +5534,7 @@ impl Renderer {
             card_scene: card_scene::CardScene::default(),
             drawn_cards: Vec::new(),
             painted_cards: Vec::new(),
+            painted_shown: Vec::new(),
             card_text_renderer,
             card_label_buffers: Vec::new(),
             card_label_texts: Vec::new(),
@@ -5698,6 +5708,23 @@ impl Renderer {
     /// The cards on screen: those the last presented frame drew.
     pub fn painted_cards(&self) -> &[PaintedCard] {
         &self.painted_cards
+    }
+
+    /// The cards on screen whose image the last presented frame showed: the
+    /// poster reached the GPU, not only the card's frame and status.
+    pub fn shown_cards(&self) -> impl Iterator<Item = &PaintedCard> + '_ {
+        self.painted_cards
+            .iter()
+            .zip(&self.painted_shown)
+            .filter_map(|(card, shown)| shown.then_some(card))
+    }
+
+    /// Put the frame's cards on screen, as presented: where each is, and
+    /// whether its image showed.
+    fn commit_painted_cards(&mut self) {
+        debug_assert_eq!(self.drawn_cards.len(), self.card_scene.shown.len());
+        self.painted_cards.clone_from(&self.drawn_cards);
+        self.painted_shown.clone_from(&self.card_scene.shown);
     }
 
     /// The card on screen under surface point (`x`, `y`), if any.
@@ -9977,7 +10004,7 @@ impl Renderer {
                 live_window: false,
                 ..scene_facts
             });
-            self.painted_cards.clone_from(&self.drawn_cards);
+            self.commit_painted_cards();
             return Ok(FrameOutcome::Occluded);
         };
         let (frame, reconfigure_after_present) = match acquired {
@@ -10115,7 +10142,7 @@ impl Renderer {
         }
         self.frames_presented += 1;
         self.last_scene = Some(scene_facts);
-        self.painted_cards.clone_from(&self.drawn_cards);
+        self.commit_painted_cards();
         Ok(FrameOutcome::Presented)
     }
 

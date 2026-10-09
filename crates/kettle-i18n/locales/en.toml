@@ -2,6 +2,7 @@
 
 inline_card_pending = "Loading…"
 inline_card_unavailable = "Unavailable"
+inline_card_tip = "Click to open"
 media_shelf_untitled = "Untitled image"
 palette_open_media_shelf = "Open media shelf"
 media_viewer_kind_image = "Image"

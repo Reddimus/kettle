@@ -8337,6 +8337,8 @@ pub struct App {
     pending_runs: std::collections::HashMap<u64, PendingRun>,
     /// `show` pushes: their render queue and the thread that renders them.
     media: crate::media::MediaService,
+    /// The one-time tip that a click opens an inline card.
+    cards_tip: crate::media::CardsTip,
     clipboard: Option<arboard::Clipboard>,
     /// Temporary PNGs materialized from clipboard bitmaps. Owner-only, bounded,
     /// and removed on exit — see [`crate::paste_image`].
@@ -9344,6 +9346,7 @@ impl App {
             ctl_start: CtlStart::NotReady,
             pending_runs: std::collections::HashMap::new(),
             media: crate::media::MediaService::default(),
+            cards_tip: crate::media::CardsTip::load(),
             clipboard,
             pasted_images: crate::paste_image::PastedImages::new(),
             video_previewer,
@@ -10312,7 +10315,25 @@ impl App {
         }
         self.close_all_modals(ws);
         self.show_media_item(ws, pane, item);
+        // Opening a card is what the tip taught.
+        self.end_cards_tip(ws);
         true
+    }
+
+    /// End the tip that a click opens a card, and take it off its card in
+    /// whichever window holds that pane.
+    fn end_cards_tip(&mut self, ws: &mut WindowState) {
+        let Some(pane) = self.cards_tip.end() else {
+            return;
+        };
+        for window in std::iter::once(&mut *ws).chain(self.windows.values_mut()) {
+            if let Some(state) = window.mux.panes.get_mut(&pane) {
+                state.inline_cards.set_tip(None);
+                if let Some(handle) = &window.window {
+                    handle.request_redraw();
+                }
+            }
+        }
     }
 
     /// The cards on screen that assistive technology can reach, in paint
@@ -16040,6 +16061,9 @@ impl App {
             .native_material
             .as_ref()
             .and_then(|material| material.live_opacity_floor());
+        // Whether anything covers the cards, for the tip: no dialog, menu or
+        // viewer over them.
+        let cards_uncovered = !self.pointer_modal_open(ws) && ws.media_viewer.is_none();
         // Status bar and native fallback state are built BEFORE the &mut
         // renderer borrow (the helpers read other window state immutably).
         let Some(renderer) = ws.renderer.as_mut() else {
@@ -16094,7 +16118,8 @@ impl App {
         );
         let frame_time = frame_started.elapsed();
         // A card has been seen once a frame showing it reached the screen.
-        if matches!(&frame_result, Ok(FrameOutcome::Presented))
+        let presented = matches!(&frame_result, Ok(FrameOutcome::Presented));
+        if presented
             && ws
                 .card_sightings
                 .note(renderer.painted_cards(), std::time::Instant::now())
@@ -16104,6 +16129,17 @@ impl App {
             ws.accessibility_pending = true;
             ws.card_hover_stale = true;
         }
+        // The first card a user ever sees says a click opens it, once its
+        // image is on screen with nothing over it: a card that loads in
+        // place, or that a dialog or the viewer uncovers, qualifies then.
+        let tip_begun = if presented && cards_uncovered {
+            self.cards_tip.begin(
+                renderer.shown_cards().map(|card| (card.pane, card.nonce)),
+                std::time::Instant::now(),
+            )
+        } else {
+            None
+        };
         // C1 records only a presented scene. Reuse that scene immediately,
         // before any renderer setter can invalidate it, and with the same cfg.
         let cursor_patch = if blink_handoff && matches!(&frame_result, Ok(FrameOutcome::Presented))
@@ -16114,6 +16150,14 @@ impl App {
         };
         // Return the snapshot pool (cell-Vec capacity recycles next frame).
         drop(panes);
+        if let Some((pane, nonce)) = tip_begun
+            && let Some(state) = ws.mux.panes.get_mut(&pane)
+        {
+            state.inline_cards.set_tip(Some(nonce));
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        }
         ws.pane_snapshots = snaps;
         ws.pane_snapshot_keys = snapshot_keys;
         match frame_result {
@@ -34779,6 +34823,15 @@ impl App {
             ws.card_hover_stale = false;
             self.sync_cursor_icon(ws);
         }
+        // The tip leaves its card when its time is up.
+        if self.cards_tip.until().is_some_and(|until| until <= now) {
+            self.end_cards_tip(ws);
+        }
+        let cards_tip_wait = self.cards_tip.until().map(|until| {
+            until
+                .saturating_duration_since(now)
+                .max(std::time::Duration::from_millis(1))
+        });
         let card_settle_wait = ws.card_settle_wake.map(|at| {
             at.saturating_duration_since(now)
                 .max(std::time::Duration::from_millis(1))
@@ -35025,6 +35078,9 @@ impl App {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         if let Some(next) = card_settle_wait {
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
+        if let Some(next) = cards_tip_wait {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         if let Some(next) = pending_video_receipt_wait {
@@ -40700,6 +40756,38 @@ mod tests {
         assert!(source.contains("ws.cursor = position; ws.native_pointer = Some(position);"));
     }
 
+    /// The first card a user ever sees carries the tip that a click opens
+    /// it, from the first frame showing it, until a card is opened or the
+    /// tip's time is up, which wakes the loop; the tip state loads at start.
+    #[test]
+    fn the_first_card_shows_the_tip_until_opened_or_timed_out() {
+        let source = super::production_source()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(source.contains("cards_tip: crate::media::CardsTip::load(),"));
+        assert!(source.contains(
+            "let cards_uncovered = !self.pointer_modal_open(ws) && ws.media_viewer.is_none();"
+        ));
+        assert!(source.contains(
+            "let tip_begun = if presented && cards_uncovered { self.cards_tip.begin( renderer.shown_cards().map(|card| (card.pane, card.nonce)),"
+        ));
+        let begun = source
+            .find("drop(panes); if let Some((pane, nonce)) = tip_begun")
+            .expect("set after the views");
+        assert!(source[begun..].contains("state.inline_cards.set_tip(Some(nonce));"));
+        assert!(source.contains(
+            "self.show_media_item(ws, pane, item); // Opening a card is what the tip taught. self.end_cards_tip(ws);"
+        ));
+        assert!(source.contains(
+            "if self.cards_tip.until().is_some_and(|until| until <= now) { self.end_cards_tip(ws); }"
+        ));
+        assert!(source.contains(
+            "if let Some(next) = cards_tip_wait { wait = Some(wait.map_or(next, |current| current.min(next))); }"
+        ));
+        assert!(source.contains("state.inline_cards.set_tip(None);"));
+    }
+
     /// A card takes its primary press before anything else in the window,
     /// on the native and control paths alike, after only the dialogs and
     /// the media viewer that own every press; its release is the card's too.
@@ -40798,7 +40886,7 @@ mod tests {
         }
         // A card has been seen once a frame showing it reached the screen.
         assert!(source.contains(
-            "if matches!(&frame_result, Ok(FrameOutcome::Presented))\n            && ws\n                .card_sightings\n                .note(renderer.painted_cards(), std::time::Instant::now())"
+            "let presented = matches!(&frame_result, Ok(FrameOutcome::Presented));\n        if presented\n            && ws\n                .card_sightings\n                .note(renderer.painted_cards(), std::time::Instant::now())"
         ));
     }
 

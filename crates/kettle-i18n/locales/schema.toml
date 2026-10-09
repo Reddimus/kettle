@@ -1431,6 +1431,9 @@ context = "crates/kettle-render/src/card_scene.rs: status inside an owned inline
 [messages.inline_card_unavailable]
 context = "crates/kettle-render/src/card_scene.rs: status inside an owned inline media card whose poster is unavailable."
 
+[messages.inline_card_tip]
+context = "crates/kettle-render/src/card_scene.rs: a short, one-time tip drawn on a strip along the foot of the first inline media card a user sees, saying that clicking the card opens it in Kettle's media viewer. Keep it very short: it must fit a card a few cells wide."
+
 [messages.media_shelf_untitled]
 context = "crates/kettle-ui/src/app.rs ctl_show: title of a media shelf item an agent sent as inline image or SVG bytes without a title. The item is a picture; keep it short."
 

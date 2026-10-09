@@ -19,6 +19,11 @@ pub(crate) struct CardScene {
     /// Each drawn card's nonce and the part of it on screen, in surface
     /// pixels, in the order drawn.
     pub drawn: Vec<(kettle_core::InlineNonce, [f32; 4])>,
+    /// For each poster, the index in `drawn` of its card.
+    poster_cards: Vec<usize>,
+    /// For each drawn card, whether its image is in the frame: its poster
+    /// reached the GPU. Set by `apply_upload_results`.
+    pub shown: Vec<bool>,
 }
 
 #[derive(Clone, Copy)]
@@ -36,6 +41,8 @@ pub(crate) enum CardLabelKind {
     Harness(crate::CardHarness),
     Pending,
     Unavailable,
+    /// The one-time tip that a click opens the card.
+    Tip,
 }
 impl CardLabel {
     pub fn text(&self) -> &'static str {
@@ -44,6 +51,7 @@ impl CardLabel {
             CardLabelKind::Harness(harness) => harness.name(),
             CardLabelKind::Pending => self.tr.text(kettle_i18n::Text::InlineCardPending),
             CardLabelKind::Unavailable => self.tr.text(kettle_i18n::Text::InlineCardUnavailable),
+            CardLabelKind::Tip => self.tr.text(kettle_i18n::Text::InlineCardTip),
         }
     }
 }
@@ -125,13 +133,20 @@ impl CardScene {
         self.cursors.clear();
         self.labels.clear();
         self.drawn.clear();
+        self.poster_cards.clear();
+        self.shown.clear();
     }
 
     pub fn apply_upload_results(&mut self, drawn: impl Iterator<Item = usize>) {
         let mut drawn = drawn.peekable();
+        self.shown.clear();
+        self.shown.resize(self.drawn.len(), false);
         for (index, failure) in self.poster_failures.iter().enumerate() {
             if drawn.peek().copied() == Some(index) {
                 drawn.next();
+                if let Some(&card) = self.poster_cards.get(index) {
+                    self.shown[card] = true;
+                }
             } else if let Some(failure) = failure {
                 self.labels.push(*failure);
             }
@@ -183,6 +198,7 @@ impl CardScene {
                             None,
                             geometry.clip,
                         ));
+                        self.poster_cards.push(self.drawn.len() - 1);
                         let failure = status_label_rect(clipped, ch, false)
                             .filter(|_| intersect(target, geometry.clip).is_some())
                             .map(|rect| CardLabel {
@@ -237,6 +253,20 @@ impl CardScene {
                         });
                     }
                 }
+            }
+            // The tip sits on a strip along the card's foot, over its image,
+            // so it reads on any poster and covers no terminal text.
+            if state == CardBadgeState::Ready
+                && cards.tip() == Some(block.nonce)
+                && let Some(strip) = status_label_rect(clipped, ch, true)
+            {
+                self.decoration.push(quad(strip, colors.background, 0.85));
+                self.labels.push(CardLabel {
+                    rect: strip,
+                    kind: CardLabelKind::Tip,
+                    tr: geometry.tr,
+                    scale: 1.0,
+                });
             }
             if state != CardBadgeState::Ready {
                 let kind = if state == CardBadgeState::Pending {
@@ -585,6 +615,90 @@ mod tests {
                 scene.labels.capacity()
             )
         );
+    }
+
+    /// The tip that a click opens a card shows on its foot, over a
+    /// backdrop, only on the card holding it and only once its image is
+    /// ready; only a registered card can hold it, and removing the card
+    /// takes it away.
+    #[test]
+    fn the_tip_shows_on_its_ready_card_only() {
+        let (mut cards, snap, nonce) = crate::inline_cards::tests::fixture();
+        let mut frame = CardFrame::default();
+        cards.recognize_into(&snap, &mut frame);
+        let scene_for = |cards: &InlineCards| {
+            let mut scene = CardScene::default();
+            scene.append(
+                cards,
+                &frame,
+                &snap,
+                &CardGeometry {
+                    grid_origin: [0.0, 0.0],
+                    cell: [8.0, 16.0],
+                    clip: [0.0, 0.0, 2000.0, 2000.0],
+                    tr: kettle_i18n::Translator::default(),
+                },
+                &CardColors {
+                    background: Rgb::new(10, 10, 10),
+                    frame: Rgb::new(255, 0, 0),
+                    selection: Rgb::new(0, 0, 255),
+                },
+            );
+            scene
+        };
+        let tips = |scene: &CardScene| {
+            scene
+                .labels
+                .iter()
+                .filter(|label| label.kind == CardLabelKind::Tip)
+                .copied()
+                .collect::<Vec<_>>()
+        };
+        cards.set_tip(Some(nonce));
+        assert!(tips(&scene_for(&cards)).is_empty(), "not while pending");
+        let poster = kettle_core::ImageData::new_with_budget(
+            2,
+            1,
+            vec![255; 8],
+            &kettle_core::GraphicsBudget::previews(),
+        );
+        cards.set_poster(nonce, poster.as_ref());
+        let scene = scene_for(&cards);
+        let tip = tips(&scene);
+        assert_eq!(tip.len(), 1);
+        assert_eq!(tip[0].text(), "Click to open");
+        let (_, drawn) = scene.drawn[0];
+        assert!(
+            tip[0].rect[0] >= drawn[0]
+                && tip[0].rect[1] >= drawn[1]
+                && tip[0].rect[0] + tip[0].rect[2] <= drawn[0] + drawn[2]
+                && tip[0].rect[1] + tip[0].rect[3] <= drawn[1] + drawn[3],
+            "on the card"
+        );
+        assert!(scene.decoration.len() > scene_for(&InlineCards::default()).decoration.len());
+        cards.set_tip(None);
+        assert!(tips(&scene_for(&cards)).is_empty());
+        let other = kettle_core::InlineNonce::new([6, 5, 4, 3, 2, 1]).unwrap();
+        cards.set_tip(Some(other));
+        assert_eq!(cards.tip(), None, "only a registered card");
+        // A tip held by another card, not on screen, leaves this one plain.
+        cards
+            .insert(
+                other,
+                crate::CardSpec {
+                    rows: 3,
+                    columns: 12,
+                    harness: crate::CardHarness::ClaudeHook,
+                    caption: "other.png - raster 2x1".into(),
+                    poster: None,
+                },
+            )
+            .unwrap();
+        cards.set_tip(Some(other));
+        assert!(tips(&scene_for(&cards)).is_empty(), "not on another card");
+        cards.set_tip(Some(nonce));
+        cards.remove(nonce);
+        assert_eq!(cards.tip(), None, "removal takes the tip");
     }
 
     #[test]
