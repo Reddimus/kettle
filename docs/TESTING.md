@@ -4088,6 +4088,22 @@ opens on the file with "You opened this from the pane", and
 to the PNG offers "Preview in Kettle" between Open Link and Copy Link
 Address; a path to a text file gets no label.
 
+Copied files: `kettle-ui` tests pin that a file a file manager copied
+previews as the first listed one a lane can show, ignoring the text beside
+it and any relative entry; that copied text previews only as one path or
+`file://` link to such a file (quotes and a shell's escapes undone, a
+relative path only from a known folder, never a web or other URL, two
+lines, `..` or more than 4 KiB), and on Windows only as a drive path; that
+Shift+right-click on the selection opens the menu instead of extending it;
+that only Shift+right-click reads the clipboard for the menu's row; and
+that `preview_next`, `preview_previous` and `close_preview` act through the
+lane's own controls. For a live check, copy a PNG's absolute path, bind
+`preview_clipboard_path` to a chord in a scratch config and press it for
+real (on macOS, System Events under `launchctl asuser`): the lane opens on
+it. `kettle ctl perform_action` with the same action previews nothing, as
+no control request may start a read. Then `send_mouse` a right click with
+`"mods":["shift"]` and see "Preview Copied File" in the menu.
+
 `kettle mcp --display`: unit tests pin that it offers exactly `kettle_show`
 (path required, no other property) and refuses every full-mode tool, that
 full mode does not offer it, that bad requests (no path, a relative path, a

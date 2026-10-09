@@ -186,6 +186,9 @@ context = "crates/kettle-ui/src/app.rs handle_action PreviewLink: title of the d
 [messages.notify_body_preview_nothing]
 context = "crates/kettle-ui/src/app.rs handle_action PreviewLink: body when the focused pane's visible text names no image, SVG or Mermaid file. Quick select finds a path only with a folder in it; './plot.png' is a literal example path and stays as is."
 
+[messages.notify_body_preview_nothing_copied]
+context = "crates/kettle-ui/src/app.rs preview_copied_file: body, under notify_title_preview_nothing, when the clipboard names no image, SVG or Mermaid file. 'file://' is a literal URL scheme and stays as is."
+
 [messages.notify_title_preview_no_room]
 context = "crates/kettle-ui/src/app.rs show_media_item: title of the desktop notification when the user opens a pane's preview lane but the pane is too small to hold even its one-row strip beside the terminal. 'kettle' is the product name, lowercase as in the other notification titles."
 
@@ -203,6 +206,9 @@ context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row.
 
 [messages.menu_preview_in_kettle]
 context = "crates/kettle-ui/src/app.rs link_menu_rows: right-click menu row on a link to a local image, SVG or Mermaid file, after Open Link: show the file in the pane's own preview lane in Kettle instead of another app. 'Kettle' is the product name."
+
+[messages.menu_preview_copied_file]
+context = "crates/kettle-ui/src/app.rs open_context_menu: right-click menu row, shown on Shift+right-click when the clipboard names a file the preview lane can show; it previews that file in the pane's lane. Title Case like the other menu rows."
 
 [messages.menu_paste]
 context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row."
@@ -1527,6 +1533,18 @@ context = "crates/kettle-config/src/palette.rs: command palette entry that opens
 
 [messages.palette_preview_link]
 context = "crates/kettle-config/src/palette.rs: command palette row that labels the image, SVG and Mermaid files named in the focused pane (quick select) and previews the one the user picks in Kettle's preview lane, beside the terminal. 'Kettle' is the product name."
+
+[messages.palette_preview_clipboard_path]
+context = "crates/kettle-config/src/palette.rs: command palette entry for preview_clipboard_path, which previews in the focused pane's preview lane the file the clipboard names (a file copied in a file manager, or a copied path or file:// link)."
+
+[messages.palette_preview_next]
+context = "crates/kettle-config/src/palette.rs: command palette entry that shows the next item of the focused pane's media shelf in its preview lane."
+
+[messages.palette_preview_previous]
+context = "crates/kettle-config/src/palette.rs: command palette entry that shows the previous item of the focused pane's media shelf in its preview lane."
+
+[messages.palette_close_preview]
+context = "crates/kettle-config/src/palette.rs: command palette entry that closes the focused pane's preview lane, giving its terminal the room back."
 
 [messages.media_viewer_kind_image]
 context = "crates/kettle-ui/src/app.rs media_viewer_projection: kind of a raster item in the media viewer's detail line."

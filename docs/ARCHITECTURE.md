@@ -697,6 +697,13 @@ stands for the user's gesture, which is what the witness asserts.
 A finished pull lands on the shelf as `Provenance::User` and waits in
 `App::previews_ready` (eight at most) for its window's next pass of the
 event loop, which opens it in the pane's lane if the pane is still open.
+`preview_clipboard_path` reaches the same two calls from the clipboard
+(`copied_preview`): a file list a file manager copied goes straight to
+`pull_preview` as this computer's, after a round trip through a file URL
+that refuses a relative path, a share or `..`; one copied path or
+`file://` link goes through `preview_pane_link` and the focused pane's
+gate. Shift+right-click reads the clipboard to offer it as a menu row; a
+plain right-click never does.
 
 ```mermaid
 graph LR

@@ -454,6 +454,14 @@ the font, whatever `keybind-yield` says; `Ctrl+-` and `Cmd+-` still are. To
 shrink with them again, add `keybind = ctrl+shift+minus=decrease_font_size`
 and `keybind = ctrl+shift+_=decrease_font_size`.
 
+The pointer works the same way. While a program has mouse reporting on, it
+gets your clicks, and Shift keeps a click Kettle's: Shift+drag selects text,
+and Shift+right-click opens Kettle's menu, which also offers "Preview Copied
+File" when the clipboard names an image, SVG or Mermaid file. With text
+selected, Shift+right-click off the selection extends it, as in xterm, and on
+the selection opens the menu. With `putty-paste-style` on, a right-click
+pastes instead, Shift or not.
+
 ## Claude Code diff panel
 
 Claude Code 2.1.260 and newer draws a diff panel beside the conversation

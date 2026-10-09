@@ -321,6 +321,15 @@ pub enum Action {
     /// Quick select for previews: label the image, SVG and Mermaid files the
     /// focused pane names, and preview the one picked in its lane.
     PreviewLink,
+    /// Preview, in the focused pane's lane, the file the clipboard names: a
+    /// file copied in a file manager, or a copied path or `file://` link.
+    PreviewClipboardPath,
+    /// Show the next item on the shelf in the focused pane's lane.
+    PreviewNext,
+    /// Show the previous item on the shelf in the focused pane's lane.
+    PreviewPrevious,
+    /// Close the focused pane's preview lane.
+    ClosePreview,
     /// Terminator parity (`key_send_newline`). Writes a literal `\n` to the focused
     /// pane's PTY. Mostly useful for inserting a newline into a
     /// shell line-editor that's otherwise consuming Enter
@@ -718,6 +727,10 @@ pub fn action_names() -> Vec<&'static str> {
         "open_theme_picker",
         "open_media_shelf",
         "preview_link",
+        "preview_clipboard_path",
+        "preview_next",
+        "preview_previous",
+        "close_preview",
         "preferences",
         "edit_config",
         "settings",
@@ -1010,6 +1023,10 @@ impl Action {
             "open_theme_picker" | "open-theme-picker" => OpenThemePicker,
             "open_media_shelf" | "open-media-shelf" => OpenMediaShelf,
             "preview_link" | "preview-link" => PreviewLink,
+            "preview_clipboard_path" | "preview-clipboard-path" => PreviewClipboardPath,
+            "preview_next" | "preview-next" => PreviewNext,
+            "preview_previous" | "preview-previous" => PreviewPrevious,
+            "close_preview" | "close-preview" => ClosePreview,
             "preferences"
             | "preferences_keybindings"
             | "preferences-keybindings"

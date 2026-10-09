@@ -633,6 +633,20 @@ file that cannot be previewed (gone, unreadable, too large, not an image, or
 previews unavailable) is explained in a notification. The right-click menu
 offers the same as "Preview in Kettle" on a link to such a file. The command
 palette lists it as "Preview a file in Kettle"; it has no default binding.
+`preview_clipboard_path` (`preview-clipboard-path`) previews the file the
+clipboard names in the focused pane's lane: the first image, SVG or Mermaid
+file a file manager copied, or else one copied path (resolved from the
+pane's folder; quotes and a shell's backslash escapes around it are undone)
+or `file://` link. A copied path or link meets the focused pane's gate, as
+one in its output would; a file a file manager copied is this computer's. On
+Windows only a drive path counts, never a `\\host\share` path.
+Shift+right-click offers it too, as "Preview Copied File", when the
+clipboard names such a file; only Shift+right-click reads the clipboard for
+that. As with `preview_link`, a control client cannot have it read a file.
+The palette lists it as "Preview the copied file in Kettle". `preview_next`,
+`preview_previous` and `close_preview` browse and close the focused pane's
+lane as its `›`, `‹` and `×` do ("Next preview", "Previous preview" and
+"Close preview lane" in the palette). None has a default binding.
 
 **Modals + UI**: `command_palette` (`palette`), `hint_mode` (`hints` /
 `quick_select`; labels the URLs, paths (a quoted or backticked path may hold

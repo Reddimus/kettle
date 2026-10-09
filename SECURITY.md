@@ -122,15 +122,22 @@ Reports that fit any of these are welcome:
   GUI user pull, and never echoes input in a failure. A frame that gets past
   those checks with oversized or hostile content is in scope.
 - **Previews the user asks for** — Kettle reads a file a pane names into a
-  preview lane only on the user's own gesture, a `preview_link` label or the
-  right-click menu's "Preview in Kettle" row, and only past the gate that
-  opening the link passes: refused for a pane on another machine or one that
-  has gone, asked about behind tmux, screen or zellij and checked again on
-  confirm. Input a control client sends (`perform_action`,
-  `dispatch_ui_key`, `send_mouse`) never counts as that gesture: while
-  Kettle handles a control request it starts no such read. Terminal
-  output, a control client or a remote host that starts such a read without
-  that gesture, or past that gate, is in scope.
+  preview lane only on the user's own gesture, a `preview_link` label or
+  the right-click menu's "Preview in Kettle" row, and only past the gate
+  that opening the link passes: refused for a pane on another machine or
+  one that has gone, asked about behind tmux, screen or zellij and checked
+  again on confirm. A copied path or `file://` link
+  (`preview_clipboard_path`, or Shift+right-click's "Preview Copied File")
+  passes the focused pane's gate the same way, since it may have been
+  copied from that pane; a file a file manager copied is this computer's,
+  as no pane's output can put one on the clipboard, and must still be an
+  absolute path that a file URL carries unchanged, never a `\\host\share`
+  path (a share mounted as a folder reads like any other folder). Input a
+  control client sends (`perform_action`, `dispatch_ui_key`, `send_mouse`)
+  never counts as that gesture: while Kettle handles a control request it
+  starts no such read. Terminal output, a control client or a remote host
+  that starts such a read without that gesture, or past that gate, is in
+  scope.
 - **Media worker selection** — Kettle looks for its media worker only beside
   its own executable, at the path recorded at startup, never in `PATH`, the
   working directory or the environment. The worker must be a regular
