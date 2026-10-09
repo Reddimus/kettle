@@ -952,7 +952,8 @@ mod tests {
         assert_eq!(schema["required"], json!(["path"]));
         assert_eq!(schema["additionalProperties"], json!(false));
         let properties: Vec<_> = schema["properties"].as_object().unwrap().keys().collect();
-        assert_eq!(properties, ["key", "path", "title"]);
+        // In the order the schema lists them, as JSON objects keep it.
+        assert_eq!(properties, ["path", "title", "key"]);
         for name in names(ToolSelection::Full) {
             assert!(
                 validate_tool_call(
