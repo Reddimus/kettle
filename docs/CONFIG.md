@@ -620,15 +620,20 @@ lane (`▾`/`▴`) and closes it (`×`). For an SVG or a Mermaid diagram it also
 shows the source the item was rendered from (`≡`, and `▣` back to the
 picture), a row per line, with tabs expanded and characters that would
 reorder or hide text shown as `�`; the wheel scrolls the source, and a
-sideways swipe, or the wheel with Shift held, scrolls it sideways. `◐` puts the picture on the next background: the pane's, white,
+sideways swipe, or the wheel with Shift held, scrolls it sideways. The
+picture zooms with `−` and `+`, a pinch, or the wheel with Cmd held on
+macOS and Ctrl elsewhere, at the pointer, from an eighth of its fit to 32
+times it; the wheel or a drag pans it, and `⤢` shows it fitted again. A
+zoomed picture shows the pixels the lane already holds, magnified.
+`◐` puts the picture on the next background: the pane's, white,
 then a checkerboard; a diagram is drawn again for it, as its colors follow
 the background, from the same source, and if the file changed since, the
 lane says so and keeps the picture as it was. `⧉` copies the picture, or the
 source while the source shows, exactly as it was read. An item read from a
 file has `↻`, which reads the file again and shows what it holds now, in the
 same place on the shelf. Where the header is too narrow, these give way,
-open outside first, then copy, browsing, the background and the source, and
-reload last. A press or the wheel over a lane never
+open outside first, then zoom out, zoom in and fit, copy, browsing, the
+background and the source, and reload last. A press or the wheel over a lane never
 reaches the terminal, and menus and dialogs open over it without closing it.
 The command palette lists it as "Open media shelf". On macOS its default
 chord is `Ctrl+Shift+Cmd+I`; elsewhere it has no default binding.
@@ -659,9 +664,11 @@ The palette lists it as "Preview the copied file in Kettle". `preview_next`,
 `preview_previous` and `close_preview` browse and close the focused pane's
 lane as its `›`, `‹` and `×` do ("Next preview", "Previous preview" and
 "Close preview lane" in the palette), and `preview_source`,
-`preview_canvas`, `preview_copy` and `preview_reload` as its `≡`, `◐`, `⧉`
-and `↻` do ("Show preview source", "Next preview canvas", "Copy preview" and
-"Reload preview"). None has a default binding.
+`preview_canvas`, `preview_copy`, `preview_reload`, `preview_zoom_in`,
+`preview_zoom_out` and `preview_fit` as its `≡`, `◐`, `⧉`, `↻`, `+`, `−` and
+`⤢` do ("Show preview source", "Next preview canvas", "Copy preview",
+"Reload preview", "Zoom preview in", "Zoom preview out" and "Fit preview to
+lane"). None has a default binding.
 
 **Modals + UI**: `command_palette` (`palette`), `hint_mode` (`hints` /
 `quick_select`; labels the URLs, paths (a quoted or backticked path may hold

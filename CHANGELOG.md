@@ -149,6 +149,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   the source exactly as it was read (`⧉`); and read an item's file again
   (`↻`), replacing it in place. Also as `preview_source`, `preview_canvas`,
   `preview_copy` and `preview_reload`. In English and Spanish.
+- Zoom and pan a preview: `−` and `+` in the lane's header, a pinch, or
+  Cmd+wheel (Ctrl+wheel off macOS) at the pointer zoom the picture, the
+  wheel or a drag pans it, and `⤢` fits it again. Also as
+  `preview_zoom_in`, `preview_zoom_out` and `preview_fit`.
 - Preview a file without an agent: `preview_link` (palette: "Preview a file
   in Kettle") labels the image, SVG and Mermaid files in the focused pane,
   and typing a label renders that file in its pane's lane; right-clicking a

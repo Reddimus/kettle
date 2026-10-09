@@ -937,6 +937,111 @@ fn source_scroll_by(steps: input::WheelSteps, shift: bool) -> (i32, i32) {
     }
 }
 
+/// What the wheel does over a lane's rendered item.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum LaneWheel {
+    /// Zoom at the pointer by this factor.
+    Zoom(f64),
+    /// Move the item by these pixels.
+    Pan((f64, f64)),
+}
+
+/// How far, in logical pixels, a press on a lane's rendered item moves
+/// before it pans the item.
+const LANE_DRAG_SLOP: f64 = 3.0;
+
+/// Whether a press at `from` moved to `at`, in physical pixels at `scale`,
+/// is a drag.
+fn past_drag_slop(from: (f64, f64), at: (f64, f64), scale: f64) -> bool {
+    (at.0 - from.0).hypot(at.1 - from.1) >= LANE_DRAG_SLOP * scale
+}
+
+/// Most zoom steps one wheel event takes, so a burst a control client or a
+/// device sends stays a zoom rather than a jump to an end.
+const MAX_ZOOM_NOTCHES: f64 = 10.0;
+
+/// What `delta` does over a lane's rendered item: zoom with `zooms` held
+/// (Cmd on macOS, Ctrl elsewhere), a step per notch or per notch's worth of
+/// a touchpad's pixels; otherwise pan, by a touchpad's pixels as they come
+/// and by a wheel's lines a notch, in `cell`s, as the terminal scrolls.
+/// Shift turns a wheel's vertical motion sideways.
+fn lane_wheel(
+    delta: &winit::event::MouseScrollDelta,
+    zooms: bool,
+    shift: bool,
+    cell: (f32, f32),
+    multiplier: f32,
+) -> LaneWheel {
+    use winit::event::MouseScrollDelta as D;
+    let (notches, pan) = match *delta {
+        D::LineDelta(x, y) => {
+            let notches = f64::from(y);
+            let (x, y) = (f64::from(x), f64::from(y));
+            let (x, y) = if shift && x == 0.0 { (y, 0.0) } else { (x, y) };
+            let lines = f64::from(input::LINES_PER_NOTCH * multiplier.max(0.0));
+            (
+                notches,
+                (x * lines * f64::from(cell.0), y * lines * f64::from(cell.1)),
+            )
+        }
+        D::PixelDelta(position) => (
+            position.y / f64::from(input::PIXELS_PER_NOTCH),
+            (position.x, position.y),
+        ),
+    };
+    if zooms {
+        LaneWheel::Zoom(
+            kettle_render::MEDIA_ZOOM_STEP.powf(notches.clamp(-MAX_ZOOM_NOTCHES, MAX_ZOOM_NOTCHES)),
+        )
+    } else {
+        LaneWheel::Pan(pan)
+    }
+}
+
+/// Whether `mods` hold the key that turns the wheel over a lane's rendered
+/// item into a zoom: Cmd on macOS, Ctrl elsewhere.
+fn lane_zoom_modifier(mods: winit::keyboard::ModifiersState) -> bool {
+    if cfg!(target_os = "macos") {
+        mods.super_key()
+    } else {
+        mods.control_key()
+    }
+}
+
+/// What whole wheel `steps` a control client sent do over a lane's
+/// rendered item, as [`lane_wheel`] does with a wheel's lines: zoom a step
+/// a notch with `zooms` held, or pan a row a line and three columns a
+/// sideways notch, the lines sideways with Shift.
+fn lane_wheel_steps(
+    steps: input::WheelSteps,
+    zooms: bool,
+    shift: bool,
+    cell: (f32, f32),
+) -> LaneWheel {
+    if zooms {
+        let notches = f64::from(steps.notches).clamp(-MAX_ZOOM_NOTCHES, MAX_ZOOM_NOTCHES);
+        return LaneWheel::Zoom(kettle_render::MEDIA_ZOOM_STEP.powf(notches));
+    }
+    let columns = f64::from(steps.cols) * f64::from(input::LINES_PER_NOTCH);
+    let lines = f64::from(steps.lines);
+    let (x, y) = if shift && steps.cols == 0 {
+        (lines, 0.0)
+    } else {
+        (columns, lines)
+    };
+    LaneWheel::Pan((x * f64::from(cell.0), y * f64::from(cell.1)))
+}
+
+/// The zoom a pinch of `delta` makes, as winit counts it: positive
+/// magnifies. Bounded, so no one event shrinks the item to nothing.
+fn pinch_zoom(delta: f64) -> f64 {
+    if delta.is_finite() {
+        1.0 + delta.clamp(-0.5, 1.0)
+    } else {
+        1.0
+    }
+}
+
 /// The part of `text`, which has `total` rows, a lane shows from `scroll`
 /// in `rows` rows of `columns` columns. A source replaced under its key may
 /// be shorter than the one scrolled, so the scroll is kept on it.
@@ -1059,7 +1164,7 @@ fn lane_controls(
     u64,
     Option<kettle_render::Rect4>,
     kettle_render::MediaLaneHit,
-); 9] {
+); 12] {
     use kettle_render::MediaLaneHit as Hit;
     [
         (1, geometry.previous, Hit::Previous),
@@ -1071,6 +1176,9 @@ fn lane_controls(
         (7, geometry.canvas, Hit::Canvas),
         (8, geometry.copy, Hit::Copy),
         (9, geometry.reload, Hit::Reload),
+        (10, geometry.zoom_out, Hit::ZoomOut),
+        (11, geometry.zoom_in, Hit::ZoomIn),
+        (12, geometry.zoom_fit, Hit::Fit),
     ]
 }
 
@@ -1087,6 +1195,9 @@ fn lane_control_name(hit: kettle_render::MediaLaneHit) -> &'static str {
         Hit::Canvas => "canvas",
         Hit::Copy => "copy",
         Hit::Reload => "reload",
+        Hit::ZoomOut => "zoom_out",
+        Hit::ZoomIn => "zoom_in",
+        Hit::Fit => "fit",
         Hit::Inside => "inside",
     }
 }
@@ -5848,6 +5959,9 @@ fn lane_action_hit(action: &Action) -> Option<kettle_render::MediaLaneHit> {
         Action::PreviewCanvas => Some(Hit::Canvas),
         Action::PreviewCopy => Some(Hit::Copy),
         Action::PreviewReload => Some(Hit::Reload),
+        Action::PreviewZoomIn => Some(Hit::ZoomIn),
+        Action::PreviewZoomOut => Some(Hit::ZoomOut),
+        Action::PreviewFit => Some(Hit::Fit),
         _ => None,
     }
 }
@@ -10839,7 +10953,9 @@ impl App {
 
     /// Close `pane`'s preview lane; its terminal gets the room back.
     fn close_preview(&mut self, ws: &mut WindowState, pane: u64) {
-        // Motion banked toward a scroll of the lane goes with it.
+        // Motion banked toward a scroll of the lane goes with it. A press
+        // on it still owns the pointer until its release, which is the
+        // lane's.
         ws.lane_wheel.reset();
         let had_panel = ws.preview_panels.remove(&pane).is_some();
         let resized = ws.mux.close_lane(pane);
@@ -11018,6 +11134,142 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Change how `pane`'s lane shows its rendered item: `change` gets the
+    /// view, the item's fitted rectangle and the content it shows in.
+    /// Whether the lane shows a rendered item to change.
+    fn change_preview_view(
+        &mut self,
+        ws: &mut WindowState,
+        pane: u64,
+        change: impl FnOnce(
+            kettle_render::MediaViewport,
+            kettle_render::Rect4,
+            kettle_render::Rect4,
+        ) -> kettle_render::MediaViewport,
+    ) -> bool {
+        let Some(geometry) = self.preview_lane_geometry_of(ws, pane) else {
+            return false;
+        };
+        let (Some(fit), Some(panel)) = (geometry.fit, ws.preview_panels.get_mut(&pane)) else {
+            return false;
+        };
+        let view = change(panel.view, fit, geometry.content);
+        if view != panel.view {
+            panel.view = view;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        }
+        true
+    }
+
+    /// Zoom `pane`'s rendered item by `factor` about the content's center.
+    fn zoom_preview(&mut self, ws: &mut WindowState, pane: u64, factor: f64) {
+        self.change_preview_view(ws, pane, |view, fit, content| {
+            view.zoomed(factor, fit, content)
+        });
+    }
+
+    /// Show `pane`'s rendered item fitted to its lane again.
+    fn fit_preview(&mut self, ws: &mut WindowState, pane: u64) {
+        self.change_preview_view(ws, pane, |_, _, _| kettle_render::MediaViewport::FIT);
+    }
+
+    /// The wheel over the lane under the pointer: over its rendered item it
+    /// zooms at the pointer with Cmd held on macOS, Ctrl elsewhere, and pans
+    /// otherwise; over its source it scrolls. A lane showing neither takes
+    /// the wheel and does nothing with it.
+    fn wheel_over_lane(&mut self, ws: &mut WindowState, delta: &winit::event::MouseScrollDelta) {
+        let pointer = (ws.cursor.x as f32, ws.cursor.y as f32);
+        let Some((pane, _, _)) = self.preview_lane_at(ws, pointer.0, pointer.1) else {
+            return;
+        };
+        let wheel = lane_wheel(
+            delta,
+            lane_zoom_modifier(ws.mods),
+            ws.mods.shift_key(),
+            self.menu_cell(ws),
+            self.cfg.scroll_multiplier,
+        );
+        let rendered = self.change_preview_view(ws, pane, |view, fit, content| match wheel {
+            LaneWheel::Zoom(factor) => view.zoomed_at(factor, pointer, fit, content),
+            LaneWheel::Pan(by) => view.panned(by, fit, content),
+        });
+        if rendered {
+            ws.lane_wheel.reset();
+            return;
+        }
+        let steps = ws.lane_wheel.feed(delta, self.cfg.scroll_multiplier);
+        self.scroll_preview_lane(ws, steps);
+    }
+
+    /// Whole wheel `steps` a control client sent over the lane under the
+    /// pointer: a rendered item zooms or pans by them as by the wheel (see
+    /// [`lane_wheel_steps`]); a source scrolls.
+    fn wheel_steps_over_lane(&mut self, ws: &mut WindowState, steps: input::WheelSteps) {
+        let Some((pane, _, _)) = self.preview_lane_at(ws, ws.cursor.x as f32, ws.cursor.y as f32)
+        else {
+            return;
+        };
+        let pointer = (ws.cursor.x as f32, ws.cursor.y as f32);
+        let wheel = lane_wheel_steps(
+            steps,
+            lane_zoom_modifier(ws.mods),
+            ws.mods.shift_key(),
+            self.menu_cell(ws),
+        );
+        let rendered = self.change_preview_view(ws, pane, |view, fit, content| match wheel {
+            LaneWheel::Zoom(factor) => view.zoomed_at(factor, pointer, fit, content),
+            LaneWheel::Pan(by) => view.panned(by, fit, content),
+        });
+        if !rendered {
+            self.scroll_preview_lane(ws, steps);
+        }
+    }
+
+    /// A pinch over the lane under the pointer zooms its rendered item at
+    /// the pointer.
+    fn pinch_over_lane(&mut self, ws: &mut WindowState, delta: f64) {
+        let pointer = (ws.cursor.x as f32, ws.cursor.y as f32);
+        if let Some((pane, _, _)) = self.preview_lane_at(ws, pointer.0, pointer.1) {
+            let factor = pinch_zoom(delta);
+            self.change_preview_view(ws, pane, |view, fit, content| {
+                view.zoomed_at(factor, pointer, fit, content)
+            });
+        }
+    }
+
+    /// Follow the pointer for a press on a lane's rendered item: past a few
+    /// logical pixels from the press it pans the item. Whether a press of
+    /// the lane's is held, which then owns the pointer's motion.
+    fn drag_preview_lane(&mut self, ws: &mut WindowState) -> bool {
+        let Some(mut drag) = ws.lane_drag else {
+            return false;
+        };
+        // A menu or dialog that opened since owns the pointer.
+        if ws.context_menu.is_some() || self.pointer_modal_open(ws) {
+            ws.lane_drag = None;
+            return false;
+        }
+        let at = (ws.cursor.x, ws.cursor.y);
+        let scale = ws
+            .window
+            .as_ref()
+            .map_or(1.0, |window| window.scale_factor());
+        if !drag.panning && past_drag_slop(drag.from, at, scale) {
+            drag.panning = true;
+        }
+        if drag.panning {
+            let by = (at.0 - drag.last.0, at.1 - drag.last.1);
+            drag.last = at;
+            self.change_preview_view(ws, drag.pane, |view, fit, content| {
+                view.panned(by, fit, content)
+            });
+        }
+        ws.lane_drag = Some(drag);
+        true
     }
 
     /// Collapse `pane`'s lane to its strip, or expand it.
@@ -11406,6 +11658,7 @@ impl App {
                 .notice
                 .map(|notice| lane_notice_text(notice, tr).to_string()),
             reload: preview_reloads(item),
+            view: panel.view,
         };
         // The source rows in view, for the room the lane has: only those are
         // read out of the text.
@@ -11486,6 +11739,24 @@ impl App {
         )
     }
 
+    /// `pane`'s lane geometry as it shows in the active tab, when it has
+    /// room to draw.
+    fn preview_lane_geometry_of(
+        &self,
+        ws: &WindowState,
+        pane: u64,
+    ) -> Option<kettle_render::MediaLaneGeometry> {
+        let share = self
+            .pane_layout(ws, self.area(ws))
+            .into_iter()
+            .find(|(id, _)| *id == pane)?
+            .1
+            .lane?;
+        let strip = matches!(share, crate::pane_partition::LaneShare::Strip(_));
+        let lane = self.preview_lane_panel(ws, pane, share.rect()?, strip)?;
+        self.preview_lane_geometry(ws, &lane)
+    }
+
     /// The lane under `(x, y)` in the active tab, with its pane and whether
     /// it shows as a strip: the whole lane, whether or not its panel has room
     /// to draw.
@@ -11501,11 +11772,9 @@ impl App {
             })
     }
 
-    /// Whether a preview lane is under the pointer. It then owns the wheel
-    /// there, so the terminal beside it never scrolls from a wheel over the
-    /// lane.
     /// Whether the wheel at the pointer is a preview lane's: over a lane that
-    /// nothing covers. A menu or dialog open over it takes the wheel instead.
+    /// nothing covers, so the terminal beside it never scrolls from a wheel
+    /// over the lane. A menu or dialog open over it takes the wheel instead.
     fn lane_takes_wheel(&self, ws: &WindowState) -> bool {
         ws.context_menu.is_none()
             && !self.pointer_modal_open(ws)
@@ -11527,10 +11796,27 @@ impl App {
         if bcode != 0 {
             return true;
         }
-        let hit = self
+        let geometry = self
             .preview_lane_panel(ws, pane, rect, collapsed)
-            .and_then(|lane| self.preview_lane_geometry(ws, &lane))
+            .and_then(|lane| self.preview_lane_geometry(ws, &lane));
+        let hit = geometry
+            .as_ref()
             .and_then(|geometry| geometry.hit_test(x, y));
+        // A press on the content of a lane showing a rendered item may
+        // become a drag that pans it.
+        if hit == Some(kettle_render::MediaLaneHit::Inside)
+            && let Some(geometry) = geometry
+            && geometry.fit.is_some()
+            && rect_contains(geometry.content, x, y)
+        {
+            let at = (f64::from(x), f64::from(y));
+            ws.lane_drag = Some(crate::window_state::LaneDrag {
+                pane,
+                from: at,
+                last: at,
+                panning: false,
+            });
+        }
         if let Some(hit) = hit {
             self.act_on_preview(ws, pane, hit);
         }
@@ -11555,6 +11841,9 @@ impl App {
             Hit::Canvas => self.next_preview_canvas(ws, pane),
             Hit::Copy => self.copy_preview(ws, pane),
             Hit::Reload => self.reload_preview(ws, pane),
+            Hit::ZoomOut => self.zoom_preview(ws, pane, 1.0 / kettle_render::MEDIA_ZOOM_STEP),
+            Hit::ZoomIn => self.zoom_preview(ws, pane, kettle_render::MEDIA_ZOOM_STEP),
+            Hit::Fit => self.fit_preview(ws, pane),
             Hit::Inside => {}
         }
     }
@@ -18335,6 +18624,7 @@ impl App {
         ws.detach_drag = crate::detach::DragState::default();
         ws.drag_press = None;
         ws.pane_drag = None;
+        ws.lane_drag = None;
         ws.reuse_pane_snapshots_once = false;
         if self.torn_drag.as_ref().is_some_and(|drag| {
             drag.seq == ws.seq
@@ -20356,7 +20646,10 @@ impl App {
             | Action::PreviewSource
             | Action::PreviewCanvas
             | Action::PreviewCopy
-            | Action::PreviewReload => {
+            | Action::PreviewReload
+            | Action::PreviewZoomIn
+            | Action::PreviewZoomOut
+            | Action::PreviewFit => {
                 if let Some(hit) = lane_action_hit(&action)
                     && let Some(pane) = ws.mux.active_focus()
                     && ws.preview_panels.contains_key(&pane)
@@ -23859,7 +24152,12 @@ impl App {
                         kettle_render::MediaCanvas::Checker => "checker",
                     }
                     .into();
+                    lane["zoom"] = panel.view.zoom().into();
                     if let Some(geometry) = self.preview_lane_geometry(target, &panel) {
+                        // Where the content is and the item is drawn in it:
+                        // rectangles, never pixels.
+                        lane["content"] = rect_json(geometry.content);
+                        lane["image"] = geometry.image.map(rect_json).into();
                         let controls: serde_json::Map<String, serde_json::Value> =
                             lane_controls(&geometry)
                                 .into_iter()
@@ -25032,6 +25330,9 @@ impl App {
         // sources keeps scrolling even though the latest pointer coordinate is
         // back over the pane.
         ws.selection_autoscroll_edge = 0;
+        if self.drag_preview_lane(ws) {
+            return;
+        }
         // Like the media receipt below, the search lane's hover follows
         // control input so automation can exercise it.
         self.update_search_hover(ws);
@@ -25072,10 +25373,11 @@ impl App {
         event_loop: &ActiveEventLoop,
         bcode: u8,
     ) -> bool {
-        // As natively: a card press whose release never came is over, a
-        // program still holding this button gets its release, and the press
-        // is Kettle's own gesture until a program receives it. Focus leaves
-        // any card.
+        // As natively: a card press whose release never came is over, as is
+        // a lane's drag, a program still holding this button gets its
+        // release, and the press is Kettle's own gesture until a program
+        // receives it. Focus leaves any card.
+        ws.lane_drag = None;
         if bcode == 0 {
             ws.card_press = None;
         }
@@ -25227,6 +25529,9 @@ impl App {
     fn ctl_mouse_release(&mut self, ws: &mut WindowState, bcode: u8) -> bool {
         // As natively: a gesture of Kettle's own ends with its release.
         ws.held_buttons.end_own(bcode);
+        if bcode == 0 && ws.lane_drag.take().is_some() {
+            return true;
+        }
         if bcode == 0
             && search_pointer_route(ws.search.open, None, ws.search.pointer_captured())
                 == SearchPointerRoute::Bar
@@ -25293,11 +25598,10 @@ impl App {
     fn ctl_mouse_wheel_delta(&mut self, ws: &mut WindowState, notches: f64) -> bool {
         if self.lane_takes_wheel(ws) {
             ws.wheel.reset();
-            let steps = ws.lane_wheel.feed(
+            self.wheel_over_lane(
+                ws,
                 &winit::event::MouseScrollDelta::LineDelta(0.0, notches as f32),
-                self.cfg.scroll_multiplier,
             );
-            self.scroll_preview_lane(ws, steps);
             return true;
         }
         ws.lane_wheel.reset();
@@ -25337,10 +25641,10 @@ impl App {
             }
             return true;
         }
-        // A wheel over a lane is the lane's: it scrolls a source, and
-        // reaches nothing behind it.
+        // A wheel over a lane is the lane's: it pans a rendered item or
+        // scrolls a source, and reaches nothing behind it.
         if self.lane_takes_wheel(ws) {
-            self.scroll_preview_lane(ws, steps);
+            self.wheel_steps_over_lane(ws, steps);
             return true;
         }
         // Wheel over a settings field adjusts it (up = forward, down = backward).
@@ -31519,6 +31823,15 @@ impl App {
                         kettle_render::MediaLaneHit::Reload => {
                             self.ui_text.text(kettle_i18n::Text::MediaLaneA11yReload)
                         }
+                        kettle_render::MediaLaneHit::ZoomOut => {
+                            self.ui_text.text(kettle_i18n::Text::MediaLaneA11yZoomOut)
+                        }
+                        kettle_render::MediaLaneHit::ZoomIn => {
+                            self.ui_text.text(kettle_i18n::Text::MediaLaneA11yZoomIn)
+                        }
+                        kettle_render::MediaLaneHit::Fit => {
+                            self.ui_text.text(kettle_i18n::Text::MediaLaneA11yFit)
+                        }
                         kettle_render::MediaLaneHit::Inside => continue,
                     };
                     let mut button = Node::new(Role::Button);
@@ -34439,6 +34752,11 @@ impl App {
                 ws.cursor = position;
                 ws.native_pointer = Some(position);
                 ws.selection_autoscroll_edge = 0;
+                // A press the lane took owns the pointer's motion until its
+                // release: it pans the lane's item, and nothing else sees it.
+                if self.drag_preview_lane(ws) {
+                    return;
+                }
                 self.update_search_hover(ws);
                 if ws.selecting {
                     note_selection_drag_motion(ws);
@@ -34808,8 +35126,11 @@ impl App {
                     MouseButton::Right => 2,
                     _ => return,
                 };
-                // A primary press while a card still holds one means that
-                // press's release went elsewhere: the card's gesture is over.
+                // Any press while a lane's drag is held means that drag's
+                // release went elsewhere, or another gesture takes the
+                // pointer: the drag is over. Likewise a primary press while a
+                // card still holds one: the card's gesture is over.
+                ws.lane_drag = None;
                 if bcode == 0 {
                     ws.card_press = None;
                 }
@@ -35281,6 +35602,10 @@ impl App {
                     self.search_button_release(ws);
                     return;
                 }
+                // The release of a press a lane took is the lane's.
+                if bcode == 0 && ws.lane_drag.take().is_some() {
+                    return;
+                }
                 // The release of a press a card took is the card's too.
                 let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
                 if self.release_card(ws, px, py, bcode) {
@@ -35457,6 +35782,14 @@ impl App {
                     }
                 }
             }
+            // A pinch over a preview lane zooms its rendered item at the
+            // pointer; anywhere else it does nothing.
+            WindowEvent::PinchGesture { delta, .. } => {
+                ws.resume_native_pointer();
+                if self.lane_takes_wheel(ws) {
+                    self.pinch_over_lane(ws, delta);
+                }
+            }
             WindowEvent::MouseWheel { delta, phase, .. } => {
                 ws.resume_native_pointer();
                 // A gesture ending (macOS momentum scroll, and any backend that
@@ -35476,8 +35809,7 @@ impl App {
                 // terminal is dropped from the lane's the same way.
                 if self.lane_takes_wheel(ws) {
                     ws.wheel.reset();
-                    let steps = ws.lane_wheel.feed(&delta, self.cfg.scroll_multiplier);
-                    self.scroll_preview_lane(ws, steps);
+                    self.wheel_over_lane(ws, &delta);
                     return;
                 }
                 ws.lane_wheel.reset();
@@ -35543,6 +35875,8 @@ impl App {
                     // An unfocused window draws no cursor, and the Metal layer
                     // beneath already shows the off phase.
                     Self::hide_cursor_layer(ws);
+                    // Its release may never come here.
+                    ws.lane_drag = None;
                 }
                 // Non-interactive UI-state marker (OS-driven focus
                 // change — a transition the PTY output stream can't show).
@@ -42729,6 +43063,7 @@ mod tests {
             reload: false,
 
             notice: None,
+            view: kettle_render::MediaViewport::FIT,
         };
         let (label, description) = super::media_lane_accessibility(&lane, &tr);
         assert!(
@@ -55808,18 +56143,158 @@ mod lane_control_tests {
             Hit::Canvas,
             Hit::Copy,
             Hit::Reload,
+            Hit::ZoomOut,
+            Hit::ZoomIn,
+            Hit::Fit,
             Hit::Inside,
         ];
         let names: std::collections::HashSet<_> =
             hits.iter().map(|hit| lane_control_name(*hit)).collect();
         assert_eq!(names.len(), hits.len());
-        let ids: std::collections::HashSet<_> = (0..=9)
+        let ids: std::collections::HashSet<_> = (0..=12)
             .map(|part| super::accessibility_lane_id(7, part).expect("in range"))
             .collect();
-        assert_eq!(ids.len(), 10);
-        for part in 0..=9 {
+        assert_eq!(ids.len(), 13);
+        for part in 0..=12 {
             let id = super::accessibility_lane_id(7, part).unwrap();
             assert_eq!(super::accessibility_lane_part(id), Some((7, part)));
+        }
+    }
+
+    /// Over a rendered item the wheel pans by a touchpad's pixels as they
+    /// come and by a wheel's lines a notch, in cells and by the multiplier,
+    /// sideways with Shift; with the zoom modifier it zooms a step a notch,
+    /// or a notch's worth of pixels, never more than ten steps an event. A
+    /// pinch zooms by its delta, bounded.
+    #[test]
+    fn the_wheel_and_a_pinch_pan_or_zoom_a_rendered_item() {
+        use super::{LaneWheel, lane_wheel, lane_wheel_steps, pinch_zoom};
+        use winit::event::MouseScrollDelta::{LineDelta, PixelDelta};
+        let pixels = |x, y| PixelDelta(winit::dpi::PhysicalPosition::new(x, y));
+        let cell = (8.0, 16.0);
+        assert_eq!(
+            lane_wheel(&pixels(3.0, -7.5), false, false, cell, 1.0),
+            LaneWheel::Pan((3.0, -7.5)),
+            "a touchpad's pixels"
+        );
+        assert_eq!(
+            lane_wheel(&LineDelta(0.0, -1.0), false, false, cell, 1.0),
+            LaneWheel::Pan((0.0, -48.0)),
+            "three rows a notch"
+        );
+        assert_eq!(
+            lane_wheel(&LineDelta(0.0, 1.0), false, false, cell, 2.0),
+            LaneWheel::Pan((0.0, 96.0)),
+            "by the multiplier"
+        );
+        assert_eq!(
+            lane_wheel(&LineDelta(0.0, 1.0), false, true, cell, 1.0),
+            LaneWheel::Pan((24.0, 0.0)),
+            "sideways with Shift"
+        );
+        assert_eq!(
+            lane_wheel(&LineDelta(0.0, 1.0), true, false, cell, 1.0),
+            LaneWheel::Zoom(kettle_render::MEDIA_ZOOM_STEP)
+        );
+        assert_eq!(
+            lane_wheel(&LineDelta(0.0, -2.0), true, true, cell, 1.0),
+            LaneWheel::Zoom(kettle_render::MEDIA_ZOOM_STEP.powi(-2)),
+            "Shift does not turn a zoom"
+        );
+        assert_eq!(
+            lane_wheel(&pixels(0.0, 60.0), true, false, cell, 1.0),
+            LaneWheel::Zoom(kettle_render::MEDIA_ZOOM_STEP),
+            "a notch's worth of pixels"
+        );
+        assert_eq!(
+            lane_wheel(&LineDelta(0.0, 1e6), true, false, cell, 1.0),
+            LaneWheel::Zoom(kettle_render::MEDIA_ZOOM_STEP.powi(10))
+        );
+        // A control client's whole steps do as a wheel's lines would.
+        let steps = |notches, lines, cols| crate::input::WheelSteps {
+            notches,
+            lines,
+            cols,
+        };
+        assert_eq!(
+            lane_wheel_steps(steps(1, 3, 0), true, false, cell),
+            LaneWheel::Zoom(kettle_render::MEDIA_ZOOM_STEP),
+            "the zoom modifier zooms"
+        );
+        assert_eq!(
+            lane_wheel_steps(steps(100, 300, 0), true, true, cell),
+            LaneWheel::Zoom(kettle_render::MEDIA_ZOOM_STEP.powi(10))
+        );
+        assert_eq!(
+            lane_wheel_steps(steps(-1, -3, 0), false, false, cell),
+            LaneWheel::Pan((0.0, -48.0))
+        );
+        assert_eq!(
+            lane_wheel_steps(steps(1, 3, 0), false, true, cell),
+            LaneWheel::Pan((24.0, 0.0)),
+            "sideways with Shift"
+        );
+        assert_eq!(
+            lane_wheel_steps(steps(0, 0, -2), false, false, cell),
+            LaneWheel::Pan((-48.0, 0.0)),
+            "three columns a sideways step"
+        );
+        assert_eq!(pinch_zoom(0.1), 1.1);
+        assert_eq!(pinch_zoom(-0.9), 0.5);
+        assert_eq!(pinch_zoom(50.0), 2.0);
+        assert_eq!(pinch_zoom(f64::NAN), 1.0);
+        // Three logical pixels make a drag, at any scale.
+        assert!(!super::past_drag_slop((10.0, 10.0), (11.0, 12.0), 1.0));
+        assert!(super::past_drag_slop((10.0, 10.0), (13.0, 10.0), 1.0));
+        assert!(!super::past_drag_slop((10.0, 10.0), (14.0, 10.0), 2.0));
+        assert!(super::past_drag_slop((10.0, 10.0), (10.0, 4.0), 2.0));
+        for (action, hit) in [
+            (
+                kettle_config::Action::PreviewZoomIn,
+                kettle_render::MediaLaneHit::ZoomIn,
+            ),
+            (
+                kettle_config::Action::PreviewZoomOut,
+                kettle_render::MediaLaneHit::ZoomOut,
+            ),
+            (
+                kettle_config::Action::PreviewFit,
+                kettle_render::MediaLaneHit::Fit,
+            ),
+        ] {
+            assert_eq!(super::lane_action_hit(&action), Some(hit));
+        }
+    }
+
+    /// The wheel over a lane goes to `wheel_over_lane` natively and from a
+    /// control client; a pinch over one zooms it. A primary press on a
+    /// rendered item's content arms a drag, whose motion pans it and reaches
+    /// nothing else until its release, the lane's on both paths; the drag
+    /// goes when the window loses focus.
+    #[test]
+    fn lane_gestures_are_wired() {
+        let src = super::production_source();
+        let flat = src.split_whitespace().collect::<Vec<_>>().join(" ");
+        for needle in [
+            "if self.lane_takes_wheel(ws) { ws.wheel.reset(); self.wheel_over_lane(ws, &delta); return; }",
+            "if self.lane_takes_wheel(ws) { ws.wheel.reset(); self.wheel_over_lane( ws, &winit::event::MouseScrollDelta::LineDelta(0.0, notches as f32), ); return true; }",
+            "if self.lane_takes_wheel(ws) { self.wheel_steps_over_lane(ws, steps); return true; }",
+            "WindowEvent::PinchGesture { delta, .. } => { ws.resume_native_pointer(); if self.lane_takes_wheel(ws) { self.pinch_over_lane(ws, delta); } }",
+            "ws.selection_autoscroll_edge = 0; // A press the lane took owns the pointer's motion until its // release: it pans the lane's item, and nothing else sees it. if self.drag_preview_lane(ws) { return; }",
+            "ws.selection_autoscroll_edge = 0; if self.drag_preview_lane(ws) { return; }",
+            "// The release of a press a lane took is the lane's. if bcode == 0 && ws.lane_drag.take().is_some() { return; } // The release of a press a card took is the card's too.",
+            "ws.held_buttons.end_own(bcode); if bcode == 0 && ws.lane_drag.take().is_some() { return true; }",
+            "Self::hide_cursor_layer(ws); // Its release may never come here. ws.lane_drag = None;",
+            // Any press ends a drag whose release went elsewhere, natively
+            // and from a control client, as does a menu opening; a menu or
+            // dialog open since takes the pointer from it.
+            "the card's gesture is over. ws.lane_drag = None; if bcode == 0 { ws.card_press = None; }",
+            "// receives it. Focus leaves any card. ws.lane_drag = None; if bcode == 0 { ws.card_press = None; }",
+            "ws.pane_drag = None; ws.lane_drag = None; ws.reuse_pane_snapshots_once = false;",
+            "if ws.context_menu.is_some() || self.pointer_modal_open(ws) { ws.lane_drag = None; return false; }",
+            "if hit == Some(kettle_render::MediaLaneHit::Inside) && let Some(geometry) = geometry && geometry.fit.is_some() && rect_contains(geometry.content, x, y)",
+        ] {
+            assert!(flat.contains(needle), "{needle}");
         }
     }
 

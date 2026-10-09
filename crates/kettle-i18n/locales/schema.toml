@@ -1558,6 +1558,15 @@ context = "crates/kettle-config/src/palette.rs: command palette entry for previe
 [messages.palette_preview_reload]
 context = "crates/kettle-config/src/palette.rs: command palette entry for preview_reload, which reads the focused pane's preview from its file again and shows what the file holds now."
 
+[messages.palette_preview_zoom_in]
+context = "crates/kettle-config/src/palette.rs: command palette entry for preview_zoom_in, which magnifies the image in the focused pane's preview lane by one step about its center."
+
+[messages.palette_preview_zoom_out]
+context = "crates/kettle-config/src/palette.rs: command palette entry for preview_zoom_out, which shrinks the image in the focused pane's preview lane by one step about its center."
+
+[messages.palette_preview_fit]
+context = "crates/kettle-config/src/palette.rs: command palette entry for preview_fit, which shows the image in the focused pane's preview lane whole again, fitted to the lane, after zooming or panning."
+
 [messages.media_viewer_kind_image]
 context = "crates/kettle-ui/src/app.rs media_viewer_projection: kind of a raster item in the media viewer's detail line."
 
@@ -1626,6 +1635,15 @@ context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of
 
 [messages.media_lane_a11y_reload]
 context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of a preview lane's button that reads the item's file again and shows what it holds now. An infinitive in Spanish."
+
+[messages.media_lane_a11y_zoom_out]
+context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of a preview lane's button that shrinks the image by one step. An infinitive in Spanish."
+
+[messages.media_lane_a11y_zoom_in]
+context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of a preview lane's button that magnifies the image by one step. An infinitive in Spanish."
+
+[messages.media_lane_a11y_fit]
+context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of a preview lane's button that shows the image whole again, fitted to the lane, after zooming or panning. An infinitive in Spanish; the lane is the panel beside the terminal."
 
 [messages.media_lane_notice_image_copied]
 context = "crates/kettle-ui/src/app.rs lane_notice_text: shown in a preview lane's footer after its image was copied to the clipboard."

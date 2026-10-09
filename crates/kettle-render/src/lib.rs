@@ -42,6 +42,7 @@ mod glyphpipe;
 mod headless_tests;
 mod imgpipe;
 mod media_lane;
+mod media_viewport;
 mod outline;
 mod present;
 mod quad;
@@ -1309,6 +1310,7 @@ pub use media_lane::{
     MediaCanvas, MediaLaneGeometry, MediaLaneHit, MediaLaneMode, MediaLanePanel, MediaLaneSender,
     MediaLaneSource, media_lane_geometry,
 };
+pub use media_viewport::{MAX_MEDIA_ZOOM, MEDIA_ZOOM_STEP, MIN_MEDIA_ZOOM, MediaViewport};
 
 /// Visible candidate rows in one completion card.
 const MAX_COMPLETION_ROWS: usize = 10;
@@ -8836,6 +8838,9 @@ impl Renderer {
                 geometry.canvas,
                 geometry.copy,
                 geometry.reload,
+                geometry.zoom_out,
+                geometry.zoom_in,
+                geometry.zoom_fit,
                 Some(geometry.toggle),
                 Some(geometry.close),
             ]
@@ -8851,8 +8856,12 @@ impl Renderer {
                     1.0,
                 ));
             }
-            if let (Some(image_rect), Some(image)) = (geometry.image, lane.image.as_ref()) {
-                let (ix, iy, iw, ih) = image_rect;
+            // A zoomed image reaches past the content, which clips it; its
+            // canvas is drawn behind the part that shows.
+            if let (Some(image_rect), Some(shown), Some(image)) =
+                (geometry.image, geometry.shown(), lane.image.as_ref())
+            {
+                let (ix, iy, iw, ih) = shown;
                 match lane.canvas {
                     MediaCanvas::Theme => {
                         lane_q.push(rect(ix, iy, iw, ih, theme.background, 1.0));
@@ -8863,17 +8872,18 @@ impl Renderer {
                     MediaCanvas::Checker => {
                         lane_q.push(rect(ix, iy, iw, ih, Rgb::new(0xee, 0xee, 0xee), 1.0));
                         let square = (8.0 * self.scale).round().max(4.0);
-                        for (sx, sy, sw, sh) in media_lane::checker_squares(image_rect, square) {
+                        for (sx, sy, sw, sh) in media_lane::checker_squares(shown, square) {
                             lane_q.push(rect(sx, sy, sw, sh, Rgb::new(0xcc, 0xcc, 0xcc), 1.0));
                         }
                     }
                 }
+                let content = geometry.content;
                 lane_items.push(imgpipe::ImageItem::placement(
-                    [ix, iy, iw, ih],
+                    [image_rect.0, image_rect.1, image_rect.2, image_rect.3],
                     image.clone(),
                     None,
                     None,
-                    [x, y, width, height],
+                    [content.0, content.1, content.2, content.3],
                 ));
             }
             // Source rows sit on the pane's background, as a terminal's do.
