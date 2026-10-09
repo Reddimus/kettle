@@ -16,6 +16,9 @@ pub(crate) struct CardScene {
     pub decoration: Vec<QuadInstance>,
     pub cursors: Vec<QuadInstance>,
     pub labels: Vec<CardLabel>,
+    /// Each drawn card's nonce and the part of it on screen, in surface
+    /// pixels, in the order drawn.
+    pub drawn: Vec<(kettle_core::InlineNonce, [f32; 4])>,
 }
 
 #[derive(Clone, Copy)]
@@ -121,6 +124,7 @@ impl CardScene {
         self.decoration.clear();
         self.cursors.clear();
         self.labels.clear();
+        self.drawn.clear();
     }
 
     pub fn apply_upload_results(&mut self, drawn: impl Iterator<Item = usize>) {
@@ -167,6 +171,7 @@ impl CardScene {
             let Some(clipped) = intersect(rect, geometry.clip) else {
                 continue;
             };
+            self.drawn.push((block.nonce, clipped));
             self.base.push(quad(clipped, colors.background, 1.0));
             let state = match visual {
                 CardVisual::Ready(image) => {
@@ -464,6 +469,52 @@ mod tests {
         assert!(intersect([50.0, 50.0, 20.0, 20.0], [0.0, 0.0, 50.0, 50.0]).is_none());
         assert!(intersect([f32::NAN, 0.0, 10.0, 10.0], [0.0, 0.0, 50.0, 50.0]).is_none());
     }
+    /// Each drawn card is recorded with the part of it on screen, which is
+    /// where a press is the card's.
+    #[test]
+    fn a_drawn_card_is_recorded_with_its_visible_part() {
+        let (cards, snap, nonce) = crate::inline_cards::tests::fixture();
+        let mut frame = CardFrame::default();
+        cards.recognize_into(&snap, &mut frame);
+        let drawn = |clip: [f32; 4]| {
+            let mut scene = CardScene::default();
+            scene.append(
+                &cards,
+                &frame,
+                &snap,
+                &CardGeometry {
+                    grid_origin: [0.0, 0.0],
+                    cell: [8.0, 16.0],
+                    clip,
+                    tr: kettle_i18n::Translator::default(),
+                },
+                &CardColors {
+                    background: Rgb::new(10, 10, 10),
+                    frame: Rgb::new(255, 0, 0),
+                    selection: Rgb::new(0, 0, 255),
+                },
+            );
+            scene.drawn
+        };
+        assert_eq!(
+            drawn([0.0, 0.0, 640.0, 128.0]),
+            [(nonce, [40.0, 16.0, 96.0, 48.0])]
+        );
+        assert_eq!(
+            drawn([0.0, 0.0, 640.0, 40.0]),
+            [(nonce, [40.0, 16.0, 96.0, 24.0])]
+        );
+        assert!(drawn([0.0, 100.0, 640.0, 28.0]).is_empty(), "off screen");
+        let card = crate::PaintedCard {
+            pane: 1,
+            nonce,
+            rect: [40.0, 16.0, 96.0, 48.0],
+        };
+        assert!(card.contains(40.0, 16.0) && card.contains(135.9, 63.9));
+        assert!(!card.contains(136.0, 20.0) && !card.contains(50.0, 64.0));
+        assert!(!card.contains(39.9, 20.0) && !card.contains(50.0, 15.9));
+    }
+
     #[test]
     fn selected_pending_card_keeps_the_full_gutter_and_frame_above_tint() {
         let (cards, mut snap, _) = crate::inline_cards::tests::fixture();

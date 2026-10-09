@@ -513,7 +513,19 @@ then gets the directory first and keeps the pane's other entries, less any
 Kettle plugin, which goes even when the pane gets none. The last refusal is
 what the Settings footer reports.
 
-The user opens a shelf with `open_media_shelf`. `WindowState::media_viewer`
+The renderer records each card it draws (`PaintedCard`: pane, nonce, the
+part inside its pane) in `drawn_cards`, whose items eviction spares, and
+copies them to `painted_cards` only once that frame is presented; `card_at`
+finds the card on screen under a press. After each presented frame the App
+notes when each card on screen first appeared at its spot (pane, nonce and
+rect, so two printed copies settle apart) in `note_card_sightings`, and a
+primary press on one settled for `CARD_SETTLE` is taken by `press_card`
+before anything but dialogs and the viewer. `release_card` then opens that
+card's item. Anything that takes the pointer while the button is held (a
+dialog through `close_all_modals` or `install_confirm_dialog`, the context
+menu, search) ends the card's press, as do focus loss and a new primary
+press after a release that never came, and `release_card` also opens
+nothing while a dialog or the viewer is up. The user opens a shelf with `open_media_shelf`. `WindowState::media_viewer`
 names the pane and item; the App projects it into a
 `kettle_render::MediaViewerOverlay` (display text and pixels, never a path)
 and closes it when its pane leaves the active tab or becomes too small to

@@ -357,7 +357,17 @@ the window title starts with `[new media: N]` while the focused pane has
 some. The user opens them with `open_media_shelf` (the palette's "Open media
 shelf"): a viewer over the pane shows one item fitted, never enlarged past
 its pixels, on white for SVG and a checkerboard for raster, with its title,
-kind, size and sender, and `‹ › ×` to browse and close. Only the user opens
+kind, size and sender, and `‹ › ×` to browse and close. Clicking an inline
+card opens the viewer on that card's item. A card takes a primary press,
+and its release, before anything else in the window except open dialogs and
+the viewer, so the program behind it sees neither. The release opens the
+item when it lands on the same card and no dialog or viewer has opened over
+it since the press; otherwise it goes nowhere. A Shift-click selects text
+and the wheel scrolls or reaches the program, as they would without the
+card. A press on a card that has been on screen where it is for less than
+half a second is ordinary input, so one that scrolls under the pointer
+cannot take a click meant for text. `kettle ctl send_mouse` clicks a card
+the same way. Only the user, or full control, opens
 it, and `kettle ctl send_keys` still writes to the pane's terminal beneath. `list_panes` reports each pane's shelf as
 `media_shelf`: item, generation, title, kind, size, warnings, `verified`, the
 `sender` of an unverified item (`executable`, `pid` and `signer`, null when
