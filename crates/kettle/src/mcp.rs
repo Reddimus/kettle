@@ -34,6 +34,10 @@ const MCP_COMPAT_VERSION: &str = "2025-06-18";
 /// `supported` should prefer.
 const MCP_SUPPORTED_VERSIONS: [&str; 3] =
     [MCP_MODERN_VERSION, MCP_PROTOCOL_VERSION, MCP_COMPAT_VERSION];
+/// How long a modern client may reuse `server/discover` and `tools/list`.
+/// Neither changes while this server runs, and both are the same for every
+/// caller, so they are also `public`.
+const STATIC_RESULT_TTL_MS: u64 = 3_600_000;
 
 /// `_meta` keys a modern request carries. The prefix is reserved for MCP, and
 /// the two marked required in the specification are required here: a request
@@ -402,7 +406,7 @@ fn discover_result() -> Value {
         "supportedVersions": MCP_SUPPORTED_VERSIONS,
         "capabilities": {"tools": {}},
         // Declared because this result is cacheable and the shape says so.
-        "ttlMs": 3_600_000,
+        "ttlMs": STATIC_RESULT_TTL_MS,
         "cacheScope": "public",
         "instructions": "Use kettle_run for bounded one-shot PTY commands. \
     Other tools inspect or drive a running Kettle control server.",
@@ -422,11 +426,17 @@ fn dispatch_modern(
 ) {
     match method {
         "server/discover" => respond(responses, success(id, modernize(discover_result()))),
+        // 2026-07-28 requires every list result to say how long it may be
+        // reused, and a client rejects a tool list that does not.
         "tools/list" => respond(
             responses,
             success(
                 id,
-                modernize(json!({"tools": crate::mcp_tools::tool_specs()})),
+                modernize(json!({
+                    "tools": crate::mcp_tools::tool_specs(),
+                    "ttlMs": STATIC_RESULT_TTL_MS,
+                    "cacheScope": "public",
+                })),
             ),
         ),
         // The tool path is shared with the legacy era on purpose: the tools and

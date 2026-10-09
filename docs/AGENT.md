@@ -498,7 +498,7 @@ answers both eras on the same stdio process:
 
 | the client opens with | kettle serves |
 |---|---|
-| `_meta["io.modelcontextprotocol/protocolVersion"]` | `2026-07-28`, statelessly — no handshake, results carry `resultType` and `serverInfo` |
+| `_meta["io.modelcontextprotocol/protocolVersion"]` | `2026-07-28`, statelessly — no handshake, results carry `resultType` and `serverInfo`, and `server/discover` and `tools/list` say how long a client may reuse them (`ttlMs`, `cacheScope`) |
 | `initialize` | the negotiated legacy revision (`2025-11-25`, or `2025-06-18`) |
 | `server/discover` | either — it is also the stdio probe a dual-era client uses to tell the two apart |
 

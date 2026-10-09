@@ -159,6 +159,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- `kettle mcp` lists its tools to clients on MCP 2026-07-28, which include
+  current Claude Code. Its tool list left out the `ttlMs` and `cacheScope`
+  fields that revision requires on every list result, so those clients
+  rejected the list and showed Kettle's server with no tools.
+
 - `kettle ctl`, `kettle mcp` and other control clients keep finding running
   servers after many Kettle sessions. Each exit used to leave its control
   socket behind; once more than about a thousand piled up, discovery stopped

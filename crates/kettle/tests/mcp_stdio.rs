@@ -197,6 +197,15 @@ fn mcp_stdio_serves_a_modern_client_that_never_handshakes() {
             .is_empty(),
         "a modern tools/list must work without a handshake: {stdout}"
     );
+    // 2026-07-28 requires every list result to say how long it may be
+    // reused; Claude Code rejects a tool list without these and shows the
+    // server with no tools.
+    let list = &responses[1]["result"];
+    assert!(list["ttlMs"].is_u64(), "{stdout}");
+    assert!(
+        matches!(list["cacheScope"].as_str(), Some("public" | "private")),
+        "{stdout}"
+    );
     for response in &responses {
         assert!(
             response.get("error").is_none(),
@@ -304,10 +313,12 @@ fn mcp_stdio_still_serves_a_legacy_client_unchanged() {
         responses[0]["result"]["protocolVersion"], "2025-11-25",
         "{stdout}"
     );
-    assert!(
-        responses[1]["result"].get("resultType").is_none(),
-        "a legacy result must stay legacy-shaped: {stdout}"
-    );
+    for field in ["resultType", "ttlMs", "cacheScope"] {
+        assert!(
+            responses[1]["result"].get(field).is_none(),
+            "a legacy result must stay legacy-shaped: {stdout}"
+        );
+    }
     assert!(
         !responses[1]["result"]["tools"]
             .as_array()
