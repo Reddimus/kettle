@@ -40,6 +40,54 @@ const MAX_QUEUED_PROTOCOL_REPLY_BYTES: usize = 2 * 1024 * 1024;
 const KETTLE_PANE_ID: &str = "KETTLE_PANE_ID";
 const KETTLE_PID: &str = "KETTLE_PID";
 
+/// The value `name` has in a pane environment built so far: its last entry,
+/// matched without case on Windows, as the child's environment is.
+fn pane_variable<'a>(environment: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    environment
+        .iter()
+        .rev()
+        .find(|(key, _)| {
+            if cfg!(windows) {
+                key.eq_ignore_ascii_case(name)
+            } else {
+                key == name
+            }
+        })
+        .map(|(_, value)| value.as_str())
+}
+
+/// Where Claude Code started with `environment` over Kettle's own keeps its
+/// configuration: the pane's `CLAUDE_CONFIG_DIR` and `HOME`, else Kettle's.
+pub(crate) fn claude_config_for(environment: &[(String, String)]) -> Option<std::path::PathBuf> {
+    let variable = |name: &str| {
+        pane_variable(environment, name)
+            .map(std::ffi::OsString::from)
+            .or_else(|| std::env::var_os(name))
+    };
+    crate::agent_plugin::claude_config_dir(
+        variable("CLAUDE_CONFIG_DIR").as_deref(),
+        variable("HOME").as_deref(),
+    )
+}
+
+/// Set the pane's Claude Code plugin directories: Kettle's plugin first when
+/// `offered`, then the others the pane would have had, its configured ones or
+/// else those Kettle `inherited`, less any other Kettle's plugin.
+#[cfg(unix)]
+fn set_claude_plugin_dirs(
+    environment: &mut Vec<(String, String)>,
+    offered: Option<&std::path::Path>,
+    inherited: Option<String>,
+) {
+    let name = crate::agent_plugin::PLUGIN_DIRS_VARIABLE;
+    let existing = pane_variable(environment, name)
+        .map(str::to_owned)
+        .or(inherited);
+    if let Some(value) = crate::agent_plugin::plugin_dirs_value(offered, existing.as_deref()) {
+        environment.push((name.to_string(), value));
+    }
+}
+
 /// The environment a new pane starts with: the user's `env` entries, then
 /// Kettle's own values, appended last so they win. `KETTLE_PANE_ID` and
 /// `KETTLE_PID` name this pane and this Kettle for control clients started
@@ -55,6 +103,19 @@ fn pane_environment(config: &Config, pane_id: u64, kettle_pid: u32) -> Vec<(Stri
     });
     environment.push((KETTLE_PANE_ID.to_string(), pane_id.to_string()));
     environment.push((KETTLE_PID.to_string(), kettle_pid.to_string()));
+    // Kettle's Claude Code plugin, checked again now, for a Claude Code
+    // configured where this pane's environment says. The plugin, like the
+    // variable's `:`-separated entries, is Unix-only.
+    #[cfg(unix)]
+    {
+        let offered = crate::agent_plugin::for_new_pane(|| claude_config_for(&environment));
+        // Claude Code reads the variable as UTF-8, replacing what is not, so
+        // a value that is not UTF-8 is taken the same way. One with nothing
+        // to change reaches the pane as it was.
+        let inherited = std::env::var_os(crate::agent_plugin::PLUGIN_DIRS_VARIABLE)
+            .map(|value| value.to_string_lossy().into_owned());
+        set_claude_plugin_dirs(&mut environment, offered.as_deref(), inherited);
+    }
     // Append after user env so the runtime capability is authoritative. The
     // terminal's existing extra-env route also carries it into WSLENV.
     environment.push((
@@ -8170,6 +8231,133 @@ mod node_tests {
             .rposition(|(key, _)| key == "KETTLE_PANE_ID")
             .unwrap();
         assert!(user < pane, "Kettle's values come after the user's");
+    }
+
+    /// Kettle's plugin comes first among a pane's Claude Code plugins and
+    /// the pane keeps the ones its config, or else Kettle's own environment,
+    /// gave it, but never another Kettle's.
+    #[cfg(unix)]
+    #[test]
+    fn the_claude_code_plugin_joins_the_panes_plugin_directories() {
+        let ours = std::path::Path::new("/data/kettle/agent-plugins/kettle-00000000000000aa");
+        let outer = "/other/kettle/agent-plugins/kettle-00000000000000bb";
+        let name = crate::agent_plugin::PLUGIN_DIRS_VARIABLE;
+        let mut environment = vec![("KEEP".to_string(), "me".to_string())];
+        super::set_claude_plugin_dirs(&mut environment, Some(ours), None);
+        assert_eq!(super::pane_variable(&environment, name), ours.to_str());
+        let mut environment = Vec::new();
+        super::set_claude_plugin_dirs(&mut environment, Some(ours), Some("/inherited".into()));
+        assert_eq!(
+            super::pane_variable(&environment, name),
+            Some("/data/kettle/agent-plugins/kettle-00000000000000aa:/inherited")
+        );
+        // The pane's configured value replaces the inherited one, as it would
+        // without Kettle's plugin.
+        let mut environment = vec![(name.to_string(), "/configured".to_string())];
+        super::set_claude_plugin_dirs(&mut environment, Some(ours), Some("/inherited".into()));
+        assert_eq!(
+            super::pane_variable(&environment, name),
+            Some("/data/kettle/agent-plugins/kettle-00000000000000aa:/configured")
+        );
+        // Offering nothing, the pane keeps its plugins but loses an outer
+        // Kettle's, which Claude Code's policy may forbid.
+        let mut environment = Vec::new();
+        super::set_claude_plugin_dirs(&mut environment, None, Some(format!("{outer}:/mine")));
+        assert_eq!(super::pane_variable(&environment, name), Some("/mine"));
+        let mut environment = Vec::new();
+        super::set_claude_plugin_dirs(&mut environment, None, Some(outer.into()));
+        assert_eq!(super::pane_variable(&environment, name), Some(""));
+        // A value Claude Code reads with replacements loses Kettle's entry
+        // all the same.
+        let mut environment = Vec::new();
+        super::set_claude_plugin_dirs(
+            &mut environment,
+            None,
+            Some(format!("{outer}:/odd\u{fffd}")),
+        );
+        assert_eq!(
+            super::pane_variable(&environment, name),
+            Some("/odd\u{fffd}")
+        );
+        // Nothing to add or remove leaves the variable alone.
+        let mut environment = Vec::new();
+        super::set_claude_plugin_dirs(&mut environment, None, Some("/inherited".into()));
+        assert!(environment.is_empty());
+        // A directory that cannot be an entry adds nothing.
+        let mut environment = Vec::new();
+        super::set_claude_plugin_dirs(
+            &mut environment,
+            Some(std::path::Path::new("/odd:path/kettle-1")),
+            Some("/inherited".into()),
+        );
+        assert!(environment.is_empty());
+    }
+
+    /// The pane's own configuration directory and home decide where its
+    /// Claude Code keeps policy, before Kettle's.
+    #[cfg(unix)]
+    #[test]
+    fn claude_code_keeps_its_configuration_where_the_pane_says() {
+        let pane = |entries: &[(&str, &str)]| {
+            entries
+                .iter()
+                .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            super::claude_config_for(&pane(&[("CLAUDE_CONFIG_DIR", "/srv/claude")])),
+            Some(std::path::PathBuf::from("/srv/claude"))
+        );
+        assert_eq!(
+            super::claude_config_for(&pane(&[("HOME", "/home/pane"), ("CLAUDE_CONFIG_DIR", "")])),
+            Some(std::path::PathBuf::from("/home/pane/.claude"))
+        );
+        assert_eq!(
+            super::claude_config_for(&pane(&[("CLAUDE_CONFIG_DIR", "relative")])),
+            None
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pane_variables_match_without_case_on_windows() {
+        let environment = vec![
+            ("Claude_Code_Plugin_Dirs".to_string(), "first".to_string()),
+            ("claude_code_plugin_dirs".to_string(), "last".to_string()),
+        ];
+        assert_eq!(
+            super::pane_variable(&environment, "CLAUDE_CODE_PLUGIN_DIRS"),
+            Some("last")
+        );
+    }
+
+    /// Every pane's environment checks the plugin when it is built, with the
+    /// Claude Code configuration and home that pane will have, and sets its
+    /// plugin directories whether or not it gets the plugin, before Kettle's
+    /// capability entry, which stays last.
+    #[test]
+    fn each_pane_environment_checks_the_claude_code_plugin() {
+        let src = production_source();
+        let body = src
+            .split_once("fn pane_environment(config: &Config, pane_id: u64, kettle_pid: u32)")
+            .expect("pane_environment")
+            .1
+            .split_once("\n}\n")
+            .expect("end of pane_environment")
+            .0;
+        let checked = body
+            .find("crate::agent_plugin::for_new_pane(|| claude_config_for(&environment))")
+            .expect("checked per pane, with the pane's configuration");
+        let inherited = body
+            .find("std::env::var_os(crate::agent_plugin::PLUGIN_DIRS_VARIABLE)")
+            .expect("an inherited value of any encoding");
+        let set = body
+            .find("set_claude_plugin_dirs(&mut environment, offered.as_deref(), inherited);")
+            .expect("set for every pane");
+        let capability = body
+            .find("\"KETTLE_COMPLETION_OVERLAY\"")
+            .expect("capability");
+        assert!(checked < inherited && inherited < set && set < capability);
     }
 
     /// The pane id exists before the child does, so the child's environment

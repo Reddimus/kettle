@@ -533,7 +533,13 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
             name: T::SettingsCategoryAgents,
             // Display only. Agent control (`agent-server`) stays config-only:
             // it grants reading and typing, and applies at launch.
-            fields: vec![toggle(T::SettingsFieldAgentPreviews, "agent-display")],
+            fields: vec![
+                toggle(T::SettingsFieldAgentPreviews, "agent-display"),
+                toggle(
+                    T::SettingsFieldAgentPreviewsClaudeCode,
+                    "agent-display-claude-code",
+                ),
+            ],
         },
         Category {
             name: T::SettingsCategoryKeybinds,
@@ -839,6 +845,7 @@ fn read_bool(cfg: &Config, key: &str) -> bool {
         "search-wrap" => cfg.search_wrap,
         "invert-search" => cfg.invert_search,
         "agent-display" => cfg.agent_display,
+        "agent-display-claude-code" => cfg.agent_display_claude_code,
         _ => false,
     }
 }
@@ -1063,26 +1070,41 @@ mod tests {
         );
     }
 
-    /// Agents → Agent previews edits `agent-display` as an ordinary toggle.
+    /// Agents → Agent previews and its Claude Code row edit `agent-display`
+    /// and `agent-display-claude-code` as ordinary toggles.
     #[test]
-    fn agent_previews_row_round_trips() {
+    fn agent_previews_rows_round_trip() {
         let cats = categories(&[]);
         let agents = cats
             .iter()
             .find(|cat| cat.name == Text::SettingsCategoryAgents)
             .expect("Agents category");
-        assert_eq!(agents.fields.len(), 1);
-        let field = &agents.fields[0];
-        assert_eq!(field.key, "agent-display");
-        assert_eq!(field.label, Text::SettingsFieldAgentPreviews);
-        assert!(matches!(field.kind, FieldKind::Toggle));
-        let off = Config::default();
-        assert_eq!(read(&off, field, &EN), "Off");
-        assert_eq!(next_value(&off, field, 1), "true");
-        let on = Config::parse_text(&format!("{} = {}", field.key, next_value(&off, field, 1)));
-        assert!(on.agent_display);
-        assert_eq!(read(&on, field, &EN), "On");
-        assert_eq!(next_value(&on, field, 1), "false");
+        assert_eq!(agents.fields.len(), 2);
+        let rows = [
+            (
+                "agent-display",
+                Text::SettingsFieldAgentPreviews,
+                (|cfg: &Config| cfg.agent_display) as fn(&Config) -> bool,
+            ),
+            (
+                "agent-display-claude-code",
+                Text::SettingsFieldAgentPreviewsClaudeCode,
+                |cfg: &Config| cfg.agent_display_claude_code,
+            ),
+        ];
+        for (field, (key, label, value)) in agents.fields.iter().zip(rows) {
+            assert_eq!(field.key, key);
+            assert_eq!(field.label, label);
+            assert!(matches!(field.kind, FieldKind::Toggle));
+            let off = Config::default();
+            assert!(!value(&off), "{key} is off by default");
+            assert_eq!(read(&off, field, &EN), "Off");
+            assert_eq!(next_value(&off, field, 1), "true");
+            let on = Config::parse_text(&format!("{} = {}", field.key, next_value(&off, field, 1)));
+            assert!(value(&on), "{key}");
+            assert_eq!(read(&on, field, &EN), "On");
+            assert_eq!(next_value(&on, field, 1), "false");
+        }
         // Agent control stays out of Settings: it grants reading and typing.
         assert!(
             cats.iter()

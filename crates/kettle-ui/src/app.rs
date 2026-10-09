@@ -9275,6 +9275,8 @@ impl App {
             last_session_sweep: None,
         };
         app.runtime_tracker.set_window_count(app.windows.len());
+        // Before the first pane, which may start Claude Code.
+        app.reconcile_claude_plugin();
         crate::startup_trace::mark(crate::startup_trace::Phase::AppBuilt);
         let result: Result<()> = match app.start_first_pane_before_launch() {
             Ok(_) => event_loop.run_app(&mut app).map_err(Into::into),
@@ -17033,7 +17035,13 @@ impl App {
                     active.fields.get(fld).map(|f| f.key),
                     ws.settings_restart_pending,
                     self.language_change_pending(),
-                    Some(self.agent_previews_note()),
+                    match active.fields.get(fld).map(|f| f.key) {
+                        Some("agent-display-claude-code") => Some(claude_code_note(
+                            self.agent_previews_live(),
+                            crate::agent_plugin::refusal(),
+                        )),
+                        _ => Some(self.agent_previews_note()),
+                    },
                 )
             },
         })
@@ -20384,6 +20392,7 @@ impl App {
         let font_size_changed = (new.font_size - previous_config_font_size).abs() > f32::EPSILON;
         self.cfg = new;
         self.reconcile_agent_display();
+        self.reconcile_claude_plugin();
         crate::dev_record::apply_retention_config(&self.cfg);
         self.sync_lua_active_theme();
         font_size_changed
@@ -20505,6 +20514,57 @@ impl App {
             self.ctl.is_some(),
             self.ctl_start == CtlStart::Attempted,
         )
+    }
+
+    /// Whether agent previews are on now and stay on: granted to this
+    /// process and still asked for. Turning them off reaches the server at
+    /// the next launch, but new panes stop getting the plugin at once.
+    fn agent_previews_live(&self) -> bool {
+        self.ctl_policy.display()
+            && ctl_overrides(&self.startup)
+                .resolve(self.cfg.ctl_policy())
+                .display()
+    }
+
+    /// Offer new panes Kettle's Claude Code plugin while agent previews and
+    /// the Claude Code integration are both on, writing it if needed; panes
+    /// already open keep what they started with.
+    fn reconcile_claude_plugin(&mut self) {
+        if !(self.agent_previews_live() && self.cfg.agent_display_claude_code) {
+            crate::agent_plugin::offer(None, None);
+            return;
+        }
+        let prepared = std::env::current_exe()
+            .and_then(std::fs::canonicalize)
+            .map_err(|_| crate::agent_plugin::PluginRefusal::UnnamedExecutable)
+            .and_then(|executable| {
+                crate::agent_plugin::PluginFiles::new(&executable, env!("CARGO_PKG_VERSION"))
+            })
+            .and_then(|files| {
+                let root = crate::agent_plugin::plugins_root()
+                    .ok_or(crate::agent_plugin::PluginRefusal::Unverified)?;
+                crate::agent_plugin::install(&root, &files).map(|directory| (directory, files))
+            })
+            .and_then(|(directory, files)| {
+                crate::agent_plugin::plugin_dir_entry(&directory)
+                    .ok_or(crate::agent_plugin::PluginRefusal::UnnamedDirectory)?;
+                Ok((directory, files))
+            });
+        match prepared {
+            Ok(plugin) => {
+                crate::agent_plugin::offer(Some(plugin), None);
+                // Check now, as for a new pane with the configured `env`, so
+                // Settings names a policy that forbids the plugin before the
+                // next pane opens.
+                let _ = crate::agent_plugin::for_new_pane(|| {
+                    crate::mux::claude_config_for(&self.cfg.env)
+                });
+            }
+            Err(refusal) => {
+                log::warn!("agent previews: the Claude Code plugin is unavailable ({refusal:?})");
+                crate::agent_plugin::offer(None, Some(refusal));
+            }
+        }
     }
 
     /// Start the control server if the policy allows anything, the first pane
@@ -27881,7 +27941,9 @@ fn settings_footer_note(
         notes.push(gpu);
     }
     match focused_key {
-        Some("agent-display") => notes.extend(agent_previews.map(|note| tr.text(note))),
+        Some("agent-display" | "agent-display-claude-code") => {
+            notes.extend(agent_previews.map(|note| tr.text(note)));
+        }
         Some("window-blur" | "background-opacity") => {
             notes.push(tr.text(Text::SettingsNoteBlur));
         }
@@ -27901,6 +27963,28 @@ fn settings_footer_note(
         notes.push(tr.text(Text::SettingsNoteRestart));
     }
     (!notes.is_empty()).then(|| notes.join("\n"))
+}
+
+/// What the Claude Code row's footer says: why new panes get no plugin, or
+/// else when the setting applies.
+fn claude_code_note(
+    display_on: bool,
+    refusal: Option<crate::agent_plugin::PluginRefusal>,
+) -> kettle_i18n::Text {
+    use crate::agent_plugin::PluginRefusal;
+    use kettle_i18n::Text;
+    match refusal {
+        Some(PluginRefusal::SideloadDisabled) => Text::SettingsNoteClaudeCodeForbidden,
+        Some(PluginRefusal::Translocated) => Text::SettingsNoteClaudeCodeTranslocated,
+        Some(
+            PluginRefusal::UnnamedExecutable
+            | PluginRefusal::UnnamedDirectory
+            | PluginRefusal::Unverified,
+        ) => Text::SettingsNoteClaudeCodeUnavailable,
+        Some(PluginRefusal::Unsupported) => Text::SettingsNoteClaudeCodeUnsupported,
+        None if !display_on => Text::SettingsNoteClaudeCodeNeedsPreviews,
+        None => Text::SettingsNoteClaudeCodeNewPanes,
+    }
 }
 
 /// What the Agent previews row's footer says: the one fact that explains
@@ -51770,6 +51854,130 @@ mod settings_footer_text_tests {
             ),
             None
         );
+    }
+
+    /// The Claude Code row's footer names why new panes get no plugin, or
+    /// else when the setting applies.
+    #[test]
+    fn claude_code_note_names_why_new_panes_get_no_plugin() {
+        use crate::agent_plugin::PluginRefusal;
+        use kettle_i18n::Text;
+        let note = super::claude_code_note;
+        assert_eq!(note(true, None), Text::SettingsNoteClaudeCodeNewPanes);
+        assert_eq!(note(false, None), Text::SettingsNoteClaudeCodeNeedsPreviews);
+        for display_on in [true, false] {
+            assert_eq!(
+                note(display_on, Some(PluginRefusal::SideloadDisabled)),
+                Text::SettingsNoteClaudeCodeForbidden
+            );
+            assert_eq!(
+                note(display_on, Some(PluginRefusal::Translocated)),
+                Text::SettingsNoteClaudeCodeTranslocated
+            );
+            assert_eq!(
+                note(display_on, Some(PluginRefusal::UnnamedExecutable)),
+                Text::SettingsNoteClaudeCodeUnavailable
+            );
+            assert_eq!(
+                note(display_on, Some(PluginRefusal::UnnamedDirectory)),
+                Text::SettingsNoteClaudeCodeUnavailable
+            );
+            assert_eq!(
+                note(display_on, Some(PluginRefusal::Unverified)),
+                Text::SettingsNoteClaudeCodeUnavailable
+            );
+            assert_eq!(
+                note(display_on, Some(PluginRefusal::Unsupported)),
+                Text::SettingsNoteClaudeCodeUnsupported
+            );
+        }
+        assert_eq!(
+            settings_footer_note(
+                &EN,
+                None,
+                Some("agent-display-claude-code"),
+                false,
+                false,
+                Some(Text::SettingsNoteClaudeCodeForbidden)
+            )
+            .as_deref(),
+            Some("Claude Code's managed settings forbid plugins from the environment.")
+        );
+        // The row with focus picks its own note.
+        let src = super::production_source();
+        assert!(src.contains(
+            "Some(\"agent-display-claude-code\") => Some(claude_code_note(\n                            self.agent_previews_live(),\n                            crate::agent_plugin::refusal(),"
+        ));
+    }
+
+    /// New panes get the plugin from the first one on, and a reload that
+    /// turns the integration or agent previews on or off changes what the
+    /// next pane gets.
+    #[test]
+    fn the_claude_code_plugin_is_offered_before_the_first_pane_and_on_reload() {
+        let src = super::production_source();
+        let run = src
+            .split_once("pub fn run_with(mut startup: crate::Options) -> Result<()> {")
+            .expect("run_with")
+            .1;
+        let built = run.find("let mut app = App {").expect("app built");
+        let offered = run
+            .find("app.reconcile_claude_plugin();")
+            .expect("startup offers the plugin");
+        let first = run
+            .find("app.start_first_pane_before_launch()")
+            .expect("first pane");
+        assert!(built < offered && offered < first);
+        let load = src
+            .split_once("fn load_reloaded_config(&mut self) -> bool {")
+            .expect("load_reloaded_config")
+            .1
+            .split_once("\n    fn apply_reloaded_config(")
+            .expect("end of load_reloaded_config")
+            .0;
+        let display = load
+            .find("self.reconcile_agent_display();")
+            .expect("reload reconciles agent display");
+        let plugin = load
+            .find("self.reconcile_claude_plugin();")
+            .expect("reload reconciles the plugin");
+        assert!(display < plugin, "the plugin follows the live policy");
+        let reconcile = src
+            .split_once("fn reconcile_claude_plugin(&mut self) {")
+            .expect("reconcile_claude_plugin")
+            .1
+            .split_once("\n    }\n")
+            .expect("end of reconcile_claude_plugin")
+            .0;
+        let gate = reconcile
+            .find("if !(self.agent_previews_live() && self.cfg.agent_display_claude_code) {")
+            .expect("gated on both settings");
+        let withdrawn = reconcile
+            .find("crate::agent_plugin::offer(None, None);")
+            .expect("off withdraws the plugin");
+        let installed = reconcile
+            .find("crate::agent_plugin::install(")
+            .expect("on installs it");
+        let named = reconcile
+            .find("crate::agent_plugin::plugin_dir_entry(&directory)")
+            .expect("a directory the variable cannot hold is refused");
+        let offered = reconcile
+            .find("crate::agent_plugin::offer(Some(plugin), None);")
+            .expect("offered");
+        let rechecked = reconcile
+            .find("crate::mux::claude_config_for(&self.cfg.env)")
+            .expect("policy checked again for Settings, as a new pane would be");
+        assert!(gate < withdrawn && withdrawn < installed && installed < named);
+        assert!(named < offered && offered < rechecked);
+        let live = src
+            .split_once("fn agent_previews_live(&self) -> bool {")
+            .expect("agent_previews_live")
+            .1
+            .split_once("\n    }\n")
+            .expect("end of agent_previews_live")
+            .0;
+        assert!(live.contains("self.ctl_policy.display()"));
+        assert!(live.contains(".resolve(self.cfg.ctl_policy())"));
     }
 
     /// Display is turned on by a successful reload only, launch flags keep
