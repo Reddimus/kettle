@@ -255,6 +255,21 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   took used to leave the program a release with no press, and one it received
   lost its release when a dialog opened while the button was held.
 
+- Every mouse press a program receives gets exactly one release, in its own
+  pane. A button held while focus moves to another pane or tab keeps its drag
+  and release with the program that got the press; the release used to go to
+  the newly focused pane, leaving the first program a press with no release
+  and handing the other a release with no press. Two buttons held at once
+  each keep their own, and Back and Forward follow the same rule. When Kettle
+  ends a drag itself (the window loses focus, search or a menu opens, the
+  pane turns read-only or is reset, or the tab moves to another window), the
+  program gets its release at the last cell it saw instead of waiting
+  forever. Pressing Shift partway through no longer drops the release, a
+  press the program never got (its input was full) leaves no release behind,
+  and a release always gets through: each pane's input keeps a little room
+  that only mouse releases may use. The newest press owns the drag, so a
+  Shift-drag selection started while a program holds Back still selects.
+
 - `kettle ctl`, `kettle mcp` and other control clients keep finding running
   servers after many Kettle sessions. Each exit used to leave its control
   socket behind; once more than about a thousand piled up, discovery stopped

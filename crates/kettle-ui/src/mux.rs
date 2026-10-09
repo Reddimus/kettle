@@ -35,6 +35,15 @@ const MAX_QUEUED_USER_INPUT_BYTES: usize = MAX_USER_INPUT_MESSAGE_BYTES + 64 * 1
 // A 1 MiB OSC 52 clipboard payload expands to roughly 1.34 MiB after base64.
 const MAX_PROTOCOL_REPLY_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_QUEUED_PROTOCOL_REPLY_BYTES: usize = 2 * 1024 * 1024;
+/// Room the user lane keeps beyond what other input may fill, for mouse
+/// releases only, so the release of a press a program received always
+/// queues behind it, in order. Each release follows a press that queued
+/// first, and presses stop at the ordinary limit, so a pane never owes more
+/// releases than it has held buttons.
+const MOUSE_RELEASE_RESERVE_DEPTH: usize = 8;
+const MOUSE_RELEASE_RESERVE_BYTES: usize = MOUSE_RELEASE_RESERVE_DEPTH * MAX_MOUSE_REPORT_BYTES;
+/// The longest mouse report: SGR with a four-digit button and coordinates.
+const MAX_MOUSE_REPORT_BYTES: usize = 32;
 
 /// Names Kettle sets in every pane, which config cannot override.
 const KETTLE_PANE_ID: &str = "KETTLE_PANE_ID";
@@ -370,7 +379,8 @@ struct PtyInputQueue {
 
 impl PtyInputQueue {
     fn new(term: &Terminal, waker: Waker) -> Result<Self> {
-        let (user_tx, user_rx) = crossbeam_channel::bounded(PTY_INPUT_QUEUE_DEPTH);
+        let (user_tx, user_rx) =
+            crossbeam_channel::bounded(PTY_INPUT_QUEUE_DEPTH + MOUSE_RELEASE_RESERVE_DEPTH);
         let (reply_tx, reply_rx) = crossbeam_channel::bounded(PTY_INPUT_QUEUE_DEPTH);
         let queued_user_bytes = Arc::new(AtomicUsize::new(0));
         let queued_reply_bytes = Arc::new(AtomicUsize::new(0));
@@ -406,7 +416,8 @@ impl PtyInputQueue {
 
     #[cfg(test)]
     fn disconnected_for_test(waker: Waker) -> Self {
-        let (user_tx, user_rx) = crossbeam_channel::bounded(PTY_INPUT_QUEUE_DEPTH);
+        let (user_tx, user_rx) =
+            crossbeam_channel::bounded(PTY_INPUT_QUEUE_DEPTH + MOUSE_RELEASE_RESERVE_DEPTH);
         let (reply_tx, reply_rx) = crossbeam_channel::bounded(PTY_INPUT_QUEUE_DEPTH);
         drop(user_rx);
         drop(reply_rx);
@@ -425,8 +436,25 @@ impl PtyInputQueue {
         self.enqueue(
             &self.user_tx,
             &self.queued_user_bytes,
-            MAX_USER_INPUT_MESSAGE_BYTES,
-            MAX_QUEUED_USER_INPUT_BYTES,
+            (MAX_USER_INPUT_MESSAGE_BYTES, MAX_QUEUED_USER_INPUT_BYTES),
+            PTY_INPUT_QUEUE_DEPTH,
+            bytes,
+            false,
+        )
+    }
+
+    /// Queue a mouse release on the user lane, from the room only releases
+    /// may use, so it lands behind its press even when other input filled
+    /// the lane.
+    fn enqueue_mouse_release(&self, bytes: Arc<[u8]>) -> PaneInputResult {
+        self.enqueue(
+            &self.user_tx,
+            &self.queued_user_bytes,
+            (
+                MAX_MOUSE_REPORT_BYTES,
+                MAX_QUEUED_USER_INPUT_BYTES + MOUSE_RELEASE_RESERVE_BYTES,
+            ),
+            PTY_INPUT_QUEUE_DEPTH + MOUSE_RELEASE_RESERVE_DEPTH,
             bytes,
             false,
         )
@@ -436,19 +464,24 @@ impl PtyInputQueue {
         self.enqueue(
             &self.reply_tx,
             &self.queued_reply_bytes,
-            MAX_PROTOCOL_REPLY_MESSAGE_BYTES,
-            MAX_QUEUED_PROTOCOL_REPLY_BYTES,
+            (
+                MAX_PROTOCOL_REPLY_MESSAGE_BYTES,
+                MAX_QUEUED_PROTOCOL_REPLY_BYTES,
+            ),
+            PTY_INPUT_QUEUE_DEPTH,
             bytes,
             true,
         )
     }
 
+    /// Queue `bytes` on a lane: refused past `max_message_bytes` for one
+    /// message, `max_queued_bytes` in all, or `max_depth` messages waiting.
     fn enqueue(
         &self,
         tx: &Sender<QueuedPtyInput>,
         queued_bytes: &Arc<AtomicUsize>,
-        max_message_bytes: usize,
-        max_queued_bytes: usize,
+        (max_message_bytes, max_queued_bytes): (usize, usize),
+        max_depth: usize,
         bytes: Arc<[u8]>,
         fail_on_reject: bool,
     ) -> PaneInputResult {
@@ -468,6 +501,15 @@ impl PtyInputQueue {
                 return PaneInputResult::Failed;
             }
             return PaneInputResult::Oversize;
+        }
+        // Only the window thread queues input, and the worker only drains, so
+        // a lane checked below its depth stays there for this message.
+        if tx.len() >= max_depth {
+            if fail_on_reject {
+                self.fail();
+                return PaneInputResult::Failed;
+            }
+            return PaneInputResult::Backpressured;
         }
         // Rust 1.99 renames fetch_update to try_update; the MSRV (1.95) predates it.
         #[allow(deprecated)]
@@ -861,6 +903,21 @@ impl Pane {
             return PaneInputResult::Oversize;
         }
         self.feed_input_shared(Arc::from(bytes))
+    }
+
+    /// Queue the release of a mouse press this pane's program received, from
+    /// the room its input keeps for releases, so a full queue never leaves
+    /// the program holding the press.
+    pub fn feed_mouse_release(&self, bytes: &[u8]) -> PaneInputResult {
+        if let Some(result) = pane_input_policy(self.pty_input.failed(), self.read_only) {
+            return result;
+        }
+        let bytes: Arc<[u8]> = Arc::from(bytes);
+        self.term
+            .with_completion_input_admission(&[bytes.as_ref()], || {
+                let result = self.pty_input.enqueue_mouse_release(bytes.clone());
+                (result, result.is_queued())
+            })
     }
 
     pub fn feed_input_shared(&self, bytes: Arc<[u8]>) -> PaneInputResult {
@@ -3203,6 +3260,15 @@ impl Mux {
     /// `extract_and_insert_tab_roundtrip`); this adds the pane transfer.
     /// Unlike `close_tab_at`, nothing is pushed to `closed_tabs` — the tab
     /// isn't closing, it's moving. Returns `None` for an out-of-range idx.
+    /// The panes of tab `idx`, if it exists.
+    pub fn tab_pane_ids(&self, idx: usize) -> Vec<u64> {
+        let mut ids = Vec::new();
+        if let Some(tab) = self.tabs.get(idx) {
+            collect_ids(&tab.root, &mut ids);
+        }
+        ids
+    }
+
     pub fn detach_tab(&mut self, idx: usize) -> Option<DetachedTab> {
         let tab = self.extract_tab(idx)?;
         let mut ids = Vec::new();
@@ -4717,6 +4783,90 @@ mod node_tests {
             0,
             "tearing down the channel must release every queued byte reservation"
         );
+    }
+
+    /// A mouse release always queues behind its press: ordinary input stops
+    /// at the lane's limits, and releases have bounded room of their own
+    /// beyond them, by message count and by bytes.
+    #[test]
+    fn a_mouse_release_queues_even_when_input_filled_the_lane() {
+        let (user_tx, user_rx) =
+            crossbeam_channel::bounded(PTY_INPUT_QUEUE_DEPTH + MOUSE_RELEASE_RESERVE_DEPTH);
+        let (reply_tx, _reply_rx) = crossbeam_channel::bounded(PTY_INPUT_QUEUE_DEPTH);
+        let queued_user_bytes = Arc::new(AtomicUsize::new(0));
+        let queue = PtyInputQueue {
+            user_tx,
+            reply_tx,
+            queued_user_bytes: queued_user_bytes.clone(),
+            queued_reply_bytes: Arc::new(AtomicUsize::new(0)),
+            failed: Arc::new(AtomicBool::new(false)),
+            stop: Arc::new(AtomicBool::new(false)),
+            waker: Arc::new(|| {}),
+        };
+        let release = || Arc::<[u8]>::from(&b"\x1b[<0;1;1m"[..]);
+        for _ in 0..PTY_INPUT_QUEUE_DEPTH {
+            assert_eq!(
+                queue.enqueue_user(Arc::from(&b"a"[..])),
+                PaneInputResult::Queued
+            );
+        }
+        assert_eq!(
+            queue.enqueue_user(Arc::from(&b"a"[..])),
+            PaneInputResult::Backpressured,
+            "ordinary input stops at the lane's depth"
+        );
+        for _ in 0..MOUSE_RELEASE_RESERVE_DEPTH {
+            assert_eq!(
+                queue.enqueue_mouse_release(release()),
+                PaneInputResult::Queued
+            );
+        }
+        assert_eq!(
+            queue.enqueue_mouse_release(release()),
+            PaneInputResult::Backpressured,
+            "the room for releases is bounded"
+        );
+        assert!(!queue.failed());
+        let lane: Vec<usize> = user_rx
+            .try_iter()
+            .map(|message| message.bytes.len())
+            .collect();
+        assert_eq!(
+            lane.len(),
+            PTY_INPUT_QUEUE_DEPTH + MOUSE_RELEASE_RESERVE_DEPTH
+        );
+        assert!(
+            lane[..PTY_INPUT_QUEUE_DEPTH].iter().all(|len| *len == 1)
+                && lane[PTY_INPUT_QUEUE_DEPTH..]
+                    .iter()
+                    .all(|len| *len == release().len()),
+            "releases queue in order, behind the input before them"
+        );
+
+        // A lane full by bytes still takes a release.
+        assert_eq!(
+            queue.enqueue_user(Arc::from(vec![b'x'; MAX_USER_INPUT_MESSAGE_BYTES])),
+            PaneInputResult::Queued
+        );
+        let rest = MAX_QUEUED_USER_INPUT_BYTES - queued_user_bytes.load(Ordering::Acquire);
+        assert_eq!(
+            queue.enqueue_user(Arc::from(vec![b'y'; rest])),
+            PaneInputResult::Queued
+        );
+        assert_eq!(
+            queue.enqueue_user(Arc::from(&b"z"[..])),
+            PaneInputResult::Backpressured
+        );
+        assert_eq!(
+            queue.enqueue_mouse_release(release()),
+            PaneInputResult::Queued
+        );
+        assert_eq!(
+            queue.enqueue_mouse_release(Arc::from(vec![b'x'; MAX_MOUSE_REPORT_BYTES + 1])),
+            PaneInputResult::Oversize,
+            "only a mouse report fits the room"
+        );
+        assert!(!queue.failed());
     }
 
     #[test]

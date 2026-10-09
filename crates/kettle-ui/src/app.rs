@@ -3555,23 +3555,6 @@ const MOUSE_BACK: u8 = 128;
 /// The report code of xterm's button 9, the Forward button.
 const MOUSE_FORWARD: u8 = 129;
 
-/// The bit a side button's SGR code (128 or 129) has in
-/// `WindowState::reported_side_buttons`.
-fn side_button_bit(sgr: u8) -> u8 {
-    1 << (sgr & 1)
-}
-
-/// Note whether the terminal received a side-button press. Each press
-/// replaces what the last one of that button left, so a release that never
-/// arrived cannot pair with a later press.
-fn note_side_button_press(reported: &mut u8, sgr: u8, delivered: bool) {
-    if delivered {
-        *reported |= side_button_bit(sgr);
-    } else {
-        *reported &= !side_button_bit(sgr);
-    }
-}
-
 /// What a mouse event did on its way to a pane's terminal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MouseReport {
@@ -3590,12 +3573,18 @@ impl MouseReport {
     }
 }
 
-/// Whether a side-button release goes to the terminal: only after a press it
-/// received, once.
-fn take_side_button_release(reported: &mut u8, sgr: u8) -> bool {
-    let held = *reported & side_button_bit(sgr) != 0;
-    *reported &= !side_button_bit(sgr);
-    held
+/// Where a mouse report lands in its pane.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum MouseAt {
+    /// The pointer's cell in the pane's rect.
+    Pointer(Rect),
+    /// The drag or release of a held button whose press the pane's program
+    /// got: the pointer's cell in its rect while it is on screen, else the
+    /// cell it was last told of.
+    Held {
+        rect: Option<Rect>,
+        cell: (usize, usize),
+    },
 }
 
 /// Whether an OSC 7 working directory is safe to turn into a `file://` URL and
@@ -4256,7 +4245,7 @@ fn context_menu_snapshot_reuse_safe(ws: &WindowState) -> bool {
     !ws.selecting
         && ws.scrollbar_drag_offset.is_none()
         && ws.dragging_split.is_none()
-        && ws.mouse_btn.is_none()
+        && !ws.held_buttons.any()
         && !ws.tab_drag_active
         && ws.tab_drag_press.is_none()
         && ws.drag_press.is_none()
@@ -14648,7 +14637,13 @@ impl App {
         self.report_mouse(ws, btn, pressed, motion).consumed()
     }
 
-    /// Send a mouse event to the focused pane's terminal and say what it did.
+    /// Send a mouse event to the terminal it belongs to and say what it did.
+    /// A press goes to the focused pane, and a program that gets one keeps
+    /// it: that button's drag and its one release go to the same pane,
+    /// wherever focus has gone since, so no program is left holding half a
+    /// click and no other gets a release it never had the press for. The
+    /// newest press owns the drag, so a gesture of Kettle's own started
+    /// since takes it. Hover goes to the focused pane.
     fn report_mouse(
         &mut self,
         ws: &mut WindowState,
@@ -14656,30 +14651,106 @@ impl App {
         pressed: bool,
         motion: bool,
     ) -> MouseReport {
+        let held = match (pressed, motion) {
+            (false, _) => match ws.held_buttons.take(btn) {
+                Some(held) if held.pane.is_some() => Some(held),
+                // No program had its press: Kettle's own gesture did, or
+                // nothing did, so no program gets its release.
+                _ => return MouseReport::Declined,
+            },
+            (true, true) => ws.held_buttons.dragging(),
+            (true, false) => None,
+        };
+        if let Some(held) = held
+            && let Some(pane) = held.pane
+        {
+            let rect = self.pane_rect(ws, self.area(ws), pane);
+            let at = MouseAt::Held {
+                rect,
+                cell: held.cell,
+            };
+            let button = if motion { held.button } else { btn };
+            return self.send_mouse_to(ws, pane, at, button, pressed, motion);
+        }
         let Some(pane_id) = ws.mux.active_focus() else {
             return MouseReport::Declined;
         };
         let Some(rect) = self.focused_rect(ws, self.area(ws)) else {
             return MouseReport::Declined;
         };
-        self.send_mouse_to(ws, pane_id, rect, btn, pressed, motion)
+        let report = self.send_mouse_to(ws, pane_id, MouseAt::Pointer(rect), btn, pressed, motion);
+        if pressed && !motion {
+            // The press is the button's gesture now: the program's if it got
+            // it, else Kettle's own.
+            let (pane, cell) = match (report, ws.last_mouse_cell) {
+                (MouseReport::Written, Some((pane, row, col))) => (Some(pane), (row, col)),
+                _ => (None, (0, 0)),
+            };
+            if let Some(stale) = ws.held_buttons.pressed(btn, pane, cell) {
+                self.release_held(ws, stale);
+            }
+        }
+        report
+    }
+
+    /// Send each held button `which` names its release now, in the pane its
+    /// press went to, at the cell that pane last saw. Kettle is ending the
+    /// gesture (focus left the window, a menu or search took the pointer,
+    /// the pane's tab is leaving, or the button was pressed again after a
+    /// release that went elsewhere), and the program must not be left
+    /// holding a press. Kettle's own gestures just end.
+    fn release_held_buttons(
+        &mut self,
+        ws: &mut WindowState,
+        which: impl FnMut(&crate::held_buttons::Held) -> bool,
+    ) {
+        for held in ws.held_buttons.take_where(which) {
+            self.release_held(ws, held);
+        }
+    }
+
+    /// Send `held`'s program its release at the cell it last saw.
+    fn release_held(&mut self, ws: &mut WindowState, held: crate::held_buttons::Held) {
+        let Some(pane) = held.pane else {
+            return;
+        };
+        let at = MouseAt::Held {
+            rect: None,
+            cell: held.cell,
+        };
+        self.send_mouse_to(ws, pane, at, held.button, false, false);
+    }
+
+    /// Release the held buttons of every pane in tab `idx` before it leaves
+    /// this window, whose events can no longer reach it.
+    fn release_held_buttons_in_tab(&mut self, ws: &mut WindowState, idx: usize) {
+        let panes = ws.mux.tab_pane_ids(idx);
+        self.release_held_buttons(ws, |held| {
+            held.pane.is_some_and(|pane| panes.contains(&pane))
+        });
     }
 
     fn send_mouse_to(
         &mut self,
         ws: &mut WindowState,
         pane_id: u64,
-        rect: Rect,
+        at: MouseAt,
         btn: u8,
         pressed: bool,
         motion: bool,
     ) -> MouseReport {
+        let held = matches!(at, MouseAt::Held { .. });
+        // A held button's pane that left the screen gets its release, but
+        // no drag: the pointer is nowhere over it.
+        if matches!(at, MouseAt::Held { rect: None, .. }) && pressed {
+            return MouseReport::Swallowed;
+        }
         self.sync_pane_focus_reports(ws);
         if search_bar_blocks_mouse_report(
             self.cursor_in_search_bar(ws),
             pressed,
             motion,
-            ws.mouse_btn.is_some(),
+            ws.held_buttons.any(),
         ) {
             return MouseReport::Swallowed;
         }
@@ -14687,8 +14758,9 @@ impl App {
         // (the xterm convention). Without it, a TUI in mouse mode (htop, vim,
         // tmux) consumes every click and the user cannot select text.
         // Returning `false` lets the caller run selection, scrollbar, and
-        // extend logic as if tracking were off.
-        if ws.mods.shift_key() {
+        // extend logic as if tracking were off. A button whose press the
+        // program got keeps its motion and release there, Shift or not.
+        if ws.mods.shift_key() && !held {
             return MouseReport::Declined;
         }
         // VTE input-enabled parity: a read-only pane gets
@@ -14707,21 +14779,27 @@ impl App {
         }
         // `motion_is_reported` owns the per-mode rule; see its comment for why
         // it is stated positively.
-        if motion && !input::motion_is_reported(track, ws.mouse_btn.is_some()) {
+        if motion && !input::motion_is_reported(track, held) {
             {
                 // A held button means the application owns the gesture even
                 // though this mode does not report the motion itself, so
                 // consume it. With no button held the pointer is only
                 // hovering, and kettle's own hover, scrollbar-drag and
                 // link-hover handling must still run.
-                return if ws.mouse_btn.is_some() {
+                return if held {
                     MouseReport::Swallowed
                 } else {
                     MouseReport::Declined
                 };
             }
         }
-        let (row, col) = self.cursor_cell_in_rect(ws, rect);
+        let (row, col) = match at {
+            MouseAt::Pointer(rect)
+            | MouseAt::Held {
+                rect: Some(rect), ..
+            } => self.cursor_cell_in_rect(ws, rect),
+            MouseAt::Held { rect: None, cell } => cell,
+        };
         // Cell-motion coalescing: a drag that stays inside one cell must not
         // re-report. xterm fires a 1002/1003 motion event only when the
         // pointer crosses into a new cell; without this a fast drag emits one
@@ -14735,14 +14813,25 @@ impl App {
             return MouseReport::Swallowed;
         }
         let seq = input::mouse_encode(sgr, btn, pressed, motion, col, row, ws.mods);
-        if let Some(pane) = ws.mux.panes.get(&pane_id) {
-            let result = pane.feed_input(&seq);
-            if !result.is_queued() {
-                self.report_input_result(result);
-            }
-            Self::dismiss_media_paste_receipt_after_input(ws, pane_id, result);
+        let Some(pane) = ws.mux.panes.get(&pane_id) else {
+            return MouseReport::Declined;
+        };
+        // A release takes the room the program's input keeps for releases,
+        // so it always lands behind its press.
+        let result = if pressed || motion {
+            pane.feed_input(&seq)
+        } else {
+            pane.feed_mouse_release(&seq)
+        };
+        Self::dismiss_media_paste_receipt_after_input(ws, pane_id, result);
+        if !result.is_queued() {
+            // The program never got it: a press it missed leaves no button
+            // held, so no release follows.
+            self.report_input_result(result);
+            return MouseReport::Swallowed;
         }
         ws.last_mouse_cell = Some((pane_id, row, col));
+        ws.held_buttons.told(pane_id, (row, col));
         MouseReport::Written
     }
 
@@ -16133,7 +16222,7 @@ impl App {
 
     fn open_search(&mut self, ws: &mut WindowState) {
         self.close_all_modals(ws);
-        ws.mouse_btn = None;
+        self.release_held_buttons(ws, |_| true);
         ws.card_press = None;
         ws.last_mouse_cell = None;
         ws.scrollbar_drag_offset = None;
@@ -16946,7 +17035,7 @@ impl App {
         self.close_media_viewer(ws);
         ws.scrollbar_drag_offset = None;
         ws.dragging_split = None;
-        ws.mouse_btn = None;
+        self.release_held_buttons(ws, |_| true);
         ws.card_press = None;
         ws.last_mouse_cell = None;
         ws.tab_drag_active = false;
@@ -18803,6 +18892,9 @@ impl App {
                 // hint mode and SSH launcher overlays), so sweep that too, or a
                 // stale highlight or open modal survives the reset.
                 if let Some(pane_id) = ws.mux.active_focus() {
+                    // The reset turns mouse reporting off, so a held button's
+                    // release goes to the program first.
+                    self.release_held_buttons(ws, |held| held.pane == Some(pane_id));
                     apply_terminal_control(&ws.mux, &[pane_id], b"\x1bc");
                 }
                 self.clear_selection_on_input(ws);
@@ -19438,6 +19530,13 @@ impl App {
             // dropped before it reaches the PTY; the child keeps producing
             // output. A `[RO]` titlebar badge shows the state.
             Action::TogglePaneReadOnly => {
+                // A pane turned read-only gets no more input, so a held
+                // button's release goes to it first.
+                if let Some(pane) = ws.mux.active_focus()
+                    && ws.mux.focused().is_some_and(|focused| !focused.read_only)
+                {
+                    self.release_held_buttons(ws, |held| held.pane == Some(pane));
+                }
                 let _ = ws.mux.toggle_focused_read_only();
                 // The `[RO]` titlebar badge reflects the new state.
                 if let Some(w) = &ws.window {
@@ -19595,6 +19694,7 @@ impl App {
                     return;
                 }
                 let closing_idx = ws.mux.active;
+                self.release_held_buttons_in_tab(ws, closing_idx);
                 let Some(dt) = ws.mux.detach_tab(closing_idx) else {
                     return;
                 };
@@ -19649,6 +19749,8 @@ impl App {
                 // ClearHistory (CSI 3 J) in one keybind, with Reset's sweep of
                 // Kettle's own UI state.
                 if let Some(pane_id) = ws.mux.active_focus() {
+                    // As for Reset, a held button's release goes first.
+                    self.release_held_buttons(ws, |held| held.pane == Some(pane_id));
                     // One request, so a full queue cannot accept RIS but reject
                     // the paired history clear.
                     apply_terminal_control(&ws.mux, &[pane_id], b"\x1bc\x1b[3J");
@@ -23084,10 +23186,9 @@ impl App {
         // like 1002 while DECRQM still reports it set, and hover highlighting
         // in Neovim, lazygit, btop and fzf goes dead. `send_mouse` decides per
         // mode whether to report.
-        {
-            let btn = ws.mouse_btn.unwrap_or(input::MOUSE_NO_BUTTON);
-            let _ = self.send_mouse(ws, btn, true, true);
-        }
+        // A held button's drag goes where its press did; `report_mouse`
+        // picks the button.
+        let _ = self.send_mouse(ws, input::MOUSE_NO_BUTTON, true, true);
         if ws.selecting {
             note_selection_drag_motion(ws);
             let area = self.area(ws);
@@ -23105,10 +23206,14 @@ impl App {
         event_loop: &ActiveEventLoop,
         bcode: u8,
     ) -> bool {
-        // As natively: a card press whose release never came is over.
+        // As natively: a card press whose release never came is over, a
+        // program still holding this button gets its release, and the press
+        // is Kettle's own gesture until a program receives it.
         if bcode == 0 {
             ws.card_press = None;
         }
+        self.release_held_buttons(ws, |held| held.button == bcode);
+        ws.held_buttons.pressed(bcode, None, (0, 0));
         let bar = self.tab_bar(ws);
         let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
         if ws.context_menu.is_some()
@@ -23239,7 +23344,6 @@ impl App {
             return true;
         }
         if self.send_mouse(ws, bcode, true, false) {
-            ws.mouse_btn = Some(bcode);
             return true;
         }
         if bcode == 0 {
@@ -23250,6 +23354,8 @@ impl App {
     }
 
     fn ctl_mouse_release(&mut self, ws: &mut WindowState, bcode: u8) -> bool {
+        // As natively: a gesture of Kettle's own ends with its release.
+        ws.held_buttons.end_own(bcode);
         if bcode == 0
             && search_pointer_route(ws.search.open, None, ws.search.pointer_captured())
                 == SearchPointerRoute::Bar
@@ -23262,11 +23368,8 @@ impl App {
         if self.release_card(ws, px, py, bcode) {
             return true;
         }
-        let mut handled = false;
-        if ws.mouse_btn == Some(bcode) {
-            ws.mouse_btn = None;
-            handled = self.send_mouse(ws, bcode, false, false);
-        }
+        // The release goes where its press did, if a program got it.
+        let mut handled = self.send_mouse(ws, bcode, false, false);
         if selection_release_matches(ws.selection_button, bcode) {
             self.finish_selection_gesture(ws);
             handled = true;
@@ -23473,7 +23576,14 @@ impl App {
                 let btn = if steps.lines > 0 { 64 } else { 65 };
                 for _ in 0..steps.lines.unsigned_abs().min(8) {
                     reported |= self
-                        .send_mouse_to(ws, wheel_pane, wheel_rect, btn, true, false)
+                        .send_mouse_to(
+                            ws,
+                            wheel_pane,
+                            MouseAt::Pointer(wheel_rect),
+                            btn,
+                            true,
+                            false,
+                        )
                         .consumed();
                 }
             }
@@ -23481,7 +23591,14 @@ impl App {
                 let btn = if steps.cols > 0 { 66 } else { 67 };
                 for _ in 0..steps.cols.unsigned_abs().min(8) {
                     reported |= self
-                        .send_mouse_to(ws, wheel_pane, wheel_rect, btn, true, false)
+                        .send_mouse_to(
+                            ws,
+                            wheel_pane,
+                            MouseAt::Pointer(wheel_rect),
+                            btn,
+                            true,
+                            false,
+                        )
                         .consumed();
                 }
             }
@@ -30263,6 +30380,7 @@ impl App {
         // The dragged tab is the ACTIVE tab. The drag-to-reorder gesture keeps
         // it active, while the FSM's armed index can go stale across reorders.
         let closing_idx = ws.mux.active;
+        self.release_held_buttons_in_tab(ws, closing_idx);
         let Some(dt) = ws.mux.detach_tab(closing_idx) else {
             return false;
         };
@@ -30816,6 +30934,7 @@ impl App {
         if td.seq == ws.seq {
             // Native loop: `ws` IS the torn window; the target is mapped.
             let donor_active = ws.mux.active;
+            self.release_held_buttons_in_tab(ws, donor_active);
             let Some(dt) = ws.mux.detach_tab(donor_active) else {
                 // Every early return after take() must clear the
                 // latched preview, or the marker (and a materialized auto
@@ -30854,6 +30973,7 @@ impl App {
                 return;
             };
             let donor_active = torn.mux.active;
+            self.release_held_buttons_in_tab(&mut torn, donor_active);
             let Some(dt) = torn.mux.detach_tab(donor_active) else {
                 self.windows.insert(td.seq, torn);
                 self.clear_dock_preview_at(ws, target_seq);
@@ -32499,8 +32619,7 @@ impl App {
                     // 1003 exists to deliver; `send_mouse` decides per mode
                     // whether this motion is reportable at all, so 1002 still
                     // needs a held button and 1000 still gets nothing.
-                    let btn = ws.mouse_btn.unwrap_or(input::MOUSE_NO_BUTTON);
-                    if self.send_mouse(ws, btn, true, true) {
+                    if self.send_mouse(ws, input::MOUSE_NO_BUTTON, true, true) {
                         return;
                     }
                 }
@@ -32565,6 +32684,11 @@ impl App {
                 // *behind* a palette/settings/… dialog. A lone context menu
                 // isn't a modal here.
                 if let Some(sgr) = extra_mouse_sgr(button) {
+                    // A press of a button still noted as held means its
+                    // release went elsewhere: its program gets it now. The
+                    // press is Kettle's until a program receives it.
+                    self.release_held_buttons(ws, |held| held.button == sgr);
+                    ws.held_buttons.pressed(sgr, None, (0, 0));
                     // A lone context menu must swallow the side-button press
                     // too. Dismiss the menu and DON'T forward.
                     // `modal_swallows_pointer` returns false for a lone menu,
@@ -32573,7 +32697,6 @@ impl App {
                     // open (every other button dismisses it).
                     if ws.context_menu.is_some() {
                         ws.context_menu = None;
-                        note_side_button_press(&mut ws.reported_side_buttons, sgr, false);
                         if let Some(w) = &ws.window {
                             w.request_redraw();
                         }
@@ -32582,13 +32705,14 @@ impl App {
                     // The media viewer owns every press while it is open; a
                     // side button does nothing there.
                     let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
-                    let reported = !self.activate_media_viewer_at(ws, px, py, sgr)
+                    if !self.activate_media_viewer_at(ws, px, py, sgr)
                         && !modal_swallows_pointer(
                             self.pointer_modal_open(ws),
                             ws.context_menu.is_some(),
                         )
-                        && self.report_mouse(ws, sgr, true, false) == MouseReport::Written;
-                    note_side_button_press(&mut ws.reported_side_buttons, sgr, reported);
+                    {
+                        self.report_mouse(ws, sgr, true, false);
+                    }
                     return;
                 }
                 let bcode = match button {
@@ -32602,6 +32726,11 @@ impl App {
                 if bcode == 0 {
                     ws.card_press = None;
                 }
+                // Likewise a program still noted as holding this button gets
+                // the release it missed, and the press is Kettle's own
+                // gesture until a program receives it.
+                self.release_held_buttons(ws, |held| held.button == bcode);
+                ws.held_buttons.pressed(bcode, None, (0, 0));
                 // Context menu: if the menu is open, a left-click
                 // either fires the row that was hit or — if the click landed
                 // outside the panel — closes the menu. Middle-click outside
@@ -32944,7 +33073,6 @@ impl App {
                     .focus_at(area, ws.cursor.x as f32, ws.cursor.y as f32);
                 self.note_focus_change(ws, pre);
                 if self.send_mouse(ws, bcode, true, false) {
-                    ws.mouse_btn = Some(bcode);
                     return;
                 }
                 // Middle-click in the content area pastes the PRIMARY
@@ -33032,9 +33160,8 @@ impl App {
                 // the media viewer took leaves no release behind, even when
                 // that surface closed while the button was held.
                 if let Some(sgr) = extra_mouse_sgr(button) {
-                    if take_side_button_release(&mut ws.reported_side_buttons, sgr) {
-                        self.send_mouse(ws, sgr, false, false);
-                    }
+                    ws.held_buttons.end_own(sgr);
+                    self.send_mouse(ws, sgr, false, false);
                     return;
                 }
                 let bcode = match button {
@@ -33043,6 +33170,10 @@ impl App {
                     MouseButton::Right => 2,
                     _ => return,
                 };
+                // A gesture of Kettle's own ends with this release, whichever
+                // handler below takes it; a program's goes on to get its
+                // release from `report_mouse`.
+                ws.held_buttons.end_own(bcode);
                 // A release ends an editor drag inside the search bar; any
                 // other release while the bar is open belongs to the grid
                 // gesture it started (selection end, copy-on-select, mouse
@@ -33071,7 +33202,7 @@ impl App {
                 // FIRST among the left-release handlers, ahead of the tear-off
                 // and mouse-reporting branches that can return early. Those are
                 // all mutually exclusive with a pane drag today -- the titlebar
-                // press returns before `mouse_btn` is ever set -- but "today"
+                // press returns before any button is noted as held -- but "today"
                 // is exactly the kind of reasoning that leaves a gesture armed
                 // when one of them grows a new early return.
                 if bcode == 0
@@ -33126,11 +33257,9 @@ impl App {
                     }
                     self.finalize_torn_drag(ws, false);
                 }
-                if ws.mouse_btn == Some(bcode) {
-                    ws.mouse_btn = None;
-                    if self.send_mouse(ws, bcode, false, false) {
-                        return;
-                    }
+                // The release goes where its press did, if a program got it.
+                if self.send_mouse(ws, bcode, false, false) {
+                    return;
                 }
                 if selection_release_matches(ws.selection_button, bcode) {
                     self.finish_selection_gesture(ws);
@@ -33170,6 +33299,7 @@ impl App {
                         && ws.mux.tabs.len() > 1
                     {
                         let closing_idx = ws.mux.active;
+                        self.release_held_buttons_in_tab(ws, closing_idx);
                         if let Some(dt) = ws.mux.detach_tab(closing_idx) {
                             // `outer_position` errs on Wayland — `None` lets
                             // the compositor place the window.
@@ -33337,7 +33467,7 @@ impl App {
                 // A focus loss can swallow the button-UP that
                 // ends an in-progress drag (the release lands on whatever window
                 // took focus), latching `selecting` / `scrollbar_drag_offset` /
-                // `tab_drag_active` / a held `mouse_btn`. The next CursorMoved
+                // `tab_drag_active` / a held button. The next CursorMoved
                 // then kept extending the selection or dragging a tab with no
                 // button down. Disarm them on focus loss, committing any pending
                 // copy-on-select first (mirrors the left-button-up path).
@@ -33361,7 +33491,9 @@ impl App {
                     ws.tab_pressed_idx = None;
                     // A focus loss also ends any split-divider drag.
                     ws.dragging_split = None;
-                    ws.mouse_btn = None;
+                    // Releases now land in another window: each program
+                    // with a held button's press gets its release here.
+                    self.release_held_buttons(ws, |_| true);
                     // And a card's press: its release may land elsewhere.
                     ws.card_press = None;
                     // A focus loss also cancels an in-flight tab tear-off
@@ -37835,9 +37967,9 @@ mod tests {
         assert!(!context_menu_snapshot_reuse_safe(&ws));
         ws.dragging_split = None;
 
-        ws.mouse_btn = Some(0);
+        ws.held_buttons.pressed(0, Some(1), (0, 0));
         assert!(!context_menu_snapshot_reuse_safe(&ws));
-        ws.mouse_btn = None;
+        ws.held_buttons.take(0);
 
         ws.tab_drag_active = true;
         assert!(!context_menu_snapshot_reuse_safe(&ws));
@@ -39989,14 +40121,16 @@ mod tests {
         let drag = release
             .find("&& let Some(drag) = ws.pane_drag.take()")
             .expect("pane drag");
-        let report = release.find("ws.mouse_btn").expect("mouse report");
+        let report = release
+            .find("if self.send_mouse(ws, bcode, false, false) {")
+            .expect("mouse report");
         assert!(card < drag && card < report);
         let ctl_release = after(source, "    fn ctl_mouse_release(");
         let card = ctl_release
             .find("if self.release_card(ws, px, py, bcode) {")
             .expect("ctl release");
         let report = ctl_release
-            .find("if ws.mouse_btn == Some(bcode)")
+            .find("let mut handled = self.send_mouse(ws, bcode, false, false);")
             .expect("ctl report");
         assert!(card < report);
         // Only a primary press without Shift, and only on a settled card.
@@ -41930,7 +42064,7 @@ mod tests {
                 && focused_arm.contains("ws.mux.panes.values().chain(")
                 && focused_arm.contains("self.windows\n                        .values()")
                 && focused_arm.contains("pane.term.invalidate_completion();")
-                && focused_arm.contains("ws.tab_drag_active = false;\n                    ws.tab_drag_press = None;\n                    ws.tab_pressed_idx = None;\n                    // A focus loss also ends any split-divider drag.\n                    ws.dragging_split = None;\n                    ws.mouse_btn = None;"),
+                && focused_arm.contains("ws.tab_drag_active = false;\n                    ws.tab_drag_press = None;\n                    ws.tab_pressed_idx = None;\n                    // A focus loss also ends any split-divider drag.\n                    ws.dragging_split = None;\n                    // Releases now land in another window: each program\n                    // with a held button's press gets its release here.\n                    self.release_held_buttons(ws, |_| true);"),
             "the Focused `!f` arm must disarm the latched drag and completion state"
         );
         // 3. Side-button dismisses a lone context menu instead of leaking SGR.
@@ -42193,7 +42327,10 @@ mod tests {
             .nth(1)
             .and_then(|body| body.split("\n    fn ").next())
             .expect("target-aware mouse sender");
-        assert!(mouse.contains("let result = pane.feed_input(&seq);"));
+        // Presses and drags take ordinary user input; a release takes the
+        // user lane's room for releases. Both stay in order with typing.
+        assert!(mouse.contains("pane.feed_input(&seq)"));
+        assert!(mouse.contains("pane.feed_mouse_release(&seq)"));
         assert!(!mouse.contains("queue_protocol_reply"));
 
         let focus = source
@@ -42211,6 +42348,12 @@ mod tests {
             .and_then(|body| body.split("\n    pub fn ").next())
             .expect("focus-report sender");
         assert!(focus_sender.contains("enqueue_user"));
+        let release_lane = mux
+            .split("fn enqueue_mouse_release(")
+            .nth(1)
+            .and_then(|body| body.split("\n    fn ").next())
+            .expect("mouse-release lane");
+        assert!(release_lane.contains("&self.user_tx,"));
         assert!(!focus_sender.contains("with_completion_input_admission"));
 
         let terminal_replies = source
@@ -44963,7 +45106,6 @@ mod tests {
     /// owns the pointer, and its release only when the press did, once.
     #[test]
     fn side_button_forward_is_modal_gated_and_releases_pair_with_presses() {
-        use super::{note_side_button_press, take_side_button_release};
         // Collapse all whitespace before scanning. rustfmt wraps the call
         // across lines, and the match must also survive a CRLF working tree
         // (which `.gitattributes eol=lf` normally prevents).
@@ -44973,23 +45115,23 @@ mod tests {
             .join(" ");
         assert!(
             src.contains(
-                "let reported = !self.activate_media_viewer_at(ws, px, py, sgr) \
+                "if !self.activate_media_viewer_at(ws, px, py, sgr) \
                  && !modal_swallows_pointer( self.pointer_modal_open(ws), ws.context_menu.is_some(), ) \
-                 && self.report_mouse(ws, sgr, true, false) == MouseReport::Written; \
-                 note_side_button_press(&mut ws.reported_side_buttons, sgr, reported);"
+                 { self.report_mouse(ws, sgr, true, false); }"
             ),
-            "a side-button press is forwarded past the viewer and modals, and noted"
+            "a side-button press is forwarded past the viewer and modals"
         );
-        assert!(src.contains(
-            "if take_side_button_release(&mut ws.reported_side_buttons, sgr) { \
-             self.send_mouse(ws, sgr, false, false); }"
-        ));
         assert!(
             src.contains(
-                "ws.context_menu = None; \
-                 note_side_button_press(&mut ws.reported_side_buttons, sgr, false);"
+                "if let Some(sgr) = extra_mouse_sgr(button) { ws.held_buttons.end_own(sgr); self.send_mouse(ws, sgr, false, false); return; }"
             ),
-            "a press that only dismisses the context menu is noted as taken"
+            "its release goes only where a press went: report_mouse declines one no program had"
+        );
+        assert!(
+            src.contains(
+                "self.release_held_buttons(ws, |held| held.button == sgr); ws.held_buttons.pressed(sgr, None, (0, 0)); // A lone context menu"
+            ),
+            "a side press first releases one whose release went elsewhere, and is Kettle's until a program gets it"
         );
         // A press the search bar keeps from the terminal is not one it saw.
         let send = production_source();
@@ -44999,33 +45141,105 @@ mod tests {
             .and_then(|rest| rest.split("\n    fn ").next())
             .expect("send_mouse_to");
         assert!(send_to.contains(
-            "ws.mouse_btn.is_some(),\n        ) {\n            return MouseReport::Swallowed;"
+            "ws.held_buttons.any(),\n        ) {\n            return MouseReport::Swallowed;"
         ));
         assert_eq!(send_to.matches("MouseReport::Written").count(), 1);
         assert!(
             super::MouseReport::Swallowed.consumed() && !super::MouseReport::Declined.consumed()
         );
+    }
 
-        let mut reported = 0;
-        note_side_button_press(&mut reported, 128, false);
+    /// A press a program got keeps its pane: that button's drag and its one
+    /// release go there wherever focus has gone, Shift or not, and one whose
+    /// pane left the screen gets only the release, at the cell it last saw.
+    /// A press no program got leaves no button held; a release takes room
+    /// the program's input keeps for releases, so a full queue cannot refuse
+    /// it. The newest press owns the drag, and a gesture of Kettle's own ends
+    /// with its release whoever handles it. Kettle ending a program's gesture
+    /// early (focus loss, search, the menu, a tab leaving, the button pressed
+    /// again) releases it in place.
+    #[test]
+    fn a_held_buttons_reports_stay_with_the_pane_its_press_went_to() {
+        let source = production_source();
+        let body = |name: &str| {
+            source
+                .split(&format!("    fn {name}("))
+                .nth(1)
+                .and_then(|rest| rest.split("\n    fn ").next())
+                .unwrap_or_else(|| panic!("{name}"))
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let report = body("report_mouse");
+        let release = report
+            .find("(false, _) => match ws.held_buttons.take(btn) { Some(held) if held.pane.is_some() => Some(held),")
+            .expect("a release takes its press's entry, and only a program's is reported");
+        let drag = report
+            .find("(true, true) => ws.held_buttons.dragging(),")
+            .expect("a drag follows the newest held button");
+        let routed = report
+            .find("return self.send_mouse_to(ws, pane, at, button, pressed, motion);")
+            .expect("held reports go to their pane");
+        let focus = report.find("ws.mux.active_focus()").expect("focus");
+        assert!(release < routed && drag < routed && routed < focus);
+        assert!(report.contains(
+            "(MouseReport::Written, Some((pane, row, col))) => (Some(pane), (row, col)), _ => (None, (0, 0)), }; if let Some(stale) = ws.held_buttons.pressed(btn, pane, cell) { self.release_held(ws, stale); }"
+        ));
+        let send = body("send_mouse_to");
+        assert!(send.contains("if ws.mods.shift_key() && !held {"));
+        assert!(send.contains(
+            "if matches!(at, MouseAt::Held { rect: None, .. }) && pressed { return MouseReport::Swallowed; }"
+        ));
+        assert!(send.contains("MouseAt::Held { rect: None, cell } => cell,"));
+        assert!(send.contains(
+            "let result = if pressed || motion { pane.feed_input(&seq) } else { pane.feed_mouse_release(&seq) };"
+        ));
+        assert!(send.contains(
+            "if !result.is_queued() { // The program never got it: a press it missed leaves no button // held, so no release follows. self.report_input_result(result); return MouseReport::Swallowed; }"
+        ));
+        assert!(send.contains("ws.held_buttons.told(pane_id, (row, col));"));
+        // Kettle releases what it ends early.
+        for ends in ["open_search", "show_context_menu"] {
+            assert!(
+                body(ends).contains("self.release_held_buttons(ws, |_| true);"),
+                "{ends}"
+            );
+        }
         assert!(
-            !take_side_button_release(&mut reported, 128),
-            "a taken press"
+            source.split_whitespace().collect::<Vec<_>>().join(" ").contains(
+                "Action::TogglePaneReadOnly => { // A pane turned read-only gets no more input, so a held // button's release goes to it first. if let Some(pane) = ws.mux.active_focus() && ws.mux.focused().is_some_and(|focused| !focused.read_only) { self.release_held_buttons(ws, |held| held.pane == Some(pane)); }"
+            ),
+            "a pane turning read-only gets its held releases first"
         );
-        note_side_button_press(&mut reported, 128, true);
-        note_side_button_press(&mut reported, 129, false);
-        assert!(
-            !take_side_button_release(&mut reported, 129),
-            "buttons are apart"
+        let flat_source = source.split_whitespace().collect::<Vec<_>>().join(" ");
+        for reset in [
+            "self.release_held_buttons(ws, |held| held.pane == Some(pane_id)); apply_terminal_control(&ws.mux, &[pane_id], b\"\\x1bc\");",
+            "self.release_held_buttons(ws, |held| held.pane == Some(pane_id)); // One request, so a full queue cannot accept RIS but reject // the paired history clear. apply_terminal_control(&ws.mux, &[pane_id], b\"\\x1bc\\x1b[3J\");",
+        ] {
+            assert!(
+                flat_source.contains(reset),
+                "a reset releases held buttons first: {reset}"
+            );
+        }
+        let flat = source.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_eq!(
+            flat.matches("self.release_held_buttons_in_tab(").count(),
+            flat.matches(".mux.detach_tab(").count(),
+            "every tab that leaves a window releases its held buttons first"
         );
-        assert!(take_side_button_release(&mut reported, 128));
-        assert!(!take_side_button_release(&mut reported, 128), "once");
-        note_side_button_press(&mut reported, 129, true);
-        note_side_button_press(&mut reported, 129, false);
-        assert!(
-            !take_side_button_release(&mut reported, 129),
-            "a lost release does not pair with a later taken press"
-        );
+        for needle in [
+            // Each press first releases one whose release went elsewhere, and
+            // is Kettle's own gesture until a program receives it.
+            "self.release_held_buttons(ws, |held| held.button == bcode); ws.held_buttons.pressed(bcode, None, (0, 0)); // Context menu:",
+            "if bcode == 0 { ws.card_press = None; } self.release_held_buttons(ws, |held| held.button == bcode); ws.held_buttons.pressed(bcode, None, (0, 0)); let bar",
+            // Each release ends a gesture of Kettle's own first.
+            "ws.held_buttons.end_own(bcode); // A release ends an editor drag inside the search bar;",
+            "if let Some(sgr) = extra_mouse_sgr(button) { ws.held_buttons.end_own(sgr); self.send_mouse(ws, sgr, false, false); return; }",
+            "// As natively: a gesture of Kettle's own ends with its release. ws.held_buttons.end_own(bcode);",
+        ] {
+            assert!(flat.contains(needle), "{needle}");
+        }
     }
 
     fn item(label: &'static str, enabled: bool) -> ContextMenuItem {

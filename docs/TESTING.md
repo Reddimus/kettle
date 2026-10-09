@@ -3825,7 +3825,27 @@ search, focus loss and a new primary press end a card press, so a dialog
 opened and closed while the button is held still cancels the click. Checked live with Codex CLI 0.162.0: a
 `send_mouse` click on a Codex card opened the viewer on its item, and a
 press on the card released after Settings opened left Settings up and
-opened nothing. The viewer's sender line finds its program's path and signer in
+opened nothing. Held buttons in general:
+`held_buttons::tests` checks one entry per button, the newest dragging, each
+release taking its own entry once, the last cell told to each pane, a press
+after a lost release handing back the stale entry, and a newer gesture of
+Kettle's own taking the drag from a program's until its release.
+`a_mouse_release_queues_even_when_input_filled_the_lane` fills a pane's
+input lane by message count and by bytes and checks a release still queues,
+in order behind the input before it, within its own bounded room.
+`a_held_buttons_reports_stay_with_the_pane_its_press_went_to` guards the
+routing: a release takes its press's entry or goes nowhere, a drag follows
+the newest held button, both reach that pane before the focused one, Shift
+no longer declines them, a pane off screen gets only the release at the cell
+it last saw, a press refused by a full input queue holds nothing while a
+release takes the room kept for releases, every release handler ends a
+gesture of Kettle's own first, and focus loss, search, the context menu,
+turning the pane read-only, Reset and Reset and Clear, every tab detach and
+a repeated press release what they end. Checked live with a probe that logs SGR reports in each
+pane: a press in one tab released after switching tabs, and a press in one
+split released after moving focus to the other, used to leave the first
+probe a press alone and hand the second a drag and release; now the first
+gets the whole click and the second nothing. The viewer's sender line finds its program's path and signer in
 any language's word order, whatever they hold, and a line too narrow even for
 the path's last segment shortens around the signer, which stays whole. In
 `kettle-ui`'s `media` module, `route` tests: the nearest live pane ancestor
