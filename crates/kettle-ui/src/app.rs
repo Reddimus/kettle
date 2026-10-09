@@ -1762,8 +1762,10 @@ fn ctl_mouse_button(params: &serde_json::Value) -> std::result::Result<u8, Strin
         "left" => Ok(0),
         "middle" => Ok(1),
         "right" => Ok(2),
-        "back" => Ok(8),
-        "forward" => Ok(9),
+        // The report codes the physical buttons send, not xterm's button
+        // numbers: 8 and 9 would encode as a modified left or middle press.
+        "back" => Ok(MOUSE_BACK),
+        "forward" => Ok(MOUSE_FORWARD),
         other => Err(format!(
             "unknown button '{other}' (expected left, middle, right, back, or forward)"
         )),
@@ -3251,11 +3253,16 @@ pub(crate) fn pane_titlebar_hit(
 /// they only do anything while mouse tracking is on.
 fn extra_mouse_sgr(button: MouseButton) -> Option<u8> {
     match button {
-        MouseButton::Back => Some(128),
-        MouseButton::Forward => Some(129),
+        MouseButton::Back => Some(MOUSE_BACK),
+        MouseButton::Forward => Some(MOUSE_FORWARD),
         _ => None,
     }
 }
+
+/// The report code of xterm's button 8, the Back button.
+const MOUSE_BACK: u8 = 128;
+/// The report code of xterm's button 9, the Forward button.
+const MOUSE_FORWARD: u8 = 129;
 
 /// Whether an OSC 7 working directory is safe to turn into a `file://` URL and
 /// hand to the OS opener.
@@ -44944,6 +44951,25 @@ mod tests {
         assert_eq!(extra_mouse_sgr(MouseButton::Middle), None);
         assert_eq!(extra_mouse_sgr(MouseButton::Right), None);
         assert_eq!(extra_mouse_sgr(MouseButton::Other(5)), None);
+    }
+
+    /// `send_mouse`'s `back` and `forward` report what the physical buttons
+    /// do, so a mouse-tracking program cannot tell them apart; xterm's button
+    /// numbers 8 and 9 would read as a modified left or middle press.
+    #[test]
+    fn ctl_side_buttons_report_like_the_physical_ones() {
+        use super::{ctl_mouse_button, extra_mouse_sgr};
+        use winit::event::MouseButton;
+        let button = |name: &str| ctl_mouse_button(&serde_json::json!({ "button": name }));
+        assert_eq!(button("back").ok(), extra_mouse_sgr(MouseButton::Back));
+        assert_eq!(
+            button("forward").ok(),
+            extra_mouse_sgr(MouseButton::Forward)
+        );
+        assert_eq!(button("left"), Ok(0));
+        let sgr =
+            |code| crate::input::mouse_encode(true, code, true, false, 0, 0, Default::default());
+        assert_eq!(sgr(button("back").unwrap()), b"\x1b[<128;1;1M");
     }
 
     #[test]
