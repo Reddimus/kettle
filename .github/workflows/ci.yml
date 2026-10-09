@@ -841,19 +841,19 @@ jobs:
             | grep -qE 'k\.cfg$'
 
 
-  # Verify the declared workspace MSRV (`rust-version = "1.89"` in
+  # Verify the declared workspace MSRV (`rust-version = "1.95"` in
   # Cargo.toml) actually still builds. Without this job we
   # only know `stable` works — a user on the declared floor (e.g. a
-  # distro shipping Rust 1.89 in its package manager, or `cargo
+  # distro shipping Rust 1.95 in its package manager, or `cargo
   # install kettle` on a slightly-stale toolchain) could hit a
-  # compile error if we accidentally use a Rust-1.90+ feature.
+  # compile error if we accidentally use a Rust-1.96+ feature.
   # Linux-only because MSRV is a "does this compile" question, not a
   # platform-portability question — the platform matrix above already
   # covers OS portability under stable. Build + test only (clippy /
   # fmt / rustdoc lints have their own evolving baselines and aren't
   # meaningful on a pinned-old toolchain).
   msrv:
-    name: msrv (rust 1.89)
+    name: msrv (rust 1.95)
     runs-on: ubuntu-latest
     # Same timeout rationale as the matrix `build` job above. 30 min is ~2x
     # the observed build + test time; tighter than `build` because this job
@@ -873,7 +873,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
-          toolchain: "1.89"
+          toolchain: "1.95"
       - name: Linux deps
         run: |
           sudo apt-get update
@@ -882,7 +882,7 @@ jobs:
             libxcb1-dev mesa-vulkan-drivers libvulkan1 xvfb
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          key: msrv-1.89
+          key: msrv-1.95
       - run: cargo build --locked --workspace --all-targets
       - run: cargo test --locked --workspace
 

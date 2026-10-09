@@ -32,16 +32,15 @@ exclude = [
 [workspace.package]
 version = "4.9.0"
 edition = "2024"
-# MSRV. The workspace uses let-chains (`if X && let Y = ... && Z`) in
-# kettle-vt / kettle-config / kettle-render / kettle, stable since Rust
-# 1.88, but two transitive deps (`cosmic-text 0.19.0`, `smol_str 0.3.6`)
-# require 1.89. Declaring 1.89 gives `cargo install` users cargo's clean
-# "package requires rustc 1.89" message instead of a confusing
-# transitive-dep failure. The `msrv` CI job builds + tests on exactly the
-# declared rustc, so a future dep bump that raises the floor again fails
-# CI instead of silently breaking `cargo install`. This is a floor, not a
-# ceiling; we still develop and CI on stable.
-rust-version = "1.89"
+# MSRV. `sysinfo` 0.39 (kettle-remote's process walk) requires Rust 1.95,
+# and so does the 5.0 Mermaid renderer. Declaring the floor gives
+# `cargo install` users cargo's clean "package requires rustc 1.95" message
+# instead of a confusing transitive-dep failure. The `msrv` CI job builds +
+# tests on exactly the declared rustc, and the Nix toolchain is derived from
+# this line, so a dep bump that raises the floor again fails CI instead of
+# silently breaking `cargo install`. This is a floor, not a ceiling; we
+# still develop and CI on stable.
+rust-version = "1.95"
 license = "MIT"
 repository = "https://github.com/Reddimus/kettle"
 homepage = "https://github.com/Reddimus/kettle"

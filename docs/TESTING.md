@@ -1546,7 +1546,7 @@ snapshot requiring a copy. These checks do not establish foreground UI pixels,
 quiet performance, or release artifact acceptance.
 Shared creation-order tests also check concurrent allocation across cloned screen
 budgets and refusal at `u64::MAX`. The allocator uses a checked compare-and-swap
-loop supported by Rust 1.89 and current stable toolchains.
+loop supported by Rust 1.95 and current stable toolchains.
 
 Native vi-mode regressions drive Alacritty's own cursor and
 selection through scrollback rotation and reflow, proving the cursor remains
@@ -3916,8 +3916,14 @@ retained compile/regression checks on **windows**:
   exit codes, happy-path basename round-trip
   (Windows path-translation parity).
 - The **MSRV verification job** builds and tests the workspace on the
-  declared Rust 1.89 floor (`dtolnay/rust-toolchain` with `toolchain: "1.89"`),
+  declared Rust 1.95 floor (`dtolnay/rust-toolchain` with `toolchain: "1.95"`),
   so a transitive-dep MSRV bump fails at PR time instead of release time.
+  `kettle-test-support`'s `msrv_consistency` test keeps the floor declared
+  once: the job's name, toolchain, cache key and locked build and test
+  commands, the Nix toolchain derived from `Cargo.toml`, every member
+  inheriting the workspace floor, and the README, CONTRIBUTING, INSTALL and
+  Nix docs must all agree with `rust-version`, and none of them may name
+  another floor.
 - The **icon raster, actool, and ico packaging smokes** — the cross-platform
   generator gate compares the Linux SVG, `AppIcon.icon`, every PNG, and
   all seven ICO resolutions. The macOS leg compiles the Icon Composer document
@@ -4024,7 +4030,7 @@ Separate workflows:
   `kettle-remote` crates: its Linux sandbox presents `/` as uid 65534 while the
   builder is uid 1000, so Kettle's private-path policy intentionally rejects
   positive private-file operations beneath that ancestry. Native Linux, macOS,
-  and Windows CI plus the Linux Rust 1.89 MSRV job remain authoritative for the
+  and Windows CI plus the Linux Rust 1.95 MSRV job remain authoritative for the
   complete workspace, including private-state, configuration persistence,
   screenshots, recording, local IPC, and updater tests. The separately named
   launch check proves the appended

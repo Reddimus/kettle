@@ -391,7 +391,7 @@ impl PtyInputQueue {
             }
             return PaneInputResult::Oversize;
         }
-        // Rust 1.99 renames fetch_update to try_update; the MSRV (1.89) predates it.
+        // Rust 1.99 renames fetch_update to try_update; the MSRV (1.95) predates it.
         #[allow(deprecated)]
         let reserved = queued_bytes.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
             current

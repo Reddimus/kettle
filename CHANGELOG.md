@@ -121,6 +121,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Each media render attempt encodes its job without first copying the
   source, which can be a 32 MiB image, so a render no longer holds two copies
   of it while starting the worker.
+
+- Building Kettle from source now needs Rust 1.95 or newer (was 1.89). The
+  `msrv` CI job, the Nix toolchain and the build docs follow the
+  `rust-version` in `Cargo.toml`. `sysinfo` moves to 0.39, whose releases
+  need 1.95; the process walk behind tab titles and remote detection asks it
+  only for parents, command lines and working directories, never thread
+  lists.
 - Image rendering reuses retired textures for same-size replacements without
   reserving a second texture, preserves every image needed later in the frame,
   and releases decoded CPU pixels independently of the GPU cache.
