@@ -9,7 +9,7 @@
 
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use kettle_core::ImageData;
 
@@ -39,9 +39,14 @@ pub(crate) enum Viewer {
 }
 
 impl Viewer {
-    /// The permitted viewer this platform has, by a quick look; the worker
-    /// checks it fully before it opens anything.
+    /// The permitted viewer this platform has, by a quick look once per
+    /// process; each open checks it fully before it hands anything over.
     pub(crate) fn find() -> Option<Self> {
+        static FOUND: OnceLock<Option<Viewer>> = OnceLock::new();
+        *FOUND.get_or_init(Self::look)
+    }
+
+    fn look() -> Option<Self> {
         #[cfg(target_os = "macos")]
         {
             Path::new(PREVIEW_APP).is_dir().then_some(Self::Preview)
@@ -61,6 +66,14 @@ impl Viewer {
         tr.text(match self {
             Self::Preview => kettle_i18n::Text::MenuOpenInPreview,
             Self::EyeOfGnome => kettle_i18n::Text::MenuOpenInImageViewer,
+        })
+    }
+
+    /// The media viewer's footer note for the key that opens an item here.
+    pub(crate) fn hint(self, tr: &kettle_i18n::Translator) -> &'static str {
+        tr.text(match self {
+            Self::Preview => kettle_i18n::Text::MediaViewerHintOpenPreview,
+            Self::EyeOfGnome => kettle_i18n::Text::MediaViewerHintOpenImageViewer,
         })
     }
 

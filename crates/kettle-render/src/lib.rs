@@ -8769,9 +8769,14 @@ impl Renderer {
             menu_q.push(rect(x, y + height - 1.0, width, 1.0, palette.border, 1.0));
             menu_q.push(rect(x, y, 1.0, height, palette.border, 1.0));
             menu_q.push(rect(x + width - 1.0, y, 1.0, height, palette.border, 1.0));
-            for button in [geometry.previous, geometry.next, Some(geometry.close)]
-                .into_iter()
-                .flatten()
+            for button in [
+                geometry.previous,
+                geometry.next,
+                geometry.open_outside,
+                Some(geometry.close),
+            ]
+            .into_iter()
+            .flatten()
             {
                 menu_q.push(rect(
                     button.0,

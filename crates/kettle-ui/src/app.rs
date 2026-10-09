@@ -504,12 +504,19 @@ fn until_next_wall_minute() -> std::time::Duration {
 }
 
 /// The keys the open media viewer takes for itself: Esc and the arrows
-/// that browse. Any other key closes it and reaches the terminal.
-fn media_viewer_takes_key(key: &Key) -> bool {
+/// that browse, and a bare O when it offers to open its item outside
+/// (`opens_outside`). Any other key closes it and reaches the terminal.
+fn media_viewer_takes_key(key: &Key, mods: ModifiersState, opens_outside: bool) -> bool {
     matches!(
         key,
         Key::Named(NamedKey::Escape | NamedKey::ArrowLeft | NamedKey::ArrowRight)
-    )
+    ) || (opens_outside && media_viewer_open_outside_key(key, mods))
+}
+
+/// O, with nothing but Shift, opens the viewer's item outside Kettle.
+fn media_viewer_open_outside_key(key: &Key, mods: ModifiersState) -> bool {
+    matches!(key, Key::Character(c) if c.eq_ignore_ascii_case("o"))
+        && !(mods.control_key() || mods.alt_key() || mods.super_key())
 }
 
 /// A modal whose input bar is an active text surface keeps the terminal
@@ -10464,35 +10471,71 @@ impl App {
             MediaMenuAction::View => {
                 self.open_card(ws, target.pane, target.nonce);
             }
-            MediaMenuAction::OpenOutside(viewer) => {
-                let tr = self.ui_text;
-                let failed = move |why: crate::media::OpenFailure| {
-                    fire_notify(
-                        tr.text(kettle_i18n::Text::NotifyTitleOpenImage),
-                        tr.text(match why {
-                            crate::media::OpenFailure::Busy => {
-                                kettle_i18n::Text::NotifyBodyOpenImageBusy
-                            }
-                            crate::media::OpenFailure::Copy => {
-                                kettle_i18n::Text::NotifyBodyOpenImageCopy
-                            }
-                            crate::media::OpenFailure::Viewer => {
-                                kettle_i18n::Text::NotifyBodyOpenImageViewer
-                            }
-                        }),
-                    );
-                };
-                match item.image() {
-                    Some(image) => crate::media::open_externally(
-                        std::sync::Arc::clone(&self.viewer_copies),
-                        image.clone(),
-                        viewer,
-                        failed,
-                    ),
-                    // Its pixels were let go to stay within the budget.
-                    None => failed(crate::media::OpenFailure::Copy),
-                }
-            }
+            MediaMenuAction::OpenOutside(viewer) => self.open_item_outside(item, viewer),
+        }
+    }
+
+    /// The permitted image viewer the open media viewer offers its item to:
+    /// none when this platform has none or the item's pixels were let go.
+    fn media_viewer_opens_outside(&self, ws: &WindowState) -> Option<crate::media::Viewer> {
+        let viewer = ws.media_viewer?;
+        let item = ws
+            .mux
+            .panes
+            .get(&viewer.pane)?
+            .media_shelf
+            .items()
+            .iter()
+            .find(|it| it.id == viewer.item)?;
+        item.image()?;
+        crate::media::Viewer::find()
+    }
+
+    /// Open the media viewer's item in the permitted image viewer, when it
+    /// offers to.
+    fn open_viewer_item_outside(&self, ws: &WindowState) {
+        let Some(outside) = self.media_viewer_opens_outside(ws) else {
+            return;
+        };
+        let Some(viewer) = ws.media_viewer else {
+            return;
+        };
+        if let Some(item) = ws.mux.panes.get(&viewer.pane).and_then(|state| {
+            state
+                .media_shelf
+                .items()
+                .iter()
+                .find(|it| it.id == viewer.item)
+        }) {
+            self.open_item_outside(item, outside);
+        }
+    }
+
+    /// Open a PNG copy of `item` in `viewer`; a notice says why if it does
+    /// not open.
+    fn open_item_outside(&self, item: &crate::media::ShelfItem, viewer: crate::media::Viewer) {
+        let tr = self.ui_text;
+        let failed = move |why: crate::media::OpenFailure| {
+            fire_notify(
+                tr.text(kettle_i18n::Text::NotifyTitleOpenImage),
+                tr.text(match why {
+                    crate::media::OpenFailure::Busy => kettle_i18n::Text::NotifyBodyOpenImageBusy,
+                    crate::media::OpenFailure::Copy => kettle_i18n::Text::NotifyBodyOpenImageCopy,
+                    crate::media::OpenFailure::Viewer => {
+                        kettle_i18n::Text::NotifyBodyOpenImageViewer
+                    }
+                }),
+            );
+        };
+        match item.image() {
+            Some(image) => crate::media::open_externally(
+                std::sync::Arc::clone(&self.viewer_copies),
+                image.clone(),
+                viewer,
+                failed,
+            ),
+            // Its pixels were let go to stay within the budget.
+            None => failed(crate::media::OpenFailure::Copy),
         }
     }
 
@@ -10620,16 +10663,21 @@ impl App {
             title: item.title.clone(),
             detail: format!("{kind} · {width}×{height}"),
             sender,
-            hint: tr
-                .text(if items.len() > 1 {
+            hint: {
+                let hint = tr.text(if items.len() > 1 {
                     kettle_i18n::Text::MediaViewerHint
                 } else {
                     kettle_i18n::Text::MediaViewerHintSingle
-                })
-                .to_string(),
+                });
+                match self.media_viewer_opens_outside(ws) {
+                    Some(outside) => format!("{hint} · {}", outside.hint(tr)),
+                    None => hint.to_string(),
+                }
+            },
             position: (index + 1, items.len()),
             image: item.image().cloned(),
             status: tr.text(kettle_i18n::Text::MediaViewerReleased).to_string(),
+            open_outside: self.media_viewer_opens_outside(ws).is_some(),
             canvas: match item.kind {
                 kettle_media::MediaKind::Svg => kettle_render::MediaCanvas::White,
                 kettle_media::MediaKind::Raster => kettle_render::MediaCanvas::Checker,
@@ -10720,6 +10768,7 @@ impl App {
                 }
                 kettle_render::MediaViewerHit::Previous => self.step_media_viewer(ws, -1),
                 kettle_render::MediaViewerHit::Next => self.step_media_viewer(ws, 1),
+                kettle_render::MediaViewerHit::OpenOutside => self.open_viewer_item_outside(ws),
                 kettle_render::MediaViewerHit::Inside => {}
             }
         }
@@ -34216,7 +34265,12 @@ impl App {
                     || ws.editing_title.is_some()
                     || ws.search.open
                     || ws.ime_preedit.is_some()
-                    || (ws.media_viewer.is_some() && media_viewer_takes_key(&event.logical_key));
+                    || (ws.media_viewer.is_some()
+                        && media_viewer_takes_key(
+                            &event.logical_key,
+                            ws.mods,
+                            self.media_viewer_opens_outside(ws).is_some(),
+                        ));
                 // The modal that gets this press, if any; a press after which
                 // it is no longer the top modal closed or replaced it.
                 let key_modal = top_modal(ws);
@@ -34383,6 +34437,12 @@ impl App {
                         }
                         Key::Named(NamedKey::ArrowRight) => {
                             self.step_media_viewer(ws, 1);
+                            return;
+                        }
+                        key if media_viewer_open_outside_key(key, ws.mods)
+                            && self.media_viewer_opens_outside(ws).is_some() =>
+                        {
+                            self.open_viewer_item_outside(ws);
                             return;
                         }
                         key if is_bare_modifier(key) => {}
@@ -40393,25 +40453,75 @@ mod tests {
         assert!(capped.is_char_boundary(capped.len()));
     }
 
-    /// The media viewer takes only Esc and the browsing arrows; every other
-    /// key goes on to the terminal, so nothing typed while it is open is lost.
+    /// The media viewer takes only Esc, the browsing arrows and, when it
+    /// offers to open its item outside, a bare O; every other key goes on
+    /// to the terminal, so nothing typed while it is open is lost.
     #[test]
-    fn the_media_viewer_takes_only_esc_and_the_arrows() {
-        use winit::keyboard::{Key, NamedKey};
-        for key in [
-            Key::Named(NamedKey::Escape),
-            Key::Named(NamedKey::ArrowLeft),
-            Key::Named(NamedKey::ArrowRight),
-        ] {
-            assert!(super::media_viewer_takes_key(&key), "{key:?}");
+    fn the_media_viewer_takes_only_esc_the_arrows_and_its_open_key() {
+        use winit::keyboard::{Key, ModifiersState, NamedKey};
+        let none = ModifiersState::empty();
+        for offered in [false, true] {
+            for key in [
+                Key::Named(NamedKey::Escape),
+                Key::Named(NamedKey::ArrowLeft),
+                Key::Named(NamedKey::ArrowRight),
+            ] {
+                assert!(
+                    super::media_viewer_takes_key(&key, none, offered),
+                    "{key:?}"
+                );
+            }
+            for key in [
+                Key::Named(NamedKey::Enter),
+                Key::Named(NamedKey::ArrowUp),
+                Key::Character("q".into()),
+            ] {
+                assert!(
+                    !super::media_viewer_takes_key(&key, none, offered),
+                    "{key:?}"
+                );
+            }
         }
-        for key in [
-            Key::Named(NamedKey::Enter),
-            Key::Named(NamedKey::ArrowUp),
-            Key::Character("q".into()),
-        ] {
-            assert!(!super::media_viewer_takes_key(&key), "{key:?}");
+        for o in ["o", "O"] {
+            let key = Key::Character(o.into());
+            assert!(super::media_viewer_takes_key(&key, none, true));
+            assert!(super::media_viewer_takes_key(
+                &key,
+                ModifiersState::SHIFT,
+                true
+            ));
+            assert!(
+                !super::media_viewer_takes_key(&key, none, false),
+                "not offered"
+            );
+            for chord in [
+                ModifiersState::CONTROL,
+                ModifiersState::ALT,
+                ModifiersState::SUPER,
+            ] {
+                assert!(
+                    !super::media_viewer_takes_key(&key, chord, true),
+                    "{chord:?} is a shortcut"
+                );
+            }
         }
+        // The key, the button and the footer all say the same thing.
+        let source = super::production_source()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(source.contains(
+            "key if media_viewer_open_outside_key(key, ws.mods) && self.media_viewer_opens_outside(ws).is_some() => { self.open_viewer_item_outside(ws); return; }"
+        ));
+        assert!(source.contains(
+            "kettle_render::MediaViewerHit::OpenOutside => self.open_viewer_item_outside(ws),"
+        ));
+        assert!(source.contains("open_outside: self.media_viewer_opens_outside(ws).is_some(),"));
+        assert!(source.contains("Some(outside) => format!(\"{hint} · {}\", outside.hint(tr)),"));
+        // Only an item that still holds its pixels is offered.
+        assert!(source.contains(
+            ".find(|it| it.id == viewer.item)?; item.image()?; crate::media::Viewer::find()"
+        ));
     }
 
     #[test]
@@ -41263,6 +41373,7 @@ mod tests {
             image: Some(kettle_core::ImageData::new(1, 1, vec![0; 4]).unwrap()),
             status: "Released.".into(),
             canvas: kettle_render::MediaCanvas::Theme,
+            open_outside: false,
         };
         let (label, description) = super::media_viewer_accessibility(&viewer, &tr);
         assert!(

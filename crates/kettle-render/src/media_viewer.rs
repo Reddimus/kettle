@@ -43,6 +43,9 @@ pub struct MediaViewerOverlay {
     /// Shown in the image's place when there are no pixels.
     pub status: String,
     pub canvas: MediaCanvas,
+    /// Whether the header offers to open the item in the image viewer this
+    /// platform permits.
+    pub open_outside: bool,
 }
 
 /// Who sent an item, in the UI language, with where the sending program's
@@ -127,6 +130,8 @@ pub struct MediaViewerGeometry {
     pub counter: Rect4,
     pub previous: Option<Rect4>,
     pub next: Option<Rect4>,
+    /// Opens the item in the permitted image viewer, when it is offered.
+    pub open_outside: Option<Rect4>,
     pub close: Rect4,
     pub detail: Rect4,
     pub sender: Rect4,
@@ -144,6 +149,7 @@ pub enum MediaViewerHit {
     Close,
     Previous,
     Next,
+    OpenOutside,
     /// Anywhere else on the viewer: nothing happens.
     Inside,
     /// Outside it: the viewer closes.
@@ -160,6 +166,8 @@ impl MediaViewerGeometry {
             MediaViewerHit::Outside
         } else if contains(self.close, x, y) {
             MediaViewerHit::Close
+        } else if self.open_outside.is_some_and(|rect| contains(rect, x, y)) {
+            MediaViewerHit::OpenOutside
         } else if self.previous.is_some_and(|rect| contains(rect, x, y)) {
             MediaViewerHit::Previous
         } else if self.next.is_some_and(|rect| contains(rect, x, y)) {
@@ -201,12 +209,16 @@ pub fn media_viewer_geometry(
     let header_y = rect.1 + pad;
     let button = 3.0 * tw;
     let close = (right - button, header_y, button, lh);
+    let open_outside = viewer
+        .open_outside
+        .then_some((close.0 - button, header_y, button, lh));
+    let browse_right = open_outside.map_or(close.0, |open| open.0);
     let (previous, next, counter_right) = if viewer.position.1 > 1 {
-        let next = (close.0 - button, header_y, button, lh);
+        let next = (browse_right - button, header_y, button, lh);
         let previous = (next.0 - button, header_y, button, lh);
         (Some(previous), Some(next), previous.0)
     } else {
-        (None, None, close.0)
+        (None, None, browse_right)
     };
     let counter_width = (media_viewer_counter(viewer.position).chars().count() as f32 + 1.0) * tw;
     let counter = (counter_right - counter_width, header_y, counter_width, lh);
@@ -270,6 +282,7 @@ pub fn media_viewer_geometry(
         counter,
         previous,
         next,
+        open_outside,
         close,
         detail,
         sender,
@@ -279,7 +292,7 @@ pub fn media_viewer_geometry(
     })
 }
 
-/// The viewer's text, shaped once per change: its six lines and the three
+/// The viewer's text, shaped once per change: its six lines and the four
 /// control glyphs.
 pub(crate) struct ViewerText {
     title: TextBuffer,
@@ -288,7 +301,7 @@ pub(crate) struct ViewerText {
     counter: TextBuffer,
     hint: TextBuffer,
     status: TextBuffer,
-    controls: [TextBuffer; 3],
+    controls: [TextBuffer; 4],
     /// What each line buffer was last shaped with; `None` until it is, or
     /// once a font change means it must be again.
     shaped: [Option<String>; 6],
@@ -321,6 +334,7 @@ impl ViewerText {
             controls: [
                 control(font_system, "‹"),
                 control(font_system, "›"),
+                control(font_system, "↗"),
                 control(font_system, "×"),
             ],
             shaped: Default::default(),
@@ -427,7 +441,12 @@ impl ViewerText {
                 description,
             ));
         }
-        let buttons = [geometry.previous, geometry.next, Some(geometry.close)];
+        let buttons = [
+            geometry.previous,
+            geometry.next,
+            geometry.open_outside,
+            Some(geometry.close),
+        ];
         for (buffer, rect) in self.controls.iter().zip(buttons) {
             if let Some(rect) = rect {
                 let mut glyph = area(buffer, rect, emphasis);
@@ -490,6 +509,7 @@ mod tests {
             }),
             status: String::new(),
             canvas: MediaCanvas::Theme,
+            open_outside: false,
         }
     }
 
@@ -511,6 +531,35 @@ mod tests {
         assert!(geometry.sender.1 > geometry.detail.1);
         assert!(geometry.image_area.1 > geometry.sender.1 + geometry.sender.3 - 1.0);
         assert!(geometry.hint.1 > geometry.image_area.1 + geometry.image_area.3);
+    }
+
+    /// The open-outside button, when offered, sits between browsing and
+    /// close on the header row, and a press on it says so; without it the
+    /// header is as before.
+    #[test]
+    fn the_open_outside_button_sits_before_close() {
+        let mut offered = viewer((2, 5), Some((640, 480)));
+        offered.open_outside = true;
+        let geometry = media_viewer_geometry(&offered, CELL, CELL).unwrap();
+        let open = geometry.open_outside.expect("offered");
+        let next = geometry.next.unwrap();
+        assert!(next.0 + next.2 <= open.0 && open.0 + open.2 <= geometry.close.0);
+        assert_eq!(open.1, geometry.close.1);
+        let center = (open.0 + open.2 / 2.0, open.1 + open.3 / 2.0);
+        assert_eq!(
+            geometry.hit_test(center.0, center.1),
+            MediaViewerHit::OpenOutside
+        );
+        let single = MediaViewerOverlay {
+            position: (1, 1),
+            ..offered.clone()
+        };
+        let geometry = media_viewer_geometry(&single, CELL, CELL).unwrap();
+        let open = geometry.open_outside.unwrap();
+        assert!(geometry.counter.0 + geometry.counter.2 <= open.0);
+        let plain = media_viewer_geometry(&viewer((2, 5), Some((640, 480))), CELL, CELL).unwrap();
+        assert_eq!(plain.open_outside, None);
+        assert_eq!(plain.next.unwrap().0 + plain.next.unwrap().2, plain.close.0);
     }
 
     #[test]
