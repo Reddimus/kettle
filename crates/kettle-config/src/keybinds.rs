@@ -337,6 +337,8 @@ pub enum Action {
     PreviewCanvas,
     /// Copy what the focused pane's preview shows: its image, or its source.
     PreviewCopy,
+    /// Read the focused pane's preview from its file again.
+    PreviewReload,
     /// Terminator parity (`key_send_newline`). Writes a literal `\n` to the focused
     /// pane's PTY. Mostly useful for inserting a newline into a
     /// shell line-editor that's otherwise consuming Enter
@@ -741,6 +743,7 @@ pub fn action_names() -> Vec<&'static str> {
         "preview_source",
         "preview_canvas",
         "preview_copy",
+        "preview_reload",
         "preferences",
         "edit_config",
         "settings",
@@ -1040,6 +1043,7 @@ impl Action {
             "preview_source" | "preview-source" => PreviewSource,
             "preview_canvas" | "preview-canvas" => PreviewCanvas,
             "preview_copy" | "preview-copy" => PreviewCopy,
+            "preview_reload" | "preview-reload" => PreviewReload,
             "preferences"
             | "preferences_keybindings"
             | "preferences-keybindings"

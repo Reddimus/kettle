@@ -8835,6 +8835,7 @@ impl Renderer {
                 geometry.mode,
                 geometry.canvas,
                 geometry.copy,
+                geometry.reload,
                 Some(geometry.toggle),
                 Some(geometry.close),
             ]

@@ -145,6 +145,8 @@ Reports that fit any of these are welcome:
   under. Rendering an item again for another background re-reads a file only
   under that authorization, never while a control request is handled, and
   keeps the result only if it has the digest the item was rendered from.
+  Reloading reads the item's own file again, as the user's pull, only on the
+  user's gesture.
   The lane's source view shows control, format and bidirectional characters
   as U+FFFD. Getting a preview to keep source or pixels past that account,
   to read a file for a control client, or to show a changed file as the

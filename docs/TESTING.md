@@ -4074,7 +4074,9 @@ diagram's as rendered until a render for the choice comes back, takes a
 lane's render only for the same item and source, queues it as its own
 sender that fails to its lane, copies on a thread that runs one copy and
 holds one more, and never reads a file for a control client's canvas
-change. `kettle-render` tests pin where the new controls sit, how they give
+change; and that reload pulls the item's own file under its key, title and
+canvas, refused for a control client, and clears the lane's notice when the
+item shows again. `kettle-render` tests pin where the new controls sit, how they give
 way in a narrow header, and, on the GPU, that source mode draws rows and not
 the image. For a live check, preview an SVG and click `≡`, `◐` and `⧉`
 (their rectangles are in `ui_geometry`'s `preview_lanes`).

@@ -1555,6 +1555,9 @@ context = "crates/kettle-config/src/palette.rs: command palette entry for previe
 [messages.palette_preview_copy]
 context = "crates/kettle-config/src/palette.rs: command palette entry for preview_copy, which copies the focused pane's preview to the clipboard: the image, or the source while the source shows."
 
+[messages.palette_preview_reload]
+context = "crates/kettle-config/src/palette.rs: command palette entry for preview_reload, which reads the focused pane's preview from its file again and shows what the file holds now."
+
 [messages.media_viewer_kind_image]
 context = "crates/kettle-ui/src/app.rs media_viewer_projection: kind of a raster item in the media viewer's detail line."
 
@@ -1620,6 +1623,9 @@ context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of
 
 [messages.media_lane_a11y_copy]
 context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of a preview lane's button that copies the image, or the source while the source shows, to the clipboard. An infinitive in Spanish."
+
+[messages.media_lane_a11y_reload]
+context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of a preview lane's button that reads the item's file again and shows what it holds now. An infinitive in Spanish."
 
 [messages.media_lane_notice_image_copied]
 context = "crates/kettle-ui/src/app.rs lane_notice_text: shown in a preview lane's footer after its image was copied to the clipboard."
