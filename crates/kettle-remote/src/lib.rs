@@ -868,7 +868,8 @@ pub(crate) fn spawn_detached_shell(script: &str, extra_args: usize) -> u32 {
 /// Waits until the shell from [`spawn_detached_shell`] has exec'd into
 /// `sh -c SCRIPT`, so a scan reads its final argv rather than the launcher's,
 /// which is also `sh -c` but with the launcher's script. Reads argv through
-/// sysinfo rather than `ps`, which the Nix build sandbox does not have.
+/// sysinfo rather than `ps`, which the Nix build sandbox does not have. On
+/// Linux sysinfo trims each argument, so the script is compared trimmed.
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn wait_for_detached_exec(pid: u32, script: &str) {
     let mut processes = sysinfo::System::new();
@@ -877,7 +878,9 @@ pub(crate) fn wait_for_detached_exec(pid: u32, script: &str) {
         ProcessTree::refresh(&mut processes);
         let argv = processes.argv_of(pid).unwrap_or_default();
         if argv.get(1).is_some_and(|flag| flag == "-c")
-            && argv.get(2).is_some_and(|command| command == script)
+            && argv
+                .get(2)
+                .is_some_and(|command| command.trim() == script.trim())
         {
             return;
         }
