@@ -281,6 +281,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- `login-shell = true` with no `command` no longer stops Kettle at launch on
+  macOS and Linux. It added `-l` to your default shell, which takes no
+  arguments there, and the pane's spawn panicked. Your default shell already
+  starts as a login shell; `login-shell` now adds `-l` only to a shell a
+  `command` names.
 - `kettle mcp` lists its tools to clients on MCP 2026-07-28, which include
   current Claude Code. Its tool list left out the `ttlMs` and `cacheScope`
   fields that revision requires on every list result, so those clients

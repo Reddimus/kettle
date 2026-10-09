@@ -1344,9 +1344,10 @@ pub struct Config {
     /// `term` / `colorterm` remain the authoritative way to change those.
     pub env: Vec<(String, String)>,
     /// Terminator parity (terminatorlib/config.py:122
-    /// `login_shell`): when true, spawn the shell with `-l` (login
-    /// shell semantics — reads /etc/profile, ~/.profile,
-    /// ~/.bash_profile, ...). Default false matches Terminator.
+    /// `login_shell`): when true, spawn the shell a `command` names with
+    /// `-l` (login shell semantics — reads /etc/profile, ~/.profile,
+    /// ~/.bash_profile, ...). The default shell always starts as a login
+    /// shell. Default false matches Terminator.
     pub login_shell: bool,
     /// Auto-load kettle's shell integration into the DEFAULT shell kettle
     /// launches, so the shell reports its working directory (OSC 7) + prompt
