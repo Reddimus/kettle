@@ -1708,26 +1708,29 @@ mod tests {
         /// A requirement only this exact signed file meets, standing in for
         /// the Developer ID signature CI cannot make. `codesign` checks every
         /// architecture in a universal file, so it names each one's cdhash.
+        /// The architectures come from the file's own header, since macOS
+        /// releases add them: 27 added `arm64e.x1` to `/usr/bin/true`.
         fn pinned_requirement(path: &Path) -> String {
-            let cdhashes: Vec<String> = ["x86_64", "arm64", "arm64e"]
+            let header = std::fs::read(path).unwrap();
+            let cdhashes: Vec<String> = parse_architectures(&header)
+                .expect("a Mach-O file")
                 .into_iter()
-                .filter_map(|arch| {
-                    let output = Command::new("/usr/bin/codesign")
-                        .args(["--display", "-vvv", "--arch", arch, "--"])
-                        .arg(path)
-                        .output()
-                        .unwrap();
+                .map(|architecture| {
+                    let mut display = Command::new("/usr/bin/codesign");
+                    display.args(["--display", "-vvv"]);
+                    if let Some(architecture) = &architecture {
+                        display.args(["--arch", architecture]);
+                    }
+                    let output = display.arg("--").arg(path).output().unwrap();
                     let described = String::from_utf8_lossy(&output.stderr).into_owned();
                     let cdhash = described
                         .lines()
-                        .find_map(|line| line.strip_prefix("CDHash="))?;
-                    output
-                        .status
-                        .success()
-                        .then(|| format!("cdhash H\"{cdhash}\""))
+                        .find_map(|line| line.strip_prefix("CDHash="))
+                        .filter(|_| output.status.success())
+                        .unwrap_or_else(|| panic!("no cdhash for {architecture:?}: {described}"));
+                    format!("cdhash H\"{cdhash}\"")
                 })
                 .collect();
-            assert!(!cdhashes.is_empty(), "codesign reports no cdhash");
             format!(
                 "identifier \"{WORKER_IDENTIFIER}\" and ({})",
                 cdhashes.join(" or ")
@@ -1797,30 +1800,46 @@ mod tests {
             );
         }
 
+        /// Where each architecture starts: the offsets in a big-endian
+        /// universal header, or the start of a single-architecture file.
+        fn architecture_offsets(bytes: &[u8]) -> Vec<usize> {
+            if bytes[..4] != [0xca, 0xfe, 0xba, 0xbe] {
+                return vec![0];
+            }
+            let word = |at: usize| u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap());
+            (0..usize::try_from(word(4)).unwrap())
+                .map(|index| usize::try_from(word(8 + 20 * index + 8)).unwrap())
+                .collect()
+        }
+
         #[test]
         fn macos_tampered_worker_is_unverified() {
-            let directory = tempfile::tempdir().unwrap();
-            let worker = program(directory.path());
-            sign_ad_hoc(&worker, true);
-            let requirement = pinned_requirement(&worker);
-            assert_eq!(verify(&worker, &requirement), Ok(()));
-            // Flip one byte in the first architecture's first page, past its
-            // header: always signed code. (The end of an architecture holds
-            // the signature itself, with unsigned room to spare, and padding
-            // between architectures is not signed either.) The first
-            // architecture's offset is in the big-endian universal header.
-            let mut bytes = std::fs::read(&worker).unwrap();
-            let offset = if bytes[..4] == [0xca, 0xfe, 0xba, 0xbe] {
-                usize::try_from(u32::from_be_bytes(bytes[16..20].try_into().unwrap())).unwrap()
-            } else {
-                0
+            // Every architecture in turn, so a check that reads only some of
+            // them fails here.
+            let count = {
+                let directory = tempfile::tempdir().unwrap();
+                architecture_offsets(&std::fs::read(program(directory.path())).unwrap()).len()
             };
-            bytes[offset + 1024] ^= 0xff;
-            std::fs::write(&worker, bytes).unwrap();
-            assert_eq!(
-                verify(&worker, &requirement),
-                Err(UnavailableCause::Unverified)
-            );
+            for index in 0..count {
+                let directory = tempfile::tempdir().unwrap();
+                let worker = program(directory.path());
+                sign_ad_hoc(&worker, true);
+                let requirement = pinned_requirement(&worker);
+                assert_eq!(verify(&worker, &requirement), Ok(()));
+                // Flip one byte in this architecture's first page, past its
+                // header: always signed code. (The end of an architecture
+                // holds the signature itself, with unsigned room to spare,
+                // and padding between architectures is not signed either.)
+                let mut bytes = std::fs::read(&worker).unwrap();
+                let offset = architecture_offsets(&bytes)[index];
+                bytes[offset + 1024] ^= 0xff;
+                std::fs::write(&worker, bytes).unwrap();
+                assert_eq!(
+                    verify(&worker, &requirement),
+                    Err(UnavailableCause::Unverified),
+                    "architecture {index}"
+                );
+            }
         }
 
         #[test]
@@ -1836,7 +1855,11 @@ mod tests {
 
         #[test]
         fn every_architecture_needs_the_hardened_runtime() {
-            for runtime in [[true, false], [false, true]] {
+            // Two architectures through macOS 26, three from 27.
+            let header = std::fs::read("/usr/bin/true").unwrap();
+            let count = parse_architectures(&header).expect("a Mach-O file").len();
+            for missing in 0..count {
+                let runtime: Vec<bool> = (0..count).map(|index| index != missing).collect();
                 let directory = tempfile::tempdir().unwrap();
                 let worker = universal(directory.path(), &runtime);
                 assert_eq!(
@@ -1845,9 +1868,9 @@ mod tests {
                     "{runtime:?}"
                 );
             }
-            // The control: the same layout with the runtime on both passes.
+            // The control: the same layout with the runtime on all passes.
             let directory = tempfile::tempdir().unwrap();
-            let worker = universal(directory.path(), &[true, true]);
+            let worker = universal(directory.path(), &vec![true; count]);
             assert_eq!(verify(&worker, &pinned_requirement(&worker)), Ok(()));
         }
 
