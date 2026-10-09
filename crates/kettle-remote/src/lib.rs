@@ -866,19 +866,19 @@ pub(crate) fn spawn_detached_shell(script: &str, extra_args: usize) -> u32 {
 }
 
 /// Waits until the shell from [`spawn_detached_shell`] has exec'd into
-/// `sh -c SCRIPT`, so a scan reads its final argv rather than the launcher's.
-/// The launcher's argv holds the same trailing arguments inside its own
-/// script, so only the start of the argv tells the two apart.
+/// `sh -c SCRIPT`, so a scan reads its final argv rather than the launcher's,
+/// which is also `sh -c` but with the launcher's script. Reads argv through
+/// sysinfo rather than `ps`, which the Nix build sandbox does not have.
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn wait_for_detached_exec(pid: u32, script: &str) {
-    let expected = format!("/bin/sh -c {script}");
+    let mut processes = sysinfo::System::new();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        let output = std::process::Command::new("ps")
-            .args(["-ww", "-o", "args=", "-p", &pid.to_string()])
-            .output()
-            .expect("run ps");
-        if String::from_utf8_lossy(&output.stdout).starts_with(&expected) {
+        ProcessTree::refresh(&mut processes);
+        let argv = processes.argv_of(pid).unwrap_or_default();
+        if argv.get(1).is_some_and(|flag| flag == "-c")
+            && argv.get(2).is_some_and(|command| command == script)
+        {
             return;
         }
         assert!(
@@ -890,16 +890,21 @@ pub(crate) fn wait_for_detached_exec(pid: u32, script: &str) {
 }
 
 /// Stops a shell from [`spawn_detached_shell`] and the command it is waiting
-/// on, which would otherwise outlive the test.
+/// on, which would otherwise outlive the test. Signals through sysinfo rather
+/// than `pkill` and `/bin/kill`, which the Nix build sandbox does not have.
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn kill_detached_shell(pid: u32) {
-    let pid = pid.to_string();
-    let _ = std::process::Command::new("pkill")
-        .args(["-KILL", "-P", &pid])
-        .status();
-    let _ = std::process::Command::new("/bin/kill")
-        .args(["-KILL", &pid])
-        .status();
+    let mut processes = sysinfo::System::new();
+    ProcessTree::refresh(&mut processes);
+    let children = processes
+        .all_pids()
+        .into_iter()
+        .filter(|&child| processes.parent_of(child) == Some(pid));
+    for target in children.chain([pid]) {
+        if let Some(process) = processes.process(sysinfo::Pid::from_u32(target)) {
+            process.kill();
+        }
+    }
 }
 
 /// The pane-rooted process tree for this platform.
