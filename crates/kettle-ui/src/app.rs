@@ -1670,9 +1670,8 @@ fn media_path_key(path: &kettle_media::NativePath) -> String {
     }
 }
 
-/// The shelf items on screen in any window, which eviction spares.
-/// The shelf items on screen, whose pixels must stay: each open viewer's,
-/// and each item whose card the last frame painted.
+/// The shelf items on screen in any window, whose pixels eviction spares:
+/// each open viewer's, and each item whose card the last frame drew.
 fn media_visible_items<'a>(
     windows: impl Iterator<Item = &'a WindowState>,
     cards: &crate::media::CardLedger,
@@ -1683,13 +1682,63 @@ fn media_visible_items<'a>(
         if let Some(renderer) = &window.renderer {
             visible.extend(
                 renderer
-                    .painted_cards()
+                    .drawn_cards()
                     .iter()
-                    .filter_map(|&(pane, nonce)| cards.item(pane, nonce)),
+                    .filter_map(|card| cards.item(card.pane, card.nonce)),
             );
         }
     }
     visible
+}
+
+/// How long a card must have been where it is drawn before a press on it is
+/// the card's: one that appears under the pointer as the user clicks text
+/// must not take the click.
+const CARD_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Where a card is on screen: its pane, its nonce and the bits of its rect.
+/// Two printed copies of one card are two spots, and a card that moved is at
+/// a new one.
+pub(crate) type CardSpot = (u64, kettle_core::InlineNonce, [u32; 4]);
+
+fn card_spot(card: &kettle_render::PaintedCard) -> CardSpot {
+    (card.pane, card.nonce, card.rect.map(f32::to_bits))
+}
+
+/// Note when each card on screen first appeared where it is: a card that
+/// moved counts as new, and one no longer on screen is forgotten.
+fn note_card_sightings(
+    sightings: &mut std::collections::HashMap<CardSpot, std::time::Instant>,
+    painted: &[kettle_render::PaintedCard],
+    now: std::time::Instant,
+) {
+    sightings.retain(|spot, _| painted.iter().any(|card| card_spot(card) == *spot));
+    for card in painted {
+        sightings.entry(card_spot(card)).or_insert(now);
+    }
+}
+
+/// The card a press at (`x`, `y`) is for: one on screen there that has been
+/// in place for `CARD_SETTLE`.
+fn settled_card_at(
+    card: Option<kettle_render::PaintedCard>,
+    sightings: &std::collections::HashMap<CardSpot, std::time::Instant>,
+    now: std::time::Instant,
+) -> Option<(u64, kettle_core::InlineNonce)> {
+    let card = card?;
+    let since = sightings.get(&card_spot(&card))?;
+    (now.saturating_duration_since(*since) >= CARD_SETTLE).then_some((card.pane, card.nonce))
+}
+
+/// Whether the release of a press card `pressed` took opens it: only over the
+/// very card it pressed, and only while nothing that owns the pointer (a
+/// dialog, a menu, the viewer) has opened over it since the press.
+fn card_release_opens(
+    pressed: (u64, kettle_core::InlineNonce),
+    over: Option<kettle_render::PaintedCard>,
+    covered: bool,
+) -> bool {
+    !covered && over.is_some_and(|card| (card.pane, card.nonce) == pressed)
 }
 
 /// Register an inline card for a published item and build the message its
@@ -10105,6 +10154,55 @@ impl App {
         }
     }
 
+    /// Take a primary press on a settled inline card, before focus, links,
+    /// selection and mouse reporting, so nothing behind it gets the press.
+    /// Shift passes the press on, as does a card that only just appeared.
+    fn press_card(&mut self, ws: &mut WindowState, px: f32, py: f32, bcode: u8) -> bool {
+        if bcode != 0 || ws.mods.shift_key() {
+            return false;
+        }
+        let card = ws
+            .renderer
+            .as_ref()
+            .and_then(|renderer| renderer.card_at(px, py));
+        let Some(card) = settled_card_at(card, &ws.card_sightings, std::time::Instant::now())
+        else {
+            return false;
+        };
+        ws.card_press = Some(card);
+        true
+    }
+
+    /// End a press a card took. Released over the same card, it opens the
+    /// card's item in the viewer; anywhere else, or once a dialog or the
+    /// viewer has opened over it, it is dropped. Either way the terminal saw
+    /// neither the press nor the release.
+    fn release_card(&mut self, ws: &mut WindowState, px: f32, py: f32, bcode: u8) -> bool {
+        if bcode != 0 {
+            return false;
+        }
+        let Some((pane, nonce)) = ws.card_press.take() else {
+            return false;
+        };
+        let over = ws
+            .renderer
+            .as_ref()
+            .and_then(|renderer| renderer.card_at(px, py));
+        let covered = self.pointer_modal_open(ws) || ws.media_viewer.is_some();
+        if card_release_opens((pane, nonce), over, covered)
+            && let Some(item) = self.media.cards.item(pane, nonce)
+            && ws
+                .mux
+                .panes
+                .get(&pane)
+                .is_some_and(|state| state.media_shelf.items().iter().any(|it| it.id == item))
+        {
+            self.close_all_modals(ws);
+            self.show_media_item(ws, pane, item);
+        }
+        true
+    }
+
     fn close_media_viewer(&self, ws: &mut WindowState) {
         if ws.media_viewer.take().is_some() {
             ws.accessibility_pending = true;
@@ -12376,6 +12474,7 @@ impl App {
         // otherwise the visible highlight survives while copy-on-select is
         // silently lost.
         self.finish_selection_gesture(ws);
+        ws.card_press = None;
         // The question replaces the media viewer rather than sitting over it,
         // so cancelling it does not bring back a viewer the user moved past.
         self.close_media_viewer(ws);
@@ -15694,6 +15793,14 @@ impl App {
             },
         );
         let frame_time = frame_started.elapsed();
+        // A card has been seen once a frame showing it reached the screen.
+        if matches!(&frame_result, Ok(FrameOutcome::Presented)) {
+            note_card_sightings(
+                &mut ws.card_sightings,
+                renderer.painted_cards(),
+                std::time::Instant::now(),
+            );
+        }
         // C1 records only a presented scene. Reuse that scene immediately,
         // before any renderer setter can invalidate it, and with the same cfg.
         let cursor_patch = if blink_handoff && matches!(&frame_result, Ok(FrameOutcome::Presented))
@@ -15986,6 +16093,9 @@ impl App {
         // selection drag here so later motion cannot keep extending or
         // autoscrolling behind Command Palette, Settings, SSH, or title edit.
         self.finish_selection_gesture(ws);
+        // A card held under a modal that opened is not clicked, even if the
+        // modal is gone by the release.
+        ws.card_press = None;
         // A live title edit materialises a chrome strip (see `tab_bar_h`), so
         // dropping it here changes the content rectangle. Resize only when it
         // was actually open -- this runs before every other modal opens, and an
@@ -16024,6 +16134,7 @@ impl App {
     fn open_search(&mut self, ws: &mut WindowState) {
         self.close_all_modals(ws);
         ws.mouse_btn = None;
+        ws.card_press = None;
         ws.last_mouse_cell = None;
         ws.scrollbar_drag_offset = None;
         ws.dragging_split = None;
@@ -16836,6 +16947,7 @@ impl App {
         ws.scrollbar_drag_offset = None;
         ws.dragging_split = None;
         ws.mouse_btn = None;
+        ws.card_press = None;
         ws.last_mouse_cell = None;
         ws.tab_drag_active = false;
         ws.tab_drag_press = None;
@@ -22993,6 +23105,10 @@ impl App {
         event_loop: &ActiveEventLoop,
         bcode: u8,
     ) -> bool {
+        // As natively: a card press whose release never came is over.
+        if bcode == 0 {
+            ws.card_press = None;
+        }
         let bar = self.tab_bar(ws);
         let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
         if ws.context_menu.is_some()
@@ -23026,6 +23142,9 @@ impl App {
             return true;
         }
         if self.activate_media_viewer_at(ws, px, py, bcode) {
+            return true;
+        }
+        if self.press_card(ws, px, py, bcode) {
             return true;
         }
         if tab_bar_pointer_region_contains(&bar, px, py) && (bcode == 0 || bcode == 1) {
@@ -23137,6 +23256,10 @@ impl App {
         {
             ws.search.dragging_editor = false;
             self.search_button_release(ws);
+            return true;
+        }
+        let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
+        if self.release_card(ws, px, py, bcode) {
             return true;
         }
         let mut handled = false;
@@ -32474,6 +32597,11 @@ impl App {
                     MouseButton::Right => 2,
                     _ => return,
                 };
+                // A primary press while a card still holds one means that
+                // press's release went elsewhere: the card's gesture is over.
+                if bcode == 0 {
+                    ws.card_press = None;
+                }
                 // Context menu: if the menu is open, a left-click
                 // either fires the row that was hit or — if the click landed
                 // outside the panel — closes the menu. Middle-click outside
@@ -32572,6 +32700,11 @@ impl App {
                 // The media viewer owns every press while it is open, the tab
                 // bar and update banner included: one outside closes it.
                 if self.activate_media_viewer_at(ws, px, py, bcode) {
+                    return;
+                }
+                // An inline card takes a primary press before anything else
+                // in the window does; its release opens the card's item.
+                if self.press_card(ws, px, py, bcode) {
                     return;
                 }
                 // Tab-bar interactions (left = switch / close-✕ / new-+;
@@ -32922,6 +33055,14 @@ impl App {
                     self.search_button_release(ws);
                     return;
                 }
+                // The release of a press a card took is the card's too.
+                let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
+                if self.release_card(ws, px, py, bcode) {
+                    if let Some(w) = &ws.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
                 // Terminator parity: the release is where a titlebar press
                 // finally means something. Moved past the slop -> move the pane
                 // to the latched drop target; never moved -> the
@@ -33221,6 +33362,8 @@ impl App {
                     // A focus loss also ends any split-divider drag.
                     ws.dragging_split = None;
                     ws.mouse_btn = None;
+                    // And a card's press: its release may land elsewhere.
+                    ws.card_press = None;
                     // A focus loss also cancels an in-flight tab tear-off
                     // (the release will land on whatever window took focus).
                     ws.detach_drag = crate::detach::DragState::default();
@@ -39750,6 +39893,159 @@ mod tests {
         );
     }
 
+    /// A press is a card's only once the card has been where it is drawn
+    /// for half a second; one that moved, or just appeared, is new again,
+    /// and one no longer drawn is forgotten.
+    #[test]
+    fn a_card_takes_a_press_only_once_it_has_settled() {
+        let nonce = kettle_core::InlineNonce::new([1, 2, 3, 4, 5, 6]).unwrap();
+        let card = |rect| kettle_render::PaintedCard {
+            pane: 7,
+            nonce,
+            rect,
+        };
+        let here = card([40.0, 16.0, 96.0, 48.0]);
+        let start = std::time::Instant::now();
+        let mut sightings = std::collections::HashMap::new();
+        super::note_card_sightings(&mut sightings, &[here], start);
+        let at = |sightings: &_, card, after| {
+            super::settled_card_at(Some(card), sightings, start + after)
+        };
+        let ms = std::time::Duration::from_millis;
+        assert_eq!(at(&sightings, here, ms(499)), None, "just appeared");
+        assert_eq!(at(&sightings, here, ms(500)), Some((7, nonce)));
+        // A later frame in the same place keeps the first sighting.
+        super::note_card_sightings(&mut sightings, &[here], start + ms(300));
+        assert_eq!(at(&sightings, here, ms(500)), Some((7, nonce)));
+        // Moved, it is new again from that frame.
+        let moved = card([40.0, 32.0, 96.0, 48.0]);
+        super::note_card_sightings(&mut sightings, &[moved], start + ms(600));
+        assert_eq!(at(&sightings, moved, ms(1000)), None);
+        assert_eq!(at(&sightings, moved, ms(1100)), Some((7, nonce)));
+        // A sighting is for the place it was seen.
+        assert_eq!(at(&sightings, here, ms(2000)), None);
+        // No longer drawn, it is forgotten.
+        super::note_card_sightings(&mut sightings, &[], start + ms(1200));
+        assert!(sightings.is_empty());
+        assert_eq!(super::settled_card_at(None, &sightings, start), None);
+        // Two printed copies of one card settle apart, each where it is, and
+        // frames showing both keep both first sightings.
+        let below = card([40.0, 96.0, 96.0, 48.0]);
+        super::note_card_sightings(&mut sightings, &[here, below], start);
+        super::note_card_sightings(&mut sightings, &[here, below], start + ms(400));
+        assert_eq!(at(&sightings, here, ms(500)), Some((7, nonce)));
+        assert_eq!(at(&sightings, below, ms(500)), Some((7, nonce)));
+        // Its release opens it only over the very card it pressed, and only
+        // while nothing that owns the pointer has opened over it.
+        let other = kettle_core::InlineNonce::new([6, 5, 4, 3, 2, 1]).unwrap();
+        assert!(super::card_release_opens((7, nonce), Some(here), false));
+        assert!(super::card_release_opens((7, nonce), Some(below), false));
+        assert!(!super::card_release_opens((7, nonce), Some(here), true));
+        assert!(!super::card_release_opens((7, nonce), None, false));
+        assert!(!super::card_release_opens((7, other), Some(here), false));
+        assert!(!super::card_release_opens((8, nonce), Some(here), false));
+    }
+
+    /// A card takes its primary press before anything else in the window,
+    /// on the native and control paths alike, after only the dialogs and
+    /// the media viewer that own every press; its release is the card's too.
+    #[test]
+    fn a_card_takes_its_press_and_release_before_anything_behind_it() {
+        let source = super::production_source();
+        let source = source.as_str();
+        fn after<'a>(text: &'a str, from: &str) -> &'a str {
+            text.split_once(from).unwrap_or_else(|| panic!("{from}")).1
+        }
+        let native = after(
+            source,
+            "WindowEvent::MouseInput {\n                state: ElementState::Pressed,",
+        );
+        let viewer = native
+            .find("if self.activate_media_viewer_at(ws, px, py, bcode) {")
+            .expect("viewer");
+        let card = native
+            .find("if self.press_card(ws, px, py, bcode) {")
+            .expect("card");
+        let bar = native.find("let bar = self.tab_bar(ws);").expect("tab bar");
+        assert!(viewer < card && card < bar);
+        let ctl = after(source, "    fn ctl_mouse_press(");
+        let viewer = ctl
+            .find("if self.activate_media_viewer_at(ws, px, py, bcode) {")
+            .expect("ctl viewer");
+        let card = ctl
+            .find("if self.press_card(ws, px, py, bcode) {")
+            .expect("ctl card");
+        let bar = ctl
+            .find("if tab_bar_pointer_region_contains(&bar, px, py)")
+            .expect("ctl tab bar");
+        assert!(viewer < card && card < bar);
+        let release = after(
+            source,
+            "WindowEvent::MouseInput {\n                state: ElementState::Released,",
+        );
+        let card = release
+            .find("if self.release_card(ws, px, py, bcode) {")
+            .expect("release");
+        let drag = release
+            .find("&& let Some(drag) = ws.pane_drag.take()")
+            .expect("pane drag");
+        let report = release.find("ws.mouse_btn").expect("mouse report");
+        assert!(card < drag && card < report);
+        let ctl_release = after(source, "    fn ctl_mouse_release(");
+        let card = ctl_release
+            .find("if self.release_card(ws, px, py, bcode) {")
+            .expect("ctl release");
+        let report = ctl_release
+            .find("if ws.mouse_btn == Some(bcode)")
+            .expect("ctl report");
+        assert!(card < report);
+        // Only a primary press without Shift, and only on a settled card.
+        let press = after(source, "    fn press_card(");
+        assert!(press.contains("if bcode != 0 || ws.mods.shift_key() {"));
+        assert!(press.contains("settled_card_at(card, &ws.card_sightings"));
+        // Its release opens nothing once a dialog or the viewer is up.
+        let release = after(source, "    fn release_card(");
+        assert!(
+            release.contains(
+                "let covered = self.pointer_modal_open(ws) || ws.media_viewer.is_some();"
+            )
+        );
+        assert!(release.contains("card_release_opens((pane, nonce), over, covered)"));
+        // A primary press ends a card press whose release went elsewhere,
+        // before anything can take it, natively and over control.
+        let reset = "if bcode == 0 {\n            ws.card_press = None;\n        }";
+        let native_reset = native
+            .find(&reset.replace("\n        ", "\n                "))
+            .expect("native reset");
+        let menu = native
+            .find("&& let Some(click) = self.context_menu_click_action(ws, bcode)")
+            .expect("menu");
+        assert!(native_reset < menu);
+        let ctl_reset = ctl.find(reset).expect("ctl reset");
+        let ctl_menu = ctl
+            .find("&& let Some(click) = self.context_menu_click_action(ws, bcode)")
+            .expect("ctl menu");
+        assert!(ctl_reset < ctl_menu);
+        // So does anything else that ends the pointer's gestures.
+        let focus = after(source, "WindowEvent::Focused(f) => {");
+        let focus = &focus[..focus.find("WindowEvent::").unwrap_or(focus.len())];
+        assert!(focus.contains("ws.card_press = None;"));
+        for gesture_end in [
+            "    fn open_search(",
+            "    fn show_context_menu(",
+            "    fn close_all_modals(",
+            "    fn install_confirm_dialog(",
+        ] {
+            let body = after(source, gesture_end);
+            let body = &body[..body.find("\n    fn ").unwrap_or(body.len())];
+            assert!(body.contains("ws.card_press = None;"), "{gesture_end}");
+        }
+        // A card has been seen once a frame showing it reached the screen.
+        assert!(source.contains(
+            "if matches!(&frame_result, Ok(FrameOutcome::Presented)) {\n            note_card_sightings(\n                &mut ws.card_sightings,\n                renderer.painted_cards(),"
+        ));
+    }
+
     /// A verified harness's card is registered in its pane with the message
     /// its harness prints; anything that cannot hold leaves the shelf alone.
     #[test]
@@ -39870,7 +40166,8 @@ mod tests {
             .nth(1)
             .and_then(|rest| rest.split("\nfn ").next())
             .expect("media_visible_items");
-        assert!(visible.contains(".painted_cards()"));
+        // Eviction spares what the next frame draws, presented or not.
+        assert!(visible.contains(".drawn_cards()"));
     }
 
     /// The sender line knows where its program's path sits, whatever the

@@ -217,11 +217,25 @@ fn a_renderer_compiles_each_distinct_pipeline_once() {
     view.inline_cards = Some(&cards);
     let pane_id = view.id;
     capture(&mut renderer, &cfg, &[view], &focused(false));
+    let painted: Vec<_> = renderer
+        .painted_cards()
+        .iter()
+        .map(|card| (card.pane, card.nonce))
+        .collect();
     assert_eq!(
-        renderer.painted_cards(),
-        &[(pane_id, nonce)],
+        painted,
+        [(pane_id, nonce)],
         "the frame reports the card it accepted"
     );
+    // A press inside the card's drawn rectangle is the card's.
+    let card = renderer.painted_cards()[0];
+    let [x, y, width, height] = card.rect;
+    assert!(width > 0.0 && height > 0.0);
+    assert_eq!(
+        renderer.card_at(x + width / 2.0, y + height / 2.0),
+        Some(card)
+    );
+    assert_eq!(renderer.card_at(x - 1.0, y), None);
     let replacing = [&renderer.pane_bases, &renderer.live_pane_bases];
     let blending = [
         &renderer.quads,

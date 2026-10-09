@@ -3809,8 +3809,23 @@ or text after the label; its tab names Codex. `kettle-ui` sizes a Codex card
 from its own column and label, and gives a card only to a sender signed as
 the harness it asked as. Checked live with Codex CLI 0.162.0 (hooks bypassed
 for that one run, so no trust was saved): the function's launch printed the
-card under `↳ Hook ·` and Kettle painted the chart there, tabbed Codex. The
-viewer's sender line finds its program's path and signer in
+card under `↳ Hook ·` and Kettle painted the chart there, tabbed Codex.
+Clicking cards: `kettle-render` records each drawn card with the part of it
+on screen, clipped to its pane, and `card_at` finds a press inside it on a
+real frame; `kettle-ui` takes a press only on a card drawn in the same place
+for half a second, as a new sighting after a move, settles two printed
+copies of one card apart, and forgets a card no longer drawn. Only a
+presented frame puts cards on screen (a guard on the renderer's frame
+path), so one whose present timed out neither moves the hit targets nor
+starts a card's half second. The card's press and release come before
+everything but dialogs and the viewer on both the native and control paths,
+only for a primary press without Shift. The release opens nothing while a
+dialog or the viewer is up, and every dialog opener, the context menu,
+search, focus loss and a new primary press end a card press, so a dialog
+opened and closed while the button is held still cancels the click. Checked live with Codex CLI 0.162.0: a
+`send_mouse` click on a Codex card opened the viewer on its item, and a
+press on the card released after Settings opened left Settings up and
+opened nothing. The viewer's sender line finds its program's path and signer in
 any language's word order, whatever they hold, and a line too narrow even for
 the path's last segment shortens around the signer, which stays whole. In
 `kettle-ui`'s `media` module, `route` tests: the nearest live pane ancestor

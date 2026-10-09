@@ -901,6 +901,12 @@ pub(crate) struct WindowState {
     /// The shelf item the user opened in this window, if any. Only a user
     /// action opens it; a push never does.
     pub(crate) media_viewer: Option<MediaViewer>,
+    /// The inline card, by pane and nonce, that took the primary press now
+    /// held; its release over the same card opens the card's item.
+    pub(crate) card_press: Option<(u64, kettle_core::InlineNonce)>,
+    /// When each card on screen first appeared where it is, by spot, so a
+    /// press on one that only just appeared stays ordinary input.
+    pub(crate) card_sightings: std::collections::HashMap<crate::app::CardSpot, std::time::Instant>,
     /// When `Some`, the user is editing a window/tab/pane title via
     /// an inline overlay.
     pub(crate) editing_title: Option<TitleEditState>,
@@ -1357,6 +1363,8 @@ impl WindowState {
             context_menu: None,
             theme_preview: None,
             media_viewer: None,
+            card_press: None,
+            card_sightings: std::collections::HashMap::new(),
             editing_title: None,
             pending_resize: false,
             confirm_dialog: None,

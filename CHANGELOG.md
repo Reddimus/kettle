@@ -92,6 +92,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   an image or SVG file to the media shelf of the pane the agent runs in. It
   needs only Agent previews and cannot read the screen, type or run
   anything.
+- Clicking an inline card opens its item in the media viewer. The card takes
+  both the press and its release, so the program behind it sees neither. A
+  Shift-click selects text as it does anywhere else, and the wheel, like a
+  press on a card that came on screen under the pointer less than half a
+  second ago, goes where it would without the card.
 - The media shelf viewer: `open_media_shelf` (palette: "Open media shelf")
   shows the focused pane's shelf over the pane, newest first, with each
   item's title, kind, size and sender; `←`/`→` browse and Esc closes, and so

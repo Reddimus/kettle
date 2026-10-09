@@ -13,6 +13,23 @@ mod bg_image;
 mod card_marks;
 mod card_scene;
 mod inline_cards;
+/// A card a frame drew: its pane, its nonce, and the part of it inside its
+/// pane in surface pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PaintedCard {
+    pub pane: u64,
+    pub nonce: kettle_core::InlineNonce,
+    pub rect: [f32; 4],
+}
+
+impl PaintedCard {
+    /// Whether surface point (`x`, `y`) falls on it.
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        let [left, top, width, height] = self.rect;
+        x >= left && x < left + width && y >= top && y < top + height
+    }
+}
+
 pub use inline_cards::{
     CardHarness, CardPoster, CardRefusal, CardSpec, InlineCards, MAX_CARD_COLUMNS, MAX_PANE_CARDS,
 };
@@ -2936,9 +2953,12 @@ pub struct Renderer {
     card_image_shared: imgpipe::ImageShared,
     card_frames: Vec<inline_cards::CardFrame>,
     card_scene: card_scene::CardScene,
-    /// The cards the last frame accepted, by pane id and nonce: their shelf
-    /// items are on screen, so their pixels must stay.
-    painted_cards: Vec<(u64, kettle_core::InlineNonce)>,
+    /// The cards the last frame drew, presented or not: the next frame
+    /// draws them again, so their shelf items' pixels must stay.
+    drawn_cards: Vec<PaintedCard>,
+    /// The cards on screen: those of the last frame presented. A press there
+    /// is the card's, so a frame that never reached the screen leaves them.
+    painted_cards: Vec<PaintedCard>,
     card_text_renderer: TextRenderer,
     card_label_buffers: Vec<TextBuffer>,
     card_label_texts: Vec<String>,
@@ -4116,6 +4136,45 @@ mod live_screenshot_tests {
         (0..width * height)
             .flat_map(|pixel| [pixel as u8, 0, 0, 255])
             .collect()
+    }
+
+    /// The cards a press can hit are the ones on screen: a frame that never
+    /// reached it (a timed-out or occluded acquire) keeps the last presented
+    /// frame's, or a click could open a card the user cannot see, or miss one
+    /// that is still there.
+    #[test]
+    fn cards_reach_the_screen_only_with_a_presented_frame() {
+        let src = production_source();
+        let body = src
+            .split("pub fn render_frame_with_status_and_pre_present")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("render_frame_with_status_and_pre_present body");
+        let normalized = body.split_whitespace().collect::<Vec<_>>().join(" ");
+        let commit = "self.painted_cards.clone_from(&self.drawn_cards);";
+        let present = normalized
+            .find("self.gpu.queue.present(frame);")
+            .expect("presentation");
+        let headless = normalized
+            .find("// Headless (tests): the offscreen capture is the whole frame.")
+            .expect("headless branch");
+        let headless_end = headless
+            + normalized[headless..]
+                .find("return Ok(FrameOutcome::Occluded);")
+                .expect("headless return");
+        let commits: Vec<usize> = normalized.match_indices(commit).map(|(at, _)| at).collect();
+        assert_eq!(commits.len(), 2, "{commits:?}");
+        assert!(
+            headless < commits[0] && commits[0] < headless_end,
+            "a headless capture stands in for a presented frame"
+        );
+        assert!(
+            present < commits[1],
+            "only a presented frame shows its cards"
+        );
+        assert_eq!(src.matches("self.painted_cards =").count(), 0);
+        assert_eq!(src.matches("painted_cards.extend(").count(), 0);
+        assert_eq!(src.matches("painted_cards.push(").count(), 0);
     }
 
     /// Metal returns `SurfaceError::Occluded` before it vends a drawable. The
@@ -5460,6 +5519,7 @@ impl Renderer {
             card_image_shared: shared.images,
             card_frames: Vec::new(),
             card_scene: card_scene::CardScene::default(),
+            drawn_cards: Vec::new(),
             painted_cards: Vec::new(),
             card_text_renderer,
             card_label_buffers: Vec::new(),
@@ -5626,14 +5686,28 @@ impl Renderer {
         (self.config.width, self.config.height)
     }
 
-    /// Line height used by chrome text buffers. Terminal rows may be shorter
-    /// or taller via `cell-height`, so overlay geometry must not infer this
-    /// value from `cell_h` when budgeting safety text.
-    /// The cards the last frame accepted, by pane id and nonce.
-    pub fn painted_cards(&self) -> &[(u64, kettle_core::InlineNonce)] {
+    /// The cards the last frame drew, whether or not it reached the screen.
+    pub fn drawn_cards(&self) -> &[PaintedCard] {
+        &self.drawn_cards
+    }
+
+    /// The cards on screen: those the last presented frame drew.
+    pub fn painted_cards(&self) -> &[PaintedCard] {
         &self.painted_cards
     }
 
+    /// The card on screen under surface point (`x`, `y`), if any.
+    pub fn card_at(&self, x: f32, y: f32) -> Option<PaintedCard> {
+        self.painted_cards
+            .iter()
+            .rev()
+            .find(|card| card.contains(x, y))
+            .copied()
+    }
+
+    /// Line height used by chrome text buffers. Terminal rows may be shorter
+    /// or taller via `cell-height`, so overlay geometry must not infer this
+    /// value from `cell_h` when budgeting safety text.
     pub fn overlay_text_line_height(&self) -> f32 {
         self.metrics.line_height
     }
@@ -6792,8 +6866,8 @@ impl Renderer {
         card_frames.truncate(panes.len());
         let mut card_scene = std::mem::take(&mut self.card_scene);
         card_scene.clear();
-        let mut painted_cards = std::mem::take(&mut self.painted_cards);
-        painted_cards.clear();
+        let mut drawn_cards = std::mem::take(&mut self.drawn_cards);
+        drawn_cards.clear();
         for (i, pv) in panes.iter().enumerate() {
             let (rx, ry, rw, rh) = pv.rect;
             // Pane separators / focus border. Both colors are config-
@@ -6902,7 +6976,7 @@ impl Renderer {
             let card_frame = &mut card_frames[i];
             if let Some(cards) = pv.inline_cards {
                 cards.recognize_into(pv.snap, card_frame);
-                painted_cards.extend(card_frame.blocks.iter().map(|block| (pv.id, block.nonce)));
+                let drawn_before = card_scene.drawn.len();
                 if let Some(pane_body) =
                     pane_backdrop_rect(pv.rect, bw, pane_titlebar_h, cfg.title_at_bottom)
                     && let Some(clip) = inline_image_clip(
@@ -6929,6 +7003,13 @@ impl Renderer {
                         },
                     );
                 }
+                drawn_cards.extend(card_scene.drawn[drawn_before..].iter().map(
+                    |&(nonce, rect)| PaintedCard {
+                        pane: pv.id,
+                        nonce,
+                        rect,
+                    },
+                ));
             } else {
                 card_frame.clear();
             }
@@ -7152,7 +7233,7 @@ impl Renderer {
         }
 
         self.card_frames = card_frames;
-        self.painted_cards = painted_cards;
+        self.drawn_cards = drawn_cards;
         self.card_scene = card_scene;
         if self.card_posters.is_none() && !self.card_scene.posters.is_empty() {
             // Preview pressure cannot prevent a text window. Retry admission
@@ -9853,6 +9934,7 @@ impl Renderer {
                 live_window: false,
                 ..scene_facts
             });
+            self.painted_cards.clone_from(&self.drawn_cards);
             return Ok(FrameOutcome::Occluded);
         };
         let (frame, reconfigure_after_present) = match acquired {
@@ -9990,6 +10072,7 @@ impl Renderer {
         }
         self.frames_presented += 1;
         self.last_scene = Some(scene_facts);
+        self.painted_cards.clone_from(&self.drawn_cards);
         Ok(FrameOutcome::Presented)
     }
 
