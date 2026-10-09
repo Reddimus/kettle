@@ -683,6 +683,65 @@ not released, nor dropped from a full shelf while another item can go
 instead. On other platforms, and without the plugin, the shelf has the
 item and the result says so.
 
+### Kettle's Claude Code plugin
+
+`agent-display-claude-code` (Settings → Agents → Claude Code previews; off by
+default, and it needs agent previews) gives Claude Code started in a new
+Kettle pane Kettle's own plugin: the display server, run as this Kettle's
+absolute path with `mcp --display --claude-card-hook`, and the `PostToolUse`
+hook that prints its cards. The hook matches only
+`mcp__plugin_kettle_kettle__kettle_show`, and the plugin approves nothing, so
+Claude Code asks before the first `kettle_show` as it does for any tool.
+
+Kettle changes none of Claude Code's settings and nothing in its plugin list.
+It writes the plugin into its own data directory, in a directory named by the
+plugin's contents (`~/Library/Application Support/kettle/agent-plugins/kettle-<hash>`
+on macOS, `$XDG_DATA_HOME/kettle/agent-plugins/kettle-<hash>` or
+`~/.local/share/…` elsewhere), and puts that directory first in the pane's
+`CLAUDE_CODE_PLUGIN_DIRS` (Claude Code 2.1.280 and later). The pane keeps the
+entries it would have had, from your `env` or from Kettle's own environment,
+except Kettle plugin directories an outer Kettle or an older version left.
+Those go even when the pane gets no plugin, since they would skip this
+Kettle's checks. Kettles that share the plugins directory install one at a
+time. An install removes this executable's plugins from the same or an
+older version and plugins whose program is gone, but keeps another installed
+Kettle's and a newer version's.
+
+Before each new pane, Kettle checks the directory again without following
+links. Each part must be owned by you or root, with nothing writable, modes
+`0500` and `0400`, and no extra entries. Every file must be byte for byte what
+this Kettle wrote. If any check fails, the pane gets no plugin, Settings says
+why, and the next reload writes the plugin again.
+
+Claude Code refuses to start when its managed policy sets
+`disableSideloadFlags` and `CLAUDE_CODE_PLUGIN_DIRS` names a directory, so
+Kettle reads that policy where Claude Code does:
+- `managed-settings.json` and the drop-ins in `managed-settings.d`, merged in
+  order as Claude Code merges them, so the last to set the rule decides;
+- the remote policy cached in the pane's Claude Code configuration directory,
+  which is its `CLAUDE_CONFIG_DIR` or else `.claude` in its `HOME`;
+- on macOS, the managed preferences, through `plutil`.
+
+While any of these forbids plugins, or can't be read whole, new panes get no
+plugin. So does a pane whose configuration directory Kettle can't place: a
+relative `CLAUDE_CONFIG_DIR`, which Claude Code takes from wherever it
+starts, or no home. Claude Code may use only the highest of these sources,
+so Kettle can withhold the plugin where Claude Code would allow it. Kettle
+doesn't see policy that Claude Code gets from a helper command or a
+`--managed-settings` flag; if that forbids plugins, Claude Code says so at
+start, and turning the setting off clears it.
+
+Panes already open keep what they started with. Turning off the setting, or
+agent previews, stops new panes getting the plugin at once. A Kettle running
+from a translocated copy (macOS runs a quarantined app that was never moved
+from where it was downloaded from a temporary path) offers no plugin, since
+its path does not last.
+
+To check it, in a new pane `echo $CLAUDE_CODE_PLUGIN_DIRS` names Kettle's
+directory, and Claude Code's `/plugin` and `/mcp` list `kettle`. To remove
+it, turn the setting off. The directory stays in Kettle's data directory;
+delete it with `chmod -R u+w` and then `rm -r`.
+
 ### Protocol revisions
 
 The server is **dual-era**. MCP 2026-07-28 removed the `initialize` handshake
@@ -1002,6 +1061,10 @@ This is also desktop-local because it opens real GUI terminal windows.
   caller's own environment, labeled unverified with the executable and pid
   the kernel names and, on macOS, the signer it validates. Never the focused pane, never another Kettle, and never
   anything opened on screen by a push.
+- **Kettle's Claude Code plugin is opt-in and checked per pane.** It is
+  offered only while `agent-display-claude-code` and agent previews are on,
+  from a read-only directory Kettle checks before every new pane, and never
+  while Claude Code's managed policy forbids plugins from the environment.
 - **Terminal-wide, not per-client.** Once enabled, every same-user client gets
   the selected mode across all windows in the process without an additional
   prompt, pairing token, or per-client capability grant.

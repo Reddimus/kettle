@@ -1042,6 +1042,9 @@ context = "crates/kettle-ui/src/settings.rs categories(): Settings category tab 
 [messages.settings_field_agent_previews]
 context = "crates/kettle-ui/src/settings.rs categories(): Settings row. Lets AI agents show images and diagrams in Kettle; it grants no screen reading or typing."
 
+[messages.settings_field_agent_previews_claude_code]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row under Agents. Offers Claude Code, in new panes, Kettle's plugin so its images and diagrams show as cards."
+
 [messages.settings_field_background_animation]
 context = "crates/kettle-ui/src/settings.rs categories(): Settings row label. When the animated background moves."
 
@@ -1246,6 +1249,24 @@ context = "crates/kettle-ui/src/app.rs agent_previews_note: footer note on the A
 
 [messages.settings_note_blur]
 context = "crates/kettle-ui/src/app.rs settings_footer_note: shown on the Window blur and Background opacity rows."
+
+[messages.settings_note_claude_code_forbidden]
+context = "crates/kettle-ui/src/app.rs claude_code_note: footer note on the Claude Code previews row when the organization's Claude Code policy (disableSideloadFlags) forbids plugins that the environment names, so new panes get none."
+
+[messages.settings_note_claude_code_needs_previews]
+context = "crates/kettle-ui/src/app.rs claude_code_note: footer note on the Claude Code previews row when agent previews are off, so new panes get no Claude Code plugin. Infinitive in Spanish, like the other notes."
+
+[messages.settings_note_claude_code_new_panes]
+context = "crates/kettle-ui/src/app.rs claude_code_note: footer note on the Claude Code previews row while new panes get the plugin, or the row is off: Claude Code started in a new pane gets Kettle's plugin, and Kettle edits none of Claude Code's settings."
+
+[messages.settings_note_claude_code_translocated]
+context = "crates/kettle-ui/src/app.rs claude_code_note: footer note on the Claude Code previews row when macOS runs Kettle from a temporary translocated copy whose path does not last. Infinitive in Spanish, like the other notes."
+
+[messages.settings_note_claude_code_unavailable]
+context = "crates/kettle-ui/src/app.rs claude_code_note: footer note on the Claude Code previews row when Kettle could not write or check its plugin directory."
+
+[messages.settings_note_claude_code_unsupported]
+context = "crates/kettle-ui/src/app.rs claude_code_note: footer note on the Claude Code previews row when this platform cannot check the plugin directory yet (Windows)."
 
 [messages.settings_note_language]
 context = "crates/kettle-ui/src/app.rs settings_footer_note: footer note while the Language row is focused. A new window keeps the current language; only a restart changes it."

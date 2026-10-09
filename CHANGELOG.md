@@ -15,6 +15,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   caption; the plugin's hook collects them once and prints them under the
   call, where Kettle paints the image. The model is told only that the media
   shows below the call.
+- Claude Code previews (`agent-display-claude-code`, Settings → Agents →
+  Claude Code previews; off by default, needs agent previews): Claude Code
+  started in a new pane gets Kettle's own plugin, the display server and the
+  hook that prints inline cards, through `CLAUDE_CODE_PLUGIN_DIRS`. Kettle
+  writes the plugin read-only into its own data directory and checks it
+  before every new pane. It changes none of Claude Code's settings, and new
+  panes get nothing while Claude Code's managed policy forbids plugins from
+  the environment, nor a plugin an outer Kettle passed down. Settings says
+  why when a pane gets no plugin.
 - `kettle ctl get_state` reports `caller`: whether the connecting process runs
   in one of this Kettle's panes, from the process tree rather than anything
   the caller says. A client's first request claims its own pid and start time;

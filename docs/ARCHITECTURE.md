@@ -486,6 +486,23 @@ each frame's accepted cards (`Renderer::painted_cards`), and their items count
 as visible when pixels are released. The tick retires cards whose harness
 exited, whose pane closed, or whose item left the shelf or was replaced.
 
+Kettle's Claude Code plugin is `kettle-ui`'s `agent_plugin` module. With
+`agent-display-claude-code` and live agent previews, the App's
+`reconcile_claude_plugin`, run before the first pane and after each reload,
+builds the plugin's three files for this executable (`PluginFiles`). Under
+a lock shared by every Kettle using the directory, it writes them once into
+a contents-named directory under Kettle's data directory through a private
+staging directory and a rename, removes stale plugins, then offers it and
+checks it at once so Settings is current. `pane_environment` asks
+`for_new_pane` before each spawn, with the pane's own `CLAUDE_CONFIG_DIR` and
+`HOME`. That call checks Claude Code's managed policy (`PolicySources`,
+cached until a source changes on disk, and never beside a source whose
+metadata cannot be read) and verifies the directory without following links,
+so a pane gets the plugin only after both pass. `CLAUDE_CODE_PLUGIN_DIRS`
+then gets the directory first and keeps the pane's other entries, less any
+Kettle plugin, which goes even when the pane gets none. The last refusal is
+what the Settings footer reports.
+
 The user opens a shelf with `open_media_shelf`. `WindowState::media_viewer`
 names the pane and item; the App projects it into a
 `kettle_render::MediaViewerOverlay` (display text and pixels, never a path)

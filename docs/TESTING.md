@@ -3749,7 +3749,37 @@ delivery for one hook for five seconds, and bound the waiting deliveries;
 `kettle_card` is never listed, refuses the model's own call, needs its
 `tool_use_id`, refuses an in-flight request id before it can take a delivery,
 and answers once, even while the tool queue is full; a card's result carries
-none of its text; and `kettle ctl` never asks for a card. The viewer's sender line finds its program's path and signer in
+none of its text; and `kettle ctl` never asks for a card. Kettle's Claude Code
+plugin: `kettle-ui`'s `agent_plugin` tests build a plugin that launches this
+Kettle's display server and hooks only `kettle_show`, refuse a translocated
+path, and install it read-only. The plugin must then verify, and a
+reinstall must keep it. An install waits while another holds the lock.
+Cleanup removes this executable's plugins from the same or an older
+version, one whose program is gone, an unreadable one, one whose server is
+not `kettle mcp` or whose file is too long, and any staging, but keeps
+another installed Kettle's plugin and a newer version's. They fail a
+changed file, an extra entry, a link and a writable directory, and repair
+each by installing again. On policy, they cover each source Claude Code
+reads: the managed file, its visible JSON drop-ins, the cached remote policy
+and, on macOS, managed preferences through `plutil`. The managed file and
+its drop-ins merge in Claude Code's order, by UTF-16 units, so a later one
+can lift the rule; other sources count beside them, and a byte-order mark is
+dropped. The user's own settings, a file that is not JSON, a
+hidden or non-JSON drop-in and a directory named like one forbid nothing; an
+oversized file, a FIFO, too many drop-ins, an unreadable plist and a
+configuration directory Kettle cannot place forbid the plugin. A change on
+disk is seen despite the cache, and a source that becomes unreadable is never
+answered from it. The configuration directory is the pane's `CLAUDE_CONFIG_DIR`
+or `.claude` in its `HOME`, never a relative one. The plugin directory comes
+first in `CLAUDE_CODE_PLUGIN_DIRS`. The pane keeps its configured or
+inherited entries, but not Kettle directories that an outer Kettle or an
+older version left there, wherever it keeps them and in any case, even when
+the pane gets no plugin or the value is not UTF-8. A path that cannot be an entry adds nothing, and Settings says so. App tests pin the
+footer note for each refusal, the offer before the first pane and after
+each reload's display reconcile, and the gate on both settings. Checked live
+with Claude Code 2.1.295: a new pane's Claude Code loaded the plugin and its
+server's `kettle_show`, the hook printed the card's rows and caption, and
+Kettle painted the image in those rows. The viewer's sender line finds its program's path and signer in
 any language's word order, whatever they hold, and a line too narrow even for
 the path's last segment shortens around the signer, which stays whole. In
 `kettle-ui`'s `media` module, `route` tests: the nearest live pane ancestor
