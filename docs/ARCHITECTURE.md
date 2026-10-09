@@ -675,6 +675,42 @@ reshaped when the font changes. Every quad a pane's cells add is clipped to
 its terminal (`clip_quads`), so a snapshot still taller than a terminal that
 has just shrunk paints nothing in its lane.
 
+Every shelf item keeps what it was rendered from (`media::ItemSource`): the
+job as a `JobSpec` (kind, theme, canvas, target, fonts, and its input), the
+source's digest, and, for an SVG or a diagram read from a file, its text as
+the worker read it (protocol 3's `exact_source`). Bytes a request carried
+are kept once, charged to the process preview account through
+`GraphicsBudget::reserve_retained_cpu`, and shared by the queue, the render
+lane and the shelf; a push whose bytes do not fit is refused as over
+budget, and a file's text that does not fit is simply not kept. A file is
+kept as its path and the authorization it was read under. Evicting an
+item's pixels releases its charged bytes too. The render lane builds each
+`Job` from its spec, copying the bytes under a transient charge, off the UI
+thread. A shelf key is a `ShelfKey`: the key a `show` named, or a file's
+native path, so two paths that print alike never replace each other.
+
+A lane's header can switch to the item's source (`MediaLaneMode::Source`),
+whose visible rows `media::display_rows` takes out of the text for the
+room the lane has, with tabs expanded and characters that act shown as
+U+FFFD; the wheel over a lane (its own `WindowState::lane_wheel`
+accumulator) scrolls them. A raster's or an SVG's canvas is painted behind
+its pixels; a diagram's colors follow its canvas, so `◐` renders it again
+as a `Requester::Lane` push, a sender of its own (`Sender::Lane`), whose
+result `finish_lane_render` takes only for the same item and generation
+read from a source with the same digest (`lane_render_verdict`), keeping
+the item's id, generation and place; a changed file is said in the lane
+instead. Such a render never reads a file while a control request is
+handled. Copying goes to `media::CopyService`, one thread with its own
+clipboard handle for the life of the process, one copy running and one
+waiting; a source copy shares the item's charged text rather than copying
+it, and the lane says what came of it. A wheel over a lane scrolls it only
+while no menu or dialog is open (`lane_takes_wheel`), from a wheel account
+of the window's own that is emptied when a gesture ends, the wheel moves to
+the terminal, or a lane closes; a source replaced under its key by a
+shorter one shows from a row it has (`lane_source`), and source rows are
+bounded in bytes as well as columns, so marks that take no column cannot
+make one long.
+
 The user can pull a file into a lane too: `preview_link` runs quick select
 with `hint_previews` keeping only the image, SVG and Mermaid files a pane
 names (a whole path, off Windows, or a local `file://` link), and the

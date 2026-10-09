@@ -4064,6 +4064,21 @@ same columns, `ui_geometry` reports the lane under `preview_lanes`, a click on
 `▾` leaves a one-row strip and on `×` gives the terminal back its size
 exactly.
 
+Lane content: `kettle-media` tests pin protocol 3's layout and exact
+source; `kettle-ui` tests pin that a spec rebuilds the job it came from, that
+an item's text is its exact source until released and evicting its pixels
+releases it, that native path keys never merge by their printed form, that
+a lane shows only the source rows in view with nothing that acts, scrolls
+within its rows, shows a raster's or an SVG's canvas as chosen but a
+diagram's as rendered until a render for the choice comes back, takes a
+lane's render only for the same item and source, queues it as its own
+sender that fails to its lane, copies on a thread that runs one copy and
+holds one more, and never reads a file for a control client's canvas
+change. `kettle-render` tests pin where the new controls sit, how they give
+way in a narrow header, and, on the GPU, that source mode draws rows and not
+the image. For a live check, preview an SVG and click `≡`, `◐` and `⧉`
+(their rectangles are in `ui_geometry`'s `preview_lanes`).
+
 Previews the user asks for: `kettle-ui` media tests pin that the user's
 request waits in a slot of its own even with every push slot full, runs
 first, gives way to a newer one, and expires and cancels like a push; that

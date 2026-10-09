@@ -371,7 +371,15 @@ the strip, along the pane's bottom whichever side it opened on; opening one
 in a pane too small even for that shows a notice and leaves the item unseen,
 and a lane that loses its room later waits as the titlebar's shelf badge. Each pane
 has its own lane; `ui_geometry` reports them as `preview_lanes` (pane,
-rectangle and `expanded`, `strip` or `badge`, never a path or pixel).
+rectangle and `expanded`, `strip` or `badge`, and for a lane with an item
+its `mode` (`rendered` or `source`), `canvas` (`theme`, `white` or
+`checker`) and `controls`, each shown control's rectangle by name; never a
+title, source, path or pixel). An SVG's or a diagram's lane can show the
+source it was rendered from (`≡`), put the picture on another background
+(`◐`; a diagram is rendered again for it, from the same source) and copy the
+picture or the source (`⧉`). A control client may press these like any
+control, but a diagram is never read from its file again while Kettle
+handles a control request.
 The user can also preview an image, SVG or Mermaid file a pane names
 without any agent: `preview_link` (the palette's "Preview a file in
 Kettle") labels such files in the focused pane as quick select does, and the

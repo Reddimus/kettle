@@ -143,6 +143,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   screen reader hears each lane, its item's place on the shelf and each of
   its buttons. A pane titlebar marks unopened items as `▣N`, and the window
   title counts them.
+- A preview lane can show the source an SVG or Mermaid diagram was rendered
+  from (`≡`), scrolled with the wheel; put the picture on another
+  background (`◐`), drawing a diagram again for it; and copy the picture, or
+  the source exactly as it was read (`⧉`). Also as `preview_source`,
+  `preview_canvas` and `preview_copy`. In English and Spanish.
 - Preview a file without an agent: `preview_link` (palette: "Preview a file
   in Kettle") labels the image, SVG and Mermaid files in the focused pane,
   and typing a label renders that file in its pane's lane; right-clicking a
