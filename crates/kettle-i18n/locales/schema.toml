@@ -48,6 +48,9 @@ context = "crates/kettle-ui/src/app.rs: Destructive confirmation button for clos
 [messages.confirm_button_open]
 context = "crates/kettle-ui/src/app.rs open_pane_link: the confirm button that opens the file. An infinitive in Spanish."
 
+[messages.confirm_button_preview]
+context = "crates/kettle-ui/src/app.rs preview_pane_link: the confirm button that previews the file in Kettle's preview lane. Short: it sits on one line beside Cancel."
+
 [messages.confirm_button_paste]
 context = "crates/kettle-ui/src/app.rs: Confirmation button for a paste."
 
@@ -69,6 +72,10 @@ plural = "count"
 
 [messages.confirm_open_local_file]
 context = "crates/kettle-ui/src/app.rs open_pane_link: confirmation before opening a local file from a clicked terminal link in a pane running a terminal multiplexer, which may be connected to another machine. name is the file name (at most 25 characters), program is the multiplexer's name (tmux, screen, zellij), never translated. One line with the Cancel and Open buttons in an 80-column window: at most 58 columns with the longest name."
+args = [{ name = "name", type = "str" }, { name = "program", type = "str" }]
+
+[messages.confirm_preview_local_file]
+context = "crates/kettle-ui/src/app.rs preview_pane_link: confirmation before previewing, in Kettle's preview lane, a local file a pane running a terminal multiplexer names; the multiplexer may be connected to another machine. name is the file name, program is the multiplexer's name (tmux, screen, zellij), never translated. One line with the Cancel and Preview buttons in an 80-column window, leaving the name at least 12 columns."
 args = [{ name = "name", type = "str" }, { name = "program", type = "str" }]
 
 [messages.confirm_paste]
@@ -149,6 +156,36 @@ context = "crates/kettle-ui/src/media/external.rs: right-click menu row on an in
 [messages.notify_title_open_image]
 context = "crates/kettle-ui/src/app.rs act_on_media: desktop notification title when opening a copy of a media item in the image viewer did not work."
 
+[messages.notify_title_preview_failed]
+context = "crates/kettle-ui/src/app.rs notify_preview_failure: title of the desktop notification when a preview the user asked for (from a file a pane's output names) could not be shown. 'kettle' is the product name, lowercase as in the other notification titles."
+
+[messages.notify_body_preview_missing]
+context = "crates/kettle-ui/src/app.rs notify_preview_failure: body when the file a preview was asked for does not exist: it was removed, or the path names no file from the folder Kettle resolved it against."
+
+[messages.notify_body_preview_unreadable]
+context = "crates/kettle-ui/src/app.rs notify_preview_failure: body when Kettle could not read the file: not a regular file (a directory or device), no permission, or it changed during the read."
+
+[messages.notify_body_preview_too_large]
+context = "crates/kettle-ui/src/app.rs notify_preview_failure: body when the file is over Kettle's preview size limit."
+
+[messages.notify_body_preview_unsupported]
+context = "crates/kettle-ui/src/app.rs notify_preview_failure: body when the file is not an image, an SVG or a Mermaid diagram Kettle can render. 'Mermaid' and 'SVG' are names."
+
+[messages.notify_body_preview_unavailable]
+context = "crates/kettle-ui/src/app.rs notify_preview_failure: body when Kettle's media worker, which renders previews in a separate process, is not available."
+
+[messages.notify_body_preview_failed]
+context = "crates/kettle-ui/src/app.rs notify_preview_failure: body for any other failure: the render timed out, needed too much memory, or Kettle was rendering something else."
+
+[messages.notify_body_preview_unplaced]
+context = "crates/kettle-ui/src/app.rs act_hint: body, under notify_title_preview_failed, when a path picked for a preview cannot be placed on this computer: the pane's folder is unknown or not local, or the path climbs with '..'."
+
+[messages.notify_title_preview_nothing]
+context = "crates/kettle-ui/src/app.rs handle_action PreviewLink: title of the desktop notification when the focused pane names no file to preview. 'kettle' is the product name, lowercase as in the other notification titles."
+
+[messages.notify_body_preview_nothing]
+context = "crates/kettle-ui/src/app.rs handle_action PreviewLink: body when the focused pane's visible text names no image, SVG or Mermaid file. Quick select finds a path only with a folder in it; './plot.png' is a literal example path and stays as is."
+
 [messages.notify_title_preview_no_room]
 context = "crates/kettle-ui/src/app.rs show_media_item: title of the desktop notification when the user opens a pane's preview lane but the pane is too small to hold even its one-row strip beside the terminal. 'kettle' is the product name, lowercase as in the other notification titles."
 
@@ -163,6 +200,9 @@ context = "crates/kettle-ui/src/app.rs act_on_media: desktop notification body w
 
 [messages.menu_open_link]
 context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row. Shown when the right-click lands on a link."
+
+[messages.menu_preview_in_kettle]
+context = "crates/kettle-ui/src/app.rs link_menu_rows: right-click menu row on a link to a local image, SVG or Mermaid file, after Open Link: show the file in the pane's own preview lane in Kettle instead of another app. 'Kettle' is the product name."
 
 [messages.menu_paste]
 context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row."
@@ -1485,6 +1525,9 @@ context = "crates/kettle-ui/src/app.rs ctl_show: title of a media shelf item an 
 [messages.palette_open_media_shelf]
 context = "crates/kettle-config/src/palette.rs: command palette entry that opens the focused pane's media shelf (images an agent sent) in the viewer."
 
+[messages.palette_preview_link]
+context = "crates/kettle-config/src/palette.rs: command palette row that labels the image, SVG and Mermaid files named in the focused pane (quick select) and previews the one the user picks in Kettle's preview lane, beside the terminal. 'Kettle' is the product name."
+
 [messages.media_viewer_kind_image]
 context = "crates/kettle-ui/src/app.rs media_viewer_projection: kind of a raster item in the media viewer's detail line."
 
@@ -1499,6 +1542,9 @@ context = "crates/kettle-ui/src/app.rs media_viewer_projection: kind of any othe
 
 [messages.media_viewer_from_pane]
 context = "crates/kettle-ui/src/app.rs media_viewer_projection: the media viewer's sender line, under the kind and size, when Kettle verified the item came from a program running in this pane. It starts its own line."
+
+[messages.media_viewer_from_user]
+context = "crates/kettle-ui/src/app.rs media_item_kind_and_sender: the sender line of a preview the user opened themselves from a file the pane's output names, rather than one a program sent. Shown in the preview lane and read by screen readers."
 
 [messages.media_viewer_unverified]
 context = "crates/kettle-ui/src/app.rs media_viewer_projection: the media viewer's sender line when Kettle could not verify the sender is in this pane and macOS could not validate who signed it. program is the executable path the system reports, shortened from its middle when the line is too long; pid is its process id. It starts its own line."

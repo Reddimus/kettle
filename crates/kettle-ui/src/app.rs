@@ -5560,6 +5560,69 @@ fn hint_action(kind: kettle_core::hints::Kind, alternate: bool, unsafe_path: boo
     }
 }
 
+/// Whether a file named `name` is one a lane can preview, by its extension:
+/// the raster formats the media worker decodes, SVG, and Mermaid. The
+/// worker still decides by the bytes; this only picks what to offer.
+fn previewable_name(name: &str) -> bool {
+    let extension = name
+        .rsplit_once('.')
+        .map(|(_, extension)| extension.to_ascii_lowercase());
+    matches!(
+        extension.as_deref(),
+        Some("png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif" | "svg" | "mmd" | "mermaid")
+    )
+}
+
+/// What quick select for previews offers: text naming a local file a lane
+/// can preview, a path or a `file://` link, as `preview_link` labels it. A
+/// path off Windows only, where `hint_path_url` resolves one.
+fn hint_previews(what: &HintWhat) -> bool {
+    use kettle_core::hints::Kind;
+    match what {
+        HintWhat::Text {
+            kind: Kind::Path,
+            text,
+            bounded: true,
+        } => !cfg!(windows) && previewable_name(text),
+        HintWhat::Text {
+            kind: Kind::Url,
+            text,
+            ..
+        } => kettle_core::links::local_file_path(text)
+            .is_some_and(|path| previewable_name(&path.to_string_lossy())),
+        _ => false,
+    }
+}
+
+/// Most previews the user asked for that wait for their window to open them.
+const MAX_PREVIEWS_READY: usize = 8;
+
+/// Tell the user why a preview they asked for did not open; nothing for a
+/// request that answers a control client (`None`).
+fn notify_preview_failure(tr: kettle_i18n::Translator, failure: Option<kettle_media::FailureCode>) {
+    use kettle_i18n::Text as T;
+    use kettle_media::FailureCode as F;
+    let Some(failure) = failure else {
+        return;
+    };
+    let body = match failure {
+        F::FileNotFound => T::NotifyBodyPreviewMissing,
+        F::FilePermission | F::FileNotRegular | F::Changed => T::NotifyBodyPreviewUnreadable,
+        F::TooLarge | F::FileTooLarge => T::NotifyBodyPreviewTooLarge,
+        F::UnsupportedMedia
+        | F::UnsupportedContainer
+        | F::CodecUnavailable
+        | F::RenderParse
+        | F::IndexOutOfRange => T::NotifyBodyPreviewUnsupported,
+        F::WorkerUnavailable
+        | F::RestartRequired
+        | F::UnsupportedPlatform
+        | F::BackendUnavailable => T::NotifyBodyPreviewUnavailable,
+        _ => T::NotifyBodyPreviewFailed,
+    };
+    fire_notify(tr.text(T::NotifyTitlePreviewFailed), tr.text(body));
+}
+
 /// Where a link handed to `App::open_url` came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LinkSource {
@@ -5590,6 +5653,15 @@ fn link_gate(uri: &str, origin: Option<PathOrigin>) -> LinkGate {
         (false, _) | (true, Some(PathOrigin::Local)) => LinkGate::Open,
         (true, Some(PathOrigin::Multiplexer(program))) => LinkGate::Confirm(program),
         (true, Some(PathOrigin::Remote) | None) => LinkGate::Refuse,
+    }
+}
+
+/// The file a preview the user confirmed names, read again when they
+/// confirm: `None` once its pane has gone remote, or gone.
+fn confirmed_preview_path(uri: &str, origin: Option<PathOrigin>) -> Option<std::path::PathBuf> {
+    match origin? {
+        PathOrigin::Local | PathOrigin::Multiplexer(_) => kettle_core::links::local_file_path(uri),
+        PathOrigin::Remote => None,
     }
 }
 
@@ -5662,14 +5734,14 @@ fn link_display_name(uri: &str, max_cols: usize) -> String {
 }
 
 /// How many columns the file name may take in the multiplexer confirmation
-/// so that the whole prompt fits beside its buttons in a bar of `max_cols`
-/// (see `kettle_render::confirm_bar_columns`); at least 5. The name is sized
-/// when the dialog opens.
+/// `prompt` words so that the whole prompt fits beside its buttons in a bar
+/// of `max_cols` (see `kettle_render::confirm_bar_columns`); at least 5. The
+/// name is sized when the dialog opens.
 fn confirm_name_columns(
     max_cols: usize,
     buttons: &[ConfirmButton],
-    program: &str,
     tr: &kettle_i18n::Translator,
+    prompt: impl Fn(&str) -> String,
 ) -> usize {
     let buttons_cols = buttons
         .iter()
@@ -5677,9 +5749,20 @@ fn confirm_name_columns(
         .sum::<usize>()
         + 2 * buttons.len().saturating_sub(1);
     let prompt_cols = kettle_render::confirm_prompt_columns(max_cols, buttons_cols);
-    prompt_cols
-        .saturating_sub(tr.confirm_open_local_file("", program).width())
-        .max(5)
+    prompt_cols.saturating_sub(prompt("").width()).max(5)
+}
+
+/// The multiplexer confirmation `prompt` words for the file link `uri`, its
+/// name shortened so the prompt fits beside `buttons` in a bar of `max_cols`.
+fn local_file_prompt(
+    max_cols: usize,
+    buttons: &[ConfirmButton],
+    tr: &kettle_i18n::Translator,
+    uri: &str,
+    prompt: impl Fn(&str) -> String,
+) -> String {
+    let name_cols = confirm_name_columns(max_cols, buttons, tr, &prompt);
+    prompt(&link_display_name(uri, name_cols))
 }
 
 /// The pane `ws.links` were scanned from: the focused pane at the last scan.
@@ -6163,6 +6246,42 @@ fn hint_path_url(text: &str, cwd: Option<&str>, home: Option<&str>) -> Option<St
 
 /// What a context-menu click dispatches, such as a kettle Action (built-in
 /// items) or a Lua callback index (kettle.add_menu_item entries).
+/// The rows a right-click on the link `url` from pane `pane`'s output leads
+/// the menu with: open it, preview it in Kettle when it is a local file a lane
+/// can show from a pane still known, copy its address, then a separator.
+fn link_menu_rows(
+    url: &str,
+    pane: Option<u64>,
+    tr: kettle_i18n::Translator,
+) -> Vec<ContextMenuItem> {
+    use kettle_i18n::Text as T;
+    let row = |label: T, how: UrlHow| ContextMenuItem::UrlItem {
+        label: tr.text(label),
+        url: url.to_string(),
+        how,
+        pane,
+    };
+    let previewable = pane.is_some()
+        && kettle_core::links::local_file_path(url)
+            .is_some_and(|path| previewable_name(&path.to_string_lossy()));
+    let mut rows = vec![row(T::MenuOpenLink, UrlHow::Open)];
+    if previewable {
+        rows.push(row(T::MenuPreviewInKettle, UrlHow::Preview));
+    }
+    rows.push(row(T::MenuCopyLink, UrlHow::Copy));
+    rows.push(ContextMenuItem::Separator);
+    rows
+}
+
+/// What a link row of the context menu does with its address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UrlHow {
+    Open,
+    Copy,
+    /// Preview the local file it names in the pane's lane.
+    Preview,
+}
+
 #[derive(Clone)]
 enum ContextMenuClick {
     Action(Action),
@@ -6190,12 +6309,13 @@ enum ContextMenuClick {
     NewTabWithArgv(Vec<String>),
     /// Terminator parity (terminal_popup_menu.py "Open link" /
     /// "Copy address"): a click on one of the URL-aware leading rows.
-    /// `copy: true` puts the address on the clipboard; `copy: false` opens it
-    /// through the `open_url` chain (Lua handler →
-    /// custom_url_handler → system open, `is_safe_url`-guarded).
+    /// `how` says what the row does with the address: open it through the
+    /// `open_url` chain (Lua handler → custom_url_handler → system open,
+    /// `is_safe_url`-guarded), copy it, or preview the local file it names
+    /// in the pane's lane.
     Url {
         url: String,
-        copy: bool,
+        how: UrlHow,
         /// The pane whose output held the link; `None` for Kettle's own
         /// links (About).
         pane: Option<u64>,
@@ -6274,11 +6394,11 @@ enum ContextMenuItem {
     /// "Copy address"): URL-aware leading rows, present only when the
     /// right-click landed on a detected hyperlink. The URL is captured at
     /// menu-open time so a subsequent output scroll can't retarget the click.
-    /// Clicking dispatches `ContextMenuClick::Url { url, copy }`.
+    /// Clicking dispatches `ContextMenuClick::Url { url, how }`.
     UrlItem {
         label: &'static str,
         url: String,
-        copy: bool,
+        how: UrlHow,
         /// The pane whose output held the link, captured with it.
         pane: Option<u64>,
     },
@@ -6607,6 +6727,10 @@ pub enum ConfirmAction {
         uri: Box<str>,
         program: &'static str,
     },
+    /// Preview a local file link from a pane behind a terminal multiplexer
+    /// in that pane's lane, once the user confirms the file is on this
+    /// computer (see `App::preview_pane_link`).
+    PreviewLocalFile { pane: u64, uri: Box<str> },
 }
 
 /// Which buttons a confirm modal shows. v1 is just
@@ -7678,11 +7802,9 @@ fn item_to_click(item: &ContextMenuItem, idx: usize) -> Option<ContextMenuClick>
         ContextMenuItem::NewTabShell { argv, .. } => {
             Some(ContextMenuClick::NewTabWithArgv(argv.clone()))
         }
-        ContextMenuItem::UrlItem {
-            url, copy, pane, ..
-        } => Some(ContextMenuClick::Url {
+        ContextMenuItem::UrlItem { url, how, pane, .. } => Some(ContextMenuClick::Url {
             url: url.clone(),
-            copy: *copy,
+            how: *how,
             pane: *pane,
         }),
         ContextMenuItem::Media { target, action, .. } => Some(ContextMenuClick::Media {
@@ -8394,6 +8516,12 @@ pub struct App {
     /// The PNG copies handed to the image viewer, made off the window thread.
     /// Owner-only, bounded, oldest dropped first, and removed on exit.
     viewer_copies: std::sync::Arc<std::sync::Mutex<crate::paste_image::PastedImages>>,
+    /// Previews the user asked for that are on their pane's shelf, waiting
+    /// for that pane's window to open them: window, pane and item.
+    previews_ready: Vec<(u64, u64, u64)>,
+    /// Whether a control client's request is being handled: what it
+    /// drives is never the user's own gesture.
+    ctl_driving: bool,
     /// Bounded native-poster jobs. Paths cross only the private child-worker
     /// protocol; decoded pixels return through the event loop.
     video_previewer: crate::video_preview::VideoPreviewer,
@@ -9403,6 +9531,8 @@ impl App {
             viewer_copies: std::sync::Arc::new(std::sync::Mutex::new(
                 crate::paste_image::PastedImages::new(crate::paste_image::OPENED),
             )),
+            previews_ready: Vec::new(),
+            ctl_driving: false,
             video_previewer,
             next_video_preview_generation: 1,
             compiled_triggers: initial_triggers,
@@ -10309,9 +10439,12 @@ impl App {
         };
         let resized = ws.mux.open_lane(pane, side);
         // A pane too small for even the strip shows no lane: say so rather
-        // than keep one nobody can see, and leave the item unseen.
-        let shown = self
-            .pane_partition(ws, self.area(ws), pane)
+        // than keep one nobody can see, and leave the item unseen. Measured
+        // where the pane is, or will be: a preview the user asked for may
+        // finish after they switched tabs or zoomed another pane.
+        let shown = ws
+            .mux
+            .partition_of(pane, self.area(ws), self.layout_style(ws))
             .and_then(|partition| partition.lane)
             .is_some_and(|lane| lane.rect().is_some());
         if !shown && !had_panel {
@@ -10749,6 +10882,11 @@ impl App {
         let sender = match &item.provenance {
             crate::media::Provenance::Verified => kettle_render::MediaLaneSender {
                 text: tr.text(kettle_i18n::Text::MediaViewerFromPane).to_string(),
+                program: None,
+                signer: None,
+            },
+            crate::media::Provenance::User => kettle_render::MediaLaneSender {
+                text: tr.text(kettle_i18n::Text::MediaViewerFromUser).to_string(),
                 program: None,
                 signer: None,
             },
@@ -12313,43 +12451,56 @@ impl App {
                 tr.text(kettle_i18n::Text::NotifyTitleRemoteFileNotOpened),
                 &tr.notify_body_remote_file_not_opened(&link_display_name(uri, 48)),
             ),
-            LinkGate::Confirm(program) => {
-                let buttons = vec![
-                    ConfirmButton::Cancel,
-                    ConfirmButton::Confirm {
-                        label: tr.text(kettle_i18n::Text::ConfirmButtonOpen).to_string(),
-                        destructive: false,
-                    },
-                ];
-                // Size the name to this window, so the prompt, warning
-                // included, fits on the bar.
-                let max_cols = ws.window.as_ref().map_or(79, |window| {
-                    let (cell_w, _) = self.cell_px(ws);
-                    kettle_render::confirm_bar_columns(
-                        window.inner_size().width as f32,
-                        cell_w as f32,
-                    )
-                });
-                let name_cols = confirm_name_columns(max_cols, &buttons, program, &tr);
-                self.install_confirm_dialog(
-                    ws,
-                    ConfirmDialogState {
-                        prompt: tr
-                            .confirm_open_local_file(&link_display_name(uri, name_cols), program),
-                        buttons,
-                        focus_idx: 0,
-                        on_confirm: ConfirmAction::OpenLocalFile {
-                            uri: uri.into(),
-                            program,
-                        },
-                    },
-                );
-                // A click can install this with no other event to come, so ask
-                // for the frame that shows it.
-                if let Some(window) = &ws.window {
-                    window.request_redraw();
-                }
-            }
+            LinkGate::Confirm(program) => self.confirm_local_file(
+                ws,
+                uri,
+                |name| tr.confirm_open_local_file(name, program),
+                kettle_i18n::Text::ConfirmButtonOpen,
+                ConfirmAction::OpenLocalFile {
+                    uri: uri.into(),
+                    program,
+                },
+            ),
+        }
+    }
+
+    /// Ask before acting on the local file link `uri` from behind a
+    /// multiplexer: `prompt` asks about a file name, `button` labels the
+    /// confirm button, and `on_confirm` is what confirming does. The name is
+    /// sized to this window, so the prompt, warning included, fits on the bar.
+    fn confirm_local_file(
+        &mut self,
+        ws: &mut WindowState,
+        uri: &str,
+        prompt: impl Fn(&str) -> String,
+        button: kettle_i18n::Text,
+        on_confirm: ConfirmAction,
+    ) {
+        let tr = self.ui_text;
+        let buttons = vec![
+            ConfirmButton::Cancel,
+            ConfirmButton::Confirm {
+                label: tr.text(button).to_string(),
+                destructive: false,
+            },
+        ];
+        let max_cols = ws.window.as_ref().map_or(79, |window| {
+            let (cell_w, _) = self.cell_px(ws);
+            kettle_render::confirm_bar_columns(window.inner_size().width as f32, cell_w as f32)
+        });
+        self.install_confirm_dialog(
+            ws,
+            ConfirmDialogState {
+                prompt: local_file_prompt(max_cols, &buttons, &tr, uri, prompt),
+                buttons,
+                focus_idx: 0,
+                on_confirm,
+            },
+        );
+        // A click can install this with no other event to come, so ask for
+        // the frame that shows it.
+        if let Some(window) = &ws.window {
+            window.request_redraw();
         }
     }
 
@@ -15047,7 +15198,7 @@ impl App {
 
     /// Scan the focused pane's visible grid for quick-select targets and
     /// assign each a short label.
-    fn collect_hints(&mut self, ws: &mut WindowState) -> Vec<HintTarget> {
+    fn collect_hints(&mut self, ws: &mut WindowState, preview: bool) -> Vec<HintTarget> {
         use kettle_core::hints;
         use kettle_core::{Column, Dimensions, Line, Point};
         let Some(pane) = ws.mux.active_focus() else {
@@ -15100,7 +15251,11 @@ impl App {
                 base.line.0
             })
             .collect();
-        let found = hint_targets_with_cards(hints::detect_rows(g, &lines, cols), &cards);
+        let mut found = hint_targets_with_cards(hints::detect_rows(g, &lines, cols), &cards);
+        // Quick select for previews labels only what a lane can show.
+        if preview {
+            found.retain(|(_, _, what)| hint_previews(what));
+        }
         let labels = hints::labels(found.len(), hints::ALPHABET);
         found
             .into_iter()
@@ -17504,20 +17659,7 @@ impl App {
             .is_some_and(|(rx, ry, rw, rh)| px >= rx && px < rx + rw && py >= ry && py < ry + rh);
         let mut items = Vec::new();
         if in_focused_pane && let Some(url) = self.link_at_cursor(ws).map(|l| l.uri.clone()) {
-            let pane = links_pane(ws);
-            items.push(ContextMenuItem::UrlItem {
-                label: tr.text(T::MenuOpenLink),
-                url: url.clone(),
-                copy: false,
-                pane,
-            });
-            items.push(ContextMenuItem::UrlItem {
-                label: tr.text(T::MenuCopyLink),
-                url,
-                copy: true,
-                pane,
-            });
-            items.push(ContextMenuItem::Separator);
+            items.extend(link_menu_rows(&url, links_pane(ws), tr));
         }
         items.extend(self.context_menu_items(ws));
         self.append_config_menu_items(&mut items);
@@ -17986,13 +18128,13 @@ impl App {
             ContextMenuItem::UrlItem {
                 label: tr.text(T::AboutCopyVersion),
                 url: format!("kettle {v}"),
-                copy: true,
+                how: UrlHow::Copy,
                 pane: None,
             },
             ContextMenuItem::UrlItem {
                 label: tr.text(T::AboutOpenGithub),
                 url: "https://github.com/Reddimus/kettle".to_string(),
-                copy: false,
+                how: UrlHow::Open,
                 pane: None,
             },
         ];
@@ -18000,7 +18142,7 @@ impl App {
             items.push(ContextMenuItem::UrlItem {
                 label: tr.text(T::AboutOpenRelease),
                 url: url.clone(),
-                copy: false,
+                how: UrlHow::Open,
                 pane: None,
             });
         }
@@ -18269,16 +18411,22 @@ impl App {
             // Open routes through the `open_url` chain (Lua URL
             // handlers → custom_url_handler → system open, with the
             // `is_safe_url` guard); Copy puts the address on the clipboard.
-            ContextMenuClick::Url { url, copy, pane } => {
+            ContextMenuClick::Url { url, how, pane } => {
                 ws.context_menu = None;
-                if copy {
-                    if let Some(cb) = &mut self.clipboard
-                        && let Err(e) = cb.set_text(url)
-                    {
-                        log::warn!("clipboard set_text failed (link address copy): {e}");
+                match how {
+                    UrlHow::Copy => {
+                        if let Some(cb) = &mut self.clipboard
+                            && let Err(e) = cb.set_text(url)
+                        {
+                            log::warn!("clipboard set_text failed (link address copy): {e}");
+                        }
                     }
-                } else {
-                    self.open_pane_link(ws, pane, &url);
+                    UrlHow::Open => self.open_pane_link(ws, pane, &url),
+                    UrlHow::Preview => {
+                        if let Some(pane) = pane {
+                            self.preview_pane_link(ws, pane, &url);
+                        }
+                    }
                 }
             }
         }
@@ -19599,11 +19747,25 @@ impl App {
             }
             Action::OpenThemePicker => self.open_theme_picker(ws),
             Action::OpenMediaShelf => self.open_media_shelf(ws),
-            Action::HintMode => {
-                let targets = self.collect_hints(ws);
-                if !targets.is_empty() {
+            Action::HintMode | Action::PreviewLink => {
+                let preview = matches!(action, Action::PreviewLink);
+                let targets = self.collect_hints(ws, preview);
+                if targets.is_empty() {
+                    // Nothing in the pane to preview: say so, as the plain
+                    // quick select's empty pane needs no word. A quick select
+                    // already open stays as it was.
+                    if preview {
+                        let tr = self.ui_text;
+                        fire_notify(
+                            tr.text(kettle_i18n::Text::NotifyTitlePreviewNothing),
+                            tr.text(kettle_i18n::Text::NotifyBodyPreviewNothing),
+                        );
+                    }
+                } else {
                     self.close_all_modals(ws);
+                    // The purpose goes with the targets it chose.
                     ws.hint_state = Some((targets, String::new()));
+                    ws.hint_preview = preview;
                 }
             }
             Action::ToggleViMode => {
@@ -20982,6 +21144,21 @@ impl App {
                 &uri,
                 LinkSource::Pane(Some(PathOrigin::Multiplexer(program))),
             ),
+            // The user confirmed; a pane that has since gone remote, or gone,
+            // still refuses.
+            ConfirmAction::PreviewLocalFile { pane, uri } => {
+                let origin = ws.mux.panes.get(&pane).map(pane_path_origin);
+                match confirmed_preview_path(&uri, origin) {
+                    Some(path) => self.pull_preview(ws, pane, &path),
+                    None => fire_notify(
+                        self.ui_text
+                            .text(kettle_i18n::Text::NotifyTitleRemoteFileNotOpened),
+                        &self
+                            .ui_text
+                            .notify_body_remote_file_not_opened(&link_display_name(&uri, 48)),
+                    ),
+                }
+            }
             ConfirmAction::PastePaths {
                 paths,
                 video,
@@ -21477,7 +21654,11 @@ impl App {
                     if !request.internal_probe() && !ctl_method_is_pure_read(request.method()) {
                         needs_redraw = true;
                     }
+                    // Nothing a control client drives stands for the user's
+                    // own gesture (see `pull_preview`).
+                    self.ctl_driving = true;
                     self.handle_ctl_request(ws, event_loop, conn_id, *request, reply);
+                    self.ctl_driving = false;
                 }
                 CtlServerMsg::Disconnect { conn_id } => {
                     let panes = self
@@ -21741,11 +21922,11 @@ impl App {
         };
         let deadline = request.admitted_at() + kettle_ctl::show::SHOW_SERVER_DEADLINE;
         let push = crate::media::Push::new(
-            crate::media::Origin {
+            crate::media::Requester::Ctl(crate::media::Origin {
                 conn_id,
                 request_id: id,
                 reply,
-            },
+            }),
             route,
             crate::media::Draft {
                 key,
@@ -21818,6 +21999,7 @@ impl App {
     /// renders, and start the next one.
     fn media_tick(&mut self, ws: &mut WindowState) {
         self.retire_cards(ws);
+        self.tell_preview_failures();
         if self.media.is_idle() {
             return;
         }
@@ -21842,6 +22024,123 @@ impl App {
                 let _ = proxy.send_event(UserEvent::MediaRendered);
             })
         });
+        self.tell_preview_failures();
+    }
+
+    /// Tell the user about each preview they asked for that ended before
+    /// it rendered: busy, unavailable, out of time.
+    fn tell_preview_failures(&mut self) {
+        let tr = self.ui_text;
+        for (_, failure) in self.media.take_user_failures() {
+            notify_preview_failure(tr, Some(failure));
+        }
+    }
+
+    /// Open, in this window, the previews the user asked for that are now
+    /// on their pane's shelf, and forget those for windows that closed.
+    fn open_ready_previews(&mut self, ws: &mut WindowState) {
+        let seq = ws.seq;
+        let ready: Vec<(u64, u64)> = self
+            .previews_ready
+            .iter()
+            .filter(|(window, _, _)| *window == seq)
+            .map(|(_, pane, item)| (*pane, *item))
+            .collect();
+        let windows = &self.windows;
+        self.previews_ready
+            .retain(|(window, _, _)| *window != seq && windows.contains_key(window));
+        for (pane, item) in ready {
+            if ws.mux.panes.get(&pane).is_some_and(|state| !state.closed) {
+                self.show_media_item(ws, pane, item);
+            }
+        }
+    }
+
+    /// Preview the local file a link from pane `pane`'s output names in that
+    /// pane's lane. A link from a pane that may be remote, or has gone, is
+    /// refused as opening it is; one from behind a multiplexer is asked
+    /// about first. The pane's origin is read now, when the user acts.
+    fn preview_pane_link(&mut self, ws: &mut WindowState, pane: u64, uri: &str) {
+        let tr = self.ui_text;
+        let origin = ws.mux.panes.get(&pane).map(pane_path_origin);
+        let Some(path) = kettle_core::links::local_file_path(uri) else {
+            return notify_preview_failure(tr, Some(kettle_media::FailureCode::UnsupportedMedia));
+        };
+        match link_gate(uri, origin) {
+            LinkGate::Open => self.pull_preview(ws, pane, &path),
+            LinkGate::Refuse => fire_notify(
+                tr.text(kettle_i18n::Text::NotifyTitleRemoteFileNotOpened),
+                &tr.notify_body_remote_file_not_opened(&link_display_name(uri, 48)),
+            ),
+            LinkGate::Confirm(program) => self.confirm_local_file(
+                ws,
+                uri,
+                |name| tr.confirm_preview_local_file(name, program),
+                kettle_i18n::Text::ConfirmButtonPreview,
+                ConfirmAction::PreviewLocalFile {
+                    pane,
+                    uri: uri.into(),
+                },
+            ),
+        }
+    }
+
+    /// Ask the media worker to render the local file at `path` for `pane`'s
+    /// lane: the user's own pull, which waits in the queue's slot for the
+    /// user, opens the lane when it is ready, and says why when it cannot.
+    fn pull_preview(&mut self, ws: &mut WindowState, pane: u64, path: &std::path::Path) {
+        // A control client may drive Kettle's UI, but its input is never the
+        // user's gesture, so it cannot have a file read on the GUI's word.
+        if self.ctl_driving {
+            log::info!("preview: a control client cannot start a preview read");
+            return;
+        }
+        let tr = self.ui_text;
+        if let Some(failure) = media_unavailable(self.startup.media.as_deref()) {
+            return notify_preview_failure(tr, Some(failure));
+        }
+        let Some((theme, target)) = self.media_surface(ws, pane) else {
+            return;
+        };
+        let Ok(native) = kettle_media::NativePath::from_path(path) else {
+            return notify_preview_failure(tr, Some(kettle_media::FailureCode::FileNotFound));
+        };
+        let key = Some(media_path_key(&native));
+        let title = native
+            .file_name_lossy()
+            .map(|name| crate::media::display_title(&name))
+            .filter(|title| !title.is_empty())
+            .unwrap_or_else(|| tr.text(kettle_i18n::Text::MediaShelfUntitled).into());
+        let job = kettle_media::Job {
+            kind: kettle_media::JobKind::Auto,
+            source: kettle_media::Source::user_pull(
+                native,
+                kettle_media::GuiActionWitness::from_explicit_gui_action(),
+            ),
+            theme,
+            canvas: kettle_media::Canvas::Theme,
+            target,
+            fallback_fonts: Vec::new(),
+        };
+        let deadline = std::time::Instant::now() + kettle_ctl::show::SHOW_SERVER_DEADLINE;
+        let push = crate::media::Push::new(
+            crate::media::Requester::User,
+            crate::media::Route {
+                pane,
+                window: ws.seq,
+                verified: true,
+            },
+            crate::media::Draft {
+                key,
+                title,
+                provenance: crate::media::Provenance::User,
+                inline: None,
+            },
+            job,
+            kettle_media::client::RenderControl::with_deadline(deadline),
+        );
+        self.media.admit(crate::media::Sender::User, deadline, push);
+        self.media_tick(ws);
     }
 
     /// Retire the cards that no longer stand for anything: their harness
@@ -21896,12 +22195,19 @@ impl App {
         use kettle_media::FailureCode;
         use kettle_media::client::RenderError;
         let crate::media::Finished { push, result } = finished;
+        let tr = self.ui_text;
         let (origin, route, draft) = push.into_parts();
         let output = match result {
             Ok(output) => output,
-            // Cancelled because its pane went, or its client left.
-            Err(RenderError::Cancelled) => return origin.refuse(FailureCode::NotInKettlePane),
-            Err(RenderError::Failure(failure)) => return origin.refuse(failure),
+            // Cancelled because its pane went, or its client left; the user
+            // who asked for a pane that went needs no word.
+            Err(RenderError::Cancelled) => {
+                let _ = origin.refuse(FailureCode::NotInKettlePane);
+                return;
+            }
+            Err(RenderError::Failure(failure)) => {
+                return notify_preview_failure(tr, origin.refuse(failure));
+            }
         };
         let kettle_media::RenderOutput { kind, rendered } = output;
         let (width, height) = (rendered.width, rendered.height);
@@ -21917,11 +22223,11 @@ impl App {
             ) {
                 Ok(image) => break image,
                 Err(kettle_core::ImageRefusal::Invalid) => {
-                    return origin.refuse(FailureCode::RenderResource);
+                    return notify_preview_failure(tr, origin.refuse(FailureCode::RenderResource));
                 }
                 Err(kettle_core::ImageRefusal::NoRoom(back)) => {
                     if !self.evict_media_pixels(ws, &visible) {
-                        return origin.refuse(FailureCode::OverBudget);
+                        return notify_preview_failure(tr, origin.refuse(FailureCode::OverBudget));
                     }
                     pixels = back;
                 }
@@ -21944,7 +22250,8 @@ impl App {
             image,
         );
         let Some(window) = window_with_pane(ws, &mut self.windows, route.pane) else {
-            return origin.refuse(FailureCode::NotInKettlePane);
+            let _ = origin.refuse(FailureCode::NotInKettlePane);
+            return;
         };
         let cell = window
             .renderer
@@ -21956,7 +22263,8 @@ impl App {
             .get_mut(&route.pane)
             .filter(|pane| !pane.closed && !pane.held)
         else {
-            return origin.refuse(FailureCode::NotInKettlePane);
+            let _ = origin.refuse(FailureCode::NotInKettlePane);
+            return;
         };
         let shown = window
             .preview_panels
@@ -22010,6 +22318,17 @@ impl App {
         if let Some(handle) = &window.window {
             handle.request_redraw();
         }
+        let origin = match origin {
+            crate::media::Requester::Ctl(origin) => origin,
+            // What the user asked to preview opens in its pane's lane, from
+            // that pane's window's next pass of the event loop.
+            crate::media::Requester::User => {
+                if self.previews_ready.len() < MAX_PREVIEWS_READY {
+                    self.previews_ready.push((seq, route.pane, published.id));
+                }
+                return;
+            }
+        };
         let mut result = kettle_ctl::show::ShowResult::new(
             (route.pane, route.verified, seq),
             published.id,
@@ -26579,6 +26898,36 @@ impl App {
     }
 
     fn act_hint(&mut self, ws: &mut WindowState, h: &HintTarget, alternate: bool) {
+        // Quick select for previews previews what was picked, its pane's
+        // gate permitting, from the pane's own directory.
+        if std::mem::take(&mut ws.hint_preview) {
+            if !hint_previews(&h.what) {
+                return;
+            }
+            if let HintWhat::Text { kind, text, .. } = &h.what {
+                let url = match kind {
+                    kettle_core::hints::Kind::Url => Some(text.clone()),
+                    _ => hint_path_url(
+                        text,
+                        ws.mux
+                            .panes
+                            .get(&h.pane)
+                            .and_then(|pane| pane.term.current_dir_or_native())
+                            .as_deref(),
+                        crate::mux::home_dir_string().as_deref(),
+                    ),
+                };
+                let tr = self.ui_text;
+                match url {
+                    Some(url) => self.preview_pane_link(ws, h.pane, &url),
+                    None => fire_notify(
+                        tr.text(kettle_i18n::Text::NotifyTitlePreviewFailed),
+                        tr.text(kettle_i18n::Text::NotifyBodyPreviewUnplaced),
+                    ),
+                }
+            }
+            return;
+        }
         let (kind, text, bounded) = match &h.what {
             // A card opens its item in the viewer, Shift or not.
             HintWhat::Card(nonce) => {
@@ -35570,6 +35919,7 @@ impl App {
         // whose pane closed are dropped, even when nothing else wakes us.
         self.media_tick(ws);
         self.prune_previews(ws);
+        self.open_ready_previews(ws);
         if let Some(soonest) = self.media.next_deadline() {
             let next = soonest.saturating_duration_since(now).clamp(
                 std::time::Duration::from_millis(1),
@@ -46535,15 +46885,15 @@ mod tests {
     /// instead of Paste).
     #[test]
     fn mnemonics_url_rows_claim_letters_last() {
-        let url = |label: &'static str, copy: bool| ContextMenuItem::UrlItem {
+        let url = |label: &'static str, how: super::UrlHow| ContextMenuItem::UrlItem {
             label,
             url: "https://example.com".into(),
-            copy,
+            how,
             pane: None,
         };
         let menu = vec![
-            url("Open Link", false),
-            url("Copy Link Address", true),
+            url("Open Link", super::UrlHow::Open),
+            url("Copy Link Address", super::UrlHow::Copy),
             ContextMenuItem::Separator,
             item("Copy", true),
             item("Paste", true),
@@ -47645,7 +47995,7 @@ mod tests {
                 .count(),
             5,
             "every confirmation path, including protected text and path paste and a local file \
-             link behind a multiplexer, must use the shared transition"
+             link opened or previewed behind a multiplexer, must use the shared transition"
         );
         assert_eq!(
             normalized_src.matches("ws.confirm_dialog = Some(").count(),
@@ -49284,7 +49634,7 @@ mod tests {
     /// mouse hit-test does. A row type it misses is a keyboard dead-end.
     #[test]
     fn item_to_click_maps_every_dispatchable_row_type() {
-        use super::{ContextMenuClick, ContextMenuItem, item_to_click};
+        use super::{ContextMenuClick, ContextMenuItem, UrlHow, item_to_click};
         use kettle_config::Action;
 
         // Enabled Item / DynamicItem → Action.
@@ -49366,21 +49716,21 @@ mod tests {
             ),
             Some(ContextMenuClick::NewTabWithArgv(_))
         ));
-        // URL-aware rows → Url { copy } carrying the captured
+        // URL-aware rows → Url { how } carrying the captured
         // address, for both the Open and Copy flavors.
         assert!(matches!(
             item_to_click(
                 &ContextMenuItem::UrlItem {
                     label: "Open Link",
                     url: "https://example.com".into(),
-                    copy: false,
+                    how: UrlHow::Open,
                     pane: Some(7),
                 },
                 0
             ),
             // The pane the link came from rides along to the click.
             Some(ContextMenuClick::Url {
-                copy: false,
+                how: UrlHow::Open,
                 pane: Some(7),
                 ..
             })
@@ -49390,12 +49740,15 @@ mod tests {
                 &ContextMenuItem::UrlItem {
                     label: "Copy Link Address",
                     url: "https://example.com".into(),
-                    copy: true,
+                    how: UrlHow::Copy,
                     pane: Some(7),
                 },
                 0
             ),
-            Some(ContextMenuClick::Url { copy: true, .. })
+            Some(ContextMenuClick::Url {
+                how: UrlHow::Copy,
+                ..
+            })
         ));
         // Non-dispatchable rows → None (disabled item + separator).
         assert!(
@@ -52524,10 +52877,131 @@ mod ui_text_drift_tests {
 #[cfg(test)]
 mod hint_action_tests {
     use super::{
-        Client, ConfirmButton, HintAction, LinkGate, PathOrigin, argv_client, confirm_name_columns,
-        hint_action, hint_path_url, link_display_name, link_gate, path_origin, production_source,
+        Client, ConfirmButton, HintAction, HintWhat, LinkGate, PathOrigin, argv_client,
+        confirm_name_columns, confirmed_preview_path, hint_action, hint_path_url, hint_previews,
+        link_display_name, link_gate, link_menu_rows, local_file_prompt, path_origin,
+        previewable_name, production_source,
     };
     use kettle_core::hints::Kind;
+
+    /// A right-click on a link leads with Open and Copy; Preview in Kettle
+    /// joins them, between the two, only for a local file a lane can show
+    /// from a pane Kettle still knows.
+    #[test]
+    fn the_menu_offers_a_preview_only_for_a_file_a_lane_can_show() {
+        use super::{ContextMenuItem, UrlHow};
+        let tr = kettle_i18n::Translator::new(kettle_i18n::Language::En);
+        let root = tempfile::tempdir().unwrap();
+        let link = |name: &str| {
+            kettle_core::links::file_url_for_path(&root.path().join(name)).expect("a file URL")
+        };
+        let rows = |url: &str, pane| {
+            link_menu_rows(url, pane, tr)
+                .into_iter()
+                .map(|row| match row {
+                    ContextMenuItem::UrlItem {
+                        label,
+                        url: row_url,
+                        how,
+                        pane: row_pane,
+                    } => {
+                        assert_eq!((row_url.as_str(), row_pane), (url, pane));
+                        Some((label, how))
+                    }
+                    ContextMenuItem::Separator => None,
+                    _ => panic!("a link row or the separator"),
+                })
+                .collect::<Vec<_>>()
+        };
+        let open = Some(("Open Link", UrlHow::Open));
+        let copy = Some(("Copy Link Address", UrlHow::Copy));
+        assert_eq!(
+            rows(&link("plot.svg"), Some(4)),
+            [
+                open,
+                Some(("Preview in Kettle", UrlHow::Preview)),
+                copy,
+                None
+            ]
+        );
+        for (url, pane) in [
+            (link("plot.svg"), None),
+            (link("notes.txt"), Some(4)),
+            ("https://example.com/plot.svg".to_string(), Some(4)),
+        ] {
+            assert_eq!(rows(&url, pane), [open, copy, None], "{url} {pane:?}");
+        }
+    }
+
+    /// A preview confirmed behind a multiplexer reads its pane's origin
+    /// again: one that has since gone remote, or gone, previews nothing.
+    #[test]
+    fn a_confirmed_preview_rechecks_its_pane() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("plot.png");
+        let uri = kettle_core::links::file_url_for_path(&file).expect("a file URL");
+        for origin in [PathOrigin::Local, PathOrigin::Multiplexer("tmux")] {
+            assert_eq!(
+                confirmed_preview_path(&uri, Some(origin)),
+                Some(file.clone())
+            );
+        }
+        assert_eq!(confirmed_preview_path(&uri, Some(PathOrigin::Remote)), None);
+        assert_eq!(confirmed_preview_path(&uri, None), None);
+        assert_eq!(
+            confirmed_preview_path("https://example.com/plot.png", Some(PathOrigin::Local)),
+            None
+        );
+    }
+
+    /// Quick select for previews labels a file a lane can show, by its
+    /// extension in any case: a whole path, or a local `file://` link.
+    #[test]
+    fn preview_quick_select_labels_only_files_a_lane_can_show() {
+        for name in [
+            "plot.png",
+            "a.JPG",
+            "b.jpeg",
+            "c.webp",
+            "d.bmp",
+            "e.gif",
+            "f.Svg",
+            "g.mmd",
+            "h.mermaid",
+        ] {
+            assert!(previewable_name(name), "{name}");
+        }
+        for name in ["notes.txt", "png", "plot.png.zip", "Makefile", "plot.", ""] {
+            assert!(!previewable_name(name), "{name}");
+        }
+        let text = |kind, text: &str, bounded| HintWhat::Text {
+            kind,
+            text: text.into(),
+            bounded,
+        };
+        assert_eq!(
+            hint_previews(&text(Kind::Path, "out/plot.png", true)),
+            !cfg!(windows),
+            "a path previews where it resolves"
+        );
+        assert!(!hint_previews(&text(Kind::Path, "out/plot.png", false)));
+        assert!(!hint_previews(&text(Kind::Path, "out/notes.txt", true)));
+        assert!(!hint_previews(&text(Kind::Hash, "deadbeef.png", true)));
+        let root = tempfile::tempdir().unwrap();
+        let link = |name: &str| {
+            kettle_core::links::file_url_for_path(&root.path().join(name)).expect("a file URL")
+        };
+        assert!(hint_previews(&text(Kind::Url, &link("plot.png"), false)));
+        assert!(!hint_previews(&text(Kind::Url, &link("notes.txt"), true)));
+        assert!(!hint_previews(&text(
+            Kind::Url,
+            "https://example.com/plot.png",
+            true
+        )));
+        assert!(!hint_previews(&HintWhat::Card(
+            kettle_core::InlineNonce::new([2, 3, 4, 5, 6, 7]).unwrap()
+        )));
+    }
 
     /// Picking a label acts as before; with Shift a URL is copied and a path
     /// opens, unless the path may not be a whole local file.
@@ -52873,25 +53347,37 @@ mod hint_action_tests {
         assert!(width(&wide) <= 13, "{wide}");
         let undecodable = link_display_name(&format!("file:///{}", "%zz".repeat(40)), 25);
         assert_eq!(width(&undecodable), 25);
-        // The confirmation, sized to an 80-column window with the longest
+        // Each confirmation, sized to an 80-column window with the longest
         // multiplexer name, fits beside its rendered buttons in every
         // language, warning and file name included.
         let max_cols = 79;
-        for language in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
+        for (language, preview) in [
+            (kettle_i18n::Language::En, false),
+            (kettle_i18n::Language::Es, false),
+            (kettle_i18n::Language::En, true),
+            (kettle_i18n::Language::Es, true),
+        ] {
             let tr = kettle_i18n::Translator::new(language);
+            let (button, ask): (_, &dyn Fn(&str) -> String) = if preview {
+                (kettle_i18n::Text::ConfirmButtonPreview, &|name| {
+                    tr.confirm_preview_local_file(name, "zellij")
+                })
+            } else {
+                (kettle_i18n::Text::ConfirmButtonOpen, &|name| {
+                    tr.confirm_open_local_file(name, "zellij")
+                })
+            };
             let buttons = vec![
                 ConfirmButton::Cancel,
                 ConfirmButton::Confirm {
-                    label: tr.text(kettle_i18n::Text::ConfirmButtonOpen).to_string(),
+                    label: tr.text(button).to_string(),
                     destructive: false,
                 },
             ];
-            let name_cols = confirm_name_columns(max_cols, &buttons, "zellij", &tr);
-            let name = link_display_name(
-                &format!("file:///tmp/{}-end.pdf", "x".repeat(200)),
-                name_cols,
-            );
-            let prompt = tr.confirm_open_local_file(&name, "zellij");
+            let uri = format!("file:///tmp/{}-end.pdf", "x".repeat(200));
+            let name_cols = confirm_name_columns(max_cols, &buttons, &tr, ask);
+            let name = link_display_name(&uri, name_cols);
+            let prompt = local_file_prompt(max_cols, &buttons, &tr, &uri, ask);
             let buttons_cols = buttons
                 .iter()
                 .map(|button| super::confirm_dialog_button_cells(button, &tr))
@@ -52901,18 +53387,18 @@ mod hint_action_tests {
                 width(&prompt) <= kettle_render::confirm_prompt_columns(max_cols, buttons_cols),
                 "{language:?}: {prompt}"
             );
-            assert!(name_cols >= 12 && prompt.contains(&name) && prompt.ends_with('.'));
+            assert!(
+                name_cols >= 12 && prompt.contains(&name) && prompt.ends_with('.'),
+                "{language:?}: {name_cols} columns for the name in {prompt}"
+            );
             // A narrower window shrinks the name below twelve columns, as long
             // as the rest of the prompt fits.
-            let template = width(&tr.confirm_open_local_file("", "zellij"));
+            let template = width(&ask(""));
             let narrow_cols = max_cols
                 - kettle_render::confirm_prompt_columns(max_cols, buttons_cols)
                 + template
                 + 8;
-            assert_eq!(
-                confirm_name_columns(narrow_cols, &buttons, "zellij", &tr),
-                8
-            );
+            assert_eq!(confirm_name_columns(narrow_cols, &buttons, &tr, ask), 8);
         }
     }
 
@@ -52945,17 +53431,32 @@ mod hint_action_tests {
                 "open_url called from {caller}"
             );
         }
-        // A confirmation installed from a click asks for the frame that shows it.
-        let pane_link = src
-            .split("fn open_pane_link(")
+        // A confirmation installed from a click asks for the frame that shows
+        // it, for opening and previewing alike.
+        let confirm = src
+            .split("fn confirm_local_file(")
             .nth(1)
             .and_then(|rest| rest.split("\n    fn ").next())
-            .expect("open_pane_link");
-        let installed = pane_link
+            .expect("confirm_local_file");
+        let installed = confirm
             .find("self.install_confirm_dialog(")
             .expect("install");
-        let redraw = pane_link.find("window.request_redraw();").expect("redraw");
+        let redraw = confirm.find("window.request_redraw();").expect("redraw");
         assert!(installed < redraw);
+        for (caller, action) in [
+            ("open_pane_link", "ConfirmAction::OpenLocalFile {"),
+            ("preview_pane_link", "ConfirmAction::PreviewLocalFile {"),
+        ] {
+            let body = src
+                .split(&format!("fn {caller}("))
+                .nth(1)
+                .and_then(|rest| rest.split("\n    fn ").next())
+                .expect(caller);
+            let asks = body
+                .find("LinkGate::Confirm(program) => self.confirm_local_file(")
+                .unwrap_or_else(|| panic!("{caller} asks through confirm_local_file"));
+            assert!(body[asks..].contains(action), "{caller}");
+        }
         // A Lua handler's rewritten target meets the same pane gate.
         let open_url = src
             .split("fn open_url(&mut self, ws: &WindowState, uri: &str, source: LinkSource) {")
@@ -52978,19 +53479,66 @@ mod hint_action_tests {
         assert!(src.contains("kettle_core::links::file_url_for_path(std::path::Path::new(&cwd))"));
         // The right-click menu captures the link's pane with its address, and
         // confirming the multiplexer prompt opens the link it was about.
-        assert!(src.contains("let pane = links_pane(ws);"));
+        assert!(src.contains("items.extend(link_menu_rows(&url, links_pane(ws), tr));"));
         assert!(src.contains(
             "ConfirmAction::OpenLocalFile { uri, program } => self.open_url(\n                ws,\n                &uri,\n                LinkSource::Pane(Some(PathOrigin::Multiplexer(program))),"
         ));
         for site in [
             "self.open_pane_link(ws, links_pane(ws), &uri);",
-            "self.open_pane_link(ws, pane, &url);",
+            "UrlHow::Open => self.open_pane_link(ws, pane, &url),",
             "self.open_pane_link(ws, Some(h.pane), text)",
             "self.open_pane_link(ws, Some(h.pane), &url)",
             "Some(url) => self.open_pane_link(ws, pane, &url),",
         ] {
             assert!(src.contains(site), "missing {site}");
         }
+        // A preview passes the same gate, from the menu row and quick select,
+        // whose labels `preview_link` limits to what a lane can show.
+        for site in [
+            "self.preview_pane_link(ws, pane, &url);",
+            "found.retain(|(_, _, what)| hint_previews(what));",
+            "if std::mem::take(&mut ws.hint_preview) {\n            if !hint_previews(&h.what) {\n                return;\n            }",
+            "Some(url) => self.preview_pane_link(ws, h.pane, &url),",
+            "match link_gate(uri, origin) {\n            LinkGate::Open => self.pull_preview(ws, pane, &path),",
+        ] {
+            assert!(src.contains(site), "missing {site}");
+        }
+        // The purpose of a quick select is set only with the targets it
+        // chose: an empty scan leaves an open one as it was.
+        assert_eq!(src.matches("ws.hint_preview = ").count(), 1);
+        assert!(src.contains(
+            "ws.hint_state = Some((targets, String::new()));\n                    ws.hint_preview = preview;"
+        ));
+        // Nothing a control client drives reads a file on the GUI's word.
+        assert!(src.contains(
+            "self.ctl_driving = true;\n                    self.handle_ctl_request(ws, event_loop, conn_id, *request, reply);\n                    self.ctl_driving = false;"
+        ));
+        let pull = src
+            .split("fn pull_preview(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("pull_preview");
+        let refused = pull
+            .find("if self.ctl_driving {")
+            .expect("the control refusal");
+        let witness = pull
+            .find("GuiActionWitness::from_explicit_gui_action()")
+            .expect("the witness");
+        assert!(refused < witness);
+        assert_eq!(
+            src.matches("GuiActionWitness::from_explicit_gui_action()")
+                .count(),
+            1,
+            "pull_preview is the one place the witness is made"
+        );
+        // A lane is measured in its pane's own tab, which need not be showing.
+        let show = src
+            .split("fn show_media_item(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("show_media_item");
+        assert!(show.contains(".partition_of(pane, self.area(ws), self.layout_style(ws))"));
+        assert!(!show.contains("self.pane_partition("));
     }
 
     /// On Windows a path hint is copied, never opened: resolving it could

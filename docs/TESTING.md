@@ -4064,6 +4064,30 @@ same columns, `ui_geometry` reports the lane under `preview_lanes`, a click on
 `▾` leaves a one-row strip and on `×` gives the terminal back its size
 exactly.
 
+Previews the user asks for: `kettle-ui` media tests pin that the user's
+request waits in a slot of its own even with every push slot full, runs
+first, gives way to a newer one, and expires and cancels like a push; that
+its failures are kept by pane, bounded and told once while a control
+client's are answered; that a replaced request, or one whose pane went, ends
+without a word; and that a client leaving never touches it. App tests pin
+the files quick select for previews labels (by extension in any case, a
+whole path off Windows, a local `file://` link, never a web link, hash or
+card), that a preview confirmed behind a multiplexer reads its pane's origin
+again, that the menu row and quick select reach `preview_pane_link` through
+`link_gate`, that its confirmation uses the shared transition, that a
+quick select for previews keeps its purpose with the targets it chose
+(an empty scan leaves an open quick select as it was) and a pick is checked
+again, that a lane is measured where its pane is or will be once another
+pane's zoom ends (`Mux::partition_of`), and that
+`pull_preview` refuses while a control request is handled. For a live check
+(macOS, worker signed), print a PNG's path in a pane, run `kettle ctl
+perform_action --json '{"action":"preview_link"}'` and type the label with
+a real key press (a `dispatch_ui_key` pick previews nothing): the lane
+opens on the file with "You opened this from the pane", and
+`list_panes` reports the item `from_user`. Right-clicking a `file://` link
+to the PNG offers "Preview in Kettle" between Open Link and Copy Link
+Address; a path to a text file gets no label.
+
 `kettle mcp --display`: unit tests pin that it offers exactly `kettle_show`
 (path required, no other property) and refuses every full-mode tool, that
 full mode does not offer it, that bad requests (no path, a relative path, a

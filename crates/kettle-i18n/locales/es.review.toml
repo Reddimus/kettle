@@ -14,11 +14,13 @@ inline_card_unavailable = "draft"
 inline_card_tip = "draft"
 media_shelf_untitled = "draft"
 palette_open_media_shelf = "draft"
+palette_preview_link = "draft"
 media_viewer_kind_image = "draft"
 media_viewer_kind_svg = "draft"
 media_viewer_kind_mermaid = "draft"
 media_viewer_kind_media = "draft"
 media_viewer_from_pane = "draft"
+media_viewer_from_user = "draft"
 media_viewer_unverified = "draft"
 media_viewer_unverified_signed = "draft"
 media_viewer_unknown_program = "draft"
@@ -47,12 +49,14 @@ completion_matches = "draft"
 confirm_button_cancel = "draft"
 confirm_button_close = "draft"
 confirm_button_open = "draft"
+confirm_button_preview = "draft"
 confirm_button_paste = "draft"
 confirm_button_reassign = "draft"
 confirm_close_pane = "draft"
 confirm_close_tab = "draft"
 confirm_close_window = "draft"
 confirm_open_local_file = "draft"
+confirm_preview_local_file = "draft"
 confirm_paste = "draft"
 confirm_rebind = "draft"
 dock_new_tab = "draft"
@@ -75,10 +79,21 @@ menu_group_tab = "draft"
 menu_new_tab = "draft"
 menu_new_window = "draft"
 menu_open_link = "draft"
+menu_preview_in_kettle = "draft"
 notify_body_open_image_viewer = "draft"
 notify_body_open_image_copy = "draft"
 notify_body_open_image_busy = "draft"
 notify_title_open_image = "draft"
+notify_title_preview_failed = "draft"
+notify_body_preview_missing = "draft"
+notify_body_preview_unreadable = "draft"
+notify_body_preview_too_large = "draft"
+notify_body_preview_unsupported = "draft"
+notify_body_preview_unavailable = "draft"
+notify_body_preview_failed = "draft"
+notify_body_preview_unplaced = "draft"
+notify_title_preview_nothing = "draft"
+notify_body_preview_nothing = "draft"
 notify_title_preview_no_room = "draft"
 menu_open_in_image_viewer = "draft"
 menu_open_in_preview = "draft"
@@ -518,12 +533,14 @@ keys = [
     "confirm_button_close",
     "confirm_button_open",
     "confirm_button_paste",
+    "confirm_button_preview",
     "confirm_button_reassign",
     "confirm_close_pane",
     "confirm_close_tab",
     "confirm_close_window",
     "confirm_open_local_file",
     "confirm_paste",
+    "confirm_preview_local_file",
     "confirm_rebind",
     "hint_a11y_list",
     "media_lane_a11y",

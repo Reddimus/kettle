@@ -20,6 +20,8 @@ pub(crate) enum Provenance {
     /// A sender Kettle could not place in this pane: routed by full
     /// control's choice of pane or by the sender's own environment.
     Unverified(UnverifiedSender),
+    /// The user, previewing a file the pane's output names.
+    User,
 }
 
 /// What Kettle read about an unverified sender from the operating system,
@@ -261,7 +263,7 @@ pub(crate) fn report(shelf: &Shelf) -> serde_json::Value {
         .iter()
         .map(|item| {
             let sender = match &item.provenance {
-                Provenance::Verified => serde_json::Value::Null,
+                Provenance::Verified | Provenance::User => serde_json::Value::Null,
                 Provenance::Unverified(sender) => serde_json::json!({
                     "executable": sender.executable,
                     "pid": sender.pid,
@@ -277,6 +279,7 @@ pub(crate) fn report(shelf: &Shelf) -> serde_json::Value {
                 "height": item.size.1,
                 "warnings": item.warnings.iter().map(|warning| warning.as_str()).collect::<Vec<_>>(),
                 "verified": matches!(item.provenance, Provenance::Verified),
+                "from_user": matches!(item.provenance, Provenance::User),
                 "sender": sender,
                 "pixels": if item.image().is_some() { "held" } else { "released" },
             })
@@ -458,17 +461,24 @@ mod tests {
         });
         unverified.warnings = vec![Warning::FontFallback];
         shelf.publish(unverified, None, &[]);
+        let mut pulled = item(3, None);
+        pulled.provenance = Provenance::User;
+        shelf.publish(pulled, None, &[]);
         shelf.evict_pixels(1);
         assert_eq!(
             report(&shelf),
             serde_json::json!([
+                {"item": 3, "generation": 0, "title": "item 3", "kind": "raster",
+                 "width": 1, "height": 1, "warnings": [], "verified": false,
+                 "from_user": true, "sender": null, "pixels": "held"},
                 {"item": 2, "generation": 0, "title": "item 2", "kind": "raster",
                  "width": 1, "height": 1, "warnings": ["font_fallback"], "verified": false,
+                 "from_user": false,
                  "sender": {"executable": "/usr/bin/tool", "pid": 77,
                             "signer": "Example Corp (ABCDE12345)"}, "pixels": "held"},
                 {"item": 1, "generation": 0, "title": "item 1", "kind": "raster",
                  "width": 1, "height": 1, "warnings": [], "verified": true,
-                 "sender": null, "pixels": "released"},
+                 "from_user": false, "sender": null, "pixels": "released"},
             ])
         );
     }

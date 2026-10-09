@@ -331,7 +331,8 @@ time), and never the newest running one.
 **When it is answered.** After the item is on the shelf, never on
 admission. One render runs at a time; up to three pushes wait behind it,
 each sender (a verified pane, or else the sending process) with at most one:
-a newer push takes the place of its sender's waiting one. A push has 15
+a newer push takes the place of its sender's waiting one. What the user
+asks to preview waits apart from them and goes first. A push has 15
 seconds from admission, queueing included; `kettle show` waits 20. A push
 that never started is `busy`; one that ran out of time is
 `render_failed` / `timeout`. A client that disconnects cancels its pushes, and
@@ -371,6 +372,17 @@ in a pane too small even for that shows a notice and leaves the item unseen,
 and a lane that loses its room later waits as the titlebar's shelf badge. Each pane
 has its own lane; `ui_geometry` reports them as `preview_lanes` (pane,
 rectangle and `expanded`, `strip` or `badge`, never a path or pixel).
+The user can also preview an image, SVG or Mermaid file a pane names
+without any agent: `preview_link` (the palette's "Preview a file in
+Kettle") labels such files in the focused pane as quick select does, and the
+right-click menu offers "Preview in Kettle" on a link to one. The file
+opens in that pane's lane once it renders, its sender reading "You opened
+this from the pane", and the shelf report marks it `from_user`. A link from
+a remote pane is refused and one from behind tmux or screen is asked about
+first, as opening it would be; when a preview cannot be had, a notification
+says why. Only the user's own key press or click starts such a read: a
+control client may run `preview_link` or drive the menus, but a pick, a
+menu row or a confirmation it sends previews nothing.
 Clicking an inline card opens its pane's lane on that card's item. A card
 takes a primary press, and its release, before anything else in the window
 except open dialogs and the lanes, so the program behind it sees neither.
@@ -402,7 +414,8 @@ button named for its item's title, kind, size and sender, as the lane
 names it (never by its card id), and pressing it opens the lane. Neither
 opens anything while a dialog or a menu is up. Only the user, or full control, opens
 it, and `kettle ctl send_keys` still writes to the pane's terminal beneath. `list_panes` reports each pane's shelf as
-`media_shelf`: item, generation, title, kind, size, warnings, `verified`, the
+`media_shelf`: item, generation, title, kind, size, warnings, `verified`,
+`from_user` (the user previewed it from the pane), the
 `sender` of an unverified item (`executable`, `pid` and `signer`, null when
 unknown) and whether its pixels are `held` or
 `released`.

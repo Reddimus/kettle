@@ -500,7 +500,8 @@ fails to parse makes the Security framework throw past its C interface. In
 kettle-ui the `media` module routes it (`route`: the nearest live pane whose
 child is an ancestor, else full control's pane or a hint naming this
 Kettle, unverified), queues it (`queue`: one render, three waiting, one per
-sender, a deadline from admission), and renders it on the lane, one thread
+sender, a deadline from admission, and apart from those a slot for the
+user's own request, which goes first), and renders it on the lane, one thread
 started on first use that drives `WorkerClient::render_media_with_control`.
 Each `Pane` owns its `Shelf`, so a shelf travels with its tab; completions
 come back through `UserEvent::MediaRendered`, the item's pixels are charged
@@ -673,6 +674,29 @@ shaped text is kept by pane, enters the retained chrome damage key and is
 reshaped when the font changes. Every quad a pane's cells add is clipped to
 its terminal (`clip_quads`), so a snapshot still taller than a terminal that
 has just shrunk paints nothing in its lane.
+
+The user can pull a file into a lane too: `preview_link` runs quick select
+with `hint_previews` keeping only the image, SVG and Mermaid files a pane
+names (a whole path, off Windows, or a local `file://` link), and the
+right-click menu adds a "Preview in Kettle" row (`UrlHow::Preview`) on a
+link to one. Both reach `preview_pane_link`, which passes the pane's
+`link_gate` as opening the link would: a remote pane, or one that has gone,
+is refused, and one behind a multiplexer is asked about
+(`ConfirmAction::PreviewLocalFile`), its origin read again on confirm
+(`confirmed_preview_path`). `pull_preview` sends a `Source::user_pull`
+carrying a `GuiActionWitness`, which only a user's gesture in the GUI makes,
+as a `media::Push` whose `Requester::User` answers no client: it waits in
+the queue's user slot (`Sender::User`), and a newer request takes its place
+without a word. A failure before rendering (busy, out of time, no worker)
+is kept in `MediaService::user_failures` (eight at most) until the App
+tells it; one the render returns, `finish_show` tells at once. Both are
+notifications. `pull_preview` refuses outright while a control client's
+request is being handled (`App::ctl_driving`): a client may drive the UI
+(`perform_action`, `dispatch_ui_key`, `send_mouse`), but its input never
+stands for the user's gesture, which is what the witness asserts.
+A finished pull lands on the shelf as `Provenance::User` and waits in
+`App::previews_ready` (eight at most) for its window's next pass of the
+event loop, which opens it in the pane's lane if the pane is still open.
 
 ```mermaid
 graph LR
