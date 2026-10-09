@@ -13,6 +13,7 @@ mod queue;
 mod route;
 mod shelf;
 mod sightings;
+mod tip;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -34,6 +35,7 @@ pub(crate) use shelf::{
     Provenance, Shelf, ShelfItem, UnverifiedSender, report as shelf_report, signer_name,
 };
 pub(crate) use sightings::{CardSightings, MAX_CARD_INSTANCE};
+pub(crate) use tip::CardsTip;
 
 use queue::{Admitted, Queue};
 

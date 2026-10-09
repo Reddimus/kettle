@@ -96,6 +96,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   card in the focused pane and opens it when picked, and a screen reader
   hears each card as a button named for its item's title, kind, size and
   sender, which opens it in the viewer. In English and Spanish.
+- The first inline card you see with its image shown says "Click to open"
+  along its foot for ten seconds, or until you open a card, and then never
+  again: Kettle records that it showed in `ui-tips.json` beside the config
+  file, so of two Kettles running at once only one shows it. It waits until
+  nothing covers the card.
 - The pointer turns into a hand over an inline card a click would open, and
   the card gets an accent outline; one that just appeared gets them once it
   has stayed put half a second, even if the pointer does not move.

@@ -1583,6 +1583,12 @@ fn refused_card_poster_upload_paints_status_and_recovers_on_the_next_frame() {
                 .is_none_or(|posters| posters.drawn_item_indices().next().is_none())
         );
         assert_eq!(renderer.card_scene.labels.len(), 3);
+        assert_eq!(renderer.painted_cards().len(), 1);
+        assert_eq!(
+            renderer.shown_cards().count(),
+            0,
+            "a refused poster leaves its card on screen without its image"
+        );
         let status = label_rects(&renderer, crate::card_scene::CardLabelKind::Unavailable);
         assert_eq!(status.len(), 1);
         assert!(
@@ -1603,6 +1609,11 @@ fn refused_card_poster_upload_paints_status_and_recovers_on_the_next_frame() {
             vec![0]
         );
         assert_eq!(renderer.card_scene.labels.len(), 2);
+        assert_eq!(
+            renderer.shown_cards().copied().collect::<Vec<_>>(),
+            renderer.painted_cards().to_vec(),
+            "the image shows once its poster is uploaded"
+        );
         let center = [
             cfg.padding_x + 11.0 * renderer.cell_w,
             cfg.padding_y + 2.5 * renderer.cell_h,
