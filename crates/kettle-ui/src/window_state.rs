@@ -842,10 +842,9 @@ pub(crate) struct WindowState {
     /// app.rs (`scan_links` re-scans only on output, resize, scroll, focus or
     /// cwd).
     pub(crate) links_scan_key: Option<LinksScanKey>,
-    pub(crate) mouse_btn: Option<u8>,
-    /// Side buttons (Back, Forward) whose press the terminal received, one
-    /// bit each, so only those get a release report.
-    pub(crate) reported_side_buttons: u8,
+    /// The buttons whose press a pane's program received, each with that
+    /// pane, until its one release goes there too.
+    pub(crate) held_buttons: crate::held_buttons::HeldButtons,
     /// Last `(pane, row, col)` reported to a mouse-tracking app, so
     /// cell-motion reports (1002/1003) fire only on a cell crossing. Pane
     /// identity is part of the key because wheel input can target a hovered
@@ -1346,8 +1345,7 @@ impl WindowState {
             scrollbar_hover: false,
             dragging_split: None,
             links_scan_key: None,
-            mouse_btn: None,
-            reported_side_buttons: 0,
+            held_buttons: crate::held_buttons::HeldButtons::default(),
             last_mouse_cell: None,
             links: Vec::new(),
             ssh_input: None,
