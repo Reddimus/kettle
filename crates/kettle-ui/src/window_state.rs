@@ -698,10 +698,11 @@ pub(crate) struct ThemePickerState {
     pub(crate) opened_on: String,
 }
 
-/// The shelf item open in a window's media viewer.
+/// What a pane's preview lane shows: one item of the pane's shelf. Where the
+/// lane sits is its tab's [`crate::mux::Tab::lanes`] entry; the two come and
+/// go together.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct MediaViewer {
-    pub(crate) pane: u64,
+pub(crate) struct PreviewPanel {
     pub(crate) item: u64,
 }
 
@@ -897,9 +898,10 @@ pub(crate) struct WindowState {
     /// one (`commit_theme`) clears it first. Reverted by the single post-event
     /// chokepoint in `window_event` (`theme_preview_change`).
     pub(crate) theme_preview: Option<(String, kettle_config::Theme)>,
-    /// The shelf item the user opened in this window, if any. Only a user
-    /// action opens it; a push never does.
-    pub(crate) media_viewer: Option<MediaViewer>,
+    /// What each pane's preview lane shows, by pane, for the panes of this
+    /// window that have one. Only a user action opens a lane; a push never
+    /// does.
+    pub(crate) preview_panels: std::collections::HashMap<u64, PreviewPanel>,
     /// The inline card, by pane and nonce, that took the primary press now
     /// held; its release over the same card opens the card's item.
     pub(crate) card_press: Option<(u64, kettle_core::InlineNonce)>,
@@ -1383,7 +1385,7 @@ impl WindowState {
             hint_state: None,
             context_menu: None,
             theme_preview: None,
-            media_viewer: None,
+            preview_panels: std::collections::HashMap::new(),
             card_press: None,
             card_sightings: crate::media::CardSightings::default(),
             card_focus: None,
@@ -1484,6 +1486,7 @@ mod tests {
             last_output_at: None,
             last_seen_at: None,
             bell: false,
+            lanes: Default::default(),
         }
     }
 

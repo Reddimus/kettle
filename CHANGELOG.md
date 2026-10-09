@@ -103,7 +103,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Inline cards for the keyboard and screen readers: quick select labels each
   card in the focused pane and opens it when picked, and a screen reader
   hears each card as a button named for its item's title, kind, size and
-  sender, which opens it in the viewer. In English and Spanish.
+  sender, which opens it in the pane's preview lane. In English and Spanish.
 - Right-click an inline card for its menu: Open, and Open in Preview on
   macOS or Open in Image Viewer on Linux with Eye of GNOME. The viewer gets
   a PNG copy of exactly what Kettle shows, never the bytes a program sent,
@@ -111,8 +111,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Apple's own Preview, or a root-owned `/usr/bin/eog`, first. Copies are
   private to you, marked as downloaded on macOS, kept to the newest 32 and
   128 MiB (each for at least a minute, so its viewer can read it), and
-  deleted when Kettle quits. The media viewer offers the same
-  from a `↗` button in its header and the O key.
+  deleted when Kettle quits. The preview lane offers the same from a `↗`
+  button in its header.
 - The first inline card you see with its image shown says "Click to open"
   along its foot for ten seconds, or until you open a card, and then never
   again: Kettle records that it showed in `ui-tips.json` beside the config
@@ -121,17 +121,27 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - The pointer turns into a hand over an inline card a click would open, and
   the card gets an accent outline; one that just appeared gets them once it
   has stayed put half a second, even if the pointer does not move.
-- Clicking an inline card opens its item in the media viewer. The card takes
+- Clicking an inline card opens its item in its pane's preview lane. The card takes
   both the press and its release, so the program behind it sees neither. A
   Shift-click selects text as it does anywhere else, and the wheel, like a
   press on a card that came on screen under the pointer less than half a
   second ago, goes where it would without the card.
-- The media shelf viewer: `open_media_shelf` (palette: "Open media shelf";
-  `Ctrl+Shift+Cmd+I` on macOS) shows the focused pane's shelf over the pane,
-  on the item published last, newest first, with each item's title, kind,
-  size and sender; `←`/`→` browse and Esc closes, and so
-  does the shortcut that opened it. A screen reader hears each item's place
-  on the shelf. A pane titlebar marks unopened items as `▣N`, and the window
+- Preview lanes: `open_media_shelf` (palette: "Open media shelf";
+  `Ctrl+Shift+Cmd+I` on macOS) opens a lane along the bottom of the focused
+  pane, about 40% of it, on the item published last, with its title, kind,
+  size and sender, and closes it again. The terminal shrinks to make room,
+  so nothing is covered, and its program sees the new size; keys still go
+  to it. The lane's header browses the shelf (`‹`/`›`), opens the item
+  outside (`↗`), collapses the lane to a one-row strip (`▾`) or closes it
+  (`×`); a lane with no room for its rows shows as that strip, along the
+  pane's bottom whichever side it opened on, and a header too narrow for
+  every control keeps close and collapse first. The terminal always keeps
+  at least 20 columns and 5 rows; opening a lane in a pane too small even
+  for the strip says so instead. Each pane has its own lane; lanes are
+  never saved, and leave with their pane or a torn-off tab.
+  `preview-lane-side = right` opens lanes beside the terminal instead. A
+  screen reader hears each lane, its item's place on the shelf and each of
+  its buttons. A pane titlebar marks unopened items as `▣N`, and the window
   title counts them.
 - The media worker can classify a file by its content, raster or SVG,
   whatever it is called, and says what it rendered. Kettle and its worker now

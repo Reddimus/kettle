@@ -149,6 +149,9 @@ context = "crates/kettle-ui/src/media/external.rs: right-click menu row on an in
 [messages.notify_title_open_image]
 context = "crates/kettle-ui/src/app.rs act_on_media: desktop notification title when opening a copy of a media item in the image viewer did not work."
 
+[messages.notify_title_preview_no_room]
+context = "crates/kettle-ui/src/app.rs show_media_item: title of the desktop notification when the user opens a pane's preview lane but the pane is too small to hold even its one-row strip beside the terminal. 'kettle' is the product name, lowercase as in the other notification titles."
+
 [messages.notify_body_open_image_busy]
 context = "crates/kettle-ui/src/app.rs act_on_media: desktop notification body when too many opens are already running."
 
@@ -361,6 +364,9 @@ context = "crates/kettle-ui/src/app.rs: desktop notification body."
 [messages.notify_body_remote_file_not_opened]
 context = "crates/kettle-ui/src/app.rs open_pane_link: desktop notification body. name is the file name, shown verbatim."
 args = [{ name = "name", type = "str" }]
+
+[messages.notify_body_preview_no_room]
+context = "crates/kettle-ui/src/app.rs show_media_item: body of that notification: nothing opened, and what to do. 'shelf' is the pane's media shelf, the list of images and diagrams sent to it."
 
 [messages.notify_body_remote_not_delivered]
 context = "crates/kettle-ui/src/app.rs: desktop notification body. pane is a pane number."
@@ -1505,24 +1511,30 @@ args = [{ name = "program", type = "str" }, { name = "pid", type = "u64" }, { na
 [messages.media_viewer_unknown_program]
 context = "crates/kettle-ui/src/app.rs media_viewer_projection: stands in for program in media_viewer_unverified when the system did not report the sender's executable."
 
-[messages.media_viewer_hint]
-context = "crates/kettle-render/src/media_viewer.rs: footer of the media viewer when the shelf has several items. Esc is the key name; the arrows browse."
-
-[messages.media_viewer_hint_single]
-context = "crates/kettle-render/src/media_viewer.rs: footer of the media viewer when the shelf has one item. Esc is the key name."
-
-[messages.media_viewer_hint_open_preview]
-context = "crates/kettle-ui/src/media/external.rs Viewer::hint: appended to the media viewer's footer after ' · ' on macOS. O is the letter key that opens the item in Apple's Preview app; 'Preview' is the app's name, which Spanish macOS calls 'Vista Previa'."
-
-[messages.media_viewer_hint_open_image_viewer]
-context = "crates/kettle-ui/src/media/external.rs Viewer::hint: appended to the media viewer's footer after ' · ' on Linux. O is the letter key that opens the item in GNOME's image viewer."
-
 [messages.media_viewer_released]
 context = "crates/kettle-ui/src/app.rs media_viewer_projection: shown in the media viewer in place of an image whose pixels Kettle released to stay within its memory budget."
 
-[messages.media_viewer_a11y]
-context = "crates/kettle-ui/src/app.rs media_viewer_accessibility: screen-reader name of the open media viewer: the item's place on the shelf (index of count, counting from 1), its title and its detail line."
+[messages.media_lane_a11y]
+context = "crates/kettle-ui/src/app.rs media_lane_accessibility: screen-reader name of a pane's preview lane, the strip below the terminal that shows one media item: the item's place on the shelf (index of count, counting from 1), its title and its detail line."
 args = [{ name = "index", type = "u64" }, { name = "count", type = "u64" }, { name = "title", type = "str" }, { name = "detail", type = "str" }]
+
+[messages.media_lane_hint]
+context = "crates/kettle-ui/src/app.rs preview_lane_panel: footer of a pane's preview lane. While the lane shows, typing still reaches the program in the terminal beside it (often an AI agent), so the user knows the lane does not take their keys."
+
+[messages.media_lane_a11y_previous]
+context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of the preview lane's button that shows the previous item on the pane's media shelf."
+
+[messages.media_lane_a11y_next]
+context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of the preview lane's button that shows the next item on the pane's media shelf."
+
+[messages.media_lane_a11y_collapse]
+context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of the preview lane's button that shrinks it to a one-line strip, giving the terminal its room back."
+
+[messages.media_lane_a11y_expand]
+context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of the collapsed preview lane's button that opens it out again."
+
+[messages.media_lane_a11y_close]
+context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of the preview lane's button that closes it."
 
 [messages.card_a11y]
 context = "crates/kettle-ui/src/app.rs card_accessibility_node: screen-reader name of an inline media card drawn in a terminal pane, a button that opens the item in Kettle's media viewer. title is the item's title (as the agent or command named it); detail is its kind, pixel size and sender, as the viewer shows them, e.g. \"Image · 640×480 · From this pane\"."

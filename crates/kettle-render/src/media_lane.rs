@@ -1,8 +1,10 @@
-//! The media viewer: one shelf item, opened by the user over the pane it
-//! belongs to. A header names the item and its sender and offers previous,
-//! next and close; the image is fitted below it on its canvas, never scaled
-//! past its own pixels; a footer says how to leave. The renderer gets only
-//! display text and pixels, never a path or a source.
+//! A pane's preview lane: one shelf item, shown in the lane the user opened
+//! beside the pane's terminal. A header names the item and offers previous,
+//! next, open outside, collapse and close; below it, when the lane is
+//! expanded, the item's kind and sender, the image fitted on its canvas and
+//! never scaled past its own pixels, and a footer saying where keys go. A
+//! collapsed lane is its header alone. The renderer gets only display text
+//! and pixels, never a path or a source.
 
 use glyphon::cosmic_text::Wrap;
 use glyphon::{
@@ -23,18 +25,22 @@ pub enum MediaCanvas {
     Checker,
 }
 
-/// One open shelf item, projected for painting.
+/// One pane's lane, projected for painting.
 #[derive(Clone, Debug)]
-pub struct MediaViewerOverlay {
-    /// The pane the viewer covers, in physical pixels.
-    pub pane_rect: Rect4,
+pub struct MediaLanePanel {
+    /// The pane the lane belongs to, which keys its retained text.
+    pub pane: u64,
+    /// The lane, in physical pixels: its whole share of the pane.
+    pub rect: Rect4,
+    /// Collapsed to its header, by the user or for want of room.
+    pub collapsed: bool,
     /// Display-ready (sanitized, bounded) title.
     pub title: String,
     /// The kind and size, in the UI language.
     pub detail: String,
     /// Who sent it, on a line of its own.
-    pub sender: MediaViewerSender,
-    /// How to leave and browse, in the UI language.
+    pub sender: MediaLaneSender,
+    /// Where keys go while the lane shows, in the UI language.
     pub hint: String,
     /// The item's place on its shelf, 1-based, and the shelf's length.
     pub position: (usize, usize),
@@ -52,7 +58,7 @@ pub struct MediaViewerOverlay {
 /// path and its signer sit in that line: the path is what gets shortened, and
 /// the signer is kept whole.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct MediaViewerSender {
+pub struct MediaLaneSender {
     pub text: String,
     /// The byte range of the program's path in `text`, when it names one.
     pub program: Option<std::ops::Range<usize>>,
@@ -60,7 +66,7 @@ pub struct MediaViewerSender {
     pub signer: Option<std::ops::Range<usize>>,
 }
 
-impl MediaViewerSender {
+impl MediaLaneSender {
     /// The line fitted to `columns`. A path that does not fit is shortened
     /// from its middle, keeping its last segment; when even that leaves the
     /// line too long, the text around the signer is shortened instead, so who
@@ -122,9 +128,10 @@ impl MediaViewerSender {
     }
 }
 
-/// Exact paint and input geometry of the viewer.
+/// Exact paint and input geometry of a lane.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct MediaViewerGeometry {
+pub struct MediaLaneGeometry {
+    /// The lane.
     pub rect: Rect4,
     pub title: Rect4,
     pub counter: Rect4,
@@ -132,7 +139,12 @@ pub struct MediaViewerGeometry {
     pub next: Option<Rect4>,
     /// Opens the item in the permitted image viewer, when it is offered.
     pub open_outside: Option<Rect4>,
+    /// Collapses an expanded lane to its header, or expands a collapsed one.
+    pub toggle: Rect4,
     pub close: Rect4,
+    /// Whether the lane shows more than its header: the rows below are
+    /// empty rectangles when it does not.
+    pub full: bool,
     pub detail: Rect4,
     pub sender: Rect4,
     pub hint: Rect4,
@@ -143,86 +155,137 @@ pub struct MediaViewerGeometry {
     pub image: Option<Rect4>,
 }
 
-/// What a pointer press at a point means to an open viewer.
+/// What a pointer press at a point in a lane means.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MediaViewerHit {
+pub enum MediaLaneHit {
     Close,
     Previous,
     Next,
     OpenOutside,
-    /// Anywhere else on the viewer: nothing happens.
+    /// Collapse or expand.
+    Toggle,
+    /// Anywhere else in the lane: nothing happens, and nothing reaches the
+    /// terminal.
     Inside,
-    /// Outside it: the viewer closes.
-    Outside,
 }
 
 fn contains(rect: Rect4, x: f32, y: f32) -> bool {
     x >= rect.0 && x < rect.0 + rect.2 && y >= rect.1 && y < rect.1 + rect.3
 }
 
-impl MediaViewerGeometry {
-    pub fn hit_test(&self, x: f32, y: f32) -> MediaViewerHit {
+impl MediaLaneGeometry {
+    /// What a press at `(x, y)` does; `None` outside the lane.
+    pub fn hit_test(&self, x: f32, y: f32) -> Option<MediaLaneHit> {
         if !contains(self.rect, x, y) {
-            MediaViewerHit::Outside
+            None
         } else if contains(self.close, x, y) {
-            MediaViewerHit::Close
+            Some(MediaLaneHit::Close)
+        } else if contains(self.toggle, x, y) {
+            Some(MediaLaneHit::Toggle)
         } else if self.open_outside.is_some_and(|rect| contains(rect, x, y)) {
-            MediaViewerHit::OpenOutside
+            Some(MediaLaneHit::OpenOutside)
         } else if self.previous.is_some_and(|rect| contains(rect, x, y)) {
-            MediaViewerHit::Previous
+            Some(MediaLaneHit::Previous)
         } else if self.next.is_some_and(|rect| contains(rect, x, y)) {
-            MediaViewerHit::Next
+            Some(MediaLaneHit::Next)
         } else {
-            MediaViewerHit::Inside
+            Some(MediaLaneHit::Inside)
         }
     }
 }
 
 /// The counter's text: the item's place and the shelf's length.
-pub fn media_viewer_counter(position: (usize, usize)) -> String {
+pub fn media_lane_counter(position: (usize, usize)) -> String {
     format!("{}/{}", position.0, position.1)
 }
 
-/// Lay the viewer out over its pane. `cell` is the terminal cell, and
-/// `text_cell` the overlay text's column width and line height. `None` when
-/// the pane is too small to hold a usable viewer.
-pub fn media_viewer_geometry(
-    viewer: &MediaViewerOverlay,
+/// The fewest overlay columns a header's title keeps before a control gives
+/// way; the collapse and close buttons never do.
+const MIN_TITLE_COLUMNS: f32 = 4.0;
+
+/// Lay a lane out in its rectangle. `cell` is the terminal cell, and
+/// `text_cell` the overlay text's column width and line height. An expanded
+/// lane with room for its rows shows them all; otherwise it is its header
+/// alone, centered down a strip. `None` when even the header does not fit.
+pub fn media_lane_geometry(
+    lane: &MediaLanePanel,
     cell: (f32, f32),
     text_cell: (f32, f32),
-) -> Option<MediaViewerGeometry> {
+) -> Option<MediaLaneGeometry> {
     let finite = |value: f32| value.is_finite() && value > 0.0;
     let (cw, ch) = cell;
     let (tw, lh) = text_cell;
     if !(finite(cw) && finite(ch) && finite(tw) && finite(lh)) {
         return None;
     }
-    let (px, py, pw, ph) = viewer.pane_rect;
-    let inset = cw.max(6.0).round();
-    let rect = (px + inset, py + inset, pw - 2.0 * inset, ph - 2.0 * inset);
-    if rect.2 < 24.0 * tw || rect.3 < 7.0 * lh {
+    let rect = lane.rect;
+    let pad = (tw * 0.75).round().max(4.0);
+    let button = 3.0 * tw;
+    // Close and collapse, a little title, and the padding around them.
+    if rect.2 < 2.0 * button + MIN_TITLE_COLUMNS * tw + 2.0 * pad || rect.3 < lh {
         return None;
     }
-    let pad = (tw * 0.75).round().max(4.0);
+    // Header, detail, sender, a line of image and the hint, with padding
+    // above, between the header block and the image, and below.
+    let full = !lane.collapsed && rect.3 >= 5.0 * lh + 4.0 * pad;
     let left = rect.0 + pad;
     let right = rect.0 + rect.2 - pad;
-    let header_y = rect.1 + pad;
-    let button = 3.0 * tw;
-    let close = (right - button, header_y, button, lh);
-    let open_outside = viewer
-        .open_outside
-        .then_some((close.0 - button, header_y, button, lh));
-    let browse_right = open_outside.map_or(close.0, |open| open.0);
-    let (previous, next, counter_right) = if viewer.position.1 > 1 {
-        let next = (browse_right - button, header_y, button, lh);
-        let previous = (next.0 - button, header_y, button, lh);
-        (Some(previous), Some(next), previous.0)
+    let header_y = if full {
+        rect.1 + pad
     } else {
-        (None, None, browse_right)
+        (rect.1 + (rect.3 - lh) / 2.0).floor()
     };
-    let counter_width = (media_viewer_counter(viewer.position).chars().count() as f32 + 1.0) * tw;
-    let counter = (counter_right - counter_width, header_y, counter_width, lh);
-    let title = (left, header_y, (counter.0 - pad - left).max(0.0), lh);
+    // Controls take the header from the right, close first; each one past
+    // collapse appears only while the title keeps its few columns, in order
+    // of need: open outside, then browsing, then the counter.
+    let title_floor = left + MIN_TITLE_COLUMNS * tw + pad;
+    let mut edge = right;
+    let mut take = |width: f32, always: bool| {
+        (always || edge - width >= title_floor).then(|| {
+            edge -= width;
+            (edge, header_y, width, lh)
+        })
+    };
+    let close = take(button, true).unwrap_or_default();
+    let toggle = take(button, true).unwrap_or_default();
+    let open_outside = if lane.open_outside {
+        take(button, false)
+    } else {
+        None
+    };
+    let (previous, next) = if lane.position.1 > 1 {
+        match take(2.0 * button, false) {
+            Some(pair) => (
+                Some((pair.0, pair.1, button, lh)),
+                Some((pair.0 + button, pair.1, button, lh)),
+            ),
+            None => (None, None),
+        }
+    } else {
+        (None, None)
+    };
+    let counter_width = (media_lane_counter(lane.position).chars().count() as f32 + 1.0) * tw;
+    let counter = take(counter_width, false).unwrap_or((edge, header_y, 0.0, lh));
+    let title = (left, header_y, (edge - pad - left).max(0.0), lh);
+    let empty = (left, header_y, 0.0, 0.0);
+    if !full {
+        return Some(MediaLaneGeometry {
+            rect,
+            title,
+            counter,
+            previous,
+            next,
+            open_outside,
+            toggle,
+            close,
+            full,
+            detail: empty,
+            sender: empty,
+            hint: empty,
+            image_area: empty,
+            image: None,
+        });
+    }
     let detail = (left, header_y + lh, right - left, lh);
     let sender = (left, detail.1 + lh, right - left, lh);
     let hint = (left, rect.1 + rect.3 - pad - lh, right - left, lh);
@@ -234,56 +297,20 @@ pub fn media_viewer_geometry(
         right - left,
         (area_bottom - area_top).max(0.0),
     );
-    let image = viewer.image.as_ref().and_then(|image| {
-        let (width, height) = (image.width as f32, image.height as f32);
-        // The whole pixels inside the area: the image lands on pixel
-        // boundaries and never past the area's edges.
-        let (left, top) = (image_area.0.ceil(), image_area.1.ceil());
-        let room = (
-            (image_area.0 + image_area.2).floor() - left,
-            (image_area.1 + image_area.3).floor() - top,
-        );
-        if width <= 0.0 || height <= 0.0 || room.0 < 1.0 || room.1 < 1.0 {
-            return None;
-        }
-        // Fit inside that room, never past the image's own pixels, at one
-        // scale. The longer edge is floored to stay inside and the shorter
-        // one follows from the image's shape, rounded, so the shape is off by
-        // under half a pixel. When rounding would take the shorter edge past
-        // the room, it takes the whole room instead and the longer edge
-        // follows it. An image too thin to keep its shape and fit still keeps
-        // one pixel, so it stays visible.
-        let scale = (room.0 / width).min(room.1 / height).min(1.0);
-        let fit = |long: f32, short: f32, short_room: f32| {
-            let long_edge = (long * scale).floor().max(1.0);
-            let short_edge = (long_edge * short / long).round().max(1.0);
-            if short_edge <= short_room {
-                (long_edge, short_edge)
-            } else {
-                ((short_room * long / short).round().max(1.0), short_room)
-            }
-        };
-        let (w, h) = if width >= height {
-            fit(width, height, room.1)
-        } else {
-            let (h, w) = fit(height, width, room.0);
-            (w, h)
-        };
-        Some((
-            left + ((room.0 - w) / 2.0).floor(),
-            top + ((room.1 - h) / 2.0).floor(),
-            w,
-            h,
-        ))
-    });
-    Some(MediaViewerGeometry {
+    let image = lane
+        .image
+        .as_ref()
+        .and_then(|image| fit_image(image, image_area));
+    Some(MediaLaneGeometry {
         rect,
         title,
         counter,
         previous,
         next,
         open_outside,
+        toggle,
         close,
+        full,
         detail,
         sender,
         hint,
@@ -292,22 +319,66 @@ pub fn media_viewer_geometry(
     })
 }
 
-/// The viewer's text, shaped once per change: its six lines and the four
-/// control glyphs.
-pub(crate) struct ViewerText {
+/// Where `image` sits in `image_area`: the whole pixels inside it, so the
+/// image lands on pixel boundaries and never past the area's edges.
+fn fit_image(image: &kettle_core::ImageData, image_area: Rect4) -> Option<Rect4> {
+    let (width, height) = (image.width as f32, image.height as f32);
+    let (left, top) = (image_area.0.ceil(), image_area.1.ceil());
+    let room = (
+        (image_area.0 + image_area.2).floor() - left,
+        (image_area.1 + image_area.3).floor() - top,
+    );
+    if width <= 0.0 || height <= 0.0 || room.0 < 1.0 || room.1 < 1.0 {
+        return None;
+    }
+    // Fit inside that room, never past the image's own pixels, at one
+    // scale. The longer edge is floored to stay inside and the shorter
+    // one follows from the image's shape, rounded, so the shape is off by
+    // under half a pixel. When rounding would take the shorter edge past
+    // the room, it takes the whole room instead and the longer edge
+    // follows it. An image too thin to keep its shape and fit still keeps
+    // one pixel, so it stays visible.
+    let scale = (room.0 / width).min(room.1 / height).min(1.0);
+    let fit = |long: f32, short: f32, short_room: f32| {
+        let long_edge = (long * scale).floor().max(1.0);
+        let short_edge = (long_edge * short / long).round().max(1.0);
+        if short_edge <= short_room {
+            (long_edge, short_edge)
+        } else {
+            ((short_room * long / short).round().max(1.0), short_room)
+        }
+    };
+    let (w, h) = if width >= height {
+        fit(width, height, room.1)
+    } else {
+        let (h, w) = fit(height, width, room.0);
+        (w, h)
+    };
+    Some((
+        left + ((room.0 - w) / 2.0).floor(),
+        top + ((room.1 - h) / 2.0).floor(),
+        w,
+        h,
+    ))
+}
+
+/// A lane's text, shaped once per change: its six lines and the control
+/// glyphs.
+pub(crate) struct LaneText {
     title: TextBuffer,
     detail: TextBuffer,
     sender: TextBuffer,
     counter: TextBuffer,
     hint: TextBuffer,
     status: TextBuffer,
-    controls: [TextBuffer; 4],
+    /// Previous, next, open outside, collapse, expand and close.
+    controls: [TextBuffer; 6],
     /// What each line buffer was last shaped with; `None` until it is, or
     /// once a font change means it must be again.
     shaped: [Option<String>; 6],
 }
 
-impl ViewerText {
+impl LaneText {
     pub(crate) fn new(font_system: &mut FontSystem, metrics: Metrics) -> Self {
         let line = |font_system: &mut FontSystem| {
             let mut buffer = TextBuffer::new(font_system, metrics);
@@ -335,6 +406,8 @@ impl ViewerText {
                 control(font_system, "‹"),
                 control(font_system, "›"),
                 control(font_system, "↗"),
+                control(font_system, "▾"),
+                control(font_system, "▴"),
                 control(font_system, "×"),
             ],
             shaped: Default::default(),
@@ -342,7 +415,7 @@ impl ViewerText {
     }
 
     /// What each line was last shaped with, for the renderer's text damage
-    /// key: buffers keep their addresses when the viewer changes item.
+    /// key: buffers keep their addresses when the lane changes item.
     pub(crate) fn shaped(&self) -> &[Option<String>; 6] {
         &self.shaped
     }
@@ -353,31 +426,41 @@ impl ViewerText {
         self.shaped = Default::default();
     }
 
-    /// Shape what `viewer` shows into its rectangles; `glyph_width` is the
-    /// overlay text's column width, which fits the sender line.
+    /// Shape what `lane` shows into its rectangles; `glyph_width` is the
+    /// overlay text's column width, which fits the sender line. A lane
+    /// showing only its header leaves the other lines empty.
     pub(crate) fn shape(
         &mut self,
         font_system: &mut FontSystem,
         metrics: Metrics,
         family: &str,
-        viewer: &MediaViewerOverlay,
-        geometry: &MediaViewerGeometry,
+        lane: &MediaLanePanel,
+        geometry: &MediaLaneGeometry,
         glyph_width: f32,
     ) {
-        let counter = media_viewer_counter(viewer.position);
-        let status = if viewer.image.is_some() {
-            ""
+        let counter = media_lane_counter(lane.position);
+        let full = |text: &'_ str| {
+            if geometry.full {
+                text.to_owned()
+            } else {
+                String::new()
+            }
+        };
+        let status = if lane.image.is_some() {
+            String::new()
         } else {
-            viewer.status.as_str()
+            full(&lane.status)
         };
         let columns = (geometry.sender.2 / glyph_width.max(1.0)).floor() as usize;
-        let sender = viewer.sender.fitted(columns);
+        let sender = full(&lane.sender.fitted(columns));
+        let detail = full(&lane.detail);
+        let hint = full(&lane.hint);
         let lines: [(&mut TextBuffer, &str, Rect4, bool); 6] = [
-            (&mut self.title, &viewer.title, geometry.title, true),
-            (&mut self.detail, &viewer.detail, geometry.detail, false),
+            (&mut self.title, &lane.title, geometry.title, true),
+            (&mut self.detail, &detail, geometry.detail, false),
             (&mut self.counter, &counter, geometry.counter, false),
-            (&mut self.hint, &viewer.hint, geometry.hint, false),
-            (&mut self.status, status, geometry.image_area, false),
+            (&mut self.hint, &hint, geometry.hint, false),
+            (&mut self.status, &status, geometry.image_area, false),
             (&mut self.sender, &sender, geometry.sender, false),
         ];
         for ((buffer, text, rect, bold), shaped) in lines.into_iter().zip(&mut self.shaped) {
@@ -405,7 +488,8 @@ impl ViewerText {
     /// colors. Control glyphs are centered in their cells by `glyph_width`.
     pub(crate) fn areas<'a>(
         &'a self,
-        geometry: &MediaViewerGeometry,
+        geometry: &MediaLaneGeometry,
+        collapsed: bool,
         colors: (GColor, GColor, GColor),
         glyph_width: f32,
         line_height: f32,
@@ -422,11 +506,15 @@ impl ViewerText {
         };
         let mut areas = vec![
             area(&self.title, geometry.title, label),
-            area(&self.detail, geometry.detail, description),
-            area(&self.sender, geometry.sender, description),
             area(&self.counter, geometry.counter, description),
-            area(&self.hint, geometry.hint, description),
         ];
+        if geometry.full {
+            areas.extend([
+                area(&self.detail, geometry.detail, description),
+                area(&self.sender, geometry.sender, description),
+                area(&self.hint, geometry.hint, description),
+            ]);
+        }
         if let Some(status) = self.shaped[4]
             .as_deref()
             .filter(|status| !status.is_empty())
@@ -441,10 +529,13 @@ impl ViewerText {
                 description,
             ));
         }
+        // The toggle collapses an expanded lane and expands a collapsed one.
         let buttons = [
             geometry.previous,
             geometry.next,
             geometry.open_outside,
+            (!collapsed).then_some(geometry.toggle),
+            collapsed.then_some(geometry.toggle),
             Some(geometry.close),
         ];
         for (buffer, rect) in self.controls.iter().zip(buttons) {
@@ -492,12 +583,14 @@ mod tests {
 
     const CELL: (f32, f32) = (10.0, 20.0);
 
-    fn viewer(position: (usize, usize), image: Option<(u32, u32)>) -> MediaViewerOverlay {
-        MediaViewerOverlay {
-            pane_rect: (0.0, 0.0, 800.0, 600.0),
+    fn viewer(position: (usize, usize), image: Option<(u32, u32)>) -> MediaLanePanel {
+        MediaLanePanel {
+            pane: 1,
+            rect: (0.0, 0.0, 800.0, 600.0),
+            collapsed: false,
             title: "Plot".into(),
             detail: "Raster 640×480".into(),
-            sender: MediaViewerSender {
+            sender: MediaLaneSender {
                 text: "from this pane".into(),
                 program: None,
                 signer: None,
@@ -514,17 +607,23 @@ mod tests {
     }
 
     #[test]
-    fn the_viewer_sits_inside_its_pane_with_its_controls_on_one_row() {
-        let geometry =
-            media_viewer_geometry(&viewer((2, 5), Some((640, 480))), CELL, CELL).unwrap();
-        let (x, y, w, h) = geometry.rect;
-        assert!(x >= 0.0 && y >= 0.0 && x + w <= 800.0 && y + h <= 600.0);
+    fn the_lane_fills_its_rect_with_its_controls_on_one_row() {
+        let geometry = media_lane_geometry(&viewer((2, 5), Some((640, 480))), CELL, CELL).unwrap();
+        assert_eq!(geometry.rect, (0.0, 0.0, 800.0, 600.0));
+        assert!(geometry.full);
         let previous = geometry.previous.unwrap();
         let next = geometry.next.unwrap();
-        assert!(previous.0 + previous.2 <= next.0 && next.0 + next.2 <= geometry.close.0);
+        assert!(previous.0 + previous.2 <= next.0 && next.0 + next.2 <= geometry.toggle.0);
+        assert!(geometry.toggle.0 + geometry.toggle.2 <= geometry.close.0);
         assert!(geometry.counter.0 + geometry.counter.2 <= previous.0);
         assert!(geometry.title.0 + geometry.title.2 <= geometry.counter.0);
-        for row in [geometry.counter, previous, next, geometry.close] {
+        for row in [
+            geometry.counter,
+            previous,
+            next,
+            geometry.toggle,
+            geometry.close,
+        ] {
             assert_eq!(row.1, geometry.title.1);
         }
         assert!(geometry.detail.1 > geometry.title.1);
@@ -533,33 +632,36 @@ mod tests {
         assert!(geometry.hint.1 > geometry.image_area.1 + geometry.image_area.3);
     }
 
-    /// The open-outside button, when offered, sits between browsing and
-    /// close on the header row, and a press on it says so; without it the
+    /// The open-outside button, when offered, sits between browsing and the
+    /// toggle on the header row, and a press on it says so; without it the
     /// header is as before.
     #[test]
     fn the_open_outside_button_sits_before_close() {
         let mut offered = viewer((2, 5), Some((640, 480)));
         offered.open_outside = true;
-        let geometry = media_viewer_geometry(&offered, CELL, CELL).unwrap();
+        let geometry = media_lane_geometry(&offered, CELL, CELL).unwrap();
         let open = geometry.open_outside.expect("offered");
         let next = geometry.next.unwrap();
-        assert!(next.0 + next.2 <= open.0 && open.0 + open.2 <= geometry.close.0);
+        assert!(next.0 + next.2 <= open.0 && open.0 + open.2 <= geometry.toggle.0);
         assert_eq!(open.1, geometry.close.1);
         let center = (open.0 + open.2 / 2.0, open.1 + open.3 / 2.0);
         assert_eq!(
             geometry.hit_test(center.0, center.1),
-            MediaViewerHit::OpenOutside
+            Some(MediaLaneHit::OpenOutside)
         );
-        let single = MediaViewerOverlay {
+        let single = MediaLanePanel {
             position: (1, 1),
             ..offered.clone()
         };
-        let geometry = media_viewer_geometry(&single, CELL, CELL).unwrap();
+        let geometry = media_lane_geometry(&single, CELL, CELL).unwrap();
         let open = geometry.open_outside.unwrap();
         assert!(geometry.counter.0 + geometry.counter.2 <= open.0);
-        let plain = media_viewer_geometry(&viewer((2, 5), Some((640, 480))), CELL, CELL).unwrap();
+        let plain = media_lane_geometry(&viewer((2, 5), Some((640, 480))), CELL, CELL).unwrap();
         assert_eq!(plain.open_outside, None);
-        assert_eq!(plain.next.unwrap().0 + plain.next.unwrap().2, plain.close.0);
+        assert_eq!(
+            plain.next.unwrap().0 + plain.next.unwrap().2,
+            plain.toggle.0
+        );
     }
 
     #[test]
@@ -571,7 +673,7 @@ mod tests {
             let start = text.find(part).unwrap();
             Some(start..start + part.len())
         };
-        let sender = MediaViewerSender {
+        let sender = MediaLaneSender {
             program: at(path),
             signer: at(signer),
             text: text.clone(),
@@ -596,7 +698,7 @@ mod tests {
         // and ranges that overlap: each fits, keeps what it can, and never
         // panics.
         let short = "Unverified sender: /a (pid 7), signed by Apple";
-        let short_sender = MediaViewerSender {
+        let short_sender = MediaLaneSender {
             program: Some(19..21),
             signer: Some(short.len() - 5..short.len()),
             text: short.into(),
@@ -606,13 +708,13 @@ mod tests {
             assert!(crate::display_width(&fitted) <= columns, "{fitted}");
             assert!(fitted.contains("Apple"), "{columns}: {fitted}");
         }
-        let overlapping = MediaViewerSender {
+        let overlapping = MediaLaneSender {
             text: "abcdef XYZ".into(),
             program: Some(0..6),
             signer: Some(0..10),
         };
         assert!(crate::display_width(&overlapping.fitted(4)) <= 4);
-        let inside = MediaViewerSender {
+        let inside = MediaLaneSender {
             text: "abcdef XYZ".into(),
             program: Some(0..6),
             signer: Some(1..4),
@@ -623,7 +725,7 @@ mod tests {
             "a signer inside the path still fits"
         );
         // A line without a path shortens as a whole.
-        let plain = MediaViewerSender {
+        let plain = MediaLaneSender {
             text: "x".repeat(50),
             program: None,
             signer: None,
@@ -633,19 +735,19 @@ mod tests {
 
     #[test]
     fn one_item_needs_no_browsing_buttons() {
-        let geometry = media_viewer_geometry(&viewer((1, 1), None), CELL, CELL).unwrap();
+        let geometry = media_lane_geometry(&viewer((1, 1), None), CELL, CELL).unwrap();
         assert_eq!((geometry.previous, geometry.next), (None, None));
         assert_eq!(geometry.image, None);
         assert_eq!(
             geometry.hit_test(geometry.close.0 + 1.0, geometry.close.1 + 1.0),
-            MediaViewerHit::Close
+            Some(MediaLaneHit::Close)
         );
     }
 
     #[test]
     fn the_image_is_fitted_centered_and_never_enlarged() {
         let geometry =
-            media_viewer_geometry(&viewer((1, 1), Some((4000, 1000))), CELL, CELL).unwrap();
+            media_lane_geometry(&viewer((1, 1), Some((4000, 1000))), CELL, CELL).unwrap();
         let (ix, iy, iw, ih) = geometry.image.unwrap();
         let (ax, ay, aw, ah) = geometry.image_area;
         assert!(iw <= aw && ih <= ah);
@@ -658,7 +760,7 @@ mod tests {
             ((iy - ay) - (ay + ah - iy - ih)).abs() <= 1.0,
             "centered down"
         );
-        let small = media_viewer_geometry(&viewer((1, 1), Some((64, 48))), CELL, CELL).unwrap();
+        let small = media_lane_geometry(&viewer((1, 1), Some((64, 48))), CELL, CELL).unwrap();
         assert_eq!(
             (small.image.unwrap().2, small.image.unwrap().3),
             (64.0, 48.0)
@@ -687,8 +789,8 @@ mod tests {
         for (pane_rect, cell, text_cell) in layouts {
             for (width, height) in sizes.clone() {
                 let mut overlay = viewer((1, 1), Some((width, height)));
-                overlay.pane_rect = pane_rect;
-                let geometry = media_viewer_geometry(&overlay, cell, text_cell).unwrap();
+                overlay.rect = pane_rect;
+                let geometry = media_lane_geometry(&overlay, cell, text_cell).unwrap();
                 let (_, _, iw, ih) = geometry.image.unwrap();
                 let (_, _, aw, ah) = geometry.image_area;
                 let (ix, iy) = (geometry.image.unwrap().0, geometry.image.unwrap().1);
@@ -711,15 +813,15 @@ mod tests {
                 }
             }
         }
-        let thin = media_viewer_geometry(&viewer((1, 1), Some((4096, 1))), CELL, CELL).unwrap();
+        let thin = media_lane_geometry(&viewer((1, 1), Some((4096, 1))), CELL, CELL).unwrap();
         let (_, _, aw, _) = thin.image_area;
         assert_eq!(
             (thin.image.unwrap().2, thin.image.unwrap().3),
             (aw.floor(), 1.0)
         );
         let mut short_room = viewer((1, 1), Some((1000, 300)));
-        short_room.pane_rect = (0.0, 0.0, 800.0, 300.0);
-        let geometry = media_viewer_geometry(&short_room, (9.0, 19.0), (9.0, 18.75)).unwrap();
+        short_room.rect = (0.0, 0.0, 800.0, 300.0);
+        let geometry = media_lane_geometry(&short_room, (9.0, 19.0), (9.0, 18.75)).unwrap();
         let (_, iy, iw, ih) = geometry.image.unwrap();
         let (_, ay, _, ah) = geometry.image_area;
         assert!(iy >= ay && iy + ih <= ay + ah, "{iw}x{ih} at {iy}");
@@ -733,9 +835,9 @@ mod tests {
     fn an_invalidated_line_takes_the_new_family_though_its_text_is_the_same() {
         let mut font_system = FontSystem::new();
         let metrics = Metrics::new(14.0, 18.0);
-        let mut text = ViewerText::new(&mut font_system, metrics);
+        let mut text = LaneText::new(&mut font_system, metrics);
         let viewer = viewer((1, 2), Some((64, 48)));
-        let geometry = media_viewer_geometry(&viewer, CELL, CELL).unwrap();
+        let geometry = media_lane_geometry(&viewer, CELL, CELL).unwrap();
         text.shape(&mut font_system, metrics, "Menlo", &viewer, &geometry, 8.0);
         text.shape(
             &mut font_system,
@@ -745,7 +847,7 @@ mod tests {
             &geometry,
             8.0,
         );
-        fn family(text: &ViewerText) -> Family<'_> {
+        fn family(text: &LaneText) -> Family<'_> {
             text.title.lines[0].attrs_list().defaults().family
         }
         assert_eq!(
@@ -767,23 +869,112 @@ mod tests {
     }
 
     #[test]
-    fn presses_map_to_controls_inside_and_outside() {
-        let geometry = media_viewer_geometry(&viewer((2, 3), Some((64, 48))), CELL, CELL).unwrap();
+    fn presses_map_to_controls_inside_and_nothing_outside() {
+        let geometry = media_lane_geometry(&viewer((2, 3), Some((64, 48))), CELL, CELL).unwrap();
         let at = |rect: Rect4| geometry.hit_test(rect.0 + 1.0, rect.1 + 1.0);
-        assert_eq!(at(geometry.previous.unwrap()), MediaViewerHit::Previous);
-        assert_eq!(at(geometry.next.unwrap()), MediaViewerHit::Next);
-        assert_eq!(at(geometry.close), MediaViewerHit::Close);
-        assert_eq!(at(geometry.image.unwrap()), MediaViewerHit::Inside);
-        assert_eq!(geometry.hit_test(1.0, 1.0), MediaViewerHit::Outside);
+        assert_eq!(at(geometry.previous.unwrap()), Some(MediaLaneHit::Previous));
+        assert_eq!(at(geometry.next.unwrap()), Some(MediaLaneHit::Next));
+        assert_eq!(at(geometry.toggle), Some(MediaLaneHit::Toggle));
+        assert_eq!(at(geometry.close), Some(MediaLaneHit::Close));
+        assert_eq!(at(geometry.image.unwrap()), Some(MediaLaneHit::Inside));
+        assert_eq!(geometry.hit_test(1.0, 1.0), Some(MediaLaneHit::Inside));
+        assert_eq!(geometry.hit_test(-1.0, 1.0), None, "outside the lane");
+        assert_eq!(geometry.hit_test(1.0, 600.0), None, "below the lane");
     }
 
     #[test]
-    fn a_pane_too_small_or_a_degenerate_cell_has_no_viewer() {
+    fn a_lane_too_narrow_or_a_degenerate_cell_has_no_panel() {
         let mut small = viewer((1, 1), None);
-        small.pane_rect = (0.0, 0.0, 120.0, 600.0);
-        assert!(media_viewer_geometry(&small, CELL, CELL).is_none());
-        assert!(media_viewer_geometry(&viewer((1, 1), None), (0.0, 20.0), CELL).is_none());
-        assert!(media_viewer_geometry(&viewer((1, 1), None), CELL, (f32::NAN, 20.0)).is_none());
+        small.rect = (0.0, 0.0, 110.0, 600.0);
+        assert!(media_lane_geometry(&small, CELL, CELL).is_none());
+        assert!(media_lane_geometry(&viewer((1, 1), None), (0.0, 20.0), CELL).is_none());
+        assert!(media_lane_geometry(&viewer((1, 1), None), CELL, (f32::NAN, 20.0)).is_none());
+        let mut short = viewer((1, 1), None);
+        short.rect = (0.0, 0.0, 800.0, 19.0);
+        assert!(
+            media_lane_geometry(&short, CELL, CELL).is_none(),
+            "shorter than a line"
+        );
+    }
+
+    /// However narrow the lane, every control and the counter lie inside it:
+    /// controls past close and collapse give way, in order, so the title
+    /// keeps a few columns, and a lane too narrow even for those has none.
+    #[test]
+    fn a_narrow_header_keeps_every_control_inside_the_lane() {
+        let inside = |outer: Rect4, inner: Rect4| {
+            inner.0 >= outer.0
+                && inner.1 >= outer.1
+                && inner.0 + inner.2 <= outer.0 + outer.2
+                && inner.1 + inner.3 <= outer.1 + outer.3
+        };
+        let mut previous_controls = usize::MAX;
+        for width in (60..=900).rev().step_by(10) {
+            let mut lane = viewer((2, 5), Some((64, 48)));
+            lane.open_outside = true;
+            lane.rect = (210.0, 40.0, width as f32, 300.0);
+            let Some(geometry) = media_lane_geometry(&lane, CELL, CELL) else {
+                assert!(width < 120, "{width} px holds close, collapse and a title");
+                continue;
+            };
+            let controls = [geometry.previous, geometry.next, geometry.open_outside]
+                .iter()
+                .flatten()
+                .count();
+            assert!(
+                controls <= previous_controls,
+                "fewer controls as it narrows"
+            );
+            previous_controls = controls;
+            for part in [
+                Some(geometry.close),
+                Some(geometry.toggle),
+                Some(geometry.counter),
+            ]
+            .into_iter()
+            .chain([geometry.previous, geometry.next, geometry.open_outside])
+            .flatten()
+            {
+                assert!(
+                    inside(lane.rect, part),
+                    "{width}: {part:?} in {:?}",
+                    lane.rect
+                );
+            }
+            assert!(geometry.title.2 >= 0.0);
+            assert!(geometry.title.0 + geometry.title.2 <= geometry.toggle.0);
+        }
+        assert_eq!(
+            previous_controls, 0,
+            "the narrowest keep only close and collapse"
+        );
+    }
+
+    /// A collapsed lane, or one too short for its rows, is its header alone,
+    /// centered down the strip, with the same controls and nothing below.
+    #[test]
+    fn a_collapsed_or_short_lane_is_its_header_alone() {
+        let mut collapsed = viewer((2, 3), Some((64, 48)));
+        collapsed.collapsed = true;
+        let short = MediaLanePanel {
+            rect: (0.0, 100.0, 800.0, 30.0),
+            collapsed: false,
+            ..collapsed.clone()
+        };
+        for lane in [collapsed, short] {
+            let geometry = media_lane_geometry(&lane, CELL, CELL).unwrap();
+            assert!(!geometry.full);
+            assert_eq!(geometry.image, None);
+            assert_eq!(geometry.detail.2 * geometry.detail.3, 0.0);
+            let (_, y, _, h) = lane.rect;
+            let middle = geometry.title.1 + geometry.title.3 / 2.0;
+            assert!((middle - (y + h / 2.0)).abs() <= 1.0, "{geometry:?}");
+            assert!(geometry.next.is_some() && geometry.close.2 > 0.0);
+            assert_eq!(
+                geometry.hit_test(geometry.toggle.0 + 1.0, geometry.toggle.1 + 1.0),
+                Some(MediaLaneHit::Toggle)
+            );
+        }
     }
 
     #[test]

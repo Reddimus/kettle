@@ -65,6 +65,7 @@ mod native_drag;
 mod native_material;
 mod notifications;
 mod owned_dir;
+mod pane_partition;
 mod paste_image;
 mod runtime_diagnostics;
 mod search_input;

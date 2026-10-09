@@ -22,12 +22,14 @@ media_viewer_from_pane = "draft"
 media_viewer_unverified = "draft"
 media_viewer_unverified_signed = "draft"
 media_viewer_unknown_program = "draft"
-media_viewer_hint = "draft"
-media_viewer_hint_single = "draft"
-media_viewer_hint_open_preview = "draft"
-media_viewer_hint_open_image_viewer = "draft"
 media_viewer_released = "draft"
-media_viewer_a11y = "draft"
+media_lane_a11y = "draft"
+media_lane_hint = "draft"
+media_lane_a11y_previous = "draft"
+media_lane_a11y_next = "draft"
+media_lane_a11y_collapse = "draft"
+media_lane_a11y_expand = "draft"
+media_lane_a11y_close = "draft"
 window_title_new_media = "draft"
 card_a11y = "draft"
 card_a11y_open = "draft"
@@ -77,6 +79,7 @@ notify_body_open_image_viewer = "draft"
 notify_body_open_image_copy = "draft"
 notify_body_open_image_busy = "draft"
 notify_title_open_image = "draft"
+notify_title_preview_no_room = "draft"
 menu_open_in_image_viewer = "draft"
 menu_open_in_preview = "draft"
 menu_open_in_kettle = "draft"
@@ -142,6 +145,7 @@ notify_body_recording_overloaded = "draft"
 notify_body_recording_start_failed = "draft"
 notify_body_recording_write_failed = "draft"
 notify_body_remote_file_not_opened = "draft"
+notify_body_preview_no_room = "draft"
 notify_body_remote_not_delivered = "draft"
 notify_body_screenshot_wait = "draft"
 notify_body_session_log_io = "draft"
@@ -522,7 +526,12 @@ keys = [
     "confirm_paste",
     "confirm_rebind",
     "hint_a11y_list",
-    "media_viewer_a11y",
+    "media_lane_a11y",
+    "media_lane_a11y_close",
+    "media_lane_a11y_collapse",
+    "media_lane_a11y_expand",
+    "media_lane_a11y_next",
+    "media_lane_a11y_previous",
     "card_a11y",
     "card_a11y_open",
     "menu_a11y_terminal",

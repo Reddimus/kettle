@@ -2018,11 +2018,13 @@ mod tests {
                     PaneView {
                         id: 2,
                         rect: (0.0, 0.0, half, height as f32),
+                        terminal: (0.0, 0.0, half, height as f32),
                         focused: false,
                         ..pane(&other, width, height)
                     },
                     PaneView {
                         rect: (half, 0.0, half, height as f32),
+                        terminal: (half, 0.0, half, height as f32),
                         ..pane(&snap, width, height)
                     },
                 ]
@@ -2034,6 +2036,7 @@ mod tests {
                     + 2.0;
                 vec![PaneView {
                     rect: (0.0, 0.0, pane_width, height as f32),
+                    terminal: (0.0, 0.0, pane_width, height as f32),
                     ..pane(&snap, width, height)
                 }]
             } else {
@@ -2145,6 +2148,7 @@ mod tests {
         let snap = snapshot_of(20, 4, bytes);
         let views = [PaneView {
             rect,
+            terminal: rect,
             ..pane(&snap, width, height)
         }];
         capture(&mut renderer, cfg, &views, &focused(false));

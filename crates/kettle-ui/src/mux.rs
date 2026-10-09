@@ -677,6 +677,9 @@ fn unnegotiated_modified_enter(mode: ModifyOtherKeysMode) -> bool {
     mode == ModifyOtherKeysMode::Always
 }
 
+use crate::pane_partition::{
+    DEFAULT_FRACTION, LaneRequest, LaneSide, LayoutStyle, PanePartition, partition_leaf,
+};
 use crate::session::{MAX_RESTORE_PANES, SNode, STab, Session};
 
 /// Pixel rectangle: `(x, y, w, h)`.
@@ -1569,6 +1572,10 @@ pub struct Tab {
     pub last_output_at: Option<std::time::Instant>,
     pub last_seen_at: Option<std::time::Instant>,
     pub bell: bool,
+    /// The preview lane each pane asks for, by pane id. Transient: a lane is
+    /// never saved, restored, duplicated or carried to another window, and
+    /// leaves with its pane.
+    pub(crate) lanes: HashMap<u64, LaneRequest>,
 }
 
 /// Activity state of an *inactive* tab, used by the renderer to pick
@@ -2275,6 +2282,7 @@ impl Mux {
                         last_output_at: None,
                         last_seen_at: None,
                         bell: false,
+                        lanes: HashMap::new(),
                     });
                 }
                 Err(e) => {
@@ -2375,6 +2383,7 @@ impl Mux {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            lanes: HashMap::new(),
         };
         // Terminator parity, terminatorlib/config.py:97
         // `new_tab_after_current_tab`: when true, insert the new
@@ -2474,6 +2483,7 @@ impl Mux {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            lanes: HashMap::new(),
         });
         self.active = self.tabs.len() - 1;
         Ok(())
@@ -2661,7 +2671,11 @@ impl Mux {
         Ok(())
     }
 
-    pub fn layout(&self, tab: usize, area: Rect) -> Vec<(u64, Rect)> {
+    /// The split leaf each pane shown in `tab` gets from `area`: every
+    /// pane, or only the focused one while the tab is zoomed. Structural
+    /// questions (which pane is where, which way is up) use these; anything
+    /// about the terminal inside a pane uses [`Mux::layout`].
+    pub(crate) fn leaves(&self, tab: usize, area: Rect) -> Vec<(u64, Rect)> {
         let mut v = Vec::new();
         if let Some(t) = self.tabs.get(tab) {
             if t.zoomed {
@@ -2672,6 +2686,91 @@ impl Mux {
             }
         }
         v
+    }
+
+    /// Each pane shown in `tab`, with its leaf divided between its
+    /// titlebar, terminal and preview lane, measured with `style`. The one
+    /// place a pane's geometry comes from.
+    pub(crate) fn layout(
+        &self,
+        tab: usize,
+        area: Rect,
+        style: LayoutStyle,
+    ) -> Vec<(u64, PanePartition)> {
+        let leaves = self.leaves(tab, area);
+        let metrics = style.metrics(leaves.len());
+        let lanes = self.tabs.get(tab).map(|t| &t.lanes);
+        leaves
+            .into_iter()
+            .map(|(id, leaf)| {
+                let lane = lanes.and_then(|lanes| lanes.get(&id)).copied();
+                (id, partition_leaf(leaf, metrics, lane))
+            })
+            .collect()
+    }
+
+    /// The tab holding `pane`, if any.
+    fn tab_of(&self, pane: u64) -> Option<usize> {
+        self.tabs
+            .iter()
+            .position(|tab| tab.root.leaf_ids().contains(&pane))
+    }
+
+    /// The lane `pane` has, if any.
+    pub(crate) fn lane(&self, pane: u64) -> Option<LaneRequest> {
+        self.tabs
+            .iter()
+            .find_map(|tab| tab.lanes.get(&pane).copied())
+    }
+
+    /// Give `pane` an expanded preview lane on `side`, or expand the one it
+    /// has where it is. Returns whether its geometry changed.
+    pub(crate) fn open_lane(&mut self, pane: u64, side: LaneSide) -> bool {
+        let Some(tab) = self.tab_of(pane) else {
+            return false;
+        };
+        let lanes = &mut self.tabs[tab].lanes;
+        match lanes.get_mut(&pane) {
+            Some(lane) if lane.expanded => false,
+            Some(lane) => {
+                lane.expanded = true;
+                true
+            }
+            None => {
+                lanes.insert(pane, LaneRequest::new(side, DEFAULT_FRACTION, true));
+                true
+            }
+        }
+    }
+
+    /// Collapse `pane`'s lane to its strip, or expand it. Returns whether
+    /// anything changed.
+    pub(crate) fn set_lane_expanded(&mut self, pane: u64, expanded: bool) -> bool {
+        self.tabs
+            .iter_mut()
+            .find_map(|tab| tab.lanes.get_mut(&pane))
+            .is_some_and(|lane| std::mem::replace(&mut lane.expanded, expanded) != expanded)
+    }
+
+    /// Close `pane`'s lane. Returns whether it had one.
+    pub(crate) fn close_lane(&mut self, pane: u64) -> bool {
+        self.tabs
+            .iter_mut()
+            .any(|tab| tab.lanes.remove(&pane).is_some())
+    }
+
+    /// Keep only the lanes of panes still in their tab that `keep` accepts.
+    /// Returns whether any lane went.
+    pub(crate) fn retain_lanes(&mut self, mut keep: impl FnMut(u64) -> bool) -> bool {
+        let mut changed = false;
+        for tab in &mut self.tabs {
+            let leaves = tab.root.leaf_ids();
+            let before = tab.lanes.len();
+            tab.lanes
+                .retain(|pane, _| leaves.contains(pane) && keep(*pane));
+            changed |= tab.lanes.len() != before;
+        }
+        changed
     }
 
     pub fn active_pane_count(&self) -> usize {
@@ -2775,7 +2874,7 @@ impl Mux {
     /// every pane must read as "no target here" so the drop hint disappears,
     /// rather than naming a pane the cursor is not over.
     pub fn pane_rect_at(&self, area: Rect, px: f32, py: f32) -> Option<(u64, Rect)> {
-        self.layout(self.active, area)
+        self.leaves(self.active, area)
             .into_iter()
             .find(|&(_, (x, y, w, h))| px >= x && px < x + w && py >= y && py < y + h)
     }
@@ -2939,7 +3038,7 @@ impl Mux {
         // test and clamp a tiny negative gap to 0.
         const EPS: f32 = 1.0;
         let a = self.active;
-        let rects = self.layout(a, area);
+        let rects = self.leaves(a, area);
         let tab = self.tabs.get(a)?;
         let &(_, (fx, fy, fw, fh)) = rects.iter().find(|(id, _)| *id == tab.focus)?;
         let (fl, fr, ft, fb) = (fx, fx + fw, fy, fy + fh);
@@ -3005,7 +3104,7 @@ impl Mux {
 
     pub fn focus_cycle(&mut self, area: Rect, forward: bool) {
         let a = self.active;
-        let rects = self.layout(a, area);
+        let rects = self.leaves(a, area);
         if let Some(tab) = self.tabs.get_mut(a)
             && let Some(pos) = rects.iter().position(|(id, _)| *id == tab.focus)
         {
@@ -3093,7 +3192,7 @@ impl Mux {
     /// Focus whichever pane contains the pixel `(px, py)`.
     pub fn focus_at(&mut self, area: Rect, px: f32, py: f32) {
         let a = self.active;
-        let rects = self.layout(a, area);
+        let rects = self.leaves(a, area);
         if let Some(tab) = self.tabs.get_mut(a) {
             for (id, (x, y, w, h)) in rects {
                 if px >= x && px < x + w && py >= y && py < y + h {
@@ -3277,7 +3376,9 @@ impl Mux {
     }
 
     pub fn detach_tab(&mut self, idx: usize) -> Option<DetachedTab> {
-        let tab = self.extract_tab(idx)?;
+        let mut tab = self.extract_tab(idx)?;
+        // A lane shows what its window holds for it, which stays behind.
+        tab.lanes.clear();
         let mut ids = Vec::new();
         collect_ids(&tab.root, &mut ids);
         let panes = ids
@@ -3507,6 +3608,7 @@ impl Mux {
                 last_output_at: None,
                 last_seen_at: None,
                 bell: false,
+                lanes: HashMap::new(),
             },
         );
         self.active = insert_at;
@@ -5103,6 +5205,98 @@ mod node_tests {
     /// A representative wide area (matches the user's HiDPI screenshot ratio).
     const AREA: Rect = (0.0, 0.0, 2560.0, 1440.0);
 
+    /// A pane's lane is carved from its own leaf: the terminal shrinks, the
+    /// pane beside it does not move, closing the lane gives back exactly the
+    /// partition it had, and a collapsed lane is a strip.
+    #[test]
+    fn a_lane_carves_its_pane_and_closes_back_exactly() {
+        use crate::pane_partition::{LaneShare, LaneSide, LayoutStyle};
+        let style = LayoutStyle::new((9.0, 18.0), (4.0, 2.0), Some(24.0), false).unwrap();
+        let area = (0.0, 0.0, 1200.0, 800.0);
+        let mut m = Mux::new();
+        let mut root = Node::Leaf(1);
+        root.split_leaf(1, 2, Dir::Horizontal);
+        push_tab(&mut m, root, 1);
+        let before = m.layout(0, area, style);
+        assert!(m.open_lane(1, LaneSide::Bottom));
+        assert!(
+            !m.open_lane(1, LaneSide::Bottom),
+            "already open and expanded"
+        );
+        let open = m.layout(0, area, style);
+        let (_, one) = open.iter().find(|(id, _)| *id == 1).unwrap();
+        let (_, one_before) = before.iter().find(|(id, _)| *id == 1).unwrap();
+        assert_eq!(one.leaf, one_before.leaf);
+        assert!(matches!(one.lane, Some(LaneShare::Expanded(_))), "{one:?}");
+        assert!(one.terminal.3 < one_before.terminal.3);
+        assert_eq!(
+            open.iter().find(|(id, _)| *id == 2),
+            before.iter().find(|(id, _)| *id == 2),
+            "the pane beside it keeps its geometry"
+        );
+        assert!(m.set_lane_expanded(1, false));
+        assert!(!m.set_lane_expanded(1, false));
+        let collapsed = m.layout(0, area, style);
+        let (_, strip) = collapsed.iter().find(|(id, _)| *id == 1).unwrap();
+        assert!(matches!(strip.lane, Some(LaneShare::Strip(_))), "{strip:?}");
+        assert!(m.close_lane(1));
+        assert!(!m.close_lane(1));
+        assert_eq!(m.layout(0, area, style), before);
+    }
+
+    /// Zoom shows the focused pane's lane in the whole area and keeps a
+    /// hidden pane's lane for when it shows again; a split leaves each lane
+    /// with its own pane and gives the new pane none.
+    #[test]
+    fn a_lane_survives_zoom_and_stays_with_its_pane_through_a_split() {
+        use crate::pane_partition::{LaneShare, LaneSide, LayoutStyle};
+        let style = LayoutStyle::new((9.0, 18.0), (4.0, 2.0), None, false).unwrap();
+        let area = (0.0, 0.0, 1200.0, 800.0);
+        let mut m = Mux::new();
+        let mut root = Node::Leaf(1);
+        root.split_leaf(1, 2, Dir::Horizontal);
+        push_tab(&mut m, root, 1);
+        m.open_lane(1, LaneSide::Bottom);
+        m.open_lane(2, LaneSide::Right);
+        m.tabs[0].zoomed = true;
+        let zoomed = m.layout(0, area, style);
+        assert_eq!(zoomed.len(), 1);
+        assert_eq!(zoomed[0].1.leaf, area);
+        assert!(matches!(zoomed[0].1.lane, Some(LaneShare::Expanded(_))));
+        assert!(m.lane(2).is_some(), "the hidden pane keeps its lane");
+        m.tabs[0].zoomed = false;
+        assert!(super::insert_split(&mut m.tabs[0], 3, Dir::Vertical, false));
+        let split = m.layout(0, area, style);
+        let lane = |pane| split.iter().find(|(id, _)| *id == pane).unwrap().1.lane;
+        assert!(lane(1).is_some() && lane(2).is_some());
+        assert_eq!(lane(3), None, "a new pane starts without a lane");
+    }
+
+    /// Lanes leave with their panes, with anything their window refuses, and
+    /// with a torn-off tab, whose panels stay behind.
+    #[test]
+    fn lanes_leave_with_their_panes_and_torn_off_tabs() {
+        use crate::pane_partition::LaneSide;
+        let mut m = Mux::new();
+        let mut root = Node::Leaf(1);
+        root.split_leaf(1, 2, Dir::Horizontal);
+        push_tab(&mut m, root, 1);
+        m.open_lane(1, LaneSide::Bottom);
+        m.open_lane(2, LaneSide::Bottom);
+        assert!(!m.retain_lanes(|_| true));
+        assert!(m.retain_lanes(|pane| pane == 1));
+        assert!(m.lane(1).is_some() && m.lane(2).is_none());
+        // A pane gone from its tab takes its lane with it.
+        m.tabs[0].root = Node::Leaf(2);
+        assert!(m.retain_lanes(|_| true));
+        assert!(m.lane(1).is_none());
+        assert!(!m.open_lane(99, LaneSide::Bottom), "no tab holds pane 99");
+        push_tab(&mut m, Node::Leaf(5), 5);
+        m.open_lane(5, LaneSide::Bottom);
+        let torn = m.detach_tab(1).unwrap();
+        assert!(torn.tab.lanes.is_empty());
+    }
+
     fn push_tab(m: &mut Mux, root: Node, focus: u64) {
         m.tabs.push(Tab {
             root,
@@ -5112,6 +5306,7 @@ mod node_tests {
             last_output_at: None,
             last_seen_at: None,
             bell: false,
+            lanes: HashMap::new(),
         });
         m.active = m.tabs.len() - 1;
     }
@@ -5149,7 +5344,7 @@ mod node_tests {
                 let predicted = mux.prospective_split_rect(dir, new_first, area);
                 assert!(super::insert_split(&mut mux.tabs[0], 8, dir, new_first));
                 let placed = mux
-                    .layout(0, area)
+                    .leaves(0, area)
                     .into_iter()
                     .find(|(id, _)| *id == 8)
                     .map(|(_, rect)| rect);
@@ -5172,7 +5367,7 @@ mod node_tests {
                     let predicted = mux.prospective_split_rect(dir, new_first, area);
                     assert!(super::insert_split(&mut mux.tabs[0], 8, dir, new_first));
                     let actual = mux
-                        .layout(0, area)
+                        .leaves(0, area)
                         .into_iter()
                         .find(|(id, _)| *id == 8)
                         .map(|(_, rect)| rect)
@@ -5258,7 +5453,7 @@ mod node_tests {
     fn focus_dir_screenshot_layout_picks_adjacent_not_diagonal() {
         let mut m = Mux::new();
         push_tab(&mut m, screenshot_tree(), 6);
-        let rects = m.layout(0, AREA);
+        let rects = m.leaves(0, AREA);
 
         // (a) Document the bug: the old center-distance rule jumps Left to the
         // DIAGONAL midL (4) and Right to the up-right midR (5) — there is no real
@@ -5976,7 +6171,7 @@ mod node_tests {
             1,
         );
         let area = (0.0f32, 0.0f32, 100.0f32, 50.0f32);
-        let rects = m.layout(m.active, area);
+        let rects = m.leaves(m.active, area);
         assert_eq!(rects.len(), 2, "fixture must lay out two panes");
         assert_eq!(m.pane_rect_at(area, 10.0, 25.0).map(|(id, _)| id), Some(1));
         assert_eq!(m.pane_rect_at(area, 90.0, 25.0).map(|(id, _)| id), Some(2));
@@ -6097,6 +6292,7 @@ mod node_tests {
             last_output_at: None,
             last_seen_at: None,
             bell: false,
+            lanes: HashMap::new(),
         });
         mux.active = 0;
         // No pane carries the "fleet" group (panes map is empty) → the raw
@@ -7181,6 +7377,7 @@ mod node_tests {
                 last_output_at: None,
                 last_seen_at: None,
                 bell: false,
+                lanes: HashMap::new(),
             });
         }
         let order = |m: &Mux| -> Vec<u64> {
@@ -7234,6 +7431,7 @@ mod node_tests {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            lanes: HashMap::new(),
         });
         assert!(!single.move_active_tab(1));
     }
@@ -7255,6 +7453,7 @@ mod node_tests {
                 last_output_at: None,
                 last_seen_at: None,
                 bell: false,
+                lanes: HashMap::new(),
             });
         }
         let order = |m: &Mux| -> Vec<u64> {
@@ -7296,6 +7495,7 @@ mod node_tests {
             last_output_at: None,
             last_seen_at: None,
             bell: false,
+            lanes: HashMap::new(),
         });
         assert!(!single.nudge_active_tab(1));
         assert!(!single.nudge_active_tab(-1));
@@ -7314,6 +7514,7 @@ mod node_tests {
                 last_output_at: None,
                 last_seen_at: None,
                 bell: false,
+                lanes: HashMap::new(),
             });
         }
         m.active = 2; // third tab
@@ -7348,6 +7549,7 @@ mod node_tests {
                 last_output_at: None,
                 last_seen_at: None,
                 bell: false,
+                lanes: HashMap::new(),
             });
         }
 
@@ -7401,6 +7603,7 @@ mod node_tests {
             last_output_at: None,
             last_seen_at: None,
             bell: false,
+            lanes: HashMap::new(),
         });
 
         // The prompt was raised for pane 10; focus then moves to 20.
@@ -7445,6 +7648,7 @@ mod node_tests {
             last_output_at: None,
             last_seen_at: None,
             bell: false,
+            lanes: HashMap::new(),
         });
         assert_eq!(m.tab_index_of_any_pane(&[10]), Some(0));
         assert_eq!(m.tab_index_of_any_pane(&[20]), Some(0), "the sibling too");
@@ -7484,6 +7688,7 @@ mod node_tests {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            lanes: HashMap::new(),
         });
         m.active = 0;
         // Close the focused (left) pane → tab survives with the right
@@ -7549,6 +7754,7 @@ mod node_tests {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            lanes: HashMap::new(),
         });
         m.active = 0;
         assert!(!m.close_focused(), "tab still has 3 panes after closing 40");
@@ -7647,6 +7853,7 @@ mod node_tests {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            lanes: HashMap::new(),
         }];
         let mut active = 0;
         // Pane 40's PTY exits → reap it.
@@ -7683,6 +7890,7 @@ mod node_tests {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            lanes: HashMap::new(),
         }];
         let mut active = 0;
         // Pane 20's PTY exits. The tab survives with its root collapsed to
@@ -7717,6 +7925,7 @@ mod node_tests {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            lanes: HashMap::new(),
         }];
         let mut active = 0;
         Mux::reap_tabs(&mut tabs, &mut active, &[20]);
@@ -7965,6 +8174,7 @@ mod node_tests {
                 last_output_at: None,
                 last_seen_at: None,
                 bell: false,
+                lanes: HashMap::new(),
             }
         }
         // Scenario 1: focused on the middle tab (B); the leftmost tab (A)
@@ -8036,6 +8246,7 @@ mod node_tests {
                 last_output_at: None,
                 last_seen_at: None,
                 bell: false,
+                lanes: HashMap::new(),
             });
         }
         m.active = 1;
@@ -8065,6 +8276,7 @@ mod node_tests {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            lanes: HashMap::new(),
         };
         super::insert_split(&mut tab, 2, Dir::Horizontal, false);
         assert_eq!(tab.focus, 2, "focus moves to the new pane");
@@ -8083,6 +8295,7 @@ mod node_tests {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            lanes: HashMap::new(),
         };
         super::insert_split(&mut tab, 2, Dir::Vertical, false);
         assert!(!tab.zoomed);
@@ -8107,6 +8320,7 @@ mod node_tests {
                 last_seen_at: None,
                 bell: false,
                 title_override: None,
+                lanes: HashMap::new(),
             };
             assert!(super::insert_split(&mut tab, 2, dir, new_first));
             assert_eq!(tab.focus, 2);
@@ -8134,6 +8348,7 @@ mod node_tests {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            lanes: HashMap::new(),
         };
         assert!(
             super::insert_split(&mut tab, 2, Dir::Horizontal, false),
@@ -8178,15 +8393,16 @@ mod node_tests {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            lanes: HashMap::new(),
         });
         m.active = 0;
-        assert_eq!(m.layout(0, (0.0, 0.0, 100.0, 50.0)).len(), 2);
+        assert_eq!(m.leaves(0, (0.0, 0.0, 100.0, 50.0)).len(), 2);
         m.toggle_zoom();
-        let z = m.layout(0, (0.0, 0.0, 100.0, 50.0));
+        let z = m.leaves(0, (0.0, 0.0, 100.0, 50.0));
         assert_eq!(z.len(), 1);
         assert_eq!(z[0], (2, (0.0, 0.0, 100.0, 50.0)));
         m.toggle_zoom();
-        assert_eq!(m.layout(0, (0.0, 0.0, 100.0, 50.0)).len(), 2);
+        assert_eq!(m.leaves(0, (0.0, 0.0, 100.0, 50.0)).len(), 2);
     }
 
     /// Resizing while zoomed leaves the hidden split alone, so unzooming shows
@@ -8204,18 +8420,19 @@ mod node_tests {
             last_seen_at: None,
             bell: false,
             title_override: None,
+            lanes: HashMap::new(),
         });
         m.active = 0;
         let area = (0.0, 0.0, 100.0, 50.0);
-        let before = m.layout(0, area);
+        let before = m.leaves(0, area);
 
         m.toggle_zoom();
         m.resize_focus(Dir::Horizontal, -0.2);
         m.toggle_zoom();
-        assert_eq!(m.layout(0, area), before, "zoomed resize moved the split");
+        assert_eq!(m.leaves(0, area), before, "zoomed resize moved the split");
 
         m.resize_focus(Dir::Horizontal, -0.2);
-        assert_ne!(m.layout(0, area), before, "unzoomed resize must still work");
+        assert_ne!(m.leaves(0, area), before, "unzoomed resize must still work");
     }
 
     #[test]
@@ -8257,6 +8474,7 @@ mod node_tests {
             last_output_at: None,
             last_seen_at: None,
             bell: false,
+            lanes: HashMap::new(),
         };
         m.tabs.push(mk(1));
         m.tabs.push(mk(2));
@@ -8296,6 +8514,7 @@ mod node_tests {
             last_output_at: None,
             last_seen_at: None,
             bell: false,
+            lanes: HashMap::new(),
         };
         let mut src = Mux::new();
         src.tabs.push(mk(101));
