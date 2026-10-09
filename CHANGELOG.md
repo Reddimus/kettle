@@ -151,6 +151,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   as opening it is. Your preview goes ahead of anything agents are
   showing, and a notification says why when one cannot open. In English
   and Spanish.
+- Preview a copied file: `preview_clipboard_path` (palette: "Preview the
+  copied file in Kettle") opens the image, SVG or Mermaid file you copied
+  in a file manager, or whose path or `file://` link you copied, in the
+  focused pane's lane. Shift+right-click offers it as "Preview Copied File".
+  `preview_next`, `preview_previous` and `close_preview` browse and close
+  the focused pane's lane from the keyboard or the palette.
+- Shift+right-click on selected text opens the menu instead of extending
+  the selection; off the selection it still extends it. With nothing
+  selected it opens the menu too, mouse reporting or not: a plain click
+  used to leave an empty selection that Shift+right-click silently
+  extended.
 - The media worker can classify a file by its content, raster or SVG,
   whatever it is called, and says what it rendered. Kettle and its worker now
   speak media protocol 2; a worker from an older build is refused until

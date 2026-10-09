@@ -5594,6 +5594,122 @@ fn hint_previews(what: &HintWhat) -> bool {
     }
 }
 
+/// What the clipboard names for a lane to show.
+#[derive(Debug, PartialEq, Eq)]
+enum CopiedPreview {
+    /// A file a file manager copied: on this computer, as no pane's output
+    /// can put a file on the clipboard.
+    File(std::path::PathBuf),
+    /// A copied path or `file://` link, as a `file://` URL. It names a file
+    /// wherever the pane it was copied from runs, so the pane's gate decides.
+    Link(String),
+}
+
+/// The lane control a lane action works as, for the focused pane's lane.
+fn lane_action_hit(action: &Action) -> Option<kettle_render::MediaLaneHit> {
+    use kettle_render::MediaLaneHit as Hit;
+    match action {
+        Action::PreviewNext => Some(Hit::Next),
+        Action::PreviewPrevious => Some(Hit::Previous),
+        Action::ClosePreview => Some(Hit::Close),
+        _ => None,
+    }
+}
+
+/// Longest copied text read as a path, in bytes.
+const MAX_COPIED_PATH: usize = 4096;
+
+/// The file the clipboard names for a lane to show: the first of `files`, as
+/// a file manager copies them, that a lane can show, or else the one path or
+/// `file://` link `text` holds. A path is resolved from the pane's `cwd` as
+/// quick select resolves one, after one pair of quotes around it, or a
+/// shell's backslash escapes, are undone. `None` when neither names one.
+fn copied_preview(
+    files: &[std::path::PathBuf],
+    text: Option<&str>,
+    cwd: Option<&str>,
+    home: Option<&str>,
+) -> Option<CopiedPreview> {
+    let shows = |path: &std::path::Path| previewable_name(&path.to_string_lossy());
+    if !files.is_empty() {
+        // Through a file URL and back, so a listed file meets the checks a
+        // link does: absolute, on this computer (no `\\host\share`), no `..`.
+        // It must come back as itself: a Linux file list can name `C:/x`,
+        // which is relative there. The CR a CRLF list leaves on a line is no
+        // part of the name.
+        return files.iter().find_map(|file| {
+            let name = file.to_str()?;
+            let file = std::path::Path::new(name.strip_suffix('\r').unwrap_or(name));
+            kettle_core::links::file_url_for_path(file)
+                .and_then(|url| kettle_core::links::local_file_path(&url))
+                .filter(|path| path == file && shows(path))
+                .map(CopiedPreview::File)
+        });
+    }
+    // Two lines are no one path: a line break decodes to a control
+    // character, which `local_file_path` refuses below. A path longer than
+    // any URL Kettle accepts is dropped before it is unescaped and encoded.
+    let text = text?.trim();
+    if text.len() > MAX_COPIED_PATH {
+        return None;
+    }
+    let url = if text
+        .get(..7)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("file://"))
+    {
+        text.to_string()
+    } else if text.contains("://") {
+        return None;
+    } else {
+        copied_path_url(&unquote_copied_path(text), cwd, home)?
+    };
+    kettle_core::links::local_file_path(&url)
+        .is_some_and(|path| shows(&path))
+        .then_some(CopiedPreview::Link(url))
+}
+
+/// A copied path without one pair of matching quotes around it or, off
+/// Windows, without a shell's backslash escapes (`my\ plot.png`).
+fn unquote_copied_path(text: &str) -> String {
+    for quote in ['"', '\''] {
+        if let Some(inner) = text
+            .strip_prefix(quote)
+            .and_then(|rest| rest.strip_suffix(quote))
+        {
+            return inner.to_string();
+        }
+    }
+    if cfg!(windows) {
+        return text.to_string();
+    }
+    let mut unescaped = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        unescaped.push(match c {
+            '\\' => chars.next().unwrap_or(c),
+            _ => c,
+        });
+    }
+    unescaped
+}
+
+/// The `file://` URL a copied path names: off Windows as quick select
+/// resolves a path (`hint_path_url`); on Windows only a drive path, never a
+/// share or a relative path.
+fn copied_path_url(text: &str, cwd: Option<&str>, home: Option<&str>) -> Option<String> {
+    if cfg!(windows) {
+        let bytes = text.as_bytes();
+        let drive = bytes.len() > 2
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'\\' | b'/');
+        return drive
+            .then(|| kettle_core::links::file_url_for_path(std::path::Path::new(text)))
+            .flatten();
+    }
+    hint_path_url(text, cwd, home)
+}
+
 /// Most previews the user asked for that wait for their window to open them.
 const MAX_PREVIEWS_READY: usize = 8;
 
@@ -13209,6 +13325,19 @@ impl App {
     /// existed (so Shift+Click on empty space starts a normal selection).
     /// Matches xterm / Alacritty / iTerm2: Shift+Click anchors the
     /// existing selection's start and pulls the end to the click.
+    /// Where the pointer is against the focused pane's selection: `None`
+    /// when nothing is selected (the empty selection a click leaves is
+    /// nothing), else whether the pointer is on it.
+    fn pointer_on_selection(&self, ws: &WindowState, area: Rect) -> Option<bool> {
+        let rect = self.focused_terminal(ws, area)?;
+        let (vp, _) = self.px_to_point(ws, rect, ws.cursor.x as f32, ws.cursor.y as f32);
+        let pane = ws.mux.active_focus().and_then(|id| ws.mux.panes.get(&id))?;
+        let term = pane.term.term.lock().ok()?;
+        let point = viewport_point_to_grid(vp, term.grid().display_offset());
+        let range = term.selection.as_ref()?.to_range(&term)?;
+        Some(range.contains(point))
+    }
+
     fn extend_selection_to_cursor(&mut self, ws: &mut WindowState, area: Rect, button: u8) -> bool {
         let rect = match self.focused_terminal(ws, area) {
             Some(r) => r,
@@ -17638,7 +17767,9 @@ impl App {
     /// panel from the cell metrics and clamps the anchor so the menu fits
     /// the surface (right-click near the bottom-right corner flips up-
     /// and-left rather than rendering off-screen).
-    fn open_context_menu(&mut self, ws: &mut WindowState, px: f32, py: f32) {
+    /// Open the right-click menu at (`px`, `py`). `offer_copied`, for a
+    /// Shift+right-click only, also offers the file the clipboard names.
+    fn open_context_menu(&mut self, ws: &mut WindowState, px: f32, py: f32, offer_copied: bool) {
         self.close_modals_for_context_menu(ws);
         // Terminator parity, terminal_popup_menu.py "Open link" /
         // "Copy address": when the right-click landed on a detected
@@ -17660,6 +17791,21 @@ impl App {
         let mut items = Vec::new();
         if in_focused_pane && let Some(url) = self.link_at_cursor(ws).map(|l| l.uri.clone()) {
             items.extend(link_menu_rows(&url, links_pane(ws), tr));
+        }
+        // Shift+right-click also offers the file the clipboard names. Only
+        // then is the clipboard read, so a slow clipboard owner never holds
+        // up a plain right-click or a menu opened from the keyboard.
+        if in_focused_pane
+            && offer_copied
+            && let Some(pane) = ws.mux.active_focus()
+            && self.copied_preview(ws, pane).is_some()
+        {
+            items.push(ContextMenuItem::Item {
+                label: tr.text(T::MenuPreviewCopiedFile),
+                action: kettle_config::Action::PreviewClipboardPath,
+                enabled: true,
+            });
+            items.push(ContextMenuItem::Separator);
         }
         items.extend(self.context_menu_items(ws));
         self.append_config_menu_items(&mut items);
@@ -19747,6 +19893,15 @@ impl App {
             }
             Action::OpenThemePicker => self.open_theme_picker(ws),
             Action::OpenMediaShelf => self.open_media_shelf(ws),
+            Action::PreviewClipboardPath => self.preview_copied_file(ws),
+            Action::PreviewNext | Action::PreviewPrevious | Action::ClosePreview => {
+                if let Some(hit) = lane_action_hit(&action)
+                    && let Some(pane) = ws.mux.active_focus()
+                    && ws.preview_panels.contains_key(&pane)
+                {
+                    self.act_on_preview(ws, pane, hit);
+                }
+            }
             Action::HintMode | Action::PreviewLink => {
                 let preview = matches!(action, Action::PreviewLink);
                 let targets = self.collect_hints(ws, preview);
@@ -19782,7 +19937,7 @@ impl App {
                 // Keyboard-triggered open: anchor at the current mouse position
                 // so the menu lands where the user is looking.
                 let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
-                self.open_context_menu(ws, px, py);
+                self.open_context_menu(ws, px, py, false);
             }
             Action::UndoCloseTab => {
                 let waker = self.waker();
@@ -22085,6 +22240,46 @@ impl App {
         }
     }
 
+    /// What the clipboard names for `pane`'s lane, read now.
+    fn copied_preview(&mut self, ws: &WindowState, pane: u64) -> Option<CopiedPreview> {
+        let files = self.clipboard_file_paste_paths().unwrap_or_default();
+        let text = files
+            .is_empty()
+            .then(|| self.clipboard.as_mut().and_then(|c| c.get_text().ok()))
+            .flatten();
+        let cwd = ws
+            .mux
+            .panes
+            .get(&pane)
+            .and_then(|state| state.term.current_dir_or_native());
+        copied_preview(
+            &files,
+            text.as_deref(),
+            cwd.as_deref(),
+            crate::mux::home_dir_string().as_deref(),
+        )
+    }
+
+    /// Preview, in the focused pane's lane, the file the clipboard names. A
+    /// copied path or link meets the pane's gate, as a link in its output
+    /// would; a file copied in a file manager is on this computer.
+    fn preview_copied_file(&mut self, ws: &mut WindowState) {
+        let Some(pane) = ws.mux.active_focus() else {
+            return;
+        };
+        match self.copied_preview(ws, pane) {
+            Some(CopiedPreview::File(path)) => self.pull_preview(ws, pane, &path),
+            Some(CopiedPreview::Link(url)) => self.preview_pane_link(ws, pane, &url),
+            None => {
+                let tr = self.ui_text;
+                fire_notify(
+                    tr.text(kettle_i18n::Text::NotifyTitlePreviewNothing),
+                    tr.text(kettle_i18n::Text::NotifyBodyPreviewNothingCopied),
+                );
+            }
+        }
+    }
+
     /// Ask the media worker to render the local file at `path` for `pane`'s
     /// lane: the user's own pull, which waits in the queue's slot for the
     /// user, opens the lane when it is ready, and says why when it cannot.
@@ -24312,7 +24507,8 @@ impl App {
         ws.mux.focus_at(area, px, py);
         self.note_focus_change(ws, pre);
         if bcode == 2 {
-            self.open_context_menu(ws, px, py);
+            let offer_copied = ws.mods.shift_key();
+            self.open_context_menu(ws, px, py, offer_copied);
             return true;
         }
         if self.send_mouse(ws, bcode, true, false) {
@@ -34284,17 +34480,23 @@ impl App {
                 }
                 // Right-click handling, layered:
                 //
-                // 1. `Shift + right-click` *with* an existing selection
-                //    keeps the extend-selection behavior (xterm
-                //    convention; muscle memory for kettle's power users).
+                // 1. `Shift + right-click` *with* selected text, off it, keeps
+                //    the extend-selection behavior (xterm convention; muscle
+                //    memory for kettle's power users).
                 // 2. Any other right-click opens the context menu at the
-                //    click point (Terminator / GNOME / iTerm2 default).
+                //    click point (Terminator / GNOME / iTerm2 default),
+                //    Shift+right-click on the selection or with nothing
+                //    selected included, so its rows can act on them.
                 //
                 // Mouse-tracking already short-circuited above when the
                 // focused program is consuming mouse events, so this only
-                // fires for the kettle chrome.
+                // fires for the kettle chrome; Shift bypasses tracking, so
+                // Shift+right-click always reaches it.
                 if bcode == 2 {
-                    if ws.mods.shift_key() && self.extend_selection_to_cursor(ws, area, bcode) {
+                    if ws.mods.shift_key()
+                        && self.pointer_on_selection(ws, area) == Some(false)
+                        && self.extend_selection_to_cursor(ws, area, bcode)
+                    {
                         if self.cfg.copy_on_select {
                             self.copy_selection(ws);
                         }
@@ -34303,7 +34505,8 @@ impl App {
                         }
                         return;
                     }
-                    self.open_context_menu(ws, px, py);
+                    let offer_copied = ws.mods.shift_key();
+                    self.open_context_menu(ws, px, py, offer_copied);
                     return;
                 }
                 if bcode == 0 {
@@ -52882,7 +53085,179 @@ mod hint_action_tests {
         link_display_name, link_gate, link_menu_rows, local_file_prompt, path_origin,
         previewable_name, production_source,
     };
+    use super::{CopiedPreview, copied_preview, lane_action_hit, unquote_copied_path};
+
+    /// The lane actions work as the lane's own controls; no other action
+    /// does.
+    #[test]
+    fn lane_actions_work_as_the_lanes_controls() {
+        use kettle_config::Action;
+        use kettle_render::MediaLaneHit as Hit;
+        assert_eq!(lane_action_hit(&Action::PreviewNext), Some(Hit::Next));
+        assert_eq!(
+            lane_action_hit(&Action::PreviewPrevious),
+            Some(Hit::Previous)
+        );
+        assert_eq!(lane_action_hit(&Action::ClosePreview), Some(Hit::Close));
+        assert_eq!(lane_action_hit(&Action::OpenMediaShelf), None);
+    }
     use kettle_core::hints::Kind;
+
+    /// A file a file manager copied previews as itself: the first listed one
+    /// a lane can show, local by construction, and the text beside it unread.
+    #[test]
+    fn a_copied_file_previews_the_first_a_lane_can_show() {
+        let root = tempfile::tempdir().unwrap();
+        let notes = root.path().join("notes.txt");
+        let plot = root.path().join("plot.png");
+        assert_eq!(
+            copied_preview(&[notes.clone(), plot.clone()], Some("/x/a.svg"), None, None),
+            Some(CopiedPreview::File(plot.clone()))
+        );
+        assert_eq!(copied_preview(&[notes], Some("/x/a.svg"), None, None), None);
+        // A relative entry is no file Kettle can place, even one a file URL
+        // would read as absolute.
+        assert_eq!(copied_preview(&["plot.png".into()], None, None, None), None);
+        if !cfg!(windows) {
+            assert_eq!(
+                copied_preview(&["C:/media/plot.png".into()], None, None, None),
+                None
+            );
+        }
+        // A CRLF file list leaves a CR on the line, which is no part of it.
+        let crlf = format!("{}\r", plot.to_str().unwrap());
+        assert_eq!(
+            copied_preview(&[crlf.into()], None, None, None),
+            Some(CopiedPreview::File(plot.clone()))
+        );
+    }
+
+    /// Copied text previews when it is one path or `file://` link to a file a
+    /// lane can show; quotes or a shell's escapes around a path are undone.
+    #[cfg(unix)]
+    #[test]
+    fn copied_text_previews_one_path_or_file_link() {
+        use super::MAX_COPIED_PATH;
+        let link = |url: &str| Some(CopiedPreview::Link(url.into()));
+        let copied =
+            |text: &str| copied_preview(&[], Some(text), Some("/home/me/proj"), Some("/home/me"));
+        assert_eq!(
+            copied("/tmp/out/plot.png"),
+            link("file:///tmp/out/plot.png")
+        );
+        assert_eq!(
+            copied("  out/plot.SVG\n"),
+            link("file:///home/me/proj/out/plot.SVG")
+        );
+        assert_eq!(copied("~/flow.mmd"), link("file:///home/me/flow.mmd"));
+        assert_eq!(
+            copied("'/tmp/my plot.png'"),
+            link("file:///tmp/my%20plot.png")
+        );
+        assert_eq!(
+            copied("/tmp/my\\ plot.png"),
+            link("file:///tmp/my%20plot.png")
+        );
+        assert_eq!(copied("file:///tmp/plot.png"), link("file:///tmp/plot.png"));
+        for refused in [
+            "/tmp/notes.txt",
+            "file:///tmp/notes.txt",
+            "https://example.com/plot.png",
+            "ssh://host/plot.png",
+            "../plot.png",
+            "/tmp/a.png\n/tmp/b.png",
+            "",
+        ] {
+            assert_eq!(copied(refused), None, "{refused:?}");
+        }
+        let long = format!("/{}.png", "a".repeat(MAX_COPIED_PATH));
+        assert_eq!(copied(&long), None);
+        assert_eq!(
+            copied_preview(&[], Some("out/plot.png"), None, None),
+            None,
+            "a relative path needs the pane's folder"
+        );
+        assert_eq!(copied_preview(&[], None, None, None), None);
+    }
+
+    /// On Windows a copied path previews only as a drive path, never a share
+    /// or a path relative to an unknown folder.
+    #[cfg(windows)]
+    #[test]
+    fn copied_text_previews_only_drive_paths_on_windows() {
+        let copied = |text: &str| copied_preview(&[], Some(text), None, None);
+        assert_eq!(
+            copied("C:\\Users\\me\\plot.png"),
+            Some(CopiedPreview::Link("file:///C:/Users/me/plot.png".into()))
+        );
+        for refused in [
+            "\\\\host\\share\\plot.png",
+            "plot.png",
+            "C:\\x\\..\\plot.png",
+        ] {
+            assert_eq!(copied(refused), None, "{refused:?}");
+        }
+    }
+
+    /// One pair of matching quotes goes; off Windows, so do a shell's escapes.
+    #[test]
+    fn copied_paths_lose_one_pair_of_quotes() {
+        assert_eq!(unquote_copied_path("\"/a b.png\""), "/a b.png");
+        assert_eq!(unquote_copied_path("'/a b.png'"), "/a b.png");
+        assert_eq!(
+            unquote_copied_path("\"/a.png'"),
+            "\"/a.png'",
+            "unmatched quotes stay"
+        );
+        assert_eq!(unquote_copied_path("'"), "'");
+        let escaped = unquote_copied_path("/a\\ b\\(1\\).png");
+        if cfg!(windows) {
+            assert_eq!(escaped, "/a\\ b\\(1\\).png");
+        } else {
+            assert_eq!(escaped, "/a b(1).png");
+        }
+    }
+
+    /// Shift+right-click on the selection opens the menu rather than
+    /// extending it, and only Shift+right-click reads the clipboard for its
+    /// row. The lane actions act on the focused pane's lane through the
+    /// lane's own controls.
+    #[test]
+    fn shift_right_click_and_lane_actions_are_wired() {
+        let src = production_source();
+        let body = |name: &str| {
+            src.split(&format!("fn {name}("))
+                .nth(1)
+                .and_then(|rest| rest.split("\n    fn ").next())
+                .unwrap_or_else(|| panic!("{name}"))
+        };
+        assert!(src.contains(
+            "if ws.mods.shift_key()\n                        && self.pointer_on_selection(ws, area) == Some(false)\n                        && self.extend_selection_to_cursor(ws, area, bcode)"
+        ));
+        let menu = body("open_context_menu");
+        let shift = menu
+            .find("&& offer_copied")
+            .expect("the Shift+right-click check");
+        let read = menu
+            .find("self.copied_preview(ws, pane)")
+            .expect("the clipboard read");
+        assert!(
+            shift < read,
+            "the clipboard is read only on Shift+right-click"
+        );
+        assert_eq!(src.matches("self.copied_preview(ws, pane)").count(), 2);
+        assert!(src.contains("self.open_context_menu(ws, px, py, false);"));
+        assert_eq!(
+            src.matches("let offer_copied = ws.mods.shift_key();\n")
+                .count(),
+            2,
+            "only the native and control right-clicks offer the copied file"
+        );
+        assert!(src.contains("Action::PreviewClipboardPath => self.preview_copied_file(ws),"));
+        assert!(src.contains(
+            "&& ws.preview_panels.contains_key(&pane)\n                {\n                    self.act_on_preview(ws, pane, hit);"
+        ));
+    }
 
     /// A right-click on a link leads with Open and Copy; Preview in Kettle
     /// joins them, between the two, only for a local file a lane can show
