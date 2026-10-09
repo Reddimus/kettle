@@ -8,7 +8,6 @@ use std::collections::HashMap;
 pub const MAX_PANE_CARDS: usize = 64;
 /// Most columns a card spans; a wider block would wrap in the harness.
 pub const MAX_CARD_COLUMNS: u8 = 107;
-const CLAUDE_LEFT: usize = 5;
 pub(crate) const MAX_CARD_ROWS: u8 = 12;
 
 /// Which harness prints a card, which fixes the label recognition expects
@@ -17,21 +16,49 @@ pub(crate) const MAX_CARD_ROWS: u8 = 12;
 pub enum CardHarness {
     /// Claude Code's synchronous hook message under the tool call.
     ClaudeHook,
+    /// Codex's hook message under the tool call (Codex CLI 0.162.0).
+    CodexHook,
 }
 
 impl CardHarness {
+    /// The label line above a card's rows as the harness prints it, from
+    /// the line's first character after any indent.
     fn label(self) -> &'static str {
         match self {
-            Self::ClaudeHook => "PostToolUse:mcp__plugin_kettle_kettle__kettle_show says:",
+            // Claude Code's `⎿` with its spacing, then the hook's label.
+            Self::ClaudeHook => {
+                "\u{23bf} \u{00a0}PostToolUse:mcp__plugin_kettle_kettle__kettle_show says:"
+            }
+            // Codex's hook line; the message's first line, which Kettle
+            // leaves empty, would follow it.
+            Self::CodexHook => "\u{21b3} Hook \u{00b7}",
+        }
+    }
+
+    /// The column a card's rows, and the caption under them, start at.
+    pub fn left(self) -> usize {
+        match self {
+            Self::ClaudeHook => 5,
+            Self::CodexHook => 4,
+        }
+    }
+
+    /// The harness's name, on a card's provenance tab.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::ClaudeHook => "Claude",
+            Self::CodexHook => "Codex",
         }
     }
 
     /// The columns the harness's label line takes as it prints it: Claude
-    /// Code's two-column indent, `⎿` with its spacing, then the label. A
-    /// narrower pane wraps the label, and the card under it is never found.
+    /// Code's two-column indent, then the label; Codex's label and the space
+    /// before the message's empty first line. A narrower pane wraps the
+    /// label, and the card under it is never found.
     pub fn label_columns(self) -> usize {
         match self {
-            Self::ClaudeHook => 2 + 3 + self.label().chars().count(),
+            Self::ClaudeHook => 2 + self.label().chars().count(),
+            Self::CodexHook => self.label().chars().count() + 1,
         }
     }
 }
@@ -89,7 +116,7 @@ pub enum CardRefusal {
 struct RegisteredCard {
     rows: u8,
     columns: u8,
-    label: &'static str,
+    harness: CardHarness,
     caption: String,
     poster: Option<CardPoster>,
     pending: bool,
@@ -140,7 +167,7 @@ impl InlineCards {
             RegisteredCard {
                 rows: spec.rows,
                 columns: spec.columns,
-                label: spec.harness.label(),
+                harness: spec.harness,
                 caption: spec.caption,
                 poster: spec.poster,
                 pending,
@@ -156,13 +183,13 @@ impl InlineCards {
     }
 
     #[cfg(test)]
-    fn register(&mut self, nonce: InlineNonce, rows: u8, columns: u8) {
+    fn register_for(&mut self, nonce: InlineNonce, rows: u8, columns: u8, harness: CardHarness) {
         self.entries.insert(
             nonce,
             RegisteredCard {
                 rows,
                 columns,
-                label: CardHarness::ClaudeHook.label(),
+                harness,
                 caption: "diagram.png - raster 640x480".into(),
                 poster: None,
                 pending: true,
@@ -225,7 +252,7 @@ impl InlineCards {
         for (&(nonce, line, column), group) in &mut frame.groups {
             let entry = &self.entries[&nonce];
             if group.cells != usize::from(entry.rows) * usize::from(entry.columns)
-                || column != CLAUDE_LEFT
+                || column != entry.harness.left()
             {
                 continue;
             }
@@ -257,8 +284,7 @@ impl InlineCards {
             let Some(caption_line) = line.checked_add(i32::from(entry.rows)) else {
                 continue;
             };
-            let label = "\u{23bf} \u{00a0}".chars().chain(entry.label.chars());
-            if !row_matches(snap, label_line, 0, label, true)
+            if !row_matches(snap, label_line, 0, entry.harness.label().chars(), true)
                 || !row_matches(snap, caption_line, column, entry.caption.chars(), false)
             {
                 continue;
@@ -270,6 +296,7 @@ impl InlineCards {
                 column,
                 rows: entry.rows,
                 columns: entry.columns,
+                harness: entry.harness,
             });
         }
         // Snapshot capture supplies each complete sequence once in row-major
@@ -413,6 +440,8 @@ pub(crate) struct CardBlock {
     pub column: usize,
     pub rows: u8,
     pub columns: u8,
+    /// Who printed it, which its provenance tab names.
+    pub harness: CardHarness,
 }
 
 fn cell_at(snap: &PaneSnapshot, line: i32, column: usize) -> Option<&SnapCell> {
@@ -486,9 +515,21 @@ pub(crate) mod tests {
     pub(crate) fn fixture_term(
         prefix_lines: usize,
     ) -> (InlineCards, Term<EventProxy>, InlineNonce) {
+        let label = "  \u{23bf} \u{00a0}PostToolUse:mcp__plugin_kettle_kettle__kettle_show says:";
+        harness_term(prefix_lines, CardHarness::ClaudeHook, label, 5)
+    }
+
+    /// A card as `harness` prints it: `label` on its own line, then the
+    /// rows and the caption at column `left`.
+    fn harness_term(
+        prefix_lines: usize,
+        harness: CardHarness,
+        label: &str,
+        left: usize,
+    ) -> (InlineCards, Term<EventProxy>, InlineNonce) {
         let nonce = InlineNonce::new([2, 3, 4, 5, 6, 7]).unwrap();
         let mut cards = InlineCards::default();
-        cards.register(nonce, 3, 12);
+        cards.register_for(nonce, 3, 12, harness);
         let (tx, _rx) = crossbeam_channel::unbounded();
         let mut term = Term::new(
             Config::default(),
@@ -500,17 +541,18 @@ pub(crate) mod tests {
         for index in 0..prefix_lines {
             output.push_str(&format!("ordinary prefix {index}\r\n"));
         }
-        output.push_str(
-            "  \u{23bf} \u{00a0}PostToolUse:mcp__plugin_kettle_kettle__kettle_show says:\r\n",
-        );
+        output.push_str(label);
+        output.push_str("\r\n");
+        let indent = " ".repeat(left);
         for row in 0..3 {
-            output.push_str("     ");
+            output.push_str(&indent);
             for column in 0..12 {
                 output.push_str(&InlineMarker { row, column, nonce }.encode().unwrap());
             }
             output.push_str("\r\n");
         }
-        output.push_str("     diagram.png - raster 640x480");
+        output.push_str(&indent);
+        output.push_str("diagram.png - raster 640x480");
         processor.advance(&mut term, output.as_bytes());
         (cards, term, nonce)
     }
@@ -681,6 +723,48 @@ pub(crate) mod tests {
             cell.fg = kettle_core::AnsiColor::Named(kettle_core::NamedColor::Red);
         }
         assert_eq!(cards.recognize(&snap).accepted_cells, first.accepted_cells);
+    }
+
+    /// Codex prints a hook message as `↳ Hook ·` and the message's first
+    /// line, then its other lines four columns in (Codex CLI 0.162.0).
+    #[test]
+    fn a_codex_hook_card_is_recognized_at_its_own_pin() {
+        let codex = |label: &str, left: usize| {
+            let (cards, term, nonce) = harness_term(0, CardHarness::CodexHook, label, left);
+            let mut snap = PaneSnapshot::default();
+            snap.capture_with_card_marks(&term, true);
+            (cards.recognize(&snap), nonce)
+        };
+        let (frame, nonce) = codex("\u{21b3} Hook \u{00b7} ", 4);
+        assert_eq!(frame.blocks.len(), 1);
+        assert_eq!(frame.blocks[0].nonce, nonce);
+        assert_eq!((frame.blocks[0].line, frame.blocks[0].column), (1, 4));
+        assert_eq!(frame.accepted_cells.len(), 36);
+        // Its provenance tab names Codex.
+        assert_eq!(frame.blocks[0].harness, CardHarness::CodexHook);
+        assert_eq!(frame.blocks[0].harness.name(), "Codex");
+        // Claude Code's label, Claude Code's column, or text after the
+        // label is not Codex's hook.
+        for (label, left) in [
+            (
+                "  \u{23bf} \u{00a0}PostToolUse:mcp__plugin_kettle_kettle__kettle_show says:",
+                4,
+            ),
+            ("\u{21b3} Hook \u{00b7}", 5),
+            ("\u{21b3} Hook \u{00b7} something", 4),
+            ("\u{21b3} Hook", 4),
+        ] {
+            assert!(
+                codex(label, left).0.blocks.is_empty(),
+                "{label:?} at {left}"
+            );
+        }
+        // Nor is Codex's label a Claude Code card's.
+        let (cards, term, _) =
+            harness_term(0, CardHarness::ClaudeHook, "\u{21b3} Hook \u{00b7}", 5);
+        let mut snap = PaneSnapshot::default();
+        snap.capture_with_card_marks(&term, true);
+        assert!(cards.recognize(&snap).blocks.is_empty());
     }
 
     #[test]

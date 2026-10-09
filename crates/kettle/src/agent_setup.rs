@@ -30,12 +30,21 @@ enum Session {
 
 /// A classified invocation: what it starts, where Kettle's options go
 /// (right after the subcommand that starts the session, or first for a fresh
-/// one, so they never follow a prompt or `--`), and whether it already runs
-/// without the background server.
+/// one, so they never follow a prompt or `--`), whether it already runs
+/// without the background server, and whether it sets hooks itself.
 struct Classified {
     session: Session,
     insert_at: usize,
     no_daemon: bool,
+    own_hooks: bool,
+}
+
+/// Whether a `-c` value sets Codex's hooks, where Kettle's card hook would
+/// be: one set later on the command line replaces another.
+fn sets_hooks(value: &str) -> bool {
+    value
+        .split_once('=')
+        .is_some_and(|(key, _)| key.trim() == "hooks" || key.trim().starts_with("hooks."))
 }
 
 /// Codex options that take a value in the next argument, in every form an
@@ -71,10 +80,12 @@ fn classify(args: &[OsString]) -> Classified {
         session: Session::PassThrough,
         insert_at: 0,
         no_daemon: false,
+        own_hooks: false,
     };
     let mut session = Session::Fresh;
     let mut insert_at = 0;
     let mut no_daemon = false;
+    let mut own_hooks = false;
     let mut positionals = 0;
     // A fresh session takes one prompt, a resumed or forked one an id and a
     // prompt.
@@ -95,13 +106,14 @@ fn classify(args: &[OsString]) -> Classified {
             break;
         }
         if takes_value(arg) {
-            if args
+            let Some(value) = args
                 .get(index + 1)
                 .and_then(|value| value.to_str())
-                .is_none_or(|value| value.starts_with('-'))
-            {
+                .filter(|value| !value.starts_with('-'))
+            else {
                 return pass_through;
-            }
+            };
+            own_hooks |= matches!(arg, "-c" | "--config") && sets_hooks(value);
             index += 2;
             continue;
         }
@@ -110,6 +122,7 @@ fn classify(args: &[OsString]) -> Classified {
             && takes_value(option)
             && !value.is_empty()
         {
+            own_hooks |= option == "--config" && sets_hooks(value);
             index += 1;
             continue;
         }
@@ -154,6 +167,7 @@ fn classify(args: &[OsString]) -> Classified {
         session,
         insert_at,
         no_daemon,
+        own_hooks,
     }
 }
 
@@ -207,42 +221,78 @@ fn toml_string(text: &str) -> String {
     out
 }
 
+/// `items` as a TOML array's contents.
+fn toml_list(items: &[&str]) -> String {
+    items
+        .iter()
+        .map(|item| toml_string(item))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// The server table Codex gets for this launch: this Kettle's display
-/// server, the pane's two variables, and `kettle_show` alone. It sets no
+/// server, the pane's two variables, and `kettle_show` alone for the model.
+/// With `cards`, the server serves Kettle's card hook, and `kettle_card`,
+/// which Codex lets only an enabled tool's hook call, is enabled for it;
+/// the server never lists it, so the model never sees it. It sets no
 /// approval, so Codex asks as its own policy says.
-fn server_table(kettle: &str) -> String {
-    let list = |items: &[&str]| {
-        items
-            .iter()
-            .map(|item| toml_string(item))
-            .collect::<Vec<_>>()
-            .join(", ")
+fn server_table(kettle: &str, cards: bool) -> String {
+    let (args, tools): (&[&str], &[&str]) = if cards {
+        (
+            &["mcp", "--display", "--codex-card-hook"],
+            &["kettle_show", "kettle_card"],
+        )
+    } else {
+        (&["mcp", "--display"], &["kettle_show"])
     };
     format!(
         "{{command = {}, args = [{}], enabled = true, env_vars = [{}], enabled_tools = [{}]}}",
         toml_string(kettle),
-        list(&["mcp", "--display"]),
-        list(&["KETTLE_PANE_ID", "KETTLE_PID"]),
-        list(&["kettle_show"]),
+        toml_list(args),
+        toml_list(&["KETTLE_PANE_ID", "KETTLE_PID"]),
+        toml_list(tools),
+    )
+}
+
+/// Kettle's card hook: after each `kettle_show`, Codex asks Kettle's server
+/// for that call's card, by the call's id, and prints it under the call.
+/// Codex adds it to the user's own hooks, and runs it only once the user has
+/// trusted it in Codex's hook review; Kettle never trusts it on their behalf.
+fn card_hook() -> String {
+    format!(
+        "hooks.PostToolUse=[{{matcher = {}, hooks = [{{type = \"mcp_tool\", server = \"kettle\", \
+         tool = \"kettle_card\", input = {{tool_use_id = {}}}, timeout = 3}}]}}]",
+        toml_string("mcp__kettle__kettle_show"),
+        toml_string("${tool_use_id}"),
     )
 }
 
 /// The arguments Codex runs with: Kettle's options added to an interactive
-/// session's, anything else unchanged.
-fn launch_args(original: &[OsString], kettle: &Path) -> Result<Vec<OsString>, SetupError> {
+/// session's, anything else unchanged. With `cards`, its card hook too,
+/// unless the launch sets hooks itself.
+fn launch_args(
+    original: &[OsString],
+    kettle: &Path,
+    cards: bool,
+) -> Result<Vec<OsString>, SetupError> {
     let classified = classify(original);
     if classified.session == Session::PassThrough {
         return Ok(original.to_vec());
     }
     let kettle = kettle_path(kettle)?;
-    let mut injected: Vec<OsString> = Vec::with_capacity(3);
+    let cards = cards && !classified.own_hooks;
+    let mut injected: Vec<OsString> = Vec::with_capacity(5);
     // A session on the shared background server would not get this launch's
     // server. Codex refuses the flag twice.
     if !classified.no_daemon {
         injected.push("--no-daemon".into());
     }
     injected.push("-c".into());
-    injected.push(format!("mcp_servers.kettle={}", server_table(kettle)).into());
+    injected.push(format!("mcp_servers.kettle={}", server_table(kettle, cards)).into());
+    if cards {
+        injected.push("-c".into());
+        injected.push(card_hook().into());
+    }
     let mut launch = Vec::with_capacity(original.len() + injected.len());
     launch.extend_from_slice(&original[..classified.insert_at]);
     launch.extend(injected);
@@ -353,14 +403,32 @@ fn uninstall_text(shell: SetupShell) -> &'static str {
 /// `--no-daemon` arrived by 0.159.0. A 1.x or later is not assumed to.
 const OLDEST_CODEX_MINOR: u64 = 159;
 
+/// The Codex CLI whose hook output Kettle's cards are placed for: `↳ Hook ·`
+/// above the message, its lines four columns in (Codex CLI 0.162).
+const CARD_CODEX_MINOR: u64 = 162;
+
+/// The minor version `codex --version` printed, for a 0.x Codex CLI.
+fn codex_minor(output: &str) -> Option<u64> {
+    let version = output.trim().strip_prefix("codex-cli ")?;
+    let parts: Vec<Option<u64>> = version.split('.').map(|part| part.parse().ok()).collect();
+    match parts.as_slice() {
+        [Some(0), Some(minor), Some(_)] => Some(*minor),
+        _ => None,
+    }
+}
+
 /// Whether `codex --version` printed a Codex CLI Kettle can add its options
 /// to.
 fn supported_version(output: &str) -> bool {
-    let Some(version) = output.trim().strip_prefix("codex-cli ") else {
-        return false;
-    };
-    let parts: Vec<Option<u64>> = version.split('.').map(|part| part.parse().ok()).collect();
-    matches!(parts.as_slice(), [Some(0), Some(minor), Some(_)] if *minor >= OLDEST_CODEX_MINOR)
+    codex_minor(output).is_some_and(|minor| minor >= OLDEST_CODEX_MINOR)
+}
+
+/// Whether it printed one whose hook output Kettle's cards are placed for,
+/// on a system where Kettle can check that a card's asker is Codex as
+/// OpenAI signs it: macOS. Elsewhere the hook could never get a card, so it
+/// is not added.
+fn card_version(output: &str) -> bool {
+    cfg!(target_os = "macos") && codex_minor(output) == Some(CARD_CODEX_MINOR)
 }
 
 /// The first line `codex --version` prints, if it answers within three
@@ -529,13 +597,14 @@ fn launch(argv: Vec<OsString>) -> i32 {
     if !this_shell_in_kettle() || classify(&argv).session == Session::PassThrough {
         return run_codex(argv);
     }
-    if !installed_version().is_some_and(|version| supported_version(&version)) {
+    let Some(version) = installed_version().filter(|version| supported_version(version)) else {
         eprintln!(
             "kettle agent-setup: this Codex CLI is not one Kettle knows; starting it without Kettle's display server."
         );
         return run_codex(argv);
-    }
-    match this_kettle().and_then(|kettle| launch_args(&argv, &kettle)) {
+    };
+    let cards = card_version(&version);
+    match this_kettle().and_then(|kettle| launch_args(&argv, &kettle, cards)) {
         Ok(launch) => run_codex(launch),
         Err(error) => {
             eprintln!(
@@ -563,7 +632,20 @@ fn print_status() {
             "not in a Kettle pane, so Codex starts without Kettle's display server"
         }
     );
-    println!("Delivery: the media shelf of the pane Codex runs in");
+    let launched = this_shell_in_kettle() && version.as_deref().is_some_and(supported_version);
+    let cards = launched && version.as_deref().is_some_and(card_version);
+    println!(
+        "Delivery: {}",
+        if cards {
+            "the media shelf of the pane Codex runs in, and a card under the call once \
+             you trust Kettle's hook in Codex's hook review"
+        } else if launched {
+            "the media shelf of the pane Codex runs in; cards under the call need \
+             Codex CLI 0.162 on macOS"
+        } else {
+            "none from this shell"
+        }
+    );
     println!("Needs: agent previews on in Kettle (Settings, Agents, Agent previews)");
     println!(
         "Interactive sessions get Kettle's display server for that launch only. Codex's \
@@ -655,7 +737,7 @@ mod tests {
         ] {
             let original = argv(&args);
             assert_eq!(
-                launch_args(&original, &fixture("kettle")).unwrap(),
+                launch_args(&original, &fixture("kettle"), false).unwrap(),
                 original,
                 "{args:?}"
             );
@@ -670,7 +752,7 @@ mod tests {
                 vec![OsString::from("--"), OsString::from_vec(vec![0xff])],
             ] {
                 assert_eq!(
-                    launch_args(&original, &fixture("kettle")).unwrap(),
+                    launch_args(&original, &fixture("kettle"), false).unwrap(),
                     original
                 );
             }
@@ -682,7 +764,7 @@ mod tests {
         let kettle = fixture("kettle");
         let expect = |args: &[&str], before: usize| {
             let original = argv(args);
-            let launch = launch_args(&original, &kettle).unwrap();
+            let launch = launch_args(&original, &kettle, false).unwrap();
             assert_eq!(&launch[..before], &original[..before], "{args:?}");
             assert_eq!(launch[before], "--no-daemon", "{args:?}");
             assert_eq!(launch[before + 1], "-c", "{args:?}");
@@ -706,7 +788,7 @@ mod tests {
     #[test]
     fn a_launch_already_off_the_background_server_keeps_its_one_flag() {
         for args in [vec!["--no-daemon"], vec!["resume", "--no-daemon", "--last"]] {
-            let launch = launch_args(&argv(&args), &fixture("kettle")).unwrap();
+            let launch = launch_args(&argv(&args), &fixture("kettle"), false).unwrap();
             assert_eq!(
                 launch.iter().filter(|arg| *arg == "--no-daemon").count(),
                 1,
@@ -725,7 +807,7 @@ mod tests {
             .join("`tick`")
             .join("back\\slash")
             .join("kettle");
-        let launch = launch_args(&[], &kettle).unwrap();
+        let launch = launch_args(&[], &kettle, false).unwrap();
         let table = launch[2]
             .to_str()
             .unwrap()
@@ -757,10 +839,108 @@ mod tests {
         assert_eq!(toml_string("a\u{1}b\n"), "\"a\\u0001b\\u000A\"");
     }
 
+    /// With cards, the server serves Kettle's card hook, `kettle_card` is
+    /// enabled for that hook alone, and the hook asks for each
+    /// `kettle_show` call's card by the call's id.
+    #[test]
+    fn a_card_launch_adds_kettles_hook_and_its_retrieval() {
+        let launch = launch_args(&argv(&["resume", "--last"]), &fixture("kettle"), true).unwrap();
+        let values: Vec<&str> = launch
+            .windows(2)
+            .filter(|pair| pair[0] == "-c")
+            .map(|pair| pair[1].to_str().unwrap())
+            .collect();
+        assert_eq!(values.len(), 2, "{launch:?}");
+        let server: toml::Table = toml::from_str(&format!(
+            "server = {}",
+            values[0].strip_prefix("mcp_servers.kettle=").unwrap()
+        ))
+        .unwrap();
+        let strings = |key: &str| {
+            server["server"][key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_str().unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(strings("args"), ["mcp", "--display", "--codex-card-hook"]);
+        assert_eq!(strings("enabled_tools"), ["kettle_show", "kettle_card"]);
+        let (key, value) = values[1].split_once('=').unwrap();
+        assert_eq!(key, "hooks.PostToolUse");
+        let hook: toml::Table = toml::from_str(&format!("groups = {value}")).unwrap();
+        let group = &hook["groups"][0];
+        assert_eq!(group["matcher"].as_str(), Some("mcp__kettle__kettle_show"));
+        let handler = &group["hooks"][0];
+        assert_eq!(handler["type"].as_str(), Some("mcp_tool"));
+        assert_eq!(handler["server"].as_str(), Some("kettle"));
+        assert_eq!(handler["tool"].as_str(), Some("kettle_card"));
+        assert_eq!(
+            handler["input"]["tool_use_id"].as_str(),
+            Some("${tool_use_id}")
+        );
+        assert_eq!(handler["timeout"].as_integer(), Some(3));
+        assert_eq!(hook["groups"].as_array().unwrap().len(), 1);
+        assert_eq!(group["hooks"].as_array().unwrap().len(), 1);
+        // Without cards, neither the hook nor its retrieval.
+        let shelf = launch_args(&argv(&["resume", "--last"]), &fixture("kettle"), false).unwrap();
+        assert_eq!(shelf.iter().filter(|arg| *arg == "-c").count(), 1);
+        assert!(
+            !shelf
+                .iter()
+                .any(|arg| arg.to_string_lossy().contains("kettle_card"))
+        );
+    }
+
+    /// A launch that sets hooks itself would replace Kettle's, so it gets no
+    /// cards; other settings do not count.
+    #[test]
+    fn a_launch_setting_its_own_hooks_gets_no_card_hook() {
+        for args in [
+            vec!["-c", "hooks.PostToolUse=[]"],
+            vec!["--config", "hooks={}"],
+            vec!["--config=hooks.Stop=[]", "a prompt"],
+            vec!["resume", "-c", " hooks.state={} ", "--last"],
+        ] {
+            let launch = launch_args(&argv(&args), &fixture("kettle"), true).unwrap();
+            assert!(
+                !launch
+                    .iter()
+                    .any(|arg| arg.to_string_lossy().contains("kettle_card")),
+                "{args:?}"
+            );
+        }
+        let launch =
+            launch_args(&argv(&["-c", "model=\"hooks\""]), &fixture("kettle"), true).unwrap();
+        assert!(
+            launch
+                .iter()
+                .any(|arg| arg.to_string_lossy().contains("kettle_card"))
+        );
+    }
+
+    #[test]
+    fn cards_are_for_the_codex_whose_hook_output_kettle_knows() {
+        // Only macOS can check a card's asker, so only there.
+        assert_eq!(
+            card_version("codex-cli 0.162.0\n"),
+            cfg!(target_os = "macos")
+        );
+        assert_eq!(card_version("codex-cli 0.162.7"), cfg!(target_os = "macos"));
+        for version in [
+            "codex-cli 0.161.9",
+            "codex-cli 0.163.0",
+            "codex-cli 1.162.0",
+            "",
+        ] {
+            assert!(!card_version(version), "{version}");
+        }
+    }
+
     #[test]
     fn a_path_that_cannot_last_or_be_named_is_refused() {
         assert_eq!(
-            launch_args(&[], Path::new("relative/kettle")),
+            launch_args(&[], Path::new("relative/kettle"), false),
             Err(SetupError::UnnamedKettle)
         );
         assert_eq!(
@@ -772,7 +952,7 @@ mod tests {
         );
         // Passing through needs no path at all.
         assert_eq!(
-            launch_args(&argv(&["exec", "x"]), Path::new("relative")),
+            launch_args(&argv(&["exec", "x"]), Path::new("relative"), true),
             Ok(argv(&["exec", "x"]))
         );
     }

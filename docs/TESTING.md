@@ -3796,7 +3796,21 @@ up on a program that never answers. The printed function, run by bash and
 zsh, hands each argument to Kettle untouched. Checked live with Codex
 CLI 0.162.0: the function launched an interactive session with the display
 server, `kettle_show` reached the pane's shelf verified, and `codex mcp list`
-ran unchanged. The viewer's sender line finds its program's path and signer in
+ran unchanged. Codex cards: `agent_setup` tests add Kettle's card hook, its
+retrieval and the server's flag only with cards. The hook reads back
+through a TOML parser as one `mcp_tool` handler matching
+`mcp__kettle__kettle_show`, asking `kettle_card` for `${tool_use_id}`. A
+launch setting its own hooks gets none, and only Codex 0.162 gets cards.
+`mcp_display` tests key a Codex session's cards by `_meta.callId`; and
+`kettle_card` refuses a call carrying either harness's model call id.
+`kettle-render` recognizes a Codex card under `↳ Hook ·` with rows and
+caption four columns in, and refuses Claude Code's label, the wrong column,
+or text after the label; its tab names Codex. `kettle-ui` sizes a Codex card
+from its own column and label, and gives a card only to a sender signed as
+the harness it asked as. Checked live with Codex CLI 0.162.0 (hooks bypassed
+for that one run, so no trust was saved): the function's launch printed the
+card under `↳ Hook ·` and Kettle painted the chart there, tabbed Codex. The
+viewer's sender line finds its program's path and signer in
 any language's word order, whatever they hold, and a line too narrow even for
 the path's last segment shortens around the signer, which stays whole. In
 `kettle-ui`'s `media` module, `route` tests: the nearest live pane ancestor

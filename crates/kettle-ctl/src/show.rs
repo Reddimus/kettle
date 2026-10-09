@@ -40,18 +40,22 @@ pub const MAX_INLINE_MESSAGE_UTF16: usize = 9_900;
 pub enum InlineTarget {
     /// Claude Code: a card printed by a synchronous hook under the call.
     ClaudeHook,
+    /// Codex: a card printed by a `PostToolUse` hook under the call.
+    CodexHook,
 }
 
 impl InlineTarget {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ClaudeHook => "claude_hook",
+            Self::CodexHook => "codex_hook",
         }
     }
 
     fn parse(text: &str) -> Option<Self> {
         match text {
             "claude_hook" => Some(Self::ClaudeHook),
+            "codex_hook" => Some(Self::CodexHook),
             _ => None,
         }
     }
@@ -612,6 +616,10 @@ mod tests {
         assert_eq!(
             parse("claude_hook".into()),
             Ok(Some(InlineTarget::ClaudeHook))
+        );
+        assert_eq!(
+            parse("codex_hook".into()),
+            Ok(Some(InlineTarget::CodexHook))
         );
         assert_eq!(parse("codex".into()), Err(FailureCode::BadParams));
         assert_eq!(

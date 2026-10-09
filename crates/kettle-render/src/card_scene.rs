@@ -29,7 +29,8 @@ pub(crate) struct CardLabel {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CardLabelKind {
     Brand,
-    Claude,
+    /// The harness that printed the card.
+    Harness(crate::CardHarness),
     Pending,
     Unavailable,
 }
@@ -37,7 +38,7 @@ impl CardLabel {
     pub fn text(&self) -> &'static str {
         match self.kind {
             CardLabelKind::Brand => "Kettle",
-            CardLabelKind::Claude => "Claude",
+            CardLabelKind::Harness(harness) => harness.name(),
             CardLabelKind::Pending => self.tr.text(kettle_i18n::Text::InlineCardPending),
             CardLabelKind::Unavailable => self.tr.text(kettle_i18n::Text::InlineCardUnavailable),
         }
@@ -207,7 +208,7 @@ impl CardScene {
             ];
             if let Some(badge) = intersect(badge, geometry.clip) {
                 self.decoration.push(quad(badge, colors.background, 1.0));
-                for (row, kind) in [CardLabelKind::Brand, CardLabelKind::Claude]
+                for (row, kind) in [CardLabelKind::Brand, CardLabelKind::Harness(block.harness)]
                     .into_iter()
                     .enumerate()
                 {
@@ -493,7 +494,10 @@ mod tests {
         assert_eq!(scene.labels.len(), 3);
         assert_eq!(scene.labels[0].kind, CardLabelKind::Brand);
         assert_eq!(scene.labels[0].rect, [0.0, 16.0, 40.0, 16.0]);
-        assert_eq!(scene.labels[1].kind, CardLabelKind::Claude);
+        assert_eq!(
+            scene.labels[1].kind,
+            CardLabelKind::Harness(crate::CardHarness::ClaudeHook)
+        );
         assert_eq!(scene.labels[1].rect, [0.0, 32.0, 40.0, 16.0]);
         assert_eq!(scene.labels[2].kind, CardLabelKind::Pending);
         assert_eq!(scene.labels[2].rect, [41.0, 48.0, 94.0, 16.0]);
@@ -631,10 +635,10 @@ mod tests {
         assert_eq!(scene.posters.len(), 1);
         assert_eq!(scene.labels.len(), 2);
         assert!(
-            scene
-                .labels
-                .iter()
-                .all(|label| matches!(label.kind, CardLabelKind::Brand | CardLabelKind::Claude))
+            scene.labels.iter().all(|label| matches!(
+                label.kind,
+                CardLabelKind::Brand | CardLabelKind::Harness(_)
+            ))
         );
         assert!(kettle_core::ImageData::new_with_budget(1, 1, vec![0; 4], &account).is_none());
         // The shelf lets its pixels go; the frame still holds them.

@@ -605,6 +605,15 @@ struct McpArgs {
     /// for one. Kettle still decides whether the caller may have it.
     #[arg(long, hide = true, requires = "display")]
     claude_card_hook: bool,
+    /// Launched by Kettle's Codex launch, whose hook prints inline cards.
+    /// Kettle still decides whether the caller may have one.
+    #[arg(
+        long,
+        hide = true,
+        requires = "display",
+        conflicts_with = "claude_card_hook"
+    )]
+    codex_card_hook: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -1186,7 +1195,13 @@ fn main() -> anyhow::Result<()> {
                 std::process::exit(if args.self_test {
                     mcp::self_test()
                 } else if args.display {
-                    mcp_display::init_session(args.claude_card_hook);
+                    mcp_display::init_session(if args.claude_card_hook {
+                        Some(mcp_display::CardHook::Claude)
+                    } else if args.codex_card_hook {
+                        Some(mcp_display::CardHook::Codex)
+                    } else {
+                        None
+                    });
                     mcp::run_mcp(mcp_tools::ToolSelection::Display)
                 } else {
                     mcp::run_mcp(mcp_tools::ToolSelection::Full)
@@ -2566,6 +2581,23 @@ mod activation_cli_tests {
         };
         assert!(args.display && args.claude_card_hook);
         assert!(parse(&["kettle", "mcp", "--claude-card-hook"]).is_err());
+        let cli = parse(&["kettle", "mcp", "--display", "--codex-card-hook"]).unwrap();
+        let Some(crate::Cmd::Mcp(args)) = cli.cmd else {
+            panic!("an mcp command");
+        };
+        assert!(args.display && args.codex_card_hook);
+        assert!(parse(&["kettle", "mcp", "--codex-card-hook"]).is_err());
+        assert!(
+            parse(&[
+                "kettle",
+                "mcp",
+                "--display",
+                "--claude-card-hook",
+                "--codex-card-hook"
+            ])
+            .is_err(),
+            "one harness's hook"
+        );
         assert!(parse(&["kettle", "mcp", "--display", "--self-test"]).is_err());
     }
 }
@@ -3678,6 +3710,7 @@ mod tests {
             "tab-handoff-fd",
             "exec",
             "claude-card-hook",
+            "codex-card-hook",
             "launch-codex",
         ];
         fn collect_missing_flags(

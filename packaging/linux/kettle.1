@@ -567,7 +567,10 @@ and
 .B KETTLE_PID
 and enabling
 .B kettle_show
-alone, without approving it; every other Codex command runs unchanged.
+alone, without approving it; every other Codex command runs unchanged. On
+macOS with Codex CLI 0.162 it also adds a hook that prints a card for each
+.B kettle_show
+under the call, once you trust that hook in Codex's own hook review.
 .B \-\-status
 reports whether Codex launched from this shell would get the server.
 .B \-\-uninstall

@@ -39,12 +39,23 @@ impl Requirement {
         r#"anchor apple generic and identifier "com.anthropic.claude-code" and certificate leaf[subject.OU] = "Q6L2SF6YDW""#,
     );
 
+    /// Codex CLI as OpenAI signs it: its identifier, under a certificate
+    /// Apple issued to OpenAI's team.
+    pub const CODEX: Self = Self(
+        r#"anchor apple generic and identifier "codex" and certificate leaf[subject.OU] = "2DC432GLL2""#,
+    );
+
     pub const fn text(self) -> &'static str {
         self.0
     }
 
     /// Every requirement Kettle checks, for the test that parses them all.
-    pub const ALL: [Self; 3] = [Self::APPLE_ISSUED, Self::APPLE_OWN, Self::CLAUDE_CODE];
+    pub const ALL: [Self; 4] = [
+        Self::APPLE_ISSUED,
+        Self::APPLE_OWN,
+        Self::CLAUDE_CODE,
+        Self::CODEX,
+    ];
 }
 
 /// A running process's signature, read after it met a requirement.

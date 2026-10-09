@@ -6,19 +6,19 @@
 use kettle_core::{InlineMarker, InlineNonce};
 use kettle_media::MediaKind;
 
-/// Where Claude Code starts a hook message's lines: five columns in.
-pub(crate) const CLAUDE_INDENT: usize = 5;
-/// Fewest and most rows a Claude Code card spans.
-const CLAUDE_ROWS: (usize, usize) = (3, 8);
+/// Fewest and most rows a card spans.
+const CARD_ROWS: (usize, usize) = (3, 8);
 /// Longest caption kept, before it is fitted to the pane's width.
 pub(crate) const MAX_CAPTION_BYTES: usize = 512;
 
-/// A Claude Code card's size in cells for an image of `image` pixels in a
-/// pane of `pane` (columns, lines) with cells of `cell` pixels: a quarter of
-/// the pane's lines, from three to eight rows, and the columns that keep the
-/// image's shape, within the width Claude Code prints without wrapping.
-/// `None` when the pane cannot hold a card with its label and caption.
-pub(crate) fn claude_card_size(
+/// The size in cells of a card `harness` prints, for an image of `image`
+/// pixels in a pane of `pane` (columns, lines) with cells of `cell` pixels:
+/// a quarter of the pane's lines, from three to eight rows, and the columns
+/// that keep the image's shape, within the width the harness prints without
+/// wrapping. `None` when the pane cannot hold a card with its label and
+/// caption.
+pub(crate) fn card_size(
+    harness: kettle_render::CardHarness,
     pane: (usize, usize),
     cell: (f32, f32),
     image: (u32, u32),
@@ -30,14 +30,14 @@ pub(crate) fn claude_card_size(
     if !finite(cell_width) || !finite(cell_height) || width == 0 || height == 0 {
         return None;
     }
-    // One column is left free: Claude Code wraps a line that reaches the edge.
+    // One column is left free: a harness wraps a line that reaches the edge.
     let room = columns
-        .checked_sub(CLAUDE_INDENT + 1)?
+        .checked_sub(harness.left() + 1)?
         .min(usize::from(kettle_render::MAX_CARD_COLUMNS));
-    let rows = (lines / 4).clamp(CLAUDE_ROWS.0, CLAUDE_ROWS.1);
+    let rows = (lines / 4).clamp(CARD_ROWS.0, CARD_ROWS.1);
     // The label above, which must print on one line, and the caption below
     // take a line each.
-    let label = kettle_render::CardHarness::ClaudeHook.label_columns();
+    let label = harness.label_columns();
     if room == 0 || columns <= label || lines < rows + 2 {
         return None;
     }
@@ -46,14 +46,10 @@ pub(crate) fn claude_card_size(
     Some((u8::try_from(rows).ok()?, u8::try_from(card_columns).ok()?))
 }
 
-/// The message Claude Code prints under the call: the card's rows of
-/// placeholder cells, then its caption, each on a line of its own after the
-/// hook's label.
-pub(crate) fn claude_card_message(
-    nonce: InlineNonce,
-    size: (u8, u8),
-    caption: &str,
-) -> Option<String> {
+/// The message a harness prints under the call: an empty first line, which
+/// follows the hook's label, then the card's rows of placeholder cells and
+/// its caption, each on a line of its own.
+pub(crate) fn card_message(nonce: InlineNonce, size: (u8, u8), caption: &str) -> Option<String> {
     let (rows, columns) = size;
     let mut message = String::with_capacity(
         usize::from(rows) * (usize::from(columns) * 20 + 1) + caption.len() + 1,
@@ -148,36 +144,122 @@ mod tests {
     #[test]
     fn a_card_takes_a_quarter_of_the_pane_and_keeps_the_images_shape() {
         // 80x40 pane, cells twice as tall as wide, a 4:3 image.
-        let (rows, columns) = claude_card_size((80, 40), (8.0, 16.0), (640, 480)).unwrap();
+        let (rows, columns) = card_size(
+            kettle_render::CardHarness::ClaudeHook,
+            (80, 40),
+            (8.0, 16.0),
+            (640, 480),
+        )
+        .unwrap();
         assert_eq!(rows, 8, "a quarter of 40 lines, at most eight");
         assert_eq!(columns, 21, "8 rows × 2 × 4/3");
         assert_eq!(
-            claude_card_size((80, 12), (8.0, 16.0), (640, 480))
-                .unwrap()
-                .0,
+            card_size(
+                kettle_render::CardHarness::ClaudeHook,
+                (80, 12),
+                (8.0, 16.0),
+                (640, 480)
+            )
+            .unwrap()
+            .0,
             3
         );
         // A very wide image fills the room left of the edge, and no more.
-        let (_, wide) = claude_card_size((80, 40), (8.0, 16.0), (10_000, 10)).unwrap();
-        assert_eq!(usize::from(wide), 80 - CLAUDE_INDENT - 1);
-        let (_, widest) = claude_card_size((400, 40), (8.0, 16.0), (10_000, 10)).unwrap();
+        let (_, wide) = card_size(
+            kettle_render::CardHarness::ClaudeHook,
+            (80, 40),
+            (8.0, 16.0),
+            (10_000, 10),
+        )
+        .unwrap();
+        assert_eq!(
+            usize::from(wide),
+            80 - kettle_render::CardHarness::ClaudeHook.left() - 1
+        );
+        let (_, widest) = card_size(
+            kettle_render::CardHarness::ClaudeHook,
+            (400, 40),
+            (8.0, 16.0),
+            (10_000, 10),
+        )
+        .unwrap();
         assert_eq!(widest, kettle_render::MAX_CARD_COLUMNS);
         // A pane that cannot hold the rows with a label and caption has none,
         // nor one too narrow to print the label on one line.
-        assert_eq!(claude_card_size((80, 4), (8.0, 16.0), (640, 480)), None);
+        assert_eq!(
+            card_size(
+                kettle_render::CardHarness::ClaudeHook,
+                (80, 4),
+                (8.0, 16.0),
+                (640, 480)
+            ),
+            None
+        );
         let label = kettle_render::CardHarness::ClaudeHook.label_columns();
         assert_eq!(label, 61);
-        assert_eq!(claude_card_size((label, 40), (8.0, 16.0), (640, 480)), None);
-        assert!(claude_card_size((label + 1, 40), (8.0, 16.0), (640, 480)).is_some());
-        assert_eq!(claude_card_size((6, 40), (8.0, 16.0), (640, 480)), None);
-        assert_eq!(claude_card_size((80, 40), (0.0, 16.0), (640, 480)), None);
-        assert_eq!(claude_card_size((80, 40), (8.0, 16.0), (0, 480)), None);
+        assert_eq!(
+            card_size(
+                kettle_render::CardHarness::ClaudeHook,
+                (label, 40),
+                (8.0, 16.0),
+                (640, 480)
+            ),
+            None
+        );
+        assert!(
+            card_size(
+                kettle_render::CardHarness::ClaudeHook,
+                (label + 1, 40),
+                (8.0, 16.0),
+                (640, 480)
+            )
+            .is_some()
+        );
+        assert_eq!(
+            card_size(
+                kettle_render::CardHarness::ClaudeHook,
+                (6, 40),
+                (8.0, 16.0),
+                (640, 480)
+            ),
+            None
+        );
+        assert_eq!(
+            card_size(
+                kettle_render::CardHarness::ClaudeHook,
+                (80, 40),
+                (0.0, 16.0),
+                (640, 480)
+            ),
+            None
+        );
+        // Codex starts its rows a column further left, so a card there can
+        // be a column wider, and its short label fits a narrow pane.
+        let codex = kettle_render::CardHarness::CodexHook;
+        let (_, wide) = card_size(codex, (80, 40), (8.0, 16.0), (10_000, 10)).unwrap();
+        assert_eq!(usize::from(wide), 80 - 4 - 1);
+        assert!(card_size(codex, (20, 40), (8.0, 16.0), (640, 480)).is_some());
+        assert_eq!(card_size(codex, (5, 40), (8.0, 16.0), (640, 480)), None);
+        // Its label prints `↳ Hook · ` over nine columns, so a pane no wider
+        // gets no card.
+        assert_eq!(codex.label_columns(), 9);
+        assert_eq!(card_size(codex, (9, 40), (8.0, 16.0), (640, 480)), None);
+        assert!(card_size(codex, (10, 40), (8.0, 16.0), (640, 480)).is_some());
+        assert_eq!(
+            card_size(
+                kettle_render::CardHarness::ClaudeHook,
+                (80, 40),
+                (8.0, 16.0),
+                (0, 480)
+            ),
+            None
+        );
     }
 
     #[test]
     fn the_message_is_the_cards_rows_then_its_caption() {
         let nonce = InlineNonce::new([1, 2, 3, 4, 5, 6]).unwrap();
-        let message = claude_card_message(nonce, (3, 4), "plot.png - raster 64x48").unwrap();
+        let message = card_message(nonce, (3, 4), "plot.png - raster 64x48").unwrap();
         let lines: Vec<&str> = message.split('\n').collect();
         assert_eq!(
             lines.len(),
@@ -206,7 +288,7 @@ mod tests {
         }
         assert_eq!(lines[4], "plot.png - raster 64x48");
         // An eight-row, widest card stays within what Claude Code prints whole.
-        let widest = claude_card_message(nonce, (8, kettle_render::MAX_CARD_COLUMNS), "x").unwrap();
+        let widest = card_message(nonce, (8, kettle_render::MAX_CARD_COLUMNS), "x").unwrap();
         assert!(
             widest.encode_utf16().count() <= kettle_ctl::show::MAX_INLINE_MESSAGE_UTF16,
             "{}",
