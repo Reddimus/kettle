@@ -46,6 +46,7 @@ pub fn commands() -> Vec<(Text, Action)> {
         (T::PalettePreviewSource, PreviewSource),
         (T::PalettePreviewCanvas, PreviewCanvas),
         (T::PalettePreviewCopy, PreviewCopy),
+        (T::PalettePreviewReload, PreviewReload),
         (T::PaletteOpenSettings, OpenSettings),
         (T::PaletteAbout, About),
         (T::PaletteEditConfig, EditConfig),
@@ -279,6 +280,7 @@ mod tests {
             PreviewSource,
             PreviewCanvas,
             PreviewCopy,
+            PreviewReload,
             EditConfig,
             SetScrollbarAlways,
             SetScrollbarAuto,
@@ -427,6 +429,7 @@ mod tests {
                 | PreviewSource
                 | PreviewCanvas
                 | PreviewCopy
+                | PreviewReload
                 | EditConfig
                 | SetScrollbarAlways
                 | SetScrollbarAuto

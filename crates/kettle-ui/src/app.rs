@@ -795,6 +795,68 @@ fn lane_mode(
     }
 }
 
+/// Whether `item` can be read again: it came from a file, not bytes a
+/// request carried.
+fn preview_reloads(item: &crate::media::ShelfItem) -> bool {
+    matches!(
+        item.source.spec.input,
+        crate::media::SourceInput::Path { .. }
+    )
+}
+
+/// What a reload keeps of the item it replaces.
+struct ReloadOf {
+    key: crate::media::ShelfKey,
+    title: String,
+    canvas: kettle_media::Canvas,
+}
+
+/// What reloading `item`, shown in `panel`, reads and keeps: its file, and
+/// its key, title and the canvas the user chose for its lane, which a file
+/// that now holds a diagram is rendered for. None for bytes a request
+/// carried, or a path this platform cannot name.
+fn reload_of(
+    item: &crate::media::ShelfItem,
+    panel: &crate::window_state::PreviewPanel,
+) -> Option<(std::path::PathBuf, ReloadOf)> {
+    let crate::media::SourceInput::Path { path, .. } = &item.source.spec.input else {
+        return None;
+    };
+    let native = native_path_buf(path)?;
+    let reload = ReloadOf {
+        key: item
+            .key
+            .clone()
+            .unwrap_or_else(|| crate::media::ShelfKey::Path(path.clone())),
+        title: item.title.clone(),
+        canvas: media_canvas(chosen_canvas(item, panel)),
+    };
+    Some((native, reload))
+}
+
+/// The path a native path names on this platform.
+fn native_path_buf(path: &kettle_media::NativePath) -> Option<std::path::PathBuf> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+        Some(std::path::PathBuf::from(std::ffi::OsStr::from_bytes(
+            path.as_bytes(),
+        )))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStringExt as _;
+        let (units, rest) = path.as_bytes().as_chunks::<2>();
+        if !rest.is_empty() {
+            return None;
+        }
+        let wide: Vec<u16> = units.iter().map(|unit| u16::from_le_bytes(*unit)).collect();
+        Some(std::path::PathBuf::from(std::ffi::OsString::from_wide(
+            &wide,
+        )))
+    }
+}
+
 /// The shelf item `pane`'s lane shows in `ws`, if it shows one.
 fn preview_item(ws: &WindowState, pane: u64) -> Option<&crate::media::ShelfItem> {
     let panel = ws.preview_panels.get(&pane)?;
@@ -997,7 +1059,7 @@ fn lane_controls(
     u64,
     Option<kettle_render::Rect4>,
     kettle_render::MediaLaneHit,
-); 8] {
+); 9] {
     use kettle_render::MediaLaneHit as Hit;
     [
         (1, geometry.previous, Hit::Previous),
@@ -1008,6 +1070,7 @@ fn lane_controls(
         (6, geometry.mode, Hit::Mode),
         (7, geometry.canvas, Hit::Canvas),
         (8, geometry.copy, Hit::Copy),
+        (9, geometry.reload, Hit::Reload),
     ]
 }
 
@@ -1023,6 +1086,7 @@ fn lane_control_name(hit: kettle_render::MediaLaneHit) -> &'static str {
         Hit::Mode => "mode",
         Hit::Canvas => "canvas",
         Hit::Copy => "copy",
+        Hit::Reload => "reload",
         Hit::Inside => "inside",
     }
 }
@@ -5783,6 +5847,7 @@ fn lane_action_hit(action: &Action) -> Option<kettle_render::MediaLaneHit> {
         Action::PreviewSource => Some(Hit::Mode),
         Action::PreviewCanvas => Some(Hit::Canvas),
         Action::PreviewCopy => Some(Hit::Copy),
+        Action::PreviewReload => Some(Hit::Reload),
         _ => None,
     }
 }
@@ -10719,9 +10784,13 @@ impl App {
     /// Show `item` of `pane`'s shelf in the pane's preview lane, opening or
     /// expanding the lane, and note the item was viewed.
     fn show_media_item(&mut self, ws: &mut WindowState, pane: u64, item: u64) {
-        // The item already showing keeps its mode, canvas and place.
+        // The item already showing keeps its mode, canvas and place, and
+        // what was last said about it goes: it may just have been read again.
         let panel = match ws.preview_panels.get(&pane) {
-            Some(panel) if panel.item == item => *panel,
+            Some(panel) if panel.item == item => crate::window_state::PreviewPanel {
+                notice: None,
+                ..*panel
+            },
             _ => crate::window_state::PreviewPanel::new(item),
         };
         let had_panel = ws.preview_panels.insert(pane, panel).is_some();
@@ -11336,6 +11405,7 @@ impl App {
             notice: panel
                 .notice
                 .map(|notice| lane_notice_text(notice, tr).to_string()),
+            reload: preview_reloads(item),
         };
         // The source rows in view, for the room the lane has: only those are
         // read out of the text.
@@ -11484,6 +11554,7 @@ impl App {
             Hit::Mode => self.switch_preview_mode(ws, pane),
             Hit::Canvas => self.next_preview_canvas(ws, pane),
             Hit::Copy => self.copy_preview(ws, pane),
+            Hit::Reload => self.reload_preview(ws, pane),
             Hit::Inside => {}
         }
     }
@@ -20284,7 +20355,8 @@ impl App {
             | Action::ClosePreview
             | Action::PreviewSource
             | Action::PreviewCanvas
-            | Action::PreviewCopy => {
+            | Action::PreviewCopy
+            | Action::PreviewReload => {
                 if let Some(hit) = lane_action_hit(&action)
                     && let Some(pane) = ws.mux.active_focus()
                     && ws.preview_panels.contains_key(&pane)
@@ -21694,7 +21766,7 @@ impl App {
             ConfirmAction::PreviewLocalFile { pane, uri } => {
                 let origin = ws.mux.panes.get(&pane).map(pane_path_origin);
                 match confirmed_preview_path(&uri, origin) {
-                    Some(path) => self.pull_preview(ws, pane, &path),
+                    Some(path) => self.pull_preview(ws, pane, &path, None),
                     None => fire_notify(
                         self.ui_text
                             .text(kettle_i18n::Text::NotifyTitleRemoteFileNotOpened),
@@ -22691,7 +22763,7 @@ impl App {
             return notify_preview_failure(tr, Some(kettle_media::FailureCode::UnsupportedMedia));
         };
         match link_gate(uri, origin) {
-            LinkGate::Open => self.pull_preview(ws, pane, &path),
+            LinkGate::Open => self.pull_preview(ws, pane, &path, None),
             LinkGate::Refuse => fire_notify(
                 tr.text(kettle_i18n::Text::NotifyTitleRemoteFileNotOpened),
                 &tr.notify_body_remote_file_not_opened(&link_display_name(uri, 48)),
@@ -22737,7 +22809,7 @@ impl App {
             return;
         };
         match self.copied_preview(ws, pane) {
-            Some(CopiedPreview::File(path)) => self.pull_preview(ws, pane, &path),
+            Some(CopiedPreview::File(path)) => self.pull_preview(ws, pane, &path, None),
             Some(CopiedPreview::Link(url)) => self.preview_pane_link(ws, pane, &url),
             None => {
                 let tr = self.ui_text;
@@ -22749,10 +22821,34 @@ impl App {
         }
     }
 
+    /// Read `pane`'s item from its file again, on the user's gesture: the
+    /// result replaces the item in place, under its key and title, on the
+    /// canvas chosen for its lane, as the user's own. The worker read the file here
+    /// before, so the pane's gate for files it names has nothing to add; a
+    /// control client still cannot start the read (see `pull_preview`).
+    fn reload_preview(&mut self, ws: &mut WindowState, pane: u64) {
+        let Some((native, reload)) = preview_item(ws, pane)
+            .zip(ws.preview_panels.get(&pane))
+            .and_then(|(item, panel)| reload_of(item, panel))
+        else {
+            return;
+        };
+        if let Some(panel) = ws.preview_panels.get_mut(&pane) {
+            panel.notice = None;
+        }
+        self.pull_preview(ws, pane, &native, Some(reload));
+    }
+
     /// Ask the media worker to render the local file at `path` for `pane`'s
     /// lane: the user's own pull, which waits in the queue's slot for the
     /// user, opens the lane when it is ready, and says why when it cannot.
-    fn pull_preview(&mut self, ws: &mut WindowState, pane: u64, path: &std::path::Path) {
+    fn pull_preview(
+        &mut self,
+        ws: &mut WindowState,
+        pane: u64,
+        path: &std::path::Path,
+        reload: Option<ReloadOf>,
+    ) {
         // A control client may drive Kettle's UI, but its input is never the
         // user's gesture, so it cannot have a file read on the GUI's word.
         if self.ctl_driving {
@@ -22769,12 +22865,21 @@ impl App {
         let Ok(native) = kettle_media::NativePath::from_path(path) else {
             return notify_preview_failure(tr, Some(kettle_media::FailureCode::FileNotFound));
         };
-        let key = Some(crate::media::ShelfKey::Path(native.clone()));
-        let title = native
-            .file_name_lossy()
-            .map(|name| crate::media::display_title(&name))
-            .filter(|title| !title.is_empty())
-            .unwrap_or_else(|| tr.text(kettle_i18n::Text::MediaShelfUntitled).into());
+        // A reload replaces its item in place, under the item's key and
+        // title, on the canvas it shows; a new pull is keyed by its file.
+        let (key, title, canvas) = match reload {
+            Some(item) => (item.key, item.title, item.canvas),
+            None => (
+                crate::media::ShelfKey::Path(native.clone()),
+                native
+                    .file_name_lossy()
+                    .map(|name| crate::media::display_title(&name))
+                    .filter(|title| !title.is_empty())
+                    .unwrap_or_else(|| tr.text(kettle_i18n::Text::MediaShelfUntitled).into()),
+                kettle_media::Canvas::Theme,
+            ),
+        };
+        let key = Some(key);
         let Some(spec) = crate::media::JobSpec::from_job(kettle_media::Job {
             kind: kettle_media::JobKind::Auto,
             source: kettle_media::Source::user_pull(
@@ -22782,7 +22887,7 @@ impl App {
                 kettle_media::GuiActionWitness::from_explicit_gui_action(),
             ),
             theme,
-            canvas: kettle_media::Canvas::Theme,
+            canvas,
             target,
             fallback_fonts: Vec::new(),
         }) else {
@@ -31410,6 +31515,9 @@ impl App {
                         }
                         kettle_render::MediaLaneHit::Copy => {
                             self.ui_text.text(kettle_i18n::Text::MediaLaneA11yCopy)
+                        }
+                        kettle_render::MediaLaneHit::Reload => {
+                            self.ui_text.text(kettle_i18n::Text::MediaLaneA11yReload)
                         }
                         kettle_render::MediaLaneHit::Inside => continue,
                     };
@@ -42617,6 +42725,9 @@ mod tests {
             mode: kettle_render::MediaLaneMode::Rendered,
             source: None,
             copy: true,
+
+            reload: false,
+
             notice: None,
         };
         let (label, description) = super::media_lane_accessibility(&lane, &tr);
@@ -54503,7 +54614,7 @@ mod hint_action_tests {
             "found.retain(|(_, _, what)| hint_previews(what));",
             "if std::mem::take(&mut ws.hint_preview) {\n            if !hint_previews(&h.what) {\n                return;\n            }",
             "Some(url) => self.preview_pane_link(ws, h.pane, &url),",
-            "match link_gate(uri, origin) {\n            LinkGate::Open => self.pull_preview(ws, pane, &path),",
+            "match link_gate(uri, origin) {\n            LinkGate::Open => self.pull_preview(ws, pane, &path, None),",
         ] {
             assert!(src.contains(site), "missing {site}");
         }
@@ -55696,16 +55807,17 @@ mod lane_control_tests {
             Hit::Mode,
             Hit::Canvas,
             Hit::Copy,
+            Hit::Reload,
             Hit::Inside,
         ];
         let names: std::collections::HashSet<_> =
             hits.iter().map(|hit| lane_control_name(*hit)).collect();
         assert_eq!(names.len(), hits.len());
-        let ids: std::collections::HashSet<_> = (0..=8)
+        let ids: std::collections::HashSet<_> = (0..=9)
             .map(|part| super::accessibility_lane_id(7, part).expect("in range"))
             .collect();
-        assert_eq!(ids.len(), 9);
-        for part in 0..=8 {
+        assert_eq!(ids.len(), 10);
+        for part in 0..=9 {
             let id = super::accessibility_lane_id(7, part).unwrap();
             assert_eq!(super::accessibility_lane_part(id), Some((7, part)));
         }
@@ -55746,6 +55858,115 @@ mod lane_control_tests {
         assert!(canvas.contains(
             "if diagram {\n            self.render_preview_again(ws, pane, media_canvas(next));"
         ));
+    }
+
+    /// Only an item read from a file reloads; bytes a request carried, kept
+    /// or released, have no file to read.
+    #[test]
+    fn only_a_file_item_reloads() {
+        let mut item = item(1, kettle_media::MediaKind::Svg, b"<svg/>");
+        assert!(!super::preview_reloads(&item), "carried bytes");
+        item.source.release();
+        assert!(!super::preview_reloads(&item), "released bytes");
+        item.source.spec.input = file_input();
+        assert!(super::preview_reloads(&item));
+    }
+
+    /// A file this platform names, as an item's source.
+    fn file_input() -> crate::media::SourceInput {
+        #[cfg(unix)]
+        let bytes = b"/tmp/plot.svg".to_vec();
+        #[cfg(windows)]
+        let bytes = "C:\\plot.svg"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        crate::media::SourceInput::Path {
+            path: kettle_media::NativePath::new(bytes).unwrap(),
+            authorization: kettle_media::Authorization::ExternalAttested(
+                kettle_media::ExternalAttested { dev: 1, ino: 2 },
+            ),
+        }
+    }
+
+    /// A reload reads an item's file again under its key and title, on the
+    /// canvas the user chose for its lane, so a file that now holds a
+    /// diagram is rendered for the background the lane showed. Bytes a
+    /// request carried have no file to read.
+    #[test]
+    fn a_reload_keeps_the_canvas_the_lane_shows() {
+        use kettle_media::Canvas;
+        use kettle_render::MediaCanvas as C;
+        let mut svg = item(1, kettle_media::MediaKind::Svg, b"<svg/>");
+        let mut panel = crate::window_state::PreviewPanel::new(1);
+        assert!(super::reload_of(&svg, &panel).is_none(), "carried bytes");
+        svg.source.spec.input = file_input();
+        let crate::media::SourceInput::Path { path, .. } = &svg.source.spec.input else {
+            unreachable!()
+        };
+        let (native, reload) = super::reload_of(&svg, &panel).expect("a file");
+        assert_eq!(Some(native), super::native_path_buf(path));
+        assert_eq!(reload.key, crate::media::ShelfKey::Path(path.clone()));
+        assert_eq!(reload.title, "plot");
+        assert_eq!(reload.canvas, Canvas::White, "an SVG shows on white");
+        panel.canvas = Some(C::Checker);
+        let (_, reload) = super::reload_of(&svg, &panel).expect("a file");
+        assert_eq!(reload.canvas, Canvas::Checker, "the user's choice");
+        let mut diagram = svg.clone();
+        diagram.kind = kettle_media::MediaKind::Mermaid;
+        diagram.source.spec.canvas = Canvas::White;
+        let mut shown = crate::window_state::PreviewPanel::new(1);
+        let (_, reload) = super::reload_of(&diagram, &shown).expect("a file");
+        assert_eq!(reload.canvas, Canvas::White, "the diagram's own");
+        // Chosen while a render for it has yet to come back.
+        shown.canvas = Some(C::Checker);
+        let (_, reload) = super::reload_of(&diagram, &shown).expect("a file");
+        assert_eq!(reload.canvas, Canvas::Checker, "the user's choice");
+    }
+
+    /// A native path is the path it names on this platform.
+    #[cfg(unix)]
+    #[test]
+    fn a_native_path_names_its_path() {
+        let native = kettle_media::NativePath::new(b"/tmp/my plot\xff.png".to_vec()).unwrap();
+        assert_eq!(
+            super::native_path_buf(&native),
+            Some(std::path::PathBuf::from(
+                <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(
+                    b"/tmp/my plot\xff.png"
+                )
+            ))
+        );
+    }
+
+    /// Reload reads an item's file again as the user's own pull, under the
+    /// item's key, title and canvas, only for an item read from a file, and
+    /// what was said about the item goes once it shows again.
+    #[test]
+    fn reload_is_a_pull_of_the_items_file_under_its_key() {
+        let src = super::production_source();
+        let body = |name: &str| {
+            src.split(&format!("fn {name}("))
+                .nth(1)
+                .and_then(|rest| rest.split("\n    fn ").next())
+                .unwrap_or_else(|| panic!("{name}"))
+        };
+        let reload = body("reload_preview");
+        assert!(reload.contains(".and_then(|(item, panel)| reload_of(item, panel))"));
+        assert!(reload.contains("self.pull_preview(ws, pane, &native, Some(reload));"));
+        let pull = body("pull_preview");
+        let refused = pull
+            .find("if self.ctl_driving {")
+            .expect("no read for a control client");
+        let kept = pull
+            .find("Some(item) => (item.key, item.title, item.canvas),")
+            .expect("a reload keeps its item's key, title and canvas");
+        assert!(refused < kept);
+        assert!(body("show_media_item").contains("notice: None,\n                ..*panel"));
+        assert_eq!(
+            super::lane_action_hit(&kettle_config::Action::PreviewReload),
+            Some(kettle_render::MediaLaneHit::Reload)
+        );
     }
 
     /// A lane shows source only while its item has a source: one replaced by

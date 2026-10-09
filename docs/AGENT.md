@@ -376,10 +376,11 @@ its `mode` (`rendered` or `source`), `canvas` (`theme`, `white` or
 `checker`) and `controls`, each shown control's rectangle by name; never a
 title, source, path or pixel). An SVG's or a diagram's lane can show the
 source it was rendered from (`≡`), put the picture on another background
-(`◐`; a diagram is rendered again for it, from the same source) and copy the
-picture or the source (`⧉`). A control client may press these like any
-control, but a diagram is never read from its file again while Kettle
-handles a control request.
+(`◐`; a diagram is rendered again for it, from the same source), copy the
+picture or the source (`⧉`), and read an item's file again (`↻`), which
+replaces the item in place, keeping its key and title, as one the user
+opened. A control client may press these like any control, but no file is
+read again while Kettle handles a control request.
 The user can also preview an image, SVG or Mermaid file a pane names
 without any agent: `preview_link` (the palette's "Preview a file in
 Kettle") labels such files in the focused pane as quick select does, and the

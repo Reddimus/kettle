@@ -700,7 +700,16 @@ result `finish_lane_render` takes only for the same item and generation
 read from a source with the same digest (`lane_render_verdict`), keeping
 the item's id, generation and place; a changed file is said in the lane
 instead. Such a render never reads a file while a control request is
-handled. Copying goes to `media::CopyService`, one thread with its own
+handled. `↻` (`reload_preview`) reads an item's file again as the user's
+own pull (`pull_preview` with a `ReloadOf`): a fresh read with a new action
+witness, under the item's key and title and on the canvas chosen for its
+lane (`reload_of`), so the result replaces the item in place as
+`Provenance::User`, and a file that now holds a diagram is drawn for the
+background the lane showed; showing it again clears what the lane last
+said. The worker read that path on this computer before, so the
+pane's gate for files its output names adds nothing; the read is still
+refused while a control request is handled. Copying goes to
+`media::CopyService`, one thread with its own
 clipboard handle for the life of the process, one copy running and one
 waiting; a source copy shares the item's charged text rather than copying
 it, and the lane says what came of it. A wheel over a lane scrolls it only

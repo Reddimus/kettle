@@ -2055,6 +2055,9 @@ fn a_lane_draws_its_open_outside_button_only_when_offered() {
         mode: MediaLaneMode::Rendered,
         source: None,
         copy: false,
+
+        reload: false,
+
         notice: None,
     };
     let geometry = media_lane_geometry(
@@ -2173,6 +2176,9 @@ fn a_lane_in_source_mode_shows_rows_instead_of_the_image() {
             total_rows: 2,
         }),
         copy: true,
+
+        reload: false,
+
         notice: None,
     };
     let reds = |image: &image::RgbaImage| {
@@ -2248,6 +2254,9 @@ fn a_preview_lane_paints_its_panel_and_leaves_the_terminal() {
         mode: MediaLaneMode::Rendered,
         source: None,
         copy: false,
+
+        reload: false,
+
         notice: None,
     };
     let without = capture(&mut renderer, &cfg, &[view()], &focused(false));

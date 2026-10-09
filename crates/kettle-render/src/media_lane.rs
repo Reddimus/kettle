@@ -79,6 +79,8 @@ pub struct MediaLanePanel {
     pub source: Option<MediaLaneSource>,
     /// Whether there is something to copy in the current mode.
     pub copy: bool,
+    /// Whether the item came from a file the header offers to read again.
+    pub reload: bool,
     /// What the lane last did, shown in place of the hint until it changes.
     pub notice: Option<String>,
 }
@@ -174,6 +176,8 @@ pub struct MediaLaneGeometry {
     pub canvas: Option<Rect4>,
     /// Copies the image, or the source in source mode.
     pub copy: Option<Rect4>,
+    /// Reads the item's file again.
+    pub reload: Option<Rect4>,
     /// Collapses an expanded lane to its header, or expands a collapsed one.
     pub toggle: Rect4,
     pub close: Rect4,
@@ -206,6 +210,8 @@ pub enum MediaLaneHit {
     /// The next canvas.
     Canvas,
     Copy,
+    /// Read the item's file again.
+    Reload,
     /// Anywhere else in the lane: nothing happens, and nothing reaches the
     /// terminal.
     Inside,
@@ -224,6 +230,8 @@ impl MediaLaneGeometry {
             Some(MediaLaneHit::Close)
         } else if contains(self.toggle, x, y) {
             Some(MediaLaneHit::Toggle)
+        } else if self.reload.is_some_and(|rect| contains(rect, x, y)) {
+            Some(MediaLaneHit::Reload)
         } else if self.mode.is_some_and(|rect| contains(rect, x, y)) {
             Some(MediaLaneHit::Mode)
         } else if self.canvas.is_some_and(|rect| contains(rect, x, y)) {
@@ -285,8 +293,8 @@ pub fn media_lane_geometry(
     };
     // Controls take the header from the right, close first; each one past
     // collapse appears only while the title keeps its few columns, in order
-    // of need: the mode, the canvas, browsing, copy, open outside, then the
-    // counter. One that does not fit leaves the rest to try.
+    // of need: reload, the mode, the canvas, browsing, copy, open outside,
+    // then the counter. One that does not fit leaves the rest to try.
     let title_floor = left + MIN_TITLE_COLUMNS * tw + pad;
     let mut edge = right;
     let mut take = |width: f32, always: bool| {
@@ -297,6 +305,11 @@ pub fn media_lane_geometry(
     };
     let close = take(button, true).unwrap_or_default();
     let toggle = take(button, true).unwrap_or_default();
+    let reload = if lane.reload {
+        take(button, false)
+    } else {
+        None
+    };
     let mode = if lane.source.is_some() {
         take(button, false)
     } else {
@@ -339,6 +352,7 @@ pub fn media_lane_geometry(
             mode,
             canvas,
             copy,
+            reload,
             toggle,
             close,
             full,
@@ -380,6 +394,7 @@ pub fn media_lane_geometry(
         mode,
         canvas,
         copy,
+        reload,
         toggle,
         close,
         full,
@@ -445,8 +460,8 @@ pub(crate) struct LaneText {
     hint: TextBuffer,
     status: TextBuffer,
     /// Previous, next, open outside, collapse, expand, close, show source,
-    /// show rendered, canvas and copy.
-    controls: [TextBuffer; 10],
+    /// show rendered, canvas, copy and reload.
+    controls: [TextBuffer; 11],
     /// What each line buffer was last shaped with; `None` until it is, or
     /// once a font change means it must be again.
     shaped: [Option<String>; 6],
@@ -490,6 +505,7 @@ impl LaneText {
                 control(font_system, "▣"),
                 control(font_system, "◐"),
                 control(font_system, "⧉"),
+                control(font_system, "↻"),
             ],
             shaped: Default::default(),
             rows: Vec::new(),
@@ -673,6 +689,7 @@ impl LaneText {
             geometry.mode.filter(|_| source),
             geometry.canvas,
             geometry.copy,
+            geometry.reload,
         ];
         for (buffer, rect) in self.controls.iter().zip(buttons) {
             if let Some(rect) = rect {
@@ -742,6 +759,9 @@ mod tests {
             mode: MediaLaneMode::Rendered,
             source: None,
             copy: false,
+
+            reload: false,
+
             notice: None,
         }
     }
@@ -1044,7 +1064,7 @@ mod tests {
     #[test]
     fn source_canvas_and_copy_appear_when_offered_and_answer_presses() {
         let plain = media_lane_geometry(&viewer((1, 1), Some((64, 48))), CELL, CELL).unwrap();
-        assert_eq!((plain.mode, plain.copy), (None, None));
+        assert_eq!((plain.mode, plain.copy, plain.reload), (None, None, None));
         assert!(plain.canvas.is_some(), "an image has a canvas");
         assert!(
             media_lane_geometry(&viewer((1, 1), None), CELL, CELL)
@@ -1056,9 +1076,16 @@ mod tests {
         let mut lane = viewer((1, 1), Some((64, 48)));
         lane.source = Some(MediaLaneSource::default());
         lane.copy = true;
+        lane.reload = true;
         let rendered = media_lane_geometry(&lane, CELL, CELL).unwrap();
+        // Reload comes first after collapse, as what a changed file needs.
+        assert_eq!(
+            rendered.reload.unwrap().0 + rendered.reload.unwrap().2,
+            rendered.toggle.0
+        );
         let center = |rect: Rect4| (rect.0 + rect.2 / 2.0, rect.1 + rect.3 / 2.0);
         for (rect, hit) in [
+            (rendered.reload, MediaLaneHit::Reload),
             (rendered.mode, MediaLaneHit::Mode),
             (rendered.canvas, MediaLaneHit::Canvas),
             (rendered.copy, MediaLaneHit::Copy),
@@ -1095,6 +1122,7 @@ mod tests {
             let mut lane = viewer((2, 5), Some((64, 48)));
             lane.open_outside = true;
             lane.copy = true;
+            lane.reload = true;
             lane.source = Some(MediaLaneSource::default());
             lane.rect = (210.0, 40.0, width as f32, 300.0);
             let Some(geometry) = media_lane_geometry(&lane, CELL, CELL) else {
@@ -1102,6 +1130,7 @@ mod tests {
                 continue;
             };
             let optional = [
+                geometry.reload,
                 geometry.mode,
                 geometry.canvas,
                 geometry.previous,
@@ -1115,13 +1144,16 @@ mod tests {
             // shows only after the mode and canvas; a single button may still
             // fit where browsing does not.
             let shown: Vec<bool> = optional.iter().map(Option::is_some).collect();
-            assert_eq!(shown[2], shown[3], "{width}: browsing comes as a pair");
-            let singles = [shown[0], shown[1], shown[4], shown[5]];
+            assert_eq!(shown[3], shown[4], "{width}: browsing comes as a pair");
+            let singles = [shown[0], shown[1], shown[2], shown[5], shown[6]];
             assert!(
                 singles.windows(2).all(|pair| pair[0] || !pair[1]),
                 "{width}: {singles:?}"
             );
-            assert!(!shown[2] || (shown[0] && shown[1]), "{width}: {shown:?}");
+            assert!(
+                !shown[3] || (shown[0] && shown[1] && shown[2]),
+                "{width}: {shown:?}"
+            );
             assert!(
                 controls <= previous_controls,
                 "fewer controls as it narrows"
