@@ -1207,12 +1207,153 @@ def check_powershell(executable: str) -> None:
         )
 
 
+CODEX_STAND_IN = "/kettle-stand-in/bin/kettle"
+CODEX_FORWARDED = "<agent-setup><--launch-codex><--><a b><*><>"
+
+
+def codex_startup(temporary: Path) -> tuple[Path, str, Path]:
+    """Lay out Kettle's Codex startup as a pane gets it, naming a stand-in
+    Kettle that prints its arguments: the zsh startup file's directory, the
+    fish code, and an empty home."""
+    kettle = temporary / "bin" / "kettle"
+    kettle.parent.mkdir(parents=True)
+    kettle.write_text("#!/bin/sh\nprintf '<%s>' \"$@\"\n", encoding="utf-8")
+    kettle.chmod(0o755)
+    zsh = temporary / "shim" / "zsh"
+    zsh.mkdir(parents=True)
+    text = (FIXTURES / "codex-zshenv").read_text(encoding="utf-8")
+    (zsh / ".zshenv").write_text(text.replace(CODEX_STAND_IN, str(kettle)), encoding="utf-8")
+    fish = (FIXTURES / "codex-init.fish").read_text(encoding="utf-8")
+    home = temporary / "home"
+    (home / ".config" / "fish" / "functions").mkdir(parents=True)
+    return zsh, fish.replace(CODEX_STAND_IN, str(kettle)), home
+
+
+def codex_run(
+    command: list[str],
+    home: Path,
+    variables: dict[str, str],
+    stdin: str = "",
+) -> tuple[str, str]:
+    """Run a shell with only a pane's variables and `stdin` as its input;
+    return its output and the trace its user startup files wrote."""
+    trace = home / "trace"
+    trace.unlink(missing_ok=True)
+    environment = {"HOME": str(home), "TERM": "dumb", "PATH": "/usr/bin:/bin", **variables}
+    result = subprocess.run(
+        command,
+        env=environment,
+        input=stdin.encode("utf-8"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=20,
+        check=False,
+    )
+    output = result.stdout.decode("utf-8", errors="replace")
+    return output, trace.read_text(encoding="utf-8") if trace.exists() else ""
+
+
+def check_codex_zsh(executable: str) -> None:
+    """Kettle's .zshenv restores ZDOTDIR exactly, runs the user's startup
+    files once each from where zsh would have found them, and defines codex
+    before the first prompt, forwarding every argument, only in an
+    interactive shell that has none, an autoloadable one included."""
+    with tempfile.TemporaryDirectory(prefix="kettle codex ") as temporary:
+        shim, _, home = codex_startup(Path(temporary))
+        (home / ".zshenv").write_text('print -r -- zshenv >> "$HOME/trace"\n', encoding="utf-8")
+        (home / ".zshrc").write_text('print -r -- zshrc >> "$HOME/trace"\n', encoding="utf-8")
+
+        def borrowed(original: str | None) -> dict[str, str]:
+            return {
+                "ZDOTDIR": str(shim),
+                "KETTLE_ZDOTDIR": original or "",
+                "KETTLE_ZDOTDIR_SET": "1" if original is not None else "",
+            }
+
+        output, trace = codex_run(
+            [executable, "-i"],
+            home,
+            borrowed(None),
+            'print -r -- "ZDOTDIR=${ZDOTDIR-unset} saved=${KETTLE_ZDOTDIR_SET-gone}"\n'
+            'whence -w codex\ncodex "a b" "*" ""\nexit\n',
+        )
+        if (
+            "ZDOTDIR=unset saved=gone" not in output
+            or "codex: function" not in output
+            or CODEX_FORWARDED not in output
+            or trace != "zshenv\nzshrc\n"
+        ):
+            raise RuntimeError(f"Codex zsh startup: {output!r} trace {trace!r}")
+        output, trace = codex_run(
+            [executable, "-i"],
+            home,
+            borrowed(""),
+            'print -r -- "ZDOTDIR=[${ZDOTDIR-unset}]"\nexit\n',
+        )
+        if "ZDOTDIR=[]" not in output or trace != "" or "no such file" in output:
+            raise RuntimeError(f"Codex zsh empty ZDOTDIR: {output!r} trace {trace!r}")
+        output, _ = codex_run([executable, "-c", "whence -w codex"], home, borrowed(None))
+        if "codex: none" not in output:
+            raise RuntimeError(f"Codex zsh non-interactive: {output!r}")
+        (home / "functions").mkdir()
+        (home / "functions" / "codex").write_text("print -r -- autoloaded\n", encoding="utf-8")
+        (home / ".zshrc").write_text(
+            "fpath=($HOME/functions $fpath)\nautoload -Uz codex\n", encoding="utf-8"
+        )
+        output, _ = codex_run([executable, "-i"], home, borrowed(None), "codex\nexit\n")
+        if "autoloaded" not in output or "<agent-setup>" in output:
+            raise RuntimeError(f"Codex zsh autoloadable codex: {output!r}")
+    print("Codex zsh startup: PASS")
+
+
+def check_codex_fish(executable: str) -> None:
+    """Kettle's fish code runs after the user's configuration, which it
+    leaves as it is, XDG_DATA_DIRS included, and defines codex, forwarding
+    every argument, only in an interactive shell that has none, an
+    autoloadable one included."""
+    with tempfile.TemporaryDirectory(prefix="kettle codex ") as temporary:
+        _, code, home = codex_startup(Path(temporary))
+        (home / ".config" / "fish" / "config.fish").write_text(
+            'echo config >> "$HOME/trace"\n', encoding="utf-8"
+        )
+        fish = [executable, "-C", code]
+        probe = (
+            'set -q XDG_DATA_DIRS; and echo "XDG=$XDG_DATA_DIRS"; or echo XDG=unset; '
+            "type -t codex; codex 'a b' '*' ''"
+        )
+        output, trace = codex_run([*fish, "-i", "-c", probe], home, {})
+        if (
+            "XDG=unset" not in output
+            or "function" not in output
+            or CODEX_FORWARDED not in output
+            or trace != "config\n"
+        ):
+            raise RuntimeError(f"Codex fish startup: {output!r} trace {trace!r}")
+        conf = home / ".config" / "fish" / "conf.d"
+        conf.mkdir()
+        (conf / "paths.fish").write_text("set -gx XDG_DATA_DIRS /opt/share\n", encoding="utf-8")
+        output, _ = codex_run([*fish, "-i", "-c", 'echo "XDG=$XDG_DATA_DIRS"'], home, {})
+        if "XDG=/opt/share" not in output:
+            raise RuntimeError(f"Codex fish user XDG_DATA_DIRS: {output!r}")
+        output, _ = codex_run([*fish, "-c", "type -q codex; and echo yes; or echo no"], home, {})
+        if not output.rstrip().endswith("no"):
+            raise RuntimeError(f"Codex fish non-interactive: {output!r}")
+        (home / ".config" / "fish" / "functions" / "codex.fish").write_text(
+            "function codex\n    echo mine\nend\n", encoding="utf-8"
+        )
+        output, _ = codex_run([*fish, "-i", "-c", "codex"], home, {})
+        if "mine" not in output or "<agent-setup>" in output:
+            raise RuntimeError(f"Codex fish autoloadable codex: {output!r}")
+    print("Codex fish startup: PASS")
+
+
 def main() -> int:
     system = platform.system()
     check_no_inline_completion_fallbacks()
 
     if system == "Darwin":
         check_zsh("/bin/zsh")
+        check_codex_zsh("/bin/zsh")
         check_bash("/bin/bash", require_32=True)
     elif os.name != "nt":
         zsh = shutil.which("zsh")
@@ -1220,6 +1361,7 @@ def main() -> int:
             print("zsh fixture: SKIP (zsh unavailable; macOS CI is the required native leg)")
         else:
             check_zsh(zsh)
+            check_codex_zsh(zsh)
         bash = shutil.which("bash")
         if bash is None:
             raise RuntimeError("Bash fixture requires bash")
@@ -1228,6 +1370,9 @@ def main() -> int:
     fish = shutil.which("fish")
     if fish is None:
         print("fish fixture: SKIP (fish unavailable; Linux CI is the required native leg)")
+    elif os.name != "nt":
+        check_fish(fish)
+        check_codex_fish(fish)
     else:
         check_fish(fish)
 

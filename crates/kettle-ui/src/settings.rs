@@ -539,6 +539,7 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                     T::SettingsFieldAgentPreviewsClaudeCode,
                     "agent-display-claude-code",
                 ),
+                toggle(T::SettingsFieldAgentPreviewsCodex, "agent-display-codex"),
             ],
         },
         Category {
@@ -846,6 +847,7 @@ fn read_bool(cfg: &Config, key: &str) -> bool {
         "invert-search" => cfg.invert_search,
         "agent-display" => cfg.agent_display,
         "agent-display-claude-code" => cfg.agent_display_claude_code,
+        "agent-display-codex" => cfg.agent_display_codex,
         _ => false,
     }
 }
@@ -1070,8 +1072,9 @@ mod tests {
         );
     }
 
-    /// Agents → Agent previews and its Claude Code row edit `agent-display`
-    /// and `agent-display-claude-code` as ordinary toggles.
+    /// Agents → Agent previews and its Claude Code and Codex rows edit
+    /// `agent-display`, `agent-display-claude-code` and
+    /// `agent-display-codex` as ordinary toggles.
     #[test]
     fn agent_previews_rows_round_trip() {
         let cats = categories(&[]);
@@ -1079,7 +1082,7 @@ mod tests {
             .iter()
             .find(|cat| cat.name == Text::SettingsCategoryAgents)
             .expect("Agents category");
-        assert_eq!(agents.fields.len(), 2);
+        assert_eq!(agents.fields.len(), 3);
         let rows = [
             (
                 "agent-display",
@@ -1090,6 +1093,11 @@ mod tests {
                 "agent-display-claude-code",
                 Text::SettingsFieldAgentPreviewsClaudeCode,
                 |cfg: &Config| cfg.agent_display_claude_code,
+            ),
+            (
+                "agent-display-codex",
+                Text::SettingsFieldAgentPreviewsCodex,
+                |cfg: &Config| cfg.agent_display_codex,
             ),
         ];
         for (field, (key, label, value)) in agents.fields.iter().zip(rows) {

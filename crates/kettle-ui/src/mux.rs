@@ -1970,6 +1970,12 @@ impl Mux {
         // pane. A failed spawn leaves a harmless gap; ids are never reused.
         let id = NEXT_PANE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let pane_env = pane_environment(cfg, id, std::process::id());
+        // Kettle's Codex integration for the pane's shell, offered while
+        // `agent-display-codex` and agent previews are on, checked again now.
+        #[cfg(unix)]
+        let shell_startup = crate::codex_shell::for_new_pane().unwrap_or_default();
+        #[cfg(not(unix))]
+        let shell_startup = kettle_core::shell_startup::ShellStartup::default();
         // Terminator parity: route through new_with_env so
         // cfg.term / cfg.colorterm / cfg.login_shell take effect at
         // PTY spawn. The legacy `Terminal::new` shim still exists
@@ -1988,6 +1994,7 @@ impl Mux {
             &pane_env,
             cfg.login_shell,
             cfg.shell_integration,
+            &shell_startup,
             TerminalCapabilities {
                 osc52_copy: self.osc52_copy_allowed,
                 unnegotiated_modified_enter: unnegotiated_modified_enter(cfg.modify_other_keys),

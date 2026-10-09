@@ -30,6 +30,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   you once to trust the hook in its own hook review; until then, and with
   other Codex versions, media goes to the pane's shelf. A card's provenance
   tab names the harness that printed it.
+- Codex previews (`agent-display-codex`, Settings → Agents → Codex previews;
+  off by default, needs agent previews): the zsh or fish a new pane starts
+  defines `codex` itself, as the function `kettle agent-setup --print`
+  prints, so there is nothing to paste. zsh reads a Kettle-owned, read-only
+  `.zshenv` through a borrowed `ZDOTDIR` it puts back exactly; fish runs
+  Kettle's code after your configuration (`fish -C`). Your startup files run
+  as before, and a `codex` you define or can autoload still wins. `kettle
+  agent-setup --status` says whether your saved settings turn it on.
 - Claude Code previews (`agent-display-claude-code`, Settings → Agents →
   Claude Code previews; off by default, needs agent previews): Claude Code
   started in a new pane gets Kettle's own plugin, the display server and the

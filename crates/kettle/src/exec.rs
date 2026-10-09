@@ -1004,9 +1004,11 @@ fn run_exec_engine(
         "truecolor",
         &[],
         false,
-        // No shell-integration injection — `kettle exec` runs a one-shot
-        // non-interactive command, not an interactive shell.
+        // No shell-integration injection or startup additions — `kettle
+        // exec` runs a one-shot non-interactive command, not an interactive
+        // shell.
         false,
+        &kettle_core::shell_startup::ShellStartup::default(),
         // Headless exec has no clipboard sink. Do not advertise DA1 extension
         // 52 when OSC 52 writes would be deliberately ignored.
         TerminalCapabilities {

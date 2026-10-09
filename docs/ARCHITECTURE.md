@@ -536,6 +536,34 @@ the Codex release whose hook output Kettle has measured, it also adds a
 `PostToolUse` `mcp_tool` hook (elsewhere no card could be admitted); the display server then keys cards by Codex's call id, and
 `kettle_card` hands each to that hook once, as for Claude Code.
 
+Both the plugin and Codex's startup files are kept by `kettle-ui`'s
+`owned_dir`: a set of files (`OwnedFiles`) written once, under a lock shared
+by every Kettle using the root, into a directory named by an FNV hash of the
+contents, read-only at every level of its nested layout, and checked again
+before each use (`verify`: no links, read-only modes, trusted owner, no entry
+it did not write, every file exactly as written); stale directories go by the
+executable and version an identity reader finds in them.
+
+Codex's startup is `kettle-ui`'s `codex_shell` module, which also renders
+the `codex` function `kettle agent-setup --print` prints
+(`codex_function`). With `agent-display-codex` and live agent previews, the
+App's `reconcile_codex_shell`, run before the first pane and after each
+reload, `prepare`s it, a manifest and a zsh `.zshenv` written under
+`agent-shell` beside the plugins plus the fish code, and offers it; a
+refusal (translocated, unavailable, unsupported) is what the Settings row
+says. `Mux` hands the offered startup, its files checked again, to the spawn
+as a `kettle_core::shell_startup::ShellStartup`. `kettle-core` owns the
+mechanism, as it does PowerShell's: once the pane's environment is set, it
+finds the shell the PTY will run the way the PTY does (`SHELL` when it can
+run, otherwise the passwd shell) and, for zsh or fish with no arguments of
+its own, adds `additions`. zsh gets `ZDOTDIR` pointing at the `.zshenv` plus
+its original value, any bytes, and whether it was set, which the file
+(`shell_startup::zshenv`) restores before anything else, unless a system
+`zshenv` names `ZDOTDIR` or the `RCS` option; a bare `zsh` command is found
+on the pane's `PATH` for that check. fish gets `-C` and the code, which the vendored
+portable-pty passes to the default shell after its login `argv[0]`
+(`shell_arg`).
+
 Kettle's Claude Code plugin is `kettle-ui`'s `agent_plugin` module. With
 `agent-display-claude-code` and live agent previews, the App's
 `reconcile_claude_plugin`, run before the first pane and after each reload,

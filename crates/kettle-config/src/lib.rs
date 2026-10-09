@@ -1379,6 +1379,12 @@ pub struct Config {
     /// It needs `agent-display`; panes that are already open keep what they
     /// started with.
     pub agent_display_claude_code: bool,
+    /// `agent-display-codex`: define `codex`, in the zsh or fish each new pane
+    /// starts, as the function `kettle agent-setup --print` prints, so Codex
+    /// started there gets Kettle's display server. Default `false`. It needs
+    /// `agent-display`; panes that are already open keep what they started
+    /// with, and a `codex` the user defines still wins.
+    pub agent_display_codex: bool,
     /// Terminator parity (terminatorlib/config.py:79
     /// `ask_before_closing`): when to show the close-confirmation
     /// dialog on window close.
@@ -2737,6 +2743,7 @@ impl Default for Config {
             agent_server: AgentServer::Off,
             agent_display: false,
             agent_display_claude_code: false,
+            agent_display_codex: false,
             ask_before_closing: AskBeforeClosing::MultipleTerminals,
             close_button_on_tab: true,
             new_tab_after_current_tab: false,
@@ -3380,6 +3387,8 @@ impl Config {
         "agent_display",
         "agent-display-claude-code",
         "agent_display_claude_code",
+        "agent-display-codex",
+        "agent_display_codex",
         "restore-session",
         "restore_session",
         "urgent-bell",
@@ -5259,6 +5268,11 @@ impl Config {
                 "agent-display-claude-code" | "agent_display_claude_code" => {
                     if let Some(b) = parse_bool(&e.value) {
                         cfg.agent_display_claude_code = b;
+                    }
+                }
+                "agent-display-codex" | "agent_display_codex" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.agent_display_codex = b;
                     }
                 }
                 // Opt IN to restoring the last session on launch
@@ -8044,6 +8058,16 @@ cell-height = 1.2\n";
         assert!(Config::parse_text("agent-display-claude-code = true").agent_display_claude_code);
         assert!(Config::parse_text("agent_display_claude_code = on").agent_display_claude_code);
         assert!(!Config::parse_text("agent-display-claude-code = maybe").agent_display_claude_code);
+    }
+
+    #[test]
+    fn the_codex_integration_defaults_off_and_parses_in_both_spellings() {
+        assert!(!Config::default().agent_display_codex);
+        assert!(Config::BOOL_KEYS.contains(&"agent-display-codex"));
+        assert!(Config::BOOL_KEYS.contains(&"agent_display_codex"));
+        assert!(Config::parse_text("agent-display-codex = true").agent_display_codex);
+        assert!(Config::parse_text("agent_display_codex = on").agent_display_codex);
+        assert!(!Config::parse_text("agent-display-codex = maybe").agent_display_codex);
     }
 
     /// `agent-display` defaults off, parses as a boolean in both spellings,

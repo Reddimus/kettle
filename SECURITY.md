@@ -85,6 +85,14 @@ Reports that fit any of these are welcome:
   those bounds or is replaced before launch, or an open that no press on a
   card asked for, is in scope. The store is `kettle-ui`'s
   `paste_image::OPENED`; the hand-off is `media::external`.
+- **Codex's startup** — with `agent-display-codex` on, the zsh a new pane
+  starts reads a Kettle-owned, read-only `.zshenv` that Kettle checks before
+  each pane and points zsh at by borrowing `ZDOTDIR`, and the fish one runs
+  Kettle's code from its command line (`-C`) after the user's configuration.
+  Startup that runs anything but the `codex` function and the user's own
+  startup files, leaves `ZDOTDIR` or Kettle's own variables changed, reaches
+  a shell other than the one the pane starts, or writes any user file is in
+  scope.
 - **Bracketed-paste injection** — a paste payload that escapes the
   `\e[200~ … \e[201~` wrapper and runs as input.
 - **Resource exhaustion via a single PTY frame** — a parser path that

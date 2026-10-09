@@ -572,8 +572,15 @@ alone, without approving it; every other Codex command runs unchanged. On
 macOS with Codex CLI 0.162 it also adds a hook that prints a card for each
 .B kettle_show
 under the call, once you trust that hook in Codex's own hook review.
+With
+.B agent\-display\-codex
+on, the zsh or fish a new kettle pane starts defines the same function
+itself; a
+.B codex
+you define still wins.
 .B \-\-status
-reports whether Codex launched from this shell would get the server.
+reports whether Codex launched from this shell would get the server, and
+whether kettle defines the function for you.
 .B \-\-uninstall
 prints how to remove the function.
 .TP

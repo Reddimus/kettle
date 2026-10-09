@@ -72,6 +72,15 @@ The same snippets live at `shell-integration/kettle.{bash,zsh,fish,ps1}` and
 ship in the release archives. Use the generated form instead of copying a
 second implementation from this guide; updates then stay in one place.
 
+## Codex's launch function
+
+The same injection idea serves one other purpose on macOS and Linux: with
+`agent-display-codex` on, the zsh or fish a new pane starts defines `codex` so
+Codex starts with Kettle's display server: zsh through a Kettle-owned
+`.zshenv` and a borrowed `ZDOTDIR` it puts back, fish through code it runs
+after your configuration (`fish -C`). It adds no prompt marks; those still need the snippet above. See
+[AGENT.md](AGENT.md#kettle-defines-it-for-you).
+
 ## Completion list
 
 `completion-overlay = auto` lets the bundled integration present the shell's

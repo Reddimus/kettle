@@ -325,14 +325,16 @@ impl SetupError {
 
 /// Kettle's path as a launch can name it: absolute, UTF-8 and lasting.
 fn kettle_path(kettle: &Path) -> Result<&str, SetupError> {
-    let path = kettle
-        .to_str()
-        .filter(|_| kettle.is_absolute())
-        .ok_or(SetupError::UnnamedKettle)?;
-    if path.contains("/AppTranslocation/") {
-        return Err(SetupError::Translocated);
+    kettle_ui::codex_shell::kettle_path(kettle).map_err(SetupError::from)
+}
+
+impl From<kettle_ui::codex_shell::FunctionError> for SetupError {
+    fn from(error: kettle_ui::codex_shell::FunctionError) -> Self {
+        match error {
+            kettle_ui::codex_shell::FunctionError::UnnamedKettle => Self::UnnamedKettle,
+            kettle_ui::codex_shell::FunctionError::Translocated => Self::Translocated,
+        }
     }
-    Ok(path)
 }
 
 /// The running Kettle's own path, links resolved.
@@ -374,29 +376,67 @@ impl SetupShell {
 /// The function `--print` writes: `codex`, handing its arguments to this
 /// Kettle as they are. The shell expands nothing in them.
 fn print_function(kettle: &Path, shell: SetupShell) -> Result<String, SetupError> {
-    let path = kettle_path(kettle)?;
-    Ok(match shell {
-        SetupShell::Bash | SetupShell::Zsh => {
-            let path = path.replace('\'', "'\\''");
-            format!("codex() {{\n  command '{path}' agent-setup --launch-codex -- \"$@\"\n}}\n")
-        }
-        SetupShell::Fish => {
-            let path = path.replace('\\', "\\\\").replace('\'', "\\'");
-            format!("function codex\n  command '{path}' agent-setup --launch-codex -- $argv\nend\n")
-        }
-    })
+    use kettle_ui::codex_shell::CodexShell;
+    let shell = match shell {
+        SetupShell::Bash => CodexShell::Bash,
+        SetupShell::Zsh => CodexShell::Zsh,
+        SetupShell::Fish => CodexShell::Fish,
+    };
+    Ok(kettle_ui::codex_shell::codex_function(kettle, shell)?)
 }
 
 /// How to take the function out again.
 fn uninstall_text(shell: SetupShell) -> &'static str {
     match shell {
         SetupShell::Bash | SetupShell::Zsh => {
-            "Remove the codex function from your shell's startup file, then run: unset -f codex"
+            "Remove the codex function from your shell's startup file, then run: unset -f codex\n\
+             If Kettle defines it for you, turn off Settings, Agents, Codex previews \
+             (agent-display-codex); new panes then start without it."
         }
         SetupShell::Fish => {
-            "Remove the codex function from your fish configuration, then run: functions --erase codex"
+            "Remove the codex function from your fish configuration, then run: functions --erase codex\n\
+             If Kettle defines it for you, turn off Settings, Agents, Codex previews \
+             (agent-display-codex); new panes then start without it."
         }
     }
+}
+
+/// Whether the saved configuration has Kettle define `codex` in new panes'
+/// shells: agent previews and `agent-display-codex` both on. It is read, never
+/// repaired, so asking changes nothing.
+fn automatic_integration() -> bool {
+    kettle_config::Config::default_path()
+        .filter(|path| path.exists())
+        .map(|path| kettle_config::Config::load_from(&path))
+        .is_some_and(|config| config.agent_display && config.agent_display_codex)
+}
+
+/// The status line for the automatic integration, which reports the saved
+/// settings: a running Kettle may have been started otherwise.
+fn automatic_status(on: bool) -> &'static str {
+    if on {
+        "on in your saved settings (agent-display-codex): zsh and fish started in a new \
+         pane define codex, unless you define your own. A Kettle started with \
+         --agent-display off or another configuration file follows that instead"
+    } else {
+        "off in your saved settings; add the function --print shows, or turn on \
+         Settings, Agents, Codex previews"
+    }
+}
+
+/// Why Kettle leaves the user's zsh alone, when it does: a system `zshenv`
+/// that names `ZDOTDIR` or the `RCS` option. `shell` is the user's shell (`SHELL`).
+fn zsh_status(shell: Option<&std::ffi::OsStr>) -> Option<String> {
+    let shell = Path::new(shell?);
+    if shell.file_name()? != "zsh" {
+        return None;
+    }
+    let zshenv = kettle_core::shell_startup::zsh_left_alone(shell)?;
+    Some(format!(
+        "{} names ZDOTDIR or the RCS option, so Kettle leaves zsh's startup alone; \
+         add the function --print zsh shows",
+        zshenv.display()
+    ))
 }
 
 /// The oldest Codex CLI whose launch options Kettle's are known to fit:
@@ -647,6 +687,14 @@ fn print_status() {
         }
     );
     println!("Needs: agent previews on in Kettle (Settings, Agents, Agent previews)");
+    let automatic = automatic_integration();
+    println!("Automatic: {}", automatic_status(automatic));
+    if let Some(zsh) = automatic
+        .then(|| zsh_status(std::env::var_os("SHELL").as_deref()))
+        .flatten()
+    {
+        println!("zsh: {zsh}");
+    }
     println!(
         "Interactive sessions get Kettle's display server for that launch only. Codex's \
          configuration and your shell's startup files are left as they are."
@@ -1096,5 +1144,36 @@ mod tests {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
+    }
+
+    /// The automatic line says it reports the saved settings, which a
+    /// running Kettle started otherwise does not follow.
+    #[test]
+    fn the_automatic_line_reports_the_saved_settings() {
+        for on in [true, false] {
+            assert!(automatic_status(on).contains("in your saved settings"));
+        }
+        assert!(automatic_status(true).contains("--agent-display off"));
+    }
+
+    /// A zsh whose system `zshenv` names `ZDOTDIR` is named as left alone;
+    /// another shell, or a zsh without one, is not.
+    #[cfg(unix)]
+    #[test]
+    fn the_status_names_a_zshenv_that_keeps_kettle_out() {
+        let prefix = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(prefix.path().join("etc")).unwrap();
+        let zsh = prefix.path().join("bin/zsh");
+        if kettle_core::shell_startup::zsh_left_alone(&zsh).is_some() {
+            return;
+        }
+        assert_eq!(zsh_status(Some(zsh.as_os_str())), None);
+        let zshenv = prefix.path().join("etc/zshenv");
+        std::fs::write(&zshenv, "ZDOTDIR=$HOME/.zsh\n").unwrap();
+        let line = zsh_status(Some(zsh.as_os_str())).unwrap();
+        assert!(line.starts_with(&zshenv.display().to_string()), "{line}");
+        let bash = prefix.path().join("bin/bash");
+        assert_eq!(zsh_status(Some(bash.as_os_str())), None);
+        assert_eq!(zsh_status(None), None);
     }
 }
