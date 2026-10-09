@@ -1134,6 +1134,9 @@ pub struct Overlay {
     pub media_paste_receipt: Option<MediaPasteReceiptOverlay>,
     /// The shelf item the user opened, over its pane.
     pub media_viewer: Option<MediaViewerOverlay>,
+    /// The inline card a click at the pointer would open, as a frame drew
+    /// it; its visible part is outlined in the accent.
+    pub card_hover: Option<PaintedCard>,
     /// `Some(typed)` while the SSH launcher is open.
     pub ssh_query: Option<String>,
     /// Keyboard help for the SSH input lane. Ranked hosts are projected through
@@ -7244,6 +7247,33 @@ impl Renderer {
             }
         }
 
+        // The card a click would open: an accent outline just inside its
+        // visible part, over its frame. Static, so there is no motion to
+        // reduce.
+        // Only over that same card, drawn there by this frame: one that
+        // moved, or another card in its place, leaves no outline behind.
+        if let Some(card) = overlay.card_hover
+            && drawn_cards.contains(&card)
+        {
+            let [x, y, width, height] = card.rect;
+            let edge = (2.0 * self.scale)
+                .round()
+                .max(1.0)
+                .min(width / 2.0)
+                .min(height / 2.0);
+            let accent = self.ui_accent(cfg, theme);
+            over.push(rect(x, y, width, edge, accent, 1.0));
+            over.push(rect(x, y + height - edge, width, edge, accent, 1.0));
+            over.push(rect(x, y + edge, edge, height - 2.0 * edge, accent, 1.0));
+            over.push(rect(
+                x + width - edge,
+                y + edge,
+                edge,
+                height - 2.0 * edge,
+                accent,
+                1.0,
+            ));
+        }
         self.card_frames = card_frames;
         self.drawn_cards = drawn_cards;
         self.card_scene = card_scene;

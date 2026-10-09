@@ -96,14 +96,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   card in the focused pane and opens it when picked, and a screen reader
   hears each card as a button named for its item's title, kind, size and
   sender, which opens it in the viewer. In English and Spanish.
+- The pointer turns into a hand over an inline card a click would open, and
+  the card gets an accent outline; one that just appeared gets them once it
+  has stayed put half a second, even if the pointer does not move.
 - Clicking an inline card opens its item in the media viewer. The card takes
   both the press and its release, so the program behind it sees neither. A
   Shift-click selects text as it does anywhere else, and the wheel, like a
   press on a card that came on screen under the pointer less than half a
   second ago, goes where it would without the card.
-- The media shelf viewer: `open_media_shelf` (palette: "Open media shelf")
-  shows the focused pane's shelf over the pane, newest first, with each
-  item's title, kind, size and sender; `←`/`→` browse and Esc closes, and so
+- The media shelf viewer: `open_media_shelf` (palette: "Open media shelf";
+  `Ctrl+Shift+Cmd+I` on macOS) shows the focused pane's shelf over the pane,
+  on the item published last, newest first, with each item's title, kind,
+  size and sender; `←`/`→` browse and Esc closes, and so
   does the shortcut that opened it. A screen reader hears each item's place
   on the shelf. A pane titlebar marks unopened items as `▣N`, and the window
   title counts them.

@@ -78,6 +78,8 @@ pub(crate) struct ShelfItem {
     pub pixels: ItemPixels,
     /// When the user last looked at it, on the process-wide view clock.
     viewed: u64,
+    /// When it was last published, a replacement included, on that clock.
+    published: u64,
     /// Whether the user has looked at it since it arrived or was replaced.
     seen: bool,
 }
@@ -103,6 +105,7 @@ impl ShelfItem {
             warnings,
             pixels: ItemPixels::Ready(pixels),
             viewed: 0,
+            published: 0,
             seen: false,
         }
     }
@@ -138,6 +141,12 @@ fn tick() -> u64 {
 }
 
 impl Shelf {
+    /// The item published last, a replacement by key included. The list
+    /// keeps a replacement where its key was, so this is not always first.
+    pub(crate) fn latest(&self) -> Option<&ShelfItem> {
+        self.items.iter().max_by_key(|item| item.published)
+    }
+
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.items.len()
@@ -162,7 +171,9 @@ impl Shelf {
         visible: Option<u64>,
         protected: &[u64],
     ) -> Published {
-        item.viewed = tick();
+        let now = tick();
+        item.viewed = now;
+        item.published = now;
         if let Some(key) = item.key.as_deref()
             && let Some(slot) = self
                 .items
@@ -309,10 +320,14 @@ mod tests {
         assert_eq!(ids(&shelf), [2, 1]);
         let plot = shelf.get(1).unwrap();
         assert_eq!((plot.generation, plot.title.as_str()), (1, "item 3"));
+        // A replacement stays where its key was, yet it is the latest.
+        assert_eq!(shelf.latest().map(|item| item.id), Some(1));
         // Keyless items never replace each other.
         shelf.publish(item(4, None), None, &[]);
         shelf.publish(item(5, None), None, &[]);
         assert_eq!(ids(&shelf), [5, 4, 2, 1]);
+        assert_eq!(shelf.latest().map(|item| item.id), Some(5));
+        assert_eq!(Shelf::default().latest().map(|item| item.id), None);
     }
 
     #[test]

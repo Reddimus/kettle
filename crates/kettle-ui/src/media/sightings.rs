@@ -83,6 +83,12 @@ impl CardSightings {
             .then_some((card.pane, card.nonce))
     }
 
+    /// When `card` settles, if it is on screen and has not yet.
+    pub(crate) fn settles_at(&self, card: &PaintedCard, now: Instant) -> Option<Instant> {
+        let at = self.spots.get(&card_spot(card))?.since + CARD_SETTLE;
+        (at > now).then_some(at)
+    }
+
     /// The instance number of `card`'s placement, if it is on screen.
     pub(crate) fn instance(&self, card: &PaintedCard) -> Option<u64> {
         self.spots.get(&card_spot(card))?.instance
@@ -127,6 +133,8 @@ mod tests {
             sightings.settled(Some(here), start + ms(500)),
             Some((7, nonce))
         );
+        assert_eq!(sightings.settles_at(&here, start), Some(start + ms(500)));
+        assert_eq!(sightings.settles_at(&here, start + ms(500)), None);
         // A later frame in the same place keeps the first sighting.
         assert!(!sightings.note(&[here], start + ms(300)));
         assert_eq!(

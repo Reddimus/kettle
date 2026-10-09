@@ -3843,7 +3843,22 @@ guards that clicks, quick select and accessibility actions all go through
 cards in panes the active tab shows now are reachable, that focusing a card
 closes Search so the keys follow it, and that a key press,
 text from an input method, or a native press of any button (side buttons
-included) returns a card's focus to its pane. Checked live with Codex CLI 0.162.0: a
+included) returns a card's focus to its pane.
+The hover: `a_hovered_card_is_outlined_in_the_accent`
+renders a card with and without `card_hover` and checks the outline rings it,
+and that a hover naming a moved card, another card or another pane at that
+spot draws nothing;
+`a_settled_card_under_the_pointer_shows_it_takes_a_click` guards the hand
+cursor's place after dialogs and chrome but before split seams, its Shift,
+viewer and pointer-left exclusions, the settle wake in `about_to_wait`, and
+that the cursor icon, native buttons and the wheel follow the physical
+pointer even after a control client moved the cursor (the icon sets nothing
+while the pointer is outside the window)
+(`native_input_resumes_at_the_physical_pointer` checks the reset), and
+`media::sightings` tests `settles_at`. The shelf test pins that a
+replacement by key, kept in its place, is still `latest()`, and on macOS
+`macos_opens_the_media_viewer_with_ctrl_shift_cmd_i` pins the default
+chord. Checked live with Codex CLI 0.162.0: a
 `send_mouse` click on a Codex card opened the viewer on its item, and a
 press on the card released after Settings opened left Settings up and
 opened nothing. Held buttons in general:

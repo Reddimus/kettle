@@ -9998,13 +9998,51 @@ impl App {
         hovered
     }
 
+    /// Note the card a primary press at the pointer would take, for the hand
+    /// cursor and the hover outline: one settled under it, with no Shift,
+    /// dialog, menu or viewer in the way. One that has not settled yet
+    /// leaves a wake for when it does, so a still pointer gets the hand
+    /// then.
+    fn note_card_hover(&self, ws: &mut WindowState) -> bool {
+        let now = std::time::Instant::now();
+        let card = ws
+            .native_pointer
+            .filter(|_| {
+                !ws.mods.shift_key() && !self.pointer_modal_open(ws) && ws.media_viewer.is_none()
+            })
+            .and_then(|pointer| {
+                ws.renderer
+                    .as_ref()?
+                    .card_at(pointer.x as f32, pointer.y as f32)
+            });
+        let settled = card.filter(|card| ws.card_sightings.settled(Some(*card), now).is_some());
+        ws.card_settle_wake = card
+            .filter(|_| settled.is_none())
+            .and_then(|card| ws.card_sightings.settles_at(&card, now));
+        if ws.card_hover != settled {
+            ws.card_hover = settled;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        }
+        settled.is_some()
+    }
+
     /// Set the OS mouse-cursor icon, deduped against the last value pushed
     /// to the window. Called on CursorMoved (position changes the
     /// hit-test) and on ModifiersChanged (the modifier state gates the
-    /// click-to-open affordance).
+    /// click-to-open affordance). The icon, and the hover state these hit
+    /// tests set, are the physical pointer's: every hit test reads where it
+    /// is, not where a control client last moved the cursor, and with the
+    /// pointer outside the window there is nothing to set.
     fn sync_cursor_icon(&mut self, ws: &mut WindowState) {
+        let Some(pointer) = ws.native_pointer else {
+            return;
+        };
+        let control = std::mem::replace(&mut ws.cursor, pointer);
         let media_receipt_hovered = self.media_paste_receipt_hovered(ws);
         self.sync_cursor_icon_with_media_receipt_hover(ws, media_receipt_hovered);
+        ws.cursor = control;
     }
 
     /// CursorMoved already computed the receipt hit test to update its hover
@@ -10078,6 +10116,8 @@ impl App {
                 .or_else(|| rect_contains(geometry.rect, x, y).then_some(CursorIcon::Default))
         });
         let media_receipt_hover = media_receipt_action_hovered.then_some(CursorIcon::Pointer);
+        // A settled card under the pointer takes a click: the pointing hand.
+        let card_hover = self.note_card_hover(ws).then_some(CursorIcon::Pointer);
         let chrome =
             chrome_cursor_icon(self.cursor_in_chrome_band(ws), self.pointer_modal_open(ws));
         // A live tab-drag owns the cursor, FIRST in the chain. Mid-drag the
@@ -10096,6 +10136,9 @@ impl App {
             .or(search_hover)
             .or(media_receipt_hover)
             .or(chrome)
+            // A card takes a press before a split seam does, so its hand
+            // wins where the two overlap.
+            .or(card_hover)
             .or_else(|| self.split_seam_hover_icon(ws))
             .unwrap_or_else(|| {
                 let want_pointer = (ws.mods.control_key() || ws.mods.super_key())
@@ -10182,7 +10225,7 @@ impl App {
             .mux
             .panes
             .get(&pane)
-            .and_then(|state| state.media_shelf.items().first())
+            .and_then(|state| state.media_shelf.latest())
             .map(|item| item.id)
         else {
             return;
@@ -15423,6 +15466,7 @@ impl App {
             .filter(|drag| drag.live)
             .and_then(|drag| drag.target)
             .map(|(_, rect, dir, before)| crate::mux::pane_drop_preview(rect, dir, before));
+        let card_hover = ws.card_hover;
         let s = &ws.search;
         // Both literals list every field: a defaulted overlay would paint
         // English and drop state such as the pane drop hint.
@@ -15446,6 +15490,7 @@ impl App {
                 completion,
                 media_paste_receipt,
                 media_viewer,
+                card_hover,
                 window_focused,
                 scrollbar_active,
                 cursor_visible,
@@ -15564,6 +15609,7 @@ impl App {
             completion: None,
             media_paste_receipt: None,
             media_viewer: None,
+            card_hover,
             window_focused,
             scrollbar_active,
             cursor_visible,
@@ -16053,8 +16099,10 @@ impl App {
                 .card_sightings
                 .note(renderer.painted_cards(), std::time::Instant::now())
         {
-            // Assistive technology names each card on screen.
+            // Assistive technology names each card on screen, and the
+            // pointer may rest on one that moved or arrived.
             ws.accessibility_pending = true;
+            ws.card_hover_stale = true;
         }
         // C1 records only a presented scene. Reuse that scene immediately,
         // before any renderer setter can invalidate it, and with the same cfg.
@@ -32621,6 +32669,10 @@ impl App {
                 ws.hovered_new_tab = false;
                 ws.hovered_new_tab_menu = false;
                 ws.search.hovered_control = None;
+                // No card is under a pointer that left.
+                ws.native_pointer = None;
+                ws.card_hover = None;
+                ws.card_settle_wake = None;
                 if let Some(receipt) = ws.media_paste_receipt.as_mut() {
                     receipt.set_hover(false, std::time::Instant::now());
                 }
@@ -32638,6 +32690,7 @@ impl App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 ws.cursor = position;
+                ws.native_pointer = Some(position);
                 ws.selection_autoscroll_edge = 0;
                 self.update_search_hover(ws);
                 if ws.selecting {
@@ -32942,6 +32995,7 @@ impl App {
                 button,
                 ..
             } => {
+                ws.resume_native_pointer();
                 // A fresh press while torn-drag tracking is live. For a NATIVE
                 // drag any client press means the tracking is stale (the OS
                 // modal loop / WM grab swallows presses mid-drag) — abandon,
@@ -33440,6 +33494,7 @@ impl App {
                 button,
                 ..
             } => {
+                ws.resume_native_pointer();
                 // Release report for the side buttons, so a tracking app sees
                 // the matching button-up after the press. Only a press the
                 // app saw gets one: a press that a context menu, a modal or
@@ -33649,6 +33704,7 @@ impl App {
                 }
             }
             WindowEvent::MouseWheel { delta, phase, .. } => {
+                ws.resume_native_pointer();
                 // A gesture ending (macOS momentum scroll, and any backend that
                 // reports phases) drops leftover sub-detent residue so a partial
                 // step can't leak into the next, unrelated gesture.
@@ -34717,6 +34773,16 @@ impl App {
         } else if let Some(receipt) = ws.media_paste_receipt.as_mut() {
             media_receipt_redraw |= receipt.mark_collapsed_if_due(now);
         }
+        // Cards that moved under a still pointer, or one under it settling,
+        // change the cursor and the hover outline without a pointer event.
+        if ws.card_hover_stale || ws.card_settle_wake.is_some_and(|at| at <= now) {
+            ws.card_hover_stale = false;
+            self.sync_cursor_icon(ws);
+        }
+        let card_settle_wait = ws.card_settle_wake.map(|at| {
+            at.saturating_duration_since(now)
+                .max(std::time::Duration::from_millis(1))
+        });
         let media_receipt_wait = ws
             .media_paste_receipt
             .as_ref()
@@ -34956,6 +35022,9 @@ impl App {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         if let Some(next) = media_receipt_wait {
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
+        if let Some(next) = card_settle_wait {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         if let Some(next) = pending_video_receipt_wait {
@@ -40569,6 +40638,66 @@ mod tests {
         );
         assert!(geometry.contains("\"instance\": target.card_sightings.instance(card),"));
         assert!(!geometry.contains("\"nonce\""));
+    }
+
+    /// A settled card under the pointer gets the pointing hand and the
+    /// hover outline, after dialogs and chrome but before split seams, and
+    /// never with Shift or under the viewer; a card under a still pointer gets them when
+    /// it settles or moves there, and a pointer that left the window has
+    /// none.
+    #[test]
+    fn a_settled_card_under_the_pointer_shows_it_takes_a_click() {
+        let source = super::production_source()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(source.contains(
+            "let card = ws .native_pointer .filter(|_| { !ws.mods.shift_key() && !self.pointer_modal_open(ws) && ws.media_viewer.is_none() })"
+        ));
+        assert!(source.contains(
+            "let settled = card.filter(|card| ws.card_sightings.settled(Some(*card), now).is_some());"
+        ));
+        assert!(source.contains(".and_then(|card| ws.card_sightings.settles_at(&card, now));"));
+        assert!(source.contains(
+            ".or(chrome) // A card takes a press before a split seam does, so its hand // wins where the two overlap. .or(card_hover) .or_else(|| self.split_seam_hover_icon(ws)) .unwrap_or_else("
+        ));
+        assert!(source.contains(
+            "if ws.card_hover_stale || ws.card_settle_wake.is_some_and(|at| at <= now) { ws.card_hover_stale = false; self.sync_cursor_icon(ws); }"
+        ));
+        assert!(source.contains(
+            "if let Some(next) = card_settle_wait { wait = Some(wait.map_or(next, |current| current.min(next))); }"
+        ));
+        assert!(source.contains(
+            "ws.native_pointer = None; ws.card_hover = None; ws.card_settle_wake = None;"
+        ));
+        assert!(source.contains("ws.accessibility_pending = true; ws.card_hover_stale = true;"));
+        assert!(source.contains("let card_hover = ws.card_hover;"));
+        // The icon, native buttons and the wheel all follow the physical
+        // pointer, even after a control client moved the cursor.
+        assert!(source.contains(
+            "fn sync_cursor_icon(&mut self, ws: &mut WindowState) { let Some(pointer) = ws.native_pointer else { return; }; let control = std::mem::replace(&mut ws.cursor, pointer); let media_receipt_hovered = self.media_paste_receipt_hovered(ws); self.sync_cursor_icon_with_media_receipt_hover(ws, media_receipt_hovered); ws.cursor = control; }"
+        ));
+        for handler in [
+            "WindowEvent::MouseInput { state: ElementState::Pressed, button, .. } => {",
+            "WindowEvent::MouseInput { state: ElementState::Released, button, .. } => {",
+            "WindowEvent::MouseWheel { delta, phase, .. } => {",
+        ] {
+            assert!(
+                source.contains(&format!("{handler} ws.resume_native_pointer();")),
+                "{handler}"
+            );
+        }
+        // The viewer opens on the item published last.
+        assert!(source.contains(".and_then(|state| state.media_shelf.latest())"));
+        // A control client's moves never light a card the user is not
+        // pointing at.
+        let ctl = source
+            .split("fn ctl_send_mouse_for_window(")
+            .nth(1)
+            .and_then(|rest| rest.split(" fn ").next())
+            .expect("ctl send_mouse");
+        assert!(!ctl.contains("native_pointer"));
+        assert!(source.contains("ws.cursor = position; ws.native_pointer = Some(position);"));
     }
 
     /// A card takes its primary press before anything else in the window,

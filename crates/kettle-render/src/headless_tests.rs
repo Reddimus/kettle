@@ -1926,3 +1926,87 @@ fn a_hint_chip_stays_inside_its_pane() {
     assert!(chip_pixels(0, 600) > 0, "the chip shows in its pane");
     assert_eq!(chip_pixels(600, 1200), 0, "and nowhere in the next");
 }
+
+/// The card a click would open gets an accent outline over its frame, and
+/// only while the UI names it.
+#[test]
+fn a_hovered_card_is_outlined_in_the_accent() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(1200, 400) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let (mut cards, snap, nonce) = crate::inline_cards::tests::fixture();
+    let poster = kettle_core::ImageData::new_with_budget(
+        2,
+        1,
+        vec![20, 200, 60, 255, 20, 200, 60, 255],
+        &kettle_core::GraphicsBudget::previews(),
+    );
+    cards.set_poster(nonce, poster.as_ref());
+    let accent = renderer.ui_accent(&cfg, &cfg.theme);
+    // The outermost whole pixels of the card's visible part, which the
+    // outline covers whole.
+    let ring = |frame: &image::RgbaImage, rect: [f32; 4]| -> (usize, usize) {
+        let [x, y, width, height] = rect;
+        let (x0, y0) = (x.ceil() as u32, y.ceil() as u32);
+        let (x1, y1) = (
+            (x + width).floor() as u32 - 1,
+            (y + height).floor() as u32 - 1,
+        );
+        let mut cells = Vec::new();
+        for px in x0..=x1 {
+            cells.push((px, y0));
+            cells.push((px, y1));
+        }
+        for py in y0..=y1 {
+            cells.push((x0, py));
+            cells.push((x1, py));
+        }
+        let lit = cells
+            .iter()
+            .filter(|(px, py)| {
+                let p = frame.get_pixel(*px, *py);
+                (p[0], p[1], p[2]) == (accent.r, accent.g, accent.b)
+            })
+            .count();
+        (lit, cells.len())
+    };
+    let mut view = pane(&snap, 1200, 400);
+    view.inline_cards = Some(&cards);
+    let plain = capture(&mut renderer, &cfg, &[view], &focused(false));
+    let card = renderer.painted_cards()[0];
+    let (lit, all) = ring(&plain, card.rect);
+    assert!(lit < all, "no outline before the hover");
+    let mut overlay = focused(false);
+    overlay.card_hover = Some(card);
+    let mut view = pane(&snap, 1200, 400);
+    view.inline_cards = Some(&cards);
+    let hovered = capture(&mut renderer, &cfg, &[view], &overlay);
+    let (lit, all) = ring(&hovered, card.rect);
+    assert_eq!(lit, all, "the outline rings the card");
+    // A hover the UI computed for where the card was, or for another card
+    // or pane at the same spot, draws nothing.
+    let [x, y, width, height] = card.rect;
+    let moved = PaintedCard {
+        rect: [x, y + renderer.cell_h, width, height],
+        ..card
+    };
+    let other = PaintedCard {
+        nonce: kettle_core::InlineNonce::new([9, 9, 9, 9, 9, 9]).unwrap(),
+        ..card
+    };
+    let elsewhere = PaintedCard {
+        pane: card.pane + 1,
+        ..card
+    };
+    for stale in [moved, other, elsewhere] {
+        let mut overlay = focused(false);
+        overlay.card_hover = Some(stale);
+        let mut view = pane(&snap, 1200, 400);
+        view.inline_cards = Some(&cards);
+        let frame = capture(&mut renderer, &cfg, &[view], &overlay);
+        let (lit, all) = ring(&frame, stale.rect);
+        assert!(lit < all, "no outline for {stale:?}");
+    }
+}
