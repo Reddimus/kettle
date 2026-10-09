@@ -865,17 +865,49 @@ pub(crate) fn spawn_detached_shell(script: &str, extra_args: usize) -> u32 {
         .expect("detached shell pid")
 }
 
+/// Waits until the shell from [`spawn_detached_shell`] has exec'd into
+/// `sh -c SCRIPT`, so a scan reads its final argv rather than the launcher's,
+/// which is also `sh -c` but with the launcher's script. Reads argv through
+/// sysinfo rather than `ps`, which the Nix build sandbox does not have. On
+/// Linux sysinfo trims each argument, so the script is compared trimmed.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn wait_for_detached_exec(pid: u32, script: &str) {
+    let mut processes = sysinfo::System::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        ProcessTree::refresh(&mut processes);
+        let argv = processes.argv_of(pid).unwrap_or_default();
+        if argv.get(1).is_some_and(|flag| flag == "-c")
+            && argv
+                .get(2)
+                .is_some_and(|command| command.trim() == script.trim())
+        {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the detached shell {pid} did not exec within ten seconds"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 /// Stops a shell from [`spawn_detached_shell`] and the command it is waiting
-/// on, which would otherwise outlive the test.
+/// on, which would otherwise outlive the test. Signals through sysinfo rather
+/// than `pkill` and `/bin/kill`, which the Nix build sandbox does not have.
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn kill_detached_shell(pid: u32) {
-    let pid = pid.to_string();
-    let _ = std::process::Command::new("pkill")
-        .args(["-KILL", "-P", &pid])
-        .status();
-    let _ = std::process::Command::new("/bin/kill")
-        .args(["-KILL", &pid])
-        .status();
+    let mut processes = sysinfo::System::new();
+    ProcessTree::refresh(&mut processes);
+    let children = processes
+        .all_pids()
+        .into_iter()
+        .filter(|&child| processes.parent_of(child) == Some(pid));
+    for target in children.chain([pid]) {
+        if let Some(process) = processes.process(sysinfo::Pid::from_u32(target)) {
+            process.kill();
+        }
+    }
 }
 
 /// The pane-rooted process tree for this platform.
@@ -5497,8 +5529,19 @@ mod tests {
     fn background_probe_worker_omits_only_the_pane_with_an_oversized_argv() {
         let long = super::spawn_detached_shell("sleep 30; true", 300);
         let short = super::spawn_detached_shell("sleep 30; true", 0);
-        // Let both exec into their final argv before the first scan.
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        struct Stop(u32, u32);
+        impl Drop for Stop {
+            fn drop(&mut self) {
+                super::kill_detached_shell(self.0);
+                super::kill_detached_shell(self.1);
+            }
+        }
+        let _cleanup = Stop(long, short);
+        // Both must have exec'd into their final argv before the first scan;
+        // before that, the long one's argv is still its short launcher's.
+        for pid in [long, short] {
+            super::wait_for_detached_exec(pid, "sleep 30; true");
+        }
         let target = |pid| RemoteProbeTarget {
             pid,
             foreground_pid: None,
@@ -5519,9 +5562,6 @@ mod tests {
                 "no snapshot published for the ordinary pane"
             );
         };
-        for pid in [long, short] {
-            super::kill_detached_shell(pid);
-        }
         assert!(!published.probes.contains_key(&long));
     }
 
