@@ -23,7 +23,7 @@ use image::{
 };
 use kettle_media::{
     Crop, FailureCode, Job, MAX_DECODED_BYTES, MAX_DECODED_EDGE, MAX_RENDERED_BYTES,
-    MAX_RENDERED_EDGE, Rendered, Target, content_digest, rgba_len,
+    MAX_RENDERED_EDGE, RenderLayout, Rendered, Target, content_digest, rgba_len,
 };
 
 use crate::{container, source};
@@ -39,7 +39,7 @@ pub(crate) fn render_loaded(
     snapshot: &source::Snapshot<'_>,
 ) -> Result<Rendered, FailureCode> {
     let image = crate::guarded(FailureCode::RenderParse, || decode(&snapshot.bytes))?;
-    let (width, height, rgba) = fit(image, job.target)?;
+    let (width, height, rgba, layout) = fit(image, job.target)?;
     let digest =
         content_digest(&snapshot.bytes, snapshot.identity).map_err(|_| FailureCode::BadParams)?;
     let rendered = Rendered {
@@ -47,6 +47,8 @@ pub(crate) fn render_loaded(
         height,
         rgba,
         digest,
+        layout,
+        exact_source: None,
         source_text: Vec::new(),
         fence_sources: Vec::new(),
         fence_count: 0,
@@ -108,10 +110,14 @@ fn decode_failure(error: ImageError) -> FailureCode {
 }
 
 /// Fit `image` inside `target`, never past its own size, then apply its crop:
-/// the width, height and straight RGBA to return. Enlarging would add no
-/// detail, only pixels to hold, and would report a size the image does not
-/// have; whoever paints the result scales it as it needs.
-pub(crate) fn fit(image: RgbaImage, target: Target) -> Result<(u32, u32, Vec<u8>), FailureCode> {
+/// the width, height and straight RGBA to return, and where they sit in the
+/// target box. Enlarging would add no detail, only pixels to hold, and would
+/// report a size the image does not have; whoever paints the result scales
+/// it as it needs.
+pub(crate) fn fit(
+    image: RgbaImage,
+    target: Target,
+) -> Result<(u32, u32, Vec<u8>, RenderLayout), FailureCode> {
     let (width, height) = image.dimensions();
     let scale = f64::min(
         f64::from(target.width) / f64::from(width),
@@ -126,9 +132,30 @@ pub(crate) fn fit(image: RgbaImage, target: Target) -> Result<(u32, u32, Vec<u8>
         resample(&image, fitted_width, fitted_height)?
     };
     clear_transparent(&mut fitted);
+    // Centered in the box, as `crop_in_box` reads it.
+    let image_in_target = Crop {
+        x: (target.width - fitted_width) / 2,
+        y: (target.height - fitted_height) / 2,
+        width: fitted_width,
+        height: fitted_height,
+    };
+    let layout = |result_in_target| RenderLayout {
+        source_width: f64::from(width),
+        source_height: f64::from(height),
+        image_in_target,
+        result_in_target,
+    };
     match target.crop {
-        None => Ok((fitted_width, fitted_height, fitted.into_raw())),
-        Some(crop) => crop_in_box(&fitted, target, crop),
+        None => Ok((
+            fitted_width,
+            fitted_height,
+            fitted.into_raw(),
+            layout(image_in_target),
+        )),
+        Some(crop) => {
+            let (width, height, rgba) = crop_in_box(&fitted, target, crop)?;
+            Ok((width, height, rgba, layout(crop)))
+        }
     }
 }
 

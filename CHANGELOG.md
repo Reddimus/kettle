@@ -164,7 +164,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   extended.
 - The media worker can classify a file by its content, raster or SVG,
   whatever it is called, and says what it rendered. Kettle and its worker now
-  speak media protocol 2; a worker from an older build is refused until
+  speak media protocol 3; a worker from an older build is refused until
   Kettle restarts, as before.
 - `kettle-media`, a new crate, defines the bounded media protocol for the
   agent visuals: jobs and results, caps, source authorization, the

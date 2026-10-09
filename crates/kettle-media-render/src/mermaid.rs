@@ -247,6 +247,7 @@ mod tests {
             content_digest(source.as_bytes(), None).unwrap()
         );
         assert_eq!(rendered.source_text[0], "flowchart LR");
+        assert_eq!(rendered.exact_source.as_deref(), Some(source));
         assert!(
             rendered
                 .rgba

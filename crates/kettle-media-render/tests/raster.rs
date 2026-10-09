@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
 use kettle_media::{
-    Canvas, Crop, FailureCode, GuiActionWitness, Job, JobKind, NativePath, PathIdentity, Source,
-    Target, Theme, content_digest,
+    Canvas, Crop, FailureCode, GuiActionWitness, Job, JobKind, NativePath, PathIdentity,
+    RenderLayout, Source, Target, Theme, content_digest,
 };
 use kettle_media_render::render;
 
@@ -237,10 +237,27 @@ fn canvas_and_crop_are_bounded() {
     // Fitted inside a 4x4 box keeping the aspect ratio: 4x2.
     let rendered = render(&job(Source::Bytes(png.clone()), target(4, 4, None))).unwrap();
     assert_eq!((rendered.width, rendered.height), (4, 2));
-    // Never enlarged: in a 16x16 box it keeps its own 8x4.
+    // Never enlarged: in a 16x16 box it keeps its own 8x4, centered there,
+    // and the pixels cover just that rectangle. A raster has no text source.
     let rendered = render(&job(Source::Bytes(png.clone()), target(16, 16, None))).unwrap();
     assert_eq!((rendered.width, rendered.height), (8, 4));
     assert!(rendered.rgba.chunks(4).all(|pixel| pixel == red));
+    let centered = Crop {
+        x: 4,
+        y: 6,
+        width: 8,
+        height: 4,
+    };
+    assert_eq!(
+        rendered.layout,
+        RenderLayout {
+            source_width: 8.0,
+            source_height: 4.0,
+            image_in_target: centered,
+            result_in_target: centered,
+        }
+    );
+    assert_eq!(rendered.exact_source, None);
     // A crop is in box coordinates around the centered image: in a 16x16
     // box, columns 4..12 and rows 6..10.
     let rendered = render(&job(
@@ -258,6 +275,17 @@ fn canvas_and_crop_are_bounded() {
     ))
     .unwrap();
     assert_eq!((rendered.width, rendered.height), (4, 4));
+    // The pixels cover the crop asked for; the image stays where it was.
+    assert_eq!(rendered.layout.image_in_target, centered);
+    assert_eq!(
+        rendered.layout.result_in_target,
+        Crop {
+            x: 2,
+            y: 4,
+            width: 4,
+            height: 4,
+        }
+    );
     let rows: Vec<&[u8]> = rendered.rgba.chunks(4 * 4).collect();
     for (row, pixels) in rows.iter().enumerate() {
         for (column, pixel) in pixels.chunks(4).enumerate() {

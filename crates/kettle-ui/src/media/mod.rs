@@ -474,6 +474,23 @@ mod tests {
                 height: 1,
                 rgba: vec![0; 4],
                 digest: kettle_media::content_digest(b"<svg/>", None).unwrap(),
+                layout: kettle_media::RenderLayout {
+                    source_width: 1.0,
+                    source_height: 1.0,
+                    image_in_target: kettle_media::Crop {
+                        x: 0,
+                        y: 0,
+                        width: 1,
+                        height: 1,
+                    },
+                    result_in_target: kettle_media::Crop {
+                        x: 0,
+                        y: 0,
+                        width: 1,
+                        height: 1,
+                    },
+                },
+                exact_source: Some("<svg/>".into()),
                 source_text: Vec::new(),
                 fence_sources: Vec::new(),
                 fence_count: 0,

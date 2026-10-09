@@ -75,7 +75,10 @@ pub const MAX_VERSION_BYTES: usize = 64;
 /// Hex digest of the source a binary was built from, up to 256 bits.
 pub const MAX_SOURCE_HASH_BYTES: usize = 64;
 /// No version negotiation. A header skew requires restart.
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
+/// Longest textual source a reply returns as it was read: the SVG input
+/// cap, the largest textual kind's.
+pub const MAX_EXACT_SOURCE_BYTES: usize = MAX_SVG_BYTES;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ValidationError {
@@ -501,6 +504,17 @@ impl MediaKind {
         }
     }
 
+    /// The longest source a render of this kind returns as it was read: a
+    /// textual kind's input cap; `None` for a kind that is not text.
+    pub fn exact_source_cap(self) -> Option<usize> {
+        match self {
+            Self::Svg => Some(MAX_SVG_BYTES),
+            Self::Mermaid => Some(MAX_MERMAID_BYTES),
+            Self::Markdown => Some(MAX_MARKDOWN_BYTES),
+            Self::Raster | Self::Video => None,
+        }
+    }
+
     /// The kind's wire word in control replies.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -853,13 +867,60 @@ pub struct Digest {
     pub sha256: [u8; 32],
     pub path_identity: Option<PathIdentity>,
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Where a render's pixels sit, in target-box pixels, and the source's own
+/// extent: what a zoomed view needs to ask for a crop and to place what
+/// comes back.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RenderLayout {
+    /// The source's own width and height: a raster's pixels, an SVG's user
+    /// units.
+    pub source_width: f64,
+    pub source_height: f64,
+    /// The rectangle the fitted image fills in the target box, centered.
+    pub image_in_target: Crop,
+    /// The target-box rectangle the returned pixels cover: the fitted image,
+    /// or the crop asked for. An SVG held to its pixel ceiling covers it with
+    /// fewer pixels than it spans.
+    pub result_in_target: Crop,
+}
+impl RenderLayout {
+    /// Finite, positive source extents and nonempty rectangles in range, the
+    /// returned `width` x `height` pixels no more than the rectangle they
+    /// cover.
+    pub fn validate(&self, width: u32, height: u32) -> Result<(), ValidationError> {
+        let extent = |value: f64| value.is_finite() && value > 0.0;
+        let rect = |crop: Crop| {
+            crop.width > 0
+                && crop.height > 0
+                && crop.x.checked_add(crop.width).is_some()
+                && crop.y.checked_add(crop.height).is_some()
+        };
+        let result = self.result_in_target;
+        if extent(self.source_width)
+            && extent(self.source_height)
+            && rect(self.image_in_target)
+            && rect(result)
+            && width <= result.width
+            && height <= result.height
+        {
+            Ok(())
+        } else {
+            Err(ValidationError::BadParams)
+        }
+    }
+}
+#[derive(Clone, Debug, PartialEq)]
 pub struct Rendered {
     pub width: u32,
     pub height: u32,
     /// Straight, un-premultiplied RGBA in row-major order.
     pub rgba: Vec<u8>,
     pub digest: Digest,
+    /// Where the pixels sit in the target box.
+    pub layout: RenderLayout,
+    /// A textual kind's input exactly as it was read, from the snapshot the
+    /// digest covers; `None` for a raster.
+    pub exact_source: Option<String>,
     /// Display lines, without embedded CR/LF. Refuse over-cap values; never truncate in the codec.
     pub source_text: Vec<String>,
     /// All fences from the same file version, for later gallery renders without reopening it.
@@ -870,7 +931,7 @@ pub struct Rendered {
     pub warnings: Vec<Warning>,
 }
 /// A rendered job and what it turned out to be.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RenderOutput {
     pub kind: MediaKind,
     pub rendered: Rendered,
@@ -888,6 +949,10 @@ impl Rendered {
             return Err(ValidationError::BadParams);
         }
         validate_identity(self.digest.path_identity)?;
+        self.layout.validate(self.width, self.height)?;
+        if let Some(source) = &self.exact_source {
+            cap(source.len(), MAX_EXACT_SOURCE_BYTES)?;
+        }
         validate_fences(self.fence_count, self.fence_index, self.fence_sources.len())?;
         cap(self.source_text.len(), MAX_SOURCE_LINES)?;
         for line in &self.source_text {
@@ -902,6 +967,18 @@ impl Rendered {
         }
         cap(self.warnings.len(), MAX_WARNINGS)?;
         Ok(())
+    }
+}
+impl Rendered {
+    /// [`Self::validate`], and as a render of `kind`: a textual kind returns
+    /// its source as read, within the kind's input cap; any other kind none.
+    pub fn validate_as(&self, kind: MediaKind) -> Result<(), ValidationError> {
+        self.validate()?;
+        match (kind.exact_source_cap(), &self.exact_source) {
+            (Some(cap_bytes), Some(source)) => cap(source.len(), cap_bytes),
+            (None, None) => Ok(()),
+            _ => Err(ValidationError::BadParams),
+        }
     }
 }
 pub(crate) fn validate_line(s: &str) -> Result<(), ValidationError> {

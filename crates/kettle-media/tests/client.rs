@@ -11,7 +11,7 @@ use kettle_media::client::{
     FileIdentity, SpawnedWorker, UnavailableCause, WorkerClient, WorkerExit, WorkerPlatform,
     WorkerProcess, worker_command,
 };
-use kettle_media::{FailureCode, Source, content_digest};
+use kettle_media::{FailureCode, MediaKind, Source, content_digest};
 
 const READY: Duration = Duration::from_millis(500);
 const RENDER: Duration = Duration::from_millis(500);
@@ -115,7 +115,7 @@ fn client(mode: &str) -> WorkerClient {
 
 #[test]
 fn a_real_worker_renders_a_job() {
-    let mut expected = common::rendered();
+    let mut expected = common::rendered_as(MediaKind::Raster);
     expected.digest = content_digest(&[7], None).unwrap();
     let client = WorkerClient::with_test_budgets(
         common::build(),

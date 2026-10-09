@@ -247,9 +247,14 @@ fn stop_rendered(
     rendered: Rendered,
 ) -> Result<RenderOutput, FailureCode> {
     match worker.stop() {
-        Stopped::Exited(WorkerExit::Code(0)) if rendered.validate().is_ok() => kind
-            .map(|kind| RenderOutput { kind, rendered })
-            .ok_or(FailureCode::WorkerUnavailable),
+        // A reply is taken only as a render of the kind it is, its source
+        // with it when that kind is text and never otherwise.
+        Stopped::Exited(WorkerExit::Code(0))
+            if kind.is_some_and(|kind| rendered.validate_as(kind).is_ok()) =>
+        {
+            kind.map(|kind| RenderOutput { kind, rendered })
+                .ok_or(FailureCode::WorkerUnavailable)
+        }
         Stopped::Exited(WorkerExit::Code(0)) => Err(FailureCode::WorkerUnavailable),
         Stopped::Exited(exit) => Err(exit_failure(exit)),
         Stopped::OverFootprint => Err(FailureCode::RenderResource),
@@ -754,6 +759,23 @@ mod tests {
             height: 1,
             rgba: vec![255, 0, 0, 255],
             digest: content_digest(&[7], None).unwrap(),
+            layout: crate::RenderLayout {
+                source_width: 1.0,
+                source_height: 1.0,
+                image_in_target: crate::Crop {
+                    x: 0,
+                    y: 0,
+                    width: 1,
+                    height: 1,
+                },
+                result_in_target: crate::Crop {
+                    x: 0,
+                    y: 0,
+                    width: 1,
+                    height: 1,
+                },
+            },
+            exact_source: None,
             source_text: vec![],
             fence_sources: vec![],
             fence_count: 0,
@@ -761,6 +783,16 @@ mod tests {
             uncovered_scripts: vec![],
             warnings: vec![],
         }
+    }
+
+    /// The fixture as a render of `kind`, its source with it when that
+    /// kind is text.
+    fn rendered_as(kind: MediaKind) -> Rendered {
+        let mut rendered = rendered();
+        if kind.exact_source_cap().is_some() {
+            rendered.exact_source = Some("<svg/>".into());
+        }
+        rendered
     }
 
     fn frame(frame: &Frame) -> Vec<u8> {
@@ -1084,7 +1116,7 @@ mod tests {
                 ready(build_id()),
                 frame(&Frame::DetectedRendered {
                     kind,
-                    rendered: rendered(),
+                    rendered: rendered_as(kind),
                 }),
             ]);
             let fake = Fake::new(vec![Script::replies(output, WorkerExit::Code(0))]);
@@ -1097,7 +1129,7 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(output.kind, kind);
-            assert_eq!(output.rendered, rendered());
+            assert_eq!(output.rendered, rendered_as(kind));
             assert_eq!(fake.spawns.load(Ordering::SeqCst), 1);
             assert!(fake.reaped.load(Ordering::SeqCst) >= 1);
         }
@@ -1122,7 +1154,7 @@ mod tests {
             ready(build_id()),
             frame(&Frame::DetectedRendered {
                 kind: MediaKind::Svg,
-                rendered: rendered(),
+                rendered: rendered_as(MediaKind::Svg),
             }),
         ]);
         let fake = Fake::new(vec![Script::replies(output, WorkerExit::Code(0))]);

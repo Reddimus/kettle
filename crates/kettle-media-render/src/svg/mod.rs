@@ -27,7 +27,8 @@ pub(crate) mod text_wrap;
 
 use kettle_media::{
     Crop, FailureCode, Job, JobKind, MAX_SOURCE_LINE_BYTES, MAX_SOURCE_LINES,
-    MAX_SVG_RENDERED_EDGE, MAX_SVG_RENDERED_PIXELS, Rendered, Target, Warning, content_digest,
+    MAX_SVG_RENDERED_EDGE, MAX_SVG_RENDERED_PIXELS, RenderLayout, Rendered, Target, Warning,
+    content_digest,
 };
 use resvg::tiny_skia::{Pixmap, Transform};
 
@@ -209,6 +210,8 @@ pub(crate) fn render_admitted_svg(
         height: placement.height,
         rgba,
         digest,
+        layout: placement.layout,
+        exact_source: Some(text.to_owned()),
         source_text,
         fence_sources: Vec::new(),
         fence_count: 0,
@@ -240,12 +243,14 @@ fn options(fonts: &fonts::JobFonts) -> usvg::Options<'static> {
     }
 }
 
-/// Where the image lands: the canvas to allocate and the transform onto it.
+/// Where the image lands: the canvas to allocate and the transform onto it,
+/// and where both sit in the target box.
 #[derive(Debug, PartialEq)]
 struct Placement {
     width: u32,
     height: u32,
     transform: Transform,
+    layout: RenderLayout,
 }
 
 /// `edge * scale`, rounded, kept within 1..=`limit`.
@@ -281,6 +286,20 @@ fn place(size: usvg::Size, target: Target) -> Result<Placement, FailureCode> {
         scaled(width, scale, target.width),
         scaled(height, scale, target.height),
     );
+    // The fitted image's place in the box, before any ceiling shrinks the
+    // pixels that cover it.
+    let image_in_target = Crop {
+        x: (target.width - fitted.0) / 2,
+        y: (target.height - fitted.1) / 2,
+        width: fitted.0,
+        height: fitted.1,
+    };
+    let layout = |result_in_target| RenderLayout {
+        source_width: f64::from(width),
+        source_height: f64::from(height),
+        image_in_target,
+        result_in_target,
+    };
     if target.crop.is_none() && !within_ceiling(fitted.0, fitted.1) {
         let edge = MAX_SVG_RENDERED_EDGE as f32;
         let area = (MAX_SVG_RENDERED_PIXELS as f64 / (f64::from(fitted.0) * f64::from(fitted.1)))
@@ -307,6 +326,7 @@ fn place(size: usvg::Size, target: Target) -> Result<Placement, FailureCode> {
             width: fitted.0,
             height: fitted.1,
             transform: to_fitted,
+            layout: layout(image_in_target),
         }),
         Some(Crop {
             x,
@@ -326,6 +346,12 @@ fn place(size: usvg::Size, target: Target) -> Result<Placement, FailureCode> {
                 width: crop_width,
                 height: crop_height,
                 transform: shift.pre_concat(to_fitted),
+                layout: layout(Crop {
+                    x,
+                    y,
+                    width: crop_width,
+                    height: crop_height,
+                }),
             })
         }
     }
@@ -392,9 +418,34 @@ mod tests {
     fn placement_fits_the_box_then_the_svg_ceiling() {
         let placed = place(size(200.0, 100.0), target(400, 400, None)).unwrap();
         assert_eq!((placed.width, placed.height), (400, 200));
-        // A 4096 box is fitted, then brought within 1024 a side.
+        let fitted = Crop {
+            x: 0,
+            y: 100,
+            width: 400,
+            height: 200,
+        };
+        assert_eq!(
+            placed.layout,
+            RenderLayout {
+                source_width: 200.0,
+                source_height: 100.0,
+                image_in_target: fitted,
+                result_in_target: fitted,
+            }
+        );
+        // A 4096 box is fitted, then brought within 1024 a side: the pixels
+        // still cover the whole fitted rectangle, more sparsely.
         let placed = place(size(100.0, 100.0), target(4096, 4096, None)).unwrap();
         assert_eq!((placed.width, placed.height), (1024, 1024));
+        let whole = Crop {
+            x: 0,
+            y: 0,
+            width: 4096,
+            height: 4096,
+        };
+        assert_eq!(placed.layout.image_in_target, whole);
+        assert_eq!(placed.layout.result_in_target, whole);
+        placed.layout.validate(placed.width, placed.height).unwrap();
         let placed = place(size(4000.0, 1000.0), target(4096, 4096, None)).unwrap();
         assert_eq!((placed.width, placed.height), (1024, 256));
     }
@@ -409,6 +460,8 @@ mod tests {
         };
         let placed = place(size(100.0, 100.0), target(2048, 2048, Some(crop))).unwrap();
         assert_eq!((placed.width, placed.height), (512, 512));
+        assert_eq!(placed.layout.result_in_target, crop);
+        assert_eq!(placed.layout.image_in_target.width, 2048);
         assert_eq!(
             placed.transform,
             Transform::from_translate(-100.0, -50.0).pre_scale(20.48, 20.48)
@@ -501,6 +554,11 @@ mod tests {
         };
         let rendered = render_admitted_svg(&job, svg.to_owned(), &snapshot, &fonts).unwrap();
         assert_eq!(rendered.source_text, ["flowchart LR", "  A --> B"]);
+        assert_eq!(
+            rendered.exact_source.as_deref(),
+            Some("flowchart LR\n  A --> B\n"),
+            "the original source, not the generated SVG"
+        );
         assert_eq!(
             rendered.digest,
             content_digest(original, Some(identity)).unwrap()
@@ -610,6 +668,25 @@ mod tests {
         ] {
             assert_eq!(root_element_name(text), root, "{text:?}");
         }
+    }
+
+    #[test]
+    fn exact_source_keeps_line_endings_and_what_display_clips() {
+        let long = "x".repeat(MAX_SOURCE_LINE_BYTES + 10);
+        let original = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"4\" height=\"4\">\r\n<!-- {long} -->\r\n</svg>"
+        );
+        let job = generated_job(original.as_bytes());
+        let fonts = fonts::for_job(&[]).unwrap();
+        let snapshot = source::Snapshot {
+            bytes: std::borrow::Cow::Borrowed(original.as_bytes()),
+            identity: None,
+        };
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"/>"#;
+        let rendered = render_admitted_svg(&job, svg.to_owned(), &snapshot, &fonts).unwrap();
+        assert_eq!(rendered.exact_source.as_deref(), Some(original.as_str()));
+        assert!(rendered.warnings.contains(&Warning::SourceDisplayClipped));
+        assert!(rendered.source_text[1].len() < long.len());
     }
 
     #[test]
