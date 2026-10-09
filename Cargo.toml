@@ -95,6 +95,10 @@ image = { version = "0.25.10", default-features = false }
 log = "0.4"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 serde = { version = "1", features = ["derive"] }
+# One declaration, with object keys kept in insertion order: the diagram
+# renderer's dependencies turn that on for any build that includes them, so
+# every crate has it on, and a JSON object reads the same in every build.
+serde_json = { version = "1.0.149", features = ["preserve_order"] }
 toml = "1.1.2"
 regex = "1"
 regex-automata = "0.4"

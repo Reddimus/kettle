@@ -1252,7 +1252,8 @@ stop has one write to interrupt. It can still cut a line whose write is blocked
 in the OS when `process::exit` runs. Events serialize from borrowed structs into
 a reused line buffer, and a chunk that is already valid UTF-8 is borrowed rather
 than copied. The structs declare their fields alphabetically, so each line keeps
-the sorted keys and exact bytes a `serde_json::Value` produces. The lifecycle counts
+the sorted keys and exact bytes the `serde_json::Value` maps they replaced
+produced, now that Kettle's JSON maps keep insertion order instead. The lifecycle counts
 admitted commands and polls their completion plus the final flush/join; timeout
 and cancellation therefore remain observable after child exit, while ordinary
 completion still drains losslessly. Between turns the lifecycle waits on the

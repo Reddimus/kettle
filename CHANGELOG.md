@@ -207,6 +207,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- JSON objects in Kettle's control, MCP and other JSON replies keep their
+  keys in the order Kettle writes them, in every build, rather than
+  alphabetically. A JSON reader sees no difference; a script that compared
+  reply text byte for byte may. `kettle exec --json` events keep their bytes.
 - The control server checks each request's permission on its connection
   thread before anything else, so a refused request does no work and never
   reaches the window. A refusal now comes before parameter errors, a

@@ -538,13 +538,13 @@ pub mod error_codes {
 /// enforce `MAX_LINE_BYTES` incrementally while reading bytes, so a peer that
 /// never sends a newline can't grow the read buffer without bound. This
 /// post-hoc check is the second line of defense, not the only one.
-pub fn parse_request_line(line: &str) -> Result<Request, Response> {
+pub fn parse_request_line(line: &str) -> Result<Request, Box<Response>> {
     if line.len() > MAX_LINE_BYTES {
-        return Err(Response::err(
+        return Err(Box::new(Response::err(
             0,
             error_codes::BAD_REQUEST,
             "request line exceeds 1 MiB",
-        ));
+        )));
     }
     let req: Request = serde_json::from_str(line).map_err(|e| {
         // Best-effort id recovery so a parse failure can still correlate.
@@ -552,21 +552,21 @@ pub fn parse_request_line(line: &str) -> Result<Request, Response> {
             .ok()
             .and_then(|v| v.get("id").and_then(|i| i.as_u64()))
             .unwrap_or(0);
-        Response::err(
+        Box::new(Response::err(
             id,
             error_codes::BAD_REQUEST,
             format!("invalid request: {e}"),
-        )
+        ))
     })?;
     if req.v != PROTOCOL_VERSION {
-        return Err(Response::err(
+        return Err(Box::new(Response::err(
             req.id,
             error_codes::UNSUPPORTED_VERSION,
             format!(
                 "protocol v{} is unsupported; expected v{PROTOCOL_VERSION}",
                 req.v
             ),
-        ));
+        )));
     }
     Ok(req)
 }

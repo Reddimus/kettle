@@ -3598,7 +3598,8 @@ query-flooding child that never reads replies must hit the bounded
 64-message reply queue promptly rather than defeating timeout. A separate
 semantic OSC-event flood must trip the 1024-event parser queue.
 Unit tests pin `--json` rendering. A golden test compares every event kind
-against the bytes equivalent `serde_json::Value` maps produce. It covers escapes,
+against the bytes equivalent `serde_json::Value` maps produced when their keys
+were sorted, which it reproduces by sorting each map's keys itself. It covers escapes,
 invalid bytes, split and carried codepoints, and the lossy tail at exit. A
 counting sink requires exactly one `write` per event, with the carried tail and
 the exit event sharing one. A sink that takes seven bytes per call proves each

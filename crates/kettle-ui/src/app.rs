@@ -21364,7 +21364,7 @@ impl App {
                     if !request.internal_probe() && !ctl_method_is_pure_read(request.method()) {
                         needs_redraw = true;
                     }
-                    self.handle_ctl_request(ws, event_loop, conn_id, request, reply);
+                    self.handle_ctl_request(ws, event_loop, conn_id, *request, reply);
                 }
                 CtlServerMsg::Disconnect { conn_id } => {
                     let panes = self

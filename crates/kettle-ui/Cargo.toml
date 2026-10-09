@@ -74,7 +74,7 @@ pollster = "1.0.1"
 # allow-list.
 regex.workspace = true
 serde = { workspace = true, features = ["derive"] }
-serde_json = "1.0.149"
+serde_json.workspace = true
 sha2 = "0.11"
 # Inline card nonces come from the OS's random source.
 getrandom.workspace = true
