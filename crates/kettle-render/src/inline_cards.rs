@@ -339,6 +339,26 @@ impl InlineCards {
         ))
     }
 
+    /// The registered cards `snap` shows whole, as a frame would draw them:
+    /// each one's nonce, its first grid line and column, and its size in
+    /// cells. For a caller that must place cards against the same grid it
+    /// reads text from, not against the last frame drawn.
+    pub fn placements(&self, snap: &PaneSnapshot) -> Vec<CardPlacement> {
+        let mut frame = CardFrame::default();
+        self.recognize_into(snap, &mut frame);
+        frame
+            .blocks
+            .iter()
+            .map(|block| CardPlacement {
+                nonce: block.nonce,
+                line: block.line,
+                column: block.column,
+                rows: block.rows,
+                columns: block.columns,
+            })
+            .collect()
+    }
+
     #[cfg(test)]
     fn recognize(&self, snap: &PaneSnapshot) -> CardFrame {
         let mut frame = CardFrame::default();
@@ -432,6 +452,18 @@ impl CardFrame {
     pub fn suppress_cell(&self, snapshot_index: usize) -> bool {
         self.accepted_cells.binary_search(&snapshot_index).is_ok()
     }
+}
+
+/// Where a recognized card sits in its pane's grid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CardPlacement {
+    pub nonce: InlineNonce,
+    /// Its first line, counted as the grid counts (the screen's top is 0,
+    /// history above it negative).
+    pub line: i32,
+    pub column: usize,
+    pub rows: u8,
+    pub columns: u8,
 }
 
 pub(crate) struct CardBlock {
@@ -727,6 +759,35 @@ pub(crate) mod tests {
 
     /// Codex prints a hook message as `↳ Hook ·` and the message's first
     /// line, then its other lines four columns in (Codex CLI 0.162.0).
+    /// A caller can place each registered card a snapshot shows whole, by
+    /// the same recognition a frame draws with; an unregistered one is not
+    /// a card.
+    #[test]
+    fn placements_name_each_registered_card_the_grid_shows() {
+        let (cards, snap, nonce) = fixture();
+        let placements = cards.placements(&snap);
+        let frame = cards.recognize(&snap);
+        assert_eq!(placements.len(), frame.blocks.len());
+        assert_eq!(placements.len(), 1);
+        let block = &frame.blocks[0];
+        assert_eq!(
+            placements[0],
+            CardPlacement {
+                nonce,
+                line: block.line,
+                column: block.column,
+                rows: block.rows,
+                columns: block.columns,
+            }
+        );
+        assert!(InlineCards::default().placements(&snap).is_empty());
+        // Recognition reads the marks a snapshot collects only when asked to.
+        let (_, term, _) = fixture_term(0);
+        let mut plain = PaneSnapshot::default();
+        plain.capture(&term);
+        assert!(cards.placements(&plain).is_empty());
+    }
+
     #[test]
     fn a_codex_hook_card_is_recognized_at_its_own_pin() {
         let codex = |label: &str, left: usize| {

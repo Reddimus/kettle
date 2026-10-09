@@ -31,7 +31,8 @@ impl PaintedCard {
 }
 
 pub use inline_cards::{
-    CardHarness, CardPoster, CardRefusal, CardSpec, InlineCards, MAX_CARD_COLUMNS, MAX_PANE_CARDS,
+    CardHarness, CardPlacement, CardPoster, CardRefusal, CardSpec, InlineCards, MAX_CARD_COLUMNS,
+    MAX_PANE_CARDS,
 };
 mod color;
 mod cursor_patch;
@@ -7129,21 +7130,32 @@ impl Renderer {
                         1.0,
                     ));
                 }
-                // Quick-select hint label chips.
+                // Quick-select hint label chips, with the menus on top of
+                // everything, inline cards included: a card's label sits on
+                // its poster and provenance tab. Hint mode closes any menu
+                // first, so nothing else is up there. A chip is cut to its
+                // pane, as its label is, so one at the last column never
+                // covers the next pane.
                 for hint in &overlay.hint_labels {
                     let n = hint.label.chars().count().max(1) as f32;
-                    quads.push(rect(
-                        grid_origin.0 + hint.col as f32 * cw,
-                        grid_origin.1 + hint.row as f32 * ch,
-                        n * cw,
-                        ch,
-                        if hint.dim {
-                            theme.palette[8]
-                        } else {
-                            cfg.search_background.unwrap_or(theme.palette[3])
-                        },
-                        if hint.dim { 0.6 } else { 0.96 },
-                    ));
+                    let left = grid_origin.0 + hint.col as f32 * cw;
+                    let top = grid_origin.1 + hint.row as f32 * ch;
+                    let (x0, y0) = (left.max(rx), top.max(ry));
+                    let (x1, y1) = ((left + n * cw).min(rx + rw), (top + ch).min(ry + rh));
+                    if x1 > x0 && y1 > y0 {
+                        menu_q.push(rect(
+                            x0,
+                            y0,
+                            x1 - x0,
+                            y1 - y0,
+                            if hint.dim {
+                                theme.palette[8]
+                            } else {
+                                cfg.search_background.unwrap_or(theme.palette[3])
+                            },
+                            if hint.dim { 0.6 } else { 0.96 },
+                        ));
+                    }
                 }
                 if let Some(preedit) = &overlay.ime_preedit {
                     let cells = unicode_width::UnicodeWidthStr::width(preedit.text.as_str()).max(1);
@@ -9176,7 +9188,8 @@ impl Renderer {
                 custom_glyphs: &[],
             });
         }
-        // Hint labels over the focused pane (chips drawn above as quads).
+        // Hint labels over the focused pane, drawn with the menus, above
+        // their chips and every card.
         if let Some((frx, fry, frw, frh)) = focus_origin {
             let focus_grid_origin = pane_grid_origin(
                 (frx, fry, frw, frh),
@@ -9188,7 +9201,7 @@ impl Renderer {
             // the theme-yellow chip) unless overridden.
             let lab = cfg.search_foreground.unwrap_or(theme.background);
             for (i, hint) in overlay.hint_labels.iter().enumerate() {
-                areas.push(TextArea {
+                menu_areas.push(TextArea {
                     buffer: &self.hint_buffers[i],
                     left: focus_grid_origin.0 + hint.col as f32 * cw,
                     top: focus_grid_origin.1 + hint.row as f32 * ch,

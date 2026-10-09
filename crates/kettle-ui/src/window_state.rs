@@ -903,9 +903,12 @@ pub(crate) struct WindowState {
     /// The inline card, by pane and nonce, that took the primary press now
     /// held; its release over the same card opens the card's item.
     pub(crate) card_press: Option<(u64, kettle_core::InlineNonce)>,
-    /// When each card on screen first appeared where it is, by spot, so a
-    /// press on one that only just appeared stays ordinary input.
-    pub(crate) card_sightings: std::collections::HashMap<crate::app::CardSpot, std::time::Instant>,
+    /// The cards on screen as of the last presented frame: since when each
+    /// is where it is, and the instance that names it.
+    pub(crate) card_sightings: crate::media::CardSightings,
+    /// The card instance assistive technology moved focus to, until a key
+    /// press returns it to the pane.
+    pub(crate) card_focus: Option<u64>,
     /// When `Some`, the user is editing a window/tab/pane title via
     /// an inline overlay.
     pub(crate) editing_title: Option<TitleEditState>,
@@ -1362,7 +1365,8 @@ impl WindowState {
             theme_preview: None,
             media_viewer: None,
             card_press: None,
-            card_sightings: std::collections::HashMap::new(),
+            card_sightings: crate::media::CardSightings::default(),
+            card_focus: None,
             editing_title: None,
             pending_resize: false,
             confirm_dialog: None,

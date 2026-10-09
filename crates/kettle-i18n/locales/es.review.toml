@@ -25,6 +25,8 @@ media_viewer_hint_single = "draft"
 media_viewer_released = "draft"
 media_viewer_a11y = "draft"
 window_title_new_media = "draft"
+card_a11y = "draft"
+card_a11y_open = "draft"
 a11y_pane = "draft"
 a11y_window = "draft"
 about_copy_version = "draft"
@@ -504,6 +506,8 @@ keys = [
     "confirm_rebind",
     "hint_a11y_list",
     "media_viewer_a11y",
+    "card_a11y",
+    "card_a11y_open",
     "menu_a11y_terminal",
     "picker_a11y_layouts",
     "picker_a11y_palette",

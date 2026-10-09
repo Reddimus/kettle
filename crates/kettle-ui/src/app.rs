@@ -56,6 +56,9 @@ const ACCESSIBILITY_COMPLETION_CONTAINER_ID: NodeId = NodeId(ACCESSIBILITY_COMPL
 const ACCESSIBILITY_MEDIA_RECEIPT_ID: NodeId = NodeId(1 << 59);
 const ACCESSIBILITY_MEDIA_RECEIPT_DISMISS_ID: NodeId = NodeId((1 << 59) | 1);
 const ACCESSIBILITY_MODAL_ID_MASK: u64 = 1 << 58;
+/// Inline cards on screen, each by its placement's instance number, which
+/// stays below this bit; never by its nonce.
+const ACCESSIBILITY_CARD_ID_MASK: u64 = crate::media::MAX_CARD_INSTANCE;
 const ACCESSIBILITY_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
 fn accessibility_completion_geometry_key(
@@ -804,6 +807,51 @@ fn media_viewer_accessibility(
         format!("{} {}", viewer.status, viewer.hint)
     };
     (label, description)
+}
+
+fn accessibility_card_id(instance: u64) -> NodeId {
+    NodeId(ACCESSIBILITY_CARD_ID_MASK | instance)
+}
+
+/// The card instance a node names, if it is a card's.
+fn accessibility_card_instance(id: NodeId) -> Option<u64> {
+    let instance = id.0 & (ACCESSIBILITY_CARD_ID_MASK - 1);
+    (id.0 & !(ACCESSIBILITY_CARD_ID_MASK - 1) == ACCESSIBILITY_CARD_ID_MASK && instance != 0)
+        .then_some(instance)
+}
+
+/// `text` without placeholder sequences. A label built from outside text,
+/// such as a sender's path, reaches a screen reader or a control client and
+/// must never carry a card's marks.
+fn without_card_marks(text: String) -> String {
+    match kettle_core::strip_placeholders(&text) {
+        std::borrow::Cow::Borrowed(_) => text,
+        std::borrow::Cow::Owned(stripped) => stripped,
+    }
+}
+
+/// A card's button for assistive technology: named by its item's title and
+/// the viewer's detail line, never by its nonce, at the part of the card on
+/// screen. Clicking it opens the item in the viewer.
+fn card_accessibility_node(
+    rect: [f32; 4],
+    title: &str,
+    detail: &str,
+    tr: &kettle_i18n::Translator,
+) -> Node {
+    let mut node = Node::new(Role::Button);
+    node.set_label(without_card_marks(tr.card_a11y(title, detail)));
+    node.set_description(tr.text(kettle_i18n::Text::CardA11yOpen));
+    node.add_action(AccessibilityAction::Focus);
+    node.add_action(AccessibilityAction::Click);
+    let [x, y, width, height] = rect;
+    node.set_bounds(accesskit::Rect::new(
+        f64::from(x),
+        f64::from(y),
+        f64::from(x + width),
+        f64::from(y + height),
+    ));
+    node
 }
 
 fn accessibility_modal_id(kind: u64, index: usize) -> NodeId {
@@ -1689,45 +1737,6 @@ fn media_visible_items<'a>(
         }
     }
     visible
-}
-
-/// How long a card must have been where it is drawn before a press on it is
-/// the card's: one that appears under the pointer as the user clicks text
-/// must not take the click.
-const CARD_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
-
-/// Where a card is on screen: its pane, its nonce and the bits of its rect.
-/// Two printed copies of one card are two spots, and a card that moved is at
-/// a new one.
-pub(crate) type CardSpot = (u64, kettle_core::InlineNonce, [u32; 4]);
-
-fn card_spot(card: &kettle_render::PaintedCard) -> CardSpot {
-    (card.pane, card.nonce, card.rect.map(f32::to_bits))
-}
-
-/// Note when each card on screen first appeared where it is: a card that
-/// moved counts as new, and one no longer on screen is forgotten.
-fn note_card_sightings(
-    sightings: &mut std::collections::HashMap<CardSpot, std::time::Instant>,
-    painted: &[kettle_render::PaintedCard],
-    now: std::time::Instant,
-) {
-    sightings.retain(|spot, _| painted.iter().any(|card| card_spot(card) == *spot));
-    for card in painted {
-        sightings.entry(card_spot(card)).or_insert(now);
-    }
-}
-
-/// The card a press at (`x`, `y`) is for: one on screen there that has been
-/// in place for `CARD_SETTLE`.
-fn settled_card_at(
-    card: Option<kettle_render::PaintedCard>,
-    sightings: &std::collections::HashMap<CardSpot, std::time::Instant>,
-    now: std::time::Instant,
-) -> Option<(u64, kettle_core::InlineNonce)> {
-    let card = card?;
-    let since = sightings.get(&card_spot(&card))?;
-    (now.saturating_duration_since(*since) >= CARD_SETTLE).then_some((card.pane, card.nonce))
 }
 
 /// Whether the release of a press card `pressed` took opens it: only over the
@@ -5467,13 +5476,64 @@ pub(crate) struct HintTarget {
     row: usize,
     col: usize,
     label: String,
-    kind: kettle_core::hints::Kind,
-    text: String,
     /// The pane the target was read from, whose directory a relative path
     /// resolves against, even if focus moved or that pane exited since.
     pane: u64,
-    /// The target meets a boundary on both sides (see `HintSpan::bounded`).
-    bounded: bool,
+    what: HintWhat,
+}
+
+/// What a quick-select target is.
+#[derive(Clone)]
+enum HintWhat {
+    /// Text the detector found: a URL, a path, or something to copy.
+    Text {
+        kind: kettle_core::hints::Kind,
+        text: String,
+        /// The text meets a boundary on both sides (see `HintSpan::bounded`).
+        bounded: bool,
+    },
+    /// An inline card on screen: picking it opens its item in the viewer.
+    Card(kettle_core::InlineNonce),
+}
+
+/// A card's place in a pane for quick select: its first and last visible
+/// cells, as (row, column), and its nonce.
+type CardCells = ((usize, usize), (usize, usize), kettle_core::InlineNonce);
+
+/// The quick-select targets in a pane, in reading order: each text span the
+/// detector found outside every card, and each card at its first visible
+/// cell. A card's rows hold its marks, not text a user would pick.
+fn hint_targets_with_cards(
+    spans: Vec<kettle_core::hints::HintSpan>,
+    cards: &[CardCells],
+) -> Vec<(usize, usize, HintWhat)> {
+    let inside_card = |row: usize, col: usize| {
+        cards.iter().any(|((top, left), (bottom, right), _)| {
+            (*top..=*bottom).contains(&row) && (*left..=*right).contains(&col)
+        })
+    };
+    let mut found: Vec<(usize, usize, HintWhat)> = spans
+        .into_iter()
+        .filter(|span| !inside_card(span.row, span.start))
+        .map(|span| {
+            (
+                span.row,
+                span.start,
+                HintWhat::Text {
+                    kind: span.kind,
+                    text: span.text,
+                    bounded: span.bounded,
+                },
+            )
+        })
+        .collect();
+    found.extend(
+        cards
+            .iter()
+            .map(|((row, col), _, nonce)| (*row, *col, HintWhat::Card(*nonce))),
+    );
+    found.sort_by_key(|(row, col, _)| (*row, *col));
+    found
 }
 
 /// What picking a quick-select hint does.
@@ -10154,8 +10214,7 @@ impl App {
             .renderer
             .as_ref()
             .and_then(|renderer| renderer.card_at(px, py));
-        let Some(card) = settled_card_at(card, &ws.card_sightings, std::time::Instant::now())
-        else {
+        let Some(card) = ws.card_sightings.settled(card, std::time::Instant::now()) else {
             return false;
         };
         ws.card_press = Some(card);
@@ -10178,18 +10237,88 @@ impl App {
             .as_ref()
             .and_then(|renderer| renderer.card_at(px, py));
         let covered = self.pointer_modal_open(ws) || ws.media_viewer.is_some();
-        if card_release_opens((pane, nonce), over, covered)
-            && let Some(item) = self.media.cards.item(pane, nonce)
-            && ws
-                .mux
-                .panes
-                .get(&pane)
-                .is_some_and(|state| state.media_shelf.items().iter().any(|it| it.id == item))
-        {
-            self.close_all_modals(ws);
-            self.show_media_item(ws, pane, item);
+        if card_release_opens((pane, nonce), over, covered) {
+            self.open_card(ws, pane, nonce);
         }
         true
+    }
+
+    /// Open the item `pane`'s card `nonce` shows in the viewer, for a click,
+    /// a hint or assistive technology. Nothing opens while a dialog, a menu
+    /// or the viewer owns the pointer, or once the card's item has left the
+    /// shelf.
+    fn open_card(
+        &mut self,
+        ws: &mut WindowState,
+        pane: u64,
+        nonce: kettle_core::InlineNonce,
+    ) -> bool {
+        if self.pointer_modal_open(ws) || ws.media_viewer.is_some() {
+            return false;
+        }
+        let Some(item) = self.media.cards.item(pane, nonce) else {
+            return false;
+        };
+        if !ws
+            .mux
+            .panes
+            .get(&pane)
+            .is_some_and(|state| state.media_shelf.items().iter().any(|it| it.id == item))
+        {
+            return false;
+        }
+        self.close_all_modals(ws);
+        self.show_media_item(ws, pane, item);
+        true
+    }
+
+    /// The cards on screen that assistive technology can reach, in paint
+    /// order: each placement's instance, where it is, and the shelf item it
+    /// shows. None while a dialog, a menu or the viewer covers them.
+    fn accessible_cards<'a>(
+        &self,
+        ws: &'a WindowState,
+    ) -> Vec<(u64, kettle_render::PaintedCard, &'a crate::media::ShelfItem)> {
+        if self.pointer_modal_open(ws) || ws.media_viewer.is_some() {
+            return Vec::new();
+        }
+        let Some(renderer) = ws.renderer.as_ref() else {
+            return Vec::new();
+        };
+        // The last frame may still show a tab or pane that has since gone
+        // from view; only what the layout shows now is reachable.
+        let shown: Vec<u64> = ws
+            .mux
+            .layout(ws.mux.active, self.area(ws))
+            .into_iter()
+            .map(|(pane, _)| pane)
+            .collect();
+        renderer
+            .painted_cards()
+            .iter()
+            .filter(|card| shown.contains(&card.pane))
+            .filter_map(|card| {
+                let instance = ws.card_sightings.instance(card)?;
+                let item = self.media.cards.item(card.pane, card.nonce)?;
+                let item = ws
+                    .mux
+                    .panes
+                    .get(&card.pane)?
+                    .media_shelf
+                    .items()
+                    .iter()
+                    .find(|it| it.id == item)?;
+                Some((instance, *card, item))
+            })
+            .collect()
+    }
+
+    /// The viewer's detail line for a card's item, as assistive technology
+    /// hears it: kind, size and sender.
+    fn card_accessibility_detail(&self, item: &crate::media::ShelfItem) -> String {
+        let (kind, sender) = self.media_item_kind_and_sender(item);
+        let (width, height) = item.size;
+        format!("{kind} · {width}×{height} · {}", sender.text)
     }
 
     fn close_media_viewer(&self, ws: &mut WindowState) {
@@ -10260,6 +10389,38 @@ impl App {
         let index = items.iter().position(|item| item.id == viewer.item)?;
         let item = &items[index];
         let tr = &self.ui_text;
+        let (kind, sender) = self.media_item_kind_and_sender(item);
+        let (width, height) = item.size;
+        Some(kettle_render::MediaViewerOverlay {
+            pane_rect,
+            title: item.title.clone(),
+            detail: format!("{kind} · {width}×{height}"),
+            sender,
+            hint: tr
+                .text(if items.len() > 1 {
+                    kettle_i18n::Text::MediaViewerHint
+                } else {
+                    kettle_i18n::Text::MediaViewerHintSingle
+                })
+                .to_string(),
+            position: (index + 1, items.len()),
+            image: item.image().cloned(),
+            status: tr.text(kettle_i18n::Text::MediaViewerReleased).to_string(),
+            canvas: match item.kind {
+                kettle_media::MediaKind::Svg => kettle_render::MediaCanvas::White,
+                kettle_media::MediaKind::Raster => kettle_render::MediaCanvas::Checker,
+                _ => kettle_render::MediaCanvas::Theme,
+            },
+        })
+    }
+
+    /// How the viewer and assistive technology describe a shelf item: its
+    /// kind, and who sent it.
+    fn media_item_kind_and_sender(
+        &self,
+        item: &crate::media::ShelfItem,
+    ) -> (&'static str, kettle_render::MediaViewerSender) {
+        let tr = &self.ui_text;
         let kind = tr.text(match item.kind {
             kettle_media::MediaKind::Raster => kettle_i18n::Text::MediaViewerKindImage,
             kettle_media::MediaKind::Svg => kettle_i18n::Text::MediaViewerKindSvg,
@@ -10288,28 +10449,7 @@ impl App {
                 }
             }
         };
-        let (width, height) = item.size;
-        Some(kettle_render::MediaViewerOverlay {
-            pane_rect,
-            title: item.title.clone(),
-            detail: format!("{kind} · {width}×{height}"),
-            sender,
-            hint: tr
-                .text(if items.len() > 1 {
-                    kettle_i18n::Text::MediaViewerHint
-                } else {
-                    kettle_i18n::Text::MediaViewerHintSingle
-                })
-                .to_string(),
-            position: (index + 1, items.len()),
-            image: item.image().cloned(),
-            status: tr.text(kettle_i18n::Text::MediaViewerReleased).to_string(),
-            canvas: match item.kind {
-                kettle_media::MediaKind::Svg => kettle_render::MediaCanvas::White,
-                kettle_media::MediaKind::Raster => kettle_render::MediaCanvas::Checker,
-                _ => kettle_render::MediaCanvas::Theme,
-            },
-        })
+        (kind, sender)
     }
 
     fn media_viewer_geometry(
@@ -14570,6 +14710,33 @@ impl App {
         };
         let g = t.grid();
         let (rows, cols) = (g.screen_lines(), g.columns());
+        // Each card the grid shows is a target too, read from the same grid
+        // as the text under the same lock, so a scroll or new output since
+        // the last frame moves both alike. It is labelled at its first
+        // visible cell; text inside it is its marks, not something to pick.
+        let mut snap = kettle_render::PaneSnapshot::default();
+        snap.capture_with_card_marks(&t, true);
+        let offset = i32::try_from(g.display_offset()).unwrap_or(i32::MAX);
+        let last_row = i32::try_from(rows).unwrap_or(i32::MAX).saturating_sub(1);
+        let cards: Vec<CardCells> = p
+            .inline_cards
+            .placements(&snap)
+            .into_iter()
+            .filter(|card| self.media.cards.item(pane, card.nonce).is_some())
+            .filter_map(|card| {
+                let top = card.line.checked_add(offset)?;
+                let bottom = top.checked_add(i32::from(card.rows).max(1) - 1)?;
+                if bottom < 0 || top > last_row || cols == 0 {
+                    return None;
+                }
+                let right = (card.column + usize::from(card.columns).max(1) - 1).min(cols - 1);
+                Some((
+                    (usize::try_from(top.max(0)).ok()?, card.column.min(cols - 1)),
+                    (usize::try_from(bottom.min(last_row)).ok()?, right),
+                    card.nonce,
+                ))
+            })
+            .collect();
         // Convert each viewport row to its grid-absolute line so hint detection
         // scans the visible rows (including history when scrolled back), not the
         // active screen. Otherwise a label drawn over a visible URL would open
@@ -14582,19 +14749,17 @@ impl App {
                 base.line.0
             })
             .collect();
-        let spans = hints::detect_rows(g, &lines, cols);
-        let labels = hints::labels(spans.len(), hints::ALPHABET);
-        spans
+        let found = hint_targets_with_cards(hints::detect_rows(g, &lines, cols), &cards);
+        let labels = hints::labels(found.len(), hints::ALPHABET);
+        found
             .into_iter()
             .zip(labels)
-            .map(|(s, label)| HintTarget {
-                row: s.row,
-                col: s.start,
+            .map(|((row, col, what), label)| HintTarget {
+                row,
+                col,
                 label,
-                kind: s.kind,
-                text: s.text,
                 pane,
-                bounded: s.bounded,
+                what,
             })
             .collect()
     }
@@ -15883,12 +16048,13 @@ impl App {
         );
         let frame_time = frame_started.elapsed();
         // A card has been seen once a frame showing it reached the screen.
-        if matches!(&frame_result, Ok(FrameOutcome::Presented)) {
-            note_card_sightings(
-                &mut ws.card_sightings,
-                renderer.painted_cards(),
-                std::time::Instant::now(),
-            );
+        if matches!(&frame_result, Ok(FrameOutcome::Presented))
+            && ws
+                .card_sightings
+                .note(renderer.painted_cards(), std::time::Instant::now())
+        {
+            // Assistive technology names each card on screen.
+            ws.accessibility_pending = true;
         }
         // C1 records only a presented scene. Reuse that scene immediately,
         // before any renderer setter can invalidate it, and with the same cfg.
@@ -16113,6 +16279,10 @@ impl App {
     /// cursor visible on the new pane right away.
     fn note_focus_change(&mut self, ws: &mut WindowState, pre: (usize, Option<u64>)) {
         if self.focus_key(ws) != pre {
+            // Focus moved to a pane, so not to a card any more.
+            if ws.card_focus.take().is_some() {
+                ws.accessibility_pending = true;
+            }
             // Vi mode belongs to the pane that owns alacritty_terminal's
             // engine cursor. A focus change must not leave that old pane in
             // TermMode::VI while the UI routes keys to a different pane.
@@ -22322,6 +22492,41 @@ impl App {
                 "focused": focused,
             })
         });
+        // The cards on screen, by instance, never by card id, so automation
+        // can find and click one as a user would.
+        let now = std::time::Instant::now();
+        let inline_cards: Vec<serde_json::Value> = target
+            .renderer
+            .as_ref()
+            .map_or(&[][..], |renderer| renderer.painted_cards())
+            .iter()
+            .map(|card| {
+                let item = self.media.cards.item(card.pane, card.nonce).and_then(|id| {
+                    target
+                        .mux
+                        .panes
+                        .get(&card.pane)?
+                        .media_shelf
+                        .items()
+                        .iter()
+                        .find(|item| item.id == id)
+                });
+                let [x, y, width, height] = card.rect;
+                serde_json::json!({
+                    "pane": card.pane,
+                    "instance": target.card_sightings.instance(card),
+                    "rect": {"x": x, "y": y, "width": width, "height": height},
+                    "settled": target.card_sightings.settled(Some(*card), now).is_some(),
+                    "item": item.map(|item| item.id),
+                    "label": item.map(|item| {
+                        without_card_marks(
+                            self.ui_text
+                                .card_a11y(&item.title, &self.card_accessibility_detail(item)),
+                        )
+                    }),
+                })
+            })
+            .collect();
         let mut geometry = serde_json::json!({
                 "window": target.seq,
                 "window_focused": target.window_focused,
@@ -22448,6 +22653,10 @@ impl App {
                 "cursor_blink": self.cursor_blink_diagnostics(target),
         });
         if let serde_json::Value::Object(fields) = &mut geometry {
+            fields.insert(
+                "inline_cards".into(),
+                serde_json::Value::Array(inline_cards),
+            );
             fields.insert(
                 "desktop".into(),
                 serde_json::json!({
@@ -23208,9 +23417,13 @@ impl App {
     ) -> bool {
         // As natively: a card press whose release never came is over, a
         // program still holding this button gets its release, and the press
-        // is Kettle's own gesture until a program receives it.
+        // is Kettle's own gesture until a program receives it. Focus leaves
+        // any card.
         if bcode == 0 {
             ws.card_press = None;
+        }
+        if ws.card_focus.take().is_some() {
+            ws.accessibility_pending = true;
         }
         self.release_held_buttons(ws, |held| held.button == bcode);
         ws.held_buttons.pressed(bcode, None, (0, 0));
@@ -25924,16 +26137,28 @@ impl App {
     }
 
     fn act_hint(&mut self, ws: &mut WindowState, h: &HintTarget, alternate: bool) {
+        let (kind, text, bounded) = match &h.what {
+            // A card opens its item in the viewer, Shift or not.
+            HintWhat::Card(nonce) => {
+                self.open_card(ws, h.pane, *nonce);
+                return;
+            }
+            HintWhat::Text {
+                kind,
+                text,
+                bounded,
+            } => (*kind, text, *bounded),
+        };
         let pane = ws.mux.panes.get(&h.pane);
         // A pane that exited took its directory with it, so nothing local can
         // be resolved for it, and a remote pane's paths name files elsewhere.
         // Behind a multiplexer the path opens once the user confirms (see
         // `open_pane_link`).
         let remote = matches!(pane.map(pane_path_origin), None | Some(PathOrigin::Remote));
-        let action = hint_action(h.kind, alternate, remote || !h.bounded);
+        let action = hint_action(kind, alternate, remote || !bounded);
         let path_url = match action {
             HintAction::OpenPath => hint_path_url(
-                &h.text,
+                text,
                 pane.and_then(|pane| pane.term.current_dir_or_native())
                     .as_deref(),
                 crate::mux::home_dir_string().as_deref(),
@@ -25944,13 +26169,13 @@ impl App {
             // Route through open_pane_link so a hint honors the pane's origin,
             // the URL safety check, Lua URL handlers and the custom URL
             // handler, like a click.
-            (HintAction::OpenUrl, _) => self.open_pane_link(ws, Some(h.pane), &h.text),
+            (HintAction::OpenUrl, _) => self.open_pane_link(ws, Some(h.pane), text),
             (HintAction::OpenPath, Some(url)) => self.open_pane_link(ws, Some(h.pane), &url),
             // A path Kettle will not open (a climb with `..`, an unknown base,
             // any path on Windows) is copied instead, as for a plain label.
             (HintAction::OpenPath, None) | (HintAction::Copy, _) => {
                 if let Some(cb) = self.clipboard.as_mut()
-                    && let Err(e) = cb.set_text(h.text.clone())
+                    && let Err(e) = cb.set_text(text.clone())
                 {
                     // Log instead of silently swallowing.
                     log::warn!("clipboard set_text failed (hint copy): {e}");
@@ -29480,8 +29705,9 @@ impl App {
         let area = self.area(ws);
         let layout = ws.mux.layout(ws.mux.active, area);
         let focused = ws.mux.active_focus();
+        let cards = self.accessible_cards(ws);
         let mut children = Vec::with_capacity(layout.len());
-        let mut nodes = Vec::with_capacity(layout.len() * 2 + 1);
+        let mut nodes = Vec::with_capacity(layout.len() * 2 + cards.len() + 1);
         for (pane_id, (x, y, width, height)) in layout {
             let Some(pane) = ws.mux.panes.get(&pane_id) else {
                 continue;
@@ -29496,7 +29722,21 @@ impl App {
                 pane.title.clone()
             };
             node.set_label(label);
-            node.set_children([text_id]);
+            let mut pane_children = vec![text_id];
+            for (instance, card, item) in cards.iter().filter(|(_, card, _)| card.pane == pane_id) {
+                let id = accessibility_card_id(*instance);
+                pane_children.push(id);
+                nodes.push((
+                    id,
+                    card_accessibility_node(
+                        card.rect,
+                        &item.title,
+                        &self.card_accessibility_detail(item),
+                        &self.ui_text,
+                    ),
+                ));
+            }
+            node.set_children(pane_children);
             let text = pane
                 .term
                 .screen_text(0)
@@ -29747,9 +29987,11 @@ impl App {
             if ws.search.open {
                 accessibility_search_control_id(ws.search.focused_control)
             } else {
-                focused
-                    .map(accessibility_pane_id)
-                    .filter(|id| nodes.iter().any(|(candidate, _)| candidate == id))
+                ws.card_focus
+                    .map(accessibility_card_id)
+                    .into_iter()
+                    .chain(focused.map(accessibility_pane_id))
+                    .find(|id| nodes.iter().any(|(candidate, _)| candidate == id))
                     .unwrap_or(ACCESSIBILITY_ROOT_ID)
             }
         });
@@ -29766,6 +30008,12 @@ impl App {
 
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         ws.mux.active_focus().hash(&mut hasher);
+        ws.card_focus.hash(&mut hasher);
+        for (instance, card, item) in self.accessible_cards(ws) {
+            instance.hash(&mut hasher);
+            card.rect.map(f32::to_bits).hash(&mut hasher);
+            (item.id, item.generation).hash(&mut hasher);
+        }
         if let Some(window) = &ws.window {
             let size = window.inner_size();
             size.width.hash(&mut hasher);
@@ -31848,6 +32096,39 @@ impl App {
             }
             return;
         }
+        if let Some(instance) = accessibility_card_instance(request.target_node) {
+            // Only a card the tree names answers: one on screen, under no
+            // dialog or viewer. A stale instance names nothing, so it can
+            // never focus or open another card.
+            let reachable = self
+                .accessible_cards(ws)
+                .iter()
+                .any(|(card, _, _)| *card == instance);
+            if reachable && let Some((pane, nonce)) = ws.card_sightings.by_instance(instance) {
+                match request.action {
+                    AccessibilityAction::Focus => {
+                        // The card's pane takes the keyboard with it, so text
+                        // typed next goes where the screen reader is. Search
+                        // would keep the keys, so it closes, remembering its
+                        // query.
+                        self.close_search(ws);
+                        let pre = self.focus_key(ws);
+                        ws.mux.focus_pane(pane);
+                        self.note_focus_change(ws, pre);
+                        ws.card_focus = Some(instance);
+                    }
+                    AccessibilityAction::Click => {
+                        self.open_card(ws, pane, nonce);
+                    }
+                    _ => return,
+                }
+                ws.accessibility_pending = true;
+                if let Some(window) = &ws.window {
+                    window.request_redraw();
+                }
+            }
+            return;
+        }
         if !ws.search.open {
             return;
         }
@@ -32683,6 +32964,11 @@ impl App {
                 // gate as L/M/R + wheel keeps SGR out of a tracking TUI
                 // *behind* a palette/settings/… dialog. A lone context menu
                 // isn't a modal here.
+                // A press of any button is the pointer's: focus is no longer
+                // on a card.
+                if ws.card_focus.take().is_some() {
+                    ws.accessibility_pending = true;
+                }
                 if let Some(sgr) = extra_mouse_sgr(button) {
                     // A press of a button still noted as held means its
                     // release went elsewhere: its program gets it now. The
@@ -33570,6 +33856,17 @@ impl App {
                 }
             }
             WindowEvent::Ime(ime) => {
+                // Text through an input method returns focus from a card to
+                // its pane, as a key press does; the method handles those
+                // presses, so none arrives.
+                let typing = match &ime {
+                    winit::event::Ime::Preedit(text, _) => !text.is_empty(),
+                    winit::event::Ime::Commit(_) => true,
+                    _ => false,
+                };
+                if typing && ws.card_focus.take().is_some() {
+                    ws.accessibility_pending = true;
+                }
                 let redraw = match ime {
                     winit::event::Ime::Enabled => {
                         if let Some(window) = &ws.window {
@@ -33625,6 +33922,11 @@ impl App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                // A key press returns focus from a card that assistive
+                // technology focused to the pane, where the key goes.
+                if event.state == ElementState::Pressed && ws.card_focus.take().is_some() {
+                    ws.accessibility_pending = true;
+                }
                 let ui_owns_key = !matches!(ws.detach_drag, crate::detach::DragState::Idle)
                     || ws.context_menu.is_some()
                     || ws.vi_mode.is_some()
@@ -40025,57 +40327,248 @@ mod tests {
         );
     }
 
-    /// A press is a card's only once the card has been where it is drawn
-    /// for half a second; one that moved, or just appeared, is new again,
-    /// and one no longer drawn is forgotten.
+    /// A release opens the card it pressed only over that very card, and
+    /// only while nothing that owns the pointer has opened over it.
     #[test]
-    fn a_card_takes_a_press_only_once_it_has_settled() {
+    fn a_card_release_opens_only_the_card_it_pressed() {
         let nonce = kettle_core::InlineNonce::new([1, 2, 3, 4, 5, 6]).unwrap();
+        let other = kettle_core::InlineNonce::new([6, 5, 4, 3, 2, 1]).unwrap();
         let card = |rect| kettle_render::PaintedCard {
             pane: 7,
             nonce,
             rect,
         };
         let here = card([40.0, 16.0, 96.0, 48.0]);
-        let start = std::time::Instant::now();
-        let mut sightings = std::collections::HashMap::new();
-        super::note_card_sightings(&mut sightings, &[here], start);
-        let at = |sightings: &_, card, after| {
-            super::settled_card_at(Some(card), sightings, start + after)
-        };
-        let ms = std::time::Duration::from_millis;
-        assert_eq!(at(&sightings, here, ms(499)), None, "just appeared");
-        assert_eq!(at(&sightings, here, ms(500)), Some((7, nonce)));
-        // A later frame in the same place keeps the first sighting.
-        super::note_card_sightings(&mut sightings, &[here], start + ms(300));
-        assert_eq!(at(&sightings, here, ms(500)), Some((7, nonce)));
-        // Moved, it is new again from that frame.
-        let moved = card([40.0, 32.0, 96.0, 48.0]);
-        super::note_card_sightings(&mut sightings, &[moved], start + ms(600));
-        assert_eq!(at(&sightings, moved, ms(1000)), None);
-        assert_eq!(at(&sightings, moved, ms(1100)), Some((7, nonce)));
-        // A sighting is for the place it was seen.
-        assert_eq!(at(&sightings, here, ms(2000)), None);
-        // No longer drawn, it is forgotten.
-        super::note_card_sightings(&mut sightings, &[], start + ms(1200));
-        assert!(sightings.is_empty());
-        assert_eq!(super::settled_card_at(None, &sightings, start), None);
-        // Two printed copies of one card settle apart, each where it is, and
-        // frames showing both keep both first sightings.
         let below = card([40.0, 96.0, 96.0, 48.0]);
-        super::note_card_sightings(&mut sightings, &[here, below], start);
-        super::note_card_sightings(&mut sightings, &[here, below], start + ms(400));
-        assert_eq!(at(&sightings, here, ms(500)), Some((7, nonce)));
-        assert_eq!(at(&sightings, below, ms(500)), Some((7, nonce)));
-        // Its release opens it only over the very card it pressed, and only
-        // while nothing that owns the pointer has opened over it.
-        let other = kettle_core::InlineNonce::new([6, 5, 4, 3, 2, 1]).unwrap();
         assert!(super::card_release_opens((7, nonce), Some(here), false));
         assert!(super::card_release_opens((7, nonce), Some(below), false));
         assert!(!super::card_release_opens((7, nonce), Some(here), true));
         assert!(!super::card_release_opens((7, nonce), None, false));
         assert!(!super::card_release_opens((7, other), Some(here), false));
         assert!(!super::card_release_opens((8, nonce), Some(here), false));
+    }
+
+    /// Each inline card on screen is a button assistive technology can name
+    /// and press: its own node id, apart from every other node's and never
+    /// its nonce, its item's title and the viewer's detail in either
+    /// language, the part of it on screen as bounds, and Focus and Click.
+    #[test]
+    fn a_card_is_a_button_assistive_technology_can_open() {
+        use accesskit::{Action, NodeId, Role};
+        use kettle_i18n::{Language, Text, Translator};
+        let id = super::accessibility_card_id(42);
+        assert_eq!(super::accessibility_card_instance(id), Some(42));
+        let last = crate::media::MAX_CARD_INSTANCE - 1;
+        assert_eq!(
+            super::accessibility_card_instance(super::accessibility_card_id(last)),
+            Some(last)
+        );
+        for other in [
+            super::ACCESSIBILITY_ROOT_ID,
+            super::accessibility_pane_id(42),
+            super::accessibility_text_id(42),
+            super::accessibility_modal_id(1, 2),
+            super::ACCESSIBILITY_MEDIA_RECEIPT_ID,
+            super::ACCESSIBILITY_SEARCH_CONTAINER_ID,
+            super::ACCESSIBILITY_COMPLETION_CONTAINER_ID,
+            NodeId(super::ACCESSIBILITY_CARD_ID_MASK),
+            NodeId(super::ACCESSIBILITY_CARD_ID_MASK | super::ACCESSIBILITY_MODAL_ID_MASK | 42),
+        ] {
+            assert_eq!(super::accessibility_card_instance(other), None, "{other:?}");
+        }
+        for language in [Language::En, Language::Es] {
+            let tr = Translator::new(language);
+            let node = super::card_accessibility_node(
+                [40.0, 16.0, 96.0, 48.0],
+                "Click test",
+                "Image · 640×480 · From this pane",
+                &tr,
+            );
+            assert_eq!(node.role(), Role::Button);
+            let label = node.label().expect("label");
+            assert!(
+                label.contains("Click test") && label.contains("640×480"),
+                "{label}"
+            );
+            // A sender's path never brings a card's marks along.
+            let marked = super::card_accessibility_node(
+                [0.0, 0.0, 8.0, 8.0],
+                "plot",
+                "Image · 1×1 · /tmp/\u{10eeee}\u{0305}\u{030d}/tool",
+                &tr,
+            );
+            let marked = marked.label().expect("label");
+            assert!(
+                !marked.contains('\u{10eeee}') && !marked.contains('\u{0305}'),
+                "{marked:?}"
+            );
+            assert_eq!(node.description(), Some(tr.text(Text::CardA11yOpen)));
+            assert!(node.supports_action(Action::Click) && node.supports_action(Action::Focus));
+            let bounds = node.bounds().expect("bounds");
+            assert_eq!(
+                (bounds.x0, bounds.y0, bounds.x1, bounds.y1),
+                (40.0, 16.0, 136.0, 64.0)
+            );
+        }
+    }
+
+    /// In quick select a card on screen is one target, labelled at its first
+    /// visible cell, among the text targets in reading order; text found in
+    /// a card's rows is its marks, not something to pick.
+    #[test]
+    fn a_card_is_a_quick_select_target_and_text_inside_it_is_not() {
+        use kettle_core::hints::{HintSpan, Kind};
+        let nonce = kettle_core::InlineNonce::new([1, 2, 3, 4, 5, 6]).unwrap();
+        let span = |row, start, text: &str| HintSpan {
+            row,
+            start,
+            end: start + text.len() - 1,
+            kind: Kind::Url,
+            text: text.to_string(),
+            bounded: true,
+        };
+        let cards = [((2, 4), (9, 30), nonce)];
+        let found = super::hint_targets_with_cards(
+            vec![
+                span(10, 0, "https://after.example"),
+                span(3, 5, "https://inside.example"),
+                span(2, 31, "https://beside.example"),
+                span(1, 0, "https://before.example"),
+            ],
+            &cards,
+        );
+        let found: Vec<(usize, usize, String)> = found
+            .into_iter()
+            .map(|(row, col, what)| {
+                let what = match what {
+                    super::HintWhat::Card(card) => {
+                        assert_eq!(card, nonce);
+                        "card".to_string()
+                    }
+                    super::HintWhat::Text { text, .. } => text,
+                };
+                (row, col, what)
+            })
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (1, 0, "https://before.example".to_string()),
+                (2, 4, "card".to_string()),
+                (2, 31, "https://beside.example".to_string()),
+                (10, 0, "https://after.example".to_string()),
+            ]
+        );
+    }
+
+    /// A click, a hint and assistive technology all open a card through one
+    /// door that refuses under a dialog, a menu or the viewer and checks the
+    /// item is still on the shelf; the tree names only cards on screen, by
+    /// instance, and a key press returns focus from a card to its pane.
+    #[test]
+    fn every_way_to_open_a_card_goes_through_one_door() {
+        let source = super::production_source()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let body = |name: &str| {
+            let start = [format!("fn {name}("), format!("fn {name}<")]
+                .iter()
+                .find_map(|head| source.find(head.as_str()))
+                .unwrap_or_else(|| panic!("{name}"));
+            let rest = &source[start..];
+            rest[..rest[1..].find(" fn ").map_or(rest.len(), |end| end + 1)].to_string()
+        };
+        let guard = "if self.pointer_modal_open(ws) || ws.media_viewer.is_some() {";
+        let open = body("open_card");
+        assert!(
+            open.contains(guard)
+                && open.contains("state.media_shelf.items().iter().any(|it| it.id == item)")
+        );
+        let reachable = body("accessible_cards");
+        assert!(reachable.contains(guard));
+        // Only cards in panes the active tab shows now, whatever the last
+        // frame drew.
+        assert!(reachable.contains(
+            "let shown: Vec<u64> = ws .mux .layout(ws.mux.active, self.area(ws)) .into_iter() .map(|(pane, _)| pane) .collect();"
+        ));
+        assert!(reachable.contains(".filter(|card| shown.contains(&card.pane))"));
+        assert!(body("release_card").contains("self.open_card(ws, pane, nonce);"));
+        assert!(
+            body("act_hint").contains(
+                "HintWhat::Card(nonce) => { self.open_card(ws, h.pane, *nonce); return; }"
+            )
+        );
+        let hints = body("collect_hints");
+        assert!(
+            hints.contains("hint_targets_with_cards(hints::detect_rows(g, &lines, cols), &cards)")
+        );
+        // Cards come from the same grid as the text, under the same lock.
+        assert!(hints.contains("snap.capture_with_card_marks(&t, true);"));
+        assert!(hints.contains(".inline_cards .placements(&snap)"));
+        assert!(!hints.contains("painted_cards"));
+        let tree = body("accessibility_tree");
+        assert!(tree.contains("let cards = self.accessible_cards(ws);"));
+        assert!(tree.contains("cards.iter().filter(|(_, card, _)| card.pane == pane_id)"));
+        assert!(tree.contains("ws.card_focus .map(accessibility_card_id) .into_iter() .chain(focused.map(accessibility_pane_id))"));
+        assert!(
+            body("accessibility_key")
+                .contains("for (instance, card, item) in self.accessible_cards(ws) {")
+        );
+        let action = body("handle_accessibility_action");
+        assert!(action.contains(
+            "if let Some(instance) = accessibility_card_instance(request.target_node) {"
+        ));
+        assert!(
+            action
+                .contains("&& let Some((pane, nonce)) = ws.card_sightings.by_instance(instance) {")
+        );
+        assert!(
+            action.contains("AccessibilityAction::Click => { self.open_card(ws, pane, nonce); }")
+        );
+        assert!(source.contains(
+            "if event.state == ElementState::Pressed && ws.card_focus.take().is_some() {"
+        ));
+        assert!(source.contains("if typing && ws.card_focus.take().is_some() {"));
+        // Focus answers only a card the tree names, and leaves a card on a
+        // pane focus change or a press.
+        assert!(action.contains(
+            "let reachable = self .accessible_cards(ws) .iter() .any(|(card, _, _)| *card == instance); if reachable && let Some((pane, nonce)) = ws.card_sightings.by_instance(instance) {"
+        ));
+        assert!(body("note_focus_change").contains(
+            "// Focus moved to a pane, so not to a card any more. if ws.card_focus.take().is_some() {"
+        ));
+        assert_eq!(
+            source
+                .matches("if ws.card_focus.take().is_some() { ws.accessibility_pending = true; }")
+                .count(),
+            3,
+            "a pane focus change, a native press and a control press"
+        );
+        // A native press of any button leaves the card, side buttons too.
+        let native = source
+            .split("WindowEvent::MouseInput { state: ElementState::Pressed, button, .. } => {")
+            .nth(1)
+            .expect("native press");
+        let cleared = native
+            .find("if ws.card_focus.take().is_some()")
+            .expect("native clear");
+        assert!(
+            cleared
+                < native
+                    .find("extra_mouse_sgr(button)")
+                    .expect("side buttons")
+        );
+        assert!(action.contains(
+            "AccessibilityAction::Focus => { // The card's pane takes the keyboard with it, so text // typed next goes where the screen reader is. Search // would keep the keys, so it closes, remembering its // query. self.close_search(ws); let pre = self.focus_key(ws); ws.mux.focus_pane(pane); self.note_focus_change(ws, pre); ws.card_focus = Some(instance); }"
+        ));
+        // Automation finds cards on screen by instance, never by card id.
+        let geometry = body("ctl_ui_geometry");
+        assert!(
+            geometry.contains("\"inline_cards\".into(), serde_json::Value::Array(inline_cards)")
+        );
+        assert!(geometry.contains("\"instance\": target.card_sightings.instance(card),"));
+        assert!(!geometry.contains("\"nonce\""));
     }
 
     /// A card takes its primary press before anything else in the window,
@@ -40136,7 +40629,7 @@ mod tests {
         // Only a primary press without Shift, and only on a settled card.
         let press = after(source, "    fn press_card(");
         assert!(press.contains("if bcode != 0 || ws.mods.shift_key() {"));
-        assert!(press.contains("settled_card_at(card, &ws.card_sightings"));
+        assert!(press.contains("ws.card_sightings.settled(card, std::time::Instant::now())"));
         // Its release opens nothing once a dialog or the viewer is up.
         let release = after(source, "    fn release_card(");
         assert!(
@@ -40176,7 +40669,7 @@ mod tests {
         }
         // A card has been seen once a frame showing it reached the screen.
         assert!(source.contains(
-            "if matches!(&frame_result, Ok(FrameOutcome::Presented)) {\n            note_card_sightings(\n                &mut ws.card_sightings,\n                renderer.painted_cards(),"
+            "if matches!(&frame_result, Ok(FrameOutcome::Presented))\n            && ws\n                .card_sightings\n                .note(renderer.painted_cards(), std::time::Instant::now())"
         ));
     }
 
@@ -45232,7 +45725,7 @@ mod tests {
             // Each press first releases one whose release went elsewhere, and
             // is Kettle's own gesture until a program receives it.
             "self.release_held_buttons(ws, |held| held.button == bcode); ws.held_buttons.pressed(bcode, None, (0, 0)); // Context menu:",
-            "if bcode == 0 { ws.card_press = None; } self.release_held_buttons(ws, |held| held.button == bcode); ws.held_buttons.pressed(bcode, None, (0, 0)); let bar",
+            "if bcode == 0 { ws.card_press = None; } if ws.card_focus.take().is_some() { ws.accessibility_pending = true; } self.release_held_buttons(ws, |held| held.button == bcode); ws.held_buttons.pressed(bcode, None, (0, 0)); let bar",
             // Each release ends a gesture of Kettle's own first.
             "ws.held_buttons.end_own(bcode); // A release ends an editor drag inside the search bar;",
             "if let Some(sgr) = extra_mouse_sgr(button) { ws.held_buttons.end_own(sgr); self.send_mouse(ws, sgr, false, false); return; }",
@@ -51415,8 +51908,8 @@ mod hint_action_tests {
         for needle in [
             "ws.mux.panes.get(&h.pane)",
             "pane.map(pane_path_origin)",
-            "hint_action(h.kind, alternate, remote || !h.bounded)",
-            "!h.bounded",
+            "hint_action(kind, alternate, remote || !bounded)",
+            "!bounded",
             // A path it will not open falls back to the copy a plain label does.
             "(HintAction::OpenPath, None) | (HintAction::Copy, _) =>",
         ] {
@@ -51831,7 +52324,7 @@ mod hint_action_tests {
         for site in [
             "self.open_pane_link(ws, links_pane(ws), &uri);",
             "self.open_pane_link(ws, pane, &url);",
-            "self.open_pane_link(ws, Some(h.pane), &h.text)",
+            "self.open_pane_link(ws, Some(h.pane), text)",
             "self.open_pane_link(ws, Some(h.pane), &url)",
             "Some(url) => self.open_pane_link(ws, pane, &url),",
         ] {

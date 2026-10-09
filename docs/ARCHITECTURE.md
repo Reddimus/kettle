@@ -513,12 +513,28 @@ then gets the directory first and keeps the pane's other entries, less any
 Kettle plugin, which goes even when the pane gets none. The last refusal is
 what the Settings footer reports.
 
-The renderer records each card it draws (`PaintedCard`: pane, nonce, the
+`media::CardSightings` keeps the cards of the last presented frame by
+spot, each with the time it appeared there and an instance number that is
+never reused. AccessKit names a card by that instance, as a `Button` child of
+its pane's `Terminal` node, so no node id carries a nonce, and an action for
+an instance no longer on screen does nothing. On screen means in a pane the
+active tab's layout shows now (`App::accessible_cards`), not merely in the
+last frame, so an action queued before a tab switch or a zoom cannot reach a
+card that has left view. Focusing a card focuses its pane and closes Search,
+which would otherwise keep the keys (its query is remembered). A press of
+any button, a key press, input-method text or a pane focus change moves
+focus off a card. Quick select places cards with
+`InlineCards::placements` on a snapshot taken under the same lock as the
+text it scans, not from the last frame, and draws its labels with the
+menus, above every card. A click, a quick-select label
+and an accessibility action all open a card through `App::open_card`, which
+refuses while a dialog, a menu or the viewer owns the pointer and checks the
+card's item is still on its pane's shelf. The renderer records each card it draws (`PaintedCard`: pane, nonce, the
 part inside its pane) in `drawn_cards`, whose items eviction spares, and
 copies them to `painted_cards` only once that frame is presented; `card_at`
 finds the card on screen under a press. After each presented frame the App
 notes when each card on screen first appeared at its spot (pane, nonce and
-rect, so two printed copies settle apart) in `note_card_sightings`, and a
+rect, so two printed copies settle apart) with `CardSightings::note`, and a
 primary press on one settled for `CARD_SETTLE` is taken by `press_card`
 before anything but dialogs and the viewer. `release_card` then opens that
 card's item. Anything that takes the pointer while the button is held (a
