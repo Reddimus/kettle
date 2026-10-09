@@ -12,6 +12,7 @@ mod inline;
 mod queue;
 mod route;
 mod shelf;
+mod sightings;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -32,6 +33,7 @@ pub(crate) use route::{PaneRoot, Route, nearest_pane, route};
 pub(crate) use shelf::{
     Provenance, Shelf, ShelfItem, UnverifiedSender, report as shelf_report, signer_name,
 };
+pub(crate) use sightings::{CardSightings, MAX_CARD_INSTANCE};
 
 use queue::{Admitted, Queue};
 

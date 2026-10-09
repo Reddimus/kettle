@@ -3822,7 +3822,28 @@ everything but dialogs and the viewer on both the native and control paths,
 only for a primary press without Shift. The release opens nothing while a
 dialog or the viewer is up, and every dialog opener, the context menu,
 search, focus loss and a new primary press end a card press, so a dialog
-opened and closed while the button is held still cancels the click. Checked live with Codex CLI 0.162.0: a
+opened and closed while the button is held still cancels the click.
+`media::sightings` tests the half second per spot, two printed copies apart,
+and instance numbers: one per placement, a new one after a move or a return,
+none reused, and none once they run out. `a_card_is_a_button_assistive_technology_can_open`
+checks the card node id namespace against every other node's, and a card's
+button (role, label from title and detail, description, Focus and Click,
+bounds) in English and Spanish. `a_card_is_a_quick_select_target_and_text_inside_it_is_not`
+orders card and text targets and drops text inside a card,
+`placements_name_each_registered_card_the_grid_shows` pins the placements
+quick select reads from the grid it scans for text (a scroll or new output
+since the last frame moves both alike), and
+`a_hint_chip_over_a_card_is_drawn_above_it` renders a label over a card's
+poster on the GPU and finds its chip, and `a_hint_chip_stays_inside_its_pane`
+renders one at a pane's last column and finds none of it in the next pane.
+The placements test also pins that a snapshot taken without card marks
+finds no cards, which is why quick select captures them. `every_way_to_open_a_card_goes_through_one_door`
+guards that clicks, quick select and accessibility actions all go through
+`open_card`, that no card label carries a placeholder sequence, that only
+cards in panes the active tab shows now are reachable, that focusing a card
+closes Search so the keys follow it, and that a key press,
+text from an input method, or a native press of any button (side buttons
+included) returns a card's focus to its pane. Checked live with Codex CLI 0.162.0: a
 `send_mouse` click on a Codex card opened the viewer on its item, and a
 press on the card released after Settings opened left Settings up and
 opened nothing. Held buttons in general:
@@ -3913,7 +3934,9 @@ eras: initialize's instructions name `kettle_show`, `tools/list` is exactly
 `server/discover` is private. For a live check, run `kettle mcp --display`
 inside a pane of `kettle --agent-server off --agent-display on` and call
 `kettle_show` on an SVG: it lands verified in that pane. Titles lose control characters,
-separators and bidirectional formatting, bounded at 256 characters.
+separators, bidirectional formatting and placeholder sequences (the
+placeholder and the marks after it, which `strip_placeholders` in `kettle-vt`
+tests), bounded at 256 characters.
 `kettle-vt` hands a refused image's pixels back when only the account's room
 was missing. `kettle show`'s own tests pin its fixed failure wording, the
 absolute attested path and its confirmation. For a live check on macOS, the

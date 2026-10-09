@@ -1473,6 +1473,13 @@ context = "crates/kettle-ui/src/app.rs media_viewer_projection: shown in the med
 context = "crates/kettle-ui/src/app.rs media_viewer_accessibility: screen-reader name of the open media viewer: the item's place on the shelf (index of count, counting from 1), its title and its detail line."
 args = [{ name = "index", type = "u64" }, { name = "count", type = "u64" }, { name = "title", type = "str" }, { name = "detail", type = "str" }]
 
+[messages.card_a11y]
+context = "crates/kettle-ui/src/app.rs card_accessibility_node: screen-reader name of an inline media card drawn in a terminal pane, a button that opens the item in Kettle's media viewer. title is the item's title (as the agent or command named it); detail is its kind, pixel size and sender, as the viewer shows them, e.g. \"Image · 640×480 · From this pane\"."
+args = [{ name = "title", type = "str" }, { name = "detail", type = "str" }]
+
+[messages.card_a11y_open]
+context = "crates/kettle-ui/src/app.rs card_accessibility_node: screen-reader description of an inline media card's button: what activating it does. 'Kettle' is the product name; 'media viewer' is Kettle's own viewer, not another app."
+
 [messages.window_title_new_media]
 context = "crates/kettle-ui/src/app.rs desired_window_title: prefix of the OS window title while the focused pane's media shelf holds items the user has not opened. ASCII only: Linux window-manager title fonts may lack symbols. count is how many."
 args = [{ name = "count", type = "u64" }]

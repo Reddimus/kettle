@@ -1831,3 +1831,98 @@ fn exhausted_preview_account_keeps_new_terminal_windows_and_recovers_cards() {
         );
     }
 }
+
+/// A quick-select chip over an inline card sits above the card's poster and
+/// frame, so its label stays readable on any image.
+#[test]
+fn a_hint_chip_over_a_card_is_drawn_above_it() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(1200, 400) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let (mut cards, snap, nonce) = crate::inline_cards::tests::fixture();
+    let poster = kettle_core::ImageData::new_with_budget(
+        2,
+        1,
+        vec![20, 200, 60, 255, 20, 200, 60, 255],
+        &kettle_core::GraphicsBudget::previews(),
+    );
+    cards.set_poster(nonce, poster.as_ref());
+    let place = cards.placements(&snap)[0];
+    let mut view = pane(&snap, 1200, 400);
+    view.inline_cards = Some(&cards);
+    let chip = cfg.search_background.unwrap_or(cfg.theme.palette[3]);
+    let near_chip = |frame: &image::RgbaImage| {
+        frame
+            .pixels()
+            .filter(|p| {
+                [(p[0], chip.r), (p[1], chip.g), (p[2], chip.b)]
+                    .iter()
+                    .all(|(a, b)| a.abs_diff(*b) <= 12)
+            })
+            .count()
+    };
+    let plain = capture(&mut renderer, &cfg, &[view], &focused(false));
+    assert_eq!(
+        near_chip(&plain),
+        0,
+        "nothing chip-coloured before the hint"
+    );
+    let mut overlay = focused(false);
+    overlay.hint_labels = vec![HintLabel {
+        row: usize::try_from(place.line + i32::from(place.rows) / 2).unwrap(),
+        col: place.column + usize::from(place.columns) / 2,
+        label: "a".to_string(),
+        dim: false,
+    }];
+    let mut view = pane(&snap, 1200, 400);
+    view.inline_cards = Some(&cards);
+    let hinted = capture(&mut renderer, &cfg, &[view], &overlay);
+    assert!(
+        near_chip(&hinted) > 0,
+        "the chip shows over the card's poster"
+    );
+}
+
+/// A quick-select chip is cut to its pane like its label, so one at the
+/// last column never paints over the next pane.
+#[test]
+fn a_hint_chip_stays_inside_its_pane() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(1200, 400) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let snap = snapshot_of(80, 20, b"");
+    let left = pane(&snap, 600, 400);
+    let mut right = pane(&snap, 600, 400);
+    right.id = 2;
+    right.rect = (600.0, 0.0, 600.0, 400.0);
+    right.focused = false;
+    // A two-letter label from the left pane's last whole column runs past
+    // its edge.
+    let col = ((600.0 - cfg.padding_x) / renderer.cell_w).floor() as usize - 1;
+    let mut overlay = focused(false);
+    overlay.hint_labels = vec![HintLabel {
+        row: 1,
+        col,
+        label: "aa".to_string(),
+        dim: false,
+    }];
+    let frame = capture(&mut renderer, &cfg, &[left, right], &overlay);
+    let chip = cfg.search_background.unwrap_or(cfg.theme.palette[3]);
+    let chip_pixels = |from: u32, to: u32| {
+        (0..frame.height())
+            .flat_map(|y| (from..to).map(move |x| (x, y)))
+            .filter(|(x, y)| {
+                let p = frame.get_pixel(*x, *y);
+                [(p[0], chip.r), (p[1], chip.g), (p[2], chip.b)]
+                    .iter()
+                    .all(|(a, b)| a.abs_diff(*b) <= 12)
+            })
+            .count()
+    };
+    assert!(chip_pixels(0, 600) > 0, "the chip shows in its pane");
+    assert_eq!(chip_pixels(600, 1200), 0, "and nowhere in the next");
+}
