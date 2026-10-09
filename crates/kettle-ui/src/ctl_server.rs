@@ -239,6 +239,25 @@ pub struct AdmittedRequest {
 pub struct ShowAdmission {
     pub request: kettle_ctl::show::ShowRequest,
     pub sender: Option<SenderIdentity>,
+    /// The harness an inline card would belong to, when the request asks
+    /// for one and its asker is one Kettle trusts to print it.
+    pub harness: Option<ProcessIdentity>,
+}
+
+/// The harness a `show` asking for a Claude Code card came through: Claude
+/// Code as Anthropic signs it, which ran Kettle's own command line (`kettle
+/// mcp`) that carried the request. Anyone else gets no card.
+fn claude_harness(sender: &SenderIdentity) -> Option<ProcessIdentity> {
+    // The asker differs from the sender only when the sender runs Kettle's
+    // own executable and its checked ancestry names who ran it.
+    let asker = sender.asker.process;
+    if asker == sender.process {
+        return None;
+    }
+    let requirement = kettle_ctl::signing::Requirement::CLAUDE_CODE;
+    kettle_ctl::signing::signature(asker, requirement)
+        .ok()
+        .map(|_| asker)
 }
 
 /// The connecting process as the kernel names it, the executable it ran when
@@ -446,9 +465,16 @@ fn prepare(
             let sender = capture
                 .peer()
                 .map(|process| SenderIdentity::read(process, chain));
+            let harness = match show.inline {
+                Some(kettle_ctl::show::InlineTarget::ClaudeHook) => {
+                    sender.as_ref().and_then(claude_harness)
+                }
+                None => None,
+            };
             request.show = Some(Box::new(ShowAdmission {
                 request: show,
                 sender,
+                harness,
             }));
         }
         _ => {}
@@ -1740,6 +1766,42 @@ mod tests {
             program.executable.as_deref(),
             Some(std::path::Path::new("/tmp/earlier-program"))
         );
+    }
+
+    /// Only Claude Code, which ran Kettle's own command line, can have a
+    /// card: a sender that asked for itself has none, nor does a program
+    /// that is not Claude Code.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn only_claude_code_running_kettles_command_line_is_a_harness() {
+        let mut sleeper = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("start /bin/sleep");
+        let sleep = kettle_ctl::process::identity(sleeper.id()).expect("its identity");
+        let program = |process| super::ProgramIdentity {
+            process,
+            executable: None,
+            signature: None,
+        };
+        let peer = ProcessIdentity::new_for_tests(30, 300);
+        let asked_for_itself = super::SenderIdentity {
+            process: sleep,
+            executable: None,
+            asker: program(sleep),
+        };
+        let through_kettle = super::SenderIdentity {
+            process: peer,
+            executable: None,
+            asker: program(sleep),
+        };
+        let found = (
+            super::claude_harness(&asked_for_itself),
+            super::claude_harness(&through_kettle),
+        );
+        let _ = sleeper.kill();
+        let _ = sleeper.wait();
+        assert_eq!(found, (None, None), "sleep is Apple's, not Claude Code");
     }
 
     /// Kettle's own command line carries another program's request, so the

@@ -33,12 +33,18 @@ impl Requirement {
     /// Apple's own code, signed with Apple's own certificate.
     pub const APPLE_OWN: Self = Self("anchor apple");
 
+    /// Claude Code as Anthropic signs it: its identifier, under a
+    /// certificate Apple issued to Anthropic's team.
+    pub const CLAUDE_CODE: Self = Self(
+        r#"anchor apple generic and identifier "com.anthropic.claude-code" and certificate leaf[subject.OU] = "Q6L2SF6YDW""#,
+    );
+
     pub const fn text(self) -> &'static str {
         self.0
     }
 
     /// Every requirement Kettle checks, for the test that parses them all.
-    pub const ALL: [Self; 2] = [Self::APPLE_ISSUED, Self::APPLE_OWN];
+    pub const ALL: [Self; 3] = [Self::APPLE_ISSUED, Self::APPLE_OWN, Self::CLAUDE_CODE];
 }
 
 /// A running process's signature, read after it met a requirement.
@@ -700,6 +706,15 @@ mod tests {
         assert!(imp::parses(anthropic));
         assert_eq!(
             signature(sleeper.identity(), anthropic),
+            Err(SignatureError::NotValid)
+        );
+    }
+
+    #[test]
+    fn apples_own_code_is_not_claude_code() {
+        let sleeper = Sleeper::start();
+        assert_eq!(
+            signature(sleeper.identity(), Requirement::CLAUDE_CODE),
             Err(SignatureError::NotValid)
         );
     }

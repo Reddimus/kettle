@@ -41,6 +41,7 @@ fn show(args: ShowArgs) -> Result<ShowResult, String> {
         title: args.title,
         key: args.key,
         pane: None,
+        inline: None,
     }
     .into_params()
     .map_err(|failure| failure.model_message().to_string())?;
@@ -227,6 +228,7 @@ mod tests {
             width: 640,
             height: 480,
             warnings: vec![],
+            inline: None,
         };
         let text = confirmation(&result);
         assert!(text.contains("pane 3") && text.contains("svg 640x480"));

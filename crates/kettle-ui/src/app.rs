@@ -1671,10 +1671,80 @@ fn media_path_key(path: &kettle_media::NativePath) -> String {
 }
 
 /// The shelf items on screen in any window, which eviction spares.
-fn media_visible_items<'a>(windows: impl Iterator<Item = &'a WindowState>) -> Vec<u64> {
-    windows
-        .filter_map(|window| window.media_viewer.as_ref().map(|viewer| viewer.item))
-        .collect()
+/// The shelf items on screen, whose pixels must stay: each open viewer's,
+/// and each item whose card the last frame painted.
+fn media_visible_items<'a>(
+    windows: impl Iterator<Item = &'a WindowState>,
+    cards: &crate::media::CardLedger,
+) -> Vec<u64> {
+    let mut visible = Vec::new();
+    for window in windows {
+        visible.extend(window.media_viewer.as_ref().map(|viewer| viewer.item));
+        if let Some(renderer) = &window.renderer {
+            visible.extend(
+                renderer
+                    .painted_cards()
+                    .iter()
+                    .filter_map(|&(pane, nonce)| cards.item(pane, nonce)),
+            );
+        }
+    }
+    visible
+}
+
+/// Register an inline card for a published item and build the message its
+/// harness prints. `None` when the harness is over its limits, the pane
+/// cannot hold a card, no nonce could be had, or the message would not
+/// print whole: the item stays on the shelf either way.
+#[allow(clippy::too_many_arguments)]
+fn register_card(
+    cards: &mut crate::media::CardLedger,
+    (pane_id, pane_cards, grid): (u64, &mut kettle_render::InlineCards, (usize, usize)),
+    cell: (f32, f32),
+    item: (u64, u64),
+    kind: kettle_media::MediaKind,
+    image: &kettle_core::ImageData,
+    inline: crate::media::InlineDraft,
+    now: std::time::Instant,
+) -> Option<kettle_ctl::show::InlineDelivery> {
+    cards.admit(inline.owner, now).ok()?;
+    let size = crate::media::claude_card_size(grid, cell, (image.width, image.height))?;
+    let nonce = cards.mint(|pool| getrandom::fill(pool).is_ok())?;
+    let room = grid.0.saturating_sub(crate::media::CLAUDE_INDENT + 1);
+    let caption = crate::media::card_caption(
+        inline.name.as_deref(),
+        kind,
+        (image.width, image.height),
+        room,
+    );
+    let delivery = kettle_ctl::show::InlineDelivery {
+        message: crate::media::claude_card_message(nonce, size, &caption)?,
+    };
+    if !delivery.fits() {
+        return None;
+    }
+    pane_cards
+        .insert(
+            nonce,
+            kettle_render::CardSpec {
+                rows: size.0,
+                columns: size.1,
+                harness: kettle_render::CardHarness::ClaudeHook,
+                caption,
+                poster: Some(kettle_render::CardPoster::new(image)),
+            },
+        )
+        .ok()?;
+    cards.record(
+        nonce,
+        crate::media::CardRecord {
+            pane: pane_id,
+            item,
+            owner: inline.owner,
+        },
+        now,
+    );
+    Some(delivery)
 }
 
 /// The window holding `pane`: `ws` or one of `windows`.
@@ -20656,6 +20726,7 @@ impl App {
         let Some(crate::ctl_server::ShowAdmission {
             request: show,
             sender,
+            harness,
         }) = request.take_show()
         else {
             refuse(FailureCode::BadParams);
@@ -20730,7 +20801,11 @@ impl App {
             return;
         };
         let kettle_ctl::show::ShowRequest {
-            source, title, key, ..
+            source,
+            title,
+            key,
+            inline,
+            ..
         } = show;
         let kind = source.job_kind();
         let (source, file_name) = match source {
@@ -20756,6 +20831,7 @@ impl App {
             kettle_media::Source::Path { path, .. } => Some(media_path_key(path)),
             kettle_media::Source::Bytes(_) => None,
         });
+        let card_name = file_name.clone();
         let title = title
             .or(file_name)
             .map(|title| crate::media::display_title(&title))
@@ -20765,6 +20841,17 @@ impl App {
                     .text(kettle_i18n::Text::MediaShelfUntitled)
                     .into()
             });
+        // A card only for the harness Kettle checked, which runs in this very
+        // pane; everyone else's push goes to the shelf alone.
+        let inline = match (inline, harness) {
+            (Some(kettle_ctl::show::InlineTarget::ClaudeHook), Some(owner)) if route.verified => {
+                Some(crate::media::InlineDraft {
+                    owner,
+                    name: card_name,
+                })
+            }
+            _ => None,
+        };
         let job = kettle_media::Job {
             kind,
             source,
@@ -20785,6 +20872,7 @@ impl App {
                 key,
                 title,
                 provenance,
+                inline,
             },
             job,
             kettle_media::client::RenderControl::with_deadline(deadline),
@@ -20850,6 +20938,7 @@ impl App {
     /// Advance `show`: drop pushes whose pane is gone, publish finished
     /// renders, and start the next one.
     fn media_tick(&mut self, ws: &mut WindowState) {
+        self.retire_cards(ws);
         if self.media.is_idle() {
             return;
         }
@@ -20876,6 +20965,53 @@ impl App {
         });
     }
 
+    /// Retire the cards that no longer stand for anything: their harness
+    /// exited, their pane closed, or their item left the shelf or was
+    /// replaced. Their text stays in the transcript and paints as unknown.
+    fn retire_cards(&mut self, ws: &mut WindowState) {
+        if self.media.cards.is_empty() {
+            return;
+        }
+        let gone: Vec<kettle_ctl::process::ProcessIdentity> = self
+            .media
+            .cards
+            .owners()
+            .into_iter()
+            .filter(|owner| kettle_ctl::process::identity(owner.pid()) != Ok(*owner))
+            .collect();
+        // Each live pane's items, by id and generation.
+        let shelves: std::collections::HashMap<u64, Vec<(u64, u64)>> = self
+            .all_windows(ws)
+            .flat_map(|window| window.mux.panes.iter())
+            .filter(|(_, pane)| !pane.closed)
+            .map(|(&id, pane)| {
+                let items = pane
+                    .media_shelf
+                    .items()
+                    .iter()
+                    .map(|item| (item.id, item.generation))
+                    .collect();
+                (id, items)
+            })
+            .collect();
+        let retired = self.media.cards.retire(|card| {
+            gone.contains(&card.owner)
+                || !shelves
+                    .get(&card.pane)
+                    .is_some_and(|items| items.contains(&card.item))
+        });
+        for (pane_id, nonce) in retired {
+            if let Some(window) = window_with_pane(ws, &mut self.windows, pane_id)
+                && let Some(pane) = window.mux.panes.get_mut(&pane_id)
+            {
+                pane.inline_cards.remove(nonce);
+                if let Some(handle) = &window.window {
+                    handle.request_redraw();
+                }
+            }
+        }
+    }
+
     /// Publish a finished render to its pane's shelf and answer its push.
     fn finish_show(&mut self, ws: &mut WindowState, finished: crate::media::Finished) {
         use kettle_media::FailureCode;
@@ -20891,7 +21027,7 @@ impl App {
         let kettle_media::RenderOutput { kind, rendered } = output;
         let (width, height) = (rendered.width, rendered.height);
         let warnings = rendered.warnings;
-        let visible = media_visible_items(self.all_windows(ws));
+        let visible = media_visible_items(self.all_windows(ws), &self.media.cards);
         let mut pixels = rendered.rgba;
         let image = loop {
             match kettle_core::ImageData::try_with_budget(
@@ -20913,11 +21049,17 @@ impl App {
             }
         };
         let item_id = self.media.next_item();
+        let crate::media::Draft {
+            key,
+            title,
+            provenance,
+            inline,
+        } = draft;
         let item = crate::media::ShelfItem::new(
             item_id,
-            draft.key,
-            draft.title,
-            draft.provenance,
+            key,
+            title,
+            provenance,
             kind,
             warnings.clone(),
             image,
@@ -20925,6 +21067,10 @@ impl App {
         let Some(window) = window_with_pane(ws, &mut self.windows, route.pane) else {
             return origin.refuse(FailureCode::NotInKettlePane);
         };
+        let cell = window
+            .renderer
+            .as_ref()
+            .map(|renderer| (renderer.cell_w, renderer.cell_h));
         let Some(pane) = window
             .mux
             .panes
@@ -20938,18 +21084,62 @@ impl App {
             .as_ref()
             .filter(|viewer| viewer.pane == route.pane)
             .map(|viewer| viewer.item);
-        let published = pane.media_shelf.publish(item, shown);
+        // A full shelf never drops an item on screen: the open viewer's, or
+        // one whose card the last frame painted.
+        let published = pane.media_shelf.publish(item, shown, &visible);
+        // Cards of the item this one replaced, or of the item a full shelf
+        // dropped, show what is gone; they never show the new pixels.
+        let current = pane
+            .media_shelf
+            .items()
+            .iter()
+            .find(|item| item.id == published.id)
+            .map(|item| (item.generation, item.image().cloned()));
+        let cards = &mut self.media.cards;
+        for (pane_id, nonce) in cards.retire(|card| {
+            card.pane == route.pane
+                && (Some(card.item.0) == published.dropped
+                    || (card.item.0 == published.id
+                        && current
+                            .as_ref()
+                            .is_none_or(|(generation, _)| card.item.1 != *generation)))
+        }) {
+            debug_assert_eq!(pane_id, route.pane);
+            pane.inline_cards.remove(nonce);
+        }
+        let grid = pane
+            .term
+            .term
+            .lock()
+            .ok()
+            .map(|term| (term.grid().columns(), term.grid().screen_lines()));
+        let delivery = match (inline, current, cell, grid) {
+            (Some(inline), Some((generation, Some(image))), Some(cell), Some(grid)) => {
+                register_card(
+                    cards,
+                    (route.pane, &mut pane.inline_cards, grid),
+                    cell,
+                    (published.id, generation),
+                    kind,
+                    &image,
+                    inline,
+                    std::time::Instant::now(),
+                )
+            }
+            _ => None,
+        };
         let seq = window.seq;
         if let Some(handle) = &window.window {
             handle.request_redraw();
         }
-        let result = kettle_ctl::show::ShowResult::new(
+        let mut result = kettle_ctl::show::ShowResult::new(
             (route.pane, route.verified, seq),
             published.id,
             kind,
             (width, height),
             &warnings,
         );
+        result.inline = delivery;
         let id = origin.request_id;
         origin.answer(kettle_ctl::protocol::Response::ok(
             id,
@@ -39468,6 +39658,125 @@ mod tests {
                 .starts_with("{\n        if ws.media_viewer.is_some() {\n            self.close_media_viewer(ws);\n            return;"),
             "the shortcut closes any open viewer, whichever pane has focus"
         );
+    }
+
+    /// A verified harness's card is registered in its pane with the message
+    /// its harness prints; anything that cannot hold leaves the shelf alone.
+    #[test]
+    fn a_card_is_registered_with_the_message_its_harness_prints() {
+        use kettle_core::InlineMarker;
+        let owner = kettle_ctl::process::ProcessIdentity::new_for_tests(40, 400);
+        let image = kettle_core::ImageData::new(64, 48, vec![9; 64 * 48 * 4]).unwrap();
+        let draft = || crate::media::InlineDraft {
+            owner,
+            name: Some("plot.png".into()),
+        };
+        let now = std::time::Instant::now();
+        let mut ledger = crate::media::CardLedger::default();
+        let mut pane_cards = kettle_render::InlineCards::default();
+        let delivery = super::register_card(
+            &mut ledger,
+            (3, &mut pane_cards, (80, 40)),
+            (8.0, 16.0),
+            (9, 0),
+            kettle_media::MediaKind::Raster,
+            &image,
+            draft(),
+            now,
+        )
+        .expect("a card");
+        assert!(delivery.fits());
+        assert_eq!(pane_cards.len(), 1);
+        let lines: Vec<&str> = delivery.message.split('\n').collect();
+        assert_eq!(lines.last(), Some(&"plot.png - raster 64x48"));
+        let first: Vec<char> = lines[1].chars().skip(1).take(8).collect();
+        let marker = InlineMarker::decode(&first).expect("the first cell's marks");
+        assert_eq!((marker.row, marker.column), (0, 0));
+        assert!(pane_cards.contains(marker.nonce));
+        assert_eq!(ledger.item(3, marker.nonce), Some(9));
+        // A pane too small for a card, or a harness past its limit, gets none.
+        assert!(
+            super::register_card(
+                &mut ledger,
+                (3, &mut pane_cards, (80, 4)),
+                (8.0, 16.0),
+                (9, 0),
+                kettle_media::MediaKind::Raster,
+                &image,
+                draft(),
+                now,
+            )
+            .is_none()
+        );
+        for _ in 0..crate::media::HARNESS_CARDS_PER_SECOND {
+            let _ = super::register_card(
+                &mut ledger,
+                (3, &mut pane_cards, (80, 40)),
+                (8.0, 16.0),
+                (9, 0),
+                kettle_media::MediaKind::Raster,
+                &image,
+                draft(),
+                now,
+            );
+        }
+        let before = pane_cards.len();
+        assert!(
+            super::register_card(
+                &mut ledger,
+                (3, &mut pane_cards, (80, 40)),
+                (8.0, 16.0),
+                (9, 0),
+                kettle_media::MediaKind::Raster,
+                &image,
+                draft(),
+                now,
+            )
+            .is_none(),
+            "four a second"
+        );
+        assert_eq!(pane_cards.len(), before, "nothing registered");
+    }
+
+    /// The App gives a card only to a verified route, retires cards on its
+    /// tick and when their item is replaced or dropped, and keeps a painted
+    /// card's pixels.
+    #[test]
+    fn cards_are_for_verified_harnesses_and_retire_with_their_item() {
+        let source = super::production_source();
+        let body = |name: &str| {
+            source
+                .split(&format!("fn {name}("))
+                .nth(1)
+                .and_then(|rest| rest.split("\n    fn ").next())
+                .unwrap_or_else(|| panic!("{name} present"))
+        };
+        assert!(body("ctl_show").contains(
+            "(Some(kettle_ctl::show::InlineTarget::ClaudeHook), Some(owner)) if route.verified =>"
+        ));
+        assert!(
+            body("ctl_show").contains("name: card_name,"),
+            "a card's caption names only a file, never a title the sender chose"
+        );
+        assert!(body("finish_show").contains(".publish(item, shown, &visible)"));
+        let finish = body("finish_show");
+        let retired = finish.find("cards.retire(").expect("replaced cards retire");
+        let registered = finish.find("register_card(").expect("a card registers");
+        assert!(
+            retired < registered,
+            "old cards retire before a new one registers"
+        );
+        assert!(finish.contains("result.inline = delivery;"));
+        assert!(body("media_tick").contains("self.retire_cards(ws);"));
+        let retire = body("retire_cards");
+        assert!(retire.contains("kettle_ctl::process::identity(owner.pid()) != Ok(*owner)"));
+        assert!(retire.contains("pane.inline_cards.remove(nonce);"));
+        let visible = source
+            .split("fn media_visible_items<'a>(")
+            .nth(1)
+            .and_then(|rest| rest.split("\nfn ").next())
+            .expect("media_visible_items");
+        assert!(visible.contains(".painted_cards()"));
     }
 
     /// The sender line knows where its program's path sits, whatever the

@@ -656,6 +656,33 @@ runs.
 claude mcp add kettle-display -- kettle mcp --display
 ```
 
+**Inline cards (Claude Code).** Launched by Kettle's own Claude Code plugin
+(with the hidden `--claude-card-hook`), in an interactive session
+(`CLAUDE_CODE_ENTRYPOINT=cli`), `kettle_show` also asks for a card under the
+call, keyed by the call's `_meta["claudecode/toolUseId"]`, never by anything in
+its arguments. Kettle gives one only to Claude Code as Anthropic signs it
+(on macOS, its running code validated against Anthropic's team and
+`com.anthropic.claude-code`), running in the very pane the item lands in, and
+that ran this server; anyone else's push goes to the shelf alone. Kettle
+builds the card: a block of placeholder cells, a quarter of the pane's lines
+(three to eight) and as wide as the image's shape allows, then a caption of
+the file's sanitized name and its kind and size (kind and size alone for media
+sent as bytes; a title never reaches a card). A pane too narrow to print the
+hook's label on one line, 61 columns, gets no card. The server keeps that text
+for five seconds; the plugin's hook collects it once through the hidden
+`kettle_card` tool (`{tool_use_id}`; a call carrying the model's own tool-use
+id is refused) and prints it under the call, where Kettle paints the image
+over the cells. The model's result says only that the media shows below the
+call (`delivery: "card"`) and that it has not seen it; nothing of the card
+reaches the model, and `kettle ctl`, whose output a model may read, refuses
+to ask for a card. A pane holds at most 64 cards, a harness owns at most 32
+and registers at most four a second; a card retires when its harness exits,
+its pane closes, or its item leaves the shelf or is replaced. Its pixels stay
+the shelf's: a card keeps none alive, and an item whose card is on screen is
+not released, nor dropped from a full shelf while another item can go
+instead. On other platforms, and without the plugin, the shelf has the
+item and the result says so.
+
 ### Protocol revisions
 
 The server is **dual-era**. MCP 2026-07-28 removed the `initialize` handshake

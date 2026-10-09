@@ -106,6 +106,7 @@ mod show_cli;
 // Agent-first: `kettle mcp` — stdio MCP server exposing kettle as
 // native agent tools (run a command, drive a running kettle).
 mod mcp;
+mod mcp_display;
 mod mcp_tools;
 mod media_platform;
 mod update_cli;
@@ -594,6 +595,11 @@ struct McpArgs {
     /// in and needs agent previews, never full control.
     #[arg(long, conflicts_with = "self_test")]
     display: bool,
+    /// Launched by Kettle's own Claude Code plugin, whose hook prints inline
+    /// cards: only then does an interactive Claude Code session ask Kettle
+    /// for one. Kettle still decides whether the caller may have it.
+    #[arg(long, hide = true, requires = "display")]
+    claude_card_hook: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -1172,6 +1178,7 @@ fn main() -> anyhow::Result<()> {
                 std::process::exit(if args.self_test {
                     mcp::self_test()
                 } else if args.display {
+                    mcp_display::init_session(args.claude_card_hook);
                     mcp::run_mcp(mcp_tools::ToolSelection::Display)
                 } else {
                     mcp::run_mcp(mcp_tools::ToolSelection::Full)
@@ -2539,6 +2546,20 @@ mod activation_cli_tests {
         let cli = Cli::try_parse_from(["kettle", "--new-process"]).unwrap();
         assert!(cli.new_process);
     }
+
+    /// The card hook rides only on a display server, and `--display` never
+    /// combines with the self-test.
+    #[test]
+    fn the_card_hook_needs_a_display_server() {
+        let parse = |args: &[&str]| Cli::try_parse_from(args.iter().copied());
+        let cli = parse(&["kettle", "mcp", "--display", "--claude-card-hook"]).unwrap();
+        let Some(crate::Cmd::Mcp(args)) = cli.cmd else {
+            panic!("an mcp command");
+        };
+        assert!(args.display && args.claude_card_hook);
+        assert!(parse(&["kettle", "mcp", "--claude-card-hook"]).is_err());
+        assert!(parse(&["kettle", "mcp", "--display", "--self-test"]).is_err());
+    }
 }
 
 #[cfg(test)]
@@ -3641,7 +3662,8 @@ mod tests {
         // (`--exec` is documented as `-e`) that the man page intentionally omits.
         // The `--record*` flags ship as a runtime feature and MUST be documented
         // in the man page (see docs/RECORDING.md), so they are not excluded here.
-        let allow_missing: &[&str] = &["tab-handoff", "tab-handoff-fd", "exec"];
+        // `--claude-card-hook` is passed only by Kettle's own Claude Code plugin.
+        let allow_missing: &[&str] = &["tab-handoff", "tab-handoff-fd", "exec", "claude-card-hook"];
         fn collect_missing_flags(
             cmd: &clap::Command,
             path: &str,

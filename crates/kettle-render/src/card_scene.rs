@@ -172,7 +172,7 @@ impl CardScene {
                     if let Some(target) = letterbox(rect, image.width, image.height) {
                         self.posters.push(ImageItem::placement(
                             target,
-                            image.clone(),
+                            image,
                             None,
                             None,
                             geometry.clip,
@@ -554,15 +554,13 @@ mod tests {
     #[test]
     fn clipped_letterbox_margin_is_not_an_upload_failure() {
         let (mut cards, snap, nonce) = crate::inline_cards::tests::fixture();
-        cards.set_poster(
-            nonce,
-            kettle_core::ImageData::new_with_budget(
-                1,
-                2,
-                vec![255; 8],
-                &kettle_core::GraphicsBudget::previews(),
-            ),
+        let poster = kettle_core::ImageData::new_with_budget(
+            1,
+            2,
+            vec![255; 8],
+            &kettle_core::GraphicsBudget::previews(),
         );
+        cards.set_poster(nonce, poster.as_ref());
         let mut frame = CardFrame::default();
         cards.recognize_into(&snap, &mut frame);
         for (clip, should_fail) in [
@@ -610,7 +608,7 @@ mod tests {
         })
         .unwrap();
         let poster = kettle_core::ImageData::new_with_budget(2, 1, vec![255; 8], &account).unwrap();
-        cards.set_poster(nonce, Some(poster));
+        cards.set_poster(nonce, Some(&poster));
         let mut frame = CardFrame::default();
         cards.recognize_into(&snap, &mut frame);
         let mut scene = CardScene::default();
@@ -639,7 +637,8 @@ mod tests {
                 .all(|label| matches!(label.kind, CardLabelKind::Brand | CardLabelKind::Claude))
         );
         assert!(kettle_core::ImageData::new_with_budget(1, 1, vec![0; 4], &account).is_none());
-        drop(cards);
+        // The shelf lets its pixels go; the frame still holds them.
+        drop(poster);
         assert!(kettle_core::ImageData::new_with_budget(1, 1, vec![0; 4], &account).is_none());
         scene.clear();
         assert!(kettle_core::ImageData::new_with_budget(2, 1, vec![0; 8], &account).is_some());
@@ -652,21 +651,17 @@ mod tests {
             CardBadgeState::Ready,
         ] {
             let (mut cards, snap, nonce) = crate::inline_cards::tests::fixture();
+            let poster = kettle_core::ImageData::new_with_budget(
+                2,
+                1,
+                vec![255; 8],
+                &kettle_core::GraphicsBudget::previews(),
+            )
+            .unwrap();
             match state {
                 CardBadgeState::Pending => {}
                 CardBadgeState::Failed => cards.set_poster(nonce, None),
-                CardBadgeState::Ready => cards.set_poster(
-                    nonce,
-                    Some(
-                        kettle_core::ImageData::new_with_budget(
-                            2,
-                            1,
-                            vec![255; 8],
-                            &kettle_core::GraphicsBudget::previews(),
-                        )
-                        .unwrap(),
-                    ),
-                ),
+                CardBadgeState::Ready => cards.set_poster(nonce, Some(&poster)),
             }
             let mut frame = CardFrame::default();
             cards.recognize_into(&snap, &mut frame);
