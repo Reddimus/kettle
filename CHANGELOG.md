@@ -15,6 +15,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   caption; the plugin's hook collects them once and prints them under the
   call, where Kettle paints the image. The model is told only that the media
   shows below the call.
+- `kettle agent-setup --print` prints a `codex` shell function to review and
+  add to your shell's startup file. In a Kettle pane, an interactive Codex
+  session started through it (fresh, `codex resume` or `codex fork`) gets
+  this Kettle's display server for that launch only, so `kettle_show` sends
+  media to the pane's shelf. Every other Codex command runs unchanged, and
+  Kettle edits neither the shell's startup files nor Codex's configuration.
+  `--status` reports what a launch would get, and `--uninstall` prints how
+  to remove the function. It is for bash, zsh and fish, on macOS and Linux.
 - Claude Code previews (`agent-display-claude-code`, Settings → Agents →
   Claude Code previews; off by default, needs agent previews): Claude Code
   started in a new pane gets Kettle's own plugin, the display server and the

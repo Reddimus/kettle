@@ -3779,7 +3779,24 @@ footer note for each refusal, the offer before the first pane and after
 each reload's display reconcile, and the gate on both settings. Checked live
 with Claude Code 2.1.295: a new pane's Claude Code loaded the plugin and its
 server's `kettle_show`, the hook printed the card's rows and caption, and
-Kettle painted the image in those rows. The viewer's sender line finds its program's path and signer in
+Kettle painted the image in those rows. `kettle`'s `agent_setup` tests
+tell interactive Codex sessions (fresh, resume, fork) from every other
+command, help and version, never take an option's value for a command or a
+prompt, and pass a remote session, images, unknown options, extra
+positionals, a value that looks like an option and arguments that are not
+Unicode through unchanged, after `--` as well. Kettle's options go right
+after the session's command, with no second `--no-daemon`; the server table
+reads back
+as written through a TOML parser for a path with spaces, quotes, `$`,
+backticks and backslashes, and carries no approval. A relative or
+translocated path is refused, only a 0.x Codex from 0.159 is known, and a
+Kettle pane needs both positive variables. The version probe reads its first
+line within three seconds even when a child keeps the output open, and gives
+up on a program that never answers. The printed function, run by bash and
+zsh, hands each argument to Kettle untouched. Checked live with Codex
+CLI 0.162.0: the function launched an interactive session with the display
+server, `kettle_show` reached the pane's shelf verified, and `codex mcp list`
+ran unchanged. The viewer's sender line finds its program's path and signer in
 any language's word order, whatever they hold, and a line too narrow even for
 the path's last segment shortens around the signer, which stays whole. In
 `kettle-ui`'s `media` module, `route` tests: the nearest live pane ancestor

@@ -742,6 +742,52 @@ directory, and Claude Code's `/plugin` and `/mcp` list `kettle`. To remove
 it, turn the setting off. The directory stays in Kettle's data directory;
 delete it with `chmod -R u+w` and then `rm -r`.
 
+### Codex's launch function
+
+Codex gets Kettle's display server one launch at a time, through a shell
+function you add yourself. `kettle agent-setup --print` prints it for the
+shell `SHELL` names, or for `--shell bash`, `zsh` or `fish`, on macOS and
+Linux. PowerShell is not offered: it drops a bare `--` before a function sees
+its arguments, so no function there could pass them on exactly.
+
+```sh
+codex() {
+  command '/Applications/Kettle.app/Contents/MacOS/kettle' agent-setup --launch-codex -- "$@"
+}
+```
+
+Review it, then add it to your shell's startup file. Kettle edits no file and
+none of Codex's configuration, and runs nothing to set it up. The function
+hands its arguments to Kettle as they are; nothing in them is evaluated. In a
+Kettle pane, with Codex CLI 0.159 or a later 0.x, an interactive session (a
+fresh one, `codex resume` or `codex fork`) then starts with these, for that
+launch only:
+- `--no-daemon`, since a session on Codex's shared background server would
+  not get this launch's server;
+- `-c mcp_servers.kettle=…`: this Kettle's `mcp --display`, forwarding
+  `KETTLE_PANE_ID` and `KETTLE_PID` (Codex passes a server only the
+  variables it is told to) and enabling `kettle_show` alone. It approves
+  nothing, so Codex asks before a call as its own policy says.
+
+Kettle's options go right after `resume` or `fork`, or first, never after a
+prompt or `--`, and `--no-daemon` is not added twice. Everything else runs
+with its arguments unchanged:
+- every other command (`exec`, `queue`, `mcp` and the rest);
+- help and version;
+- a `--remote` session and `--image`;
+- any option Kettle doesn't know, an option's value given separately that
+  looks like an option (`--cd -x`; an attached `--cd=-x` is unambiguous), and
+  arguments that are not Unicode or more than the session takes, before `--`
+  or after it;
+- Codex outside a Kettle pane, or a version Kettle doesn't know, which it
+  says.
+
+Codex then sends media to the shelf of the pane it runs in. A session started
+this way does not show in `codex agents`. The function names the Kettle that
+printed it, and a Kettle running from a translocated copy refuses to print
+one. `kettle agent-setup --status` reports what a launch from this shell would
+get, and `--uninstall` prints how to remove the function.
+
 ### Protocol revisions
 
 The server is **dual-era**. MCP 2026-07-28 removed the `initialize` handshake

@@ -486,6 +486,11 @@ each frame's accepted cards (`Renderer::painted_cards`), and their items count
 as visible when pixels are released. The tick retires cards whose harness
 exited, whose pane closed, or whose item left the shelf or was replaced.
 
+Codex has no plugin route. `kettle`'s `agent_setup` module prints a shell
+function that hands each launch to `agent-setup --launch-codex`, which
+classifies the arguments without a shell and execs `codex`, adding
+per-launch `-c` server options to interactive sessions only.
+
 Kettle's Claude Code plugin is `kettle-ui`'s `agent_plugin` module. With
 `agent-display-claude-code` and live agent previews, the App's
 `reconcile_claude_plugin`, run before the first pane and after each reload,

@@ -102,6 +102,7 @@ mod exec;
 // kettle-ctl (discover a running server, call a method, or stream events).
 mod ctl_cli;
 // `kettle show` — send media to the shelf of the pane it runs in.
+mod agent_setup;
 mod show_cli;
 // Agent-first: `kettle mcp` — stdio MCP server exposing kettle as
 // native agent tools (run a command, drive a running kettle).
@@ -559,6 +560,10 @@ enum Cmd {
     /// stdin. The item waits on the shelf; nothing opens on screen. Agent
     /// previews must be on; full control is never needed.
     Show(ShowArgs),
+    /// Set up Codex to start with Kettle's display server: print a `codex`
+    /// shell function to review and add to your shell's startup file, report
+    /// its status, or print how to remove it. Kettle edits no file.
+    AgentSetup(agent_setup::SetupArgs),
     /// Install the latest authenticated stable release into an official
     /// installer-owned kettle layout.
     Update(UpdateArgs),
@@ -1173,6 +1178,9 @@ fn main() -> anyhow::Result<()> {
             }
             Cmd::Show(args) => {
                 std::process::exit(show_cli::run_show(args));
+            }
+            Cmd::AgentSetup(args) => {
+                std::process::exit(agent_setup::run(args));
             }
             Cmd::Mcp(args) => {
                 std::process::exit(if args.self_test {
@@ -3663,7 +3671,15 @@ mod tests {
         // The `--record*` flags ship as a runtime feature and MUST be documented
         // in the man page (see docs/RECORDING.md), so they are not excluded here.
         // `--claude-card-hook` is passed only by Kettle's own Claude Code plugin.
-        let allow_missing: &[&str] = &["tab-handoff", "tab-handoff-fd", "exec", "claude-card-hook"];
+        // `--launch-codex` is run only by the function `agent-setup --print`
+        // prints.
+        let allow_missing: &[&str] = &[
+            "tab-handoff",
+            "tab-handoff-fd",
+            "exec",
+            "claude-card-hook",
+            "launch-codex",
+        ];
         fn collect_missing_flags(
             cmd: &clap::Command,
             path: &str,
