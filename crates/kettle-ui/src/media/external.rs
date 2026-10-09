@@ -69,14 +69,6 @@ impl Viewer {
         })
     }
 
-    /// The media viewer's footer note for the key that opens an item here.
-    pub(crate) fn hint(self, tr: &kettle_i18n::Translator) -> &'static str {
-        tr.text(match self {
-            Self::Preview => kettle_i18n::Text::MediaViewerHintOpenPreview,
-            Self::EyeOfGnome => kettle_i18n::Text::MediaViewerHintOpenImageViewer,
-        })
-    }
-
     /// Whether the viewer is still the one permitted: Preview signed by
     /// Apple as itself, or Eye of GNOME owned by root and writable by no one
     /// else.

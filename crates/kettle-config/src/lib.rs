@@ -1044,6 +1044,16 @@ impl AskBeforeClosing {
     }
 }
 
+/// The side of its pane a preview lane opens on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PreviewLaneSide {
+    /// Below the terminal, which keeps its columns.
+    #[default]
+    Bottom,
+    /// Beside the terminal, which keeps its rows.
+    Right,
+}
+
 /// When the per-pane scrollback scrollbar is shown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScrollbarMode {
@@ -1386,6 +1396,10 @@ pub struct Config {
     /// `agent-display`; panes that are already open keep what they started
     /// with, and a `codex` the user defines still wins.
     pub agent_display_codex: bool,
+    /// `preview-lane-side`: where a pane's preview lane opens, `bottom`
+    /// (default), which keeps the terminal's columns, or `right`, which keeps
+    /// its rows. Applies to lanes opened after it changes.
+    pub preview_lane_side: PreviewLaneSide,
     /// Terminator parity (terminatorlib/config.py:79
     /// `ask_before_closing`): when to show the close-confirmation
     /// dialog on window close.
@@ -2745,6 +2759,7 @@ impl Default for Config {
             agent_display: false,
             agent_display_claude_code: false,
             agent_display_codex: false,
+            preview_lane_side: PreviewLaneSide::Bottom,
             ask_before_closing: AskBeforeClosing::MultipleTerminals,
             close_button_on_tab: true,
             new_tab_after_current_tab: false,
@@ -3879,6 +3894,10 @@ impl Config {
                 "scrollbar" => matches!(
                     v.to_ascii_lowercase().as_str(),
                     "never" | "off" | "false" | "auto" | "always"
+                ),
+                "preview-lane-side" | "preview_lane_side" => matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "bottom" | "right"
                 ),
                 "update-policy" | "update_policy" => matches!(
                     v.trim().to_ascii_lowercase().as_str(),
@@ -5269,6 +5288,13 @@ impl Config {
                 "agent-display-claude-code" | "agent_display_claude_code" => {
                     if let Some(b) = parse_bool(&e.value) {
                         cfg.agent_display_claude_code = b;
+                    }
+                }
+                "preview-lane-side" | "preview_lane_side" => {
+                    match e.value.trim().to_ascii_lowercase().as_str() {
+                        "bottom" => cfg.preview_lane_side = PreviewLaneSide::Bottom,
+                        "right" => cfg.preview_lane_side = PreviewLaneSide::Right,
+                        _ => {}
                     }
                 }
                 "agent-display-codex" | "agent_display_codex" => {
@@ -8059,6 +8085,28 @@ cell-height = 1.2\n";
         assert!(Config::parse_text("agent-display-claude-code = true").agent_display_claude_code);
         assert!(Config::parse_text("agent_display_claude_code = on").agent_display_claude_code);
         assert!(!Config::parse_text("agent-display-claude-code = maybe").agent_display_claude_code);
+    }
+
+    #[test]
+    fn the_preview_lane_opens_at_the_bottom_unless_set_to_the_right() {
+        assert_eq!(Config::default().preview_lane_side, PreviewLaneSide::Bottom);
+        assert_eq!(
+            Config::parse_text("preview-lane-side = right").preview_lane_side,
+            PreviewLaneSide::Right
+        );
+        assert_eq!(
+            Config::parse_text("preview_lane_side = Bottom").preview_lane_side,
+            PreviewLaneSide::Bottom
+        );
+        assert_eq!(
+            Config::parse_text("preview-lane-side = left").preview_lane_side,
+            PreviewLaneSide::Bottom
+        );
+        assert!(
+            !Config::detect_malformed_values("preview-lane-side = left").is_empty(),
+            "an unknown side is reported"
+        );
+        assert!(Config::detect_malformed_values("preview-lane-side = right").is_empty());
     }
 
     #[test]

@@ -46,6 +46,8 @@ pub(crate) fn pane<'a>(snap: &'a PaneSnapshot, width: u32, height: u32) -> PaneV
     PaneView {
         id: 1,
         rect: (0.0, 0.0, width as f32, height as f32),
+        terminal: (0.0, 0.0, width as f32, height as f32),
+        titlebar: None,
         snap,
         inline_cards: None,
         tr: kettle_i18n::Translator::default(),
@@ -2022,34 +2024,36 @@ fn a_hovered_card_is_outlined_in_the_accent() {
     }
 }
 
-/// The viewer's open-outside button is drawn where its geometry puts it, a
-/// button cell with its glyph like the close button beside it, and is not
-/// there when the viewer does not offer it.
+/// A lane's open-outside button is drawn where its geometry puts it, a
+/// button cell with its glyph like the close button, and is not there when
+/// the lane does not offer it.
 #[test]
-fn the_viewer_draws_its_open_outside_button_only_when_offered() {
+fn a_lane_draws_its_open_outside_button_only_when_offered() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(800, 600) else {
         eprintln!("no GPU adapter on this host; skipped");
         return;
     };
     let snap = snapshot_of(80, 30, b"");
-    let viewer = |open_outside| MediaViewerOverlay {
-        pane_rect: (0.0, 0.0, 800.0, 600.0),
+    let viewer = |open_outside| MediaLanePanel {
+        pane: 1,
+        rect: (0.0, 0.0, 800.0, 600.0),
+        collapsed: false,
         title: "Plot".into(),
         detail: "Image · 4×4".into(),
-        sender: MediaViewerSender {
+        sender: MediaLaneSender {
             text: "From this pane".into(),
             program: None,
             signer: None,
         },
-        hint: "Esc closes".into(),
+        hint: "Keys still go to the terminal".into(),
         position: (1, 1),
         image: Some(kettle_core::ImageData::new(4, 4, vec![200; 64]).unwrap()),
         status: String::new(),
         canvas: MediaCanvas::Theme,
         open_outside,
     };
-    let geometry = media_viewer_geometry(
+    let geometry = media_lane_geometry(
         &viewer(true),
         (renderer.cell_w, renderer.cell_h),
         (
@@ -2057,14 +2061,14 @@ fn the_viewer_draws_its_open_outside_button_only_when_offered() {
             renderer.metrics.line_height,
         ),
     )
-    .expect("the viewer fits");
+    .expect("the lane fits");
     let open = geometry.open_outside.expect("offered");
     let corner = |frame: &image::RgbaImage, rect: (f32, f32, f32, f32)| {
         let p = frame.get_pixel(rect.0.ceil() as u32 + 1, rect.1.ceil() as u32 + 1);
         (p[0], p[1], p[2])
     };
     let mut overlay = focused(false);
-    overlay.media_viewer = Some(viewer(true));
+    overlay.media_lanes = vec![viewer(true)];
     let offered = capture(&mut renderer, &cfg, &[pane(&snap, 800, 600)], &overlay);
     assert_eq!(
         corner(&offered, open),
@@ -2076,12 +2080,117 @@ fn the_viewer_draws_its_open_outside_button_only_when_offered() {
         "its glyph is drawn"
     );
     let mut overlay = focused(false);
-    overlay.media_viewer = Some(viewer(false));
+    overlay.media_lanes = vec![viewer(false)];
     let plain = capture(&mut renderer, &cfg, &[pane(&snap, 800, 600)], &overlay);
     assert_ne!(
         corner(&plain, open),
         corner(&plain, geometry.close),
         "no button where none is offered"
     );
-    eprintln!("MEDIA_VIEWER_GPU_ACCEPTANCE: open-outside button");
+    eprintln!("MEDIA_LANE_GPU_ACCEPTANCE: open-outside button");
+}
+
+/// A pane's terminal paints nothing outside its rectangle: a snapshot left
+/// taller than a terminal that has just shrunk for its preview lane draws no
+/// glyph or cell below it, so the lane's share of the pane shows exactly
+/// what it would with no text at all.
+#[test]
+fn a_terminal_paints_nothing_outside_its_rect() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(320, 240) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    // Reverse-video rows paint cell quads; plain rows paint glyphs alone.
+    let text: Vec<u8> = (0..14)
+        .flat_map(|row| {
+            let reverse = if row % 2 == 0 { "\x1b[7m" } else { "" };
+            format!("{reverse}MMMMMMMMMMMMMMMMMMM{row}\x1b[0m\r\n").into_bytes()
+        })
+        .collect();
+    let full = snapshot_of(30, 14, &text);
+    let empty = snapshot_of(30, 14, b"");
+    let carved = |snap| PaneView {
+        terminal: (0.0, 0.0, 320.0, 120.0),
+        ..pane(snap, 320, 240)
+    };
+    let drawn = capture(&mut renderer, &cfg, &[carved(&full)], &focused(false));
+    let bare = capture(&mut renderer, &cfg, &[carved(&empty)], &focused(false));
+    let ink_above =
+        (0..120).any(|y| (0..320).any(|x| drawn.get_pixel(x, y) != bare.get_pixel(x, y)));
+    assert!(ink_above, "the text inside the terminal is drawn");
+    for y in 121..240 {
+        for x in 0..320 {
+            assert_eq!(
+                drawn.get_pixel(x, y),
+                bare.get_pixel(x, y),
+                "({x}, {y}) is below the terminal"
+            );
+        }
+    }
+}
+
+/// A preview lane paints its opaque panel over its share of the pane, with
+/// its title, and leaves the terminal beside it as it was.
+#[test]
+fn a_preview_lane_paints_its_panel_and_leaves_the_terminal() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(480, 320) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let snap = snapshot_of(40, 8, b"hello");
+    let view = || PaneView {
+        terminal: (0.0, 0.0, 480.0, 180.0),
+        ..pane(&snap, 480, 320)
+    };
+    let lane = MediaLanePanel {
+        pane: 1,
+        rect: (0.0, 180.0, 480.0, 140.0),
+        collapsed: false,
+        title: "Plot of the week".into(),
+        detail: "Image · 2×2".into(),
+        sender: MediaLaneSender {
+            text: "From this pane".into(),
+            program: None,
+            signer: None,
+        },
+        hint: "Keys still go to the terminal".into(),
+        position: (1, 1),
+        image: Some(kettle_core::ImageData::new(2, 2, vec![255; 16]).unwrap()),
+        status: String::new(),
+        canvas: MediaCanvas::Theme,
+        open_outside: false,
+    };
+    let without = capture(&mut renderer, &cfg, &[view()], &focused(false));
+    let overlay = Overlay {
+        media_lanes: vec![lane],
+        ..focused(false)
+    };
+    let with = capture(&mut renderer, &cfg, &[view()], &overlay);
+    for y in 0..180 {
+        for x in 0..480 {
+            assert_eq!(
+                with.get_pixel(x, y),
+                without.get_pixel(x, y),
+                "({x}, {y}) is the terminal's"
+            );
+        }
+    }
+    let panel = crate::completion_palette(&cfg.theme, cfg.theme.palette[4]).panel_bg;
+    let lane_pixels = (182..320)
+        .flat_map(|y| (2..480).map(move |x| (x, y)))
+        .filter(|&(x, y)| {
+            let p = with.get_pixel(x, y);
+            (p[0], p[1], p[2]) == (panel.r, panel.g, panel.b)
+        })
+        .count();
+    assert!(
+        lane_pixels > 478 * 138 / 2,
+        "the panel fills the lane: {lane_pixels}"
+    );
+    assert!(
+        distinct_colors(&with, [8.0, 184.0, 200.0, 24.0]) > 2,
+        "the title is drawn"
+    );
 }

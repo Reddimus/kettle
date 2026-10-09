@@ -39,6 +39,7 @@ use crate::mux::PtyOutputClosePhase;
 use crate::mux::{
     BroadcastScope, Dir, Mux, Pane, PaneInputDelivery, PaneInputResult, PaneTitleOrigin, Rect,
 };
+use crate::pane_partition::{LayoutStyle, PanePartition};
 use crate::window_state::{
     DpiResizeAction, DpiResizeEvent, FrameRecoveryAction, FrameRecoveryPoll, WindowState,
     track_consumed_key_release, track_terminal_key_press,
@@ -503,22 +504,6 @@ fn until_next_wall_minute() -> std::time::Duration {
     std::time::Duration::from_millis(60_000 - into_minute)
 }
 
-/// The keys the open media viewer takes for itself: Esc and the arrows
-/// that browse, and a bare O when it offers to open its item outside
-/// (`opens_outside`). Any other key closes it and reaches the terminal.
-fn media_viewer_takes_key(key: &Key, mods: ModifiersState, opens_outside: bool) -> bool {
-    matches!(
-        key,
-        Key::Named(NamedKey::Escape | NamedKey::ArrowLeft | NamedKey::ArrowRight)
-    ) || (opens_outside && media_viewer_open_outside_key(key, mods))
-}
-
-/// O, with nothing but Shift, opens the viewer's item outside Kettle.
-fn media_viewer_open_outside_key(key: &Key, mods: ModifiersState) -> bool {
-    matches!(key, Key::Character(c) if c.eq_ignore_ascii_case("o"))
-        && !(mods.control_key() || mods.alt_key() || mods.super_key())
-}
-
 /// A modal whose input bar is an active text surface keeps the terminal
 /// cursor steady, never mid-blink-off, while it is open.
 fn modal_holds_cursor_steady(ws: &WindowState) -> bool {
@@ -780,7 +765,7 @@ fn media_viewer_sender_line(
     line: impl Fn(&str, Option<&str>) -> String,
     program: &str,
     signer: Option<&str>,
-) -> kettle_render::MediaViewerSender {
+) -> kettle_render::MediaLaneSender {
     let text = line(program, signer);
     let find = |marked: String, marker: char, part: &str| {
         marked
@@ -791,29 +776,69 @@ fn media_viewer_sender_line(
     let program_range = find(line("\u{1}", signer), '\u{1}', program);
     let signer_range =
         signer.and_then(|signer| find(line(program, Some("\u{2}")), '\u{2}', signer));
-    kettle_render::MediaViewerSender {
+    kettle_render::MediaLaneSender {
         text,
         program: program_range,
         signer: signer_range,
     }
 }
 
-/// What a screen reader hears for the open media viewer: its name, with the
-/// item's place on the shelf, title and detail line, and a description that
-/// says when the pixels were released and how to close or browse.
-fn media_viewer_accessibility(
-    viewer: &kettle_render::MediaViewerOverlay,
+/// What a screen reader hears for a preview lane: its name, with the item's
+/// place on the shelf, title and detail line, and a description that says
+/// when the pixels were released and where keys go.
+fn media_lane_accessibility(
+    lane: &kettle_render::MediaLanePanel,
     tr: &kettle_i18n::Translator,
 ) -> (String, String) {
-    let (index, count) = viewer.position;
-    let detail = format!("{} · {}", viewer.detail, viewer.sender.text);
-    let label = tr.media_viewer_a11y(index as u64, count as u64, &viewer.title, &detail);
-    let description = if viewer.image.is_some() {
-        viewer.hint.clone()
+    let (index, count) = lane.position;
+    let detail = format!("{} · {}", lane.detail, lane.sender.text);
+    let label = tr.media_lane_a11y(index as u64, count as u64, &lane.title, &detail);
+    let description = if lane.image.is_some() {
+        lane.hint.clone()
     } else {
-        format!("{} {}", viewer.status, viewer.hint)
+        format!("{} {}", lane.status, lane.hint)
     };
     (label, description)
+}
+
+/// Preview lanes and their controls, each by pane: the lane at part 0 and
+/// its controls after it. Pane ids at or past [`MAX_LANE_ACCESSIBILITY_PANE`]
+/// have no lane nodes rather than ones that could collide.
+const ACCESSIBILITY_LANE_ID_MASK: u64 = 1 << 56;
+const MAX_LANE_ACCESSIBILITY_PANE: u64 = 1 << 52;
+const LANE_ACCESSIBILITY_PARTS: u64 = 8;
+
+/// The node of `pane`'s lane (`part` 0) or one of its controls.
+fn accessibility_lane_id(pane: u64, part: u64) -> Option<NodeId> {
+    (pane < MAX_LANE_ACCESSIBILITY_PANE && part < LANE_ACCESSIBILITY_PARTS)
+        .then(|| NodeId(ACCESSIBILITY_LANE_ID_MASK | (pane * LANE_ACCESSIBILITY_PARTS) | part))
+}
+
+/// The pane and part a lane node names, if it is a lane's.
+fn accessibility_lane_part(id: NodeId) -> Option<(u64, u64)> {
+    let payload = id.0 & (ACCESSIBILITY_LANE_ID_MASK - 1);
+    (id.0 & !(ACCESSIBILITY_LANE_ID_MASK - 1) == ACCESSIBILITY_LANE_ID_MASK).then_some((
+        payload / LANE_ACCESSIBILITY_PARTS,
+        payload % LANE_ACCESSIBILITY_PARTS,
+    ))
+}
+
+/// A lane's controls in order, with the part each answers to.
+fn lane_controls(
+    geometry: &kettle_render::MediaLaneGeometry,
+) -> [(
+    u64,
+    Option<kettle_render::Rect4>,
+    kettle_render::MediaLaneHit,
+); 5] {
+    use kettle_render::MediaLaneHit as Hit;
+    [
+        (1, geometry.previous, Hit::Previous),
+        (2, geometry.next, Hit::Next),
+        (3, geometry.open_outside, Hit::OpenOutside),
+        (4, Some(geometry.toggle), Hit::Toggle),
+        (5, Some(geometry.close), Hit::Close),
+    ]
 }
 
 fn accessibility_card_id(instance: u64) -> NodeId {
@@ -1130,26 +1155,6 @@ fn modal_accessibility_projection(
         projection.nodes.push((container_id, dialog));
         if projection.focus.is_none() {
             projection.focus = Some(input_id);
-        }
-    }
-
-    if let Some(viewer) = overlay.media_viewer.as_ref() {
-        let id = accessibility_modal_id(10, 0);
-        let mut node = Node::new(Role::Dialog);
-        let (label, description) = media_viewer_accessibility(viewer, tr);
-        node.set_label(label);
-        node.set_description(description);
-        let (x, y, width, height) = viewer.pane_rect;
-        node.set_bounds(accesskit::Rect::new(
-            f64::from(x),
-            f64::from(y),
-            f64::from(x + width),
-            f64::from(y + height),
-        ));
-        projection.roots.push(id);
-        projection.nodes.push((id, node));
-        if projection.focus.is_none() {
-            projection.focus = Some(id);
         }
     }
 
@@ -1726,14 +1731,14 @@ fn media_path_key(path: &kettle_media::NativePath) -> String {
 }
 
 /// The shelf items on screen in any window, whose pixels eviction spares:
-/// each open viewer's, and each item whose card the last frame drew.
+/// each preview lane's, and each item whose card the last frame drew.
 fn media_visible_items<'a>(
     windows: impl Iterator<Item = &'a WindowState>,
     cards: &crate::media::CardLedger,
 ) -> Vec<u64> {
     let mut visible = Vec::new();
     for window in windows {
-        visible.extend(window.media_viewer.as_ref().map(|viewer| viewer.item));
+        visible.extend(window.preview_panels.values().map(|panel| panel.item));
         if let Some(renderer) = &window.renderer {
             visible.extend(
                 renderer
@@ -4024,14 +4029,12 @@ pub(crate) fn is_bidi_format_char(c: char) -> bool {
 fn px_to_cell(
     px: f32,
     py: f32,
-    rect: Rect,
+    terminal: Rect,
     cell: (f32, f32),
     pad: (f32, f32),
-    titlebar_h: f32,
-    title_at_bottom: bool,
 ) -> (usize, i32, kettle_core::Side) {
     let (cw, ch) = cell;
-    let (ox, oy) = kettle_render::pane_grid_origin(rect, pad, titlebar_h, title_at_bottom);
+    let (ox, oy) = (terminal.0 + pad.0, terminal.1 + pad.1);
     // Derive BOTH col and side from the same non-negative offset so they agree at
     // the left clamp: a pointer in the left padding (offset < 0) maps to
     // (col 0, Side::Left) — the first cell is included, not trimmed. Computing the
@@ -4269,22 +4272,15 @@ fn context_menu_snapshot_reuse_safe(ws: &WindowState) -> bool {
         && matches!(&ws.detach_drag, crate::detach::DragState::Idle)
 }
 
-/// Pure cols/rows-that-fit math for a pane rect, shared by `grid_of`. A
-/// multi-pane tab's per-pane titlebar steals `titlebar_h` of height, so the PTY
-/// must be sized for the rows that fit *below* it; otherwise the bottom row is
-/// drawn under the chrome and clipped. `max(1)` keeps a degenerate tiny pane at
-/// ≥ 1×1.
-fn grid_dims_px(
-    size: (f32, f32),
-    cell: (f32, f32),
-    pad: (f32, f32),
-    titlebar_h: f32,
-) -> (usize, usize) {
+/// Pure cols/rows-that-fit math for a terminal rect, shared by `grid_of`. The
+/// terminal is already clear of the pane's titlebar and lane, so only the
+/// padding comes off. `max(1)` keeps a degenerate tiny pane at ≥ 1×1.
+fn grid_dims_px(size: (f32, f32), cell: (f32, f32), pad: (f32, f32)) -> (usize, usize) {
     let (w, h) = size;
     let (cw, ch) = cell;
     let (pad_x, pad_y) = pad;
     let cols = ((w - pad_x * 2.0) / cw).floor().max(1.0) as usize;
-    let rows = ((h - pad_y * 2.0 - titlebar_h) / ch).floor().max(1.0) as usize;
+    let rows = ((h - pad_y * 2.0) / ch).floor().max(1.0) as usize;
     (cols, rows)
 }
 
@@ -10075,9 +10071,7 @@ impl App {
         let now = std::time::Instant::now();
         let card = ws
             .native_pointer
-            .filter(|_| {
-                !ws.mods.shift_key() && !self.pointer_modal_open(ws) && ws.media_viewer.is_none()
-            })
+            .filter(|_| !ws.mods.shift_key() && !self.pointer_modal_open(ws))
             .and_then(|pointer| {
                 ws.renderer
                     .as_ref()?
@@ -10278,17 +10272,17 @@ impl App {
         true
     }
 
-    /// Open the focused pane's media shelf in the viewer, on its newest
-    /// item, or close the viewer if one is open. Only a user action opens
-    /// it; a push never does.
+    /// Open the focused pane's media shelf in its preview lane, on its
+    /// newest item, or close the lane if it has one. Only a user action
+    /// opens a lane; a push never does.
     fn open_media_shelf(&mut self, ws: &mut WindowState) {
-        if ws.media_viewer.is_some() {
-            self.close_media_viewer(ws);
-            return;
-        }
         let Some(pane) = ws.mux.active_focus() else {
             return;
         };
+        if ws.preview_panels.contains_key(&pane) {
+            self.close_preview(ws, pane);
+            return;
+        }
         let Some(item) = ws
             .mux
             .panes
@@ -10302,16 +10296,69 @@ impl App {
         self.show_media_item(ws, pane, item);
     }
 
-    /// Show `item` of `pane`'s shelf in the viewer and note it was viewed.
-    fn show_media_item(&self, ws: &mut WindowState, pane: u64, item: u64) {
-        ws.media_viewer = Some(crate::window_state::MediaViewer { pane, item });
+    /// Show `item` of `pane`'s shelf in the pane's preview lane, opening or
+    /// expanding the lane, and note the item was viewed.
+    fn show_media_item(&mut self, ws: &mut WindowState, pane: u64, item: u64) {
+        let had_panel = ws
+            .preview_panels
+            .insert(pane, crate::window_state::PreviewPanel { item })
+            .is_some();
+        let side = match self.cfg.preview_lane_side {
+            kettle_config::PreviewLaneSide::Bottom => crate::pane_partition::LaneSide::Bottom,
+            kettle_config::PreviewLaneSide::Right => crate::pane_partition::LaneSide::Right,
+        };
+        let resized = ws.mux.open_lane(pane, side);
+        // A pane too small for even the strip shows no lane: say so rather
+        // than keep one nobody can see, and leave the item unseen.
+        let shown = self
+            .pane_partition(ws, self.area(ws), pane)
+            .and_then(|partition| partition.lane)
+            .is_some_and(|lane| lane.rect().is_some());
+        if !shown && !had_panel {
+            ws.preview_panels.remove(&pane);
+            let resized = ws.mux.close_lane(pane) || resized;
+            self.lanes_changed(ws, resized);
+            let tr = self.ui_text;
+            fire_notify(
+                tr.text(kettle_i18n::Text::NotifyTitlePreviewNoRoom),
+                tr.text(kettle_i18n::Text::NotifyBodyPreviewNoRoom),
+            );
+            return;
+        }
         if let Some(state) = ws.mux.panes.get_mut(&pane) {
             state.media_shelf.viewed(item);
+        }
+        self.lanes_changed(ws, resized);
+    }
+
+    /// After a lane opened, closed, collapsed or changed item: give the
+    /// terminals their new size when the geometry moved, and repaint.
+    fn lanes_changed(&mut self, ws: &mut WindowState, resized: bool) {
+        if resized {
+            self.resize_all(ws);
         }
         ws.accessibility_pending = true;
         if let Some(window) = &ws.window {
             window.request_redraw();
         }
+    }
+
+    /// Close `pane`'s preview lane; its terminal gets the room back.
+    fn close_preview(&mut self, ws: &mut WindowState, pane: u64) {
+        let had_panel = ws.preview_panels.remove(&pane).is_some();
+        let resized = ws.mux.close_lane(pane);
+        if had_panel || resized {
+            self.lanes_changed(ws, resized);
+        }
+    }
+
+    /// Collapse `pane`'s lane to its strip, or expand it.
+    fn toggle_preview(&mut self, ws: &mut WindowState, pane: u64) {
+        let Some(lane) = ws.mux.lane(pane) else {
+            return;
+        };
+        let resized = ws.mux.set_lane_expanded(pane, !lane.expanded);
+        self.lanes_changed(ws, resized);
     }
 
     /// Take a primary press on a settled inline card, before focus, links,
@@ -10352,24 +10399,24 @@ impl App {
             .renderer
             .as_ref()
             .and_then(|renderer| renderer.card_at(px, py));
-        let covered = self.pointer_modal_open(ws) || ws.media_viewer.is_some();
+        let covered = self.pointer_modal_open(ws);
         if card_release_opens((pane, nonce), over, covered) {
             self.open_card(ws, pane, nonce);
         }
         true
     }
 
-    /// Open the item `pane`'s card `nonce` shows in the viewer, for a click,
-    /// a hint or assistive technology. Nothing opens while a dialog, a menu
-    /// or the viewer owns the pointer, or once the card's item has left the
-    /// shelf.
+    /// Open the item `pane`'s card `nonce` shows in the pane's preview lane,
+    /// for a click, a hint or assistive technology. Nothing opens while a
+    /// dialog or a menu owns the pointer, or once the card's item has left
+    /// the shelf.
     fn open_card(
         &mut self,
         ws: &mut WindowState,
         pane: u64,
         nonce: kettle_core::InlineNonce,
     ) -> bool {
-        if self.pointer_modal_open(ws) || ws.media_viewer.is_some() {
+        if self.pointer_modal_open(ws) {
             return false;
         }
         let Some(item) = self.media.cards.item(pane, nonce) else {
@@ -10476,38 +10523,37 @@ impl App {
         }
     }
 
-    /// The permitted image viewer the open media viewer offers its item to:
-    /// none when this platform has none or the item's pixels were let go.
-    fn media_viewer_opens_outside(&self, ws: &WindowState) -> Option<crate::media::Viewer> {
-        let viewer = ws.media_viewer?;
-        let item = ws
-            .mux
+    /// The item `pane`'s lane shows, if it has one and the item is still
+    /// on the shelf.
+    fn preview_item<'a>(
+        &self,
+        ws: &'a WindowState,
+        pane: u64,
+    ) -> Option<&'a crate::media::ShelfItem> {
+        let panel = ws.preview_panels.get(&pane)?;
+        ws.mux
             .panes
-            .get(&viewer.pane)?
+            .get(&pane)?
             .media_shelf
             .items()
             .iter()
-            .find(|it| it.id == viewer.item)?;
-        item.image()?;
+            .find(|it| it.id == panel.item)
+    }
+
+    /// The permitted image viewer `pane`'s lane offers its item to: none when
+    /// this platform has none or the item's pixels were let go.
+    fn preview_opens_outside(&self, ws: &WindowState, pane: u64) -> Option<crate::media::Viewer> {
+        self.preview_item(ws, pane)?.image()?;
         crate::media::Viewer::find()
     }
 
-    /// Open the media viewer's item in the permitted image viewer, when it
-    /// offers to.
-    fn open_viewer_item_outside(&self, ws: &WindowState) {
-        let Some(outside) = self.media_viewer_opens_outside(ws) else {
+    /// Open `pane`'s lane item in the permitted image viewer, when it offers
+    /// to.
+    fn open_preview_outside(&self, ws: &WindowState, pane: u64) {
+        let Some(outside) = self.preview_opens_outside(ws, pane) else {
             return;
         };
-        let Some(viewer) = ws.media_viewer else {
-            return;
-        };
-        if let Some(item) = ws.mux.panes.get(&viewer.pane).and_then(|state| {
-            state
-                .media_shelf
-                .items()
-                .iter()
-                .find(|it| it.id == viewer.item)
-        }) {
+        if let Some(item) = self.preview_item(ws, pane) {
             self.open_item_outside(item, outside);
         }
     }
@@ -10542,12 +10588,12 @@ impl App {
 
     /// The cards on screen that assistive technology can reach, in paint
     /// order: each placement's instance, where it is, and the shelf item it
-    /// shows. None while a dialog, a menu or the viewer covers them.
+    /// shows. None while a dialog or a menu covers them.
     fn accessible_cards<'a>(
         &self,
         ws: &'a WindowState,
     ) -> Vec<(u64, kettle_render::PaintedCard, &'a crate::media::ShelfItem)> {
-        if self.pointer_modal_open(ws) || ws.media_viewer.is_some() {
+        if self.pointer_modal_open(ws) {
             return Vec::new();
         }
         let Some(renderer) = ws.renderer.as_ref() else {
@@ -10557,7 +10603,7 @@ impl App {
         // from view; only what the layout shows now is reachable.
         let shown: Vec<u64> = ws
             .mux
-            .layout(ws.mux.active, self.area(ws))
+            .leaves(ws.mux.active, self.area(ws))
             .into_iter()
             .map(|(pane, _)| pane)
             .collect();
@@ -10589,30 +10635,21 @@ impl App {
         format!("{kind} · {width}×{height} · {}", sender.text)
     }
 
-    fn close_media_viewer(&self, ws: &mut WindowState) {
-        if ws.media_viewer.take().is_some() {
-            ws.accessibility_pending = true;
-            if let Some(window) = &ws.window {
-                window.request_redraw();
-            }
-        }
-    }
-
-    /// Show the shelf item `step` places along from the open one, stopping
-    /// at either end.
-    fn step_media_viewer(&self, ws: &mut WindowState, step: isize) {
-        let Some(viewer) = ws.media_viewer else {
+    /// Show the shelf item `step` places along from the one `pane`'s lane
+    /// shows, stopping at either end.
+    fn step_preview(&mut self, ws: &mut WindowState, pane: u64, step: isize) {
+        let Some(panel) = ws.preview_panels.get(&pane).copied() else {
             return;
         };
         let Some(items) = ws
             .mux
             .panes
-            .get(&viewer.pane)
-            .map(|pane| pane.media_shelf.items())
+            .get(&pane)
+            .map(|state| state.media_shelf.items())
         else {
             return;
         };
-        let Some(at) = items.iter().position(|item| item.id == viewer.item) else {
+        let Some(at) = items.iter().position(|item| item.id == panel.item) else {
             return;
         };
         let Some(next) = at
@@ -10622,63 +10659,72 @@ impl App {
         else {
             return;
         };
-        self.show_media_item(ws, viewer.pane, next);
+        self.show_media_item(ws, pane, next);
     }
 
-    /// Close a viewer that is not on screen: its pane closed, left this
-    /// window or its tab is not the active one, its item left the shelf, or
-    /// the pane is too small to hold it. It also closes under any other
-    /// modal, which every opener already ensures; this keeps that true for
-    /// one added later.
-    fn prune_media_viewer(&self, ws: &mut WindowState) {
-        let Some(viewer) = ws.media_viewer else {
-            return;
-        };
-        let shown = !self.any_modal_open(ws)
-            && ws
-                .mux
-                .panes
-                .get(&viewer.pane)
-                .is_some_and(|pane| !pane.closed)
-            && self.media_viewer_geometry(ws).is_some();
-        if !shown {
-            self.close_media_viewer(ws);
+    /// Close every lane that has nothing to show: its pane closed or left
+    /// this window, or its item left the shelf. A lane without a panel, or a
+    /// panel without a lane, goes too. Run on each pass of the event loop.
+    fn prune_previews(&mut self, ws: &mut WindowState) {
+        let before = ws.preview_panels.len();
+        let live: Vec<u64> = ws
+            .preview_panels
+            .keys()
+            .copied()
+            .filter(|pane| {
+                ws.mux.lane(*pane).is_some()
+                    && ws.mux.panes.get(pane).is_some_and(|state| !state.closed)
+                    && self.preview_item(ws, *pane).is_some()
+            })
+            .collect();
+        ws.preview_panels.retain(|pane, _| live.contains(pane));
+        let resized = ws.mux.retain_lanes(|pane| live.contains(&pane));
+        if resized || ws.preview_panels.len() != before {
+            self.lanes_changed(ws, resized);
         }
     }
 
-    /// The open shelf item, projected for painting over its pane.
-    fn media_viewer_projection(
+    /// The active tab's preview lanes, projected for painting: each pane
+    /// whose lane has room to show more than a badge.
+    fn preview_lane_projections(&self, ws: &WindowState) -> Vec<kettle_render::MediaLanePanel> {
+        self.pane_layout(ws, self.area(ws))
+            .into_iter()
+            .filter_map(|(pane, partition)| {
+                let share = partition.lane?;
+                let rect = share.rect()?;
+                let collapsed = matches!(share, crate::pane_partition::LaneShare::Strip(_));
+                self.preview_lane_panel(ws, pane, rect, collapsed)
+            })
+            .collect()
+    }
+
+    /// `pane`'s lane in `rect`, projected for painting.
+    fn preview_lane_panel(
         &self,
         ws: &WindowState,
-    ) -> Option<kettle_render::MediaViewerOverlay> {
-        let viewer = ws.media_viewer?;
-        let pane_rect = self.pane_rect(ws, self.area(ws), viewer.pane)?;
-        let items = ws.mux.panes.get(&viewer.pane)?.media_shelf.items();
-        let index = items.iter().position(|item| item.id == viewer.item)?;
+        pane: u64,
+        rect: Rect,
+        collapsed: bool,
+    ) -> Option<kettle_render::MediaLanePanel> {
+        let panel = ws.preview_panels.get(&pane)?;
+        let items = ws.mux.panes.get(&pane)?.media_shelf.items();
+        let index = items.iter().position(|item| item.id == panel.item)?;
         let item = &items[index];
         let tr = &self.ui_text;
         let (kind, sender) = self.media_item_kind_and_sender(item);
         let (width, height) = item.size;
-        Some(kettle_render::MediaViewerOverlay {
-            pane_rect,
+        Some(kettle_render::MediaLanePanel {
+            pane,
+            rect,
+            collapsed,
             title: item.title.clone(),
             detail: format!("{kind} · {width}×{height}"),
             sender,
-            hint: {
-                let hint = tr.text(if items.len() > 1 {
-                    kettle_i18n::Text::MediaViewerHint
-                } else {
-                    kettle_i18n::Text::MediaViewerHintSingle
-                });
-                match self.media_viewer_opens_outside(ws) {
-                    Some(outside) => format!("{hint} · {}", outside.hint(tr)),
-                    None => hint.to_string(),
-                }
-            },
+            hint: tr.text(kettle_i18n::Text::MediaLaneHint).to_string(),
             position: (index + 1, items.len()),
             image: item.image().cloned(),
             status: tr.text(kettle_i18n::Text::MediaViewerReleased).to_string(),
-            open_outside: self.media_viewer_opens_outside(ws).is_some(),
+            open_outside: self.preview_opens_outside(ws, pane).is_some(),
             canvas: match item.kind {
                 kettle_media::MediaKind::Svg => kettle_render::MediaCanvas::White,
                 kettle_media::MediaKind::Raster => kettle_render::MediaCanvas::Checker,
@@ -10692,7 +10738,7 @@ impl App {
     fn media_item_kind_and_sender(
         &self,
         item: &crate::media::ShelfItem,
-    ) -> (&'static str, kettle_render::MediaViewerSender) {
+    ) -> (&'static str, kettle_render::MediaLaneSender) {
         let tr = &self.ui_text;
         let kind = tr.text(match item.kind {
             kettle_media::MediaKind::Raster => kettle_i18n::Text::MediaViewerKindImage,
@@ -10701,7 +10747,7 @@ impl App {
             _ => kettle_i18n::Text::MediaViewerKindMedia,
         });
         let sender = match &item.provenance {
-            crate::media::Provenance::Verified => kettle_render::MediaViewerSender {
+            crate::media::Provenance::Verified => kettle_render::MediaLaneSender {
                 text: tr.text(kettle_i18n::Text::MediaViewerFromPane).to_string(),
                 program: None,
                 signer: None,
@@ -10726,13 +10772,14 @@ impl App {
         (kind, sender)
     }
 
-    fn media_viewer_geometry(
+    /// Where `lane`'s controls are.
+    fn preview_lane_geometry(
         &self,
         ws: &WindowState,
-    ) -> Option<kettle_render::MediaViewerGeometry> {
-        let viewer = self.media_viewer_projection(ws)?;
-        kettle_render::media_viewer_geometry(
-            &viewer,
+        lane: &kettle_render::MediaLanePanel,
+    ) -> Option<kettle_render::MediaLaneGeometry> {
+        kettle_render::media_lane_geometry(
+            lane,
             self.menu_cell(ws),
             (
                 self.overlay_text_cell_width(ws),
@@ -10741,40 +10788,65 @@ impl App {
         )
     }
 
-    /// Whether the open media viewer covers the pointer. It then owns the
-    /// wheel there, so nothing it hides scrolls.
-    fn media_viewer_under_pointer(&self, ws: &WindowState) -> bool {
-        ws.media_viewer.is_some()
-            && self.media_viewer_geometry(ws).is_some_and(|geometry| {
-                geometry.hit_test(ws.cursor.x as f32, ws.cursor.y as f32)
-                    != kettle_render::MediaViewerHit::Outside
+    /// The lane under `(x, y)` in the active tab, with its pane and whether
+    /// it shows as a strip: the whole lane, whether or not its panel has room
+    /// to draw.
+    fn preview_lane_at(&self, ws: &WindowState, x: f32, y: f32) -> Option<(u64, Rect, bool)> {
+        self.pane_layout(ws, self.area(ws))
+            .into_iter()
+            .find_map(|(pane, partition)| {
+                let share = partition.lane?;
+                let rect = share.rect()?;
+                let strip = matches!(share, crate::pane_partition::LaneShare::Strip(_));
+                (x >= rect.0 && x < rect.0 + rect.2 && y >= rect.1 && y < rect.1 + rect.3)
+                    .then_some((pane, rect, strip))
             })
     }
 
-    /// A press while the viewer is open belongs to it, whichever button and
-    /// wherever it lands, so nothing the viewer hides receives it. The
-    /// primary button acts: close, browse, or close from outside. Shared by
-    /// native and ctl mouse input.
-    fn activate_media_viewer_at(&self, ws: &mut WindowState, x: f32, y: f32, bcode: u8) -> bool {
-        if ws.media_viewer.is_none() {
-            return false;
-        }
-        let Some(geometry) = self.media_viewer_geometry(ws) else {
-            self.close_media_viewer(ws);
+    /// Whether a preview lane is under the pointer. It then owns the wheel
+    /// there, so the terminal beside it never scrolls from a wheel over the
+    /// lane.
+    fn preview_lane_under_pointer(&self, ws: &WindowState) -> bool {
+        self.preview_lane_at(ws, ws.cursor.x as f32, ws.cursor.y as f32)
+            .is_some()
+    }
+
+    /// A press over a preview lane belongs to it, whichever button, so the
+    /// terminal beside it never receives it. The primary button acts on the
+    /// control under it. Shared by native and ctl mouse input.
+    fn press_preview_lane(&mut self, ws: &mut WindowState, x: f32, y: f32, bcode: u8) -> bool {
+        let Some((pane, rect, collapsed)) = self.preview_lane_at(ws, x, y) else {
             return false;
         };
-        if bcode == 0 {
-            match geometry.hit_test(x, y) {
-                kettle_render::MediaViewerHit::Close | kettle_render::MediaViewerHit::Outside => {
-                    self.close_media_viewer(ws);
-                }
-                kettle_render::MediaViewerHit::Previous => self.step_media_viewer(ws, -1),
-                kettle_render::MediaViewerHit::Next => self.step_media_viewer(ws, 1),
-                kettle_render::MediaViewerHit::OpenOutside => self.open_viewer_item_outside(ws),
-                kettle_render::MediaViewerHit::Inside => {}
-            }
+        if bcode != 0 {
+            return true;
+        }
+        let hit = self
+            .preview_lane_panel(ws, pane, rect, collapsed)
+            .and_then(|lane| self.preview_lane_geometry(ws, &lane))
+            .and_then(|geometry| geometry.hit_test(x, y));
+        if let Some(hit) = hit {
+            self.act_on_preview(ws, pane, hit);
         }
         true
+    }
+
+    /// Do what a lane control does, from the pointer or assistive technology.
+    fn act_on_preview(
+        &mut self,
+        ws: &mut WindowState,
+        pane: u64,
+        hit: kettle_render::MediaLaneHit,
+    ) {
+        use kettle_render::MediaLaneHit as Hit;
+        match hit {
+            Hit::Close => self.close_preview(ws, pane),
+            Hit::Toggle => self.toggle_preview(ws, pane),
+            Hit::Previous => self.step_preview(ws, pane, -1),
+            Hit::Next => self.step_preview(ws, pane, 1),
+            Hit::OpenOutside => self.open_preview_outside(ws, pane),
+            Hit::Inside => {}
+        }
     }
 
     /// Open Kettle's retained private image after rechecking its pane and file
@@ -11044,8 +11116,6 @@ impl App {
         if ws.context_menu.is_some() || ws.vi_mode.is_some() || ws.hint_state.is_some() {
             return;
         }
-        // Committed text closes the media viewer and goes on as typed.
-        self.close_media_viewer(ws);
         // The modal handlers below filter typed text by the modifiers that
         // produced it. A committed composition has none: the input method
         // decides when to commit, and whatever is latched at that instant did
@@ -11218,7 +11288,7 @@ impl App {
             return None;
         }
         let active = ws.mux.active;
-        let rects = ws.mux.layout(active, self.area(ws));
+        let rects = ws.mux.leaves(active, self.area(ws));
         if rects.len() < 2 {
             // Single-pane tab: titlebar isn't rendered (the renderer's
             // titlebar gate requires `show_titlebar` and more than one pane).
@@ -11750,34 +11820,12 @@ impl App {
         }
     }
 
-    /// Height the per-pane titlebar reserves on its configured edge in a tab
-    /// with `pane_count` panes, matching the renderer's `pane_titlebar_h`
-    /// (`cfg.show_titlebar && panes > 1 → cell_h + 6`) and the
-    /// `pane_at_titlebar_click` hit-test. `0.0` (no inset) for a single-pane
-    /// tab or when titlebars are off.
-    fn pane_titlebar_inset(&self, ws: &WindowState, pane_count: usize) -> f32 {
-        if self.cfg.show_titlebar && pane_count > 1 {
-            ws.renderer.as_ref().map(|r| r.cell_h + 6.0).unwrap_or(20.0)
-        } else {
-            0.0
-        }
-    }
-
-    fn grid_of(&self, ws: &WindowState, rect: Rect) -> (usize, usize) {
-        // Full-area / single-pane sizing: no titlebar inset. Per-pane sizing in
-        // a split tab goes through `grid_of_inset`.
-        self.grid_of_inset(ws, rect, 0.0)
-    }
-
-    fn grid_of_inset(&self, ws: &WindowState, rect: Rect, titlebar_h: f32) -> (usize, usize) {
+    /// The columns and rows that fit in `terminal`, a pane's terminal (or a
+    /// whole area with nothing carved from it), inside its padding.
+    fn grid_of(&self, ws: &WindowState, terminal: Rect) -> (usize, usize) {
         let (cw, ch) = Self::cell_size(ws).unwrap_or((8.0, 16.0));
-        let (_, _, w, h) = rect;
-        grid_dims_px(
-            (w, h),
-            (cw, ch),
-            (self.cfg.padding_x, self.cfg.padding_y),
-            titlebar_h,
-        )
+        let (_, _, w, h) = terminal;
+        grid_dims_px((w, h), (cw, ch), (self.cfg.padding_x, self.cfg.padding_y))
     }
 
     fn pty_geometry_for_grid(&self, ws: &WindowState, columns: usize, rows: usize) -> PtyGeometry {
@@ -11786,8 +11834,8 @@ impl App {
         PtyGeometry::new(columns, rows, pixel_width, pixel_height)
     }
 
-    fn pty_geometry_for_rect(&self, ws: &WindowState, rect: Rect, titlebar_h: f32) -> PtyGeometry {
-        let (columns, rows) = self.grid_of_inset(ws, rect, titlebar_h);
+    fn pty_geometry_for_terminal(&self, ws: &WindowState, terminal: Rect) -> PtyGeometry {
+        let (columns, rows) = self.grid_of(ws, terminal);
         self.pty_geometry_for_grid(ws, columns, rows)
     }
 
@@ -11797,13 +11845,17 @@ impl App {
         dir: Dir,
         new_first: bool,
     ) -> PtyGeometry {
+        // The new pane's leaf in a tab one pane larger, with no lane of its own.
         let area = self.area(ws);
-        let rect = ws
+        let leaf = ws
             .mux
             .prospective_split_rect(dir, new_first, area)
             .unwrap_or(area);
-        let titlebar_h = self.pane_titlebar_inset(ws, ws.mux.active_pane_count().saturating_add(1));
-        self.pty_geometry_for_rect(ws, rect, titlebar_h)
+        let metrics = self
+            .layout_style(ws)
+            .metrics(ws.mux.active_pane_count().saturating_add(1));
+        let terminal = crate::pane_partition::partition_leaf(leaf, metrics, None).terminal;
+        self.pty_geometry_for_terminal(ws, terminal)
     }
 
     fn restore_geometries(
@@ -11811,24 +11863,29 @@ impl App {
         ws: &WindowState,
         session: &crate::session::Session,
     ) -> Vec<Vec<PtyGeometry>> {
+        // A restored tab has no lanes: each pane's terminal is its leaf less
+        // its titlebar.
         let area = self.area(ws);
+        let style = self.layout_style(ws);
+        let terminal = |leaf: Rect, panes: usize| {
+            crate::pane_partition::partition_leaf(leaf, style.metrics(panes), None).terminal
+        };
         session
             .tabs
             .iter()
             .map(|tab| {
                 let rectangles = tab.root.leaf_rects(area);
                 let pane_count = rectangles.len();
-                let titlebar_inset = self.pane_titlebar_inset(ws, pane_count);
                 let mut geometries: Vec<_> = rectangles
                     .into_iter()
-                    .map(|rect| self.pty_geometry_for_rect(ws, rect, titlebar_inset))
+                    .map(|leaf| self.pty_geometry_for_terminal(ws, terminal(leaf, pane_count)))
                     .collect();
                 if tab.zoomed
                     && let Some(focused_index) =
                         (!geometries.is_empty()).then(|| tab.focus.min(geometries.len() - 1))
                     && let Some(focused) = geometries.get_mut(focused_index)
                 {
-                    *focused = self.pty_geometry_for_rect(ws, area, 0.0);
+                    *focused = self.pty_geometry_for_terminal(ws, terminal(area, 1));
                 }
                 geometries
             })
@@ -11840,11 +11897,10 @@ impl App {
             return false;
         }
         let area = self.area(ws);
-        let layout = ws.mux.layout(ws.mux.active, area);
-        let titlebar_h = self.pane_titlebar_inset(ws, layout.len());
-        let current = layout.iter().filter_map(|(id, rect)| {
+        let layout = self.pane_layout(ws, area);
+        let current = layout.iter().filter_map(|(id, partition)| {
             let pane = ws.mux.panes.get(id)?;
-            let (columns, screen_lines) = self.grid_of_inset(ws, *rect, titlebar_h);
+            let (columns, screen_lines) = self.grid_of(ws, partition.terminal);
             Some((*id, pane.term.output_generation(), columns, screen_lines))
         });
         pane_snapshot_keys_match(&ws.pane_snapshot_keys, current)
@@ -11908,7 +11964,16 @@ impl App {
     /// binding keeps that meaning where the aspect ratio favours neither side.
     fn auto_split_dir(&self, ws: &WindowState) -> Dir {
         let area = self.area(ws);
-        let rect = self.focused_rect(ws, area).unwrap_or(area);
+        let rect = ws
+            .mux
+            .active_focus()
+            .and_then(|focus| {
+                ws.mux
+                    .leaves(ws.mux.active, area)
+                    .into_iter()
+                    .find(|(id, _)| *id == focus)
+            })
+            .map_or(area, |(_, leaf)| leaf);
         if rect.2 > rect.3 {
             Dir::Horizontal
         } else {
@@ -11916,16 +11981,44 @@ impl App {
         }
     }
 
-    fn focused_rect(&self, ws: &WindowState, area: Rect) -> Option<Rect> {
-        self.pane_rect(ws, area, ws.mux.active_focus()?)
+    /// How this window measures its panes: its cells and padding, and the
+    /// titlebar a pane shows beside another.
+    fn layout_style(&self, ws: &WindowState) -> LayoutStyle {
+        let cell = Self::cell_size(ws).unwrap_or((8.0, 16.0));
+        let padding = (self.cfg.padding_x, self.cfg.padding_y);
+        let titlebar = self
+            .cfg
+            .show_titlebar
+            .then(|| ws.renderer.as_ref().map(|r| r.cell_h + 6.0).unwrap_or(20.0));
+        LayoutStyle::new(cell, padding, titlebar, self.cfg.title_at_bottom)
+            .or_else(|| LayoutStyle::new((8.0, 16.0), padding, titlebar, self.cfg.title_at_bottom))
+            .unwrap_or_else(LayoutStyle::fallback)
     }
 
-    fn pane_rect(&self, ws: &WindowState, area: Rect, pane_id: u64) -> Option<Rect> {
-        ws.mux
-            .layout(ws.mux.active, area)
+    /// The active tab's panes laid out over `area`, each divided between its
+    /// titlebar, terminal and preview lane.
+    fn pane_layout(&self, ws: &WindowState, area: Rect) -> Vec<(u64, PanePartition)> {
+        ws.mux.layout(ws.mux.active, area, self.layout_style(ws))
+    }
+
+    /// The partition of `pane_id` in the active tab.
+    fn pane_partition(&self, ws: &WindowState, area: Rect, pane_id: u64) -> Option<PanePartition> {
+        self.pane_layout(ws, area)
             .into_iter()
             .find(|(id, _)| *id == pane_id)
-            .map(|(_, r)| r)
+            .map(|(_, partition)| partition)
+    }
+
+    /// The terminal of `pane_id` in the active tab: its grid with the
+    /// padding around it, clear of the titlebar and lane.
+    fn pane_terminal(&self, ws: &WindowState, area: Rect, pane_id: u64) -> Option<Rect> {
+        self.pane_partition(ws, area, pane_id)
+            .map(|partition| partition.terminal)
+    }
+
+    /// The focused pane's terminal.
+    fn focused_terminal(&self, ws: &WindowState, area: Rect) -> Option<Rect> {
+        self.pane_terminal(ws, area, ws.mux.active_focus()?)
     }
 
     /// Terminal pane addressed by a wheel event. Pointer ownership is
@@ -11933,14 +12026,24 @@ impl App {
     /// chrome/gaps/out-of-window coordinates fall back to the focused pane.
     /// Modal, tab-bar and Ctrl-zoom handling run before this helper is used.
     fn wheel_target(&self, ws: &WindowState) -> Option<(u64, Rect)> {
+        // The pane under the pointer is found by its whole leaf; the wheel
+        // then scrolls that pane's terminal.
         let area = self.area(ws);
-        let layout = ws.mux.layout(ws.mux.active, area);
-        wheel_target_at(
-            &layout,
+        let layout = self.pane_layout(ws, area);
+        let leaves: Vec<(u64, Rect)> = layout
+            .iter()
+            .map(|(id, partition)| (*id, partition.leaf))
+            .collect();
+        let (pane, _) = wheel_target_at(
+            &leaves,
             ws.mux.active_focus(),
             ws.cursor.x as f32,
             ws.cursor.y as f32,
-        )
+        )?;
+        layout
+            .into_iter()
+            .find(|(id, _)| *id == pane)
+            .map(|(id, partition)| (id, partition.terminal))
     }
 
     /// Start a scrollbar drag and return the pointer's offset inside the thumb.
@@ -11970,7 +12073,7 @@ impl App {
         if self.cfg.scrollbar == kettle_config::ScrollbarMode::Never {
             return None;
         }
-        let (rx, ry, rw, rh) = self.focused_rect(ws, area)?;
+        let (rx, ry, rw, rh) = self.focused_terminal(ws, area)?;
         let scale = ws
             .window
             .as_ref()
@@ -12022,7 +12125,7 @@ impl App {
         if self.cfg.scrollbar == kettle_config::ScrollbarMode::Never {
             return false;
         }
-        let Some((rx, ry, rw, rh)) = self.focused_rect(ws, area) else {
+        let Some((rx, ry, rw, rh)) = self.focused_terminal(ws, area) else {
             return false;
         };
         let scale = ws
@@ -12046,21 +12149,14 @@ impl App {
             .as_ref()
             .map(|r| (r.cell_w, r.cell_h))
             .unwrap_or((8.0, 16.0));
-        // Apply the same title-position-aware grid origin the renderer draws
-        // content with, or a split pane's pointer maps roughly one row away
-        // from the visible cell grid.
-        // The focused pane lives in the active tab, so its inset depends on the
-        // active tab's pane count.
-        let titlebar_h =
-            self.pane_titlebar_inset(ws, ws.mux.layout(ws.mux.active, self.area(ws)).len());
+        // `rect` is the pane's terminal, clear of its titlebar and lane, so
+        // the grid starts inside its padding, as the renderer draws it.
         let (col, line, side) = px_to_cell(
             px,
             py,
             rect,
             (cw, ch),
             (self.cfg.padding_x, self.cfg.padding_y),
-            titlebar_h,
-            self.cfg.title_at_bottom,
         );
         (
             kettle_core::Point::new(kettle_core::Line(line), kettle_core::Column(col)),
@@ -12156,7 +12252,7 @@ impl App {
             clear_selection_gesture(ws);
             return;
         };
-        let Some(rect) = self.pane_rect(ws, area, pane_id) else {
+        let Some(rect) = self.pane_terminal(ws, area, pane_id) else {
             clear_selection_gesture(ws);
             return;
         };
@@ -12879,9 +12975,6 @@ impl App {
         // silently lost.
         self.finish_selection_gesture(ws);
         ws.card_press = None;
-        // The question replaces the media viewer rather than sitting over it,
-        // so cancelling it does not bring back a viewer the user moved past.
-        self.close_media_viewer(ws);
         ws.confirm_dialog = Some(dialog);
     }
 
@@ -12893,7 +12986,7 @@ impl App {
             self.finish_selection_gesture(ws);
             return;
         };
-        let Some(rect) = self.pane_rect(ws, area, pane_id) else {
+        let Some(rect) = self.pane_terminal(ws, area, pane_id) else {
             // A tab switch can make the owning pane temporarily absent from
             // the active layout while its selection is still available in
             // the mux. Commit copy-on-select before dropping that ownership.
@@ -12966,7 +13059,7 @@ impl App {
     /// Matches xterm / Alacritty / iTerm2: Shift+Click anchors the
     /// existing selection's start and pulls the end to the click.
     fn extend_selection_to_cursor(&mut self, ws: &mut WindowState, area: Rect, button: u8) -> bool {
-        let rect = match self.focused_rect(ws, area) {
+        let rect = match self.focused_terminal(ws, area) {
             Some(r) => r,
             None => return false,
         };
@@ -13016,15 +13109,12 @@ impl App {
             .unwrap_or((f32::from(cw), f32::from(ch)));
         let area = self.area(ws);
         let mut plan: Vec<(u64, usize, usize, u16, u16)> = Vec::new();
+        let style = self.layout_style(ws);
         for ti in 0..ws.mux.tabs.len() {
-            // A split tab's panes each lose `titlebar_h` of
-            // height to their per-pane titlebar, so size each PTY for the rows
-            // that fit below it (per-tab, since the inset depends on that tab's
-            // own pane count).
-            let panes = ws.mux.layout(ti, area);
-            let titlebar_h = self.pane_titlebar_inset(ws, panes.len());
-            for (id, r) in panes {
-                let (cols, rows) = self.grid_of_inset(ws, r, titlebar_h);
+            // Each PTY gets the rows and columns of its pane's terminal, clear
+            // of its titlebar and lane.
+            for (id, partition) in ws.mux.layout(ti, area, style) {
+                let (cols, rows) = self.grid_of(ws, partition.terminal);
                 let (pixel_width, pixel_height) = pty_pixel_size(fractional_cell, (cols, rows));
                 plan.push((id, cols, rows, pixel_width, pixel_height));
             }
@@ -13047,9 +13137,6 @@ impl App {
         }
         ws.pty_resize_retry
             .record_result(std::time::Instant::now(), native_resize_failed);
-        // A pane too small to hold the media viewer closes it at once, so no
-        // key or press goes to a viewer that is not drawn.
-        self.prune_media_viewer(ws);
     }
 
     /// Shared zoom transition for `Action::ToggleZoom` and
@@ -14913,17 +15000,10 @@ impl App {
             let Some((row, col)) = self.terminal_cursor_cell(ws) else {
                 return;
             };
-            let Some(rect) = self.focused_rect(ws, self.area(ws)) else {
+            let Some(rect) = self.focused_terminal(ws, self.area(ws)) else {
                 return;
             };
-            let titlebar =
-                self.pane_titlebar_inset(ws, ws.mux.layout(ws.mux.active, self.area(ws)).len());
-            let grid_origin = kettle_render::pane_grid_origin(
-                rect,
-                (self.cfg.padding_x, self.cfg.padding_y),
-                titlebar,
-                self.cfg.title_at_bottom,
-            );
+            let grid_origin = (rect.0 + self.cfg.padding_x, rect.1 + self.cfg.padding_y);
             (
                 grid_origin.0 + col as f32 * cw,
                 grid_origin.1 + row as f32 * ch,
@@ -14950,13 +15030,9 @@ impl App {
         // side is irrelevant here, so discard it.
         let (p, _) = self.px_to_point(ws, rect, ws.cursor.x as f32, ws.cursor.y as f32);
         let (row, col) = (p.line.0.max(0) as usize, p.column.0);
-        // Clamp to the pane's geometric grid, using the same cell size and
-        // titlebar inset as `px_to_point`. The inset grid is the size
-        // `resize_all` gave the split pane's PTY; the zero-inset `grid_of` is
-        // about one row too tall in a split with a titlebar.
-        let titlebar_h =
-            self.pane_titlebar_inset(ws, ws.mux.layout(ws.mux.active, self.area(ws)).len());
-        let (cols, rows) = self.grid_of_inset(ws, rect, titlebar_h);
+        // Clamp to the terminal's grid, the size `resize_all` gave the pane's
+        // PTY.
+        let (cols, rows) = self.grid_of(ws, rect);
         (
             row.min(rows.saturating_sub(1)),
             col.min(cols.saturating_sub(1)),
@@ -14965,7 +15041,7 @@ impl App {
 
     /// `(row, col)` of the mouse within the focused pane, if any.
     fn cursor_cell(&self, ws: &WindowState) -> Option<(usize, usize)> {
-        let rect = self.focused_rect(ws, self.area(ws))?;
+        let rect = self.focused_terminal(ws, self.area(ws))?;
         Some(self.cursor_cell_in_rect(ws, rect))
     }
 
@@ -15104,7 +15180,7 @@ impl App {
         if let Some(held) = held
             && let Some(pane) = held.pane
         {
-            let rect = self.pane_rect(ws, self.area(ws), pane);
+            let rect = self.pane_terminal(ws, self.area(ws), pane);
             let at = MouseAt::Held {
                 rect,
                 cell: held.cell,
@@ -15115,9 +15191,14 @@ impl App {
         let Some(pane_id) = ws.mux.active_focus() else {
             return MouseReport::Declined;
         };
-        let Some(rect) = self.focused_rect(ws, self.area(ws)) else {
+        let Some(rect) = self.focused_terminal(ws, self.area(ws)) else {
             return MouseReport::Declined;
         };
+        // Motion over a lane is the lane's: only a drag the program's own
+        // press began follows the pointer there (above).
+        if motion && self.preview_lane_under_pointer(ws) {
+            return MouseReport::Declined;
+        }
         let report = self.send_mouse_to(ws, pane_id, MouseAt::Pointer(rect), btn, pressed, motion);
         if pressed && !motion {
             // The press is the button's gesture now: the program's if it got
@@ -15306,13 +15387,10 @@ impl App {
             .zip(list.input_prefix.as_deref())
             .map(|(cursor, prefix)| completion_anchor_col(cursor, prefix));
         let area = self.area(ws);
-        let pane_rect = self.focused_rect(ws, area)?;
-        let titlebar = self.pane_titlebar_inset(ws, ws.mux.layout(ws.mux.active, area).len());
-        let grid_origin = kettle_render::pane_grid_origin(
-            pane_rect,
-            (self.cfg.padding_x, self.cfg.padding_y),
-            titlebar,
-            self.cfg.title_at_bottom,
+        let pane_rect = self.focused_terminal(ws, area)?;
+        let grid_origin = (
+            pane_rect.0 + self.cfg.padding_x,
+            pane_rect.1 + self.cfg.padding_y,
         );
         let renderer = ws.renderer.as_ref()?;
         let kind = self.ui_text.text(match list.kind {
@@ -15356,7 +15434,7 @@ impl App {
         // The open media viewer hides the receipt until it closes: the viewer
         // owns every press, and the receipt's thumbnail and labels would
         // otherwise paint over it.
-        if !terminal_surface || !ws.window_focused || ws.media_viewer.is_some() {
+        if !terminal_surface || !ws.window_focused {
             return None;
         }
         let receipt = ws.media_paste_receipt.as_ref()?;
@@ -15400,13 +15478,10 @@ impl App {
             )
         };
         let area = self.area(ws);
-        let pane_rect = self.focused_rect(ws, area)?;
-        let titlebar = self.pane_titlebar_inset(ws, ws.mux.layout(ws.mux.active, area).len());
-        let grid_origin = kettle_render::pane_grid_origin(
-            pane_rect,
-            (self.cfg.padding_x, self.cfg.padding_y),
-            titlebar,
-            self.cfg.title_at_bottom,
+        let pane_rect = self.focused_terminal(ws, area)?;
+        let grid_origin = (
+            pane_rect.0 + self.cfg.padding_x,
+            pane_rect.1 + self.cfg.padding_y,
         );
         let renderer = ws.renderer.as_ref()?;
         let scrollbar_present = self.cfg.scrollbar == kettle_config::ScrollbarMode::Always
@@ -15586,9 +15661,9 @@ impl App {
             terminal_surface,
             std::time::Instant::now(),
         );
-        let media_viewer = terminal_surface
-            .then(|| self.media_viewer_projection(ws))
-            .flatten();
+        // Lanes stay drawn under every modal, which paints over them; their
+        // room in the pane stays carved either way.
+        let media_lanes = self.preview_lane_projections(ws);
         let ime_preedit = preedit.filter(|_| terminal_surface).and_then(|text| {
             let (row, col) = self.terminal_cursor_cell(ws)?;
             Some(ImePreedit {
@@ -15721,7 +15796,7 @@ impl App {
                 ime_preedit,
                 completion,
                 media_paste_receipt,
-                media_viewer,
+                media_lanes,
                 card_hover,
                 window_focused,
                 scrollbar_active,
@@ -15840,7 +15915,7 @@ impl App {
             ime_preedit,
             completion: None,
             media_paste_receipt: None,
-            media_viewer: None,
+            media_lanes: Vec::new(),
             card_hover,
             window_focused,
             scrollbar_active,
@@ -16016,7 +16091,7 @@ impl App {
             if ws.selecting {
                 let area = self.area(ws);
                 if let Some(pane_id) = ws.selecting_pane
-                    && let Some(rect) = self.pane_rect(ws, area, pane_id)
+                    && let Some(rect) = self.pane_terminal(ws, area, pane_id)
                 {
                     let scale = ws
                         .window
@@ -16073,8 +16148,7 @@ impl App {
         // since `build_status_bar` reads ws.mux / self.cfg
         // immutably.
         let status = self.build_status_bar(ws);
-        let active = ws.mux.active;
-        let layout = ws.mux.layout(active, area);
+        let layout = self.pane_layout(ws, area);
         let focus = ws.mux.active_focus();
         let window = ws.window.clone();
 
@@ -16250,7 +16324,9 @@ impl App {
                 )| {
                     PaneView {
                         id: *id,
-                        rect: *r,
+                        rect: r.leaf,
+                        terminal: r.terminal,
+                        titlebar: r.titlebar,
                         snap,
                         focused: *f,
                         images: imgs.as_slice(),
@@ -16274,7 +16350,7 @@ impl App {
             .and_then(|material| material.live_opacity_floor());
         // Whether anything covers the cards, for the tip: no dialog, menu or
         // viewer over them.
-        let cards_uncovered = !self.pointer_modal_open(ws) && ws.media_viewer.is_none();
+        let cards_uncovered = !self.pointer_modal_open(ws);
         // Status bar and native fallback state are built BEFORE the &mut
         // renderer borrow (the helpers read other window state immutably).
         let Some(renderer) = ws.renderer.as_mut() else {
@@ -16679,7 +16755,6 @@ impl App {
         ws.ssh_input = None;
         ws.context_menu = None;
         ws.editing_title = None;
-        ws.media_viewer = None;
         // Vi mode is backed by per-terminal engine state, so closing the modal
         // must clear both the UI owner and TermMode::VI.
         self.exit_vi_mode(ws);
@@ -17425,7 +17500,7 @@ impl App {
         // here could surface "Open Link" for a link the user never pointed at
         // (right-click on chrome / another pane mapping into the focused grid).
         let in_focused_pane = self
-            .focused_rect(ws, self.area(ws))
+            .focused_terminal(ws, self.area(ws))
             .is_some_and(|(rx, ry, rw, rh)| px >= rx && px < rx + rw && py >= ry && py < ry + rh);
         let mut items = Vec::new();
         if in_focused_pane && let Some(url) = self.link_at_cursor(ws).map(|l| l.uri.clone()) {
@@ -17505,7 +17580,6 @@ impl App {
         // hint, so leaving one of these armed would make the cached snapshot
         // stale without changing output_generation.
         self.finish_selection_gesture(ws);
-        self.close_media_viewer(ws);
         ws.scrollbar_drag_offset = None;
         ws.dragging_split = None;
         self.release_held_buttons(ws, |_| true);
@@ -19694,7 +19768,7 @@ impl App {
                 let focus_id = ws.mux.tabs.get(active).map(|t| t.focus).unwrap_or(0);
                 let crop = ws
                     .mux
-                    .layout(active, area)
+                    .leaves(active, area)
                     .into_iter()
                     .find(|(id, _)| *id == focus_id)
                     .map(|(_, rect)| rect);
@@ -21885,12 +21959,11 @@ impl App {
             return origin.refuse(FailureCode::NotInKettlePane);
         };
         let shown = window
-            .media_viewer
-            .as_ref()
-            .filter(|viewer| viewer.pane == route.pane)
-            .map(|viewer| viewer.item);
-        // A full shelf never drops an item on screen: the open viewer's, or
-        // one whose card the last frame painted.
+            .preview_panels
+            .get(&route.pane)
+            .map(|panel| panel.item);
+        // A full shelf never drops an item on screen: the one its pane's lane
+        // shows, or one whose card the last frame painted.
         let published = pane.media_shelf.publish(item, shown, &visible);
         // Cards of the item this one replaced, or of the item a full shelf
         // dropped, show what is gone; they never show the new pixels.
@@ -22531,12 +22604,7 @@ impl App {
                 })
             })
             .collect();
-        let pane_layout = target.mux.layout(target.mux.active, self.area(target));
-        let pane_titlebar_h = if self.cfg.show_titlebar && pane_layout.len() > 1 {
-            cell_h + 6.0
-        } else {
-            0.0
-        };
+        let pane_layout = self.pane_layout(target, self.area(target));
         let active_search_match_rects: Vec<serde_json::Value> = target
             .search
             .target_pane
@@ -22545,14 +22613,12 @@ impl App {
                 pane_layout
                     .iter()
                     .find(|(candidate, _)| *candidate == pane_id)
-                    .map(|(_, rect)| (pane_id, *rect))
+                    .map(|(_, partition)| (pane_id, partition.terminal))
             })
-            .map(|(pane_id, pane_rect)| {
-                let origin = kettle_render::pane_grid_origin(
-                    pane_rect,
-                    (self.cfg.padding_x, self.cfg.padding_y),
-                    pane_titlebar_h,
-                    self.cfg.title_at_bottom,
+            .map(|(pane_id, terminal)| {
+                let origin = (
+                    terminal.0 + self.cfg.padding_x,
+                    terminal.1 + self.cfg.padding_y,
                 );
                 self.overlay(target, false)
                     .highlights
@@ -22572,12 +22638,35 @@ impl App {
                     .collect()
             })
             .unwrap_or_default();
+        // Each pane's preview lane, by pane: where it is and how it shows.
+        // Geometry only; never a path, title or pixel.
+        let preview_lanes: Vec<serde_json::Value> = pane_layout
+            .iter()
+            .filter_map(|(id, partition)| {
+                let share = partition.lane?;
+                let state = match share {
+                    crate::pane_partition::LaneShare::Expanded(_) => "expanded",
+                    crate::pane_partition::LaneShare::Strip(_) => "strip",
+                    crate::pane_partition::LaneShare::Badge => "badge",
+                };
+                Some(serde_json::json!({
+                    "pane": id,
+                    "rect": share.rect().map(rect_json),
+                    "state": state,
+                }))
+            })
+            .collect();
         let home = crate::mux::home_dir_string();
         let focus = target.mux.active_focus();
-        let pane_titlebars: Vec<serde_json::Value> = if pane_titlebar_h > 0.0 {
+        let pane_titlebars: Vec<serde_json::Value> = if pane_layout
+            .iter()
+            .any(|(_, partition)| partition.titlebar.is_some())
+        {
             pane_layout
                 .iter()
-                .filter_map(|(pane_id, rect)| {
+                .filter_map(|(pane_id, partition)| {
+                    let titlebar_rect = partition.titlebar?;
+                    let rect = &partition.leaf;
                     let pane = target.mux.panes.get(pane_id)?;
                     let cwd = pane.term.current_dir_or_native();
                     let mut title_parts = pane_title_parts(
@@ -22592,7 +22681,7 @@ impl App {
                     title_parts
                         .prefix
                         .push_str(&media_shelf_badge(pane.media_shelf.unseen()));
-                    let (cols, rows) = self.grid_of_inset(target, *rect, pane_titlebar_h);
+                    let (cols, rows) = self.grid_of(target, partition.terminal);
                     let size_text =
                         (!self.cfg.title_hide_sizetext).then(|| format!("{}x{}", cols, rows));
                     let bell: Option<&str> = None;
@@ -22607,16 +22696,6 @@ impl App {
                         bell,
                         budget,
                     );
-                    let titlebar_rect = if self.cfg.title_at_bottom {
-                        (
-                            rect.0,
-                            rect.1 + rect.3 - pane_titlebar_h,
-                            rect.2,
-                            pane_titlebar_h,
-                        )
-                    } else {
-                        (rect.0, rect.1, rect.2, pane_titlebar_h)
-                    };
                     Some(serde_json::json!({
                         "pane": pane_id,
                         "focused": Some(*pane_id) == focus,
@@ -22908,14 +22987,15 @@ impl App {
                 // tab bar and the modals but has no way to point at a PANE, so
                 // anything pane-geometric (the drag gesture, split ratios after
                 // a resize) could only be checked by eye.
-                "panes": target
-                    .mux
-                    .layout(target.mux.active, self.area(target))
-                    .into_iter()
-                    .map(|(id, rect)| serde_json::json!({
+                // `rect` is the pane's whole leaf and `terminal` its grid with
+                // the padding, clear of its titlebar and lane.
+                "panes": pane_layout
+                    .iter()
+                    .map(|(id, partition)| serde_json::json!({
                         "id": id,
-                        "rect": rect_json(rect),
-                        "focused": target.mux.active_focus() == Some(id),
+                        "rect": rect_json(partition.leaf),
+                        "terminal": rect_json(partition.terminal),
+                        "focused": target.mux.active_focus() == Some(*id),
                     }))
                     .collect::<Vec<_>>(),
                 "modals": {
@@ -23012,6 +23092,10 @@ impl App {
             fields.insert(
                 "inline_cards".into(),
                 serde_json::Value::Array(inline_cards),
+            );
+            fields.insert(
+                "preview_lanes".into(),
+                serde_json::Value::Array(preview_lanes),
             );
             fields.insert(
                 "desktop".into(),
@@ -23244,7 +23328,7 @@ impl App {
             Action::FocusLeft => (-1, 0),
             Action::FocusRight => (1, 0),
             Action::FocusNext | Action::FocusPrev => {
-                return ws.mux.layout(ws.mux.active, self.area(ws)).len() > 1;
+                return ws.mux.leaves(ws.mux.active, self.area(ws)).len() > 1;
             }
             _ => return false,
         };
@@ -23815,7 +23899,7 @@ impl App {
         if modal_swallows_pointer(self.pointer_modal_open(ws), ws.context_menu.is_some()) {
             return true;
         }
-        if self.activate_media_viewer_at(ws, px, py, bcode) {
+        if self.press_preview_lane(ws, px, py, bcode) {
             return true;
         }
         if self.press_card(ws, px, py, bcode) {
@@ -23989,7 +24073,7 @@ impl App {
     /// (a stream of ~0.08-detent events). The integer `wheel_lines` form cannot,
     /// because it enters downstream of quantization.
     fn ctl_mouse_wheel_delta(&mut self, ws: &mut WindowState, notches: f64) -> bool {
-        if self.media_viewer_under_pointer(ws) {
+        if self.preview_lane_under_pointer(ws) {
             ws.wheel.reset();
             return true;
         }
@@ -24031,7 +24115,7 @@ impl App {
         }
         // The open media viewer covers its pane: a wheel over it reaches
         // nothing it hides.
-        if self.media_viewer_under_pointer(ws) {
+        if self.preview_lane_under_pointer(ws) {
             return true;
         }
         // Wheel over a settings field adjusts it (up = forward, down = backward).
@@ -24355,9 +24439,11 @@ impl App {
             target.and_then(|target| {
                 let area = self.area(target);
                 let active = target.mux.active;
+                // A pane screenshot shows the whole pane, its titlebar and
+                // lane included.
                 target
                     .mux
-                    .layout(active, area)
+                    .leaves(active, area)
                     .into_iter()
                     .find(|(id, _)| *id == pane_id)
                     .map(|(_, rect)| rect)
@@ -28231,39 +28317,6 @@ fn is_vi_mode_toggle_chord(
     )
 }
 
-/// Whether a key press is bound to opening the media shelf. Any other key
-/// closes the viewer before the keybind table is consulted, so without this
-/// check the shortcut that opened it would reopen it instead of closing it.
-fn is_media_shelf_chord(
-    bindings: &Bindings,
-    logical_key: &Key,
-    physical_key: &PhysicalKey,
-    mods: ModifiersState,
-) -> bool {
-    matches!(
-        resolve_keybind_action(bindings, Some(logical_key), Some(physical_key), mods),
-        Some((_, Action::OpenMediaShelf))
-    )
-}
-
-/// Whether `key` is a modifier pressed on its own, which types nothing and may
-/// begin a shortcut.
-fn is_bare_modifier(key: &Key) -> bool {
-    matches!(
-        key,
-        Key::Named(
-            NamedKey::Shift
-                | NamedKey::Control
-                | NamedKey::Alt
-                | NamedKey::AltGraph
-                | NamedKey::Super
-                | NamedKey::Meta
-                | NamedKey::Hyper
-                | NamedKey::Fn
-        )
-    )
-}
-
 fn resolve_keybind_action(
     bindings: &Bindings,
     logical_key: Option<&Key>,
@@ -30076,12 +30129,15 @@ impl App {
 
     fn accessibility_tree(&self, ws: &WindowState, overlay: &Overlay) -> TreeUpdate {
         let area = self.area(ws);
-        let layout = ws.mux.layout(ws.mux.active, area);
+        let layout = self.pane_layout(ws, area);
         let focused = ws.mux.active_focus();
         let cards = self.accessible_cards(ws);
         let mut children = Vec::with_capacity(layout.len());
         let mut nodes = Vec::with_capacity(layout.len() * 2 + cards.len() + 1);
-        for (pane_id, (x, y, width, height)) in layout {
+        // A pane's terminal node covers its terminal, clear of its titlebar
+        // and lane.
+        for (pane_id, partition) in layout {
+            let (x, y, width, height) = partition.terminal;
             let Some(pane) = ws.mux.panes.get(&pane_id) else {
                 continue;
             };
@@ -30139,6 +30195,70 @@ impl App {
                 f64::from(y + height),
             ));
             nodes.push((node_id, node));
+        }
+        // Each preview lane, beside its pane's terminal, with a button for
+        // each control it shows, bounded where the lane paints it.
+        let ax_rect = |(x, y, width, height): kettle_render::Rect4| {
+            accesskit::Rect::new(
+                f64::from(x),
+                f64::from(y),
+                f64::from(x + width),
+                f64::from(y + height),
+            )
+        };
+        // Under a dialog or menu a lane is out of reach, as its pointer is.
+        let lanes_reachable = !self.pointer_modal_open(ws);
+        for lane in overlay.media_lanes.iter().filter(|_| lanes_reachable) {
+            let Some(lane_id) = accessibility_lane_id(lane.pane, 0) else {
+                continue;
+            };
+            children.push(lane_id);
+            let mut node = Node::new(Role::Group);
+            let (label, description) = media_lane_accessibility(lane, &self.ui_text);
+            node.set_label(label);
+            node.set_description(description);
+            node.set_bounds(ax_rect(lane.rect));
+            let mut controls = Vec::new();
+            if let Some(geometry) = self.preview_lane_geometry(ws, lane) {
+                for (part, rect, hit) in lane_controls(&geometry) {
+                    let (Some(rect), Some(id)) = (rect, accessibility_lane_id(lane.pane, part))
+                    else {
+                        continue;
+                    };
+                    let text = match hit {
+                        kettle_render::MediaLaneHit::Previous => {
+                            self.ui_text.text(kettle_i18n::Text::MediaLaneA11yPrevious)
+                        }
+                        kettle_render::MediaLaneHit::Next => {
+                            self.ui_text.text(kettle_i18n::Text::MediaLaneA11yNext)
+                        }
+                        kettle_render::MediaLaneHit::Toggle if lane.collapsed => {
+                            self.ui_text.text(kettle_i18n::Text::MediaLaneA11yExpand)
+                        }
+                        kettle_render::MediaLaneHit::Toggle => {
+                            self.ui_text.text(kettle_i18n::Text::MediaLaneA11yCollapse)
+                        }
+                        kettle_render::MediaLaneHit::Close => {
+                            self.ui_text.text(kettle_i18n::Text::MediaLaneA11yClose)
+                        }
+                        kettle_render::MediaLaneHit::OpenOutside => {
+                            match self.preview_opens_outside(ws, lane.pane) {
+                                Some(viewer) => viewer.label(&self.ui_text),
+                                None => continue,
+                            }
+                        }
+                        kettle_render::MediaLaneHit::Inside => continue,
+                    };
+                    let mut button = Node::new(Role::Button);
+                    button.set_label(text);
+                    button.add_action(AccessibilityAction::Click);
+                    button.set_bounds(ax_rect(rect));
+                    controls.push(id);
+                    nodes.push((id, button));
+                }
+            }
+            node.set_children(controls);
+            nodes.push((lane_id, node));
         }
         if ws.search.open
             && let Some(geometry) = self.search_geometry(ws)
@@ -30531,21 +30651,29 @@ impl App {
                 }
             }
         }
-        let projected_viewer = overlay.media_viewer.as_ref();
-        projected_viewer.is_some().hash(&mut hasher);
-        if let Some(viewer) = projected_viewer {
-            media_viewer_accessibility(viewer, &self.ui_text).hash(&mut hasher);
-            let (x, y, width, height) = viewer.pane_rect;
+        overlay.media_lanes.len().hash(&mut hasher);
+        for lane in &overlay.media_lanes {
+            lane.pane.hash(&mut hasher);
+            lane.collapsed.hash(&mut hasher);
+            lane.open_outside.hash(&mut hasher);
+            media_lane_accessibility(lane, &self.ui_text).hash(&mut hasher);
+            let (x, y, width, height) = lane.rect;
             for component in [x, y, width, height] {
                 component.to_bits().hash(&mut hasher);
             }
         }
-        let mut layout = ws.mux.layout(ws.mux.active, self.area(ws));
+        let mut layout = self.pane_layout(ws, self.area(ws));
         layout.sort_by_key(|(pane_id, _)| *pane_id);
-        for (pane_id, rect) in layout {
+        for (pane_id, partition) in layout {
             pane_id.hash(&mut hasher);
-            for component in [rect.0, rect.1, rect.2, rect.3] {
-                component.to_bits().hash(&mut hasher);
+            let lane = partition
+                .lane
+                .and_then(crate::pane_partition::LaneShare::rect);
+            for rect in [Some(partition.leaf), Some(partition.terminal), lane] {
+                rect.is_some().hash(&mut hasher);
+                for component in rect.into_iter().flat_map(|r| [r.0, r.1, r.2, r.3]) {
+                    component.to_bits().hash(&mut hasher);
+                }
             }
             if let Some(pane) = ws.mux.panes.get(&pane_id) {
                 pane.title.hash(&mut hasher);
@@ -32469,6 +32597,28 @@ impl App {
             }
             return;
         }
+        if let Some((pane, part)) = accessibility_lane_part(request.target_node) {
+            // Only a control the lane shows now, with nothing over it,
+            // answers: a stale part names nothing.
+            if request.action != AccessibilityAction::Click || self.pointer_modal_open(ws) {
+                return;
+            }
+            let hit = self
+                .preview_lane_projections(ws)
+                .into_iter()
+                .find(|lane| lane.pane == pane)
+                .and_then(|lane| self.preview_lane_geometry(ws, &lane))
+                .and_then(|geometry| {
+                    lane_controls(&geometry)
+                        .into_iter()
+                        .find(|(at, rect, _)| *at == part && rect.is_some())
+                        .map(|(_, _, hit)| hit)
+                });
+            if let Some(hit) = hit {
+                self.act_on_preview(ws, pane, hit);
+            }
+            return;
+        }
         if let Some(instance) = accessibility_card_instance(request.target_node) {
             // Only a card the tree names answers: one on screen, under no
             // dialog or viewer. A stale instance names nothing, so it can
@@ -33367,10 +33517,10 @@ impl App {
                         }
                         return;
                     }
-                    // The media viewer owns every press while it is open; a
-                    // side button does nothing there.
+                    // A preview lane owns every press over it; a side button
+                    // does nothing there.
                     let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
-                    if !self.activate_media_viewer_at(ws, px, py, sgr)
+                    if !self.press_preview_lane(ws, px, py, sgr)
                         && !modal_swallows_pointer(
                             self.pointer_modal_open(ws),
                             ws.context_menu.is_some(),
@@ -33491,9 +33641,9 @@ impl App {
                     return;
                 }
                 let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
-                // The media viewer owns every press while it is open, the tab
-                // bar and update banner included: one outside closes it.
-                if self.activate_media_viewer_at(ws, px, py, bcode) {
+                // A preview lane owns every press over it, so the terminal
+                // beside it never gets one.
+                if self.press_preview_lane(ws, px, py, bcode) {
                     return;
                 }
                 // An inline card takes a primary press before anything else
@@ -34042,7 +34192,7 @@ impl App {
                 // The open media viewer owns the wheel over it. Its motion is
                 // dropped rather than banked, so no part of it reaches the
                 // terminal once the viewer closes.
-                if self.media_viewer_under_pointer(ws) {
+                if self.preview_lane_under_pointer(ws) {
                     ws.wheel.reset();
                     return;
                 }
@@ -34320,13 +34470,7 @@ impl App {
                     || ws.confirm_dialog.is_some()
                     || ws.editing_title.is_some()
                     || ws.search.open
-                    || ws.ime_preedit.is_some()
-                    || (ws.media_viewer.is_some()
-                        && media_viewer_takes_key(
-                            &event.logical_key,
-                            ws.mods,
-                            self.media_viewer_opens_outside(ws).is_some(),
-                        ));
+                    || ws.ime_preedit.is_some();
                 // The modal that gets this press, if any; a press after which
                 // it is no longer the top modal closed or replaced it.
                 let key_modal = top_modal(ws);
@@ -34467,44 +34611,6 @@ impl App {
                 // every modern terminal). Re-shown on the next CursorMoved.
                 self.hide_mouse_cursor(ws);
                 let text = event.text.as_ref().map(|s| s.as_str());
-
-                // The media viewer takes Esc (close) and the arrows (browse).
-                // Any other key closes it and goes on where it was going, so
-                // nothing typed while it is open is lost. The shelf's own
-                // shortcut, whatever key it is bound to, goes on to the
-                // keybind table, which closes the viewer; a modifier alone
-                // leaves it open, since it may begin that shortcut.
-                if ws.media_viewer.is_some() && ws.confirm_dialog.is_none() {
-                    match &event.logical_key {
-                        _ if is_media_shelf_chord(
-                            &self.cfg.keybinds,
-                            &event.logical_key,
-                            &event.physical_key,
-                            ws.mods,
-                        ) => {}
-                        Key::Named(NamedKey::Escape) => {
-                            self.close_media_viewer(ws);
-                            ws.closing_keys.insert(event.physical_key);
-                            return;
-                        }
-                        Key::Named(NamedKey::ArrowLeft) => {
-                            self.step_media_viewer(ws, -1);
-                            return;
-                        }
-                        Key::Named(NamedKey::ArrowRight) => {
-                            self.step_media_viewer(ws, 1);
-                            return;
-                        }
-                        key if media_viewer_open_outside_key(key, ws.mods)
-                            && self.media_viewer_opens_outside(ws).is_some() =>
-                        {
-                            self.open_viewer_item_outside(ws);
-                            return;
-                        }
-                        key if is_bare_modifier(key) => {}
-                        _ => self.close_media_viewer(ws),
-                    }
-                }
 
                 // Phase 5 of TERMINATOR-CONFIRM-DIALOG-DESIGN.md:
                 // confirm-modal key handler. Tab/Shift+Tab/←→ move focus,
@@ -35233,7 +35339,7 @@ impl App {
                 .as_ref()
                 .map_or(1.0, |window| window.scale_factor() as f32);
             ws.selecting_pane
-                .and_then(|id| self.pane_rect(ws, area, id))
+                .and_then(|id| self.pane_terminal(ws, area, id))
                 .map(|r| {
                     ws.selection_autoscroll_edge != 0
                         || selection_autoscroll_lines(
@@ -35463,7 +35569,7 @@ impl App {
         // `show` pushes waiting past their deadline are answered, and those
         // whose pane closed are dropped, even when nothing else wakes us.
         self.media_tick(ws);
-        self.prune_media_viewer(ws);
+        self.prune_previews(ws);
         if let Some(soonest) = self.media.next_deadline() {
             let next = soonest.saturating_duration_since(now).clamp(
                 std::time::Duration::from_millis(1),
@@ -35722,8 +35828,8 @@ mod modal_discipline_guard {
             .next()
             .expect("chooser body");
         assert!(
-            chooser.contains("self.focused_rect(ws, area)"),
-            "the choice must come from the focused pane's rect, not the window"
+            chooser.contains(".leaves(ws.mux.active, area)") && chooser.contains("*id == focus"),
+            "the choice must come from the focused pane's leaf, not the window"
         );
         assert!(
             chooser.contains("rect.2 > rect.3")
@@ -39952,7 +40058,7 @@ mod tests {
                                 surface, bands, pos, status, strip,
                             );
                             assert_eq!(
-                                super::grid_dims_px((w, h), (cw, ch), pad, 0.0),
+                                super::grid_dims_px((w, h), (cw, ch), pad),
                                 grid,
                                 "cell {cw}x{ch}, {pos:?}, status {status:?}, surface {surface:?}"
                             );
@@ -40509,75 +40615,24 @@ mod tests {
         assert!(capped.is_char_boundary(capped.len()));
     }
 
-    /// The media viewer takes only Esc, the browsing arrows and, when it
-    /// offers to open its item outside, a bare O; every other key goes on
-    /// to the terminal, so nothing typed while it is open is lost.
+    /// A preview lane takes no keys: while lanes show, every key goes on to
+    /// the terminal beside them, so nothing typed is lost to a lane.
     #[test]
-    fn the_media_viewer_takes_only_esc_the_arrows_and_its_open_key() {
-        use winit::keyboard::{Key, ModifiersState, NamedKey};
-        let none = ModifiersState::empty();
-        for offered in [false, true] {
-            for key in [
-                Key::Named(NamedKey::Escape),
-                Key::Named(NamedKey::ArrowLeft),
-                Key::Named(NamedKey::ArrowRight),
-            ] {
-                assert!(
-                    super::media_viewer_takes_key(&key, none, offered),
-                    "{key:?}"
-                );
-            }
-            for key in [
-                Key::Named(NamedKey::Enter),
-                Key::Named(NamedKey::ArrowUp),
-                Key::Character("q".into()),
-            ] {
-                assert!(
-                    !super::media_viewer_takes_key(&key, none, offered),
-                    "{key:?}"
-                );
-            }
-        }
-        for o in ["o", "O"] {
-            let key = Key::Character(o.into());
-            assert!(super::media_viewer_takes_key(&key, none, true));
-            assert!(super::media_viewer_takes_key(
-                &key,
-                ModifiersState::SHIFT,
-                true
-            ));
-            assert!(
-                !super::media_viewer_takes_key(&key, none, false),
-                "not offered"
-            );
-            for chord in [
-                ModifiersState::CONTROL,
-                ModifiersState::ALT,
-                ModifiersState::SUPER,
-            ] {
-                assert!(
-                    !super::media_viewer_takes_key(&key, chord, true),
-                    "{chord:?} is a shortcut"
-                );
-            }
-        }
-        // The key, the button and the footer all say the same thing.
-        let source = super::production_source()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-        assert!(source.contains(
-            "key if media_viewer_open_outside_key(key, ws.mods) && self.media_viewer_opens_outside(ws).is_some() => { self.open_viewer_item_outside(ws); return; }"
-        ));
-        assert!(source.contains(
-            "kettle_render::MediaViewerHit::OpenOutside => self.open_viewer_item_outside(ws),"
-        ));
-        assert!(source.contains("open_outside: self.media_viewer_opens_outside(ws).is_some(),"));
-        assert!(source.contains("Some(outside) => format!(\"{hint} · {}\", outside.hint(tr)),"));
-        // Only an item that still holds its pixels is offered.
-        assert!(source.contains(
-            ".find(|it| it.id == viewer.item)?; item.image()?; crate::media::Viewer::find()"
-        ));
+    fn a_preview_lane_takes_no_keys() {
+        let source = super::production_source();
+        let owns = source
+            .split("let ui_owns_key = ")
+            .nth(1)
+            .and_then(|rest| rest.split(';').next())
+            .expect("ui_owns_key");
+        assert!(
+            !owns.contains("preview") && !owns.contains("lane"),
+            "{owns}"
+        );
+        assert!(
+            !source.contains("fn media_viewer_takes_key("),
+            "no key list of its own"
+        );
     }
 
     #[test]
@@ -40586,44 +40641,11 @@ mod tests {
         assert_eq!(super::media_shelf_badge(3), "▣3 ");
     }
 
-    /// The viewer owns every press and wheel over it, on the native and the
-    /// ctl paths alike, ahead of the receipt and the terminal; and opening
-    /// another modal closes it.
+    /// A preview lane owns every press and wheel over it, on the native and
+    /// the ctl paths alike, ahead of inline cards, the receipt and the
+    /// terminal; only the primary button acts on its controls.
     #[test]
-    fn the_media_viewer_owns_presses_and_wheels_over_it() {
-        let source = include_str!("app.rs");
-        let body = |name: &str| {
-            source
-                .split(&format!("fn {name}("))
-                .nth(1)
-                .and_then(|rest| rest.split("\n    fn ").next())
-                .unwrap_or_else(|| panic!("{name} present"))
-        };
-        for name in ["ctl_mouse_press", "window_event_inner"] {
-            let press = body(name);
-            let viewer = press
-                .find("self.activate_media_viewer_at(ws, px, py, bcode)")
-                .unwrap_or_else(|| panic!("{name} asks the viewer"));
-            let receipt = press
-                .find("self.activate_media_paste_receipt_at(ws, px, py, bcode)")
-                .unwrap_or_else(|| panic!("{name} asks the receipt"));
-            assert!(viewer < receipt, "{name}: the viewer is above the receipt");
-        }
-        let under = body("media_viewer_under_pointer");
-        assert!(under.contains("kettle_render::MediaViewerHit::Outside"));
-        assert!(body("dispatch_wheel").contains("if self.media_viewer_under_pointer(ws) {"));
-        assert!(body("close_all_modals").contains("ws.media_viewer = None;"));
-        let activate = body("activate_media_viewer_at");
-        assert!(
-            activate.contains("if bcode == 0 {") && activate.contains("        true\n    }"),
-            "every press over an open viewer is consumed; only the primary button acts"
-        );
-    }
-
-    /// A press anywhere closes the viewer before the tab bar or the update
-    /// banner can act on it, on the native and the ctl paths alike.
-    #[test]
-    fn the_media_viewer_takes_presses_before_the_tab_bar() {
+    fn a_preview_lane_owns_presses_and_wheels_over_it() {
         let source = super::production_source();
         let body = |name: &str| {
             source
@@ -40634,34 +40656,80 @@ mod tests {
         };
         for name in ["ctl_mouse_press", "window_event_inner"] {
             let press = body(name);
-            let viewer = press
-                .find("if self.activate_media_viewer_at(ws, px, py, bcode) {")
-                .unwrap_or_else(|| panic!("{name} asks the viewer"));
-            let bar = press
-                .find("if tab_bar_pointer_region_contains(&bar, px, py)")
-                .unwrap_or_else(|| panic!("{name} has a tab bar"));
+            let lane = press
+                .find("self.press_preview_lane(ws, px, py, bcode)")
+                .unwrap_or_else(|| panic!("{name} asks the lanes"));
+            let card = press
+                .find("self.press_card(ws, px, py, bcode)")
+                .unwrap_or_else(|| panic!("{name} asks the cards"));
+            let receipt = press
+                .find("self.activate_media_paste_receipt_at(ws, px, py, bcode)")
+                .unwrap_or_else(|| panic!("{name} asks the receipt"));
             assert!(
-                viewer < bar,
-                "{name}: the viewer is asked before the tab bar"
+                lane < card && lane < receipt,
+                "{name}: the lane is asked first"
             );
         }
-        let native = body("window_event_inner");
-        let viewer = native
-            .find("if self.activate_media_viewer_at(ws, px, py, bcode) {")
-            .expect("the native path asks the viewer");
-        let banner = native
-            .find("self.update_banner_rect(ws)")
-            .expect("the native path has an update banner");
         assert!(
-            viewer < banner,
-            "the viewer is asked before the update banner"
+            body("window_event_inner").contains("if !self.press_preview_lane(ws, px, py, sgr)"),
+            "a side button over a lane goes nowhere"
+        );
+        assert!(body("dispatch_wheel").contains("if self.preview_lane_under_pointer(ws) {"));
+        let press = body("press_preview_lane");
+        assert!(
+            press.contains("if bcode != 0 {\n            return true;\n        }"),
+            "every press over a lane is consumed; only the primary button acts"
         );
     }
 
-    /// Wheel motion over the viewer is dropped before it is banked, so no
-    /// part of it scrolls the terminal after the viewer closes.
+    /// Plain motion over a lane reaches no program, though a drag a press in
+    /// the terminal began still does; lanes stay drawn under modals; under a
+    /// dialog or menu a lane leaves the accessibility tree and answers no
+    /// action; and a lane with no room to show at all is refused with a
+    /// notice, leaving its item unseen.
     #[test]
-    fn the_media_viewer_drops_wheel_motion_before_it_is_banked() {
+    fn a_lane_is_out_of_reach_where_it_cannot_be_seen_or_pressed() {
+        let source = super::production_source();
+        let body = |name: &str| {
+            source
+                .split(&format!("fn {name}("))
+                .nth(1)
+                .and_then(|rest| rest.split("\n    fn ").next())
+                .unwrap_or_else(|| panic!("{name} present"))
+        };
+        let report = body("report_mouse");
+        let held = report.find("MouseAt::Held {").expect("held drags");
+        let motion = report
+            .find("if motion && self.preview_lane_under_pointer(ws) {\n            return MouseReport::Declined;")
+            .expect("motion over a lane is declined");
+        let pointer = report
+            .find("MouseAt::Pointer(rect)")
+            .expect("pointer reports");
+        assert!(held < motion && motion < pointer);
+        assert!(body("overlay").contains("let media_lanes = self.preview_lane_projections(ws);"));
+        let tree = body("accessibility_tree");
+        assert!(tree.contains("let lanes_reachable = !self.pointer_modal_open(ws);"));
+        assert!(tree.contains(".filter(|_| lanes_reachable)"));
+        assert!(body("handle_accessibility_action").contains(
+            "if request.action != AccessibilityAction::Click || self.pointer_modal_open(ws) {"
+        ));
+        let show = body("show_media_item");
+        let refused = show
+            .find("if !shown && !had_panel {")
+            .expect("no room is refused");
+        let notice = show
+            .find("kettle_i18n::Text::NotifyTitlePreviewNoRoom")
+            .expect("with a notice");
+        let viewed = show
+            .find("state.media_shelf.viewed(item);")
+            .expect("viewed");
+        assert!(refused < notice && notice < viewed);
+    }
+
+    /// Wheel motion over a lane is dropped before it is banked, so no part of
+    /// it scrolls the terminal beside it.
+    #[test]
+    fn a_preview_lane_drops_wheel_motion_before_it_is_banked() {
         let source = super::production_source();
         let ctl = source
             .split("fn ctl_mouse_wheel_delta(")
@@ -40674,12 +40742,12 @@ mod tests {
             .expect("native wheel");
         for (path, body) in [("ctl", ctl), ("native", native)] {
             let gate = body
-                .find("if self.media_viewer_under_pointer(ws) {\n")
-                .unwrap_or_else(|| panic!("{path} asks the viewer"));
+                .find("if self.preview_lane_under_pointer(ws) {\n")
+                .unwrap_or_else(|| panic!("{path} asks the lanes"));
             let feed = body
                 .find("ws.wheel.feed(")
                 .unwrap_or_else(|| panic!("{path} banks motion"));
-            assert!(gate < feed, "{path}: the viewer is asked before banking");
+            assert!(gate < feed, "{path}: the lanes are asked before banking");
             assert!(
                 body[gate..feed].contains("ws.wheel.reset();"),
                 "{path}: the residue is dropped"
@@ -40687,11 +40755,11 @@ mod tests {
         }
     }
 
-    /// Another modal never sits over or under the viewer: a confirmation or
-    /// a context menu closes it, as `close_all_modals` does for the rest, and
-    /// the tick closes it under any modal opened another way.
+    /// A lane is no modal: dialogs, menus and other modals sit over it and
+    /// leave it where it is, and the event loop closes a lane only when it
+    /// has nothing to show.
     #[test]
-    fn another_modal_closes_the_media_viewer() {
+    fn a_modal_leaves_the_preview_lanes_in_place() {
         let source = super::production_source();
         let body = |name: &str| {
             source
@@ -40700,102 +40768,44 @@ mod tests {
                 .and_then(|rest| rest.split("\n    fn ").next())
                 .unwrap_or_else(|| panic!("{name} present"))
         };
-        let confirm = body("install_confirm_dialog");
-        let closed = confirm
-            .find("self.close_media_viewer(ws);")
-            .expect("a confirmation closes the viewer");
-        let shown = confirm
-            .find("ws.confirm_dialog = Some(dialog);")
-            .expect("the confirmation is installed");
-        assert!(closed < shown);
-        assert!(body("show_context_menu").contains("self.close_media_viewer(ws);"));
-        let prune = body("prune_media_viewer");
-        assert!(prune.contains("let shown = !self.any_modal_open(ws)"));
-        assert!(
-            prune.contains("&& self.media_viewer_geometry(ws).is_some();"),
-            "a viewer its pane is too small to draw is closed, not kept unseen"
-        );
-        assert!(
-            body("resize_all").contains("self.prune_media_viewer(ws);"),
-            "a resize closes a viewer that no longer fits before the next key"
-        );
-        assert!(
-            body("media_paste_receipt_overlay_projection")
-                .contains("|| ws.media_viewer.is_some() {\n            return None;"),
-            "the viewer hides the receipt, which would paint over it"
-        );
+        for name in [
+            "close_all_modals",
+            "install_confirm_dialog",
+            "show_context_menu",
+            "commit_ime_text",
+        ] {
+            let modal = body(name);
+            assert!(
+                !modal.contains("preview_panels") && !modal.contains("close_preview"),
+                "{name} leaves the lanes alone"
+            );
+        }
+        assert!(body("about_to_wait_inner").contains("self.prune_previews(ws);"));
+        let prune = body("prune_previews");
+        assert!(prune.contains("&& self.preview_item(ws, *pane).is_some()"));
+        assert!(prune.contains("ws.mux.retain_lanes(|pane| live.contains(&pane))"));
     }
 
-    /// The shelf's own shortcut closes the viewer it opened instead of
-    /// reopening it, once per press.
+    /// The shelf's own shortcut opens the focused pane's lane on its newest
+    /// item, or closes that lane if it has one, once per press.
     #[test]
-    fn the_shelf_shortcut_toggles_the_media_viewer() {
-        use super::is_media_shelf_chord;
-        use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
-
-        let mut bindings = kettle_config::keybinds::defaults();
-        kettle_config::keybinds::apply_keybind(&mut bindings, "f8=open_media_shelf")
-            .expect("binding parses");
-        let f8 = PhysicalKey::Code(KeyCode::F8);
-        assert!(is_media_shelf_chord(
-            &bindings,
-            &Key::Named(NamedKey::F8),
-            &f8,
-            ModifiersState::empty()
-        ));
-        assert!(!is_media_shelf_chord(
-            &bindings,
-            &Key::Character("q".into()),
-            &PhysicalKey::Code(KeyCode::KeyQ),
-            ModifiersState::empty()
-        ));
+    fn the_shelf_shortcut_toggles_the_focused_panes_lane() {
         assert!(super::toggles_once_per_press(
             &kettle_config::keybinds::Action::OpenMediaShelf
         ));
         let source = super::production_source();
-        let branch = source
-            .split("if ws.media_viewer.is_some() && ws.confirm_dialog.is_none() {")
-            .nth(1)
-            .and_then(|rest| rest.split("_ => self.close_media_viewer(ws),").next())
-            .expect("the viewer's key branch");
-        let chord = branch
-            .find("_ if is_media_shelf_chord(")
-            .expect("the shortcut is let through before any other key closes the viewer");
-        let escape = branch
-            .find("Key::Named(NamedKey::Escape) =>")
-            .expect("Esc closes");
-        let arrows = branch
-            .find("Key::Named(NamedKey::ArrowLeft) =>")
-            .expect("the arrows browse");
-        assert!(
-            chord < escape && chord < arrows,
-            "the shortcut wins over Esc and the arrows, whatever key it is bound to"
-        );
-        assert!(
-            branch.contains("key if is_bare_modifier(key) => {}"),
-            "a modifier alone leaves the viewer open, since it may begin the shortcut"
-        );
-        for key in [
-            NamedKey::Control,
-            NamedKey::Shift,
-            NamedKey::Alt,
-            NamedKey::Super,
-        ] {
-            assert!(super::is_bare_modifier(&Key::Named(key)), "{key:?}");
-        }
-        for key in [Key::Named(NamedKey::F8), Key::Character("q".into())] {
-            assert!(!super::is_bare_modifier(&key), "{key:?}");
-        }
         let open = source
             .split("fn open_media_shelf(")
             .nth(1)
             .and_then(|rest| rest.split("\n    fn ").next())
             .expect("open_media_shelf");
-        assert!(
-            open.trim_start_matches(|c| c != '{')
-                .starts_with("{\n        if ws.media_viewer.is_some() {\n            self.close_media_viewer(ws);\n            return;"),
-            "the shortcut closes any open viewer, whichever pane has focus"
-        );
+        let close = open
+            .find("if ws.preview_panels.contains_key(&pane) {\n            self.close_preview(ws, pane);\n            return;")
+            .expect("the shortcut closes the focused pane's lane");
+        let show = open
+            .find("self.show_media_item(ws, pane, item);")
+            .expect("otherwise it shows the newest item");
+        assert!(close < show);
     }
 
     /// A release opens the card it pressed only over that very card, and
@@ -40950,7 +40960,7 @@ mod tests {
             let rest = &source[start..];
             rest[..rest[1..].find(" fn ").map_or(rest.len(), |end| end + 1)].to_string()
         };
-        let guard = "if self.pointer_modal_open(ws) || ws.media_viewer.is_some() {";
+        let guard = "if self.pointer_modal_open(ws) {";
         let open = body("open_card");
         assert!(
             open.contains(guard)
@@ -40961,7 +40971,7 @@ mod tests {
         // Only cards in panes the active tab shows now, whatever the last
         // frame drew.
         assert!(reachable.contains(
-            "let shown: Vec<u64> = ws .mux .layout(ws.mux.active, self.area(ws)) .into_iter() .map(|(pane, _)| pane) .collect();"
+            "let shown: Vec<u64> = ws .mux .leaves(ws.mux.active, self.area(ws)) .into_iter() .map(|(pane, _)| pane) .collect();"
         ));
         assert!(reachable.contains(".filter(|card| shown.contains(&card.pane))"));
         assert!(body("release_card").contains("self.open_card(ws, pane, nonce);"));
@@ -41069,7 +41079,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         assert!(source.contains(
-            "let card = ws .native_pointer .filter(|_| { !ws.mods.shift_key() && !self.pointer_modal_open(ws) && ws.media_viewer.is_none() })"
+            "let card = ws .native_pointer .filter(|_| !ws.mods.shift_key() && !self.pointer_modal_open(ws))"
         ));
         assert!(source.contains(
             "let settled = card.filter(|card| ws.card_sightings.settled(Some(*card), now).is_some());"
@@ -41127,9 +41137,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         assert!(source.contains("cards_tip: crate::media::CardsTip::load(),"));
-        assert!(source.contains(
-            "let cards_uncovered = !self.pointer_modal_open(ws) && ws.media_viewer.is_none();"
-        ));
+        assert!(source.contains("let cards_uncovered = !self.pointer_modal_open(ws);"));
         assert!(source.contains(
             "let tip_begun = if presented && cards_uncovered { self.cards_tip.begin( renderer.shown_cards().map(|card| (card.pane, card.nonce)),"
         ));
@@ -41151,7 +41159,7 @@ mod tests {
 
     /// A card takes its primary press before anything else in the window,
     /// on the native and control paths alike, after only the dialogs and
-    /// the media viewer that own every press; its release is the card's too.
+    /// the preview lanes that own every press; its release is the card's too.
     #[test]
     fn a_card_takes_its_press_and_release_before_anything_behind_it() {
         let source = super::production_source();
@@ -41164,8 +41172,8 @@ mod tests {
             "WindowEvent::MouseInput {\n                state: ElementState::Pressed,",
         );
         let viewer = native
-            .find("if self.activate_media_viewer_at(ws, px, py, bcode) {")
-            .expect("viewer");
+            .find("if self.press_preview_lane(ws, px, py, bcode) {")
+            .expect("lane");
         let card = native
             .find("if self.press_card(ws, px, py, bcode) {")
             .expect("card");
@@ -41173,8 +41181,8 @@ mod tests {
         assert!(viewer < card && card < bar);
         let ctl = after(source, "    fn ctl_mouse_press(");
         let viewer = ctl
-            .find("if self.activate_media_viewer_at(ws, px, py, bcode) {")
-            .expect("ctl viewer");
+            .find("if self.press_preview_lane(ws, px, py, bcode) {")
+            .expect("ctl lane");
         let card = ctl
             .find("if self.press_card(ws, px, py, bcode) {")
             .expect("ctl card");
@@ -41212,11 +41220,7 @@ mod tests {
         assert!(press.contains("ws.card_sightings.settled(card, std::time::Instant::now())"));
         // Its release opens nothing once a dialog or the viewer is up.
         let release = after(source, "    fn release_card(");
-        assert!(
-            release.contains(
-                "let covered = self.pointer_modal_open(ws) || ws.media_viewer.is_some();"
-            )
-        );
+        assert!(release.contains("let covered = self.pointer_modal_open(ws);"));
         assert!(release.contains("card_release_opens((pane, nonce), over, covered)"));
         // A primary press ends a card press whose release went elsewhere,
         // before anything can take it, natively and over control.
@@ -41409,36 +41413,38 @@ mod tests {
         assert!(unsigned.program.is_some());
     }
 
-    /// A screen reader hears the item's place on the shelf and, when its
-    /// pixels were released, that too; the tree is republished when either
-    /// changes.
+    /// A screen reader hears a lane's item, its place on the shelf and,
+    /// when its pixels were released, that too; the tree is republished when
+    /// either changes, and each lane's nodes are its pane's alone.
     #[test]
-    fn the_media_viewer_speaks_its_place_and_republishes_on_change() {
+    fn a_preview_lane_speaks_its_place_and_republishes_on_change() {
         let tr = kettle_i18n::Translator::new(kettle_i18n::Language::En);
-        let mut viewer = kettle_render::MediaViewerOverlay {
-            pane_rect: (0.0, 0.0, 800.0, 600.0),
+        let mut lane = kettle_render::MediaLanePanel {
+            pane: 7,
+            rect: (0.0, 360.0, 800.0, 240.0),
+            collapsed: false,
             title: "Plot".into(),
             detail: "Image · 64×48".into(),
-            sender: kettle_render::MediaViewerSender {
+            sender: kettle_render::MediaLaneSender {
                 text: "From this pane".into(),
                 program: None,
                 signer: None,
             },
-            hint: "Esc closes".into(),
+            hint: "Keys still go to the terminal".into(),
             position: (2, 3),
             image: Some(kettle_core::ImageData::new(1, 1, vec![0; 4]).unwrap()),
             status: "Released.".into(),
             canvas: kettle_render::MediaCanvas::Theme,
             open_outside: false,
         };
-        let (label, description) = super::media_viewer_accessibility(&viewer, &tr);
+        let (label, description) = super::media_lane_accessibility(&lane, &tr);
         assert!(
             label.contains("2 of 3") && label.contains("Plot"),
             "{label}"
         );
-        assert_eq!(description, "Esc closes");
-        viewer.image = None;
-        let (_, description) = super::media_viewer_accessibility(&viewer, &tr);
+        assert_eq!(description, "Keys still go to the terminal");
+        lane.image = None;
+        let (_, description) = super::media_lane_accessibility(&lane, &tr);
         assert!(description.starts_with("Released."), "{description}");
         let source = super::production_source();
         let key = source
@@ -41446,10 +41452,30 @@ mod tests {
             .nth(1)
             .and_then(|rest| rest.split("\n    fn ").next())
             .expect("accessibility_key");
-        assert!(
-            key.contains("media_viewer_accessibility(viewer, &self.ui_text).hash(&mut hasher);")
+        assert!(key.contains("media_lane_accessibility(lane, &self.ui_text).hash(&mut hasher);"));
+        assert!(key.contains("lane.collapsed.hash(&mut hasher);"));
+
+        // Lane node ids round-trip, keep clear of every other kind of node,
+        // and a pane id too large for the space has no lane nodes.
+        for (pane, part) in [(1, 0), (7, 5), (super::MAX_LANE_ACCESSIBILITY_PANE - 1, 7)] {
+            let id = super::accessibility_lane_id(pane, part).unwrap();
+            assert_eq!(super::accessibility_lane_part(id), Some((pane, part)));
+            assert_eq!(super::accessibility_card_instance(id), None);
+            assert_ne!(id, super::accessibility_pane_id(pane));
+        }
+        assert_eq!(
+            super::accessibility_lane_id(super::MAX_LANE_ACCESSIBILITY_PANE, 0),
+            None
         );
-        assert!(key.contains("viewer.pane_rect"));
+        assert_eq!(super::accessibility_lane_id(1, 8), None);
+        assert_eq!(
+            super::accessibility_lane_part(super::accessibility_pane_id(3)),
+            None
+        );
+        assert_eq!(
+            super::accessibility_lane_part(super::accessibility_card_id(3)),
+            None
+        );
     }
 
     /// `get_state`'s caller is verified in the nearest live pane whose child
@@ -44645,13 +44671,13 @@ mod tests {
         assert!(
             src.contains("if drop_closing_key_repeat(\n                    &mut ws.closing_keys,")
         );
-        // The Escape that cancels a pane, tab or torn-window drag, or closes
-        // the media viewer, is consumed the same way.
+        // The Escape that cancels a pane, tab or torn-window drag is consumed
+        // the same way.
         assert_eq!(
             src.matches("ws.closing_keys.insert(event.physical_key);")
                 .count(),
-            4,
-            "pane drag, tab drag and torn-window drag cancels, and the media viewer's close"
+            3,
+            "pane drag, tab drag and torn-window drag cancels"
         );
     }
 
@@ -44828,6 +44854,7 @@ mod tests {
             focus: 2,
             title_override: None,
             zoomed: false,
+            lanes: Default::default(),
             last_output_at: None,
             last_seen_at: None,
             bell: false,
@@ -46189,11 +46216,11 @@ mod tests {
             .join(" ");
         assert!(
             src.contains(
-                "if !self.activate_media_viewer_at(ws, px, py, sgr) \
+                "if !self.press_preview_lane(ws, px, py, sgr) \
                  && !modal_swallows_pointer( self.pointer_modal_open(ws), ws.context_menu.is_some(), ) \
                  { self.report_mouse(ws, sgr, true, false); }"
             ),
-            "a side-button press is forwarded past the viewer and modals"
+            "a side-button press is forwarded past the lanes and modals"
         );
         assert!(
             src.contains(
@@ -48141,45 +48168,54 @@ mod tests {
         );
     }
 
+    /// A titlebar the layout carves off the top moves row zero down by its
+    /// height for the pointer and the grid alike; one at the bottom leaves row
+    /// zero at the padded pane origin. Both follow from the pane's partition,
+    /// whose terminal the pointer maps into and the PTY is sized from.
     #[test]
     fn titlebar_inset_realigns_hit_test_and_grid() {
         use super::{grid_dims_px, px_to_cell};
+        use crate::pane_partition::{Metrics, partition_leaf};
         let rect = (10.0, 20.0, 800.0, 600.0);
         let (cw, ch, pad) = (8.0_f32, 16.0_f32, 4.0_f32);
-        let tb = ch + 6.0; // renderer's pane_titlebar_h
+        let tb = ch + 6.0; // the titlebar height the window's style uses
+        let terminal = |titlebar: f32, at_bottom: bool| {
+            let metrics = Metrics::new((cw, ch), (pad, pad), titlebar, at_bottom).unwrap();
+            partition_leaf(rect, metrics, None).terminal
+        };
+        let bare = terminal(0.0, false);
+        let top = terminal(tb, false);
+        let bottom = terminal(tb, true);
 
         // No titlebar (single-pane tab): content origin = ry + pad = 24.
-        let (_, line0, _) = px_to_cell(100.0, 24.0, rect, (cw, ch), (pad, pad), 0.0, false);
+        let (_, line0, _) = px_to_cell(100.0, 24.0, bare, (cw, ch), (pad, pad));
         assert_eq!(line0, 0, "py at content origin → row 0 (no titlebar)");
 
         // With a titlebar: content origin shifts down by `tb` to 24 + 22 = 46.
-        let (_, line_origin, _) =
-            px_to_cell(100.0, 24.0 + tb, rect, (cw, ch), (pad, pad), tb, false);
+        let (_, line_origin, _) = px_to_cell(100.0, 24.0 + tb, top, (cw, ch), (pad, pad));
         assert_eq!(
             line_origin, 0,
             "py at the titlebar'd content origin → row 0"
         );
         // One cell below the titlebar'd origin → row 1. Ignoring the titlebar
         // inset would give row 2, an off-by-one.
-        let (_, line1, _) =
-            px_to_cell(100.0, 24.0 + tb + ch, rect, (cw, ch), (pad, pad), tb, false);
+        let (_, line1, _) = px_to_cell(100.0, 24.0 + tb + ch, top, (cw, ch), (pad, pad));
         assert_eq!(line1, 1);
         // A click up in the titlebar band clamps to row 0 (never negative).
-        let (_, clamped, _) = px_to_cell(100.0, 24.0, rect, (cw, ch), (pad, pad), tb, false);
+        let (_, clamped, _) = px_to_cell(100.0, 24.0, top, (cw, ch), (pad, pad));
         assert_eq!(clamped, 0);
 
         // Moving the title to the bottom moves row zero back to the ordinary
         // padded pane origin. Pointer projection must follow the rendered grid,
         // not retain the old top-title inset.
-        let (_, bottom_line0, _) = px_to_cell(100.0, 24.0, rect, (cw, ch), (pad, pad), tb, true);
+        let (_, bottom_line0, _) = px_to_cell(100.0, 24.0, bottom, (cw, ch), (pad, pad));
         assert_eq!(bottom_line0, 0);
-        let (_, bottom_line1, _) =
-            px_to_cell(100.0, 24.0 + ch, rect, (cw, ch), (pad, pad), tb, true);
+        let (_, bottom_line1, _) = px_to_cell(100.0, 24.0 + ch, bottom, (cw, ch), (pad, pad));
         assert_eq!(bottom_line1, 1);
 
-        // grid_of: the titlebar steals height, so fewer rows are reported.
-        let (cols_no, rows_no) = grid_dims_px((800.0, 600.0), (cw, ch), (pad, pad), 0.0);
-        let (cols_tb, rows_tb) = grid_dims_px((800.0, 600.0), (cw, ch), (pad, pad), tb);
+        // The titlebar steals height, so fewer rows fit in its terminal.
+        let (cols_no, rows_no) = grid_dims_px((bare.2, bare.3), (cw, ch), (pad, pad));
+        let (cols_tb, rows_tb) = grid_dims_px((top.2, top.3), (cw, ch), (pad, pad));
         assert_eq!(cols_no, cols_tb, "titlebar doesn't change column count");
         assert!(
             rows_tb < rows_no,
@@ -48218,30 +48254,22 @@ mod tests {
         let y = 30.0; // any in-grid row
 
         // Left half of cell 0 → Left.
-        let (c0, _, s0) = px_to_cell(ox + 1.0, y, rect, (cw, ch), (pad, pad), 0.0, false);
+        let (c0, _, s0) = px_to_cell(ox + 1.0, y, rect, (cw, ch), (pad, pad));
         assert_eq!(c0, 0);
         assert_eq!(s0, Side::Left, "left half of the cell → Left");
 
         // Right half of cell 0 → Right.
-        let (_, _, s1) = px_to_cell(ox + 6.0, y, rect, (cw, ch), (pad, pad), 0.0, false);
+        let (_, _, s1) = px_to_cell(ox + 6.0, y, rect, (cw, ch), (pad, pad));
         assert_eq!(s1, Side::Right, "right half of the cell → Right");
 
         // The exact midpoint counts as the right half (matches alacritty's
         // `< half ⇒ Left` boundary — anything ≥ half is Right).
-        let (_, _, s2) = px_to_cell(ox + cw / 2.0, y, rect, (cw, ch), (pad, pad), 0.0, false);
+        let (_, _, s2) = px_to_cell(ox + cw / 2.0, y, rect, (cw, ch), (pad, pad));
         assert_eq!(s2, Side::Right, "exact midpoint → Right");
 
         // The side is a within-cell property: the same sub-cell offset in a later
         // column yields the same side (no drift across the row).
-        let (c3, _, s3) = px_to_cell(
-            ox + cw * 5.0 + 1.0,
-            y,
-            rect,
-            (cw, ch),
-            (pad, pad),
-            0.0,
-            false,
-        );
+        let (c3, _, s3) = px_to_cell(ox + cw * 5.0 + 1.0, y, rect, (cw, ch), (pad, pad));
         assert_eq!(c3, 5);
         assert_eq!(s3, Side::Left, "side is independent of the column index");
 
@@ -48249,7 +48277,7 @@ mod tests {
         // Side::Left, so a drag starting there still INCLUDES the first cell.
         // Deriving the side from the raw negative offset via `rem_euclid` would
         // wrap it into the right half and drop column 0.
-        let (c4, _, s4) = px_to_cell(ox - 3.0, y, rect, (cw, ch), (pad, pad), 0.0, false);
+        let (c4, _, s4) = px_to_cell(ox - 3.0, y, rect, (cw, ch), (pad, pad));
         assert_eq!(c4, 0, "left of origin clamps to column 0");
         assert_eq!(
             s4,

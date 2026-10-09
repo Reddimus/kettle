@@ -142,6 +142,7 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `agent-server` | `off`\|`read-only`\|`full` | `off` | The agent control server mode. **Off by default.** When enabled, kettle starts a local-IPC control server that an AI agent / `kettle ctl` / `kettle mcp` can use to read the screen and drive panes (`read-only` reads / lists / subscribes; `full` also sends text + runs commands). Security: local-only — a Unix domain socket (mode `0600`) or a Windows named pipe (current-user DACL); no TCP. `--agent-server <mode>` is the per-launch override. `agent-server` applies at launch; a reload does not change it. See [docs/AGENT.md](AGENT.md) |
 | `agent-display` (alias `agent_display`) | bool | `false` | Agent previews: let agents show media in kettle without granting them screen reads or input. On its own it starts the control server for display requests only, which refuse every read (`display_only`) and mutation (`read_only`); `agent-server = full` already includes display. Agents show media with `show` (or `kettle show`), which lands on the media shelf of the pane they run in. Turning it on (here or in Settings → Agents) applies at once, also for open connections; turning it off applies at the next launch. `--agent-display on\|off` is the per-launch override; `--agent-server off` alone also turns display off, and a reload never overrides either flag. See [docs/AGENT.md](AGENT.md) |
 | `agent-display-codex` (alias `agent_display_codex`) | bool | `false` | Codex previews: the zsh or fish a new pane starts defines `codex` as the function `kettle agent-setup --print` prints: zsh through a Kettle-owned, read-only `.zshenv` and a borrowed `ZDOTDIR` it puts back, fish through code run after your configuration (`fish -C`). Needs `agent-display`. A `codex` you define or can autoload still wins; other shells use the printed function; panes already open keep what they started with. See [AGENT.md](AGENT.md#kettle-defines-it-for-you). |
+| `preview-lane-side` (alias `preview_lane_side`) | `bottom`\|`right` | `bottom` | Where a pane's preview lane opens: `bottom` keeps the terminal's columns, `right` keeps its rows. A lane takes about 40% of the pane and leaves the terminal at least 20 columns and 5 rows. Applies to lanes opened after it changes. See **Media** under keybind actions. |
 | `agent-display-claude-code` (alias `agent_display_claude_code`) | bool | `false` | Claude Code previews: Claude Code started in a new pane gets Kettle's own plugin (the display server and the hook that prints inline cards) through `CLAUDE_CODE_PLUGIN_DIRS`. Needs `agent-display`. Kettle writes the plugin into its own data directory, checks it before every new pane, and offers nothing while Claude Code's managed policy forbids plugins from the environment; it changes none of Claude Code's settings. Panes already open keep what they started with. See [docs/AGENT.md](AGENT.md#kettles-claude-code-plugin) |
 | `agent-badge` | string | `"[agent] "` | The per-pane titlebar prefix shown while an agent connection has the pane attached. Set to any glyph you like (`agent-badge = 🤖 `); empty disables it |
 | `scroll-on-keystroke` (`scroll-on-input`) | bool | `true` | Jump back to the bottom when the user types while scrolled back |
@@ -605,17 +606,20 @@ menu as "Theme…", and Enter or a click on the Settings Theme row opens it.
 **Titles**: `edit_window_title`, `edit_tab_title`, `edit_pane_title` (open the
 inline rename overlay for the OS window / active tab / focused pane).
 
-**Media**: `open_media_shelf` opens the focused pane's media shelf (images and
-SVGs an agent or `kettle show` sent there) in the viewer, on the item published
-last (a replacement by key counts as new),
-or closes the viewer if one is open, whatever key it is bound to. In the
-viewer, `←`/`→` move along the shelf and Esc closes it; any other key closes
-it and goes on to the terminal or its shortcut, and a modifier alone leaves it
-open. The viewer takes every press while it is open: a click
-outside it, the tab bar included, closes it, and other buttons and the wheel
-over it reach nothing beneath. Opening another modal or a confirmation closes
-it. The command palette lists it as "Open media shelf". On macOS its
-default chord is `Ctrl+Shift+Cmd+I`; elsewhere it has no default binding.
+**Media**: `open_media_shelf` opens the focused pane's preview lane on its
+media shelf (images, SVGs and diagrams an agent or `kettle show` sent there),
+on the item published last (a replacement by key counts as new), or closes
+the pane's lane if it has one, whatever key it is bound to. The lane takes
+about 40% of the pane along its bottom (`preview-lane-side`), and the
+terminal shrinks to make room, never below 20 columns and 5 rows: with less
+room the lane is a one-row strip along the pane's bottom (a right lane
+too), and a pane too small even for that gets a notice instead.
+Keys still go to the terminal while a lane shows. The lane's header browses
+the shelf (`‹`/`›`), opens the item outside (`↗`), collapses or expands the
+lane (`▾`/`▴`) and closes it (`×`). A press or the wheel over a lane never
+reaches the terminal, and menus and dialogs open over it without closing it.
+The command palette lists it as "Open media shelf". On macOS its default
+chord is `Ctrl+Shift+Cmd+I`; elsewhere it has no default binding.
 
 **Modals + UI**: `command_palette` (`palette`), `hint_mode` (`hints` /
 `quick_select`; labels the URLs, paths (a quoted or backticked path may hold

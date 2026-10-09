@@ -356,17 +356,26 @@ recently viewed item not on screen go, and its details stay. A push never
 opens anything on screen: a pane titlebar marks unopened items as `▣N`, and
 the window title starts with `[new media: N]` while the focused pane has
 some. The user opens them with `open_media_shelf` (the palette's "Open media
-shelf"): a viewer over the pane shows one item fitted, never enlarged past
-its pixels, on white for SVG and a checkerboard for raster, with its title,
-kind, size and sender, and `‹ › ×` to browse and close. Where this platform
-permits an image viewer and the item still holds its pixels, the header also
-has `↗` and the footer says that O opens it there (Preview on macOS, Eye of
-GNOME on Linux), the same hand-off as a card menu's row. Clicking an inline
-card opens the viewer on that card's item. A card takes a primary press,
-and its release, before anything else in the window except open dialogs and
-the viewer, so the program behind it sees neither. The release opens the
-item when it lands on the same card and no dialog or viewer has opened over
-it since the press; otherwise it goes nowhere. A Shift-click selects text
+shelf"): the pane's preview lane opens along its bottom, about 40% of the
+pane, and the terminal shrinks to make room, so the program in it sees a
+smaller window and nothing of its screen is covered; keys still go to it.
+The lane shows one item fitted, never enlarged past its pixels, on white for
+SVG and a checkerboard for raster, with its title, kind, size and sender,
+and `‹ ›` to browse, `▾` to collapse the lane to a one-row strip and `×` to
+close it. Where this platform permits an image viewer and the item still
+holds its pixels, the header also has `↗`, which opens it there (Preview on
+macOS, Eye of GNOME on Linux), the same hand-off as a card menu's row. The
+terminal keeps at least 20 columns and 5 rows: with less room the lane is
+the strip, along the pane's bottom whichever side it opened on; opening one
+in a pane too small even for that shows a notice and leaves the item unseen,
+and a lane that loses its room later waits as the titlebar's shelf badge. Each pane
+has its own lane; `ui_geometry` reports them as `preview_lanes` (pane,
+rectangle and `expanded`, `strip` or `badge`, never a path or pixel).
+Clicking an inline card opens its pane's lane on that card's item. A card
+takes a primary press, and its release, before anything else in the window
+except open dialogs and the lanes, so the program behind it sees neither.
+The release opens the item when it lands on the same card and no dialog has
+opened over it since the press; otherwise it goes nowhere. A Shift-click selects text
 and the wheel scrolls or reaches the program, as they would without the
 card. A press on a card that has been on screen where it is for less than
 half a second is ordinary input, so one that scrolls under the pointer
@@ -377,8 +386,7 @@ settles. The first card a user ever sees with its image shown says "Click
 to open" on a strip along its foot for ten seconds, or until a card is
 opened; `ui-tips.json` beside the config file records that it showed, so it
 never shows again, and of two Kettles running at once only one shows it. It
-waits for a card whose image is on screen with no dialog, menu or viewer
-over it.
+waits for a card whose image is on screen with no dialog or menu over it.
 A right-press on a settled card opens the card's menu instead of the
 terminal's: Open, as a click does, and, where this platform permits one
 viewer, Open in Preview (macOS) or Open in Image Viewer (Linux, Eye of
@@ -390,9 +398,9 @@ another app.
 `kettle ctl send_mouse` clicks a card the same way. Quick select (`hint_mode`) labels each card on screen in the
 focused pane, and picking its label opens it; text in a card's rows is its
 marks, so it gets no label of its own. Screen readers see each card as a
-button named for its item's title, kind, size and sender, as the viewer
-names it (never by its card id), and pressing it opens the viewer. Neither
-opens anything while a dialog, a menu or the viewer is up. Only the user, or full control, opens
+button named for its item's title, kind, size and sender, as the lane
+names it (never by its card id), and pressing it opens the lane. Neither
+opens anything while a dialog or a menu is up. Only the user, or full control, opens
 it, and `kettle ctl send_keys` still writes to the pane's terminal beneath. `list_panes` reports each pane's shelf as
 `media_shelf`: item, generation, title, kind, size, warnings, `verified`, the
 `sender` of an unverified item (`executable`, `pid` and `signer`, null when

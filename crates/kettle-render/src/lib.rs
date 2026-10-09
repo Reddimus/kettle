@@ -41,7 +41,7 @@ mod glyphpipe;
 #[cfg(test)]
 mod headless_tests;
 mod imgpipe;
-mod media_viewer;
+mod media_lane;
 mod outline;
 mod present;
 mod quad;
@@ -417,10 +417,33 @@ mod font_reload_tests {
         assert!(reload.contains("for label in &mut self.hint_texts"));
     }
 
-    /// The media viewer keeps its lines shaped while their text is unchanged,
-    /// so a reload that keeps the text must reshape them in the new family.
+    /// Preview lanes draw above the terminal's text and cursor and below its
+    /// dimming, scrollbar and every overlay, so a menu or dialog covers a
+    /// lane's text as well as its panel.
     #[test]
-    fn a_font_reload_reshapes_the_media_viewer() {
+    fn preview_lanes_draw_between_the_terminal_and_the_overlays() {
+        let production = production_source();
+        let pass = production
+            .split_once("fn encode_scene_pass(")
+            .expect("encode_scene_pass")
+            .1;
+        let at = |needle: &str| pass.find(needle).unwrap_or_else(|| panic!("{needle}"));
+        let terminal_text = at("self.text_renderer\n            .render(");
+        let cursor = at("self.cursor_glyph_renderer\n                .render(");
+        let lane_quads = at("self.lane_quads.draw(&mut pass);");
+        let lane_images = at("lanes.draw(&mut pass);");
+        let lane_text = at("self.lane_text_renderer\n            .render(");
+        let overlay = at("self.overlay_quads.draw(&mut pass);");
+        let menus = at("self.menu_quads.draw(&mut pass);");
+        assert!(terminal_text < lane_quads && cursor < lane_quads);
+        assert!(lane_quads < lane_images && lane_images < lane_text);
+        assert!(lane_text < overlay && overlay < menus);
+    }
+
+    /// A lane keeps its lines shaped while their text is unchanged, so a
+    /// reload that keeps the text must reshape them in the new family.
+    #[test]
+    fn a_font_reload_reshapes_the_preview_lanes() {
         let production = production_source();
         let reload = production
             .split_once("if self.chrome_style_key != k {")
@@ -429,7 +452,12 @@ mod font_reload_tests {
             .split_once("// Ensure one text buffer per pane.")
             .expect("end of font reload invalidation")
             .0;
-        assert!(reload.contains("self.media_viewer_text.invalidate();"));
+        let reload: String = reload.split_whitespace().collect();
+        assert!(
+            reload.contains(
+                "self.lane_texts.values_mut().for_each(media_lane::LaneText::invalidate);"
+            )
+        );
     }
 }
 
@@ -1132,8 +1160,9 @@ pub struct Overlay {
     pub completion: Option<CompletionOverlay>,
     /// Visual receipt for the focused pane's most recent image or video paste.
     pub media_paste_receipt: Option<MediaPasteReceiptOverlay>,
-    /// The shelf item the user opened, over its pane.
-    pub media_viewer: Option<MediaViewerOverlay>,
+    /// The preview lanes the user opened, one per pane at most, each in the
+    /// share of its pane the layout carved for it.
+    pub media_lanes: Vec<MediaLanePanel>,
     /// The inline card a click at the pointer would open, as a frame drew
     /// it; its visible part is outlined in the accent.
     pub card_hover: Option<PaintedCard>,
@@ -1273,9 +1302,12 @@ pub struct SettingsRow {
 /// Pixel rectangle `(x, y, w, h)`.
 pub type Rect4 = (f32, f32, f32, f32);
 
-pub use media_viewer::{
-    MediaCanvas, MediaViewerGeometry, MediaViewerHit, MediaViewerOverlay, MediaViewerSender,
-    media_viewer_geometry,
+/// Most lane images one frame draws: one per pane with a lane.
+const MAX_LANE_IMAGES: usize = 64;
+
+pub use media_lane::{
+    MediaCanvas, MediaLaneGeometry, MediaLaneHit, MediaLanePanel, MediaLaneSender,
+    media_lane_geometry,
 };
 
 /// Visible candidate rows in one completion card.
@@ -2288,8 +2320,15 @@ pub struct PaneView<'a> {
     /// Process-global pane id. Used to keep renderer caches attached to the
     /// same terminal pane across split reorders and tab/window moves.
     pub id: u64,
-    /// Pixel rect `(x, y, w, h)` within the surface.
+    /// Pixel rect `(x, y, w, h)` within the surface: the pane's whole
+    /// leaf, its titlebar and preview lane included.
     pub rect: (f32, f32, f32, f32),
+    /// The pane's terminal within `rect`: its grid with the padding around
+    /// it, clear of its titlebar and preview lane. Everything drawn from the
+    /// terminal's cells is placed and clipped by this.
+    pub terminal: (f32, f32, f32, f32),
+    /// The pane's titlebar strip within `rect`, when it shows one.
+    pub titlebar: Option<(f32, f32, f32, f32)>,
     /// Raw terminal state captured under the Term lock by `redraw` (µs-scale
     /// flat copy, pooled per window), borrowed here so the whole GPU frame
     /// runs with the lock released and the PTY reader never stalls behind
@@ -2950,10 +2989,17 @@ pub struct Renderer {
     card_cursor_quad_range: Option<std::ops::Range<u32>>,
     card_decoration: QuadPipeline,
     card_posters: Option<imgpipe::ImagePipeline>,
-    /// The open media viewer's image, charged to the preview account like
-    /// card posters; made on first use.
-    media_viewer_img: Option<imgpipe::ImagePipeline>,
-    media_viewer_text: media_viewer::ViewerText,
+    /// The preview lanes: their panels' quads, their images (charged to the
+    /// preview account like card posters, made on first use) and their text,
+    /// drawn above the terminal and below every overlay.
+    lane_quads: QuadPipeline,
+    lane_img: Option<imgpipe::ImagePipeline>,
+    lane_text_renderer: TextRenderer,
+    /// Each lane's text, by pane, kept while its lane shows.
+    lane_texts: std::collections::HashMap<u64, media_lane::LaneText>,
+    /// Whether the lane text renderer last prepared any text, so closing the
+    /// last lane prepares it once more, empty.
+    lane_labels_prepared: bool,
     card_image_shared: imgpipe::ImageShared,
     card_frames: Vec<inline_cards::CardFrame>,
     card_scene: card_scene::CardScene,
@@ -5363,7 +5409,6 @@ impl Renderer {
             Shaping::Advanced,
             None,
         );
-        let media_viewer_text = media_viewer::ViewerText::new(&mut font_system, metrics);
         let mut ime_buffer = TextBuffer::new(&mut font_system, metrics);
         ime_buffer.set_wrap(Wrap::None);
 
@@ -5383,6 +5428,9 @@ impl Renderer {
         let card_text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let card_base = shared.quads.blend(&device);
+        let lane_quads = shared.quads.blend(&device);
+        let lane_text_renderer =
+            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let card_cursors = shared.quads.blend(&device);
         let card_decoration = shared.quads.blend(&device);
         let presentation =
@@ -5527,8 +5575,11 @@ impl Renderer {
             card_cursor_quad_range: None,
             card_decoration,
             card_posters: None,
-            media_viewer_img: None,
-            media_viewer_text,
+            lane_quads,
+            lane_img: None,
+            lane_text_renderer,
+            lane_texts: std::collections::HashMap::new(),
+            lane_labels_prepared: false,
             card_image_shared: shared.images,
             card_frames: Vec::new(),
             card_scene: card_scene::CardScene::default(),
@@ -6236,7 +6287,9 @@ impl Renderer {
                 self.completion_count_text.clear();
                 self.media_receipt_title_text.clear();
                 self.media_receipt_detail_text.clear();
-                self.media_viewer_text.invalidate();
+                self.lane_texts
+                    .values_mut()
+                    .for_each(media_lane::LaneText::invalidate);
                 self.search_buffer_text.clear();
                 self.search_segment_texts.iter_mut().for_each(String::clear);
             }
@@ -6396,7 +6449,8 @@ impl Renderer {
         let mut over: Vec<QuadInstance> = Vec::with_capacity(panes.len() * 4 + 8);
         let mut img_items: Vec<imgpipe::ImageItem> = Vec::with_capacity(16);
         let mut media_receipt_items: Vec<imgpipe::ImageItem> = Vec::with_capacity(1);
-        let mut media_viewer_items: Vec<imgpipe::ImageItem> = Vec::with_capacity(1);
+        let mut lane_items: Vec<imgpipe::ImageItem> = Vec::with_capacity(overlay.media_lanes.len());
+        let mut lane_q: Vec<QuadInstance> = Vec::new();
         // The wallpaper is always one retained item in its own back-most pass;
         // tile mode repeats UVs in the sampler instead of rebuilding a quad per
         // tile on every frame.
@@ -6998,18 +7052,12 @@ impl Renderer {
                 .search
                 .as_ref()
                 .map_or(pv.focused, |search| search.target_pane == Some(pv.id));
-            let grid_origin = pane_grid_origin(
-                pv.rect,
-                (pad_x, pad_y),
-                pane_titlebar_h,
-                cfg.title_at_bottom,
-            );
+            let grid_origin = pane_grid_origin(pv.terminal, (pad_x, pad_y));
             let card_frame = &mut card_frames[i];
             if let Some(cards) = pv.inline_cards {
                 cards.recognize_into(pv.snap, card_frame);
                 let drawn_before = card_scene.drawn.len();
-                if let Some(pane_body) =
-                    pane_backdrop_rect(pv.rect, bw, pane_titlebar_h, cfg.title_at_bottom)
+                if let Some(pane_body) = pane_backdrop_rect(pv.terminal, bw)
                     && let Some(clip) = inline_image_clip(
                         pane_body,
                         grid_origin,
@@ -7060,23 +7108,19 @@ impl Renderer {
                 card_frame,
                 &mut card_scene.base,
                 &mut card_scene.cursors,
-                pane_titlebar_h,
             );
 
             // Image placements, anchored history-aware so they scroll.
             {
                 let quota = placement_quotas[i];
-                let image_clip =
-                    pane_backdrop_rect(pv.rect, bw, pane_titlebar_h, cfg.title_at_bottom).and_then(
-                        |pane_body| {
-                            inline_image_clip(
-                                pane_body,
-                                grid_origin,
-                                (pv.snap.columns, pv.snap.screen_lines),
-                                (cw, ch),
-                            )
-                        },
-                    );
+                let image_clip = pane_backdrop_rect(pv.terminal, bw).and_then(|pane_body| {
+                    inline_image_clip(
+                        pane_body,
+                        grid_origin,
+                        (pv.snap.columns, pv.snap.screen_lines),
+                        (cw, ch),
+                    )
+                });
                 let mut draw = |p: &kettle_core::Placement| {
                     let Some(image_clip) = image_clip else {
                         return;
@@ -7235,6 +7279,9 @@ impl Renderer {
                 over.push(rect(rx, ry, rw, rh, theme.background, composed_dim));
             }
             if cfg.scrollbar != ScrollbarMode::Never {
+                // The scrollbar runs the height of the terminal it scrolls,
+                // clear of the titlebar and lane.
+                let (rx, ry, rw, rh) = pv.terminal;
                 let s = pv.snap;
                 let (rows, hist, off) = (s.screen_lines, s.history_size, s.display_offset);
                 let has_scroll = hist > 0 && rows + hist > rows;
@@ -8457,22 +8504,23 @@ impl Renderer {
             self.media_receipt_detail_text.clear();
         }
 
-        if let Some(viewer) = &overlay.media_viewer
-            && let Some(geometry) = media_viewer_geometry(
-                viewer,
+        // Each shown lane's text, kept by pane; a lane gone takes its text.
+        self.lane_texts
+            .retain(|pane, _| overlay.media_lanes.iter().any(|lane| lane.pane == *pane));
+        for lane in &overlay.media_lanes {
+            let Some(geometry) = media_lane_geometry(
+                lane,
                 (cw, ch),
                 (self.overlay_text_cell_width(), self.metrics.line_height),
-            )
-        {
+            ) else {
+                continue;
+            };
             let glyph_width = self.overlay_text_cell_width();
-            self.media_viewer_text.shape(
-                &mut self.font_system,
-                metrics,
-                &family,
-                viewer,
-                &geometry,
-                glyph_width,
-            );
+            let font_system = &mut self.font_system;
+            self.lane_texts
+                .entry(lane.pane)
+                .or_insert_with(|| media_lane::LaneText::new(font_system, metrics))
+                .shape(font_system, metrics, &family, lane, &geometry, glyph_width);
         }
 
         // Quick-select hint label glyphs (one buffer per label).
@@ -8529,7 +8577,7 @@ impl Renderer {
         } else {
             self.ime_text.clear();
         }
-        let focus_origin = panes.iter().find(|p| p.focused).map(|p| p.rect);
+        let focus_origin = panes.iter().find(|p| p.focused).map(|p| p.terminal);
 
         // Assemble text areas (panes + tab bar + search).
         self.viewport.update(
@@ -8744,41 +8792,53 @@ impl Renderer {
                 custom_glyphs: &[],
             });
         }
-        if let Some(viewer) = &overlay.media_viewer
-            && let Some(geometry) = media_viewer_geometry(
-                viewer,
+        // The preview lanes: each panel fills its lane, opaque, with a rule
+        // along the edge it shares with the terminal. Drawn in their own layer
+        // above the terminal and below every overlay, so a menu or dialog
+        // covers a lane's text as well as its frame.
+        let mut lane_areas: Vec<TextArea> = Vec::with_capacity(overlay.media_lanes.len() * 8);
+        // Inside the pane's focus border, as the terminal's backdrop is.
+        let lane_border = if cfg.handle_size < 0 {
+            1.0
+        } else {
+            cfg.handle_size as f32
+        };
+        for lane in &overlay.media_lanes {
+            let palette = completion_palette(theme, self.ui_accent(cfg, theme));
+            let (x, y, width, height) = lane.rect;
+            let inner = (
+                x + lane_border,
+                y + lane_border,
+                (width - 2.0 * lane_border).max(0.0),
+                (height - 2.0 * lane_border).max(0.0),
+            );
+            lane_q.push(rect(
+                inner.0,
+                inner.1,
+                inner.2,
+                inner.3,
+                palette.panel_bg,
+                1.0,
+            ));
+            lane_q.push(rect(inner.0, inner.1, inner.2, 1.0, palette.border, 1.0));
+            let Some(geometry) = media_lane_geometry(
+                lane,
                 (cw, ch),
                 (self.overlay_text_cell_width(), self.metrics.line_height),
-            )
-        {
-            let palette = completion_palette(theme, self.ui_accent(cfg, theme));
-            let (x, y, width, height) = geometry.rect;
-            for (offset, alpha) in [(1.0_f32, 0.28_f32), (2.0, 0.16), (3.0, 0.08)] {
-                menu_q.push(rect(
-                    x + offset,
-                    y + offset,
-                    width,
-                    height,
-                    Rgb::new(0, 0, 0),
-                    alpha,
-                ));
-            }
-            // Opaque: the terminal beneath must not show through the viewer.
-            menu_q.push(rect(x, y, width, height, palette.panel_bg, 1.0));
-            menu_q.push(rect(x, y, width, 1.0, palette.border, 1.0));
-            menu_q.push(rect(x, y + height - 1.0, width, 1.0, palette.border, 1.0));
-            menu_q.push(rect(x, y, 1.0, height, palette.border, 1.0));
-            menu_q.push(rect(x + width - 1.0, y, 1.0, height, palette.border, 1.0));
+            ) else {
+                continue;
+            };
             for button in [
                 geometry.previous,
                 geometry.next,
                 geometry.open_outside,
+                Some(geometry.toggle),
                 Some(geometry.close),
             ]
             .into_iter()
             .flatten()
             {
-                menu_q.push(rect(
+                lane_q.push(rect(
                     button.0,
                     button.1,
                     button.2,
@@ -8787,24 +8847,24 @@ impl Renderer {
                     1.0,
                 ));
             }
-            if let (Some(image_rect), Some(image)) = (geometry.image, viewer.image.as_ref()) {
+            if let (Some(image_rect), Some(image)) = (geometry.image, lane.image.as_ref()) {
                 let (ix, iy, iw, ih) = image_rect;
-                match viewer.canvas {
+                match lane.canvas {
                     MediaCanvas::Theme => {
-                        menu_q.push(rect(ix, iy, iw, ih, theme.background, 1.0));
+                        lane_q.push(rect(ix, iy, iw, ih, theme.background, 1.0));
                     }
                     MediaCanvas::White => {
-                        menu_q.push(rect(ix, iy, iw, ih, Rgb::new(255, 255, 255), 1.0));
+                        lane_q.push(rect(ix, iy, iw, ih, Rgb::new(255, 255, 255), 1.0));
                     }
                     MediaCanvas::Checker => {
-                        menu_q.push(rect(ix, iy, iw, ih, Rgb::new(0xee, 0xee, 0xee), 1.0));
+                        lane_q.push(rect(ix, iy, iw, ih, Rgb::new(0xee, 0xee, 0xee), 1.0));
                         let square = (8.0 * self.scale).round().max(4.0);
-                        for (sx, sy, sw, sh) in media_viewer::checker_squares(image_rect, square) {
-                            menu_q.push(rect(sx, sy, sw, sh, Rgb::new(0xcc, 0xcc, 0xcc), 1.0));
+                        for (sx, sy, sw, sh) in media_lane::checker_squares(image_rect, square) {
+                            lane_q.push(rect(sx, sy, sw, sh, Rgb::new(0xcc, 0xcc, 0xcc), 1.0));
                         }
                     }
                 }
-                media_viewer_items.push(imgpipe::ImageItem::placement(
+                lane_items.push(imgpipe::ImageItem::placement(
                     [ix, iy, iw, ih],
                     image.clone(),
                     None,
@@ -8812,16 +8872,19 @@ impl Renderer {
                     [x, y, width, height],
                 ));
             }
-            menu_areas.extend(self.media_viewer_text.areas(
-                &geometry,
-                (
-                    gc(palette.label),
-                    gc(palette.description),
-                    gc(palette.emphasis),
-                ),
-                self.overlay_text_cell_width(),
-                self.metrics.line_height,
-            ));
+            if let Some(text) = self.lane_texts.get(&lane.pane) {
+                lane_areas.extend(text.areas(
+                    &geometry,
+                    lane.collapsed || !geometry.full,
+                    (
+                        gc(palette.label),
+                        gc(palette.description),
+                        gc(palette.emphasis),
+                    ),
+                    self.overlay_text_cell_width(),
+                    self.metrics.line_height,
+                ));
+            }
         }
         if let Some(completion) = &overlay.completion
             && let Some(geometry) = completion_panel_geometry(completion, (cw, ch))
@@ -8966,13 +9029,8 @@ impl Renderer {
             });
         }
         for (i, pv) in panes.iter().enumerate() {
-            let (rx, ry, rw, rh) = pv.rect;
-            let grid_origin = pane_grid_origin(
-                pv.rect,
-                (pad_x, pad_y),
-                pane_titlebar_h,
-                cfg.title_at_bottom,
-            );
+            let (rx, ry, rw, rh) = pv.terminal;
+            let grid_origin = pane_grid_origin(pv.terminal, (pad_x, pad_y));
             // Per-pane OSC 10 default-fg: glyphon's `default_color` is the
             // fallback when a span lacks an explicit color. Almost every
             // cell does carry an explicit color via `Attrs::color`, but
@@ -9253,12 +9311,7 @@ impl Renderer {
         // Hint labels over the focused pane, drawn with the menus, above
         // their chips and every card.
         if let Some((frx, fry, frw, frh)) = focus_origin {
-            let focus_grid_origin = pane_grid_origin(
-                (frx, fry, frw, frh),
-                (pad_x, pad_y),
-                pane_titlebar_h,
-                cfg.title_at_bottom,
-            );
+            let focus_grid_origin = pane_grid_origin((frx, fry, frw, frh), (pad_x, pad_y));
             // Hint-label text follows the theme background (dark on
             // the theme-yellow chip) unless overridden.
             let lab = cfg.search_foreground.unwrap_or(theme.background);
@@ -9611,7 +9664,12 @@ impl Renderer {
             self.media_receipt_detail_text.hash(&mut h);
             // Retained like the receipt's: a buffer keeps its address when
             // the viewer moves to another item, so hash what it shows.
-            self.media_viewer_text.shaped().hash(&mut h);
+            for lane in &overlay.media_lanes {
+                lane.pane.hash(&mut h);
+                if let Some(text) = self.lane_texts.get(&lane.pane) {
+                    text.shaped().hash(&mut h);
+                }
+            }
             context_menu_text_damage_key(
                 overlay.context_menu.as_ref(),
                 theme.foreground,
@@ -9717,6 +9775,21 @@ impl Renderer {
                 )?;
                 self.card_labels_prepared = has_labels;
             }
+            if !lane_areas.is_empty() || self.lane_labels_prepared {
+                self.chrome_prepares += 1;
+                self.text_prepares += 1;
+                let has_labels = !lane_areas.is_empty();
+                self.lane_text_renderer.prepare(
+                    &self.gpu.device,
+                    &self.gpu.queue,
+                    &mut self.font_system,
+                    &mut self.atlas,
+                    &self.viewport,
+                    lane_areas,
+                    &mut self.swash,
+                )?;
+                self.lane_labels_prepared = has_labels;
+            }
             self.menu_text_renderer.prepare(
                 &self.gpu.device,
                 &self.gpu.queue,
@@ -9746,7 +9819,7 @@ impl Renderer {
             gi.clear();
             gc.clear();
             if cfg.text_renderer == TextRendererMode::Grid {
-                self.emit_pane_glyphs(panes, cfg, pane_titlebar_h, &mut gi, &mut gc);
+                self.emit_pane_glyphs(panes, cfg, &mut gi, &mut gc);
             }
             self.glyph_pipeline
                 .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &gi);
@@ -9861,17 +9934,17 @@ impl Renderer {
         self.imgs.prepare_frame(&self.gpu.device, &img_items);
         self.media_receipt_img
             .prepare_frame(&self.gpu.device, &media_receipt_items);
-        if self.media_viewer_img.is_none() && !media_viewer_items.is_empty() {
-            // Preview pressure cannot prevent a frame: without room the viewer
+        if self.lane_img.is_none() && !lane_items.is_empty() {
+            // Preview pressure cannot prevent a frame: without room a lane
             // paints its frame and text, and tries again next frame.
-            self.media_viewer_img = self.card_image_shared.layer_with_instance_limit(
+            self.lane_img = self.card_image_shared.layer_with_instance_limit(
                 &self.gpu.device,
                 kettle_core::GraphicsBudget::previews(),
-                1,
+                MAX_LANE_IMAGES,
             );
         }
-        if let Some(viewer) = &mut self.media_viewer_img {
-            viewer.prepare_frame(&self.gpu.device, &media_viewer_items);
+        if let Some(lanes) = &mut self.lane_img {
+            lanes.prepare_frame(&self.gpu.device, &lane_items);
         }
         let wallpaper_upload_complete = self.bg_imgs.upload_retained(
             &self.gpu.device,
@@ -9901,14 +9974,11 @@ impl Renderer {
             [sw, sh],
             &media_receipt_items,
         );
-        if let Some(viewer) = &mut self.media_viewer_img {
-            viewer.upload(
-                &self.gpu.device,
-                &self.gpu.queue,
-                [sw, sh],
-                &media_viewer_items,
-            );
+        if let Some(lanes) = &mut self.lane_img {
+            lanes.upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &lane_items);
         }
+        self.lane_quads
+            .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &lane_q);
         self.overlay_quads
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &over);
         self.menu_quads
@@ -10171,7 +10241,8 @@ impl Renderer {
                 .map(imgpipe::ImagePipeline::upload_counts)
                 .unwrap_or_default(),
             self.media_receipt_img.upload_counts(),
-            self.media_viewer_img
+            self.lane_quads.upload_counts(),
+            self.lane_img
                 .as_ref()
                 .map(imgpipe::ImagePipeline::upload_counts)
                 .unwrap_or_default(),
@@ -10347,6 +10418,14 @@ impl Renderer {
             self.cursor_glyph_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)?;
         }
+        // Preview lanes sit above the terminal and below its dimming,
+        // scrollbar and every overlay: menus and dialogs cover them whole.
+        self.lane_quads.draw(&mut pass);
+        if let Some(lanes) = &self.lane_img {
+            lanes.draw(&mut pass);
+        }
+        self.lane_text_renderer
+            .render(&self.atlas, &self.viewport, &mut pass)?;
         // Dimming + scrollbar sit on top of glyphs.
         self.overlay_quads.draw(&mut pass);
         // Menu chrome sits above terminal content. The receipt thumbnail is
@@ -10354,9 +10433,6 @@ impl Renderer {
         // and the context-menu labels both remain readable above images.
         self.menu_quads.draw(&mut pass);
         self.media_receipt_img.draw(&mut pass);
-        if let Some(viewer) = &self.media_viewer_img {
-            viewer.draw(&mut pass);
-        }
         self.menu_text_renderer
             .render(&self.atlas, &self.viewport, &mut pass)?;
         Ok(())
@@ -10531,7 +10607,10 @@ impl Renderer {
         }
     }
 
-    /// Build one pane's text buffer + background/cursor/selection/search quads.
+    /// Build one pane's cells, cursor and text, and keep every quad it adds
+    /// inside the pane's terminal: a snapshot can be briefly larger than a
+    /// terminal that has just shrunk for its preview lane, and its extra
+    /// rows must not paint over the lane or past the pane.
     #[allow(clippy::too_many_arguments)]
     fn build_pane(
         &mut self,
@@ -10546,10 +10625,48 @@ impl Renderer {
         card_frame: &inline_cards::CardFrame,
         card_base: &mut Vec<QuadInstance>,
         card_cursors: &mut Vec<QuadInstance>,
-        // Terminator parity (TERMINATOR-PANE-TITLEBAR-DESIGN.md): the per-pane
-        // titlebar height reserved so cell content doesn't overlap the bar.
-        // 0.0 when the titlebar is off.
-        pane_titlebar_h: f32,
+    ) -> bool {
+        let starts = (
+            quads.len(),
+            pane_bases.len(),
+            card_base.len(),
+            card_cursors.len(),
+        );
+        let text_changed = self.build_pane_cells(
+            idx,
+            pv,
+            cfg,
+            family,
+            window_focused,
+            search_highlights,
+            quads,
+            pane_bases,
+            card_frame,
+            card_base,
+            card_cursors,
+        );
+        clip_quads(&mut quads[starts.0..], pv.terminal);
+        clip_quads(&mut pane_bases[starts.1..], pv.terminal);
+        clip_quads(&mut card_base[starts.2..], pv.terminal);
+        clip_quads(&mut card_cursors[starts.3..], pv.terminal);
+        text_changed
+    }
+
+    /// Build one pane's text buffer + background/cursor/selection/search quads.
+    #[allow(clippy::too_many_arguments)]
+    fn build_pane_cells(
+        &mut self,
+        idx: usize,
+        pv: &PaneView<'_>,
+        cfg: &Config,
+        family: &str,
+        window_focused: bool,
+        search_highlights: &[HighlightRect],
+        quads: &mut Vec<QuadInstance>,
+        pane_bases: &mut Vec<QuadInstance>,
+        card_frame: &inline_cards::CardFrame,
+        card_base: &mut Vec<QuadInstance>,
+        card_cursors: &mut Vec<QuadInstance>,
     ) -> bool {
         // True iff this pane mutated its text buffer this frame (a row
         // reshaped, or the line count changed). When no pane changed, chrome
@@ -10560,13 +10677,8 @@ impl Renderer {
         // reshape and no glyph re-encode.
         let mut text_changed = false;
         let theme = &cfg.theme;
-        let (_, _, rw, rh) = pv.rect;
-        let (ox, oy) = pane_grid_origin(
-            pv.rect,
-            (cfg.padding_x, cfg.padding_y),
-            pane_titlebar_h,
-            cfg.title_at_bottom,
-        );
+        let (_, _, rw, rh) = pv.terminal;
+        let (ox, oy) = pane_grid_origin(pv.terminal, (cfg.padding_x, cfg.padding_y));
         let cw = self.cell_w;
         let ch = self.cell_h;
         // Everything below reads the lock-free snapshot captured by `redraw`,
@@ -10596,9 +10708,7 @@ impl Renderer {
         } else {
             cfg.handle_size as f32
         };
-        if let Some((bx, by, bwid, bhgt)) =
-            pane_backdrop_rect(pv.rect, bw, pane_titlebar_h, cfg.title_at_bottom)
-        {
+        if let Some((bx, by, bwid, bhgt)) = pane_backdrop_rect(pv.terminal, bw) {
             let backdrop = rect(
                 bx,
                 by,
@@ -10614,10 +10724,9 @@ impl Renderer {
             }
         }
 
-        let fallback_clip = pane_backdrop_rect(pv.rect, bw, pane_titlebar_h, cfg.title_at_bottom)
-            .and_then(|body| {
-                inline_image_clip(body, (ox, oy), (cols, snap.screen_lines), (cw, ch))
-            });
+        let fallback_clip = pane_backdrop_rect(pv.terminal, bw).and_then(|body| {
+            inline_image_clip(body, (ox, oy), (cols, snap.screen_lines), (cw, ch))
+        });
 
         // Take the pooled scratch (with last frame's String
         // buffers) instead of allocating fresh. `n` is the LOGICAL run count;
@@ -10997,7 +11106,7 @@ impl Renderer {
                         ch: gch,
                         emoji_qualified: gqualified,
                         color: gcolor,
-                        clip: pv.rect,
+                        clip: pv.terminal,
                     });
                 }
             }
@@ -11025,7 +11134,7 @@ impl Renderer {
         buf.set_metrics(pm);
         buf.set_size(
             Some((rw - cfg.padding_x * 2.0).max(1.0)),
-            Some((rh - cfg.padding_y * 2.0 - pane_titlebar_h).max(1.0)),
+            Some((rh - cfg.padding_y * 2.0).max(1.0)),
         );
         // Terminal rows are hard-wrapped by the VT engine at `cols`; the renderer
         // must NEVER soft-wrap. Wrap::None keeps exactly one layout run per buffer
@@ -11189,7 +11298,6 @@ impl Renderer {
         &mut self,
         panes: &[PaneView<'_>],
         cfg: &Config,
-        pane_titlebar_h: f32,
         out: &mut Vec<GlyphInstance>,
         clips: &mut Vec<GlyphClip>,
     ) {
@@ -11214,13 +11322,8 @@ impl Renderer {
         let queue = &gpu.queue;
 
         for (i, pv) in panes.iter().enumerate() {
-            let (rx, ry, rw, rh) = pv.rect;
-            let (ox, oy) = pane_grid_origin(
-                pv.rect,
-                (pad_x, pad_y),
-                pane_titlebar_h,
-                cfg.title_at_bottom,
-            );
+            let (rx, ry, rw, rh) = pv.terminal;
+            let (ox, oy) = pane_grid_origin(pv.terminal, (pad_x, pad_y));
             // This pane's glyphs form one contiguous instance range; record it
             // with the pane rect so `draw` can scissor-clip text to the pane.
             let clip_start = out.len() as u32;
@@ -11883,8 +11986,8 @@ mod shaped_row_tests {
     fn build_pane_keys_and_shapes_the_same_extent() {
         let src = production_source();
         let build_pane = src
-            .split_once("    fn build_pane(")
-            .expect("build_pane")
+            .split_once("    fn build_pane_cells(")
+            .expect("build_pane_cells")
             .1
             .split_once("\n    fn ")
             .expect("end of build_pane")
@@ -14498,6 +14601,20 @@ pub fn bell_flash_alpha(theme: &kettle_config::Theme, cfg: &Config, ramp: f32) -
     color::perceptual_wash_alpha(theme.background, theme.foreground, step)
 }
 
+/// Shrink each of `quads` to its part inside `clip`, to nothing when it lies
+/// wholly outside. In place, so ranges into the list stay valid.
+fn clip_quads(quads: &mut [QuadInstance], clip: (f32, f32, f32, f32)) {
+    let (cx, cy, cw, ch) = clip;
+    for quad in quads {
+        let x0 = quad.pos[0].max(cx);
+        let y0 = quad.pos[1].max(cy);
+        let x1 = (quad.pos[0] + quad.size[0]).min(cx + cw);
+        let y1 = (quad.pos[1] + quad.size[1]).min(cy + ch);
+        quad.pos = [x0, y0];
+        quad.size = [(x1 - x0).max(0.0), (y1 - y0).max(0.0)];
+    }
+}
+
 fn rect(x: f32, y: f32, w: f32, h: f32, c: Rgb, a: f32) -> QuadInstance {
     QuadInstance {
         pos: [x, y],
@@ -15171,50 +15288,23 @@ fn unpremultiply_rgba8(pixels: &mut [u8], srgb_encoded: bool) {
     }
 }
 
-/// Surface-pixel origin of a pane's terminal grid.
-///
-/// A top titlebar consumes space before row zero; a bottom titlebar consumes
-/// the same vertical space after the final row and therefore must not move the
-/// origin. Renderer content and UI pointer/IME projection share this helper so
-/// changing the title position cannot shift their coordinate systems apart.
-pub fn pane_grid_origin(
-    pane: (f32, f32, f32, f32),
-    padding: (f32, f32),
-    pane_titlebar_h: f32,
-    title_at_bottom: bool,
-) -> (f32, f32) {
-    let title_top = if title_at_bottom {
-        0.0
-    } else {
-        pane_titlebar_h
-    };
-    (pane.0 + padding.0, pane.1 + padding.1 + title_top)
+/// Surface-pixel origin of a pane's terminal grid: inside the padding of its
+/// terminal rectangle, which the layout has already carved clear of the
+/// pane's titlebar (above or below) and preview lane.
+pub fn pane_grid_origin(terminal: (f32, f32, f32, f32), padding: (f32, f32)) -> (f32, f32) {
+    (terminal.0 + padding.0, terminal.1 + padding.1)
 }
 
-/// The interior rectangle of a pane to paint with its
-/// own default background, given the pane `(x, y, w, h)`, border width
-/// `bw`, titlebar strip height `pane_titlebar_h` (0 when off), and whether
-/// the titlebar sits at the bottom. Returns the rect *inside* the border
-/// and clear of the titlebar so the backdrop never overpaints the focus
-/// border or the per-pane titlebar quad. `None` when the interior would be
-/// empty (degenerate pane / border ≥ half the size).
-fn pane_backdrop_rect(
-    pane: (f32, f32, f32, f32),
-    bw: f32,
-    pane_titlebar_h: f32,
-    title_at_bottom: bool,
-) -> Option<(f32, f32, f32, f32)> {
-    let (rx, ry, rw, rh) = pane;
-    let (title_top, title_bot) = if title_at_bottom {
-        (0.0, pane_titlebar_h)
-    } else {
-        (pane_titlebar_h, 0.0)
-    };
-    let bx = rx + bw;
-    let by = ry + bw + title_top;
+/// The interior of a pane's terminal to paint with its own default
+/// background: the terminal rectangle `(x, y, w, h)` inset by the border
+/// width `bw`, so the backdrop never overpaints the focus border, the
+/// titlebar or the preview lane beside it. `None` when the interior would be
+/// empty (a degenerate pane, or a border at least half its size).
+fn pane_backdrop_rect(terminal: (f32, f32, f32, f32), bw: f32) -> Option<(f32, f32, f32, f32)> {
+    let (rx, ry, rw, rh) = terminal;
     let bwid = (rw - 2.0 * bw).max(0.0);
-    let bhgt = (rh - 2.0 * bw - title_top - title_bot).max(0.0);
-    (bwid > 0.0 && bhgt > 0.0).then_some((bx, by, bwid, bhgt))
+    let bhgt = (rh - 2.0 * bw).max(0.0);
+    (bwid > 0.0 && bhgt > 0.0).then_some((rx + bw, ry + bw, bwid, bhgt))
 }
 
 /// The foreground a cell's glyph is drawn in, after the attributes that modify
@@ -15831,7 +15921,18 @@ fn text_layout_damage_key(
     cfg.title_at_bottom.hash(&mut h);
     for pv in panes {
         pv.id.hash(&mut h);
-        for v in [pv.rect.0, pv.rect.1, pv.rect.2, pv.rect.3] {
+        // The terminal can move inside an unmoved pane (a preview lane
+        // opening or closing), and its glyphs move with it.
+        for v in [
+            pv.rect.0,
+            pv.rect.1,
+            pv.rect.2,
+            pv.rect.3,
+            pv.terminal.0,
+            pv.terminal.1,
+            pv.terminal.2,
+            pv.terminal.3,
+        ] {
             hf(&mut h, v);
         }
         pv.snap.columns.hash(&mut h);
@@ -19806,13 +19907,16 @@ mod pane_buffer_lifecycle_tests {
     /// per-cell loop skips default-bg cells (they'd otherwise leak the
     /// focused pane's clear color). The backdrop rect must stay INSIDE the
     /// border and clear of the titlebar strip so it never overpaints the
-    /// focus border or per-pane titlebar.
+    /// focus border or per-pane titlebar. The terminal it is given is the
+    /// pane less its titlebar, as the layout carves it.
     #[test]
     fn pane_backdrop_rect_stays_inside_border_and_titlebar() {
         use super::{pane_backdrop_rect, pane_grid_origin};
         // 200x150 pane at (10, 20), 2px border, 18px titlebar at the top.
         let pane = (10.0, 20.0, 200.0, 150.0);
-        let (x, y, w, h) = pane_backdrop_rect(pane, 2.0, 18.0, false).unwrap();
+        let below_title = (10.0, 38.0, 200.0, 132.0);
+        let above_title = (10.0, 20.0, 200.0, 132.0);
+        let (x, y, w, h) = pane_backdrop_rect(below_title, 2.0).unwrap();
         // Inside the left/top border, below the top titlebar.
         assert_eq!(x, 12.0);
         assert_eq!(y, 40.0); // 20 + 2 (border) + 18 (titlebar)
@@ -19822,25 +19926,22 @@ mod pane_buffer_lifecycle_tests {
         assert!(y + h <= pane.1 + pane.3 - 2.0 + f32::EPSILON);
 
         // Titlebar at the bottom: interior shifts to leave the bottom strip.
-        let (_, yb, _, hb) = pane_backdrop_rect(pane, 2.0, 18.0, true).unwrap();
+        let (_, yb, _, hb) = pane_backdrop_rect(above_title, 2.0).unwrap();
         assert_eq!(yb, 22.0); // 20 + 2 (border), no top titlebar
         assert_eq!(hb, 128.0); // 150 - 2*2 - 18 (bottom titlebar)
 
         // No titlebar (h = 0): interior is the full pane minus border.
-        let (_, y0, _, h0) = pane_backdrop_rect(pane, 1.0, 0.0, false).unwrap();
+        let (_, y0, _, h0) = pane_backdrop_rect(pane, 1.0).unwrap();
         assert_eq!(y0, 21.0);
         assert_eq!(h0, 148.0);
 
         // Degenerate pane (border ≥ half the size) → None, no quad pushed.
-        assert!(pane_backdrop_rect((0.0, 0.0, 3.0, 3.0), 2.0, 0.0, false).is_none());
+        assert!(pane_backdrop_rect((0.0, 0.0, 3.0, 3.0), 2.0).is_none());
 
         // The terminal grid follows the title position: top titles move row
         // zero down, bottom titles reserve the same height after the grid.
-        assert_eq!(
-            pane_grid_origin(pane, (6.0, 8.0), 18.0, false),
-            (16.0, 46.0)
-        );
-        assert_eq!(pane_grid_origin(pane, (6.0, 8.0), 18.0, true), (16.0, 28.0));
+        assert_eq!(pane_grid_origin(below_title, (6.0, 8.0)), (16.0, 46.0));
+        assert_eq!(pane_grid_origin(above_title, (6.0, 8.0)), (16.0, 28.0));
     }
 
     /// The background-image cache must (a) key on blur
@@ -20217,7 +20318,7 @@ mod pane_buffer_lifecycle_tests {
             "build_pane must route every pane backdrop through wallpaper-over or replacement semantics"
         );
         assert!(
-            src.contains("pane_backdrop_rect(pv.rect, bw, pane_titlebar_h, cfg.title_at_bottom)"),
+            src.contains("pane_backdrop_rect(pv.terminal, bw)"),
             "the backdrop must use the border/titlebar-aware geometry helper"
         );
     }
@@ -22010,8 +22111,9 @@ mod completion_panel_tests {
         assert!(hash.contains("self.media_receipt_title_text.hash(&mut h);"));
         assert!(hash.contains("self.media_receipt_detail_text.hash(&mut h);"));
         assert!(
-            hash.contains("self.media_viewer_text.shaped().hash(&mut h);"),
-            "browsing the media viewer changes its text without moving its buffers"
+            hash.contains("text.shaped().hash(&mut h);")
+                && hash.contains("for lane in &overlay.media_lanes {"),
+            "browsing a lane changes its text without moving its buffers"
         );
     }
 
@@ -23689,12 +23791,14 @@ mod inline_placement_budget_tests {
 
     #[test]
     fn inline_image_clip_excludes_padding_titlebar_and_pane_edges() {
-        let pane = (10.0, 30.0, 200.0, 120.0);
+        // A 200x120 pane at (10, 30) with a 20px titlebar, which the layout
+        // has already carved off the terminal: top, then bottom.
+        let below_title = (10.0, 50.0, 200.0, 100.0);
+        let above_title = (10.0, 30.0, 200.0, 100.0);
         let padding = (8.0, 8.0);
-        let titlebar_h = 20.0;
         // Pane interior after a 1px border and 20px top titlebar.
-        let pane_body = pane_backdrop_rect(pane, 1.0, titlebar_h, false).expect("pane body");
-        let top_origin = pane_grid_origin(pane, padding, titlebar_h, false);
+        let pane_body = pane_backdrop_rect(below_title, 1.0).expect("pane body");
+        let top_origin = pane_grid_origin(below_title, padding);
         // The grid starts another 8px inside the pane and is wider/taller than
         // the remaining body. The intersection must start at the grid (so no
         // padding/titlebar paint) and end at the pane body (so no sibling/chrome
@@ -23709,8 +23813,8 @@ mod inline_placement_budget_tests {
         );
 
         let bottom_title_body =
-            pane_backdrop_rect(pane, 1.0, titlebar_h, true).expect("bottom-title pane body");
-        let bottom_origin = pane_grid_origin(pane, padding, titlebar_h, true);
+            pane_backdrop_rect(above_title, 1.0).expect("bottom-title pane body");
+        let bottom_origin = pane_grid_origin(above_title, padding);
         assert_eq!(
             inline_image_clip(bottom_title_body, bottom_origin, (30, 10), (8.0, 16.0)),
             Some([18.0, 38.0, 191.0, 91.0]),
@@ -24512,6 +24616,8 @@ mod text_layout_damage_tests {
         let pane = |rect: (f32, f32, f32, f32)| PaneView {
             id: 1,
             rect,
+            terminal: rect,
+            titlebar: None,
             snap: &snap,
             inline_cards: None,
             tr: kettle_i18n::Translator::default(),
@@ -24543,6 +24649,16 @@ mod text_layout_damage_tests {
         assert_ne!(
             shortened, moved,
             "a pane of unchanged size at a new origin must invalidate the key too"
+        );
+
+        // A preview lane opening shrinks the terminal inside an unmoved pane.
+        let leaf = (0.0, 0.0, 800.0, 600.0);
+        let mut carved = pane(leaf);
+        carved.terminal = (0.0, 0.0, 800.0, 360.0);
+        assert_ne!(
+            full,
+            text_layout_damage_key(&[carved], &cfg, surface, cell, 0.0),
+            "a terminal carved inside an unmoved pane must invalidate the key"
         );
     }
 }

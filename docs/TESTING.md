@@ -3842,9 +3842,9 @@ copies of one card apart, and forgets a card no longer drawn. Only a
 presented frame puts cards on screen (a guard on the renderer's frame
 path), so one whose present timed out neither moves the hit targets nor
 starts a card's half second. The card's press and release come before
-everything but dialogs and the viewer on both the native and control paths,
-only for a primary press without Shift. The release opens nothing while a
-dialog or the viewer is up, and every dialog opener, the context menu,
+everything but dialogs and the preview lanes on both the native and control
+paths, only for a primary press without Shift. The release opens nothing
+while a dialog is up, and every dialog opener, the context menu,
 search, focus loss and a new primary press end a card press, so a dialog
 opened and closed while the button is held still cancels the click.
 `media::sightings` tests the half second per spot, two printed copies apart,
@@ -3940,14 +3940,11 @@ another while full of newer ones (`a_full_store_of_new_copies_is_busy` turns
 that into the busy notice), and still counts a copy it could not delete,
 deleting it at cleanup, and takes nothing once closed
 (`a_copy_that_will_not_go_still_counts_until_cleanup`, skipped as root), and `signing::only_preview_passes_for_preview`
-that nothing else passes for Preview. In the viewer,
+that nothing else passes for Preview. In a preview lane,
 `the_open_outside_button_sits_before_close` places the `↗` button between
-browsing and close and hit-tests it,
-`the_viewer_draws_its_open_outside_button_only_when_offered` renders it on
-the GPU as a button cell with its glyph only when offered, and
-`the_media_viewer_takes_only_esc_the_arrows_and_its_open_key` checks a bare O
-(Shift allowed, no Ctrl, Alt or Cmd) is taken only when offered and that the
-key, the button and the footer all reach the same hand-off. The tip: `media::tip` tests it shows once on the first card
+browsing and the collapse toggle and hit-tests it, and
+`a_lane_draws_its_open_outside_button_only_when_offered` renders it on the
+GPU as a button cell with its glyph only when offered. The tip: `media::tip` tests it shows once on the first card
 and is remembered, that of two Kettles that loaded before either showed it
 only the first to record it shows it, that a corrupt, oversized or empty
 record is left alone and stops the tip, and that only a regular file is read,
@@ -3962,7 +3959,7 @@ on a presented frame's first shown card with no dialog, menu or viewer over
 the cards (checked every presented frame while it waits, so a card that
 loads in place or is uncovered qualifies) and its end on an open or at its
 deadline. Checked live with Codex CLI 0.162.0: a
-`send_mouse` click on a Codex card opened the viewer on its item, and a
+`send_mouse` click on a Codex card opened its item, and a
 press on the card released after Settings opened left Settings up and
 opened nothing. Held buttons in general:
 `held_buttons::tests` checks one entry per button, the newest dragging, each
@@ -3984,7 +3981,7 @@ a repeated press release what they end. Checked live with a probe that logs SGR 
 pane: a press in one tab released after switching tabs, and a press in one
 split released after moving focus to the other, used to leave the first
 probe a press alone and hand the second a drag and release; now the first
-gets the whole click and the second nothing. The viewer's sender line finds its program's path and signer in
+gets the whole click and the second nothing. A lane's sender line finds its program's path and signer in
 any language's word order, whatever they hold, and a line too narrow even for
 the path's last segment shortens around the signer, which stays whole. In
 `kettle-ui`'s `media` module, `route` tests: the nearest live pane ancestor
@@ -4003,41 +4000,69 @@ by a return or a panic, closes its result channel before it wakes the App.
 The shelf counts unseen items, and a replaced item is unseen again unless it
 is the one on screen.
 
-The media viewer (`kettle-render`'s `media_viewer` tests) sits inside its
-pane with its controls on one header row and the sender on a line of its own
-under kind and size; a sender line too long for the viewer shortens the
-program's path from its middle, keeping its last segment and who signed it, needs no browsing buttons for one
-item, fits its image centered and never enlarged, keeps the image's shape
-within half a pixel at one scale and lands on whole pixels inside its area (a
-sweep of wide and tall sizes under whole and fractional overlay metrics; an
-image too thin to fit keeps one pixel),
-maps presses to previous, next, close,
-inside and outside, has no geometry in a pane too small or with a degenerate
-cell, and bounds and clips its checkerboard. Drift tests keep the viewer's
-shaped text in the retained chrome damage key, so browsing repaints its
-labels, and reshape it on a font reload; a font-system test shows an
-invalidated line takes the new family though its text is unchanged.
-`kettle-ui` tests pin that the viewer takes only Esc and the arrows, that the
-titlebar badge counts unseen items only, and that both the native and the
-ctl press paths reach the viewer before the tab bar, the update banner, the
-receipt or the terminal, and only the primary button acts. A Back or
-Forward press stops at the viewer, a modal or a context menu, and a release
-reaches the terminal only after a press it wrote (one the search bar kept back
-does not count), once. Wheel motion over
-the viewer is dropped before the accumulator banks it. A confirmation, a
-context menu, or any other modal closes it, as does a resize that leaves its
-pane too small to draw it, and the receipt is hidden under it. The shelf's
-shortcut closes any open viewer whatever key it is bound to, ahead of Esc and
-the arrows, a bare modifier leaves the viewer open, and the shortcut runs
-once per press. Its accessibility
-node says the item's place on the shelf and a release, and enters the
-accessibility key so browsing republishes it. For a live check (macOS, worker signed),
-show a PNG and an SVG, run `kettle ctl perform_action --json
-'{"action":"open_media_shelf"}'` and take screenshots: the viewer shows the
-newest item with its title, kind, size and `1/2`; clicking `›` shows the
-other with its own text; `×` and a click in the margin outside close it; the
-window title counts unopened items. Real Esc and arrow presses need window
-focus, which the release's native checks cover.
+Pane geometry and preview lanes. `kettle-ui`'s `pane_partition` tests check
+that a pane's titlebar, terminal and lane tile its leaf exactly, with no
+overlap and nothing left over, across fractional origins and cells, both
+titlebar positions, both lane sides, expanded and collapsed lanes and sizes
+around every floor (`partitions_tile_the_leaf_without_overlap`); that a
+collapsed or cramped right lane is a strip along the bottom with the pane's
+whole width; that with
+no lane the terminal is the leaf less its titlebar, as before lanes existed;
+that a lane takes about its share and leaves the terminal whole rows (or,
+on the right, its rows); that it never takes the terminal below 20 columns
+and 5 rows; that a collapsed lane is a strip, or a badge that changes
+nothing when the strip would cost the floor's last row; that closing a lane
+gives back exactly the partition the pane had; that bad numbers are refused
+where they come in and a degenerate leaf keeps its pane; and that a lone
+pane has no titlebar. `mux`'s lane tests check that a lane carves only its
+own pane, closes back exactly and collapses to a strip, survives zoom (a
+hidden pane keeps its lane) and stays with its pane through a split (the new
+pane has none), and leaves with its pane, with anything its window refuses
+and with a torn-off tab. The App tests that pinned titlebar insets now
+check pointer mapping and grid sizes through the partition
+(`titlebar_inset_realigns_hit_test_and_grid`).
+
+The lane panel (`kettle-render`'s `media_lane` tests) fills its lane with
+its controls on one header row (previous, next, open outside, collapse,
+close) and the sender on a line of its own under kind and size; a sender
+line too long for the lane shortens the program's path from its middle,
+keeping its last segment and who signed it; it needs no browsing buttons
+for one item, fits its image centered and never enlarged, keeps the image's
+shape within half a pixel at one scale and lands on whole pixels inside its
+area (a sweep of wide and tall sizes under whole and fractional overlay
+metrics; an image too thin to fit keeps one pixel), maps presses to its
+controls and to the lane itself and nothing outside it, keeps every control
+inside however narrow it gets, dropping them in order down to close and
+collapse (`a_narrow_header_keeps_every_control_inside_the_lane`), is its
+header alone when collapsed or too short for its rows, has no panel in a lane too narrow
+or with a degenerate cell, and bounds and clips its checkerboard. On the
+GPU, `a_terminal_paints_nothing_outside_its_rect` checks a snapshot taller
+than its terminal paints nothing below it (glyphs and cell quads both), and
+`a_preview_lane_paints_its_panel_and_leaves_the_terminal` checks the panel
+fills the lane with its title while the terminal beside it is unchanged; a
+drift test pins that lanes draw after the terminal's text and cursor and
+before its dimming, scrollbar and every overlay. Other drift tests keep each
+lane's shaped text in the retained chrome damage key and reshape it on a
+font reload, and the text layout damage key changes when a terminal is
+carved inside an unmoved pane. `kettle-ui` tests pin that a lane takes no
+keys, that the native and ctl press paths reach the lanes before inline
+cards, the receipt and the terminal and only the primary button acts, that a
+side button over a lane goes nowhere, that wheel motion over a lane is
+dropped before the accumulator banks it, that plain motion over a lane
+reaches no program while a drag from the terminal still does, that modals
+open over lanes without closing them and take them out of the
+accessibility tree and its actions, that opening a lane with no room is
+refused with a notice and leaves the item unseen, that the event loop prunes a lane with nothing to show, that
+the shelf's shortcut toggles the focused pane's lane, and that a lane's
+accessibility node says the item's place on the shelf and a release, enters
+the accessibility key, and that lane node ids round-trip and never collide
+with pane, card or other nodes. For a live check (macOS, worker signed), show
+a PNG, run `kettle ctl perform_action --json '{"action":"open_media_shelf"}'`
+and take screenshots: the lane opens along the bottom with the item's title,
+kind, size and sender, `stty size` in the pane reports fewer rows and the
+same columns, `ui_geometry` reports the lane under `preview_lanes`, a click on
+`▾` leaves a one-row strip and on `×` gives the terminal back its size
+exactly.
 
 `kettle mcp --display`: unit tests pin that it offers exactly `kettle_show`
 (path required, no other property) and refuses every full-mode tool, that
