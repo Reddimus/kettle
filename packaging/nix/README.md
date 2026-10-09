@@ -65,7 +65,7 @@ home.packages = [ inputs.kettle.packages.${pkgs.system}.default ];
 git clone https://github.com/Reddimus/kettle
 cd kettle
 nix develop
-# Drops you into a shell with the workspace MSRV (Rust 1.89) and
+# Drops you into a shell with the workspace MSRV (Rust 1.95) and
 # every runtime lib on LD_LIBRARY_PATH. `cargo run`, `cargo test`,
 # `cargo clippy` all work without further setup.
 ```
@@ -94,7 +94,7 @@ for Rust dependencies.
 
 ## What the flake does that's kettle-specific
 
-- **Rust toolchain pinned to 1.89** via
+- **Rust toolchain derived from the workspace MSRV (1.95)** via
   [oxalica/rust-overlay](https://github.com/oxalica/rust-overlay)
   — matches the workspace MSRV declared in `Cargo.toml`.
   Drift-proofs the Nix path against a nixpkgs Rust version bump.
@@ -104,7 +104,7 @@ for Rust dependencies.
   anywhere beneath that ancestry. The derivation therefore runs tests for only
   the root-independent `kettle-vt` and `kettle-remote` crates; it still builds
   the complete application. Native Linux, macOS, and Windows CI plus the Linux
-  Rust 1.89 MSRV job are authoritative for the full workspace, including
+  Rust 1.95 MSRV job are authoritative for the full workspace, including
   private-state, configuration persistence, screenshots, recording, local IPC,
   and updater tests. Package-level selection also avoids negative security
   tests passing for the wrong early rejection reason.

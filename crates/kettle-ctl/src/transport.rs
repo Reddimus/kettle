@@ -392,6 +392,29 @@ impl CtlStream {
         }
     }
 
+    /// The pid the kernel reports for the other end: the connecting process
+    /// for an accepted connection, the server for a client. Linux reports the
+    /// process that connected; macOS the last process to use the peer socket;
+    /// Windows the process that opened the pipe end. A pid alone names no
+    /// process instance, so callers pair it with a start time.
+    pub fn peer_pid(&self) -> io::Result<u32> {
+        match self {
+            #[cfg(unix)]
+            CtlStream::Unix(stream) => {
+                use std::os::fd::AsRawFd as _;
+                let pid = unix_peer_pid(stream.stream.as_raw_fd())?;
+                u32::try_from(pid)
+                    .ok()
+                    .filter(|pid| *pid != 0)
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid peer pid"))
+            }
+            #[cfg(windows)]
+            CtlStream::Windows(stream) => {
+                windows_security::pipe_peer_pid(&stream.file, stream.server_end)
+            }
+        }
+    }
+
     /// Has the peer hung up? Non-destructive and non-blocking (a zero-byte
     /// peek). Lets `wait_for`'s poll loop notice a vanished client instead of
     /// pinning one of the MAX_CONNECTIONS slots, and hammering the UI thread
@@ -861,7 +884,9 @@ mod windows_security {
         EqualSid, GetTokenInformation, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
         TOKEN_QUERY, TOKEN_USER, TokenUser,
     };
-    use windows_sys::Win32::System::Pipes::GetNamedPipeClientProcessId;
+    use windows_sys::Win32::System::Pipes::{
+        GetNamedPipeClientProcessId, GetNamedPipeServerProcessId,
+    };
     use windows_sys::Win32::System::Threading::{
         GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
     };
@@ -995,14 +1020,34 @@ mod windows_security {
         Ok(LocalSecurityDescriptor(descriptor))
     }
 
-    pub(super) fn client_is_same_user(file: &std::fs::File) -> io::Result<bool> {
-        let mut client_pid = 0u32;
-        // SAFETY: `file` owns a connected named-pipe server handle.
-        if unsafe { GetNamedPipeClientProcessId(file.as_raw_handle() as HANDLE, &mut client_pid) }
-            == 0
-        {
+    /// The pid at the other end of a connected pipe handle: the client for a
+    /// server end, the server for a client end.
+    pub(super) fn pipe_peer_pid(file: &std::fs::File, server_end: bool) -> io::Result<u32> {
+        let mut pid = 0u32;
+        let handle = file.as_raw_handle() as HANDLE;
+        // SAFETY: `file` owns a connected named-pipe handle and `pid` is a
+        // valid out-parameter for the call.
+        let ok = unsafe {
+            if server_end {
+                GetNamedPipeClientProcessId(handle, &mut pid)
+            } else {
+                GetNamedPipeServerProcessId(handle, &mut pid)
+            }
+        };
+        if ok == 0 {
             return Err(io::Error::last_os_error());
         }
+        if pid == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid peer pid",
+            ));
+        }
+        Ok(pid)
+    }
+
+    pub(super) fn client_is_same_user(file: &std::fs::File) -> io::Result<bool> {
+        let client_pid = pipe_peer_pid(file, true)?;
         // SAFETY: the PID came from the pipe kernel object.
         let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, client_pid) };
         if process.is_null() {
@@ -1317,8 +1362,71 @@ pub fn connect(endpoint: &str) -> io::Result<CtlStream> {
     authenticate_connected(stream, CtlStream::peer_is_same_user)
 }
 
+/// The peer pid of a connected Unix socket. Linux reports the process that
+/// connected; macOS the last process to use the peer socket.
+#[cfg(unix)]
+fn unix_peer_pid(fd: std::os::fd::RawFd) -> io::Result<libc::pid_t> {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        let mut credentials: libc::ucred = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        // SAFETY: `credentials` and `len` are valid writable buffers and the
+        // caller keeps `fd` open for the duration of the call.
+        let rc = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                std::ptr::addr_of_mut!(credentials).cast(),
+                &mut len,
+            )
+        };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if len as usize != std::mem::size_of::<libc::ucred>() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "short peer credentials",
+            ));
+        }
+        Ok(credentials.pid)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut pid: libc::pid_t = 0;
+        let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+        // SAFETY: `pid` and `len` are valid writable buffers and the caller
+        // keeps `fd` open for the duration of the call.
+        let rc = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_LOCAL,
+                libc::LOCAL_PEERPID,
+                std::ptr::addr_of_mut!(pid).cast(),
+                &mut len,
+            )
+        };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if len as usize != std::mem::size_of::<libc::pid_t>() {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "short peer pid"));
+        }
+        Ok(pid)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+    {
+        let _ = fd;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "peer pids are unavailable on this Unix target",
+        ))
+    }
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::io::BufRead as _;
 
@@ -1491,7 +1599,7 @@ mod tests {
         canceller.join().expect("canceller thread");
     }
 
-    fn test_endpoint(tag: &str) -> String {
+    pub(crate) fn test_endpoint(tag: &str) -> String {
         let pid = std::process::id();
         #[cfg(unix)]
         return std::env::temp_dir()
@@ -1676,6 +1784,28 @@ mod tests {
             server.join().expect("server thread"),
             "accepting from this same process must report the same user"
         );
+    }
+
+    /// Both ends of a same-process connection name this process.
+    #[test]
+    fn peer_pid_names_the_process_at_each_end() {
+        let endpoint = test_endpoint("peer-pid");
+        let listener = CtlListener::bind(&endpoint).expect("bind");
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let server = std::thread::spawn(move || {
+            let conn = listener.accept().expect("accept");
+            let pid = conn.peer_pid().expect("server-side peer pid");
+            // Keep this end open until the client has asked about it.
+            let _ = done_rx.recv();
+            pid
+        });
+        let client = connect(&endpoint).expect("connect");
+        assert_eq!(
+            client.peer_pid().expect("client-side peer pid"),
+            std::process::id()
+        );
+        done_tx.send(()).expect("release the server end");
+        assert_eq!(server.join().expect("server thread"), std::process::id());
     }
 
     #[test]

@@ -29,10 +29,11 @@
         overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs { inherit system overlays; };
 
-        # Pin to the workspace MSRV (1.89) so a `nix build`
+        # Derive the toolchain from the workspace MSRV so a `nix build`
         # uses exactly the toolchain CI verifies on every PR. Drift-
         # proofs the Nix path against a nixpkgs Rust version bump.
-        rustToolchain = pkgs.rust-bin.stable."1.89.0".default;
+        workspaceMsrv = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package."rust-version";
+        rustToolchain = pkgs.rust-bin.stable."${workspaceMsrv}.0".default;
 
         rustPlatform = pkgs.makeRustPlatform {
           cargo = rustToolchain;
@@ -213,7 +214,7 @@
           # faithfully inside the derivation sandbox. Run only
           # root-identity-independent crates here. The native CI matrix
           # executes the complete workspace on Linux, macOS, and Windows, and
-          # the MSRV job repeats it on Rust 1.89. Do not add individual skips:
+          # the MSRV job repeats it on the declared workspace floor. Do not add individual skips:
           # later private-state, recording, IPC, and update tests share the
           # same impossible premise, while negative tests could pass for the
           # wrong early-rejection reason.

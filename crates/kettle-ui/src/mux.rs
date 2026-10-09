@@ -36,8 +36,25 @@ const MAX_QUEUED_USER_INPUT_BYTES: usize = MAX_USER_INPUT_MESSAGE_BYTES + 64 * 1
 const MAX_PROTOCOL_REPLY_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_QUEUED_PROTOCOL_REPLY_BYTES: usize = 2 * 1024 * 1024;
 
-fn pane_environment(config: &Config) -> Vec<(String, String)> {
+/// Names Kettle sets in every pane, which config cannot override.
+const KETTLE_PANE_ID: &str = "KETTLE_PANE_ID";
+const KETTLE_PID: &str = "KETTLE_PID";
+
+/// The environment a new pane starts with: the user's `env` entries, then
+/// Kettle's own values, appended last so they win. `KETTLE_PANE_ID` and
+/// `KETTLE_PID` name this pane and this Kettle for control clients started
+/// inside it. They are hints a program can still change, never proof of
+/// where a caller runs.
+fn pane_environment(config: &Config, pane_id: u64, kettle_pid: u32) -> Vec<(String, String)> {
     let mut environment = config.env.clone();
+    // Windows names are case-insensitive, so a differently cased user entry
+    // would otherwise survive beside Kettle's.
+    #[cfg(windows)]
+    environment.retain(|(name, _)| {
+        !name.eq_ignore_ascii_case(KETTLE_PANE_ID) && !name.eq_ignore_ascii_case(KETTLE_PID)
+    });
+    environment.push((KETTLE_PANE_ID.to_string(), pane_id.to_string()));
+    environment.push((KETTLE_PID.to_string(), kettle_pid.to_string()));
     // Append after user env so the runtime capability is authoritative. The
     // terminal's existing extra-env route also carries it into WSLENV.
     environment.push((
@@ -391,7 +408,7 @@ impl PtyInputQueue {
             }
             return PaneInputResult::Oversize;
         }
-        // Rust 1.99 renames fetch_update to try_update; the MSRV (1.89) predates it.
+        // Rust 1.99 renames fetch_update to try_update; the MSRV (1.95) predates it.
         #[allow(deprecated)]
         let reserved = queued_bytes.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
             current
@@ -599,6 +616,12 @@ pub(crate) enum PtyOutputClosePhase {
 pub struct Pane {
     pub inline_cards: kettle_render::InlineCards,
     pub term: Terminal,
+    /// The pane's own child process, read right after spawning it. Only this
+    /// thread reaps that child, and only later, so the pid still names it:
+    /// the identity can never belong to a process that reused the pid. A
+    /// control caller is verified in this pane when this process is one of
+    /// its ancestors. `None` when the OS would not describe the child.
+    pub caller_root: Option<kettle_ctl::process::ProcessIdentity>,
     pub rx: Receiver<TermEvent>,
     pty_input: PtyInputQueue,
     /// Terminator plugin parity: optional output sidechannel, `Some` when a
@@ -1822,7 +1845,10 @@ impl Mux {
         };
         // Shell integration must not take over a stock completion binding when
         // the matching UI is disabled.
-        let pane_env = pane_environment(cfg);
+        // Allocated before the spawn so the child's environment can name its
+        // pane. A failed spawn leaves a harmless gap; ids are never reused.
+        let id = NEXT_PANE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let pane_env = pane_environment(cfg, id, std::process::id());
         // Terminator parity: route through new_with_env so
         // cfg.term / cfg.colorterm / cfg.login_shell take effect at
         // PTY spawn. The legacy `Terminal::new` shim still exists
@@ -1852,8 +1878,12 @@ impl Mux {
             waker.clone(),
             output_tx,
         )?;
+        // Read before anything on this thread can reap the child; see
+        // `Pane::caller_root`.
+        let caller_root = term
+            .child_pid()
+            .and_then(|pid| kettle_ctl::process::identity(pid).ok());
         let pty_input = PtyInputQueue::new(&term, waker)?;
-        let id = NEXT_PANE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         term.link_startup_geometry(id);
         let initial_title = initial_pane_title(argv);
         // Only generic-shell panes ("kettle" seed) are eligible for conhost
@@ -1875,6 +1905,7 @@ impl Mux {
             Pane {
                 inline_cards: kettle_render::InlineCards::default(),
                 term,
+                caller_root,
                 rx,
                 pty_input,
                 output_rx,
@@ -8096,12 +8127,64 @@ mod node_tests {
         config
             .env
             .push(("KETTLE_COMPLETION_OVERLAY".to_string(), "stale".to_string()));
-        let environment = super::pane_environment(&config);
+        let environment = super::pane_environment(&config, 1, 2);
         assert_eq!(environment.last().unwrap().1, "1");
 
         config.completion_overlay = kettle_config::CompletionOverlayMode::Off;
-        let environment = super::pane_environment(&config);
+        let environment = super::pane_environment(&config, 1, 2);
         assert_eq!(environment.last().unwrap().1, "0");
+    }
+
+    /// Config cannot spoof which pane or Kettle a program runs in: Kettle's
+    /// values come after the user's, so the child sees Kettle's.
+    #[test]
+    fn pane_identity_overrides_user_env_values() {
+        let mut config = Config::default();
+        config
+            .env
+            .push(("KETTLE_PANE_ID".to_string(), "999".to_string()));
+        config.env.push(("KETTLE_PID".to_string(), "1".to_string()));
+        config.env.push(("KEEP".to_string(), "me".to_string()));
+        let environment = super::pane_environment(&config, 7, 4242);
+        // The effective value is the last one applied for each name.
+        let effective = |name: &str| {
+            environment
+                .iter()
+                .rev()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(effective("KETTLE_PANE_ID"), Some("7"));
+        assert_eq!(effective("KETTLE_PID"), Some("4242"));
+        assert_eq!(effective("KEEP"), Some("me"));
+        let user = environment
+            .iter()
+            .position(|(key, _)| key == "KEEP")
+            .unwrap();
+        let pane = environment
+            .iter()
+            .rposition(|(key, _)| key == "KETTLE_PANE_ID")
+            .unwrap();
+        assert!(user < pane, "Kettle's values come after the user's");
+    }
+
+    /// The pane id exists before the child does, so the child's environment
+    /// can carry it.
+    #[test]
+    fn pane_ids_are_allocated_before_the_child_spawns() {
+        let src = production_source();
+        let spawn = src.split_once("fn spawn_pane(").expect("spawn_pane").1;
+        let allocated = spawn
+            .find("let id = NEXT_PANE_ID.fetch_add(")
+            .expect("pane id allocation");
+        let environment = spawn
+            .find("pane_environment(cfg, id, std::process::id())")
+            .expect("pane environment names the pane");
+        let spawned = spawn
+            .find("Terminal::new_with_env_and_output_geometry_and_capabilities(")
+            .expect("terminal spawn");
+        assert!(allocated < environment && environment < spawned);
+        assert_eq!(spawn.matches("NEXT_PANE_ID.fetch_add(").count(), 1);
     }
 
     #[test]

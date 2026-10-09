@@ -289,14 +289,86 @@ if none runs; a launch flag keeps its precedence over a reload. Turning display
 off applies at the next launch. `get_state` reports the policy in force as
 `policy: {server, display}`, beside the original `mode` field.
 
+### Which pane is calling
+
+Every pane starts with `KETTLE_PANE_ID` (its pane id) and `KETTLE_PID` (the
+Kettle process) in its environment, set after your `env` entries so config
+cannot change them. They are hints: a program in the pane can still change
+them.
+
+What Kettle believes instead is the process tree. A client's first request
+carries a claim about itself, `caller: {pid, start_token, pane_hint, pid_hint}`.
+`start_token` is a decimal string: the platform's process start instant (clock
+ticks since boot on Linux, microseconds since the epoch on macOS, a creation
+`FILETIME` on Windows). Kettle reads the connecting process from the kernel the
+moment it accepts the connection, and believes the claim only if its pid and
+start match. It then walks the caller's parents, at most 64 links, on the
+connection's own thread. Each parent must be alive, readable, and no younger
+than its child, and the child must still name it after the parent is read. The
+caller is *verified* in a pane when that pane's own child process, whose
+identity Kettle read when it spawned it, is one of those ancestors. The nearest
+such pane wins.
+
+`get_state` reports the result:
+
+```json
+"caller": {
+  "verified": true,
+  "reason": null,
+  "pane": 7,
+  "window": 2,
+  "peer": {"pid": 4201, "start_token": "1791486593096067"},
+  "hint": {"pane": 7, "window": 2}
+}
+```
+
+An unverified caller has `pane` and `window` null and one fixed `reason`:
+`missing_claim` (no claim or no start token, as from older clients),
+`invalid_claim` (the first frame was malformed), `claim_changed` (a later
+request claimed another process), `peer_unavailable`, `claim_mismatch`,
+`peer_exited`, `peer_started_after_accept`, `ancestor_unavailable`,
+`parent_younger_than_child`, `chain_changed`, `cycle`, `depth_exceeded`,
+`deadline_exceeded`, `no_pane` or `unsupported`. `hint` repeats the pane the
+caller's environment names, only when it names this Kettle and one of its
+panes; it never makes a caller verified.
+
+The first nonblank frame fixes a connection's claim. A connection that starts
+without one, or with a malformed one, stays unverified; a later request that
+claims another process makes it unverified for good. `kettle ctl` and `kettle
+mcp` send the claim automatically; a client inherited across `fork()` refuses
+to speak. A parent the walk cannot read ends the chain, so a caller outside
+Kettle reads `no_pane`, and a daemonized, reparented or `tmux`-hosted process,
+whose chain no longer runs through a pane's child, is unverified. Verification
+describes the process the kernel names when Kettle accepts the connection,
+before reading any request, and the first request must claim that process.
+Linux and Windows name the process that connected. macOS names the last process
+to use the socket by then, so a descriptor handed on before Kettle accepts
+binds to the process that received it; that process must then claim itself and
+run in the pane, so an outside process reaches a pane only through the
+cooperation of a process inside it. A descriptor handed on after acceptance
+cannot match the claim, and no platform here names the writer of each later
+frame. Only `get_state` checks its caller today, so other methods cost nothing
+extra.
+
 The endpoint is local-only and user-private. Unix uses a `0600` domain socket;
 both accepted servers and connecting clients compare peer credentials with the
 effective uid. Windows rejects remote named-pipe clients, gives every pipe an
 exact token-user owner plus a protected owner/SYSTEM/Administrators DACL, and
 then compares the connecting process or pipe owner with the exact current
 token-user SID. A client authenticates that server identity before sending any
-request bytes. Discovery ignores links, unsafe permissions, mismatched pids,
-and non-v1 records. A discovery reads at most 1,024 registry entries from a
+request bytes: the kernel must name the registry entry's pid at the other end,
+and that process must still be the instance the entry recorded. A client picks
+the server `--pid` names; else the Kettle it runs inside, by matching its own
+ancestors' pids and start times against registry entries; else the one
+`KETTLE_PID` names; else the newest. A server chosen by name or ancestry is
+the only one tried, so a failure there never lands a request in another
+Kettle. Because the registry directory comes from the environment, each
+server also leaves a `<pid>.alias.json` pointer where the OS puts the registry
+for this user (`/run/user/<uid>` or the account's home on Unix, the Local
+AppData known folder on Windows), and clients read that location too, so one
+started with a stripped environment still finds its Kettle. The pointer only
+names the real entry, which is read and checked in its own registry. Discovery
+ignores links, unsafe permissions, mismatched pids, and non-v1 records. A discovery reads at most 1,024 registry entries from a
 walk of at most 8,192 directory entries, since each server's socket sits beside
 its entry; presence walks inspect at most 1,024 entries. A server unlinks its
 socket when it shuts down. Pruning a dead server's entry also removes that
@@ -354,7 +426,7 @@ so press Enter with `send_keys`, not a trailing `\n`.
 
 | Method | Mode | Result |
 |---|---|---|
-| `get_state` | read-only | version, pid, mode, `policy` (`{server: "off"\|"read-only"\|"full", display: bool}`, the policy in force), theme, focused pane, `windows` (count), `focused_window` (seq), `window_title`, `media` (`{availability: "checking"}` until the first check finishes, then `{availability: "available"}` or `{availability: "unavailable", reason}`; reasons: `worker_missing`, `unsafe_worker_file`, `unverified_worker`, `no_install_location`, `unsupported_platform`, `check_failed`, `not_configured`, `stuck_workers` (two killed workers would not exit; media is off until Kettle restarts)). Availability starts no worker; each render still requires the matching build handshake. Asking never waits on the check; each ask starts a fresh one in the background |
+| `get_state` | read-only | version, pid, mode, `policy` (`{server: "off"\|"read-only"\|"full", display: bool}`, the policy in force), `caller` (whether the connecting process runs in one of this Kettle's panes; see [Which pane is calling](#which-pane-is-calling)), theme, focused pane, `windows` (count), `focused_window` (seq), `window_title`, `media` (`{availability: "checking"}` until the first check finishes, then `{availability: "available"}` or `{availability: "unavailable", reason}`; reasons: `worker_missing`, `unsafe_worker_file`, `unverified_worker`, `no_install_location`, `unsupported_platform`, `check_failed`, `not_configured`, `stuck_workers` (two killed workers would not exit; media is off until Kettle restarts)). Availability starts no worker; each render still requires the matching build handshake. Asking never waits on the check; each ask starts a fresh one in the background |
 | `list_tabs` | read-only | every window's tabs: `window` (seq), index, title, active, pane ids |
 | `list_panes` | read-only | every window's panes: id, `window` (seq), tab, title, cwd, cols/rows, focused, argv, child_pid, agent_attached, read_only |
 | `read_screen` | read-only | visible viewport text + cursor + `cursor_visible` (DEC ?25) + history metadata + selection presence/range; `include_selection: true` includes selected text only when its preflight is at most 128 KiB (otherwise it is omitted and `selection_truncated` is true); with `scrollback_lines`, returns requested history plus the active screen for command-output capture (params: `pane`, `scrollback_lines`, `include_selection`, and paging fields) |

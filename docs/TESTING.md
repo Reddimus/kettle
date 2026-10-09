@@ -1546,7 +1546,7 @@ snapshot requiring a copy. These checks do not establish foreground UI pixels,
 quiet performance, or release artifact acceptance.
 Shared creation-order tests also check concurrent allocation across cloned screen
 budgets and refusal at `u64::MAX`. The allocator uses a checked compare-and-swap
-loop supported by Rust 1.89 and current stable toolchains.
+loop supported by Rust 1.95 and current stable toolchains.
 
 Native vi-mode regressions drive Alacritty's own cursor and
 selection through scrollback rotation and reflow, proving the cursor remains
@@ -3619,6 +3619,33 @@ launch `kettle --agent-server off --agent-display on` and confirm `kettle ctl
 get_state` is refused with `display_only`; then turn Agent previews on in
 Settings in a plain launch and confirm a running `kettle ctl` client is
 refused with `display_only` rather than finding no server.
+
+Caller verification has scripted and real-process coverage. `kettle-ctl`'s
+`identity` tests walk a scripted process table: a matching claim reaches the
+server; equal start ticks pass; a pid alone, a different start, or a pid reused
+before accept (S4's failure) never verifies; a peer that exits or is replaced
+after accept, a younger parent, a reparented child, a cycle, a spent deadline
+and a 65th link all fail closed; an unreadable parent ends the chain. Two real
+tests connect over the actual transport: the test process to itself, and a
+shell-started grandchild that the server verifies through the shell up to
+itself. `process` tests read this process and a child, a killed child before it
+is reaped, and Linux `stat` lines with hostile command names. `ctl_server`
+tests pin the claim latch and that `get_state` alone carries the check over a
+real connection; App tests pin the nearest-pane match and that hints never
+verify; `mux` tests pin that the pane id exists before the child and that
+config cannot override `KETTLE_PANE_ID`/`KETTLE_PID`. For a live check, run
+`kettle ctl get_state --pid $KETTLE_PID` inside a pane and confirm `caller`
+names it, then run it outside Kettle and confirm `no_pane`.
+
+Client selection is tested over scripted registries: the Kettle a client runs
+inside beats a newer one, the nearer of nested ones wins, a reused pid with
+another start is not an ancestor, its failure never falls through to another
+instance, `KETTLE_PID` is a fallback behind the ancestry and only when well
+formed, and an explicit `--pid` is exact. An alias leads a client that knows
+only the OS location to the real entry once, an alias to a missing entry leads
+nowhere, and a dead server's alias is withdrawn while its entry is left to its
+own registry. A real connection is accepted only when the kernel names the
+entry's pid and the live start matches its token.
 #### `kettle mcp`
 
 `kettle mcp --self-test` (in-process handshake +
@@ -3916,8 +3943,14 @@ retained compile/regression checks on **windows**:
   exit codes, happy-path basename round-trip
   (Windows path-translation parity).
 - The **MSRV verification job** builds and tests the workspace on the
-  declared Rust 1.89 floor (`dtolnay/rust-toolchain` with `toolchain: "1.89"`),
+  declared Rust 1.95 floor (`dtolnay/rust-toolchain` with `toolchain: "1.95"`),
   so a transitive-dep MSRV bump fails at PR time instead of release time.
+  `kettle-test-support`'s `msrv_consistency` test keeps the floor declared
+  once: the job's name, toolchain, cache key and locked build and test
+  commands, the Nix toolchain derived from `Cargo.toml`, every member
+  inheriting the workspace floor, and the README, CONTRIBUTING, INSTALL and
+  Nix docs must all agree with `rust-version`, and none of them may name
+  another floor.
 - The **icon raster, actool, and ico packaging smokes** — the cross-platform
   generator gate compares the Linux SVG, `AppIcon.icon`, every PNG, and
   all seven ICO resolutions. The macOS leg compiles the Icon Composer document
@@ -4024,7 +4057,7 @@ Separate workflows:
   `kettle-remote` crates: its Linux sandbox presents `/` as uid 65534 while the
   builder is uid 1000, so Kettle's private-path policy intentionally rejects
   positive private-file operations beneath that ancestry. Native Linux, macOS,
-  and Windows CI plus the Linux Rust 1.89 MSRV job remain authoritative for the
+  and Windows CI plus the Linux Rust 1.95 MSRV job remain authoritative for the
   complete workspace, including private-state, configuration persistence,
   screenshots, recording, local IPC, and updater tests. The separately named
   launch check proves the appended
