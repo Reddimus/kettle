@@ -1800,30 +1800,46 @@ mod tests {
             );
         }
 
+        /// Where each architecture starts: the offsets in a big-endian
+        /// universal header, or the start of a single-architecture file.
+        fn architecture_offsets(bytes: &[u8]) -> Vec<usize> {
+            if bytes[..4] != [0xca, 0xfe, 0xba, 0xbe] {
+                return vec![0];
+            }
+            let word = |at: usize| u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap());
+            (0..usize::try_from(word(4)).unwrap())
+                .map(|index| usize::try_from(word(8 + 20 * index + 8)).unwrap())
+                .collect()
+        }
+
         #[test]
         fn macos_tampered_worker_is_unverified() {
-            let directory = tempfile::tempdir().unwrap();
-            let worker = program(directory.path());
-            sign_ad_hoc(&worker, true);
-            let requirement = pinned_requirement(&worker);
-            assert_eq!(verify(&worker, &requirement), Ok(()));
-            // Flip one byte in the first architecture's first page, past its
-            // header: always signed code. (The end of an architecture holds
-            // the signature itself, with unsigned room to spare, and padding
-            // between architectures is not signed either.) The first
-            // architecture's offset is in the big-endian universal header.
-            let mut bytes = std::fs::read(&worker).unwrap();
-            let offset = if bytes[..4] == [0xca, 0xfe, 0xba, 0xbe] {
-                usize::try_from(u32::from_be_bytes(bytes[16..20].try_into().unwrap())).unwrap()
-            } else {
-                0
+            // Every architecture in turn, so a check that reads only some of
+            // them fails here.
+            let count = {
+                let directory = tempfile::tempdir().unwrap();
+                architecture_offsets(&std::fs::read(program(directory.path())).unwrap()).len()
             };
-            bytes[offset + 1024] ^= 0xff;
-            std::fs::write(&worker, bytes).unwrap();
-            assert_eq!(
-                verify(&worker, &requirement),
-                Err(UnavailableCause::Unverified)
-            );
+            for index in 0..count {
+                let directory = tempfile::tempdir().unwrap();
+                let worker = program(directory.path());
+                sign_ad_hoc(&worker, true);
+                let requirement = pinned_requirement(&worker);
+                assert_eq!(verify(&worker, &requirement), Ok(()));
+                // Flip one byte in this architecture's first page, past its
+                // header: always signed code. (The end of an architecture
+                // holds the signature itself, with unsigned room to spare,
+                // and padding between architectures is not signed either.)
+                let mut bytes = std::fs::read(&worker).unwrap();
+                let offset = architecture_offsets(&bytes)[index];
+                bytes[offset + 1024] ^= 0xff;
+                std::fs::write(&worker, bytes).unwrap();
+                assert_eq!(
+                    verify(&worker, &requirement),
+                    Err(UnavailableCause::Unverified),
+                    "architecture {index}"
+                );
+            }
         }
 
         #[test]
