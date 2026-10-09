@@ -99,14 +99,17 @@ fn decode_failure(error: ImageError) -> FailureCode {
     }
 }
 
-/// Fit `image` inside `target`, then apply its crop: the width, height and
-/// straight RGBA to return.
+/// Fit `image` inside `target`, never past its own size, then apply its crop:
+/// the width, height and straight RGBA to return. Enlarging would add no
+/// detail, only pixels to hold, and would report a size the image does not
+/// have; whoever paints the result scales it as it needs.
 pub(crate) fn fit(image: RgbaImage, target: Target) -> Result<(u32, u32, Vec<u8>), FailureCode> {
     let (width, height) = image.dimensions();
     let scale = f64::min(
         f64::from(target.width) / f64::from(width),
         f64::from(target.height) / f64::from(height),
-    );
+    )
+    .min(1.0);
     let fitted_width = scaled(width, scale, target.width);
     let fitted_height = scaled(height, scale, target.height);
     let mut fitted = if (fitted_width, fitted_height) == (width, height) {

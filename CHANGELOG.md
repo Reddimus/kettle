@@ -55,9 +55,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   open descriptor, refusing anything but a regular file and a file that
   changes while it is read; it takes the format from the content, not the
   name, and decodes PNG, JPEG, WebP, BMP and a GIF's first frame only after
-  checking the image's size against the decoded caps. The image is fitted
-  into the requested box keeping its aspect ratio, without transparent pixels
-  bleeding color. Mermaid and video rendering remain later work; GUI preview
+  checking the image's size against the decoded caps. The image is scaled
+  down to fit the requested box, never enlarged past its own size, keeping its
+  aspect ratio, without transparent pixels bleeding color. Mermaid and video
+  rendering remain later work; GUI preview
   callers are introduced separately.
 - The media worker renders SVG with resvg. The document is parsed with no
   DTD, scripts and foreign content are dropped, its style sheets (simple
