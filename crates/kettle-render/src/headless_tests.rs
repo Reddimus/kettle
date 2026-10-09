@@ -2059,6 +2059,7 @@ fn a_lane_draws_its_open_outside_button_only_when_offered() {
         reload: false,
 
         notice: None,
+        view: crate::MediaViewport::FIT,
     };
     let geometry = media_lane_geometry(
         &viewer(true),
@@ -2180,6 +2181,7 @@ fn a_lane_in_source_mode_shows_rows_instead_of_the_image() {
         reload: false,
 
         notice: None,
+        view: crate::MediaViewport::FIT,
     };
     let reds = |image: &image::RgbaImage| {
         image
@@ -2220,6 +2222,81 @@ fn a_lane_in_source_mode_shows_rows_instead_of_the_image() {
     );
 }
 
+/// A zoomed lane draws its image larger, covering its content, and clipped
+/// to it: none of it reaches the header, the footer or the terminal.
+#[test]
+fn a_zoomed_lane_covers_its_content_and_stays_inside_it() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(480, 320) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let snap = snapshot_of(40, 2, b"");
+    let view = || PaneView {
+        terminal: (0.0, 0.0, 480.0, 40.0),
+        ..pane(&snap, 480, 320)
+    };
+    let red = [255, 0, 0, 255];
+    let lane = |view| MediaLanePanel {
+        pane: 1,
+        rect: (0.0, 40.0, 480.0, 280.0),
+        collapsed: false,
+        title: "plot.png".into(),
+        detail: "Image · 16×16".into(),
+        sender: MediaLaneSender {
+            text: "From this pane".into(),
+            program: None,
+            signer: None,
+        },
+        hint: "Keys still go to the terminal".into(),
+        position: (1, 1),
+        image: Some(kettle_core::ImageData::new(16, 16, red.repeat(16 * 16)).unwrap()),
+        status: String::new(),
+        canvas: MediaCanvas::Theme,
+        open_outside: false,
+        mode: MediaLaneMode::Rendered,
+        source: None,
+        copy: true,
+        reload: false,
+        notice: None,
+        view,
+    };
+    let geometry = |view| {
+        media_lane_geometry(
+            &lane(view),
+            (renderer.cell_w, renderer.cell_h),
+            (
+                renderer.overlay_text_cell_width(),
+                renderer.metrics.line_height,
+            ),
+        )
+        .unwrap()
+    };
+    let fitted = geometry(crate::MediaViewport::FIT);
+    let zoom = crate::MediaViewport::FIT.zoomed(32.0, fitted.fit.unwrap(), fitted.content);
+    let zoomed = geometry(zoom);
+    let (cx, cy, cw, ch) = zoomed.content;
+    let overlay = Overlay {
+        media_lanes: vec![lane(zoom)],
+        ..focused(false)
+    };
+    let shot = capture(&mut renderer, &cfg, &[view()], &overlay);
+    let (mut inside, mut outside) = (0usize, 0usize);
+    for (x, y, pixel) in shot.enumerate_pixels() {
+        if pixel[0] > 200 && pixel[1] < 40 && pixel[2] < 40 {
+            let (x, y) = (x as f32, y as f32);
+            if x >= cx && x < cx + cw && y >= cy && y < cy + ch {
+                inside += 1;
+            } else {
+                outside += 1;
+            }
+        }
+    }
+    assert_eq!(outside, 0, "nothing past the content");
+    let area = (cw * ch) as usize;
+    assert!(inside * 100 >= area * 99, "{inside} of {area}: covered");
+}
+
 /// A preview lane paints its opaque panel over its share of the pane, with
 /// its title, and leaves the terminal beside it as it was.
 #[test]
@@ -2258,6 +2335,7 @@ fn a_preview_lane_paints_its_panel_and_leaves_the_terminal() {
         reload: false,
 
         notice: None,
+        view: crate::MediaViewport::FIT,
     };
     let without = capture(&mut renderer, &cfg, &[view()], &focused(false));
     let overlay = Overlay {

@@ -59,12 +59,12 @@ pub fn mouse_tracking(mode: TermMode) -> (MouseTracking, bool) {
 }
 
 /// Scrollback lines per physical wheel detent at `scroll-multiplier = 1.0`.
-const LINES_PER_NOTCH: f32 = 3.0;
+pub(crate) const LINES_PER_NOTCH: f32 = 3.0;
 
 /// Physical pixels per detent for backends that report `PixelDelta` (macOS
 /// trackpads, Wayland/libinput). At 3 lines per detent, that is one scrollback
 /// line per 20 px at `scroll-multiplier = 1.0`.
-const PIXELS_PER_NOTCH: f32 = 60.0;
+pub(crate) const PIXELS_PER_NOTCH: f32 = 60.0;
 
 /// Ceiling on retained residue. A device streaming deltas faster than they are
 /// drained — or a hostile synthetic feed over the ctl socket — cannot grow the

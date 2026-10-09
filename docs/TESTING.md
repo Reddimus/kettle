@@ -4081,6 +4081,23 @@ way in a narrow header, and, on the GPU, that source mode draws rows and not
 the image. For a live check, preview an SVG and click `≡`, `◐` and `⧉`
 (their rectangles are in `ui_geometry`'s `preview_lanes`).
 
+Zoom and pan: `kettle-render`'s `media_viewport` tests pin that zooming at a
+point keeps the image point under it, that an axis longer than the content
+keeps it covered and a shorter one stays centered, that the zoom stays
+within an eighth and 32 times the fit, that panning stops at the edges and a
+pan back takes effect at once, and that a resized lane keeps the image point
+at its center; lane tests pin the zoom controls' place, presses and absence
+without a rendered image, and, on the GPU, that a zoomed image covers its
+content and nothing of it reaches the header, footer or terminal.
+`kettle-ui` tests pin how the wheel and a pinch pan or zoom (a touchpad's
+pixels, three cells a notch by the multiplier, sideways with Shift, a zoom
+step a notch, at most ten an event) and that the gestures are wired: a press
+on the content arms a drag whose motion and release are the lane's on the
+native and control paths, and focus loss ends it. For a live check, preview
+an image, zoom with Cmd+wheel (Ctrl+wheel off macOS) over a corner, drag,
+and press `⤢`: `ui_geometry`'s `preview_lanes` reports `zoom` and the
+image's rectangle at each step. A pinch needs a real touchpad.
+
 Previews the user asks for: `kettle-ui` media tests pin that the user's
 request waits in a slot of its own even with every push slot full, runs
 first, gives way to a newer one, and expires and cancels like a push; that

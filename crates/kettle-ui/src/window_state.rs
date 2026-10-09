@@ -701,7 +701,7 @@ pub(crate) struct ThemePickerState {
 /// What a pane's preview lane shows: one item of the pane's shelf. Where the
 /// lane sits is its tab's [`crate::mux::Tab::lanes`] entry; the two come and
 /// go together.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct PreviewPanel {
     pub(crate) item: u64,
     /// The rendered item, or its source.
@@ -712,10 +712,12 @@ pub(crate) struct PreviewPanel {
     pub(crate) scroll: (usize, usize),
     /// What the lane last did, shown until the next thing it does.
     pub(crate) notice: Option<LaneNotice>,
+    /// How the rendered item is zoomed and panned.
+    pub(crate) view: kettle_render::MediaViewport,
 }
 
 impl PreviewPanel {
-    /// A lane showing `item` rendered, on its kind's canvas.
+    /// A lane showing `item` rendered and fitted, on its kind's canvas.
     pub(crate) fn new(item: u64) -> Self {
         Self {
             item,
@@ -723,8 +725,22 @@ impl PreviewPanel {
             canvas: None,
             scroll: (0, 0),
             notice: None,
+            view: kettle_render::MediaViewport::FIT,
         }
     }
+}
+
+/// A primary press on a lane's rendered item, which pans it once it moves
+/// past a few pixels. The release is the lane's, wherever it lands.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct LaneDrag {
+    pub(crate) pane: u64,
+    /// Where the press was, in physical pixels.
+    pub(crate) from: (f64, f64),
+    /// Where the pointer was at the last pan.
+    pub(crate) last: (f64, f64),
+    /// Past the threshold: the pointer's motion pans the item.
+    pub(crate) panning: bool,
 }
 
 /// What a lane says it did, in place of its hint.
@@ -844,6 +860,8 @@ pub(crate) struct WindowState {
     pub(crate) wheel: crate::input::WheelAccum,
     /// The wheel's motion over a preview lane, apart from the terminal's.
     pub(crate) lane_wheel: crate::input::WheelAccum,
+    /// A press on a lane's rendered item, until its release.
+    pub(crate) lane_drag: Option<LaneDrag>,
     pub(crate) selecting: bool,
     /// Pane that owns the active pointer selection gesture. Focus can
     /// move through ctl/Lua while a drag is live; pinning the id prevents the
@@ -1403,6 +1421,7 @@ impl WindowState {
             cursor: PhysicalPosition::new(0.0, 0.0),
             wheel: crate::input::WheelAccum::default(),
             lane_wheel: crate::input::WheelAccum::default(),
+            lane_drag: None,
             selecting: false,
             selecting_pane: None,
             selection_autoscroll_edge: 0,

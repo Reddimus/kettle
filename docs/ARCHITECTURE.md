@@ -720,6 +720,23 @@ shorter one shows from a row it has (`lane_source`), and source rows are
 bounded in bytes as well as columns, so marks that take no column cannot
 make one long.
 
+A rendered item zooms and pans through `kettle_render::MediaViewport`, which
+the panel keeps and the renderer and the UI share: a zoom relative to the
+item's fit, bounded to an eighth and 32 times it, and the image point at the
+content's center, so a resized lane keeps showing the same part. Every
+change places the image by one rule, an axis longer than the content
+covering it and a shorter one centered, and `media_lane_geometry` reports
+the fit, the placed image and the whole-pixel `content` that clips it; the
+renderer draws the one image item it always did, clipped to that content,
+with its canvas behind the part that shows. Over a rendered item the wheel
+pans and, with Cmd held on macOS or Ctrl elsewhere, zooms at the pointer
+(`lane_wheel`), as a pinch does; a primary press on the content arms a
+`LaneDrag` that pans once it moves three logical pixels and owns the
+pointer's motion and its release, natively and from a control client, until
+the release, another press, a menu or dialog opening, or focus loss. A
+control client's whole wheel steps zoom and pan as the wheel's lines do
+(`lane_wheel_steps`).
+
 The user can pull a file into a lane too: `preview_link` runs quick select
 with `hint_previews` keeping only the image, SVG and Mermaid files a pane
 names (a whole path, off Windows, or a local `file://` link), and the

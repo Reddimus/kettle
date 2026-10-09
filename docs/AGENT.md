@@ -373,13 +373,18 @@ and a lane that loses its room later waits as the titlebar's shelf badge. Each p
 has its own lane; `ui_geometry` reports them as `preview_lanes` (pane,
 rectangle and `expanded`, `strip` or `badge`, and for a lane with an item
 its `mode` (`rendered` or `source`), `canvas` (`theme`, `white` or
-`checker`) and `controls`, each shown control's rectangle by name; never a
+`checker`), `zoom` (relative to the item's fit), `content` and `image` (the
+content area's rectangle and where the item is drawn in it, past it when
+zoomed in) and `controls`, each shown control's rectangle by name; never a
 title, source, path or pixel). An SVG's or a diagram's lane can show the
 source it was rendered from (`≡`), put the picture on another background
 (`◐`; a diagram is rendered again for it, from the same source), copy the
 picture or the source (`⧉`), and read an item's file again (`↻`), which
 replaces the item in place, keeping its key and title, as one the user
-opened. A control client may press these like any control, but no file is
+opened. A rendered item zooms (`−`, `+`, back to its fit with `⤢`, or a
+pinch or Cmd/Ctrl+wheel at the pointer) and pans (the wheel or a drag);
+`perform_action` takes `preview_zoom_in`, `preview_zoom_out` and
+`preview_fit` for the focused pane's lane. A control client may press these like any control, but no file is
 read again while Kettle handles a control request.
 The user can also preview an image, SVG or Mermaid file a pane names
 without any agent: `preview_link` (the palette's "Preview a file in

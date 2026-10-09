@@ -339,6 +339,12 @@ pub enum Action {
     PreviewCopy,
     /// Read the focused pane's preview from its file again.
     PreviewReload,
+    /// Zoom the focused pane's rendered preview in a step.
+    PreviewZoomIn,
+    /// Zoom the focused pane's rendered preview out a step.
+    PreviewZoomOut,
+    /// Show the focused pane's rendered preview fitted to its lane again.
+    PreviewFit,
     /// Terminator parity (`key_send_newline`). Writes a literal `\n` to the focused
     /// pane's PTY. Mostly useful for inserting a newline into a
     /// shell line-editor that's otherwise consuming Enter
@@ -744,6 +750,9 @@ pub fn action_names() -> Vec<&'static str> {
         "preview_canvas",
         "preview_copy",
         "preview_reload",
+        "preview_zoom_in",
+        "preview_zoom_out",
+        "preview_fit",
         "preferences",
         "edit_config",
         "settings",
@@ -1044,6 +1053,9 @@ impl Action {
             "preview_canvas" | "preview-canvas" => PreviewCanvas,
             "preview_copy" | "preview-copy" => PreviewCopy,
             "preview_reload" | "preview-reload" => PreviewReload,
+            "preview_zoom_in" | "preview-zoom-in" => PreviewZoomIn,
+            "preview_zoom_out" | "preview-zoom-out" => PreviewZoomOut,
+            "preview_fit" | "preview-fit" => PreviewFit,
             "preferences"
             | "preferences_keybindings"
             | "preferences-keybindings"

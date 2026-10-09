@@ -2,7 +2,8 @@
 //! beside the pane's terminal. A header names the item and offers previous,
 //! next, open outside, collapse and close; below it, when the lane is
 //! expanded, the item's kind and sender, the image fitted on its canvas and
-//! never scaled past its own pixels, and a footer saying where keys go. A
+//! never scaled past its own pixels until the user zooms it, and a footer
+//! saying where keys go. A
 //! collapsed lane is its header alone. The renderer gets only display text
 //! and pixels, never a path or a source.
 
@@ -83,6 +84,8 @@ pub struct MediaLanePanel {
     pub reload: bool,
     /// What the lane last did, shown in place of the hint until it changes.
     pub notice: Option<String>,
+    /// How the rendered item is zoomed and panned.
+    pub view: crate::MediaViewport,
 }
 
 /// Who sent an item, in the UI language, with where the sending program's
@@ -178,6 +181,10 @@ pub struct MediaLaneGeometry {
     pub copy: Option<Rect4>,
     /// Reads the item's file again.
     pub reload: Option<Rect4>,
+    /// Zoom the rendered item out, in, and back to its fit.
+    pub zoom_out: Option<Rect4>,
+    pub zoom_in: Option<Rect4>,
+    pub zoom_fit: Option<Rect4>,
     /// Collapses an expanded lane to its header, or expands a collapsed one.
     pub toggle: Rect4,
     pub close: Rect4,
@@ -190,7 +197,14 @@ pub struct MediaLaneGeometry {
     /// Where the image area is: the fitted image, or the whole area when
     /// there is no image.
     pub image_area: Rect4,
-    /// The fitted image, when there are pixels and the lane shows them.
+    /// The image area in whole pixels: what clips the image, and what a
+    /// zoomed image keeps covered.
+    pub content: Rect4,
+    /// The image fitted in `content`, when there are pixels and the lane
+    /// shows them.
+    pub fit: Option<Rect4>,
+    /// Where the image is drawn: `fit` zoomed and panned, reaching past
+    /// `content` when zoomed in.
     pub image: Option<Rect4>,
     /// How many source rows fit the content area, in source mode.
     pub source_rows: usize,
@@ -212,6 +226,10 @@ pub enum MediaLaneHit {
     Copy,
     /// Read the item's file again.
     Reload,
+    ZoomOut,
+    ZoomIn,
+    /// Back to the fit.
+    Fit,
     /// Anywhere else in the lane: nothing happens, and nothing reaches the
     /// terminal.
     Inside,
@@ -222,6 +240,18 @@ fn contains(rect: Rect4, x: f32, y: f32) -> bool {
 }
 
 impl MediaLaneGeometry {
+    /// The part of the image that shows: where it is drawn, clipped to the
+    /// content. `None` without an image, or with none of it in view.
+    pub fn shown(&self) -> Option<Rect4> {
+        let image = self.image?;
+        let content = self.content;
+        let left = image.0.max(content.0);
+        let top = image.1.max(content.1);
+        let right = (image.0 + image.2).min(content.0 + content.2);
+        let bottom = (image.1 + image.3).min(content.1 + content.3);
+        (right > left && bottom > top).then_some((left, top, right - left, bottom - top))
+    }
+
     /// What a press at `(x, y)` does; `None` outside the lane.
     pub fn hit_test(&self, x: f32, y: f32) -> Option<MediaLaneHit> {
         if !contains(self.rect, x, y) {
@@ -238,6 +268,12 @@ impl MediaLaneGeometry {
             Some(MediaLaneHit::Canvas)
         } else if self.copy.is_some_and(|rect| contains(rect, x, y)) {
             Some(MediaLaneHit::Copy)
+        } else if self.zoom_fit.is_some_and(|rect| contains(rect, x, y)) {
+            Some(MediaLaneHit::Fit)
+        } else if self.zoom_in.is_some_and(|rect| contains(rect, x, y)) {
+            Some(MediaLaneHit::ZoomIn)
+        } else if self.zoom_out.is_some_and(|rect| contains(rect, x, y)) {
+            Some(MediaLaneHit::ZoomOut)
         } else if self.open_outside.is_some_and(|rect| contains(rect, x, y)) {
             Some(MediaLaneHit::OpenOutside)
         } else if self.previous.is_some_and(|rect| contains(rect, x, y)) {
@@ -293,8 +329,9 @@ pub fn media_lane_geometry(
     };
     // Controls take the header from the right, close first; each one past
     // collapse appears only while the title keeps its few columns, in order
-    // of need: reload, the mode, the canvas, browsing, copy, open outside,
-    // then the counter. One that does not fit leaves the rest to try.
+    // of need: reload, the mode, the canvas, browsing, copy, fit, zoom in,
+    // zoom out, open outside, then the counter. One that does not fit
+    // leaves the rest to try.
     let title_floor = left + MIN_TITLE_COLUMNS * tw + pad;
     let mut edge = right;
     let mut take = |width: f32, always: bool| {
@@ -332,6 +369,12 @@ pub fn media_lane_geometry(
         (None, None)
     };
     let copy = if lane.copy { take(button, false) } else { None };
+    // Zooming is for a rendered image the lane shows.
+    let zooms = full && lane.mode == MediaLaneMode::Rendered && lane.image.is_some();
+    let mut zoom_control = || if zooms { take(button, false) } else { None };
+    let zoom_fit = zoom_control();
+    let zoom_in = zoom_control();
+    let zoom_out = zoom_control();
     let open_outside = if lane.open_outside {
         take(button, false)
     } else {
@@ -353,6 +396,9 @@ pub fn media_lane_geometry(
             canvas,
             copy,
             reload,
+            zoom_out,
+            zoom_in,
+            zoom_fit,
             toggle,
             close,
             full,
@@ -360,6 +406,8 @@ pub fn media_lane_geometry(
             sender: empty,
             hint: empty,
             image_area: empty,
+            content: empty,
+            fit: None,
             image: None,
             source_rows: 0,
         });
@@ -375,15 +423,17 @@ pub fn media_lane_geometry(
         right - left,
         (area_bottom - area_top).max(0.0),
     );
-    let (image, source_rows) = match lane.mode {
+    let content = whole_pixels(image_area);
+    let (fit, source_rows) = match lane.mode {
         MediaLaneMode::Rendered => (
             lane.image
                 .as_ref()
-                .and_then(|image| fit_image(image, image_area)),
+                .and_then(|image| fit_image(image, content)),
             0,
         ),
         MediaLaneMode::Source => (None, (image_area.3 / lh).floor() as usize),
     };
+    let image = fit.and_then(|fit| lane.view.place(fit, content));
     Some(MediaLaneGeometry {
         rect,
         title,
@@ -395,6 +445,9 @@ pub fn media_lane_geometry(
         canvas,
         copy,
         reload,
+        zoom_out,
+        zoom_in,
+        zoom_fit,
         toggle,
         close,
         full,
@@ -402,20 +455,29 @@ pub fn media_lane_geometry(
         sender,
         hint,
         image_area,
+        content,
+        fit,
         image,
         source_rows,
     })
 }
 
-/// Where `image` sits in `image_area`: the whole pixels inside it, so the
-/// image lands on pixel boundaries and never past the area's edges.
-fn fit_image(image: &kettle_core::ImageData, image_area: Rect4) -> Option<Rect4> {
+/// The whole pixels inside `area`, so an image lands on pixel boundaries
+/// and never past its edges.
+fn whole_pixels(area: Rect4) -> Rect4 {
+    let (left, top) = (area.0.ceil(), area.1.ceil());
+    (
+        left,
+        top,
+        ((area.0 + area.2).floor() - left).max(0.0),
+        ((area.1 + area.3).floor() - top).max(0.0),
+    )
+}
+
+/// Where `image` sits fitted in `content`, which is in whole pixels.
+fn fit_image(image: &kettle_core::ImageData, content: Rect4) -> Option<Rect4> {
     let (width, height) = (image.width as f32, image.height as f32);
-    let (left, top) = (image_area.0.ceil(), image_area.1.ceil());
-    let room = (
-        (image_area.0 + image_area.2).floor() - left,
-        (image_area.1 + image_area.3).floor() - top,
-    );
+    let (left, top, room) = (content.0, content.1, (content.2, content.3));
     if width <= 0.0 || height <= 0.0 || room.0 < 1.0 || room.1 < 1.0 {
         return None;
     }
@@ -460,8 +522,8 @@ pub(crate) struct LaneText {
     hint: TextBuffer,
     status: TextBuffer,
     /// Previous, next, open outside, collapse, expand, close, show source,
-    /// show rendered, canvas, copy and reload.
-    controls: [TextBuffer; 11],
+    /// show rendered, canvas, copy, reload, zoom out, zoom in and fit.
+    controls: [TextBuffer; 14],
     /// What each line buffer was last shaped with; `None` until it is, or
     /// once a font change means it must be again.
     shaped: [Option<String>; 6],
@@ -506,6 +568,9 @@ impl LaneText {
                 control(font_system, "◐"),
                 control(font_system, "⧉"),
                 control(font_system, "↻"),
+                control(font_system, "−"),
+                control(font_system, "+"),
+                control(font_system, "⤢"),
             ],
             shaped: Default::default(),
             rows: Vec::new(),
@@ -690,6 +755,9 @@ impl LaneText {
             geometry.canvas,
             geometry.copy,
             geometry.reload,
+            geometry.zoom_out,
+            geometry.zoom_in,
+            geometry.zoom_fit,
         ];
         for (buffer, rect) in self.controls.iter().zip(buttons) {
             if let Some(rect) = rect {
@@ -763,6 +831,7 @@ mod tests {
             reload: false,
 
             notice: None,
+            view: crate::MediaViewport::FIT,
         }
     }
 
@@ -1106,6 +1175,72 @@ mod tests {
         assert!(source.source_rows > 0);
     }
 
+    /// A rendered image in an expanded lane offers zoom out, zoom in and fit,
+    /// in that order left of copy, each answering its press; a source, a
+    /// lane without pixels and a collapsed one offer none. Zoomed, the image
+    /// is drawn larger than its fit, about the same center, and shows only
+    /// within the content.
+    #[test]
+    fn a_rendered_image_zooms_within_its_content() {
+        let mut lane = viewer((1, 1), Some((64, 48)));
+        lane.copy = true;
+        let geometry = media_lane_geometry(&lane, CELL, CELL).unwrap();
+        let (out, zoom_in, fit) = (
+            geometry.zoom_out.expect("offered"),
+            geometry.zoom_in.expect("offered"),
+            geometry.zoom_fit.expect("offered"),
+        );
+        let copy = geometry.copy.unwrap();
+        assert_eq!(out.0 + out.2, zoom_in.0);
+        assert_eq!(zoom_in.0 + zoom_in.2, fit.0);
+        assert_eq!(fit.0 + fit.2, copy.0);
+        let center = |rect: Rect4| (rect.0 + rect.2 / 2.0, rect.1 + rect.3 / 2.0);
+        for (rect, hit) in [
+            (out, MediaLaneHit::ZoomOut),
+            (zoom_in, MediaLaneHit::ZoomIn),
+            (fit, MediaLaneHit::Fit),
+        ] {
+            let (x, y) = center(rect);
+            assert_eq!(geometry.hit_test(x, y), Some(hit));
+        }
+        // Fitted, the image is its fit and shows whole.
+        let fitted = geometry.fit.unwrap();
+        assert_eq!(geometry.image, Some(fitted));
+        assert_eq!(geometry.shown(), Some(fitted));
+        assert_eq!(fitted, (368.0, 296.0, 64.0, 48.0));
+        // Zoomed, it is larger, about the same center, and shows only within
+        // the content.
+        lane.view = crate::MediaViewport::FIT.zoomed(32.0, fitted, geometry.content);
+        let zoomed = media_lane_geometry(&lane, CELL, CELL).unwrap();
+        assert_eq!(zoomed.fit, Some(fitted));
+        let image = zoomed.image.unwrap();
+        assert_eq!((image.2, image.3), (2048.0, 1536.0));
+        assert_eq!(center(image), center(fitted));
+        assert_eq!(zoomed.shown(), Some(zoomed.content));
+        for offered in [
+            MediaLanePanel {
+                mode: MediaLaneMode::Source,
+                source: Some(MediaLaneSource::default()),
+                ..lane.clone()
+            },
+            MediaLanePanel {
+                image: None,
+                ..lane.clone()
+            },
+            MediaLanePanel {
+                collapsed: true,
+                ..lane.clone()
+            },
+        ] {
+            let geometry = media_lane_geometry(&offered, CELL, CELL).unwrap();
+            assert_eq!(
+                (geometry.zoom_out, geometry.zoom_in, geometry.zoom_fit),
+                (None, None, None)
+            );
+            assert_eq!((geometry.image, geometry.shown()), (None, None));
+        }
+    }
+
     /// However narrow the lane, every control and the counter lie inside it:
     /// controls past close and collapse give way, in order, so the title
     /// keeps a few columns, and a lane too narrow even for those has none.
@@ -1136,6 +1271,9 @@ mod tests {
                 geometry.previous,
                 geometry.next,
                 geometry.copy,
+                geometry.zoom_fit,
+                geometry.zoom_in,
+                geometry.zoom_out,
                 geometry.open_outside,
             ];
             let controls = optional.iter().flatten().count();
@@ -1145,7 +1283,9 @@ mod tests {
             // fit where browsing does not.
             let shown: Vec<bool> = optional.iter().map(Option::is_some).collect();
             assert_eq!(shown[3], shown[4], "{width}: browsing comes as a pair");
-            let singles = [shown[0], shown[1], shown[2], shown[5], shown[6]];
+            let singles = [
+                shown[0], shown[1], shown[2], shown[5], shown[6], shown[7], shown[8], shown[9],
+            ];
             assert!(
                 singles.windows(2).all(|pair| pair[0] || !pair[1]),
                 "{width}: {singles:?}"
