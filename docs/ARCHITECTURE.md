@@ -69,10 +69,32 @@ named regular files; only the requested collection face is inserted, with its
 index preserved and bounded metadata. The worker does no host font discovery
 and refuses embedded SVG/color/bitmap glyph formats. Actual shaped glyphs
 produce fallback and missing-script warnings; databases are isolated across
-jobs. Raster images and SVG are rendered, and so is an Auto job: one held
-snapshot of a file, classified by its bytes as raster or SVG and rendered as
-that, with a typed reply that says which. Every other kind is refused as
-unsupported until its renderer lands. The client's `render` runs one job in a
+jobs. Raster images, SVG and Mermaid diagrams are rendered, and so is an
+Auto job: one held snapshot of a file, classified by its bytes as raster,
+SVG or Mermaid and rendered as that, with a typed reply that says which.
+Mermaid goes through merman 0.8.0, pinned exactly with its layout and
+painting family, under a resource-constrained policy and a two-second
+`OperationControl` deadline that starts before its fonts load. Kettle
+measures every label itself (`svg::text_host`, with `text_metrics`,
+`text_wrap`, `text_rows` and a bounded `text_cache`) from the job's own font
+database, which adds bundled Fira Sans for proportional labels, so layout and
+painting use the same faces; a measurement merman made any other way refuses
+the diagram. Its colors follow the job's canvas: the pane's own palette
+on the pane's background, a light palette on white, or the pane's palette
+on no background at all for a checkerboard, which merman's root background,
+otherwise always white, is set to (`RootBackgroundPostprocessor`). The SVG
+it produces takes the outside-SVG path in a generated
+mode: its style sheets are lowered by `svg::generated_css`, with simplecss as
+usvg reads them; a declaration the checker cannot read, an element whose
+attributes fail the checks (such as a gantt's today line far off the chart)
+is left out rather than refusing the diagram; the first element with each id
+owns it, written or not, so a later one loses the id and a reference never
+moves to it; and relative font sizes, from attributes and style sheets alike,
+are resolved against the inherited size to absolute pixels within the number
+bound, or left out; and admission, the layer checks and
+resvg follow unchanged. The rendered item keeps the Mermaid source as its
+source text and digest. Every other kind is refused as unsupported until its
+renderer lands. The client's `render` runs one job in a
 fresh worker under startup and job deadlines, with the worker in its own
 process group, killed before it is reaped; `render_with_control` adds
 cancellation and one absolute deadline its caller owns. Nothing in the GUI

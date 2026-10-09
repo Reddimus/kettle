@@ -14,10 +14,16 @@
 //! lines.
 
 mod css;
-mod fonts;
+pub(crate) mod fonts;
+mod generated_css;
 mod layers;
 mod sanitize;
 mod structure;
+pub(crate) mod text_cache;
+pub(crate) mod text_host;
+pub(crate) mod text_metrics;
+mod text_rows;
+pub(crate) mod text_wrap;
 
 use kettle_media::{
     Crop, FailureCode, Job, JobKind, MAX_SOURCE_LINE_BYTES, MAX_SOURCE_LINES,
@@ -30,12 +36,13 @@ use crate::source;
 /// Build the bundled font database.
 pub(crate) fn prepare() {
     fonts::bundled();
+    fonts::mermaid_bundled();
 }
 
 pub(crate) fn render(job: &Job) -> Result<Rendered, FailureCode> {
     let snapshot = source::load(&job.source, job.kind.input_cap())?;
     let text = std::str::from_utf8(&snapshot.bytes).map_err(|_| FailureCode::RenderParse)?;
-    render_parsed(job, &snapshot, text, &sanitize::parse(text)?)
+    render_parsed(job, &snapshot, &sanitize::parse(text)?)
 }
 
 /// Render an Auto job's snapshot if it is SVG: UTF-8 markup whose root
@@ -60,7 +67,13 @@ pub(crate) fn render_auto(
     if document.root_element().tag_name().name() != "svg" {
         return Err(FailureCode::RenderParse);
     }
-    render_parsed(job, snapshot, text, &document)
+    render_parsed(job, snapshot, &document)
+}
+
+/// Whether `text` is markup: an element follows its byte-order mark and
+/// prolog.
+pub(crate) fn is_markup(text: &str) -> bool {
+    root_element_name(text).is_some()
 }
 
 /// The local name of the first element in `text`, past a byte-order mark and
@@ -124,11 +137,10 @@ fn after_declaration(text: &str) -> Option<&str> {
     }
 }
 
-/// Render `document`, parsed from `text`, the UTF-8 of `snapshot`.
+/// Render `document`, parsed from the UTF-8 of `snapshot`.
 fn render_parsed(
     job: &Job,
     snapshot: &source::Snapshot<'_>,
-    text: &str,
     document: &roxmltree::Document<'_>,
 ) -> Result<Rendered, FailureCode> {
     // Sanitized (CSS resolved into attributes), then admitted on exactly
@@ -136,8 +148,38 @@ fn render_parsed(
     let sanitized = sanitize::write(document)?;
     structure::admit(&sanitize::parse(&sanitized)?)?;
     let fonts = fonts::for_job(&job.fallback_fonts)?;
+    render_admitted_svg(job, sanitized, snapshot, &fonts)
+}
+
+/// Generated diagrams retain their original source snapshot and layout fonts.
+pub(crate) fn render_generated_svg(
+    job: &Job,
+    generated: String,
+    snapshot: &source::Snapshot<'_>,
+    fonts: &fonts::JobFonts,
+) -> Result<Rendered, FailureCode> {
+    if generated.len() > kettle_media::MAX_SVG_BYTES {
+        return Err(FailureCode::RenderResource);
+    }
+    let document = sanitize::parse(&generated)?;
+    let sanitized = sanitize::write_generated(&document)?;
+    structure::admit(&sanitize::parse(&sanitized)?)?;
+    drop(document);
+    drop(generated);
+    render_admitted_svg(job, sanitized, snapshot, fonts)
+}
+
+/// Render an admitted SVG while retaining the original source and its identity.
+/// Generated diagrams share their font database with layout measurements.
+pub(crate) fn render_admitted_svg(
+    job: &Job,
+    sanitized: String,
+    snapshot: &source::Snapshot<'_>,
+    fonts: &fonts::JobFonts,
+) -> Result<Rendered, FailureCode> {
+    let text = std::str::from_utf8(&snapshot.bytes).map_err(|_| FailureCode::RenderParse)?;
     let tree = crate::guarded(FailureCode::RenderParse, || {
-        usvg::Tree::from_str(&sanitized, &options(&fonts)).map_err(|_| FailureCode::RenderParse)
+        usvg::Tree::from_str(&sanitized, &options(fonts)).map_err(|_| FailureCode::RenderParse)
     })?;
     drop(sanitized);
     let placement = place(tree.size(), job.target)?;
@@ -421,6 +463,120 @@ mod tests {
             unpremultiply(vec![64, 32, 0, 128, 9, 9, 9, 0, 255, 255, 255, 255]),
             [128, 64, 0, 128, 0, 0, 0, 0, 255, 255, 255, 255]
         );
+    }
+
+    fn generated_job(source: &[u8]) -> Job {
+        Job {
+            kind: kettle_media::JobKind::Mermaid,
+            source: kettle_media::Source::Bytes(source.to_vec()),
+            theme: kettle_media::Theme {
+                background: [0; 4],
+                foreground: [255; 4],
+                palette: [[0; 4]; 16],
+                accent: [0; 4],
+                is_dark: true,
+            },
+            canvas: kettle_media::Canvas::Theme,
+            target: target(16, 16, None),
+            fallback_fonts: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn generated_svg_keeps_original_source_and_file_identity() {
+        let original = b"flowchart LR\n  A --> B\n";
+        let job = generated_job(original);
+        let fonts = fonts::for_job(&[]).unwrap();
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16" fill="red"/></svg>"#;
+        let identity = kettle_media::PathIdentity {
+            dev: 7,
+            ino: 11,
+            size: original.len() as u64,
+            mtime_seconds: 13,
+            mtime_nanos: 17,
+        };
+        let snapshot = source::Snapshot {
+            bytes: std::borrow::Cow::Borrowed(original),
+            identity: Some(identity),
+        };
+        let rendered = render_admitted_svg(&job, svg.to_owned(), &snapshot, &fonts).unwrap();
+        assert_eq!(rendered.source_text, ["flowchart LR", "  A --> B"]);
+        assert_eq!(
+            rendered.digest,
+            content_digest(original, Some(identity)).unwrap()
+        );
+        assert_ne!(
+            rendered.digest,
+            content_digest(svg.as_bytes(), None).unwrap()
+        );
+        assert_eq!(&rendered.rgba[..4], &[255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn generated_svg_pixels_can_change_without_replacing_source_metadata() {
+        let original = b"flowchart LR\n  A --> B";
+        let job = generated_job(original);
+        let fonts = fonts::for_job(&[]).unwrap();
+        let snapshot = source::Snapshot {
+            bytes: std::borrow::Cow::Borrowed(original),
+            identity: None,
+        };
+        let make_svg = |color| {
+            format!(
+                "<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16'><rect width='16' height='16' fill='{color}'/></svg>"
+            )
+        };
+        let red = render_admitted_svg(&job, make_svg("red"), &snapshot, &fonts).unwrap();
+        let blue = render_admitted_svg(&job, make_svg("blue"), &snapshot, &fonts).unwrap();
+        assert_eq!(red.digest, blue.digest);
+        assert_eq!(red.source_text, blue.source_text);
+        assert_ne!(red.rgba, blue.rgba);
+        assert_eq!(&blue.rgba[..4], &[0, 0, 255, 255]);
+    }
+
+    fn generated_class_marker(fill: &str) -> Rendered {
+        let original = b"classDiagram\n  A -- B";
+        let mut job = generated_job(original);
+        job.target = target(64, 32, None);
+        let fonts = fonts::for_mermaid_job(&[]).unwrap();
+        let snapshot = source::Snapshot {
+            bytes: std::borrow::Cow::Borrowed(original),
+            identity: None,
+        };
+        // Match Merman's generated marker-parent CSS, including priority and
+        // descendant scoping. This is generated output, not a caller SVG job.
+        let svg = format!(
+            "<svg xmlns='http://www.w3.org/2000/svg' id='diagram' width='64' height='32'><style>#diagram .aggregation{{fill:{fill}!important;stroke:#00ff00!important;stroke-width:1;}}</style><defs><marker id='diagram-classDiagram-aggregationEnd' class='marker aggregation classDiagram' refX='18' refY='7' markerWidth='20' markerHeight='14' orient='0' markerUnits='userSpaceOnUse'><path d='M18,7 L9,13 L1,7 L9,1 Z'/></marker></defs><path d='M4,16 H50' stroke='#0000ff' stroke-width='1' marker-end='url(#diagram-classDiagram-aggregationEnd)'/></svg>"
+        );
+        render_admitted_svg(&job, svg, &snapshot, &fonts).unwrap()
+    }
+
+    #[test]
+    fn generated_class_markers_keep_hollow_fill_from_parent_css() {
+        let rendered = generated_class_marker("transparent");
+        let inside = (19 * rendered.width as usize + 41) * 4;
+        assert_eq!(&rendered.rgba[inside..inside + 4], &[0; 4]);
+        // Interior probe is away from the relation line; this also requires
+        // an actual marker outline, rather than a completely missing marker.
+        assert!(
+            rendered
+                .rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| pixel[1] > 100 && pixel[0] < 10 && pixel[2] < 10 && pixel[3] > 100)
+        );
+        assert_eq!(rendered.source_text, ["classDiagram", "  A -- B"]);
+    }
+
+    #[test]
+    fn generated_class_markers_keep_filled_shapes_distinct_from_hollow_shapes() {
+        let filled = generated_class_marker("#00ff00");
+        let hollow = generated_class_marker("transparent");
+        let inside = (19 * filled.width as usize + 41) * 4;
+        assert_eq!(&filled.rgba[inside..inside + 4], &[0, 255, 0, 255]);
+        assert_ne!(filled.rgba, hollow.rgba);
+        assert_eq!(filled.digest, hollow.digest);
     }
 
     #[test]

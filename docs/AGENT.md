@@ -291,7 +291,8 @@ off applies at the next launch. `get_state` reports the policy in force as
 
 ### Showing media
 
-`show` sends an image or SVG to the media shelf of the pane its caller runs
+`show` sends an image, SVG or Mermaid diagram to the media shelf of the pane
+its caller runs
 in. It needs only Display, so `agent-display` is enough; it grants no reads
 or mutations, and a display-only client learns nothing about the screen from
 it. `kettle show PATH` and `kettle show -` (bytes on stdin) send it from a
@@ -303,7 +304,7 @@ Params take exactly one source, plus optional `title` (at most 4 KiB) and
 | Source | Rendered as |
 |---|---|
 | `svg`: SVG text, at most 2 MiB | SVG |
-| `image_b64`: standard base64 bytes, at most 32 MiB decoded | whatever the media worker finds the bytes to be: raster or SVG |
+| `image_b64`: standard base64 bytes, at most 32 MiB decoded | whatever the media worker finds the bytes to be: raster, SVG, or text that parses as a Mermaid diagram |
 | `path` + `dev` + `ino`: an absolute path and the device and inode the caller saw | whatever the worker finds in the file it opens; another file at that path is refused |
 
 The whole request still fits the 1 MiB request line, so larger media goes by
@@ -552,7 +553,7 @@ so press Enter with `send_keys`, not a trailing `\n`.
 | `resize_window` | full | request a live window client-area resize (`window`, `width`, `height`) and let the normal renderer/PTY resize path process it |
 | `perform_action` | full | dispatch a named Kettle app action (`action`, for example `start_search`, `command_palette`, `open_ssh`, `hint_mode`, `edit_tab_title`). The control-only `focus_window` action shows and focuses its target without toggling visibility. Use this for app chrome that is not pane input; `send_keys` intentionally writes terminal keystrokes to the focused pane |
 | `run_command` | full | run `command` in a pane, reply with `{exit_code, duration_ms, output, output_truncated}`; capture is capped at the newest 10,000 retained lines and then 512 KiB, and `output_truncated` is true if either cap drops output |
-| `show` | display | put an image or SVG on the shelf of the caller's pane, reply with `{pane, verified, window, item, kind, width, height, warnings}` once it is there (see [Showing media](#showing-media)) |
+| `show` | display | put an image, SVG or Mermaid diagram on the shelf of the caller's pane, reply with `{pane, verified, window, item, kind, width, height, warnings}` once it is there (see [Showing media](#showing-media)) |
 
 **Multi-window**: a kettle process can host several OS windows.
 `list_tabs` / `list_panes` enumerate them all, ordered by window seq;
@@ -673,8 +674,8 @@ Or a project-scoped `.mcp.json`:
 
 `kettle mcp --display` offers one tool, `kettle_show`, and nothing that reads
 the screen, types, runs commands or drives Kettle. It needs agent previews,
-never full control. Its arguments are an absolute `path` (an image or SVG
-file) and an optional `title` and `key`; inline bytes go through `kettle show
+never full control. Its arguments are an absolute `path` (an image, SVG or
+Mermaid diagram file) and an optional `title` and `key`; inline bytes go through `kettle show
 -` instead. It finds its Kettle the strict way `kettle show` does, the one the
 server runs inside, and returns one plain line and status-only structured
 content (`status`, `delivery: "shelf"`, `pane`, `window`, `item`, `verified`,

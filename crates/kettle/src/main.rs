@@ -555,9 +555,9 @@ enum Cmd {
     /// Run a Model Context Protocol server over stdio, exposing kettle as native
     /// agent tools. Register with Claude Code: `claude mcp add kettle -- kettle mcp`.
     Mcp(McpArgs),
-    /// Send a local image or SVG to the media shelf of the pane this runs in,
-    /// in the Kettle it runs inside. Pass - to read a small image or SVG from
-    /// stdin. The item waits on the shelf; nothing opens on screen. Agent
+    /// Send a local image, SVG or Mermaid diagram to the media shelf of the
+    /// pane this runs in, in the Kettle it runs inside. Pass - to read a small
+    /// one from stdin. The item waits on the shelf; nothing opens on screen. Agent
     /// previews must be on; full control is never needed.
     Show(ShowArgs),
     /// Set up Codex to start with Kettle's display server: print a `codex`
@@ -571,7 +571,7 @@ enum Cmd {
 
 #[derive(clap::Args, Debug)]
 struct ShowArgs {
-    /// The image or SVG file to show, or - for bytes on stdin.
+    /// The image, SVG or Mermaid file to show, or - for bytes on stdin.
     #[arg(value_name = "PATH", allow_hyphen_values = true)]
     source: std::path::PathBuf,
     /// A title for the shelf item (default: the file name).

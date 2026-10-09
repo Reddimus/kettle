@@ -446,7 +446,8 @@ fn instructions(selection: ToolSelection) -> &'static str {
             "Use kettle_run for bounded one-shot PTY commands. Other tools inspect or drive a running Kettle control server."
         }
         ToolSelection::Display if kettle_ctl::client::display_target().is_some() => {
-            "Use kettle_show to send the user an image or SVG file in this Kettle session; it goes \
+            "Use kettle_show to send the user an image, SVG or Mermaid diagram file in this Kettle \
+             session; it goes \
              to the media shelf of the pane you run in, where the user can open it. Call it after \
              making an image the user should see, with its absolute path. Reuse key to replace an \
              item. A successful show does not mean you have seen the media. If it is unavailable, \

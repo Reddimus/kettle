@@ -1467,6 +1467,9 @@ context = "crates/kettle-ui/src/app.rs media_viewer_projection: kind of a raster
 [messages.media_viewer_kind_svg]
 context = "crates/kettle-ui/src/app.rs media_viewer_projection: kind of an SVG item in the media viewer's detail line, which lists kind, size and sender. SVG is a format name."
 
+[messages.media_viewer_kind_mermaid]
+context = "crates/kettle-ui/src/app.rs media_item_kind_and_sender: the kind of a media shelf item that is a rendered Mermaid diagram, in the viewer's detail line and a card's screen-reader label. Mermaid is a product name."
+
 [messages.media_viewer_kind_media]
 context = "crates/kettle-ui/src/app.rs media_viewer_projection: kind of any other media item in the media viewer's detail line."
 

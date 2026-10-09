@@ -18,3 +18,11 @@
 *.woff2 binary
 *.gz    binary
 *.zip   binary
+
+# Third-party license text kept byte for byte as upstream ships it, so its
+# recorded SHA-256 still matches: the Fira Sans OFL uses CRLF.
+assets/fonts/fira-sans/OFL.txt -text
+
+# Upstream Mermaid fixtures kept byte for byte, so their recorded SHA-256 in
+# the fixture README still match: two end without a final newline.
+crates/kettle-media-render/tests/fixtures/mermaid/*.mmd -text

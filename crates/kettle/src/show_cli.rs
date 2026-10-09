@@ -1,4 +1,5 @@
-//! `kettle show`: send a local image or SVG to the media shelf of the pane
+//! `kettle show`: send a local image, SVG or Mermaid diagram to the media
+//! shelf of the pane
 //! this command runs in, in the Kettle it runs inside. It never reaches
 //! another Kettle, never opens anything on screen, and never needs full
 //! control: agent previews (`agent-display`) are enough.

@@ -45,6 +45,25 @@ def write_lf(path: Path, text: str) -> None:
 
 
 class TrackedFileAuditTests(unittest.TestCase):
+    def test_text_unset_files_keep_their_bytes(self) -> None:
+        """A file `.gitattributes` marks `-text` keeps its CRLF, its last
+        line without a newline and its trailing white space; any other text
+        file is still held to the LF rules."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_lf(root / ".gitattributes", "* text=auto eol=lf\nexact/** -text\n")
+            (root / "exact").mkdir()
+            (root / "exact" / "LICENSE.txt").write_bytes(b"line one \r\nline two")
+            (root / "exact" / "capture.txt").write_bytes(b"graph LR")
+            initialize_repository(root)
+            self.assertEqual(AUDIT.audit(root)["errors"], [])
+            (root / "plain.txt").write_bytes(b"crlf\r\nno newline ")
+            subprocess.run(["git", "add", "plain.txt"], cwd=root, check=True)
+            errors = AUDIT.audit(root)["errors"]
+            self.assertIn("plain.txt: CR/CRLF found; tracked text must use LF", errors)
+            self.assertIn("plain.txt: missing final newline", errors)
+            self.assertFalse(any(error.startswith("exact/") for error in errors), errors)
+
     def test_missing_local_markdown_link_with_inline_code_label_is_fatal(
         self,
     ) -> None:

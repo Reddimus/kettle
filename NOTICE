@@ -21,6 +21,16 @@ This product depends on and/or adapts ideas from the following projects:
   (MIT OR Apache-2.0). Kettle's SVG admission mirrors resvg's allocation
   geometry; the code is original.
 
+* Merman, merman-core, merman-render, dugong, dugong-graphlib and manatee
+  0.8.0 - MIT OR Apache-2.0
+  https://github.com/Latias94/merman
+  The media worker uses its SVG and Cytoscape layout adapters with package
+  defaults disabled. Native diagram measurements use Kettle's SVG font database.
+
+* roughr-merman 0.12.3 - MIT
+  https://github.com/Latias94/merman
+  Deterministic sketch primitives used by the pinned diagram renderer.
+
 * Contour — Apache-2.0
   Reference for the Sixel parser state machine.
 
@@ -65,3 +75,28 @@ Bundled assets:
 * iTerm2-Color-Schemes (Ghostty theme set) — MIT
   See assets/themes/LICENSE
   https://github.com/mbadolato/iTerm2-Color-Schemes
+
+* Fira Sans 4.301 - SIL Open Font License 1.1
+  Digitized data copyright 2012-2018, The Mozilla Foundation and Telefonica S.A.,
+  bBox Type GmbH and Carrois Corporate GbR, with Reserved Font Name "Fira".
+  See assets/fonts/fira-sans/OFL.txt and README.md for exact source provenance.
+  The media worker embeds matching regular, bold, italic and bold italic
+  outlines for proportional diagram labels.
+  Monospace inline code reuses the JetBrains Mono Nerd Font asset listed
+  above; diagram layout and final SVG shaping use the same per-job database.
+
+* Merman / Mermaid createText conventions -- MIT OR Apache-2.0
+  https://github.com/Latias94/merman
+  Native formatted-label measurement follows Merman 0.8.0's row baselines,
+  whitespace boundaries, literal word spans and line-break conventions.
+  Kettle's bounded implementation is original.
+
+Test fixtures:
+
+* Merman 0.8.0 and Mermaid - MIT
+  https://github.com/Latias94/merman
+  The small Mermaid integration corpus is retained from upstream commit
+  2029bd547077b1a6800878e125663633d81e6d87. Exact source paths and file hashes
+  are recorded in crates/kettle-media-render/tests/fixtures/mermaid/README.md.
+  Merman contributors' and Mermaid's complete MIT notices are retained beside
+  those fixtures as LICENSE-MERMAN-MIT.txt and LICENSE-MERMAID-MIT.txt.

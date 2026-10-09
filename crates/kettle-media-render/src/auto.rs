@@ -2,12 +2,14 @@
 //! its name, then rendered as what it is. The snapshot is read once, within
 //! the largest input cap of the kinds it can be, and the actual kind's own cap
 //! applies before anything decodes it. Raster is recognized by its magic
-//! bytes; SVG is UTF-8 markup whose root element is `svg`. Anything else is
+//! bytes; SVG is UTF-8 markup whose root element is `svg`; other UTF-8 text
+//! goes to the Mermaid renderer, which recognizes a diagram with its own
+//! preprocessing as it parses and refuses anything else. Anything else is
 //! `UnsupportedMedia`.
 
 use kettle_media::{FailureCode, Job, JobKind, MediaKind, Rendered};
 
-use crate::{raster, source, svg};
+use crate::{mermaid, raster, source, svg};
 
 pub(crate) fn render(
     job: &Job,
@@ -27,8 +29,18 @@ fn render_loaded(
         on_kind(MediaKind::Raster);
         return raster::render_loaded(job, snapshot).map(|rendered| (MediaKind::Raster, rendered));
     }
-    svg::render_auto(job, snapshot, || on_kind(MediaKind::Svg))
-        .map(|rendered| (MediaKind::Svg, rendered))
+    let text = std::str::from_utf8(&snapshot.bytes).map_err(|_| FailureCode::UnsupportedMedia)?;
+    if svg::is_markup(text) {
+        return svg::render_auto(job, snapshot, || on_kind(MediaKind::Svg))
+            .map(|rendered| (MediaKind::Svg, rendered));
+    }
+    // Mermaid is known to be Mermaid only once it parses as a diagram, so
+    // the kind is heard after rendering; the renderer keeps its own
+    // deadline, which starts here, before its fonts load.
+    snapshot.within(JobKind::Mermaid.input_cap())?;
+    let rendered = mermaid::render_loaded(job, snapshot, mermaid::control())?;
+    on_kind(MediaKind::Mermaid);
+    Ok((MediaKind::Mermaid, rendered))
 }
 
 #[cfg(test)]
@@ -143,7 +155,6 @@ mod tests {
         let path = directory.path().join("diagram.svg");
         for bytes in [
             b"ordinary prose".as_slice(),
-            b"flowchart TD\nA --> B".as_slice(),
             b"<html><body>ordinary page</body></html>".as_slice(),
             b"\xff\xfe not text and not an image".as_slice(),
             b"".as_slice(),
@@ -153,6 +164,38 @@ mod tests {
             assert_eq!(result, Err(FailureCode::UnsupportedMedia), "{bytes:?}");
             assert!(kinds.is_empty());
         }
+    }
+
+    /// Text that is a Mermaid diagram is Mermaid whatever the file is
+    /// called, heard once it has rendered; one that only starts like a
+    /// diagram is a parse failure, never another kind.
+    #[test]
+    fn mermaid_text_is_mermaid_whatever_the_file_is_called() {
+        let directory = tempfile::tempdir().unwrap();
+        for name in ["diagram.bin", "diagram.svg", "notes.txt"] {
+            let path = directory.path().join(name);
+            std::fs::write(&path, b"flowchart TD\nA --> B").unwrap();
+            let (kinds, result) = classify(&job(&path));
+            let (kind, rendered) = result.unwrap();
+            assert_eq!(
+                (kind, kinds),
+                (MediaKind::Mermaid, vec![MediaKind::Mermaid])
+            );
+            assert_eq!(rendered.source_text, ["flowchart TD", "A --> B"]);
+            assert!(
+                rendered
+                    .rgba
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .any(|pixel| pixel[3] != 0)
+            );
+        }
+        let path = directory.path().join("broken.mmd");
+        std::fs::write(&path, b"flowchart TD\n A[unterminated").unwrap();
+        let (kinds, result) = classify(&job(&path));
+        assert_eq!(result.map(|(kind, _)| kind), Err(FailureCode::RenderParse));
+        assert!(kinds.is_empty());
     }
 
     /// Markup whose root is not `svg` is unsupported however large it is

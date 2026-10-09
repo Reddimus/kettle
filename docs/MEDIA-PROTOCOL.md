@@ -367,8 +367,8 @@ of 0 backs it up. Every size is checked before the work it would cost, so the
 worker's limits and the client's deadlines and memory limit are a second
 bound, not the only one. An empty target box, one over 4096 pixels on an
 edge, a scale that is not a positive finite number, or a crop that is empty or
-leaves the box, is `BadParams`. Raster, SVG and Auto jobs are rendered; every
-other kind is `UnsupportedMedia` until its renderer lands. On Windows, where no
+leaves the box, is `BadParams`. Raster, SVG, Mermaid and Auto jobs are
+rendered; every other kind is `UnsupportedMedia` until its renderer lands. On Windows, where no
 worker runs, every job is `UnsupportedPlatform`.
 
 **Auto jobs.** The source is read once, under the larger of the raster and
@@ -380,8 +380,11 @@ byte-order mark and the prolog (the XML declaration, processing
 instructions, comments and a document type declaration), is `svg` is SVG.
 That root is found by one scan, before the SVG cap applies or the parser
 runs, so other markup is `UnsupportedMedia` however large it is or however
-hard it would be to parse. Anything else, Mermaid and Markdown included for
-now, is `UnsupportedMedia` too. The actual kind's own cap applies before
+hard it would be to parse. Other UTF-8 text goes to the Mermaid renderer,
+which recognizes a diagram with its own preprocessing as it parses it and
+answers `UnsupportedMedia` for text that is not one, so the Mermaid kind is
+reported once the diagram has rendered. Markdown is `UnsupportedMedia` for
+now, as are bytes that are not UTF-8. The actual kind's own cap applies before
 anything decodes the snapshot, so SVG content over 2 MiB is refused as an
 explicit SVG job's would be: `FileTooLarge` from a file and `TooLarge`
 inline. SVG behind a document type declaration is classified as SVG and then

@@ -251,7 +251,7 @@ fn property_name(name: &str) -> Result<&str, FailureCode> {
 
 /// The declarations of a rule body or a `style` attribute, checked, with
 /// shorthands expanded and non-presentation properties left out.
-fn declarations(body: &str) -> Result<Vec<(String, String)>, FailureCode> {
+pub(super) fn declarations(body: &str) -> Result<Vec<(String, String)>, FailureCode> {
     let mut out = Vec::new();
     for declaration in sanitize::declarations(body)? {
         let name = property_name(declaration.name)?;

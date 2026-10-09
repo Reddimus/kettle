@@ -514,6 +514,48 @@ fn absolute_length(value: &str) -> bool {
     number.trim().parse::<f64>().is_ok()
 }
 
+/// usvg's font size where nothing sets one.
+const DEFAULT_FONT_SIZE: f64 = 12.0;
+
+/// An absolute length as pixels, at 96 to the inch as usvg reads it.
+fn absolute_px(value: &str) -> Option<f64> {
+    let value = value.trim().to_ascii_lowercase();
+    let (number, scale) = [
+        ("px", 1.0),
+        ("pt", 4.0 / 3.0),
+        ("pc", 16.0),
+        ("in", 96.0),
+        ("cm", 96.0 / 2.54),
+        ("mm", 96.0 / 25.4),
+    ]
+    .iter()
+    .find_map(|(unit, scale)| value.strip_suffix(unit).map(|number| (number, *scale)))
+    .unwrap_or((value.as_str(), 1.0));
+    let px = number.trim().parse::<f64>().ok()? * scale;
+    (px.is_finite() && px.abs() <= MAX_NUMBER).then_some(px)
+}
+
+/// Whether `value` is a relative font size [`relative_px`] can resolve.
+pub(super) fn relative_font_size(value: &str) -> bool {
+    relative_px(value, 1.0).is_some()
+}
+
+/// A relative font size (`em`, `ex` at half an em as usvg reads it, or a
+/// percentage) as pixels against `parent`, within the number bound.
+fn relative_px(value: &str, parent: f64) -> Option<f64> {
+    let value = value.trim().to_ascii_lowercase();
+    let (number, scale) = [("em", 1.0), ("ex", 0.5), ("%", 0.01)]
+        .iter()
+        .find_map(|(unit, scale)| value.strip_suffix(unit).map(|number| (number, *scale)))?;
+    let px = number.trim().parse::<f64>().ok()? * scale * parent;
+    (px.is_finite() && (0.0..=MAX_NUMBER).contains(&px)).then_some(px)
+}
+
+/// Pixels as an attribute value.
+fn format_px(px: f64) -> String {
+    format!("{}px", (px * 1000.0).round() / 1000.0)
+}
+
 /// The font-size keywords, all of which usvg scales by the parent's size.
 fn size_keyword(token: &str) -> bool {
     matches!(
@@ -601,6 +643,14 @@ fn escape(text: &str, attribute: bool) -> String {
 
 /// Write the kept parts of `document` back as SVG text.
 pub(super) fn write(document: &Document<'_>) -> Result<String, FailureCode> {
+    write_with_styles(document, false)
+}
+
+pub(super) fn write_generated(document: &Document<'_>) -> Result<String, FailureCode> {
+    write_with_styles(document, true)
+}
+
+fn write_with_styles(document: &Document<'_>, generated: bool) -> Result<String, FailureCode> {
     let root = document.root_element();
     if !kept(root) || root.tag_name().name() != "svg" {
         return Err(FailureCode::RenderParse);
@@ -625,13 +675,35 @@ pub(super) fn write(document: &Document<'_>) -> Result<String, FailureCode> {
             pending.extend(node.children().filter(Node::is_element).rev());
         }
     }
-    let sheets = css::StyleSheets::parse(&sheets, elements)?;
+    enum Sheets<'a> {
+        External(css::StyleSheets),
+        Generated(super::generated_css::StyleSheets<'a>),
+    }
+    let sheets = if generated {
+        Sheets::Generated(super::generated_css::StyleSheets::parse(&sheets)?)
+    } else {
+        Sheets::External(css::StyleSheets::parse(&sheets, elements)?)
+    };
     // Each entry is a node to enter, or (None) the end of an open element.
     let mut stack: Vec<Option<Node<'_, '_>>> = vec![Some(root)];
+    // The font size each open element computes to, and the ids written.
+    let mut sizes: Vec<f64> = Vec::new();
+    // A generated diagram's first element with each id owns it, whether or
+    // not it is written: a reference never moves to a later one.
+    let mut owners: std::collections::HashMap<&str, roxmltree::NodeId> =
+        std::collections::HashMap::new();
+    if generated {
+        for node in root.descendants().filter(Node::is_element) {
+            if let Some(id) = plain(node, "id") {
+                owners.entry(id).or_insert(node.id());
+            }
+        }
+    }
     let mut written = 0usize;
     while let Some(entry) = stack.pop() {
         let Some(node) = entry else {
             writer.end_element();
+            sizes.pop();
             continue;
         };
         if node.is_text() {
@@ -640,11 +712,6 @@ pub(super) fn write(document: &Document<'_>) -> Result<String, FailureCode> {
             writer.write_text(&text);
         } else if kept(node) && node.tag_name().name() != "style" {
             let name = node.tag_name().name();
-            writer.start_element(name);
-            if node == root {
-                writer.write_attribute("xmlns", SVG_NS);
-                writer.write_attribute("xmlns:xlink", XLINK_NS);
-            }
             if name == "feConvolveMatrix" {
                 let mut refused = false;
                 numbers(plain(node, "order").unwrap_or_default(), |token| {
@@ -660,22 +727,83 @@ pub(super) fn write(document: &Document<'_>) -> Result<String, FailureCode> {
             // CSS, the element's `style` last, replaces presentation
             // attributes: the last value of each property is written.
             let mut applied: Vec<css::Applied> = Vec::new();
-            for (property, value) in sheets.applied(node)? {
+            let styles = match &sheets {
+                Sheets::External(sheets) => sheets.applied(node)?,
+                Sheets::Generated(sheets) => sheets.applied(node)?,
+            };
+            for (property, value) in styles {
                 applied.retain(|(name, _)| *name != property);
                 applied.push((property, value));
             }
+            // The size this element's text computes to: a relative size in a
+            // generated diagram resolves against its parent's.
+            let parent_size = sizes.last().copied().unwrap_or(DEFAULT_FONT_SIZE);
+            // A generated style sheet's relative font size resolves here,
+            // against the size this element inherits; one that does not is
+            // left out.
+            if generated {
+                applied.retain_mut(|(name, value)| {
+                    if &**name != "font-size" || absolute_px(value).is_some() {
+                        return true;
+                    }
+                    match relative_px(value, parent_size) {
+                        Some(px) => {
+                            *value = format_px(px).into();
+                            true
+                        }
+                        None => false,
+                    }
+                });
+            }
+            let mut size = applied
+                .iter()
+                .find(|(name, _)| &**name == "font-size")
+                .and_then(|(_, value)| absolute_px(value))
+                .unwrap_or(parent_size);
             let mut attributes = Vec::new();
+            let mut refused = false;
             for attribute in node.attributes() {
                 if attribute.namespace().is_none()
                     && applied.iter().any(|(name, _)| &**name == attribute.name())
                 {
                     continue;
                 }
-                match attribute_policy(&attribute, plain_href)? {
-                    Kept::As(name) => attributes.push((name, attribute.value().to_owned())),
-                    Kept::Rewritten(name, value) => attributes.push((name, value)),
-                    Kept::Dropped => {}
+                if generated && attribute.namespace().is_none() {
+                    match attribute.name() {
+                        // Diagram renderers repeat ids; the first is the one
+                        // a reference finds, as in a browser.
+                        "id" if owners.get(attribute.value()) != Some(&node.id()) => continue,
+                        "font-size" => {
+                            if let Some(px) = relative_px(attribute.value(), parent_size) {
+                                size = px;
+                                attributes.push(("font-size".to_owned(), format_px(px)));
+                                continue;
+                            }
+                            size = absolute_px(attribute.value()).unwrap_or(size);
+                        }
+                        _ => {}
+                    }
                 }
+                match attribute_policy(&attribute, plain_href) {
+                    Ok(Kept::As(name)) => attributes.push((name, attribute.value().to_owned())),
+                    Ok(Kept::Rewritten(name, value)) => attributes.push((name, value)),
+                    Ok(Kept::Dropped) => {}
+                    // A generated diagram's element that does not pass, such
+                    // as a marker drawn far off the page, is left out whole.
+                    Err(FailureCode::RenderParse) if generated && node != root => {
+                        refused = true;
+                        break;
+                    }
+                    Err(failure) => return Err(failure),
+                }
+            }
+            if refused {
+                continue;
+            }
+            writer.start_element(name);
+            if node == root {
+                writer.write_attribute("xmlns", SVG_NS);
+                writer.write_attribute("xmlns:xlink", XLINK_NS);
             }
             // usvg reads these three only from CSS: a `style` attribute of
             // checked keywords, composed here, carries them.
@@ -699,6 +827,7 @@ pub(super) fn write(document: &Document<'_>) -> Result<String, FailureCode> {
                     buffer.extend_from_slice(value.as_bytes())
                 });
             }
+            sizes.push(size);
             stack.push(None);
             stack.extend(node.children().rev().map(Some));
         }
@@ -723,6 +852,55 @@ mod tests {
 
     const OPEN: &str =
         r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">"#;
+
+    /// A generated diagram keeps the first of repeated ids, leaves out whole
+    /// an element that does not pass (a marker far off the page), resolves
+    /// relative font sizes against the inherited size, and leaves out a
+    /// declaration it cannot read; an outside SVG gets none of that.
+    #[test]
+    fn generated_diagrams_are_cleaned_where_outside_svg_is_refused() {
+        let svg = format!(
+            r##"{OPEN}<style>svg{{font-size:14px}}.d{{filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1))}}.c{{fill:#ff0000}}</style><g id="a"><path id="a" d="M0 0"/></g><line x1="-12819875" x2="0" y1="0" y2="1"/><text font-size="4ex">T</text><g font-size="20px"><text font-size="50%">U</text><text font-size="1.5em">V</text></g><rect class="c d" width="1" height="1"/></svg>"##
+        );
+        let document = parse(&svg).unwrap();
+        let out = write_generated(&document).unwrap();
+        assert_eq!(out.matches(r#"id="a""#).count(), 1, "{out}");
+        assert!(!out.contains("<line"), "{out}");
+        assert!(out.contains(r#"font-size="28px""#), "{out}");
+        assert!(out.contains(r#"font-size="10px""#), "{out}");
+        assert!(out.contains(r#"font-size="30px""#), "{out}");
+        assert!(out.contains(r##"fill="#ff0000""##), "{out}");
+        assert!(!out.contains("drop-shadow"), "{out}");
+        assert_eq!(write(&document), Err(FailureCode::RenderParse));
+        // A style sheet's relative size resolves against the inherited one
+        // too, and one past the bound is left out.
+        let styled = format!(
+            r##"{OPEN}<style>.r{{font-size:2em}}.h{{font-size:100000000%}}</style><g font-size="14px"><text class="r">X</text><text class="h">Y</text></g></svg>"##
+        );
+        let out = write_generated(&parse(&styled).unwrap()).unwrap();
+        assert!(
+            out.contains(r#"<text class="r" font-size="28px">X"#),
+            "{out}"
+        );
+        assert!(out.contains(r#"<text class="h">Y"#), "{out}");
+        // A left-out element keeps its id, whichever attribute comes first,
+        // so a reference never moves to a later element with that id.
+        for first in [r#"x="10000001" id="b""#, r#"id="b" x="10000001""#] {
+            let owned = format!(
+                r##"{OPEN}<defs><rect {first} width="1" height="1"/><rect id="b" width="1" height="1" fill="blue"/></defs><use href="#b"/></svg>"##
+            );
+            let out = write_generated(&parse(&owned).unwrap()).unwrap();
+            assert!(!out.contains(r#"id="b""#), "{first}: {out}");
+            assert!(out.contains(r##"fill="blue""##), "{first}: {out}");
+        }
+        // A size that would pass the number bound only before resolving is
+        // still left out.
+        let huge = format!(
+            r##"{OPEN}<g font-size="9000000px"><text font-size="200%">W</text></g></svg>"##
+        );
+        let out = write_generated(&parse(&huge).unwrap()).unwrap();
+        assert!(!out.contains("<text"), "{out}");
+    }
 
     #[test]
     fn local_references_survive_and_others_are_removed() {
