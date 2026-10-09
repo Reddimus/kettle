@@ -541,7 +541,19 @@ card's item. Anything that takes the pointer while the button is held (a
 dialog through `close_all_modals` or `install_confirm_dialog`, the context
 menu, search) ends the card's press, as do focus loss and a new primary
 press after a release that never came, and `release_card` also opens
-nothing while a dialog or the viewer is up. The user opens a shelf with `open_media_shelf`. `WindowState::media_viewer`
+nothing while a dialog or the viewer is up. `note_card_hover` names the card
+a press at the physical pointer would take (`native_pointer`, which a control
+client's moves never set), for the hand cursor and the overlay's accent
+outline (`Overlay::card_hover`, the whole `PaintedCard`, drawn only where that
+frame drew that same card in that pane). The cursor icon as a whole, with the
+hover state its hit tests set, and every native press, release and wheel step,
+works from `native_pointer` too (`WindowState::resume_native_pointer`), so a
+control client's moves change neither; with the physical pointer outside the
+window, `sync_cursor_icon` sets nothing at all. A card that has not settled leaves
+`card_settle_wake`, which `about_to_wait` folds into its deadline so a still
+pointer gets the hand when the card settles, and a presented frame whose
+cards changed marks the hover stale for the same recheck. The user opens a shelf with `open_media_shelf`, on `Shelf::latest()`, the item
+published last (a replacement by key keeps its place in the list). `WindowState::media_viewer`
 names the pane and item; the App projects it into a
 `kettle_render::MediaViewerOverlay` (display text and pixels, never a path)
 and closes it when its pane leaves the active tab or becomes too small to

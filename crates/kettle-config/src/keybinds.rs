@@ -1486,6 +1486,16 @@ pub fn defaults_audit() -> (Bindings, Vec<Trigger>) {
         Char('b'),
         ToggleBroadcastOff,
     );
+    // Ctrl+Shift+Cmd+I opens the media viewer on the focused pane's latest
+    // item (I for image). It is not a standard macOS shortcut, and with all
+    // three modifiers no other default here can shadow it; Ctrl+Shift+I
+    // stays NewWindow.
+    #[cfg(target_os = "macos")]
+    bind(
+        Mods::CTRL | Mods::SHIFT | Mods::SUPER,
+        Char('i'),
+        OpenMediaShelf,
+    );
     bind(Mods::empty(), F(11), ToggleFullscreen);
     bind(cs, Char('m'), ReloadConfig);
     // Ctrl+, opens the Settings overlay (VS Code / common
@@ -2534,6 +2544,20 @@ mod tests {
                 "Cmd+{n} must select tab {n}"
             );
         }
+    }
+
+    /// The media viewer has a default chord on macOS, beside the palette
+    /// entry every platform has, and it shadows nothing.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_opens_the_media_viewer_with_ctrl_shift_cmd_i() {
+        let d = defaults();
+        let chord = Trigger::new(Mods::CTRL | Mods::SHIFT | Mods::SUPER, Key::Char('i'));
+        assert_eq!(d.get(&chord), Some(&Action::OpenMediaShelf));
+        assert_eq!(
+            d.get(&Trigger::new(Mods::CTRL | Mods::SHIFT, Key::Char('i'))),
+            Some(&Action::NewWindow)
+        );
     }
 
     #[cfg(target_os = "macos")]

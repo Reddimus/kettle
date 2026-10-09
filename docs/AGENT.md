@@ -366,8 +366,10 @@ it since the press; otherwise it goes nowhere. A Shift-click selects text
 and the wheel scrolls or reaches the program, as they would without the
 card. A press on a card that has been on screen where it is for less than
 half a second is ordinary input, so one that scrolls under the pointer
-cannot take a click meant for text. `kettle ctl send_mouse` clicks a card
-the same way. Quick select (`hint_mode`) labels each card on screen in the
+cannot take a click meant for text. The pointer turns into a hand over a
+card a click would open and the card is outlined in the accent, so it is
+clear which press the card will take; a still pointer gets them as the card
+settles. `kettle ctl send_mouse` clicks a card the same way. Quick select (`hint_mode`) labels each card on screen in the
 focused pane, and picking its label opens it; text in a card's rows is its
 marks, so it gets no label of its own. Screen readers see each card as a
 button named for its item's title, kind, size and sender, as the viewer

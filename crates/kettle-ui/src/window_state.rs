@@ -909,6 +909,18 @@ pub(crate) struct WindowState {
     /// The card instance assistive technology moved focus to, until a key
     /// press returns it to the pane.
     pub(crate) card_focus: Option<u64>,
+    /// The card a primary press at the pointer would take, for the hand
+    /// cursor and the hover outline.
+    pub(crate) card_hover: Option<kettle_render::PaintedCard>,
+    /// When the card under a still pointer settles and takes the hand.
+    pub(crate) card_settle_wake: Option<std::time::Instant>,
+    /// Cards on screen changed since the pointer was last checked against
+    /// them.
+    pub(crate) card_hover_stale: bool,
+    /// Where the physical pointer is over this window's client area, from
+    /// native events only: a control client's moves set `cursor` but never
+    /// this, so they cannot light a card the user is not pointing at.
+    pub(crate) native_pointer: Option<PhysicalPosition<f64>>,
     /// When `Some`, the user is editing a window/tab/pane title via
     /// an inline overlay.
     pub(crate) editing_title: Option<TitleEditState>,
@@ -1179,6 +1191,14 @@ pub(crate) struct MovedPasteState {
 }
 
 impl WindowState {
+    /// Point `cursor` back at the physical pointer before a native button or
+    /// wheel acts there: a control client's move may have left it elsewhere.
+    pub(crate) fn resume_native_pointer(&mut self) {
+        if let Some(pointer) = self.native_pointer {
+            self.cursor = pointer;
+        }
+    }
+
     /// Take the receipt and pending video preview that belong to `tab`'s
     /// panes, leaving another tab's receipt where it is. Pixels move without
     /// copying and the receipt keeps its lifetime; a hover pause ends because
@@ -1367,6 +1387,10 @@ impl WindowState {
             card_press: None,
             card_sightings: crate::media::CardSightings::default(),
             card_focus: None,
+            card_hover: None,
+            card_settle_wake: None,
+            card_hover_stale: false,
+            native_pointer: None,
             editing_title: None,
             pending_resize: false,
             confirm_dialog: None,
@@ -1434,6 +1458,22 @@ impl WindowState {
 mod tests {
     use super::*;
     use winit::keyboard::{KeyCode, PhysicalKey};
+
+    /// A native button acts at the physical pointer after a control client
+    /// moved the cursor, and a pointer outside the window leaves the cursor
+    /// where it was.
+    #[test]
+    fn native_input_resumes_at_the_physical_pointer() {
+        let mut ws = WindowState::new(1, false, Mux::new());
+        let control = PhysicalPosition::new(300.0, 40.0);
+        ws.cursor = control;
+        ws.resume_native_pointer();
+        assert_eq!(ws.cursor, control, "no native pointer, no change");
+        let pointer = PhysicalPosition::new(12.5, 80.0);
+        ws.native_pointer = Some(pointer);
+        ws.resume_native_pointer();
+        assert_eq!(ws.cursor, pointer);
+    }
 
     fn moving_tab(pane: u64) -> crate::mux::Tab {
         crate::mux::Tab {

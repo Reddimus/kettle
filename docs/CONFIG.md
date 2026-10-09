@@ -605,15 +605,16 @@ menu as "Theme…", and Enter or a click on the Settings Theme row opens it.
 inline rename overlay for the OS window / active tab / focused pane).
 
 **Media**: `open_media_shelf` opens the focused pane's media shelf (images and
-SVGs an agent or `kettle show` sent there) in the viewer, on its newest item,
+SVGs an agent or `kettle show` sent there) in the viewer, on the item published
+last (a replacement by key counts as new),
 or closes the viewer if one is open, whatever key it is bound to. In the
 viewer, `←`/`→` move along the shelf and Esc closes it; any other key closes
 it and goes on to the terminal or its shortcut, and a modifier alone leaves it
 open. The viewer takes every press while it is open: a click
 outside it, the tab bar included, closes it, and other buttons and the wheel
 over it reach nothing beneath. Opening another modal or a confirmation closes
-it. The command palette lists it as "Open media shelf". It has no default
-binding.
+it. The command palette lists it as "Open media shelf". On macOS its
+default chord is `Ctrl+Shift+Cmd+I`; elsewhere it has no default binding.
 
 **Modals + UI**: `command_palette` (`palette`), `hint_mode` (`hints` /
 `quick_select`; labels the URLs, paths (a quoted or backticked path may hold
