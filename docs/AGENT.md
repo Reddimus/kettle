@@ -850,7 +850,44 @@ would replace Kettle's.
 A session started this way does not show in `codex agents`. The function names the Kettle that
 printed it, and a Kettle running from a translocated copy refuses to print
 one. `kettle agent-setup --status` reports what a launch from this shell would
-get, and `--uninstall` prints how to remove the function.
+get and whether Kettle defines the function for you, and `--uninstall` prints
+how to remove it.
+
+### Kettle defines it for you
+
+With `agent-display-codex` (Settings → Agents → Codex previews; off by
+default, and it needs agent previews), the zsh or fish a new pane starts
+defines the same function itself, so there is nothing to add:
+- zsh: Kettle writes a `.zshenv`, read-only, into its own data directory
+  (`~/Library/Application Support/kettle/agent-shell/codex-shell-<hash>` on
+  macOS, `$XDG_DATA_HOME/kettle/agent-shell/` or `~/.local/share/kettle/agent-shell/`
+  elsewhere), checks it before every new pane as it does the Claude Code
+  plugin, and points zsh at it by borrowing `ZDOTDIR`. The file puts
+  `ZDOTDIR` back exactly as it was, set, empty or unset, then runs your
+  `.zshenv` from where zsh would have found it, and zsh reads the rest of
+  your startup files from there, as always. Just before the first prompt,
+  after all of them, it defines `codex` unless you have one. One difference
+  remains: while your `.zshenv` runs, `$0` is its path, as for any file zsh
+  sources.
+- fish: Kettle starts it with `-C` and code that runs after your
+  configuration and defines `codex` unless you have one. Nothing is
+  borrowed, so your configuration sees what it would without Kettle.
+
+Your own startup files run once each, in their usual order, and a `codex` you
+define, or can autoload, still wins. In zsh the definition waits in
+`precmd_functions`, so a `.zshrc` that replaces that list outright gets no
+`codex` from Kettle. A system `zshenv` (`/etc/zshenv`, `/etc/zsh/zshenv`, or
+the `etc/zshenv` of the prefix zsh is installed under) runs before Kettle's
+file. One that names `ZDOTDIR` would find Kettle's directory there, and one
+that names the `RCS` option may stop zsh reading Kettle's file at all, so
+Kettle leaves that zsh alone, and `kettle agent-setup --status` names the
+file. Only the shell a pane starts gets it: your login shell, or a `zsh` or
+`fish` command with no arguments of its own, found the way the pane finds
+the shell it runs. Bash, a shell given arguments, and a shell started from the pane's
+shell do not; add the printed function there. Kettle writes none of your startup files and none of Codex's
+configuration. Turning it off applies to new panes: one already open keeps
+its function until it closes, or until `unset -f codex` (`functions --erase
+codex` in fish) removes it.
 
 ### Protocol revisions
 

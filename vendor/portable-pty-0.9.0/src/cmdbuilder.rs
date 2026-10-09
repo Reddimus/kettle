@@ -329,6 +329,10 @@ pub struct CommandBuilder {
     /// home directory.
     #[cfg_attr(feature = "serde_support", serde(default))]
     require_cwd: bool,
+    /// Arguments for the default program, which still starts as a login
+    /// shell, with `-` and its name as argv\[0\]. Unix only.
+    #[cfg_attr(feature = "serde_support", serde(default))]
+    shell_args: Vec<OsString>,
 }
 
 impl CommandBuilder {
@@ -344,6 +348,7 @@ impl CommandBuilder {
             controlling_tty: true,
             contain_process_tree: false,
             require_cwd: false,
+            shell_args: vec![],
         }
     }
 
@@ -358,6 +363,7 @@ impl CommandBuilder {
             controlling_tty: true,
             contain_process_tree: false,
             require_cwd: false,
+            shell_args: vec![],
         }
     }
 
@@ -410,6 +416,7 @@ impl CommandBuilder {
             controlling_tty: true,
             contain_process_tree: false,
             require_cwd: false,
+            shell_args: vec![],
         }
     }
 
@@ -436,6 +443,23 @@ impl CommandBuilder {
         for arg in args {
             self.arg(arg);
         }
+    }
+
+    /// Append an argument for the default program, which still starts as a
+    /// login shell. Unix only, where the default program is the user's
+    /// shell.
+    /// Will panic if called on a builder that names its program.
+    #[cfg(unix)]
+    pub fn shell_arg<S: AsRef<OsStr>>(&mut self, arg: S) {
+        if !self.is_default_prog() {
+            panic!("attempted to add shell args to a builder that names its program");
+        }
+        self.shell_args.push(arg.as_ref().to_owned());
+    }
+
+    /// The arguments [`CommandBuilder::shell_arg`] added.
+    pub fn get_shell_args(&self) -> &[OsString] {
+        &self.shell_args
     }
 
     pub fn get_argv(&self) -> &Vec<OsString> {
@@ -665,6 +689,7 @@ impl CommandBuilder {
             // basename with `-` and setting that as argv0
             let basename = shell.rsplit('/').next().unwrap_or(&shell);
             cmd.arg0(format!("-{}", basename));
+            cmd.args(&self.shell_args);
             cmd
         } else {
             let resolved = self.search_path(&self.args[0], dir)?;
@@ -1113,6 +1138,40 @@ mod tests {
             cmd.as_command().unwrap().get_current_dir(),
             Some(missing.as_path())
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_default_shell_keeps_its_login_name_with_shell_args() {
+        let mut cmd = CommandBuilder::new_default_prog();
+        cmd.env("SHELL", "/bin/sh");
+        cmd.shell_arg("-C");
+        cmd.shell_arg("echo hi");
+        assert!(cmd.is_default_prog());
+        assert_eq!(cmd.get_shell_args(), ["-C", "echo hi"]);
+        let command = cmd.as_command().unwrap();
+        assert_eq!(command.get_program(), "/bin/sh");
+        let args: Vec<&OsStr> = command.get_args().collect();
+        assert_eq!(args, ["-C", "echo hi"]);
+    }
+
+    #[cfg(all(unix, feature = "serde_support"))]
+    #[test]
+    fn shell_args_survive_serialization() {
+        let mut cmd = CommandBuilder::new_default_prog();
+        cmd.env_clear();
+        cmd.shell_arg("-C");
+        let serialized = serde_json::to_value(&cmd).expect("serialize command builder");
+        let restored: CommandBuilder =
+            serde_json::from_value(serialized).expect("deserialize command builder");
+        assert_eq!(restored, cmd);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[should_panic(expected = "names its program")]
+    fn shell_args_are_only_for_the_default_shell() {
+        CommandBuilder::new("/bin/sh").shell_arg("-C");
     }
 
     #[cfg(windows)]

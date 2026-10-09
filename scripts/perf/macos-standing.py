@@ -884,7 +884,7 @@ ASSET_MAX_BYTES = 64 * 1024 * 1024
 CONFIG_FILE_KEYS = {"background-image": "asset", "record-dir": "output-directory"}
 # Canonical top-level parse_collect arms. Reject new nonempty keys until their
 # dependencies have been audited; a suffix/path-string heuristic misses inputs.
-CONFIG_KEYS = frozenset("""accent-color agent-badge agent-display agent-display-claude-code agent-server allow-bold always-on-top always-split-with-profile
+CONFIG_KEYS = frozenset("""accent-color agent-badge agent-display agent-display-claude-code agent-display-codex agent-server allow-bold always-on-top always-split-with-profile
 ask-before-closing audible-bell autoclean-groups background background-animation background-blur
 background-color background-darkness background-image background-image-align-horiz
 background-image-align-vert background-image-mode background-opacity background-type

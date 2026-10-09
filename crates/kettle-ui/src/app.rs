@@ -9434,8 +9434,9 @@ impl App {
             last_session_sweep: None,
         };
         app.runtime_tracker.set_window_count(app.windows.len());
-        // Before the first pane, which may start Claude Code.
+        // Before the first pane, which may start Claude Code or Codex.
         app.reconcile_claude_plugin();
+        app.reconcile_codex_shell();
         crate::startup_trace::mark(crate::startup_trace::Phase::AppBuilt);
         let result: Result<()> = match app.start_first_pane_before_launch() {
             Ok(_) => event_loop.run_app(&mut app).map_err(Into::into),
@@ -17714,6 +17715,10 @@ impl App {
                             self.agent_previews_live(),
                             crate::agent_plugin::refusal(),
                         )),
+                        Some("agent-display-codex") => Some(codex_note(
+                            self.agent_previews_live(),
+                            crate::codex_shell::refusal(),
+                        )),
                         _ => Some(self.agent_previews_note()),
                     },
                 )
@@ -21094,6 +21099,7 @@ impl App {
         self.cfg = new;
         self.reconcile_agent_display();
         self.reconcile_claude_plugin();
+        self.reconcile_codex_shell();
         crate::dev_record::apply_retention_config(&self.cfg);
         self.sync_lua_active_theme();
         font_size_changed
@@ -21264,6 +21270,38 @@ impl App {
             Err(refusal) => {
                 log::warn!("agent previews: the Claude Code plugin is unavailable ({refusal:?})");
                 crate::agent_plugin::offer(None, Some(refusal));
+            }
+        }
+    }
+
+    /// Offer new panes' shells the startup that defines `codex` while
+    /// `agent-display-codex` and agent previews are on, writing its files
+    /// first if they are not there intact; otherwise offer none. Panes
+    /// already open keep what they started with.
+    fn reconcile_codex_shell(&mut self) {
+        if !(self.agent_previews_live() && self.cfg.agent_display_codex) {
+            crate::codex_shell::offer(None, None);
+            return;
+        }
+        if cfg!(not(unix)) {
+            crate::codex_shell::offer(None, Some(crate::codex_shell::ShellRefusal::Unsupported));
+            return;
+        }
+        let prepared = std::env::current_exe()
+            .and_then(std::fs::canonicalize)
+            .map_err(|_| crate::codex_shell::ShellRefusal::Unavailable)
+            .and_then(|executable| {
+                let root = crate::codex_shell::startup_root()
+                    .ok_or(crate::codex_shell::ShellRefusal::Unavailable)?;
+                crate::codex_shell::prepare(&root, &executable, env!("CARGO_PKG_VERSION"))
+            });
+        match prepared {
+            Ok(offered) => crate::codex_shell::offer(Some(offered), None),
+            Err(refusal) => {
+                log::warn!(
+                    "agent previews: Codex's shell integration is unavailable ({refusal:?})"
+                );
+                crate::codex_shell::offer(None, Some(refusal));
             }
         }
     }
@@ -28730,7 +28768,7 @@ fn settings_footer_note(
         notes.push(gpu);
     }
     match focused_key {
-        Some("agent-display" | "agent-display-claude-code") => {
+        Some("agent-display" | "agent-display-claude-code" | "agent-display-codex") => {
             notes.extend(agent_previews.map(|note| tr.text(note)));
         }
         Some("window-blur" | "background-opacity") => {
@@ -28773,6 +28811,23 @@ fn claude_code_note(
         Some(PluginRefusal::Unsupported) => Text::SettingsNoteClaudeCodeUnsupported,
         None if !display_on => Text::SettingsNoteClaudeCodeNeedsPreviews,
         None => Text::SettingsNoteClaudeCodeNewPanes,
+    }
+}
+
+/// What the Codex row's footer says: why new panes' shells get no `codex`,
+/// or else where and when the setting applies.
+fn codex_note(
+    display_on: bool,
+    refusal: Option<crate::codex_shell::ShellRefusal>,
+) -> kettle_i18n::Text {
+    use crate::codex_shell::ShellRefusal;
+    use kettle_i18n::Text;
+    match refusal {
+        Some(ShellRefusal::Translocated) => Text::SettingsNoteCodexTranslocated,
+        Some(ShellRefusal::Unavailable) => Text::SettingsNoteCodexUnavailable,
+        Some(ShellRefusal::Unsupported) => Text::SettingsNoteCodexUnsupported,
+        None if !display_on => Text::SettingsNoteCodexNeedsPreviews,
+        None => Text::SettingsNoteCodexNewPanes,
     }
 }
 
@@ -53500,6 +53555,97 @@ mod settings_footer_text_tests {
         assert!(src.contains(
             "Some(\"agent-display-claude-code\") => Some(claude_code_note(\n                            self.agent_previews_live(),\n                            crate::agent_plugin::refusal(),"
         ));
+    }
+
+    /// The Codex row's footer names why new panes' shells get no `codex`, or
+    /// else where the setting applies; the row with focus picks it.
+    #[test]
+    fn codex_note_names_why_new_panes_get_no_codex() {
+        use crate::codex_shell::ShellRefusal;
+        use kettle_i18n::Text;
+        let note = super::codex_note;
+        assert_eq!(note(true, None), Text::SettingsNoteCodexNewPanes);
+        assert_eq!(note(false, None), Text::SettingsNoteCodexNeedsPreviews);
+        for display_on in [true, false] {
+            assert_eq!(
+                note(display_on, Some(ShellRefusal::Translocated)),
+                Text::SettingsNoteCodexTranslocated
+            );
+            assert_eq!(
+                note(display_on, Some(ShellRefusal::Unavailable)),
+                Text::SettingsNoteCodexUnavailable
+            );
+            assert_eq!(
+                note(display_on, Some(ShellRefusal::Unsupported)),
+                Text::SettingsNoteCodexUnsupported
+            );
+        }
+        assert!(
+            settings_footer_note(
+                &EN,
+                None,
+                Some("agent-display-codex"),
+                false,
+                false,
+                Some(Text::SettingsNoteCodexNewPanes)
+            )
+            .is_some_and(|note| note.starts_with("Applies to zsh and fish"))
+        );
+        let src = super::production_source();
+        assert!(src.contains(
+            "Some(\"agent-display-codex\") => Some(codex_note(\n                            self.agent_previews_live(),\n                            crate::codex_shell::refusal(),"
+        ));
+    }
+
+    /// New panes' shells get `codex` from the first pane on, and a reload
+    /// that turns the integration or agent previews on or off changes what
+    /// the next pane gets.
+    #[test]
+    fn the_codex_startup_files_are_offered_before_the_first_pane_and_on_reload() {
+        let src = super::production_source();
+        let run = src
+            .split_once("pub fn run_with(mut startup: crate::Options) -> Result<()> {")
+            .expect("run_with")
+            .1;
+        let built = run.find("let mut app = App {").expect("app built");
+        let offered = run
+            .find("app.reconcile_codex_shell();")
+            .expect("startup offers the startup files");
+        let first = run
+            .find("app.start_first_pane_before_launch()")
+            .expect("first pane");
+        assert!(built < offered && offered < first);
+        let load = src
+            .split_once("fn load_reloaded_config(&mut self) -> bool {")
+            .expect("load_reloaded_config")
+            .1
+            .split_once("\n    fn apply_reloaded_config(")
+            .expect("end of load_reloaded_config")
+            .0;
+        let display = load
+            .find("self.reconcile_agent_display();")
+            .expect("reload reconciles agent display");
+        let shell = load
+            .find("self.reconcile_codex_shell();")
+            .expect("reload reconciles the startup files");
+        assert!(display < shell, "the startup files follow the live policy");
+        let reconcile = src
+            .split_once("fn reconcile_codex_shell(&mut self) {")
+            .expect("reconcile_codex_shell")
+            .1
+            .split_once("\n    }\n")
+            .expect("end of reconcile_codex_shell")
+            .0;
+        let gate = reconcile
+            .find("if !(self.agent_previews_live() && self.cfg.agent_display_codex) {")
+            .expect("gated on both settings");
+        let withdrawn = reconcile
+            .find("crate::codex_shell::offer(None, None);")
+            .expect("off withdraws the startup files");
+        let installed = reconcile
+            .find("crate::codex_shell::prepare(&root, &executable, env!(\"CARGO_PKG_VERSION\"))")
+            .expect("on installs them");
+        assert!(gate < withdrawn && withdrawn < installed);
     }
 
     /// New panes get the plugin from the first one on, and a reload that

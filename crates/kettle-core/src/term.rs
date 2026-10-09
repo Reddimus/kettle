@@ -34,6 +34,7 @@ use crate::images::{
     prune, relative_origin,
 };
 use crate::persistence::{AsyncFileWriter, AsyncWriterStatus};
+use crate::shell_startup::ShellStartup;
 
 const PTY_READ_BUFFER_BYTES: usize = 64 * 1024;
 const PTY_PUMP_QUEUE_DEPTH: usize = 4;
@@ -6576,6 +6577,7 @@ impl Terminal {
             extra_env,
             login_shell,
             shell_integration,
+            &ShellStartup::default(),
             TerminalCapabilities::default(),
             event_tx,
             waker,
@@ -6602,6 +6604,7 @@ impl Terminal {
         extra_env: &[(String, String)],
         login_shell: bool,
         shell_integration: bool,
+        shell_startup: &ShellStartup,
         capabilities: TerminalCapabilities,
         event_tx: crossbeam_channel::Sender<TermEvent>,
         waker: Waker,
@@ -6621,6 +6624,7 @@ impl Terminal {
             extra_env,
             login_shell,
             shell_integration,
+            shell_startup,
             capabilities,
             WorkingDirectoryPolicy::FallbackToHome,
             event_tx,
@@ -6649,6 +6653,7 @@ impl Terminal {
         extra_env: &[(String, String)],
         login_shell: bool,
         shell_integration: bool,
+        shell_startup: &ShellStartup,
         capabilities: TerminalCapabilities,
         cwd_policy: WorkingDirectoryPolicy,
         event_tx: crossbeam_channel::Sender<TermEvent>,
@@ -6735,6 +6740,13 @@ impl Terminal {
             "WSLENV",
             child_wslenv(&std::env::var("WSLENV").unwrap_or_default(), extra_env),
         );
+        // After the environment, which decides the shell the PTY runs and
+        // holds the `ZDOTDIR` zsh would have read.
+        let explicit = match argv {
+            [program] => Some(program.as_str()),
+            _ => None,
+        };
+        crate::shell_startup::apply(&mut cmd, explicit, shell_startup);
         apply_working_directory(&mut cmd, cwd, cwd_policy);
         #[cfg(unix)]
         let reader_poll_fd = pair
@@ -14656,6 +14668,7 @@ mod teardown_tests {
                 &[],
                 false,
                 false,
+                &crate::shell_startup::ShellStartup::default(),
                 TerminalCapabilities {
                     color_scheme_dark: seed,
                     ..TerminalCapabilities::default()

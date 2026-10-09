@@ -3882,7 +3882,45 @@ while the pointer is outside the window)
 `media::sightings` tests `settles_at`. The shelf test pins that a
 replacement by key, kept in its place, is still `latest()`, and on macOS
 `macos_opens_the_media_viewer_with_ctrl_shift_cmd_i` pins the default
-chord. The card menu: `a_card_menu_row_is_an_ordinary_menu_row` checks its
+chord. Codex's startup: `kettle-core`'s `shell_startup` checks that the
+user's zsh borrows `ZDOTDIR` and keeps what it was (set, empty, unset, or not
+UTF-8), that fish gets `-C` and its code as arguments to the login shell with
+nothing borrowed, that a lone `zsh` or `fish` command gets the same and other
+shells or commands with arguments get nothing, that it adds to the shell the
+PTY will run (a `SHELL` that cannot run falls to the passwd shell for both),
+and that a system `zshenv` naming `ZDOTDIR` or the `RCS` option in any
+spelling zsh accepts, or too large to read, keeps Kettle out of zsh, the
+`etc/zshenv` of zsh's install prefix included, that a FIFO there is passed
+over without waiting, and that a bare `zsh` command is found on the pane's
+`PATH`; the
+vendored portable-pty's `the_default_shell_keeps_its_login_name_with_shell_args`
+checks the default shell keeps its login `argv[0]` with those arguments.
+`codex_shell` runs a real zsh and fish (skipped where not installed) with
+what `additions` gives, a scratch home and a stand-in Kettle: zsh runs the
+user's files once each in zsh's order (`.zshenv`, `.zprofile`, `.zshrc`,
+`.zlogin` for a login shell) from the `ZDOTDIR` they had, gets it back
+exactly, prints no error for a missing or unreadable `.zshenv`, defines
+`codex` before the first prompt only when interactive and hands every
+argument through exactly, and a user's own or autoloadable `codex` wins; fish
+reads the user's configuration as it would without Kettle, a `conf.d` file's
+`XDG_DATA_DIRS` included, defines `codex` only when interactive, and leaves
+alone a `codex` the user can autoload. The same startup, kept as fixtures
+that `the_startup_matches_the_checked_fixtures` holds equal to the
+generator, runs under every zsh and fish the shell-integration check covers
+(macOS zsh, and fish 3.7, 4.2 and 4.8 in CI): `check_codex_zsh` and
+`check_codex_fish` check the restored variable, the user's startup order, the
+forwarded arguments and that a user's own or autoloadable `codex` wins.
+`agent-setup`'s tests check that `--status` reports the saved settings and
+names a system `zshenv` that keeps Kettle out of zsh; `owned_dir` checks a nested layout installs
+read-only at every level and that an extra entry deep inside fails the
+check; the App tests pin that the startup files are offered before the first
+pane and on reload, gated on both settings, and the Codex row's note. Checked
+live on macOS with the owner's own zsh setup and Codex CLI 0.162.0: a new
+pane's zsh loaded the user's startup files as usual, `whence -w codex` said
+function, `ZDOTDIR` was unset again with Kettle's variables gone, and `codex
+--version` went through Kettle's launcher to Codex; a pane whose shell was
+fish ran as the login `-fish -C …`, defined `codex`, and kept the
+`XDG_DATA_DIRS` Kettle inherited. The card menu: `a_card_menu_row_is_an_ordinary_menu_row` checks its
 rows dispatch with what the menu captured and take mnemonics and typing, and
 `a_card_takes_its_press_and_release_before_anything_behind_it` and
 `every_way_to_open_a_card_goes_through_one_door` guard that a right-press on a
