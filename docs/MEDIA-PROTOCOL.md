@@ -377,16 +377,18 @@ needs more) is `RenderResource`. The codec's own limits are set to the same
 values, but they are best effort. A GIF or an animated WebP yields its first
 frame only. Content that does not decode is `RenderParse`.
 
-**Fitting.** The image is scaled to fit inside the target box, keeping its
-aspect ratio, each edge rounded and kept between 1 pixel and the box. It is
-resampled (triangle filter) with premultiplied alpha, so a transparent pixel's
-hidden color does not bleed into its neighbours, and returned as straight
-RGBA in which every fully transparent pixel is all zero. Resampling filters
-each input row once and keeps it only while an output row needs it, so beside
-the decoded image and the result it holds a few rows, never a full-size
-working copy. A crop is in target
-box coordinates, with the fitted image centered in the box: it returns just
-that region, transparent wherever the image does not reach. The canvas color
+**Fitting.** The image is scaled down to fit inside the target box, keeping
+its aspect ratio, each edge rounded and kept between 1 pixel and the box. It
+is never enlarged: an image smaller than the box keeps its own size, since
+enlarging adds no detail, only pixels to hold, and the GUI scales what it
+paints. It is resampled (triangle filter) with premultiplied alpha, so a
+transparent pixel's hidden color does not bleed into its neighbours, and
+returned as straight RGBA in which every fully transparent pixel is all zero.
+Resampling filters each input row once and keeps it only while an output row
+needs it, so beside the decoded image and the result it holds a few rows,
+never a full-size working copy. A crop is in target box coordinates, with the
+fitted image centered in the box: it returns just that region, transparent
+wherever the image does not reach. The canvas color
 is the GUI's to draw behind the result, and the scale is for vector content: a
 raster target is already in device pixels.
 

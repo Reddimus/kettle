@@ -233,19 +233,24 @@ fn rgba_is_straight_with_zero_alpha_zero_rgb() {
 #[test]
 fn canvas_and_crop_are_bounded() {
     let red = [255, 0, 0, 255];
-    let png = encode(&solid(4, 2, red), ImageFormat::Png);
-    // Fitted inside an 8x8 box keeping the aspect ratio: 8x4.
-    let rendered = render(&job(Source::Bytes(png.clone()), target(8, 8, None))).unwrap();
+    let png = encode(&solid(8, 4, red), ImageFormat::Png);
+    // Fitted inside a 4x4 box keeping the aspect ratio: 4x2.
+    let rendered = render(&job(Source::Bytes(png.clone()), target(4, 4, None))).unwrap();
+    assert_eq!((rendered.width, rendered.height), (4, 2));
+    // Never enlarged: in a 16x16 box it keeps its own 8x4.
+    let rendered = render(&job(Source::Bytes(png.clone()), target(16, 16, None))).unwrap();
     assert_eq!((rendered.width, rendered.height), (8, 4));
-    // A crop is in box coordinates around the centered image (rows 2..6).
+    assert!(rendered.rgba.chunks(4).all(|pixel| pixel == red));
+    // A crop is in box coordinates around the centered image: in a 16x16
+    // box, columns 4..12 and rows 6..10.
     let rendered = render(&job(
         Source::Bytes(png.clone()),
         target(
-            8,
-            8,
+            16,
+            16,
             Some(Crop {
                 x: 2,
-                y: 0,
+                y: 4,
                 width: 4,
                 height: 4,
             }),
@@ -254,16 +259,13 @@ fn canvas_and_crop_are_bounded() {
     .unwrap();
     assert_eq!((rendered.width, rendered.height), (4, 4));
     let rows: Vec<&[u8]> = rendered.rgba.chunks(4 * 4).collect();
-    assert!(
-        rows[..2]
-            .iter()
-            .all(|row| row.iter().all(|&byte| byte == 0))
-    );
-    assert!(
-        rows[2..]
-            .iter()
-            .all(|row| row.chunks(4).all(|pixel| pixel == red))
-    );
+    for (row, pixels) in rows.iter().enumerate() {
+        for (column, pixel) in pixels.chunks(4).enumerate() {
+            let inside = row >= 2 && column >= 2;
+            let expected = if inside { red } else { [0; 4] };
+            assert_eq!(pixel, expected, "row {row}, column {column}");
+        }
+    }
     // A target past the rendered cap, or a crop outside its box, is refused.
     for bad in [
         target(5000, 10, None),
