@@ -1306,8 +1306,8 @@ pub type Rect4 = (f32, f32, f32, f32);
 const MAX_LANE_IMAGES: usize = 64;
 
 pub use media_lane::{
-    MediaCanvas, MediaLaneGeometry, MediaLaneHit, MediaLanePanel, MediaLaneSender,
-    media_lane_geometry,
+    MediaCanvas, MediaLaneGeometry, MediaLaneHit, MediaLaneMode, MediaLanePanel, MediaLaneSender,
+    MediaLaneSource, media_lane_geometry,
 };
 
 /// Visible candidate rows in one completion card.
@@ -8832,6 +8832,9 @@ impl Renderer {
                 geometry.previous,
                 geometry.next,
                 geometry.open_outside,
+                geometry.mode,
+                geometry.canvas,
+                geometry.copy,
                 Some(geometry.toggle),
                 Some(geometry.close),
             ]
@@ -8872,10 +8875,16 @@ impl Renderer {
                     [x, y, width, height],
                 ));
             }
+            // Source rows sit on the pane's background, as a terminal's do.
+            if lane.mode == MediaLaneMode::Source && geometry.full {
+                let (sx, sy, sw, sh) = geometry.image_area;
+                lane_q.push(rect(sx, sy, sw, sh, theme.background, 1.0));
+            }
             if let Some(text) = self.lane_texts.get(&lane.pane) {
                 lane_areas.extend(text.areas(
                     &geometry,
                     lane.collapsed || !geometry.full,
+                    lane.mode,
                     (
                         gc(palette.label),
                         gc(palette.description),

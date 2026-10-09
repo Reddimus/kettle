@@ -30,6 +30,9 @@ pub(crate) enum Sender {
     Process(ProcessIdentity),
     /// The user, previewing something themselves.
     User,
+    /// A pane's lane rendering its item again: one at a time, and a newer
+    /// one takes the waiting one's place.
+    Lane(u64),
 }
 
 /// What admitting a push did with it.

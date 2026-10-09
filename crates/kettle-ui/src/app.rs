@@ -783,6 +783,173 @@ fn media_viewer_sender_line(
     }
 }
 
+/// The mode a lane shows `item` in: its source only while it has a source to
+/// show, as after a replacement by key with a raster it may not.
+fn lane_mode(
+    item: &crate::media::ShelfItem,
+    panel: &crate::window_state::PreviewPanel,
+) -> kettle_render::MediaLaneMode {
+    match item.source.text() {
+        Some(_) => panel.mode,
+        None => kettle_render::MediaLaneMode::Rendered,
+    }
+}
+
+/// The shelf item `pane`'s lane shows in `ws`, if it shows one.
+fn preview_item(ws: &WindowState, pane: u64) -> Option<&crate::media::ShelfItem> {
+    let panel = ws.preview_panels.get(&pane)?;
+    ws.mux
+        .panes
+        .get(&pane)?
+        .media_shelf
+        .items()
+        .iter()
+        .find(|item| item.id == panel.item)
+}
+
+/// What a lane's render of its item is worth when it comes back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LaneRenderVerdict {
+    /// The item left the shelf or was replaced: the render is dropped.
+    Gone,
+    /// What was read is not what the item was rendered from.
+    Changed,
+    /// The same item from the same source: the render replaces its pixels.
+    Same,
+}
+
+/// Judge a lane's render, which read a source with `digest`, against the
+/// shelf `items` it asked about.
+fn lane_render_verdict(
+    items: &[crate::media::ShelfItem],
+    render: &crate::media::LaneRender,
+    digest: &kettle_media::Digest,
+) -> LaneRenderVerdict {
+    match items
+        .iter()
+        .find(|item| item.id == render.item && item.generation == render.generation)
+    {
+        None => LaneRenderVerdict::Gone,
+        Some(item) if item.source.digest != *digest => LaneRenderVerdict::Changed,
+        Some(_) => LaneRenderVerdict::Same,
+    }
+}
+
+/// Most columns a source scrolls sideways: past any line a source can hold.
+const MAX_SOURCE_COLUMN: usize = kettle_media::MAX_EXACT_SOURCE_BYTES;
+
+/// `scroll` moved by `rows` and `columns`, kept on the source: from its
+/// first row to its last of `total`, and from its first column.
+fn scrolled_source(
+    scroll: (usize, usize),
+    rows: i32,
+    columns: i32,
+    total: usize,
+) -> (usize, usize) {
+    let step = |at: usize, by: i32, last: usize| {
+        if by < 0 {
+            at.saturating_sub(by.unsigned_abs() as usize)
+        } else {
+            at.saturating_add(by as usize)
+        }
+        .min(last)
+    };
+    (
+        step(scroll.0, rows, total.saturating_sub(1)),
+        step(scroll.1, columns, MAX_SOURCE_COLUMN),
+    )
+}
+
+/// The rows and columns a lane's source moves for wheel `steps`: back
+/// toward its start for the wheel up, and sideways for a horizontal swipe,
+/// or the wheel with `shift` held. A positive horizontal step reveals what
+/// is to the left, as winit's does; macOS turns a mouse wheel's motion with
+/// Shift held into one.
+fn source_scroll_by(steps: input::WheelSteps, shift: bool) -> (i32, i32) {
+    let back = steps.lines.saturating_neg();
+    let left = steps.cols.saturating_neg();
+    if shift {
+        (0, back.saturating_add(left))
+    } else {
+        (back, left)
+    }
+}
+
+/// The part of `text`, which has `total` rows, a lane shows from `scroll`
+/// in `rows` rows of `columns` columns. A source replaced under its key may
+/// be shorter than the one scrolled, so the scroll is kept on it.
+fn lane_source(
+    text: &str,
+    total: usize,
+    scroll: (usize, usize),
+    rows: usize,
+    columns: usize,
+) -> kettle_render::MediaLaneSource {
+    let (first_row, first_column) = scrolled_source(scroll, 0, 0, total);
+    kettle_render::MediaLaneSource {
+        rows: crate::media::display_rows(text, first_row, rows, first_column, columns),
+        first_row,
+        total_rows: total,
+    }
+}
+
+/// The worker's canvas for a lane's.
+fn media_canvas(canvas: kettle_render::MediaCanvas) -> kettle_media::Canvas {
+    match canvas {
+        kettle_render::MediaCanvas::Theme => kettle_media::Canvas::Theme,
+        kettle_render::MediaCanvas::White => kettle_media::Canvas::White,
+        kettle_render::MediaCanvas::Checker => kettle_media::Canvas::Checker,
+    }
+}
+
+/// The canvas a lane shows `item` on. The user's choice for a raster or an
+/// SVG is drawn behind its pixels; a diagram's is the one its pixels were
+/// rendered for, as its colors follow the canvas, until a render for the
+/// choice comes back. Otherwise the kind's own: white for SVG, a checkerboard
+/// for a raster's transparency, the pane's background for a diagram.
+fn preview_canvas(
+    item: &crate::media::ShelfItem,
+    panel: &crate::window_state::PreviewPanel,
+) -> kettle_render::MediaCanvas {
+    use kettle_render::MediaCanvas as C;
+    match item.kind {
+        kettle_media::MediaKind::Mermaid => match item.source.spec.canvas {
+            kettle_media::Canvas::Theme => C::Theme,
+            kettle_media::Canvas::White => C::White,
+            kettle_media::Canvas::Checker => C::Checker,
+        },
+        kettle_media::MediaKind::Svg => panel.canvas.unwrap_or(C::White),
+        kettle_media::MediaKind::Raster => panel.canvas.unwrap_or(C::Checker),
+        _ => panel.canvas.unwrap_or(C::Theme),
+    }
+}
+
+/// The canvas the user chose for `item`'s lane, or else the one it shows.
+fn chosen_canvas(
+    item: &crate::media::ShelfItem,
+    panel: &crate::window_state::PreviewPanel,
+) -> kettle_render::MediaCanvas {
+    panel.canvas.unwrap_or_else(|| preview_canvas(item, panel))
+}
+
+/// What a lane says in place of its hint after `notice`.
+fn lane_notice_text(
+    notice: crate::window_state::LaneNotice,
+    tr: &kettle_i18n::Translator,
+) -> &'static str {
+    use crate::window_state::LaneNotice as N;
+    use kettle_i18n::Text as T;
+    tr.text(match notice {
+        N::ImageCopied => T::MediaLaneNoticeImageCopied,
+        N::SourceCopied => T::MediaLaneNoticeSourceCopied,
+        N::CopyFailed => T::MediaLaneNoticeCopyFailed,
+        N::CopyBusy => T::MediaLaneNoticeCopyBusy,
+        N::Rendering => T::MediaLaneNoticeRendering,
+        N::RenderFailed => T::MediaLaneNoticeRenderFailed,
+        N::Changed => T::MediaLaneNoticeChanged,
+    })
+}
+
 /// What a screen reader hears for a preview lane: its name, with the item's
 /// place on the shelf, title and detail line, and a description that says
 /// when the pixels were released and where keys go.
@@ -806,7 +973,7 @@ fn media_lane_accessibility(
 /// have no lane nodes rather than ones that could collide.
 const ACCESSIBILITY_LANE_ID_MASK: u64 = 1 << 56;
 const MAX_LANE_ACCESSIBILITY_PANE: u64 = 1 << 52;
-const LANE_ACCESSIBILITY_PARTS: u64 = 8;
+const LANE_ACCESSIBILITY_PARTS: u64 = 16;
 
 /// The node of `pane`'s lane (`part` 0) or one of its controls.
 fn accessibility_lane_id(pane: u64, part: u64) -> Option<NodeId> {
@@ -830,7 +997,7 @@ fn lane_controls(
     u64,
     Option<kettle_render::Rect4>,
     kettle_render::MediaLaneHit,
-); 5] {
+); 8] {
     use kettle_render::MediaLaneHit as Hit;
     [
         (1, geometry.previous, Hit::Previous),
@@ -838,7 +1005,26 @@ fn lane_controls(
         (3, geometry.open_outside, Hit::OpenOutside),
         (4, Some(geometry.toggle), Hit::Toggle),
         (5, Some(geometry.close), Hit::Close),
+        (6, geometry.mode, Hit::Mode),
+        (7, geometry.canvas, Hit::Canvas),
+        (8, geometry.copy, Hit::Copy),
     ]
+}
+
+/// A lane control's name in ctl `ui_geometry`.
+fn lane_control_name(hit: kettle_render::MediaLaneHit) -> &'static str {
+    use kettle_render::MediaLaneHit as Hit;
+    match hit {
+        Hit::Previous => "previous",
+        Hit::Next => "next",
+        Hit::OpenOutside => "open_outside",
+        Hit::Toggle => "toggle",
+        Hit::Close => "close",
+        Hit::Mode => "mode",
+        Hit::Canvas => "canvas",
+        Hit::Copy => "copy",
+        Hit::Inside => "inside",
+    }
 }
 
 fn accessibility_card_id(instance: u64) -> NodeId {
@@ -1709,24 +1895,6 @@ fn media_unavailable(
             Some(FailureCode::UnsupportedPlatform)
         }
         Some(MediaAvailability::Unavailable(_)) => Some(FailureCode::WorkerUnavailable),
-    }
-}
-
-/// A file's default shelf key: its path, as text.
-fn media_path_key(path: &kettle_media::NativePath) -> String {
-    #[cfg(windows)]
-    {
-        let (units, _) = path.as_bytes().as_chunks::<2>();
-        String::from_utf16_lossy(
-            &units
-                .iter()
-                .map(|unit| u16::from_le_bytes(*unit))
-                .collect::<Vec<_>>(),
-        )
-    }
-    #[cfg(not(windows))]
-    {
-        String::from_utf8_lossy(path.as_bytes()).into_owned()
     }
 }
 
@@ -5612,6 +5780,9 @@ fn lane_action_hit(action: &Action) -> Option<kettle_render::MediaLaneHit> {
         Action::PreviewNext => Some(Hit::Next),
         Action::PreviewPrevious => Some(Hit::Previous),
         Action::ClosePreview => Some(Hit::Close),
+        Action::PreviewSource => Some(Hit::Mode),
+        Action::PreviewCanvas => Some(Hit::Canvas),
+        Action::PreviewCopy => Some(Hit::Copy),
         _ => None,
     }
 }
@@ -8638,6 +8809,8 @@ pub struct App {
     /// Whether a control client's request is being handled: what it
     /// drives is never the user's own gesture.
     ctl_driving: bool,
+    /// The thread that copies a lane's image or source, from the first copy.
+    preview_copy: Option<crate::media::CopyService>,
     /// Bounded native-poster jobs. Paths cross only the private child-worker
     /// protocol; decoded pixels return through the event loop.
     video_previewer: crate::video_preview::VideoPreviewer,
@@ -9649,6 +9822,7 @@ impl App {
             )),
             previews_ready: Vec::new(),
             ctl_driving: false,
+            preview_copy: None,
             video_previewer,
             next_video_preview_generation: 1,
             compiled_triggers: initial_triggers,
@@ -10545,10 +10719,12 @@ impl App {
     /// Show `item` of `pane`'s shelf in the pane's preview lane, opening or
     /// expanding the lane, and note the item was viewed.
     fn show_media_item(&mut self, ws: &mut WindowState, pane: u64, item: u64) {
-        let had_panel = ws
-            .preview_panels
-            .insert(pane, crate::window_state::PreviewPanel { item })
-            .is_some();
+        // The item already showing keeps its mode, canvas and place.
+        let panel = match ws.preview_panels.get(&pane) {
+            Some(panel) if panel.item == item => *panel,
+            _ => crate::window_state::PreviewPanel::new(item),
+        };
+        let had_panel = ws.preview_panels.insert(pane, panel).is_some();
         let side = match self.cfg.preview_lane_side {
             kettle_config::PreviewLaneSide::Bottom => crate::pane_partition::LaneSide::Bottom,
             kettle_config::PreviewLaneSide::Right => crate::pane_partition::LaneSide::Right,
@@ -10594,10 +10770,184 @@ impl App {
 
     /// Close `pane`'s preview lane; its terminal gets the room back.
     fn close_preview(&mut self, ws: &mut WindowState, pane: u64) {
+        // Motion banked toward a scroll of the lane goes with it.
+        ws.lane_wheel.reset();
         let had_panel = ws.preview_panels.remove(&pane).is_some();
         let resized = ws.mux.close_lane(pane);
         if had_panel || resized {
             self.lanes_changed(ws, resized);
+        }
+    }
+
+    /// Show `pane`'s item as its source, or rendered again; only an item
+    /// whose source the lane holds has the choice.
+    fn switch_preview_mode(&mut self, ws: &mut WindowState, pane: u64) {
+        use kettle_render::MediaLaneMode as Mode;
+        let has_text = preview_item(ws, pane).is_some_and(|item| item.source.text().is_some());
+        let Some(panel) = ws.preview_panels.get_mut(&pane).filter(|_| has_text) else {
+            return;
+        };
+        panel.mode = match panel.mode {
+            Mode::Rendered => Mode::Source,
+            Mode::Source => Mode::Rendered,
+        };
+        panel.notice = None;
+        self.lanes_changed(ws, false);
+    }
+
+    /// Show `pane`'s item on the next canvas: the pane's background, white,
+    /// then a checkerboard. A raster's or an SVG's is drawn behind its
+    /// pixels; a diagram's colors follow its canvas, so it is rendered
+    /// again for it, from the same source.
+    fn next_preview_canvas(&mut self, ws: &mut WindowState, pane: u64) {
+        use kettle_render::MediaCanvas as C;
+        let Some((item, panel)) = preview_item(ws, pane).zip(ws.preview_panels.get(&pane)) else {
+            return;
+        };
+        if item.image().is_none() {
+            return;
+        }
+        let next = match chosen_canvas(item, panel) {
+            C::Theme => C::White,
+            C::White => C::Checker,
+            C::Checker => C::Theme,
+        };
+        let diagram = item.kind == kettle_media::MediaKind::Mermaid;
+        if let Some(panel) = ws.preview_panels.get_mut(&pane) {
+            panel.canvas = Some(next);
+            panel.notice = None;
+        }
+        if diagram {
+            self.render_preview_again(ws, pane, media_canvas(next));
+        }
+        self.lanes_changed(ws, false);
+    }
+
+    /// Render `pane`'s item again from its source on `canvas`, for its lane.
+    /// The result replaces the item's pixels only if the item is still the
+    /// one shown, unreplaced, and its source unchanged (see
+    /// [`Self::finish_lane_render`]). A file is read again only on the user's
+    /// own gesture, never while a control client's request is handled.
+    fn render_preview_again(
+        &mut self,
+        ws: &mut WindowState,
+        pane: u64,
+        canvas: kettle_media::Canvas,
+    ) {
+        let Some(item) = preview_item(ws, pane) else {
+            return;
+        };
+        let mut spec = item.source.spec.clone();
+        let reads_a_file = matches!(spec.input, crate::media::SourceInput::Path { .. });
+        if self.ctl_driving && reads_a_file
+            || matches!(spec.input, crate::media::SourceInput::Released)
+        {
+            if let Some(panel) = ws.preview_panels.get_mut(&pane) {
+                panel.notice = Some(crate::window_state::LaneNotice::RenderFailed);
+            }
+            return;
+        }
+        spec.canvas = canvas;
+        let render = crate::media::LaneRender {
+            window: ws.seq,
+            pane,
+            item: item.id,
+            generation: item.generation,
+        };
+        let deadline = std::time::Instant::now() + kettle_ctl::show::SHOW_SERVER_DEADLINE;
+        let push = crate::media::Push::new(
+            crate::media::Requester::Lane(render),
+            crate::media::Route {
+                pane,
+                window: ws.seq,
+                verified: true,
+            },
+            crate::media::Draft {
+                key: None,
+                title: String::new(),
+                provenance: crate::media::Provenance::User,
+                inline: None,
+            },
+            spec,
+            kettle_media::client::RenderControl::with_deadline(deadline),
+        );
+        if let Some(panel) = ws.preview_panels.get_mut(&pane) {
+            panel.notice = Some(crate::window_state::LaneNotice::Rendering);
+        }
+        self.media
+            .admit(crate::media::Sender::Lane(pane), deadline, push);
+        self.media_tick(ws);
+    }
+
+    /// Copy what `pane`'s lane shows: the item's image, or its source in
+    /// source mode, on the clipboard thread.
+    fn copy_preview(&mut self, ws: &mut WindowState, pane: u64) {
+        use crate::window_state::LaneNotice;
+        let Some((item, panel)) = preview_item(ws, pane).zip(ws.preview_panels.get(&pane)) else {
+            return;
+        };
+        let content = match lane_mode(item, panel) {
+            kettle_render::MediaLaneMode::Source => item
+                .source
+                .text_backing()
+                .map(|text| crate::media::CopyContent::Text(Arc::clone(text))),
+            kettle_render::MediaLaneMode::Rendered => {
+                item.image().cloned().map(crate::media::CopyContent::Image)
+            }
+        };
+        let Some(content) = content else {
+            return;
+        };
+        if self.preview_copy.is_none() {
+            let proxy = self.proxy.clone();
+            self.preview_copy = crate::media::CopyService::with_platform_clipboard(
+                std::sync::Arc::new(move || {
+                    let _ = proxy.send_event(UserEvent::MediaRendered);
+                }),
+            );
+        }
+        let started = self
+            .preview_copy
+            .as_ref()
+            .map_or(crate::media::CopyStarted::Unavailable, |copy| {
+                copy.copy(ws.seq, pane, content)
+            });
+        let notice = match started {
+            crate::media::CopyStarted::Started => None,
+            crate::media::CopyStarted::Busy => Some(LaneNotice::CopyBusy),
+            crate::media::CopyStarted::Unavailable => Some(LaneNotice::CopyFailed),
+        };
+        if let Some(panel) = ws.preview_panels.get_mut(&pane) {
+            panel.notice = notice;
+        }
+        self.lanes_changed(ws, false);
+    }
+
+    /// Scroll the source the lane under the pointer shows by `steps`: a line
+    /// per scrollback line, toward the end for the wheel down; sideways for
+    /// a horizontal swipe, or the wheel with Shift held. Over a lane showing
+    /// no source it does nothing.
+    fn scroll_preview_lane(&mut self, ws: &mut WindowState, steps: input::WheelSteps) {
+        let Some((pane, _, _)) = self.preview_lane_at(ws, ws.cursor.x as f32, ws.cursor.y as f32)
+        else {
+            return;
+        };
+        let Some(total) = preview_item(ws, pane)
+            .zip(ws.preview_panels.get(&pane))
+            .filter(|(item, panel)| lane_mode(item, panel) == kettle_render::MediaLaneMode::Source)
+            .map(|(item, _)| item.source.text_rows())
+        else {
+            return;
+        };
+        let (rows, columns) = source_scroll_by(steps, ws.mods.shift_key());
+        if let Some(panel) = ws.preview_panels.get_mut(&pane) {
+            let scroll = scrolled_source(panel.scroll, rows, columns, total);
+            if scroll != panel.scroll {
+                panel.scroll = scroll;
+                if let Some(window) = &ws.window {
+                    window.request_redraw();
+                }
+            }
         }
     }
 
@@ -10962,7 +11312,9 @@ impl App {
         let tr = &self.ui_text;
         let (kind, sender) = self.media_item_kind_and_sender(item);
         let (width, height) = item.size;
-        Some(kettle_render::MediaLanePanel {
+        let text = item.source.text();
+        let mode = lane_mode(item, panel);
+        let mut lane = kettle_render::MediaLanePanel {
             pane,
             rect,
             collapsed,
@@ -10974,12 +11326,34 @@ impl App {
             image: item.image().cloned(),
             status: tr.text(kettle_i18n::Text::MediaViewerReleased).to_string(),
             open_outside: self.preview_opens_outside(ws, pane).is_some(),
-            canvas: match item.kind {
-                kettle_media::MediaKind::Svg => kettle_render::MediaCanvas::White,
-                kettle_media::MediaKind::Raster => kettle_render::MediaCanvas::Checker,
-                _ => kettle_render::MediaCanvas::Theme,
+            canvas: preview_canvas(item, panel),
+            mode,
+            source: text.map(|_| kettle_render::MediaLaneSource::default()),
+            copy: match mode {
+                kettle_render::MediaLaneMode::Rendered => item.image().is_some(),
+                kettle_render::MediaLaneMode::Source => true,
             },
-        })
+            notice: panel
+                .notice
+                .map(|notice| lane_notice_text(notice, tr).to_string()),
+        };
+        // The source rows in view, for the room the lane has: only those are
+        // read out of the text.
+        if mode == kettle_render::MediaLaneMode::Source
+            && let Some(text) = text
+            && let Some(geometry) = self.preview_lane_geometry(ws, &lane)
+        {
+            let glyph = self.overlay_text_cell_width(ws).max(1.0);
+            let columns = (geometry.image_area.2 / glyph).ceil() as usize + 1;
+            lane.source = Some(lane_source(
+                text,
+                item.source.text_rows(),
+                panel.scroll,
+                geometry.source_rows,
+                columns,
+            ));
+        }
+        Some(lane)
     }
 
     /// How the viewer and assistive technology describe a shelf item: its
@@ -11060,6 +11434,14 @@ impl App {
     /// Whether a preview lane is under the pointer. It then owns the wheel
     /// there, so the terminal beside it never scrolls from a wheel over the
     /// lane.
+    /// Whether the wheel at the pointer is a preview lane's: over a lane that
+    /// nothing covers. A menu or dialog open over it takes the wheel instead.
+    fn lane_takes_wheel(&self, ws: &WindowState) -> bool {
+        ws.context_menu.is_none()
+            && !self.pointer_modal_open(ws)
+            && self.preview_lane_under_pointer(ws)
+    }
+
     fn preview_lane_under_pointer(&self, ws: &WindowState) -> bool {
         self.preview_lane_at(ws, ws.cursor.x as f32, ws.cursor.y as f32)
             .is_some()
@@ -11099,6 +11481,9 @@ impl App {
             Hit::Previous => self.step_preview(ws, pane, -1),
             Hit::Next => self.step_preview(ws, pane, 1),
             Hit::OpenOutside => self.open_preview_outside(ws, pane),
+            Hit::Mode => self.switch_preview_mode(ws, pane),
+            Hit::Canvas => self.next_preview_canvas(ws, pane),
+            Hit::Copy => self.copy_preview(ws, pane),
             Hit::Inside => {}
         }
     }
@@ -19894,7 +20279,12 @@ impl App {
             Action::OpenThemePicker => self.open_theme_picker(ws),
             Action::OpenMediaShelf => self.open_media_shelf(ws),
             Action::PreviewClipboardPath => self.preview_copied_file(ws),
-            Action::PreviewNext | Action::PreviewPrevious | Action::ClosePreview => {
+            Action::PreviewNext
+            | Action::PreviewPrevious
+            | Action::ClosePreview
+            | Action::PreviewSource
+            | Action::PreviewCanvas
+            | Action::PreviewCopy => {
                 if let Some(hit) = lane_action_hit(&action)
                     && let Some(pane) = ws.mux.active_focus()
                     && ws.preview_panels.contains_key(&pane)
@@ -22036,10 +22426,14 @@ impl App {
             }
         };
         // A file's key defaults to the file, so showing it again replaces it.
-        let key = key.or_else(|| match &source {
-            kettle_media::Source::Path { path, .. } => Some(media_path_key(path)),
-            kettle_media::Source::Bytes(_) => None,
-        });
+        let key = key
+            .map(crate::media::ShelfKey::Explicit)
+            .or_else(|| match &source {
+                kettle_media::Source::Path { path, .. } => {
+                    Some(crate::media::ShelfKey::Path(path.clone()))
+                }
+                kettle_media::Source::Bytes(_) => None,
+            });
         let card_name = file_name.clone();
         let title = title
             .or(file_name)
@@ -22067,13 +22461,18 @@ impl App {
             }),
             _ => None,
         };
-        let job = kettle_media::Job {
+        // The bytes a push carried are kept, charged, for the item to be
+        // rendered again: no room for them is no room for the push.
+        let Some(spec) = crate::media::JobSpec::from_job(kettle_media::Job {
             kind,
             source,
             theme,
             canvas: kettle_media::Canvas::Theme,
             target,
             fallback_fonts: Vec::new(),
+        }) else {
+            refuse(FailureCode::OverBudget);
+            return;
         };
         let deadline = request.admitted_at() + kettle_ctl::show::SHOW_SERVER_DEADLINE;
         let push = crate::media::Push::new(
@@ -22089,7 +22488,7 @@ impl App {
                 provenance,
                 inline,
             },
-            job,
+            spec,
             kettle_media::client::RenderControl::with_deadline(deadline),
         );
         self.media.admit(sender, deadline, push);
@@ -22154,7 +22553,7 @@ impl App {
     /// renders, and start the next one.
     fn media_tick(&mut self, ws: &mut WindowState) {
         self.retire_cards(ws);
-        self.tell_preview_failures();
+        self.tell_preview_failures(ws);
         if self.media.is_idle() {
             return;
         }
@@ -22179,15 +22578,85 @@ impl App {
                 let _ = proxy.send_event(UserEvent::MediaRendered);
             })
         });
-        self.tell_preview_failures();
+        self.tell_preview_failures(ws);
     }
 
     /// Tell the user about each preview they asked for that ended before
     /// it rendered: busy, unavailable, out of time.
-    fn tell_preview_failures(&mut self) {
+    fn tell_preview_failures(&mut self, ws: &mut WindowState) {
+        use crate::window_state::LaneNotice;
         let tr = self.ui_text;
         for (_, failure) in self.media.take_user_failures() {
             notify_preview_failure(tr, Some(failure));
+        }
+        // A lane's render that could not run, and each copy that ended, are
+        // said in the lane that asked.
+        for render in self.media.take_lane_failures() {
+            self.tell_lane(
+                ws,
+                render.window,
+                render.pane,
+                render.item,
+                LaneNotice::RenderFailed,
+            );
+        }
+        let copies = self
+            .preview_copy
+            .as_ref()
+            .map(crate::media::CopyService::take_done)
+            .unwrap_or_default();
+        for copy in copies {
+            let notice = match (copy.copied, copy.image) {
+                (true, true) => LaneNotice::ImageCopied,
+                (true, false) => LaneNotice::SourceCopied,
+                (false, _) => LaneNotice::CopyFailed,
+            };
+            let item = self
+                .window_by_seq(ws, copy.window)
+                .and_then(|window| window.preview_panels.get(&copy.pane))
+                .map(|panel| panel.item);
+            if let Some(item) = item {
+                self.tell_lane(ws, copy.window, copy.pane, item, notice);
+            }
+        }
+    }
+
+    /// The window numbered `seq`: `ws` or another.
+    fn window_by_seq<'a>(
+        &'a mut self,
+        ws: &'a mut WindowState,
+        seq: u64,
+    ) -> Option<&'a mut WindowState> {
+        if ws.seq == seq {
+            Some(ws)
+        } else {
+            self.windows.get_mut(&seq)
+        }
+    }
+
+    /// Say `notice` in the lane of `pane` in window `window`, while it still
+    /// shows `item`.
+    fn tell_lane(
+        &mut self,
+        ws: &mut WindowState,
+        window: u64,
+        pane: u64,
+        item: u64,
+        notice: crate::window_state::LaneNotice,
+    ) {
+        let Some(window) = self.window_by_seq(ws, window) else {
+            return;
+        };
+        if let Some(panel) = window
+            .preview_panels
+            .get_mut(&pane)
+            .filter(|panel| panel.item == item)
+        {
+            panel.notice = Some(notice);
+            window.accessibility_pending = true;
+            if let Some(handle) = &window.window {
+                handle.request_redraw();
+            }
         }
     }
 
@@ -22300,13 +22769,13 @@ impl App {
         let Ok(native) = kettle_media::NativePath::from_path(path) else {
             return notify_preview_failure(tr, Some(kettle_media::FailureCode::FileNotFound));
         };
-        let key = Some(media_path_key(&native));
+        let key = Some(crate::media::ShelfKey::Path(native.clone()));
         let title = native
             .file_name_lossy()
             .map(|name| crate::media::display_title(&name))
             .filter(|title| !title.is_empty())
             .unwrap_or_else(|| tr.text(kettle_i18n::Text::MediaShelfUntitled).into());
-        let job = kettle_media::Job {
+        let Some(spec) = crate::media::JobSpec::from_job(kettle_media::Job {
             kind: kettle_media::JobKind::Auto,
             source: kettle_media::Source::user_pull(
                 native,
@@ -22316,6 +22785,8 @@ impl App {
             canvas: kettle_media::Canvas::Theme,
             target,
             fallback_fonts: Vec::new(),
+        }) else {
+            return notify_preview_failure(tr, Some(kettle_media::FailureCode::OverBudget));
         };
         let deadline = std::time::Instant::now() + kettle_ctl::show::SHOW_SERVER_DEADLINE;
         let push = crate::media::Push::new(
@@ -22331,7 +22802,7 @@ impl App {
                 provenance: crate::media::Provenance::User,
                 inline: None,
             },
-            job,
+            spec,
             kettle_media::client::RenderControl::with_deadline(deadline),
         );
         self.media.admit(crate::media::Sender::User, deadline, push);
@@ -22385,13 +22856,117 @@ impl App {
         }
     }
 
+    /// Charge rendered pixels to the preview account, releasing the pixels of
+    /// the least recently viewed items not on screen while there is no room.
+    fn admit_preview_pixels(
+        &mut self,
+        ws: &mut WindowState,
+        width: u32,
+        height: u32,
+        mut pixels: Vec<u8>,
+    ) -> Result<kettle_core::ImageData, kettle_media::FailureCode> {
+        let visible = media_visible_items(self.all_windows(ws), &self.media.cards);
+        loop {
+            match kettle_core::ImageData::try_with_budget(
+                width,
+                height,
+                pixels,
+                &kettle_core::GraphicsBudget::previews(),
+            ) {
+                Ok(image) => return Ok(image),
+                Err(kettle_core::ImageRefusal::Invalid) => {
+                    return Err(kettle_media::FailureCode::RenderResource);
+                }
+                Err(kettle_core::ImageRefusal::NoRoom(back)) => {
+                    if !self.evict_media_pixels(ws, &visible) {
+                        return Err(kettle_media::FailureCode::OverBudget);
+                    }
+                    pixels = back;
+                }
+            }
+        }
+    }
+
+    /// Take a lane's render of its item on another canvas. It replaces the
+    /// item's pixels only while the item is the one asked about, unreplaced,
+    /// and what was read is the source the item came from: a file changed
+    /// since says so in the lane instead. The item keeps its place, id and
+    /// generation; its cards show the new pixels.
+    fn finish_lane_render(
+        &mut self,
+        ws: &mut WindowState,
+        render: crate::media::LaneRender,
+        spec: crate::media::JobSpec,
+        result: Result<kettle_media::RenderOutput, kettle_media::client::RenderError>,
+    ) {
+        use crate::window_state::LaneNotice;
+        use kettle_media::FailureCode;
+        use kettle_media::client::RenderError;
+        let tell = |app: &mut Self, ws: &mut WindowState, notice| {
+            app.tell_lane(ws, render.window, render.pane, render.item, notice);
+        };
+        let output = match result {
+            Ok(output) => output,
+            Err(RenderError::Cancelled) => return,
+            Err(RenderError::Failure(FailureCode::Changed)) => {
+                return tell(self, ws, LaneNotice::Changed);
+            }
+            Err(RenderError::Failure(_)) => return tell(self, ws, LaneNotice::RenderFailed),
+        };
+        let rendered = output.rendered;
+        let verdict = self
+            .window_by_seq(ws, render.window)
+            .and_then(|window| window.mux.panes.get(&render.pane))
+            .map_or(LaneRenderVerdict::Gone, |pane| {
+                lane_render_verdict(pane.media_shelf.items(), &render, &rendered.digest)
+            });
+        match verdict {
+            // Replaced or gone: nothing to say.
+            LaneRenderVerdict::Gone => return,
+            LaneRenderVerdict::Changed => return tell(self, ws, LaneNotice::Changed),
+            LaneRenderVerdict::Same => {}
+        }
+        let (width, height) = (rendered.width, rendered.height);
+        let image = match self.admit_preview_pixels(ws, width, height, rendered.rgba) {
+            Ok(image) => image,
+            Err(_) => return tell(self, ws, LaneNotice::RenderFailed),
+        };
+        let Some(window) = self.window_by_seq(ws, render.window) else {
+            return;
+        };
+        let Some(item) = window.mux.panes.get_mut(&render.pane).and_then(|pane| {
+            pane.media_shelf
+                .get_mut(render.item)
+                .filter(|item| item.generation == render.generation)
+        }) else {
+            return;
+        };
+        item.pixels = crate::media::ItemPixels::Ready(image);
+        item.size = (width, height);
+        item.source.spec.canvas = spec.canvas;
+        if let Some(panel) = window
+            .preview_panels
+            .get_mut(&render.pane)
+            .filter(|panel| panel.item == render.item)
+        {
+            panel.notice = None;
+        }
+        window.accessibility_pending = true;
+        if let Some(handle) = &window.window {
+            handle.request_redraw();
+        }
+    }
+
     /// Publish a finished render to its pane's shelf and answer its push.
     fn finish_show(&mut self, ws: &mut WindowState, finished: crate::media::Finished) {
         use kettle_media::FailureCode;
         use kettle_media::client::RenderError;
         let crate::media::Finished { push, result } = finished;
         let tr = self.ui_text;
-        let (origin, route, draft) = push.into_parts();
+        let (origin, route, draft, spec) = push.into_parts();
+        if let crate::media::Requester::Lane(render) = origin {
+            return self.finish_lane_render(ws, render, spec, result);
+        }
         let output = match result {
             Ok(output) => output,
             // Cancelled because its pane went, or its client left; the user
@@ -22407,27 +22982,11 @@ impl App {
         let kettle_media::RenderOutput { kind, rendered } = output;
         let (width, height) = (rendered.width, rendered.height);
         let warnings = rendered.warnings;
-        let visible = media_visible_items(self.all_windows(ws), &self.media.cards);
-        let mut pixels = rendered.rgba;
-        let image = loop {
-            match kettle_core::ImageData::try_with_budget(
-                width,
-                height,
-                pixels,
-                &kettle_core::GraphicsBudget::previews(),
-            ) {
-                Ok(image) => break image,
-                Err(kettle_core::ImageRefusal::Invalid) => {
-                    return notify_preview_failure(tr, origin.refuse(FailureCode::RenderResource));
-                }
-                Err(kettle_core::ImageRefusal::NoRoom(back)) => {
-                    if !self.evict_media_pixels(ws, &visible) {
-                        return notify_preview_failure(tr, origin.refuse(FailureCode::OverBudget));
-                    }
-                    pixels = back;
-                }
-            }
+        let image = match self.admit_preview_pixels(ws, width, height, rendered.rgba) {
+            Ok(image) => image,
+            Err(failure) => return notify_preview_failure(tr, origin.refuse(failure)),
         };
+        let visible = media_visible_items(self.all_windows(ws), &self.media.cards);
         let item_id = self.media.next_item();
         let crate::media::Draft {
             key,
@@ -22435,6 +22994,12 @@ impl App {
             provenance,
             inline,
         } = draft;
+        let textual = matches!(
+            kind,
+            kettle_media::MediaKind::Svg | kettle_media::MediaKind::Mermaid
+        );
+        let source =
+            crate::media::ItemSource::new(spec, rendered.digest, textual, rendered.exact_source);
         let item = crate::media::ShelfItem::new(
             item_id,
             key,
@@ -22443,6 +23008,7 @@ impl App {
             kind,
             warnings.clone(),
             image,
+            source,
         );
         let Some(window) = window_with_pane(ws, &mut self.windows, route.pane) else {
             let _ = origin.refuse(FailureCode::NotInKettlePane);
@@ -22523,6 +23089,8 @@ impl App {
                 }
                 return;
             }
+            // Taken by `finish_lane_render` before publishing.
+            crate::media::Requester::Lane(_) => return,
         };
         let mut result = kettle_ctl::show::ShowResult::new(
             (route.pane, route.verified, seq),
@@ -23163,11 +23731,41 @@ impl App {
                     crate::pane_partition::LaneShare::Strip(_) => "strip",
                     crate::pane_partition::LaneShare::Badge => "badge",
                 };
-                Some(serde_json::json!({
+                let mut lane = serde_json::json!({
                     "pane": id,
                     "rect": share.rect().map(rect_json),
                     "state": state,
-                }))
+                });
+                // What the lane shows and where its controls are: names and
+                // rectangles only, never a title, a source or pixels.
+                let collapsed = matches!(share, crate::pane_partition::LaneShare::Strip(_));
+                if let Some(panel) = share
+                    .rect()
+                    .and_then(|rect| self.preview_lane_panel(target, *id, rect, collapsed))
+                {
+                    lane["mode"] = match panel.mode {
+                        kettle_render::MediaLaneMode::Rendered => "rendered",
+                        kettle_render::MediaLaneMode::Source => "source",
+                    }
+                    .into();
+                    lane["canvas"] = match panel.canvas {
+                        kettle_render::MediaCanvas::Theme => "theme",
+                        kettle_render::MediaCanvas::White => "white",
+                        kettle_render::MediaCanvas::Checker => "checker",
+                    }
+                    .into();
+                    if let Some(geometry) = self.preview_lane_geometry(target, &panel) {
+                        let controls: serde_json::Map<String, serde_json::Value> =
+                            lane_controls(&geometry)
+                                .into_iter()
+                                .filter_map(|(_, rect, hit)| {
+                                    Some((lane_control_name(hit).to_string(), rect_json(rect?)))
+                                })
+                                .collect();
+                        lane["controls"] = controls.into();
+                    }
+                }
+                Some(lane)
             })
             .collect();
         let home = crate::mux::home_dir_string();
@@ -24588,10 +25186,16 @@ impl App {
     /// (a stream of ~0.08-detent events). The integer `wheel_lines` form cannot,
     /// because it enters downstream of quantization.
     fn ctl_mouse_wheel_delta(&mut self, ws: &mut WindowState, notches: f64) -> bool {
-        if self.preview_lane_under_pointer(ws) {
+        if self.lane_takes_wheel(ws) {
             ws.wheel.reset();
+            let steps = ws.lane_wheel.feed(
+                &winit::event::MouseScrollDelta::LineDelta(0.0, notches as f32),
+                self.cfg.scroll_multiplier,
+            );
+            self.scroll_preview_lane(ws, steps);
             return true;
         }
+        ws.lane_wheel.reset();
         let steps = ws.wheel.feed(
             &winit::event::MouseScrollDelta::LineDelta(0.0, notches as f32),
             self.cfg.scroll_multiplier,
@@ -24628,9 +25232,10 @@ impl App {
             }
             return true;
         }
-        // The open media viewer covers its pane: a wheel over it reaches
-        // nothing it hides.
-        if self.preview_lane_under_pointer(ws) {
+        // A wheel over a lane is the lane's: it scrolls a source, and
+        // reaches nothing behind it.
+        if self.lane_takes_wheel(ws) {
+            self.scroll_preview_lane(ws, steps);
             return true;
         }
         // Wheel over a settings field adjusts it (up = forward, down = backward).
@@ -30792,6 +31397,20 @@ impl App {
                                 None => continue,
                             }
                         }
+                        kettle_render::MediaLaneHit::Mode
+                            if lane.mode == kettle_render::MediaLaneMode::Source =>
+                        {
+                            self.ui_text.text(kettle_i18n::Text::MediaLaneA11yRendered)
+                        }
+                        kettle_render::MediaLaneHit::Mode => {
+                            self.ui_text.text(kettle_i18n::Text::MediaLaneA11ySource)
+                        }
+                        kettle_render::MediaLaneHit::Canvas => {
+                            self.ui_text.text(kettle_i18n::Text::MediaLaneA11yCanvas)
+                        }
+                        kettle_render::MediaLaneHit::Copy => {
+                            self.ui_text.text(kettle_i18n::Text::MediaLaneA11yCopy)
+                        }
                         kettle_render::MediaLaneHit::Inside => continue,
                     };
                     let mut button = Node::new(Role::Button);
@@ -34740,14 +35359,20 @@ impl App {
                     winit::event::TouchPhase::Ended | winit::event::TouchPhase::Cancelled
                 ) {
                     ws.wheel.reset();
+                    ws.lane_wheel.reset();
                 }
-                // The open media viewer owns the wheel over it. Its motion is
-                // dropped rather than banked, so no part of it reaches the
-                // terminal once the viewer closes.
-                if self.preview_lane_under_pointer(ws) {
+                // A preview lane owns the wheel over it. Its motion is dropped
+                // from the terminal's account rather than banked there, so no
+                // part of it reaches the terminal once the lane closes; the
+                // lane keeps its own, to scroll a source. Motion over the
+                // terminal is dropped from the lane's the same way.
+                if self.lane_takes_wheel(ws) {
                     ws.wheel.reset();
+                    let steps = ws.lane_wheel.feed(&delta, self.cfg.scroll_multiplier);
+                    self.scroll_preview_lane(ws, steps);
                     return;
                 }
+                ws.lane_wheel.reset();
                 let steps = ws.wheel.feed(&delta, self.cfg.scroll_multiplier);
                 // Numbers only — never terminal content. Makes the
                 // precision-touchpad class of bug diagnosable from a user's
@@ -41227,7 +41852,7 @@ mod tests {
             body("window_event_inner").contains("if !self.press_preview_lane(ws, px, py, sgr)"),
             "a side button over a lane goes nowhere"
         );
-        assert!(body("dispatch_wheel").contains("if self.preview_lane_under_pointer(ws) {"));
+        assert!(body("dispatch_wheel").contains("if self.lane_takes_wheel(ws) {"));
         let press = body("press_preview_lane");
         assert!(
             press.contains("if bcode != 0 {\n            return true;\n        }"),
@@ -41295,7 +41920,7 @@ mod tests {
             .expect("native wheel");
         for (path, body) in [("ctl", ctl), ("native", native)] {
             let gate = body
-                .find("if self.preview_lane_under_pointer(ws) {\n")
+                .find("if self.lane_takes_wheel(ws) {\n")
                 .unwrap_or_else(|| panic!("{path} asks the lanes"));
             let feed = body
                 .find("ws.wheel.feed(")
@@ -41989,6 +42614,10 @@ mod tests {
             status: "Released.".into(),
             canvas: kettle_render::MediaCanvas::Theme,
             open_outside: false,
+            mode: kettle_render::MediaLaneMode::Rendered,
+            source: None,
+            copy: true,
+            notice: None,
         };
         let (label, description) = super::media_lane_accessibility(&lane, &tr);
         assert!(
@@ -42010,7 +42639,7 @@ mod tests {
 
         // Lane node ids round-trip, keep clear of every other kind of node,
         // and a pane id too large for the space has no lane nodes.
-        for (pane, part) in [(1, 0), (7, 5), (super::MAX_LANE_ACCESSIBILITY_PANE - 1, 7)] {
+        for (pane, part) in [(1, 0), (7, 5), (super::MAX_LANE_ACCESSIBILITY_PANE - 1, 15)] {
             let id = super::accessibility_lane_id(pane, part).unwrap();
             assert_eq!(super::accessibility_lane_part(id), Some((pane, part)));
             assert_eq!(super::accessibility_card_instance(id), None);
@@ -42020,7 +42649,7 @@ mod tests {
             super::accessibility_lane_id(super::MAX_LANE_ACCESSIBILITY_PANE, 0),
             None
         );
-        assert_eq!(super::accessibility_lane_id(1, 8), None);
+        assert_eq!(super::accessibility_lane_id(1, 16), None);
         assert_eq!(
             super::accessibility_lane_part(super::accessibility_pane_id(3)),
             None
@@ -54868,5 +55497,284 @@ mod settings_footer_text_tests {
             spanish_os
         ));
         assert!(!language_change_pending(Pref::Auto, Language::En, || None));
+    }
+}
+
+#[cfg(test)]
+mod lane_control_tests {
+    use super::{
+        LaneRenderVerdict, MAX_SOURCE_COLUMN, lane_control_name, lane_render_verdict, lane_source,
+        preview_canvas, scrolled_source, source_scroll_by,
+    };
+
+    fn item(id: u64, kind: kettle_media::MediaKind, svg: &[u8]) -> crate::media::ShelfItem {
+        crate::media::ShelfItem::new(
+            id,
+            None,
+            "plot".into(),
+            crate::media::Provenance::User,
+            kind,
+            Vec::new(),
+            kettle_core::ImageData::new(1, 1, vec![0, 0, 0, 255]).unwrap(),
+            crate::media::ItemSource::sample(svg),
+        )
+    }
+
+    /// The wheel up scrolls a source back and the wheel down on. A swipe
+    /// whose content moves right shows the columns to its left, as winit
+    /// counts it; the wheel with Shift held moves sideways, as does the
+    /// swipe macOS makes of it. No count a control client sends overflows.
+    #[test]
+    fn wheel_steps_scroll_a_source_the_way_its_content_moves() {
+        let steps = |lines, cols| crate::input::WheelSteps {
+            notches: 0,
+            lines,
+            cols,
+        };
+        assert_eq!(source_scroll_by(steps(3, 0), false), (-3, 0), "wheel up");
+        assert_eq!(source_scroll_by(steps(-2, 0), false), (2, 0), "wheel down");
+        assert_eq!(
+            source_scroll_by(steps(0, 1), false),
+            (0, -1),
+            "content right"
+        );
+        assert_eq!(
+            source_scroll_by(steps(0, -1), false),
+            (0, 1),
+            "content left"
+        );
+        assert_eq!(source_scroll_by(steps(-1, 0), true), (0, 1), "Shift, down");
+        assert_eq!(
+            source_scroll_by(steps(0, -1), true),
+            (0, 1),
+            "macOS's Shift"
+        );
+        assert_eq!(
+            source_scroll_by(steps(i32::MIN, i32::MIN), true),
+            (0, i32::MAX)
+        );
+        // A 60-pixel swipe right from column ten shows column nine.
+        let (rows, columns) = source_scroll_by(steps(0, 1), false);
+        assert_eq!(scrolled_source((0, 10), rows, columns, 5), (0, 9));
+    }
+
+    /// A source replaced under its key by a shorter one shows from its last
+    /// row rather than past its end; within it, from the row scrolled to.
+    #[test]
+    fn a_lane_shows_its_source_from_a_row_it_has() {
+        let replaced = lane_source("<svg/>", 1, (80, 0), 4, 10);
+        assert_eq!(replaced.first_row, 0);
+        assert_eq!(replaced.rows, ["<svg/>"]);
+        assert_eq!(replaced.total_rows, 1);
+        let within = lane_source("a\nb\nc\n", 3, (1, 0), 1, 10);
+        assert_eq!((within.first_row, within.rows), (1, vec!["b".to_owned()]));
+    }
+
+    /// Leftover wheel motion goes when its gesture ends, wherever it was
+    /// banked; motion over the terminal is not banked for a lane, nor is a
+    /// closed lane's kept.
+    #[test]
+    fn a_lanes_wheel_motion_goes_with_its_gesture() {
+        let src = super::production_source();
+        let wheel = src
+            .split("WindowEvent::MouseWheel { delta, phase, .. } =>")
+            .nth(1)
+            .expect("the wheel event");
+        let ended = wheel
+            .find("winit::event::TouchPhase::Ended | winit::event::TouchPhase::Cancelled")
+            .expect("a gesture's end");
+        let lane = wheel
+            .find("if self.lane_takes_wheel(ws) {")
+            .expect("the lane's wheel");
+        assert!(
+            wheel[ended..lane]
+                .contains("ws.wheel.reset();\n                    ws.lane_wheel.reset();")
+        );
+        assert!(wheel[lane..].contains(
+            "ws.lane_wheel.reset();\n                let steps = ws.wheel.feed(&delta, self.cfg.scroll_multiplier);"
+        ));
+        let body = |name: &str| {
+            src.split(&format!("fn {name}("))
+                .nth(1)
+                .and_then(|rest| rest.split("\n    fn ").next())
+                .unwrap_or_else(|| panic!("{name}"))
+        };
+        assert!(
+            body("ctl_mouse_wheel_delta")
+                .contains("ws.lane_wheel.reset();\n        let steps = ws.wheel.feed(")
+        );
+        assert!(body("close_preview").contains("ws.lane_wheel.reset();"));
+    }
+
+    /// A source scrolls row by row to its last row and no further, and from
+    /// its first column; nothing scrolls past its start.
+    #[test]
+    fn a_source_scrolls_within_its_rows_and_from_its_first_column() {
+        assert_eq!(scrolled_source((0, 0), 3, 0, 10), (3, 0));
+        assert_eq!(scrolled_source((3, 0), -5, 0, 10), (0, 0));
+        assert_eq!(scrolled_source((0, 0), 100, 0, 10), (9, 0));
+        assert_eq!(scrolled_source((5, 0), 0, 0, 0), (0, 0), "an empty source");
+        assert_eq!(scrolled_source((0, 2), 0, -9, 10), (0, 0));
+        assert_eq!(scrolled_source((0, 2), 0, 4, 10), (0, 6));
+        assert_eq!(
+            scrolled_source((0, MAX_SOURCE_COLUMN), 0, 7, 10),
+            (0, MAX_SOURCE_COLUMN)
+        );
+    }
+
+    /// A raster's and an SVG's canvas is the user's choice over its kind's
+    /// own; a diagram's is the one its pixels were rendered for, whatever
+    /// the user chose, until a render for that choice comes back.
+    #[test]
+    fn a_canvas_is_the_users_except_a_diagrams_until_it_renders() {
+        use kettle_media::MediaKind;
+        use kettle_render::MediaCanvas as C;
+        let mut panel = crate::window_state::PreviewPanel::new(1);
+        let canvas = |kind, panel: &crate::window_state::PreviewPanel| {
+            preview_canvas(&item(1, kind, b"<svg/>"), panel)
+        };
+        assert_eq!(canvas(MediaKind::Svg, &panel), C::White);
+        assert_eq!(canvas(MediaKind::Raster, &panel), C::Checker);
+        assert_eq!(canvas(MediaKind::Mermaid, &panel), C::Theme);
+        panel.canvas = Some(C::White);
+        assert_eq!(canvas(MediaKind::Raster, &panel), C::White);
+        assert_eq!(
+            canvas(MediaKind::Mermaid, &panel),
+            C::Theme,
+            "its pixels were rendered for the pane's background"
+        );
+        let mut rendered = item(1, MediaKind::Mermaid, b"flowchart LR");
+        rendered.source.spec.canvas = kettle_media::Canvas::White;
+        assert_eq!(preview_canvas(&rendered, &panel), C::White);
+    }
+
+    /// A lane's render replaces its item's pixels only for the item asked
+    /// about, unreplaced, read from the source it came from.
+    #[test]
+    fn a_lane_render_counts_only_for_the_same_item_and_source() {
+        let shelf = [item(4, kettle_media::MediaKind::Mermaid, b"flowchart LR")];
+        let render = crate::media::LaneRender {
+            window: 1,
+            pane: 2,
+            item: 4,
+            generation: 0,
+        };
+        let same = shelf[0].source.digest.clone();
+        let other = kettle_media::content_digest(b"flowchart TD", None).unwrap();
+        assert_eq!(
+            lane_render_verdict(&shelf, &render, &same),
+            LaneRenderVerdict::Same
+        );
+        assert_eq!(
+            lane_render_verdict(&shelf, &render, &other),
+            LaneRenderVerdict::Changed
+        );
+        let replaced = crate::media::LaneRender {
+            generation: 1,
+            ..render
+        };
+        assert_eq!(
+            lane_render_verdict(&shelf, &replaced, &same),
+            LaneRenderVerdict::Gone
+        );
+        assert_eq!(
+            lane_render_verdict(&[], &render, &same),
+            LaneRenderVerdict::Gone
+        );
+    }
+
+    /// Each lane control has its own name over ctl and its own node id.
+    #[test]
+    fn lane_controls_have_distinct_names_and_node_ids() {
+        use kettle_render::MediaLaneHit as Hit;
+        let hits = [
+            Hit::Previous,
+            Hit::Next,
+            Hit::OpenOutside,
+            Hit::Toggle,
+            Hit::Close,
+            Hit::Mode,
+            Hit::Canvas,
+            Hit::Copy,
+            Hit::Inside,
+        ];
+        let names: std::collections::HashSet<_> =
+            hits.iter().map(|hit| lane_control_name(*hit)).collect();
+        assert_eq!(names.len(), hits.len());
+        let ids: std::collections::HashSet<_> = (0..=8)
+            .map(|part| super::accessibility_lane_id(7, part).expect("in range"))
+            .collect();
+        assert_eq!(ids.len(), 9);
+        for part in 0..=8 {
+            let id = super::accessibility_lane_id(7, part).unwrap();
+            assert_eq!(super::accessibility_lane_part(id), Some((7, part)));
+        }
+    }
+
+    /// Copying copies what the lane shows: the source in source mode, else
+    /// the image; a diagram's canvas is rendered again, never for a file
+    /// while a control client's request is handled; and a lane's render is
+    /// taken before anything is published.
+    #[test]
+    fn lane_content_actions_are_wired() {
+        let src = super::production_source();
+        let body = |name: &str| {
+            src.split(&format!("fn {name}("))
+                .nth(1)
+                .and_then(|rest| rest.split("\n    fn ").next())
+                .unwrap_or_else(|| panic!("{name}"))
+        };
+        let copy = body("copy_preview");
+        assert!(copy.contains("kettle_render::MediaLaneMode::Source => item"));
+        assert!(copy.contains(".map(|text| crate::media::CopyContent::Text(Arc::clone(text)))"));
+        assert!(copy.contains(".map(crate::media::CopyContent::Image)"));
+        let again = body("render_preview_again");
+        let refused = again
+            .find("if self.ctl_driving && reads_a_file")
+            .expect("no file read for a control client");
+        let admitted = again
+            .find(".admit(crate::media::Sender::Lane(pane), deadline, push);")
+            .expect("queued as the lane");
+        assert!(refused < admitted);
+        let finish = body("finish_show");
+        let lane = finish
+            .find("return self.finish_lane_render(ws, render, spec, result);")
+            .expect("a lane's render is its own");
+        let publish = finish.find("media_shelf.publish(").expect("publishing");
+        assert!(lane < publish);
+        let canvas = body("next_preview_canvas");
+        assert!(canvas.contains(
+            "if diagram {\n            self.render_preview_again(ws, pane, media_canvas(next));"
+        ));
+    }
+
+    /// A lane shows source only while its item has a source: one replaced by
+    /// a raster under the same key shows rendered, and copies the image.
+    #[test]
+    fn a_lane_without_a_source_shows_and_copies_rendered() {
+        use kettle_render::MediaLaneMode as Mode;
+        let mut panel = crate::window_state::PreviewPanel::new(1);
+        panel.mode = Mode::Source;
+        let svg = item(1, kettle_media::MediaKind::Svg, b"<svg/>");
+        assert_eq!(super::lane_mode(&svg, &panel), Mode::Source);
+        let mut raster = svg.clone();
+        raster.kind = kettle_media::MediaKind::Raster;
+        raster.source.release();
+        assert_eq!(super::lane_mode(&raster, &panel), Mode::Rendered);
+        let src = super::production_source();
+        let body = |name: &str| {
+            src.split(&format!("fn {name}("))
+                .nth(1)
+                .and_then(|rest| rest.split("\n    fn ").next())
+                .unwrap_or_else(|| panic!("{name}"))
+        };
+        assert!(body("copy_preview").contains("let content = match lane_mode(item, panel) {"));
+        let scroll = body("scroll_preview_lane");
+        assert!(scroll.contains("lane_mode(item, panel) == kettle_render::MediaLaneMode::Source"));
+        assert!(scroll.contains("source_scroll_by(steps, ws.mods.shift_key());"));
+        // A menu or dialog over a lane takes the wheel.
+        let gate = body("lane_takes_wheel");
+        assert!(gate.contains("ws.context_menu.is_none()"));
+        assert!(gate.contains("!self.pointer_modal_open(ws)"));
     }
 }

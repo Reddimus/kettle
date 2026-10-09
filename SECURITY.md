@@ -138,6 +138,17 @@ Reports that fit any of these are welcome:
   starts no such read. Terminal output, a control client or a remote host
   that starts such a read without that gesture, or past that gate, is in
   scope.
+- **What a preview keeps** — a shelf item keeps the bytes a request carried,
+  and an SVG's or a diagram's text as the worker read it from a file, both
+  charged to the bounded preview account and released with the item's
+  pixels; a file is kept only as its path and the authorization it was read
+  under. Rendering an item again for another background re-reads a file only
+  under that authorization, never while a control request is handled, and
+  keeps the result only if it has the digest the item was rendered from.
+  The lane's source view shows control, format and bidirectional characters
+  as U+FFFD. Getting a preview to keep source or pixels past that account,
+  to read a file for a control client, or to show a changed file as the
+  item it was, is in scope.
 - **Media worker selection** — Kettle looks for its media worker only beside
   its own executable, at the path recorded at startup, never in `PATH`, the
   working directory or the environment. The worker must be a regular

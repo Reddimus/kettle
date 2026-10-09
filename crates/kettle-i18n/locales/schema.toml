@@ -1546,6 +1546,15 @@ context = "crates/kettle-config/src/palette.rs: command palette entry that shows
 [messages.palette_close_preview]
 context = "crates/kettle-config/src/palette.rs: command palette entry that closes the focused pane's preview lane, giving its terminal the room back."
 
+[messages.palette_preview_source]
+context = "crates/kettle-config/src/palette.rs: command palette entry for preview_source, which switches the focused pane's preview lane between the rendered item and its source text."
+
+[messages.palette_preview_canvas]
+context = "crates/kettle-config/src/palette.rs: command palette entry for preview_canvas, which shows the focused pane's preview on its next background: the pane's, white, then a checkerboard."
+
+[messages.palette_preview_copy]
+context = "crates/kettle-config/src/palette.rs: command palette entry for preview_copy, which copies the focused pane's preview to the clipboard: the image, or the source while the source shows."
+
 [messages.media_viewer_kind_image]
 context = "crates/kettle-ui/src/app.rs media_viewer_projection: kind of a raster item in the media viewer's detail line."
 
@@ -1599,6 +1608,39 @@ context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of
 
 [messages.media_lane_a11y_close]
 context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of the preview lane's button that closes it."
+
+[messages.media_lane_a11y_source]
+context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of a preview lane's button that shows the item's source text (SVG or Mermaid) instead of the rendered image."
+
+[messages.media_lane_a11y_rendered]
+context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of a preview lane's button that shows the rendered image again after its source."
+
+[messages.media_lane_a11y_canvas]
+context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of a preview lane's button that shows the image on the next background: the pane's, white, then a checkerboard."
+
+[messages.media_lane_a11y_copy]
+context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of a preview lane's button that copies the image, or the source while the source shows, to the clipboard. An infinitive in Spanish."
+
+[messages.media_lane_notice_image_copied]
+context = "crates/kettle-ui/src/app.rs lane_notice_text: shown in a preview lane's footer after its image was copied to the clipboard."
+
+[messages.media_lane_notice_source_copied]
+context = "crates/kettle-ui/src/app.rs lane_notice_text: shown in a preview lane's footer after the item's source text was copied to the clipboard."
+
+[messages.media_lane_notice_copy_failed]
+context = "crates/kettle-ui/src/app.rs lane_notice_text: shown in a preview lane's footer when the clipboard refused a copy."
+
+[messages.media_lane_notice_copy_busy]
+context = "crates/kettle-ui/src/app.rs lane_notice_text: shown in a preview lane's footer when a copy is refused because another copy is still running and one more waits."
+
+[messages.media_lane_notice_rendering]
+context = "crates/kettle-ui/src/app.rs lane_notice_text: shown in a preview lane's footer while a diagram is rendered again for the background the user chose; the old picture stays until then."
+
+[messages.media_lane_notice_render_failed]
+context = "crates/kettle-ui/src/app.rs lane_notice_text: shown in a preview lane's footer when rendering the item again (for another background) failed; the old picture stays."
+
+[messages.media_lane_notice_changed]
+context = "crates/kettle-ui/src/app.rs lane_notice_text: shown in a preview lane's footer when the file the item came from changed since it was shown, so it was not rendered again from the new contents."
 
 [messages.card_a11y]
 context = "crates/kettle-ui/src/app.rs card_accessibility_node: screen-reader name of an inline media card drawn in a terminal pane, a button that opens the item in Kettle's media viewer. title is the item's title (as the agent or command named it); detail is its kind, pixel size and sender, as the viewer shows them, e.g. \"Image · 640×480 · From this pane\"."

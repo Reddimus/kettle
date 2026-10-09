@@ -62,6 +62,15 @@ pub(crate) enum ItemPixels {
     Evicted,
 }
 
+/// What replaces an item in place when it is published again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ShelfKey {
+    /// The key a `show` request named.
+    Explicit(String),
+    /// A file, by its native path: two paths that print alike stay apart.
+    Path(kettle_media::NativePath),
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct ShelfItem {
     /// Process-unique and stable while the item stays on a shelf, through
@@ -69,7 +78,7 @@ pub(crate) struct ShelfItem {
     pub id: u64,
     /// Bumped by every replacement, so a stale view can tell.
     pub generation: u64,
-    pub key: Option<String>,
+    pub key: Option<ShelfKey>,
     /// Display-ready: sanitized and bounded.
     pub title: String,
     pub provenance: Provenance,
@@ -78,6 +87,8 @@ pub(crate) struct ShelfItem {
     pub size: (u32, u32),
     pub warnings: Vec<Warning>,
     pub pixels: ItemPixels,
+    /// What it was rendered from, and how.
+    pub source: super::ItemSource,
     /// When the user last looked at it, on the process-wide view clock.
     viewed: u64,
     /// When it was last published, a replacement included, on that clock.
@@ -87,14 +98,16 @@ pub(crate) struct ShelfItem {
 }
 
 impl ShelfItem {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         id: u64,
-        key: Option<String>,
+        key: Option<ShelfKey>,
         title: String,
         provenance: Provenance,
         kind: MediaKind,
         warnings: Vec<Warning>,
         pixels: ImageData,
+        source: super::ItemSource,
     ) -> Self {
         Self {
             id,
@@ -106,6 +119,7 @@ impl ShelfItem {
             size: (pixels.width, pixels.height),
             warnings,
             pixels: ItemPixels::Ready(pixels),
+            source,
             viewed: 0,
             published: 0,
             seen: false,
@@ -164,6 +178,10 @@ impl Shelf {
         self.items.iter().find(|item| item.id == id)
     }
 
+    pub(crate) fn get_mut(&mut self, id: u64) -> Option<&mut ShelfItem> {
+        self.items.iter_mut().find(|item| item.id == id)
+    }
+
     /// Put `item` on the shelf. `visible` is the item the viewer shows,
     /// whose replacement is already seen; a full shelf never drops it, nor
     /// any item in `protected`, which are on screen elsewhere.
@@ -176,11 +194,11 @@ impl Shelf {
         let now = tick();
         item.viewed = now;
         item.published = now;
-        if let Some(key) = item.key.as_deref()
+        if let Some(key) = item.key.as_ref()
             && let Some(slot) = self
                 .items
                 .iter_mut()
-                .find(|existing| existing.key.as_deref() == Some(key))
+                .find(|existing| existing.key.as_ref() == Some(key))
         {
             item.id = slot.id;
             item.generation = slot.generation + 1;
@@ -243,11 +261,13 @@ impl Shelf {
             .map(|item| (item.viewed, item.id))
     }
 
-    /// Release `id`'s pixels.
+    /// Release `id`'s pixels, and the bytes it kept to render again.
     pub(crate) fn evict_pixels(&mut self, id: u64) -> bool {
         match self.items.iter_mut().find(|item| item.id == id) {
             Some(item) if item.image().is_some() => {
+                // The bytes it kept to render again go with the pixels.
                 item.pixels = ItemPixels::Evicted;
+                item.source.release();
                 true
             }
             _ => false,
@@ -294,13 +314,53 @@ mod tests {
     fn item(id: u64, key: Option<&str>) -> ShelfItem {
         ShelfItem::new(
             id,
-            key.map(Into::into),
+            key.map(|key| ShelfKey::Explicit(key.into())),
             format!("item {id}"),
             Provenance::Verified,
             MediaKind::Raster,
             Vec::new(),
             ImageData::new(1, 1, vec![0, 0, 0, 255]).unwrap(),
+            crate::media::ItemSource::sample(b"<svg/>"),
         )
+    }
+
+    /// A file's key is its native path: two paths that print alike are two
+    /// items, a path and an explicit key that read alike are two, and the
+    /// same path again replaces in place.
+    #[test]
+    fn native_path_keys_never_merge_by_their_printed_form() {
+        let path =
+            |bytes: &[u8]| ShelfKey::Path(kettle_media::NativePath::new(bytes.to_vec()).unwrap());
+        let with = |id, key: ShelfKey| {
+            let mut item = item(id, None);
+            item.key = Some(key);
+            item
+        };
+        let mut shelf = Shelf::default();
+        // Both print as "/tmp/\u{FFFD}.png" on a Unix system.
+        shelf.publish(with(1, path(b"/tmp/\xff.png")), None, &[]);
+        shelf.publish(with(2, path(b"/tmp/\xfe.png")), None, &[]);
+        shelf.publish(
+            with(3, ShelfKey::Explicit("/tmp/\u{FFFD}.png".into())),
+            None,
+            &[],
+        );
+        assert_eq!(shelf.len(), 3);
+        let again = shelf.publish(with(4, path(b"/tmp/\xff.png")), None, &[]);
+        assert_eq!((again.id, shelf.len()), (1, 3));
+    }
+
+    /// Evicting an item's pixels gives back the bytes it kept to render
+    /// again; a file item keeps its path.
+    #[test]
+    fn evicting_pixels_releases_kept_bytes() {
+        let mut shelf = Shelf::default();
+        shelf.publish(item(1, None), None, &[]);
+        assert!(shelf.get(1).unwrap().source.text().is_some());
+        assert!(shelf.evict_pixels(1));
+        let evicted = shelf.get(1).unwrap();
+        assert!(evicted.image().is_none());
+        assert_eq!(evicted.source.text(), None);
     }
 
     fn ids(shelf: &Shelf) -> Vec<u64> {

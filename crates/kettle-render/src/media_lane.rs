@@ -6,7 +6,7 @@
 //! collapsed lane is its header alone. The renderer gets only display text
 //! and pixels, never a path or a source.
 
-use glyphon::cosmic_text::Wrap;
+use glyphon::cosmic_text::{FeatureTag, FontFeatures, Wrap};
 use glyphon::{
     Attrs, Buffer as TextBuffer, Color as GColor, Family, FontSystem, Metrics, Shaping, TextArea,
     Weight,
@@ -23,6 +23,26 @@ pub enum MediaCanvas {
     White,
     /// A checkerboard, so a raster's transparency shows as such.
     Checker,
+}
+
+/// What a lane's content area shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MediaLaneMode {
+    /// The rendered item.
+    #[default]
+    Rendered,
+    /// The item's source text, a row per line.
+    Source,
+}
+
+/// The rows of an item's source a lane shows: display-ready (no control,
+/// format or bidirectional characters, tabs expanded), only those in view.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MediaLaneSource {
+    /// The rows in view, from `first_row`, each from `first_column`.
+    pub rows: Vec<String>,
+    pub first_row: usize,
+    pub total_rows: usize,
 }
 
 /// One pane's lane, projected for painting.
@@ -52,6 +72,15 @@ pub struct MediaLanePanel {
     /// Whether the header offers to open the item in the image viewer this
     /// platform permits.
     pub open_outside: bool,
+    /// Rendered or source.
+    pub mode: MediaLaneMode,
+    /// The item's source rows in view, when it is text the lane still holds:
+    /// then the header offers to switch modes.
+    pub source: Option<MediaLaneSource>,
+    /// Whether there is something to copy in the current mode.
+    pub copy: bool,
+    /// What the lane last did, shown in place of the hint until it changes.
+    pub notice: Option<String>,
 }
 
 /// Who sent an item, in the UI language, with where the sending program's
@@ -139,6 +168,12 @@ pub struct MediaLaneGeometry {
     pub next: Option<Rect4>,
     /// Opens the item in the permitted image viewer, when it is offered.
     pub open_outside: Option<Rect4>,
+    /// Switches between the rendered item and its source, when it has one.
+    pub mode: Option<Rect4>,
+    /// Shows the item on the next canvas.
+    pub canvas: Option<Rect4>,
+    /// Copies the image, or the source in source mode.
+    pub copy: Option<Rect4>,
     /// Collapses an expanded lane to its header, or expands a collapsed one.
     pub toggle: Rect4,
     pub close: Rect4,
@@ -151,8 +186,10 @@ pub struct MediaLaneGeometry {
     /// Where the image area is: the fitted image, or the whole area when
     /// there is no image.
     pub image_area: Rect4,
-    /// The fitted image, when there are pixels.
+    /// The fitted image, when there are pixels and the lane shows them.
     pub image: Option<Rect4>,
+    /// How many source rows fit the content area, in source mode.
+    pub source_rows: usize,
 }
 
 /// What a pointer press at a point in a lane means.
@@ -164,6 +201,11 @@ pub enum MediaLaneHit {
     OpenOutside,
     /// Collapse or expand.
     Toggle,
+    /// Rendered or source.
+    Mode,
+    /// The next canvas.
+    Canvas,
+    Copy,
     /// Anywhere else in the lane: nothing happens, and nothing reaches the
     /// terminal.
     Inside,
@@ -182,6 +224,12 @@ impl MediaLaneGeometry {
             Some(MediaLaneHit::Close)
         } else if contains(self.toggle, x, y) {
             Some(MediaLaneHit::Toggle)
+        } else if self.mode.is_some_and(|rect| contains(rect, x, y)) {
+            Some(MediaLaneHit::Mode)
+        } else if self.canvas.is_some_and(|rect| contains(rect, x, y)) {
+            Some(MediaLaneHit::Canvas)
+        } else if self.copy.is_some_and(|rect| contains(rect, x, y)) {
+            Some(MediaLaneHit::Copy)
         } else if self.open_outside.is_some_and(|rect| contains(rect, x, y)) {
             Some(MediaLaneHit::OpenOutside)
         } else if self.previous.is_some_and(|rect| contains(rect, x, y)) {
@@ -237,7 +285,8 @@ pub fn media_lane_geometry(
     };
     // Controls take the header from the right, close first; each one past
     // collapse appears only while the title keeps its few columns, in order
-    // of need: open outside, then browsing, then the counter.
+    // of need: the mode, the canvas, browsing, copy, open outside, then the
+    // counter. One that does not fit leaves the rest to try.
     let title_floor = left + MIN_TITLE_COLUMNS * tw + pad;
     let mut edge = right;
     let mut take = |width: f32, always: bool| {
@@ -248,7 +297,12 @@ pub fn media_lane_geometry(
     };
     let close = take(button, true).unwrap_or_default();
     let toggle = take(button, true).unwrap_or_default();
-    let open_outside = if lane.open_outside {
+    let mode = if lane.source.is_some() {
+        take(button, false)
+    } else {
+        None
+    };
+    let canvas = if lane.mode == MediaLaneMode::Rendered && lane.image.is_some() {
         take(button, false)
     } else {
         None
@@ -264,6 +318,12 @@ pub fn media_lane_geometry(
     } else {
         (None, None)
     };
+    let copy = if lane.copy { take(button, false) } else { None };
+    let open_outside = if lane.open_outside {
+        take(button, false)
+    } else {
+        None
+    };
     let counter_width = (media_lane_counter(lane.position).chars().count() as f32 + 1.0) * tw;
     let counter = take(counter_width, false).unwrap_or((edge, header_y, 0.0, lh));
     let title = (left, header_y, (edge - pad - left).max(0.0), lh);
@@ -276,6 +336,9 @@ pub fn media_lane_geometry(
             previous,
             next,
             open_outside,
+            mode,
+            canvas,
+            copy,
             toggle,
             close,
             full,
@@ -284,6 +347,7 @@ pub fn media_lane_geometry(
             hint: empty,
             image_area: empty,
             image: None,
+            source_rows: 0,
         });
     }
     let detail = (left, header_y + lh, right - left, lh);
@@ -297,10 +361,15 @@ pub fn media_lane_geometry(
         right - left,
         (area_bottom - area_top).max(0.0),
     );
-    let image = lane
-        .image
-        .as_ref()
-        .and_then(|image| fit_image(image, image_area));
+    let (image, source_rows) = match lane.mode {
+        MediaLaneMode::Rendered => (
+            lane.image
+                .as_ref()
+                .and_then(|image| fit_image(image, image_area)),
+            0,
+        ),
+        MediaLaneMode::Source => (None, (image_area.3 / lh).floor() as usize),
+    };
     Some(MediaLaneGeometry {
         rect,
         title,
@@ -308,6 +377,9 @@ pub fn media_lane_geometry(
         previous,
         next,
         open_outside,
+        mode,
+        canvas,
+        copy,
         toggle,
         close,
         full,
@@ -316,6 +388,7 @@ pub fn media_lane_geometry(
         hint,
         image_area,
         image,
+        source_rows,
     })
 }
 
@@ -362,8 +435,8 @@ fn fit_image(image: &kettle_core::ImageData, image_area: Rect4) -> Option<Rect4>
     ))
 }
 
-/// A lane's text, shaped once per change: its six lines and the control
-/// glyphs.
+/// A lane's text, shaped once per change: its six lines, the source rows in
+/// view and the control glyphs.
 pub(crate) struct LaneText {
     title: TextBuffer,
     detail: TextBuffer,
@@ -371,11 +444,15 @@ pub(crate) struct LaneText {
     counter: TextBuffer,
     hint: TextBuffer,
     status: TextBuffer,
-    /// Previous, next, open outside, collapse, expand and close.
-    controls: [TextBuffer; 6],
+    /// Previous, next, open outside, collapse, expand, close, show source,
+    /// show rendered, canvas and copy.
+    controls: [TextBuffer; 10],
     /// What each line buffer was last shaped with; `None` until it is, or
     /// once a font change means it must be again.
     shaped: [Option<String>; 6],
+    /// One buffer per source row in view, and what each was shaped with.
+    rows: Vec<TextBuffer>,
+    rows_shaped: Vec<String>,
 }
 
 impl LaneText {
@@ -409,21 +486,30 @@ impl LaneText {
                 control(font_system, "▾"),
                 control(font_system, "▴"),
                 control(font_system, "×"),
+                control(font_system, "≡"),
+                control(font_system, "▣"),
+                control(font_system, "◐"),
+                control(font_system, "⧉"),
             ],
             shaped: Default::default(),
+            rows: Vec::new(),
+            rows_shaped: Vec::new(),
         }
     }
 
-    /// What each line was last shaped with, for the renderer's text damage
-    /// key: buffers keep their addresses when the lane changes item.
-    pub(crate) fn shaped(&self) -> &[Option<String>; 6] {
-        &self.shaped
+    /// What each line and source row was last shaped with, for the
+    /// renderer's text damage key: buffers keep their addresses when the
+    /// lane changes item.
+    pub(crate) fn shaped(&self) -> (&[Option<String>; 6], &[String]) {
+        (&self.shaped, &self.rows_shaped)
     }
 
     /// Reshape every line on the next fill, after the font family or the
     /// loaded faces change: the text alone would not say so.
     pub(crate) fn invalidate(&mut self) {
         self.shaped = Default::default();
+        self.rows.clear();
+        self.rows_shaped.clear();
     }
 
     /// Shape what `lane` shows into its rectangles; `glyph_width` is the
@@ -454,7 +540,41 @@ impl LaneText {
         let columns = (geometry.sender.2 / glyph_width.max(1.0)).floor() as usize;
         let sender = full(&lane.sender.fitted(columns));
         let detail = full(&lane.detail);
-        let hint = full(&lane.hint);
+        let hint = full(lane.notice.as_deref().unwrap_or(&lane.hint));
+        // The source rows in view, in source mode; none otherwise.
+        let rows: &[String] = match (&lane.source, lane.mode, geometry.full) {
+            (Some(source), MediaLaneMode::Source, true) => {
+                &source.rows[..source.rows.len().min(geometry.source_rows)]
+            }
+            _ => &[],
+        };
+        self.rows.truncate(rows.len());
+        self.rows_shaped.truncate(rows.len());
+        while self.rows.len() < rows.len() {
+            let mut buffer = TextBuffer::new(font_system, metrics);
+            buffer.set_wrap(Wrap::None);
+            self.rows.push(buffer);
+            self.rows_shaped.push(String::new());
+        }
+        for ((buffer, shaped), row) in self.rows.iter_mut().zip(&mut self.rows_shaped).zip(rows) {
+            buffer.set_metrics(metrics);
+            buffer.set_size(Some(geometry.image_area.2), Some(metrics.line_height));
+            if *shaped != *row {
+                // A source shows the characters it holds: no ligature may
+                // join `-->` into an arrow, whatever the terminal's font
+                // settings.
+                let mut features = FontFeatures::new();
+                for tag in [b"liga", b"clig", b"calt", b"dlig"] {
+                    features.disable(FeatureTag::new(tag));
+                }
+                let attrs = Attrs::new()
+                    .family(Family::Name(family))
+                    .font_features(features);
+                buffer.set_text(row, &attrs, Shaping::Advanced, None);
+                row.clone_into(shaped);
+            }
+            buffer.shape_until_scroll(font_system, false);
+        }
         let lines: [(&mut TextBuffer, &str, Rect4, bool); 6] = [
             (&mut self.title, &lane.title, geometry.title, true),
             (&mut self.detail, &detail, geometry.detail, false),
@@ -490,6 +610,7 @@ impl LaneText {
         &'a self,
         geometry: &MediaLaneGeometry,
         collapsed: bool,
+        mode: MediaLaneMode,
         colors: (GColor, GColor, GColor),
         glyph_width: f32,
         line_height: f32,
@@ -529,7 +650,18 @@ impl LaneText {
                 description,
             ));
         }
-        // The toggle collapses an expanded lane and expands a collapsed one.
+        let (x, y, _, _) = geometry.image_area;
+        for (row, buffer) in self.rows.iter().enumerate() {
+            let top = y + row as f32 * line_height;
+            areas.push(area(
+                buffer,
+                (x, top, geometry.image_area.2, line_height),
+                label,
+            ));
+        }
+        // The toggle collapses an expanded lane and expands a collapsed one;
+        // the mode control offers whichever mode is not showing.
+        let source = mode == MediaLaneMode::Source;
         let buttons = [
             geometry.previous,
             geometry.next,
@@ -537,6 +669,10 @@ impl LaneText {
             (!collapsed).then_some(geometry.toggle),
             collapsed.then_some(geometry.toggle),
             Some(geometry.close),
+            geometry.mode.filter(|_| !source),
+            geometry.mode.filter(|_| source),
+            geometry.canvas,
+            geometry.copy,
         ];
         for (buffer, rect) in self.controls.iter().zip(buttons) {
             if let Some(rect) = rect {
@@ -603,6 +739,10 @@ mod tests {
             status: String::new(),
             canvas: MediaCanvas::Theme,
             open_outside: false,
+            mode: MediaLaneMode::Rendered,
+            source: None,
+            copy: false,
+            notice: None,
         }
     }
 
@@ -632,17 +772,17 @@ mod tests {
         assert!(geometry.hint.1 > geometry.image_area.1 + geometry.image_area.3);
     }
 
-    /// The open-outside button, when offered, sits between browsing and the
-    /// toggle on the header row, and a press on it says so; without it the
-    /// header is as before.
+    /// The open-outside button, when offered, sits on the header row left of
+    /// browsing, the last control before the counter, and a press on it says
+    /// so; without it the header is as before.
     #[test]
     fn the_open_outside_button_sits_before_close() {
         let mut offered = viewer((2, 5), Some((640, 480)));
         offered.open_outside = true;
         let geometry = media_lane_geometry(&offered, CELL, CELL).unwrap();
         let open = geometry.open_outside.expect("offered");
-        let next = geometry.next.unwrap();
-        assert!(next.0 + next.2 <= open.0 && open.0 + open.2 <= geometry.toggle.0);
+        let previous = geometry.previous.unwrap();
+        assert!(open.0 + open.2 <= previous.0 && geometry.counter.0 + geometry.counter.2 <= open.0);
         assert_eq!(open.1, geometry.close.1);
         let center = (open.0 + open.2 / 2.0, open.1 + open.3 / 2.0);
         assert_eq!(
@@ -656,12 +796,13 @@ mod tests {
         let geometry = media_lane_geometry(&single, CELL, CELL).unwrap();
         let open = geometry.open_outside.unwrap();
         assert!(geometry.counter.0 + geometry.counter.2 <= open.0);
+        // Without it, browsing sits against the canvas, which sits against
+        // the toggle.
         let plain = media_lane_geometry(&viewer((2, 5), Some((640, 480))), CELL, CELL).unwrap();
         assert_eq!(plain.open_outside, None);
-        assert_eq!(
-            plain.next.unwrap().0 + plain.next.unwrap().2,
-            plain.toggle.0
-        );
+        let canvas = plain.canvas.unwrap();
+        assert_eq!(plain.next.unwrap().0 + plain.next.unwrap().2, canvas.0);
+        assert_eq!(canvas.0 + canvas.2, plain.toggle.0);
     }
 
     #[test]
@@ -856,7 +997,7 @@ mod tests {
             "same text, no reshape"
         );
         text.invalidate();
-        assert!(text.shaped().iter().all(Option::is_none));
+        assert!(text.shaped().0.iter().all(Option::is_none));
         text.shape(
             &mut font_system,
             metrics,
@@ -897,6 +1038,47 @@ mod tests {
         );
     }
 
+    /// The mode control comes with a source, the canvas with an image shown,
+    /// and copy when there is something to copy; each answers its press.
+    /// Source mode lays out rows in the content area instead of the image.
+    #[test]
+    fn source_canvas_and_copy_appear_when_offered_and_answer_presses() {
+        let plain = media_lane_geometry(&viewer((1, 1), Some((64, 48))), CELL, CELL).unwrap();
+        assert_eq!((plain.mode, plain.copy), (None, None));
+        assert!(plain.canvas.is_some(), "an image has a canvas");
+        assert!(
+            media_lane_geometry(&viewer((1, 1), None), CELL, CELL)
+                .unwrap()
+                .canvas
+                .is_none(),
+            "no pixels, no canvas"
+        );
+        let mut lane = viewer((1, 1), Some((64, 48)));
+        lane.source = Some(MediaLaneSource::default());
+        lane.copy = true;
+        let rendered = media_lane_geometry(&lane, CELL, CELL).unwrap();
+        let center = |rect: Rect4| (rect.0 + rect.2 / 2.0, rect.1 + rect.3 / 2.0);
+        for (rect, hit) in [
+            (rendered.mode, MediaLaneHit::Mode),
+            (rendered.canvas, MediaLaneHit::Canvas),
+            (rendered.copy, MediaLaneHit::Copy),
+        ] {
+            let (x, y) = center(rect.expect("offered"));
+            assert_eq!(rendered.hit_test(x, y), Some(hit));
+        }
+        assert!(rendered.image.is_some());
+        assert_eq!(rendered.source_rows, 0);
+        lane.mode = MediaLaneMode::Source;
+        let source = media_lane_geometry(&lane, CELL, CELL).unwrap();
+        assert_eq!(source.image, None, "source mode shows rows, not the image");
+        assert_eq!(source.canvas, None, "a canvas is for the image");
+        assert_eq!(
+            source.source_rows,
+            (source.image_area.3 / CELL.1).floor() as usize
+        );
+        assert!(source.source_rows > 0);
+    }
+
     /// However narrow the lane, every control and the counter lie inside it:
     /// controls past close and collapse give way, in order, so the title
     /// keeps a few columns, and a lane too narrow even for those has none.
@@ -912,15 +1094,34 @@ mod tests {
         for width in (60..=900).rev().step_by(10) {
             let mut lane = viewer((2, 5), Some((64, 48)));
             lane.open_outside = true;
+            lane.copy = true;
+            lane.source = Some(MediaLaneSource::default());
             lane.rect = (210.0, 40.0, width as f32, 300.0);
             let Some(geometry) = media_lane_geometry(&lane, CELL, CELL) else {
                 assert!(width < 120, "{width} px holds close, collapse and a title");
                 continue;
             };
-            let controls = [geometry.previous, geometry.next, geometry.open_outside]
-                .iter()
-                .flatten()
-                .count();
+            let optional = [
+                geometry.mode,
+                geometry.canvas,
+                geometry.previous,
+                geometry.next,
+                geometry.copy,
+                geometry.open_outside,
+            ];
+            let controls = optional.iter().flatten().count();
+            // They give way from the end of that order: no single button
+            // shows while one before it does not, and browsing, two wide,
+            // shows only after the mode and canvas; a single button may still
+            // fit where browsing does not.
+            let shown: Vec<bool> = optional.iter().map(Option::is_some).collect();
+            assert_eq!(shown[2], shown[3], "{width}: browsing comes as a pair");
+            let singles = [shown[0], shown[1], shown[4], shown[5]];
+            assert!(
+                singles.windows(2).all(|pair| pair[0] || !pair[1]),
+                "{width}: {singles:?}"
+            );
+            assert!(!shown[2] || (shown[0] && shown[1]), "{width}: {shown:?}");
             assert!(
                 controls <= previous_controls,
                 "fewer controls as it narrows"
@@ -932,7 +1133,7 @@ mod tests {
                 Some(geometry.counter),
             ]
             .into_iter()
-            .chain([geometry.previous, geometry.next, geometry.open_outside])
+            .chain(optional)
             .flatten()
             {
                 assert!(

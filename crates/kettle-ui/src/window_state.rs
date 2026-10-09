@@ -704,6 +704,43 @@ pub(crate) struct ThemePickerState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PreviewPanel {
     pub(crate) item: u64,
+    /// The rendered item, or its source.
+    pub(crate) mode: kettle_render::MediaLaneMode,
+    /// The canvas the user chose for the item, over its kind's own.
+    pub(crate) canvas: Option<kettle_render::MediaCanvas>,
+    /// The first source row and column in view.
+    pub(crate) scroll: (usize, usize),
+    /// What the lane last did, shown until the next thing it does.
+    pub(crate) notice: Option<LaneNotice>,
+}
+
+impl PreviewPanel {
+    /// A lane showing `item` rendered, on its kind's canvas.
+    pub(crate) fn new(item: u64) -> Self {
+        Self {
+            item,
+            mode: kettle_render::MediaLaneMode::Rendered,
+            canvas: None,
+            scroll: (0, 0),
+            notice: None,
+        }
+    }
+}
+
+/// What a lane says it did, in place of its hint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LaneNotice {
+    ImageCopied,
+    SourceCopied,
+    CopyFailed,
+    /// A copy runs, and another waits.
+    CopyBusy,
+    /// Rendering the item again on the canvas chosen.
+    Rendering,
+    /// That render failed; the item shows as it was.
+    RenderFailed,
+    /// The file changed since the item was rendered.
+    Changed,
 }
 
 pub(crate) struct WindowState {
@@ -805,6 +842,8 @@ pub(crate) struct WindowState {
     /// and the wheel does nothing at all. Per-window because each OS window has
     /// its own independent pointer-event stream.
     pub(crate) wheel: crate::input::WheelAccum,
+    /// The wheel's motion over a preview lane, apart from the terminal's.
+    pub(crate) lane_wheel: crate::input::WheelAccum,
     pub(crate) selecting: bool,
     /// Pane that owns the active pointer selection gesture. Focus can
     /// move through ctl/Lua while a drag is live; pinning the id prevents the
@@ -1363,6 +1402,7 @@ impl WindowState {
             fullscreen,
             cursor: PhysicalPosition::new(0.0, 0.0),
             wheel: crate::input::WheelAccum::default(),
+            lane_wheel: crate::input::WheelAccum::default(),
             selecting: false,
             selecting_pane: None,
             selection_autoscroll_edge: 0,

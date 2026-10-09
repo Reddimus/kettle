@@ -19,6 +19,9 @@ palette_preview_clipboard_path = "draft"
 palette_preview_next = "draft"
 palette_preview_previous = "draft"
 palette_close_preview = "draft"
+palette_preview_source = "draft"
+palette_preview_canvas = "draft"
+palette_preview_copy = "draft"
 media_viewer_kind_image = "draft"
 media_viewer_kind_svg = "draft"
 media_viewer_kind_mermaid = "draft"
@@ -36,6 +39,17 @@ media_lane_a11y_next = "draft"
 media_lane_a11y_collapse = "draft"
 media_lane_a11y_expand = "draft"
 media_lane_a11y_close = "draft"
+media_lane_a11y_source = "draft"
+media_lane_a11y_rendered = "draft"
+media_lane_a11y_canvas = "draft"
+media_lane_a11y_copy = "draft"
+media_lane_notice_image_copied = "draft"
+media_lane_notice_source_copied = "draft"
+media_lane_notice_copy_failed = "draft"
+media_lane_notice_copy_busy = "draft"
+media_lane_notice_rendering = "draft"
+media_lane_notice_render_failed = "draft"
+media_lane_notice_changed = "draft"
 window_title_new_media = "draft"
 card_a11y = "draft"
 card_a11y_open = "draft"
@@ -534,6 +548,8 @@ window_title_gpu_lost = "draft"
 keys = [
     "a11y_pane",
     "a11y_window",
+    "card_a11y",
+    "card_a11y_open",
     "completion_a11y_list",
     "confirm_button_cancel",
     "confirm_button_close",
@@ -550,13 +566,15 @@ keys = [
     "confirm_rebind",
     "hint_a11y_list",
     "media_lane_a11y",
+    "media_lane_a11y_canvas",
     "media_lane_a11y_close",
     "media_lane_a11y_collapse",
+    "media_lane_a11y_copy",
     "media_lane_a11y_expand",
     "media_lane_a11y_next",
     "media_lane_a11y_previous",
-    "card_a11y",
-    "card_a11y_open",
+    "media_lane_a11y_rendered",
+    "media_lane_a11y_source",
     "menu_a11y_terminal",
     "picker_a11y_layouts",
     "picker_a11y_palette",

@@ -8,12 +8,14 @@
 //! item is on the shelf; nothing a push does opens anything on screen.
 
 mod cards;
+mod copy;
 mod external;
 mod inline;
 mod queue;
 mod route;
 mod shelf;
 mod sightings;
+mod source;
 mod tip;
 
 use std::sync::Arc;
@@ -22,21 +24,24 @@ use std::time::Instant;
 use crossbeam_channel::{Receiver, Sender as ChannelSender};
 use kettle_ctl::protocol::Response;
 use kettle_media::client::{RenderControl, RenderError, WorkerClient};
-use kettle_media::{FailureCode, Job, RenderOutput};
+use kettle_media::{FailureCode, RenderOutput};
 
 use crate::ctl_server::ReplyTx;
 
 #[cfg(test)]
 pub(crate) use cards::HARNESS_CARDS_PER_SECOND;
 pub(crate) use cards::{CardLedger, CardRecord};
+pub(crate) use copy::{CopyContent, CopyService, CopyStarted};
 pub(crate) use external::{OpenFailure, Viewer, open as open_externally};
 pub(crate) use inline::{card_caption, card_message, card_size};
 pub(crate) use queue::Sender;
 pub(crate) use route::{PaneRoot, Route, nearest_pane, route};
 pub(crate) use shelf::{
-    Provenance, Shelf, ShelfItem, UnverifiedSender, report as shelf_report, signer_name,
+    ItemPixels, Provenance, Shelf, ShelfItem, ShelfKey, UnverifiedSender, report as shelf_report,
+    signer_name,
 };
 pub(crate) use sightings::{CardSightings, MAX_CARD_INSTANCE};
+pub(crate) use source::{ItemSource, JobSpec, SourceInput, display_rows};
 pub(crate) use tip::CardsTip;
 
 use queue::{Admitted, Queue};
@@ -67,17 +72,30 @@ impl Origin {
     }
 }
 
-/// Who a push answers: a control client waiting on its connection, or the
+/// Who a push answers: a control client waiting on its connection; the
 /// user, whose preview opens in the pane's lane when it is ready and who is
-/// told when it cannot be.
+/// told when it cannot be; or a lane rendering its item again.
 pub(crate) enum Requester {
     Ctl(Origin),
     User,
+    Lane(LaneRender),
+}
+
+/// A lane rendering its item again, on another canvas: it answers no one,
+/// and what it renders replaces the item's pixels only while the item is the
+/// one it asked about, unreplaced, from the same source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LaneRender {
+    pub window: u64,
+    pub pane: u64,
+    pub item: u64,
+    pub generation: u64,
 }
 
 impl Requester {
     /// Answer a control client with `failure`; for the user, hand it back to
-    /// be shown.
+    /// be shown. A lane's failure is the lane's to show (see
+    /// [`MediaService::take_lane_failures`]).
     pub(crate) fn refuse(self, failure: FailureCode) -> Option<FailureCode> {
         match self {
             Self::Ctl(origin) => {
@@ -85,13 +103,14 @@ impl Requester {
                 None
             }
             Self::User => Some(failure),
+            Self::Lane(_) => None,
         }
     }
 }
 
 /// What a push's shelf item will say about itself.
 pub(crate) struct Draft {
-    pub key: Option<String>,
+    pub key: Option<ShelfKey>,
     /// Display-ready (see [`display_title`]).
     pub title: String,
     pub provenance: Provenance,
@@ -114,8 +133,8 @@ pub(crate) struct Push {
     pub draft: Draft,
     pub control: RenderControl,
     requester: Requester,
-    /// The job, until the lane takes it.
-    job: Option<Job>,
+    /// The job: what the lane renders, and what the item keeps.
+    spec: JobSpec,
 }
 
 impl Push {
@@ -123,7 +142,7 @@ impl Push {
         requester: Requester,
         route: Route,
         draft: Draft,
-        job: Job,
+        spec: JobSpec,
         control: RenderControl,
     ) -> Self {
         Self {
@@ -131,26 +150,29 @@ impl Push {
             draft,
             control,
             requester,
-            job: Some(job),
+            spec,
         }
     }
 
-    /// Whether the user asked for it.
-    pub(crate) fn is_users(&self) -> bool {
-        matches!(self.requester, Requester::User)
+    /// Whether a control client waits for it: the user's own requests and a
+    /// lane's renders end without a word when replaced or when their pane
+    /// goes.
+    pub(crate) fn answers_client(&self) -> bool {
+        matches!(self.requester, Requester::Ctl(_))
     }
 
     /// The control client it answers, if one does.
     fn conn_id(&self) -> Option<u64> {
         match &self.requester {
             Requester::Ctl(origin) => Some(origin.conn_id),
-            Requester::User => None,
+            Requester::User | Requester::Lane(_) => None,
         }
     }
 
-    /// Who waits for it, where it goes, and what its item will say.
-    pub(crate) fn into_parts(self) -> (Requester, Route, Draft) {
-        (self.requester, self.route, self.draft)
+    /// Who waits for it, where it goes, what its item will say, and the
+    /// job that rendered it.
+    pub(crate) fn into_parts(self) -> (Requester, Route, Draft, JobSpec) {
+        (self.requester, self.route, self.draft, self.spec)
     }
 }
 
@@ -162,7 +184,7 @@ pub(crate) struct Finished {
 
 /// The render thread and its two channels.
 struct Lane {
-    work: ChannelSender<(Job, RenderControl)>,
+    work: ChannelSender<(JobSpec, RenderControl)>,
     done: Receiver<Result<RenderOutput, RenderError>>,
 }
 
@@ -170,7 +192,7 @@ impl Lane {
     /// Start the thread. `wake` runs after each render, on that thread,
     /// and once more when the thread ends, however it ends.
     fn start(client: Arc<WorkerClient>, wake: Arc<dyn Fn() + Send + Sync>) -> Option<Self> {
-        let (work, jobs) = crossbeam_channel::bounded::<(Job, RenderControl)>(1);
+        let (work, jobs) = crossbeam_channel::bounded::<(JobSpec, RenderControl)>(1);
         let (finished, done) = crossbeam_channel::bounded(1);
         std::thread::Builder::new()
             .name("kettle-media-lane".into())
@@ -179,11 +201,14 @@ impl Lane {
                     finished: Some(finished),
                     wake,
                 };
-                for (job, control) in jobs {
-                    let result = client.render_media_with_control(&job, &control);
-                    // The source can be megabytes; it goes before the wait
-                    // for the next job, not after.
-                    drop(job);
+                for (spec, control) in jobs {
+                    // The job copies the source, which can be megabytes:
+                    // here, not on the UI thread, and gone before the wait
+                    // for the next job.
+                    let result = match spec.job() {
+                        Ok(job) => client.render_media_with_control(&job.job, &control),
+                        Err(failure) => Err(RenderError::Failure(failure)),
+                    };
                     if exit.send(result).is_err() {
                         return;
                     }
@@ -224,6 +249,9 @@ pub(crate) struct MediaService {
     /// What the user asked to preview and could not have, by pane, for the
     /// App to tell them; bounded, as each failure comes from one request.
     user_failures: Vec<(u64, FailureCode)>,
+    /// The lanes whose renders failed before running, for the App to say so
+    /// in each lane; as bounded.
+    lane_failures: Vec<LaneRender>,
     lane: Option<Lane>,
     /// The push being rendered.
     active: Option<Push>,
@@ -246,7 +274,7 @@ impl MediaService {
     pub(crate) fn admit(&mut self, sender: Sender, deadline: Instant, push: Push) {
         match self.queue.admit(sender, deadline, push) {
             Admitted::Queued => {}
-            Admitted::Displaced(push) if push.is_users() => {}
+            Admitted::Displaced(push) if !push.answers_client() => {}
             Admitted::Displaced(push) | Admitted::Busy(push) => {
                 self.refuse(push, FailureCode::Busy);
             }
@@ -254,14 +282,29 @@ impl MediaService {
     }
 
     /// End `push` with `failure`, answering its client or keeping it for
-    /// the user.
+    /// the user or the lane that asked.
     fn refuse(&mut self, push: Push, failure: FailureCode) {
         let pane = push.route.pane;
-        if let Some(failure) = push.requester.refuse(failure)
-            && self.user_failures.len() < MAX_USER_FAILURES
-        {
-            self.user_failures.push((pane, failure));
+        match push.requester {
+            Requester::Lane(render) => {
+                if self.lane_failures.len() < MAX_USER_FAILURES {
+                    self.lane_failures.push(render);
+                }
+            }
+            requester => {
+                if let Some(failure) = requester.refuse(failure)
+                    && self.user_failures.len() < MAX_USER_FAILURES
+                {
+                    self.user_failures.push((pane, failure));
+                }
+            }
         }
+    }
+
+    /// The lanes whose renders failed before they ran, since this was last
+    /// asked.
+    pub(crate) fn take_lane_failures(&mut self) -> Vec<LaneRender> {
+        std::mem::take(&mut self.lane_failures)
     }
 
     /// The previews the user asked for that failed before rendering, by
@@ -285,21 +328,17 @@ impl MediaService {
         if self.queue.is_rendering() {
             return;
         }
-        let Some(mut push) = self.queue.start_next(now) else {
-            return;
-        };
-        let Some(job) = push.job.take() else {
-            self.queue.finished();
-            self.refuse(push, FailureCode::WorkerUnavailable);
+        let Some(push) = self.queue.start_next(now) else {
             return;
         };
         if self.lane.is_none() {
             self.lane = client.and_then(|client| Lane::start(Arc::clone(client), wake()));
         }
+        let work = (push.spec.clone(), push.control.clone());
         let sent = self
             .lane
             .as_ref()
-            .is_some_and(|lane| lane.work.send((job, push.control.clone())).is_ok());
+            .is_some_and(|lane| lane.work.try_send(work).is_ok());
         if sent {
             self.active = Some(push);
         } else {
@@ -352,9 +391,10 @@ impl MediaService {
     /// Pushes to panes `live` no longer lists are answered as having no
     /// pane, and one rendering is cancelled.
     pub(crate) fn retain_panes(&mut self, live: impl Fn(u64) -> bool) {
-        // The user's own request for a pane that went needs no word.
+        // The user's own request, or a lane's, for a pane that went needs no
+        // word.
         for push in self.queue.cancel(|push| !live(push.route.pane)) {
-            if !push.is_users() {
+            if push.answers_client() {
                 self.refuse(push, FailureCode::NotInKettlePane);
             }
         }
@@ -439,25 +479,7 @@ mod tests {
                 provenance: Provenance::Verified,
                 inline: None,
             },
-            Job {
-                kind: kettle_media::JobKind::Svg,
-                source: kettle_media::Source::Bytes(b"<svg/>".to_vec()),
-                theme: kettle_media::Theme {
-                    background: [0; 4],
-                    foreground: [0; 4],
-                    palette: [[0; 4]; 16],
-                    accent: [0; 4],
-                    is_dark: true,
-                },
-                canvas: kettle_media::Canvas::Theme,
-                target: kettle_media::Target {
-                    width: 1,
-                    height: 1,
-                    scale: 1.0,
-                    crop: None,
-                },
-                fallback_fonts: Vec::new(),
-            },
+            ItemSource::sample(b"<svg/>").spec,
             RenderControl::default(),
         )
     }
@@ -554,6 +576,40 @@ mod tests {
             service.pump(None, no_wake);
         }
         assert_eq!(service.take_user_failures().len(), MAX_USER_FAILURES);
+    }
+
+    /// A lane's render is a sender of its own: a newer one for the same lane
+    /// takes the waiting one's place without a word, and one that waits past
+    /// its deadline is kept for its lane, not told as the user's.
+    #[test]
+    fn a_lanes_render_waits_as_its_own_sender_and_fails_to_its_lane() {
+        let mut service = MediaService::default();
+        let render = LaneRender {
+            window: 1,
+            pane: 3,
+            item: 9,
+            generation: 2,
+        };
+        let later = Instant::now() + std::time::Duration::from_secs(60);
+        service.admit(Sender::Lane(3), later, push_for(Requester::Lane(render)));
+        service.admit(Sender::Lane(3), later, push_for(Requester::Lane(render)));
+        assert!(
+            service.take_lane_failures().is_empty(),
+            "a replaced render is silent"
+        );
+        service.retain_panes(|_| false);
+        assert!(
+            service.take_lane_failures().is_empty(),
+            "so is one whose pane went"
+        );
+        service.admit(
+            Sender::Lane(3),
+            Instant::now(),
+            push_for(Requester::Lane(render)),
+        );
+        service.pump(None, no_wake);
+        assert_eq!(service.take_lane_failures(), [render]);
+        assert!(service.take_user_failures().is_empty());
     }
 
     /// The lane's end of the channel closes before the App is woken, by a

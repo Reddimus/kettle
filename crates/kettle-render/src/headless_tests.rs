@@ -2052,6 +2052,10 @@ fn a_lane_draws_its_open_outside_button_only_when_offered() {
         status: String::new(),
         canvas: MediaCanvas::Theme,
         open_outside,
+        mode: MediaLaneMode::Rendered,
+        source: None,
+        copy: false,
+        notice: None,
     };
     let geometry = media_lane_geometry(
         &viewer(true),
@@ -2130,6 +2134,86 @@ fn a_terminal_paints_nothing_outside_its_rect() {
     }
 }
 
+/// In source mode a lane shows its source's rows on the pane's background
+/// where the image was, and the image not at all; rendered, the image.
+#[test]
+fn a_lane_in_source_mode_shows_rows_instead_of_the_image() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(480, 320) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let snap = snapshot_of(40, 2, b"");
+    let view = || PaneView {
+        terminal: (0.0, 0.0, 480.0, 40.0),
+        ..pane(&snap, 480, 320)
+    };
+    let red = [255, 0, 0, 255];
+    let lane = |mode| MediaLanePanel {
+        pane: 1,
+        rect: (0.0, 40.0, 480.0, 280.0),
+        collapsed: false,
+        title: "flow.mmd".into(),
+        detail: "Mermaid diagram · 16×16".into(),
+        sender: MediaLaneSender {
+            text: "From this pane".into(),
+            program: None,
+            signer: None,
+        },
+        hint: "Keys still go to the terminal".into(),
+        position: (1, 1),
+        image: Some(kettle_core::ImageData::new(16, 16, red.repeat(16 * 16)).unwrap()),
+        status: String::new(),
+        canvas: MediaCanvas::Theme,
+        open_outside: false,
+        mode,
+        source: Some(MediaLaneSource {
+            rows: vec!["flowchart LR".into(), "  A --> B".into()],
+            first_row: 0,
+            total_rows: 2,
+        }),
+        copy: true,
+        notice: None,
+    };
+    let reds = |image: &image::RgbaImage| {
+        image
+            .pixels()
+            .filter(|pixel| pixel[0] > 200 && pixel[1] < 40 && pixel[2] < 40)
+            .count()
+    };
+    let geometry = media_lane_geometry(
+        &lane(MediaLaneMode::Source),
+        (renderer.cell_w, renderer.cell_h),
+        (
+            renderer.overlay_text_cell_width(),
+            renderer.metrics.line_height,
+        ),
+    )
+    .unwrap();
+    let (x, y, _, _) = geometry.image_area;
+    let first_row = [
+        x,
+        y,
+        12.0 * renderer.overlay_text_cell_width(),
+        renderer.metrics.line_height,
+    ];
+    let mut shot = |mode| {
+        let overlay = Overlay {
+            media_lanes: vec![lane(mode)],
+            ..focused(false)
+        };
+        capture(&mut renderer, &cfg, &[view()], &overlay)
+    };
+    let rendered = shot(MediaLaneMode::Rendered);
+    assert!(reds(&rendered) >= 16 * 16, "the image is drawn");
+    let source = shot(MediaLaneMode::Source);
+    assert_eq!(reds(&source), 0, "the image is not");
+    assert!(
+        distinct_colors(&source, first_row) > 2,
+        "the first source row is drawn"
+    );
+}
+
 /// A preview lane paints its opaque panel over its share of the pane, with
 /// its title, and leaves the terminal beside it as it was.
 #[test]
@@ -2161,6 +2245,10 @@ fn a_preview_lane_paints_its_panel_and_leaves_the_terminal() {
         status: String::new(),
         canvas: MediaCanvas::Theme,
         open_outside: false,
+        mode: MediaLaneMode::Rendered,
+        source: None,
+        copy: false,
+        notice: None,
     };
     let without = capture(&mut renderer, &cfg, &[view()], &focused(false));
     let overlay = Overlay {
