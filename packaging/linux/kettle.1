@@ -531,14 +531,15 @@ and exits, for CI.
 .B \-\-display
 offers only
 .BR kettle_show ,
-which sends an image or SVG file to the media shelf of the kettle pane the
+which sends an image, SVG or Mermaid diagram file to the media shelf of the
+kettle pane the
 server runs in and needs agent previews, never full control.
 .TP
 .B kettle show \fIPATH\fR|\fB\-\fR [\fB\-\-title \fITITLE\fR] [\fB\-\-key \fIKEY\fR]
-Send a local image or SVG to the media shelf of the pane this runs in, in the
-kettle it runs inside; never another kettle. Pass
+Send a local image, SVG or Mermaid diagram to the media shelf of the pane this
+runs in, in the kettle it runs inside; never another kettle. Pass
 .B \-
-for a small image or SVG on stdin; larger media goes by path. The media worker
+for a small one on stdin; larger media goes by path. The media worker
 decides what the bytes are, not the file name. A later
 .B show
 with the same

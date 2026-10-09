@@ -35,7 +35,26 @@ xmlwriter = "=0.1.0"
 # uses, without fontdb's all-face collection/name loader.
 skrifa = "=0.44.0"
 unicode-script = "=0.5.8"
+unicode-segmentation.workspace = true
+unicode-linebreak = "=0.1.5"
+# The pinned SVG engine's selector dialect, used only for generated diagrams.
+simplecss = "=0.2.2"
+# Mermaid: parsing, layout and SVG, without its own text measurement (Kettle
+# measures with the job's fonts) or any network or file access.
+merman = { version = "=0.8.0", default-features = false, features = ["svg", "layout-cytoscape", "all-diagrams"] }
+# Exact transitive family constraints keep parsing, layout and painting coherent.
+merman-core = { version = "=0.8.0", default-features = false }
+merman-render = { version = "=0.8.0", default-features = false }
+dugong = { version = "=0.8.0", default-features = false }
+dugong-graphlib = { version = "=0.8.0", default-features = false }
+manatee = { version = "=0.8.0", default-features = false }
+roughr-merman = { version = "=0.12.3", default-features = false }
+
+[package.metadata.cargo-machete]
+# These dependencies constrain the renderer family rather than expose APIs.
+ignored = ["merman-core", "merman-render", "dugong", "dugong-graphlib", "manatee", "roughr-merman"]
 
 [dev-dependencies]
+toml.workspace = true
 kettle-test-support.workspace = true
 tempfile = "3"

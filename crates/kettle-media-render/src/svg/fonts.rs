@@ -53,16 +53,60 @@ pub(crate) fn bundled() -> &'static (Arc<fontdb::Database>, String) {
 pub(crate) struct JobFonts {
     pub database: Arc<fontdb::Database>,
     pub family: String,
-    bundled_id: fontdb::ID,
+    primary_ids: Vec<fontdb::ID>,
+}
+
+/// Proportional diagram faces, loaded once before Mermaid jobs are accepted.
+/// Four matching proportional outlines retain weight/style selection; inline
+/// code reuses the existing terminal face for generic monospace.
+pub(crate) fn mermaid_bundled() -> &'static (Arc<fontdb::Database>, String) {
+    static FONTS: OnceLock<(Arc<fontdb::Database>, String)> = OnceLock::new();
+    FONTS.get_or_init(|| {
+        let mut database = fontdb::Database::new();
+        for bytes in [
+            include_bytes!("../../../../assets/fonts/fira-sans/FiraSans-Regular.ttf").as_slice(),
+            include_bytes!("../../../../assets/fonts/fira-sans/FiraSans-Bold.ttf").as_slice(),
+            include_bytes!("../../../../assets/fonts/fira-sans/FiraSans-Italic.ttf").as_slice(),
+            include_bytes!("../../../../assets/fonts/fira-sans/FiraSans-BoldItalic.ttf").as_slice(),
+        ] {
+            database.load_font_source(fontdb::Source::Binary(Arc::new(bytes)));
+        }
+        let family = database
+            .faces()
+            .next()
+            .and_then(|face| face.families.first())
+            .map(|(name, _)| name.clone())
+            .unwrap_or_default();
+        database.set_serif_family(family.clone());
+        database.set_sans_serif_family(family.clone());
+        database.load_font_source(fontdb::Source::Binary(Arc::new(BUNDLED)));
+        database.set_monospace_family(bundled().1.clone());
+        database.set_cursive_family(family.clone());
+        database.set_fantasy_family(family.clone());
+        (Arc::new(database), family)
+    })
 }
 
 pub(crate) fn for_job(entries: &[FallbackFont]) -> Result<JobFonts, FailureCode> {
+    with_base(bundled(), entries)
+}
+
+pub(crate) fn for_mermaid_job(entries: &[FallbackFont]) -> Result<JobFonts, FailureCode> {
+    with_base(mermaid_bundled(), entries)
+}
+
+fn with_base(
+    (bundled, family): &(Arc<fontdb::Database>, String),
+    entries: &[FallbackFont],
+) -> Result<JobFonts, FailureCode> {
     if entries.len() > MAX_FALLBACK_FONTS {
         return Err(FailureCode::BadParams);
     }
-    let (bundled, family) = bundled();
     let mut database = bundled.clone();
-    let bundled_id = bundled.faces().next().ok_or(FailureCode::RenderParse)?.id;
+    let primary_ids = bundled.faces().map(|face| face.id).collect::<Vec<_>>();
+    if primary_ids.is_empty() {
+        return Err(FailureCode::RenderParse);
+    }
     let mut total = 0;
     for entry in entries {
         let cap = MAX_FALLBACK_FONT_BYTES.min(MAX_FALLBACK_FONT_TOTAL_BYTES - total);
@@ -82,7 +126,7 @@ pub(crate) fn for_job(entries: &[FallbackFont]) -> Result<JobFonts, FailureCode>
     Ok(JobFonts {
         database,
         family: family.clone(),
-        bundled_id,
+        primary_ids,
     })
 }
 
@@ -238,7 +282,7 @@ pub(crate) fn resolver() -> usvg::FontResolver<'static> {
                     // usvg reshapes the whole run, but asks only about its
                     // first missing character. Try other supplied faces even
                     // when that character is uncovered, so later glyphs can
-                    // resolve. Its exclusion list bounds this to nine faces.
+                    // resolve. Its exclusion list is bounded by the bundled and supplied faces.
                     (u8::from(!covers), distance)
                 })
                 .map(|face| face.id)
@@ -293,7 +337,7 @@ impl JobFonts {
                                     return Err(FailureCode::RenderResource);
                                 }
                                 if glyph.id.0 != 0 {
-                                    fallback |= glyph.font != self.bundled_id;
+                                    fallback |= !self.primary_ids.contains(&glyph.font);
                                     continue;
                                 }
                                 for c in glyph.text.chars() {
@@ -362,6 +406,91 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(Some(id), database.faces().next().map(|face| face.id));
+        }
+    }
+
+    #[test]
+    fn diagram_generic_monospace_selects_the_existing_bundled_terminal_family() {
+        let fonts = for_mermaid_job(&[]).unwrap();
+        let code = fonts
+            .database
+            .query(&fontdb::Query {
+                families: &[fontdb::Family::Monospace],
+                ..fontdb::Query::default()
+            })
+            .unwrap();
+        let prose = fonts
+            .database
+            .query(&fontdb::Query {
+                families: &[fontdb::Family::SansSerif],
+                ..fontdb::Query::default()
+            })
+            .unwrap();
+        assert_ne!(code, prose);
+        let face = fonts.database.face(code).unwrap();
+        assert_eq!(face.families.first().unwrap().0, bundled().1);
+        assert!(fonts.primary_ids.contains(&code));
+        assert_eq!(
+            fonts
+                .database
+                .face(prose)
+                .unwrap()
+                .families
+                .first()
+                .unwrap()
+                .0,
+            "Fira Sans"
+        );
+        assert_eq!(for_job(&[]).unwrap().database.len(), 1);
+    }
+
+    #[test]
+    fn diagram_font_weights_and_styles_select_distinct_bundled_faces() {
+        let fonts = for_mermaid_job(&[]).unwrap();
+        assert_eq!(fonts.database.len(), 5);
+        assert_eq!(fonts.family, "Fira Sans");
+        let mut ids = HashSet::new();
+        for (weight, style) in [
+            (fontdb::Weight::NORMAL, fontdb::Style::Normal),
+            (fontdb::Weight::BOLD, fontdb::Style::Normal),
+            (fontdb::Weight::NORMAL, fontdb::Style::Italic),
+            (fontdb::Weight::BOLD, fontdb::Style::Italic),
+        ] {
+            let id = fonts
+                .database
+                .query(&fontdb::Query {
+                    families: &[fontdb::Family::Name(&fonts.family)],
+                    weight,
+                    style,
+                    ..fontdb::Query::default()
+                })
+                .unwrap();
+            let face = fonts.database.face(id).unwrap();
+            assert_eq!(face.weight, weight);
+            assert_eq!(face.style, style);
+            assert!(fonts.primary_ids.contains(&id));
+            assert!(ids.insert(id));
+        }
+        assert_eq!(for_job(&[]).unwrap().database.len(), 1);
+    }
+
+    #[test]
+    fn bundled_diagram_styles_are_not_reported_as_font_fallbacks() {
+        let fonts = for_mermaid_job(&[]).unwrap();
+        for attributes in [
+            "",
+            "font-weight='bold'",
+            "font-style='italic'",
+            "font-weight='bold' font-style='italic'",
+        ] {
+            let svg = format!(
+                "<svg xmlns='http://www.w3.org/2000/svg' width='200' height='40'><text x='0' y='24' {attributes}>Style AV ffi</text></svg>"
+            );
+            let tree = usvg::Tree::from_str(&svg, &super::super::options(&fonts)).unwrap();
+            let coverage = fonts.coverage(&tree).unwrap();
+            assert!(coverage.scripts.is_empty());
+            assert!(!coverage.warnings.contains(&Warning::FontFallback));
+            assert!(!coverage.warnings.contains(&Warning::MissingGlyphs));
         }
     }
 

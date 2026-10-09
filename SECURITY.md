@@ -154,6 +154,17 @@ Reports that fit any of these are welcome:
   that allocates past those caps, a decoder panic reached from hostile
   input, or rendered output that carries a transparent pixel's hidden color
   is in scope.
+- **Diagram rendering** — Mermaid source is parsed and laid out by merman
+  0.8.0, pinned exactly, with its resource-constrained policy, a deadline,
+  no network or file access, and Kettle's own text measurement from the job's
+  fonts. Its SVG then passes the same sanitizer and admission as an outside
+  SVG, in a generated mode that leaves out what it cannot check instead of
+  passing it: an element whose attributes fail the checks, an id a later
+  element repeats (the first element owns it, written or not), a style
+  declaration it cannot read. Relative font sizes are resolved to absolute
+  ones within the same number bound, or left out. A diagram that outlasts its
+  deadline or resource policy, gets anything unchecked past the sanitizer,
+  or makes the worker read or reach anything is in scope.
 - **SVG rendering** — an SVG is parsed with no DTD, and written back without
   scripts, foreign content, event attributes, namespaced attributes other
   than `xlink:href` and `xml:space`, or any `href` or `url()` that names

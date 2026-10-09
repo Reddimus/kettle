@@ -80,7 +80,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   show a video card; movies renamed to another supported video suffix still
   work. Header inspection reads at most 64 KiB on the background worker.
 - `kettle show PATH` (or `-` for stdin) and the `show` control method send an
-  image or SVG to the media shelf of the pane they run in, in the Kettle they
+  image, SVG or Mermaid diagram to the media shelf of the pane they run in, in the Kettle they
   run inside. They need only Agent previews, never full control. Media lands
   in the caller's own pane by its process ancestry; a sender Kettle cannot
   place is labeled unverified with the program the system names for it (for
@@ -89,7 +89,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Each pane keeps its last eight items; `list_panes` reports them. A push
   never opens anything on screen.
 - `kettle mcp --display` offers agents one tool, `kettle_show`, which sends
-  an image or SVG file to the media shelf of the pane the agent runs in. It
+  an image, SVG or Mermaid diagram file to the media shelf of the pane the agent runs in. It
   needs only Agent previews and cannot read the screen, type or run
   anything.
 - Inline cards for the keyboard and screen readers: quick select labels each
@@ -153,9 +153,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   name, and decodes PNG, JPEG, WebP, BMP and a GIF's first frame only after
   checking the image's size against the decoded caps. The image is scaled
   down to fit the requested box, never enlarged past its own size, keeping its
-  aspect ratio, without transparent pixels bleeding color. Mermaid and video
-  rendering remain later work; GUI preview
+  aspect ratio, without transparent pixels bleeding color. Video rendering
+  remains later work; GUI preview
   callers are introduced separately.
+- The media worker renders Mermaid diagrams, every family merman 0.8.0
+  pins, from flowcharts and sequences to gantt charts, mind maps and
+  timelines: `kettle show diagram.mmd`, a small one on stdin, or an agent's
+  `kettle_show` puts the rendered diagram on the shelf, in the pane's colors.
+  Labels are measured and drawn with the same fonts, bundled Fira Sans for
+  text, and the diagram's SVG goes through the same checks as any other SVG.
 - The media worker renders SVG with resvg. The document is parsed with no
   DTD, scripts and foreign content are dropped, its style sheets (simple
   selectors, only from retained subtrees) are applied and written as

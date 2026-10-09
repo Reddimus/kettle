@@ -1009,8 +1009,27 @@ file is called (`.svg`, `.bin`, no suffix), and a declared SVG with a
 byte-order mark, an XML declaration and a comment is SVG named `.png`; each
 reports its kind once. Replacing the file after it is loaded changes
 nothing: the loaded snapshot is classified and rendered, its digest and
-identity included. Prose, Mermaid source, an HTML page, bytes that are not
-UTF-8 and an empty file are `UnsupportedMedia` with no kind reported. SVG
+identity included. Mermaid text is Mermaid whatever the file is called,
+reported once it has rendered, and text that only starts like a diagram is
+`RenderParse` with no kind reported. Prose, an HTML page, bytes that are not
+UTF-8 and an empty file are `UnsupportedMedia` with no kind reported.
+`src/mermaid.rs` renders real diagrams that keep their Mermaid source as
+source text and digest, rerenders on a white canvas with new pixels but the
+same identity, keeps prose (`UnsupportedMedia`) apart from broken diagram
+syntax (`RenderParse`), and keeps the fixed failures for a spent deadline,
+bytes that are not UTF-8, an oversized source and an empty one.
+`tests/mermaid_corpus.rs` renders each of the 37 pinned diagram families
+(fixtures from merman's upstream, provenance in their README) as a Mermaid
+and as an Auto job, with real pixels inside the target, and checks the
+fallback collection face per job. `svg::sanitize`'s
+`generated_diagrams_are_cleaned_where_outside_svg_is_refused` checks that a
+generated diagram keeps the first of repeated ids, leaves out an element
+past the number bound whole, resolves `em`, `ex` and percentage font sizes
+from attributes and style sheets against the inherited size (and leaves out
+one that would resolve past the bound), keeps a left-out element's id from
+passing to a later element, whichever attribute comes first, and leaves out
+a style declaration it cannot read, while an outside SVG with the same
+content is refused. SVG
 content one byte over the SVG cap is refused before it is parsed, as an
 explicit SVG job's is (`FileTooLarge` from a file, `TooLarge` inline), and a
 byte less renders; a file over the Auto cap is never read whole. The root
@@ -2909,7 +2928,11 @@ tables. It writes the full per-file SHA-256 ledger to
 `target/diagnostics/tracked-files-audit.json`. Add `--require-clean-index` when
 auditing a staged release tree. The Markdown scan masks fenced and inline code,
 but retains the link delimiters around inline-code labels so those links cannot
-bypass target validation.
+bypass target validation. A file `.gitattributes` marks `-text` (an upstream
+license, an upstream fixture, a terminal capture) keeps its bytes on purpose,
+so the LF, final-newline and trailing-whitespace rules pass it by; its own
+self-test (`scripts/test-audit-tracked-files.py`) pins that, and that other
+text is still held to them.
 
 **Search regressions.** Search changes need focused tests at all three owning
 boundaries:

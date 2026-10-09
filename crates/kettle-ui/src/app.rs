@@ -10696,6 +10696,7 @@ impl App {
         let kind = tr.text(match item.kind {
             kettle_media::MediaKind::Raster => kettle_i18n::Text::MediaViewerKindImage,
             kettle_media::MediaKind::Svg => kettle_i18n::Text::MediaViewerKindSvg,
+            kettle_media::MediaKind::Mermaid => kettle_i18n::Text::MediaViewerKindMermaid,
             _ => kettle_i18n::Text::MediaViewerKindMedia,
         });
         let sender = match &item.provenance {
