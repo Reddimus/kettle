@@ -45,16 +45,21 @@ impl Requirement {
         r#"anchor apple generic and identifier "codex" and certificate leaf[subject.OU] = "2DC432GLL2""#,
     );
 
+    /// Preview, Apple's image viewer, as Apple signs it: the one app Kettle
+    /// hands an image to open outside it on macOS.
+    pub const PREVIEW: Self = Self(r#"anchor apple and identifier "com.apple.Preview""#);
+
     pub const fn text(self) -> &'static str {
         self.0
     }
 
     /// Every requirement Kettle checks, for the test that parses them all.
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::APPLE_ISSUED,
         Self::APPLE_OWN,
         Self::CLAUDE_CODE,
         Self::CODEX,
+        Self::PREVIEW,
     ];
 }
 
@@ -93,6 +98,17 @@ pub enum SignatureError {
 /// Longest identifier, team or authority kept; a longer one is not read, as
 /// no real signature carries one.
 pub const MAX_SIGNATURE_FIELD_BYTES: usize = 256;
+
+/// Whether the code at `path`, an app bundle or a program, meets
+/// `requirement`. It is checked without hashing the code and without the
+/// network, which suits code on the sealed system volume the OS keeps
+/// intact, such as Preview.
+pub fn verify_static(
+    path: &std::path::Path,
+    requirement: Requirement,
+) -> Result<(), SignatureError> {
+    imp::verify_static(path, requirement)
+}
 
 /// Validate the code `process` runs against `requirement` and read who
 /// signed it.
@@ -176,6 +192,12 @@ mod imp {
         fn CFArrayGetTypeID() -> usize;
         fn CFDataGetTypeID() -> usize;
         fn CFDataCreate(allocator: CFTypeRef, bytes: *const u8, length: CFIndex) -> CFTypeRef;
+        fn CFURLCreateFromFileSystemRepresentation(
+            allocator: CFTypeRef,
+            buffer: *const u8,
+            length: CFIndex,
+            is_directory: u8,
+        ) -> CFTypeRef;
         fn CFDataGetLength(data: CFTypeRef) -> CFIndex;
         fn CFDataGetBytePtr(data: CFTypeRef) -> *const u8;
         fn CFDictionaryCreate(
@@ -221,6 +243,11 @@ mod imp {
             attributes: CFTypeRef,
             flags: SecCSFlags,
             guest: *mut CFTypeRef,
+        ) -> OSStatus;
+        fn SecStaticCodeCreateWithPath(
+            path: CFTypeRef,
+            flags: SecCSFlags,
+            static_code: *mut CFTypeRef,
         ) -> OSStatus;
         fn SecCodeCopyStaticCode(
             code: CFTypeRef,
@@ -509,6 +536,31 @@ mod imp {
         }
     }
 
+    pub(super) fn verify_static(
+        path: &std::path::Path,
+        requirement: Requirement,
+    ) -> Result<(), SignatureError> {
+        use std::os::unix::ffi::OsStrExt as _;
+        let bytes = path.as_os_str().as_bytes();
+        let length = CFIndex::try_from(bytes.len()).map_err(|_| SignatureError::Os)?;
+        // SAFETY: `bytes` is valid for `length` bytes; the call copies them.
+        let url = Owned::new(unsafe {
+            CFURLCreateFromFileSystemRepresentation(
+                std::ptr::null(),
+                bytes.as_ptr(),
+                length,
+                u8::from(path.is_dir()),
+            )
+        })
+        .ok_or(SignatureError::Os)?;
+        let mut code: CFTypeRef = std::ptr::null();
+        // SAFETY: `url` is a live URL and `code` receives an owned reference
+        // on success.
+        let status = unsafe { SecStaticCodeCreateWithPath(url.0, SEC_CS_DEFAULT_FLAGS, &mut code) };
+        let code = copied(status, code)?;
+        meets(&code, requirement)
+    }
+
     pub(super) fn signature(
         process: ProcessIdentity,
         requirement: Requirement,
@@ -625,6 +677,10 @@ mod imp {
     use super::{Requirement, Signature, SignatureError};
     use crate::process::ProcessIdentity;
 
+    pub(super) fn verify_static(_: &std::path::Path, _: Requirement) -> Result<(), SignatureError> {
+        Err(SignatureError::Unsupported)
+    }
+
     pub(super) fn signature(
         _: ProcessIdentity,
         _: Requirement,
@@ -661,6 +717,30 @@ mod tests {
             let _ = self.0.kill();
             let _ = self.0.wait();
         }
+    }
+
+    /// Preview on the sealed system volume meets its requirement, and
+    /// nothing else passes for it: another requirement, another program, or
+    /// a path with no code.
+    #[test]
+    fn only_preview_passes_for_preview() {
+        let preview = std::path::Path::new("/System/Applications/Preview.app");
+        assert_eq!(verify_static(preview, Requirement::PREVIEW), Ok(()));
+        assert_eq!(
+            verify_static(preview, Requirement::CODEX),
+            Err(SignatureError::NotValid)
+        );
+        assert_eq!(
+            verify_static(std::path::Path::new("/usr/bin/true"), Requirement::PREVIEW),
+            Err(SignatureError::NotValid)
+        );
+        assert!(
+            verify_static(
+                std::path::Path::new("/nonexistent/Preview.app"),
+                Requirement::PREVIEW
+            )
+            .is_err()
+        );
     }
 
     #[test]

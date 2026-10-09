@@ -6163,6 +6163,11 @@ fn hint_path_url(text: &str, cwd: Option<&str>, home: Option<&str>) -> Option<St
 #[derive(Clone)]
 enum ContextMenuClick {
     Action(Action),
+    /// A media row: what it does, and to which shelf item.
+    Media {
+        target: MediaTarget,
+        action: MediaMenuAction,
+    },
     LuaMenuItem(usize),
     /// Terminator parity (`custom_commands.py`): a
     /// `menu-item = LABEL = CMD` config entry. Dispatch writes
@@ -6274,6 +6279,14 @@ enum ContextMenuItem {
         /// The pane whose output held the link, captured with it.
         pane: Option<u64>,
     },
+    /// A row of an inline card's menu: open its item in Kettle, or a copy of
+    /// it in the permitted image viewer. The card and its item, with the
+    /// item's generation, are captured when the menu opens.
+    Media {
+        label: &'static str,
+        target: MediaTarget,
+        action: MediaMenuAction,
+    },
     /// A static, non-dispatchable information line
     /// (the About panel's version/update rows). Rendered like a disabled row
     /// (dimmed), survives `filter_disabled`, never highlighted, claims no
@@ -6281,6 +6294,25 @@ enum ContextMenuItem {
     Info {
         label: String,
     },
+}
+
+/// The card a media menu row acts on, and the shelf item it showed when the
+/// menu opened.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MediaTarget {
+    pane: u64,
+    nonce: kettle_core::InlineNonce,
+    item: u64,
+    generation: u64,
+}
+
+/// What a media menu row does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MediaMenuAction {
+    /// Open the item in Kettle's viewer.
+    View,
+    /// Open a copy of it in the permitted image viewer.
+    OpenOutside(crate::media::Viewer),
 }
 
 /// What the title-edit overlay edits (Terminator parity).
@@ -6828,6 +6860,7 @@ fn context_menu_item_columns(item: &ContextMenuItem, hint: &str) -> usize {
         ContextMenuItem::ProfileChoice { label, .. } => (label, "", false),
         ContextMenuItem::NewTabShell { label, .. } => (label, "", true),
         ContextMenuItem::UrlItem { label, .. } => (label, "", false),
+        ContextMenuItem::Media { label, .. } => (label, "", false),
         ContextMenuItem::Info { label } => (label, "", false),
         ContextMenuItem::Separator => return 0,
     };
@@ -6862,6 +6895,7 @@ fn assign_mnemonics(items: &[ContextMenuItem], reserved: &[char]) -> Vec<Option<
             ContextMenuItem::ProfileChoice { label, .. } => label.as_str(),
             ContextMenuItem::NewTabShell { label, .. } => label.as_str(),
             ContextMenuItem::UrlItem { label, .. } => *label,
+            ContextMenuItem::Media { label, .. } => *label,
             // Info rows are non-dispatchable — no mnemonic to claim.
             ContextMenuItem::Info { .. } => "",
             ContextMenuItem::Separator => "",
@@ -6875,7 +6909,10 @@ fn assign_mnemonics(items: &[ContextMenuItem], reserved: &[char]) -> Vec<Option<
     // Address", which lead the menu, would take 'o'/'c' and silently remap
     // muscle-memory mnemonics ('p' would fire Copy instead of Paste).
     let round = |items: &[ContextMenuItem], idx: usize| -> usize {
-        usize::from(matches!(items[idx], ContextMenuItem::UrlItem { .. }))
+        usize::from(matches!(
+            items[idx],
+            ContextMenuItem::UrlItem { .. } | ContextMenuItem::Media { .. }
+        ))
     };
     for pass in 0..2 {
         for (i, label) in labels.iter().enumerate() {
@@ -6931,7 +6968,9 @@ fn typeahead_match(items: &[ContextMenuItem], buf: &str) -> Option<usize> {
         | ContextMenuItem::NewTabShell { label, .. } => {
             label.to_ascii_lowercase().starts_with(&needle)
         }
-        ContextMenuItem::UrlItem { label, .. } => label.to_ascii_lowercase().starts_with(&needle),
+        ContextMenuItem::UrlItem { label, .. } | ContextMenuItem::Media { label, .. } => {
+            label.to_ascii_lowercase().starts_with(&needle)
+        }
         // Info rows aren't dispatchable, so typeahead skips them.
         _ => false,
     })
@@ -7599,8 +7638,10 @@ fn item_is_dispatchable(item: &ContextMenuItem) -> bool {
             // navigable.
             | ContextMenuItem::NewTabShell { .. }
             // The URL-aware "Open Link" / "Copy Link Address" rows.
-            | ContextMenuItem::UrlItem { .. } // ContextMenuItem::Info is deliberately absent: a static info line
-                                              // (About panel) is not highlightable or clickable.
+            | ContextMenuItem::UrlItem { .. }
+            // A card's or the viewer's media rows.
+            | ContextMenuItem::Media { .. } // ContextMenuItem::Info is deliberately absent: a static info line
+                                            // (About panel) is not highlightable or clickable.
     )
 }
 
@@ -7640,6 +7681,10 @@ fn item_to_click(item: &ContextMenuItem, idx: usize) -> Option<ContextMenuClick>
             url: url.clone(),
             copy: *copy,
             pane: *pane,
+        }),
+        ContextMenuItem::Media { target, action, .. } => Some(ContextMenuClick::Media {
+            target: *target,
+            action: *action,
         }),
         ContextMenuItem::Item { enabled: false, .. }
         | ContextMenuItem::DynamicItem { enabled: false, .. }
@@ -8343,6 +8388,9 @@ pub struct App {
     /// Temporary PNGs materialized from clipboard bitmaps. Owner-only, bounded,
     /// and removed on exit — see [`crate::paste_image`].
     pasted_images: crate::paste_image::PastedImages,
+    /// The PNG copies handed to the image viewer, made off the window thread.
+    /// Owner-only, bounded, oldest dropped first, and removed on exit.
+    viewer_copies: std::sync::Arc<std::sync::Mutex<crate::paste_image::PastedImages>>,
     /// Bounded native-poster jobs. Paths cross only the private child-worker
     /// protocol; decoded pixels return through the event loop.
     video_previewer: crate::video_preview::VideoPreviewer,
@@ -9348,7 +9396,10 @@ impl App {
             media: crate::media::MediaService::default(),
             cards_tip: crate::media::CardsTip::load(),
             clipboard,
-            pasted_images: crate::paste_image::PastedImages::new(),
+            pasted_images: crate::paste_image::PastedImages::new(crate::paste_image::PASTED),
+            viewer_copies: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::paste_image::PastedImages::new(crate::paste_image::OPENED),
+            )),
             video_previewer,
             next_video_preview_generation: 1,
             compiled_triggers: initial_triggers,
@@ -9391,6 +9442,12 @@ impl App {
         // the session that produced them. Runs on the error path too — an exit
         // caused by a failure is exactly when leftovers would go unnoticed.
         app.pasted_images.cleanup();
+        // So are the copies handed to the image viewer, and the store closes
+        // so an open still on its way cannot leave a new one.
+        app.viewer_copies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .close();
         if let Err(error) = &result {
             app.runtime_tracker.record_exit(&error.to_string());
         }
@@ -10253,7 +10310,7 @@ impl App {
     /// selection and mouse reporting, so nothing behind it gets the press.
     /// Shift passes the press on, as does a card that only just appeared.
     fn press_card(&mut self, ws: &mut WindowState, px: f32, py: f32, bcode: u8) -> bool {
-        if bcode != 0 || ws.mods.shift_key() {
+        if !matches!(bcode, 0 | 2) || ws.mods.shift_key() {
             return false;
         }
         let card = ws
@@ -10263,6 +10320,11 @@ impl App {
         let Some(card) = ws.card_sightings.settled(card, std::time::Instant::now()) else {
             return false;
         };
+        if bcode == 2 {
+            // A right-press on a card opens the card's menu, not the
+            // terminal's; its release is Kettle's own gesture's.
+            return self.open_card_menu(ws, card, (px, py));
+        }
         ws.card_press = Some(card);
         true
     }
@@ -10331,6 +10393,104 @@ impl App {
                 state.inline_cards.set_tip(None);
                 if let Some(handle) = &window.window {
                     handle.request_redraw();
+                }
+            }
+        }
+    }
+
+    /// Open the menu of the card `nonce` in `pane` at (`px`, `py`): open its
+    /// item in Kettle, and open a copy of it in the permitted image viewer
+    /// where this platform has one. False when the card's item has left the
+    /// shelf, so the press goes where it would have.
+    fn open_card_menu(
+        &mut self,
+        ws: &mut WindowState,
+        (pane, nonce): (u64, kettle_core::InlineNonce),
+        (px, py): (f32, f32),
+    ) -> bool {
+        let Some(item) = self.media.cards.item(pane, nonce) else {
+            return false;
+        };
+        let Some(generation) = ws.mux.panes.get(&pane).and_then(|state| {
+            state
+                .media_shelf
+                .items()
+                .iter()
+                .find(|it| it.id == item)
+                .map(|it| it.generation)
+        }) else {
+            return false;
+        };
+        let target = MediaTarget {
+            pane,
+            nonce,
+            item,
+            generation,
+        };
+        let tr = self.ui_text;
+        let mut items = vec![ContextMenuItem::Media {
+            label: tr.text(kettle_i18n::Text::MenuOpenInKettle),
+            target,
+            action: MediaMenuAction::View,
+        }];
+        if let Some(viewer) = crate::media::Viewer::find() {
+            items.push(ContextMenuItem::Media {
+                label: viewer.label(&tr),
+                target,
+                action: MediaMenuAction::OpenOutside(viewer),
+            });
+        }
+        self.show_context_menu(ws, items, px, py);
+        true
+    }
+
+    /// Act on a card menu row, if the card still shows the item the menu
+    /// named: open it as a click would, or a PNG copy of it in the permitted
+    /// image viewer.
+    fn act_on_media(&mut self, ws: &mut WindowState, target: MediaTarget, action: MediaMenuAction) {
+        if self.media.cards.item(target.pane, target.nonce) != Some(target.item) {
+            return;
+        }
+        let Some(item) = ws.mux.panes.get(&target.pane).and_then(|state| {
+            state
+                .media_shelf
+                .items()
+                .iter()
+                .find(|it| it.id == target.item && it.generation == target.generation)
+        }) else {
+            return;
+        };
+        match action {
+            MediaMenuAction::View => {
+                self.open_card(ws, target.pane, target.nonce);
+            }
+            MediaMenuAction::OpenOutside(viewer) => {
+                let tr = self.ui_text;
+                let failed = move |why: crate::media::OpenFailure| {
+                    fire_notify(
+                        tr.text(kettle_i18n::Text::NotifyTitleOpenImage),
+                        tr.text(match why {
+                            crate::media::OpenFailure::Busy => {
+                                kettle_i18n::Text::NotifyBodyOpenImageBusy
+                            }
+                            crate::media::OpenFailure::Copy => {
+                                kettle_i18n::Text::NotifyBodyOpenImageCopy
+                            }
+                            crate::media::OpenFailure::Viewer => {
+                                kettle_i18n::Text::NotifyBodyOpenImageViewer
+                            }
+                        }),
+                    );
+                };
+                match item.image() {
+                    Some(image) => crate::media::open_externally(
+                        std::sync::Arc::clone(&self.viewer_copies),
+                        image.clone(),
+                        viewer,
+                        failed,
+                    ),
+                    // Its pixels were let go to stay within the budget.
+                    None => failed(crate::media::OpenFailure::Copy),
                 }
             }
         }
@@ -17333,6 +17493,7 @@ impl App {
                 | ContextMenuItem::ProfileChoice { .. }
                 | ContextMenuItem::NewTabShell { .. }
                 | ContextMenuItem::UrlItem { .. }
+                | ContextMenuItem::Media { .. }
                 | ContextMenuItem::Info { .. } => row_h,
             })
             .sum();
@@ -17933,6 +18094,13 @@ impl App {
                 ws.context_menu = None;
                 self.handle_action(ws, action, event_loop);
             }
+            ContextMenuClick::Media { target, action } => {
+                ws.context_menu = None;
+                self.act_on_media(ws, target, action);
+                if let Some(w) = &ws.window {
+                    w.request_redraw();
+                }
+            }
             ContextMenuClick::LuaMenuItem(idx) => {
                 ws.context_menu = None;
                 // Invoke the Lua callback + drain any
@@ -18164,6 +18332,13 @@ impl App {
                 // URL-aware leading rows ("Open Link" /
                 // "Copy Link Address") — normal clickable rows.
                 ContextMenuItem::UrlItem { label, .. } => ContextMenuRow {
+                    label: (*label).to_string(),
+                    separator: false,
+                    enabled: true,
+                    hint: String::new(),
+                },
+                // A card's media rows — normal clickable rows.
+                ContextMenuItem::Media { label, .. } => ContextMenuRow {
                     label: (*label).to_string(),
                     separator: false,
                     enabled: true,
@@ -22398,6 +22573,7 @@ impl App {
                         ContextMenuItem::ProfileChoice { label, .. } => label.as_str(),
                         ContextMenuItem::NewTabShell { label, .. } => label.as_str(),
                         ContextMenuItem::UrlItem { label, .. } => *label,
+                        ContextMenuItem::Media { label, .. } => *label,
                         ContextMenuItem::Info { label } => label.as_str(),
                         ContextMenuItem::Separator => "",
                     };
@@ -35786,6 +35962,10 @@ mod tests {
             run.find("app.start_first_pane_before_launch()").unwrap(),
             run.find("event_loop.run_app(&mut app)").unwrap(),
             run.find("app.pasted_images.cleanup();").unwrap(),
+            // Copies handed to the image viewer go on exit too.
+            run.find("app.viewer_copies").unwrap(),
+            run.find(".close();\n        if let Err(error) = &result {")
+                .unwrap(),
             run.find("app.runtime_tracker.stop();").unwrap(),
         ];
         assert!(order.windows(2).all(|w| w[0] < w[1]));
@@ -40619,6 +40799,21 @@ mod tests {
         ));
         assert!(reachable.contains(".filter(|card| shown.contains(&card.pane))"));
         assert!(body("release_card").contains("self.open_card(ws, pane, nonce);"));
+        // A card menu row acts only while the card still shows the item the
+        // menu named, and its Open row is a click.
+        let act = body("act_on_media");
+        assert!(act.contains(
+            "if self.media.cards.item(target.pane, target.nonce) != Some(target.item) { return; }"
+        ));
+        assert!(
+            act.contains(".find(|it| it.id == target.item && it.generation == target.generation)")
+        );
+        assert!(act.contains(
+            "MediaMenuAction::View => { self.open_card(ws, target.pane, target.nonce); }"
+        ));
+        assert!(body("dispatch_context_menu_click").contains(
+            "ContextMenuClick::Media { target, action } => { ws.context_menu = None; self.act_on_media(ws, target, action);"
+        ));
         assert!(
             body("act_hint").contains(
                 "HintWhat::Card(nonce) => { self.open_card(ws, h.pane, *nonce); return; }"
@@ -40843,9 +41038,11 @@ mod tests {
             .find("let mut handled = self.send_mouse(ws, bcode, false, false);")
             .expect("ctl report");
         assert!(card < report);
-        // Only a primary press without Shift, and only on a settled card.
+        // Only a primary or secondary press without Shift, and only on a
+        // settled card; the secondary one opens the card's menu.
         let press = after(source, "    fn press_card(");
-        assert!(press.contains("if bcode != 0 || ws.mods.shift_key() {"));
+        assert!(press.contains("if !matches!(bcode, 0 | 2) || ws.mods.shift_key() {"));
+        assert!(press.contains("return self.open_card_menu(ws, card, (px, py));"));
         assert!(press.contains("ws.card_sightings.settled(card, std::time::Instant::now())"));
         // Its release opens nothing once a dialog or the viewer is up.
         let release = after(source, "    fn release_card(");
@@ -48833,6 +49030,58 @@ mod tests {
         // empty menu, but the guard exists.)
         let all_disabled = vec![ContextMenuItem::Separator];
         assert_eq!(next_context_menu_highlight(&all_disabled, 0, 1), 0);
+    }
+
+    /// A card menu's rows are ordinary rows: dispatchable, clicked with what
+    /// the menu captured, reachable by mnemonic and by typing, and measured
+    /// by their label.
+    #[test]
+    fn a_card_menu_row_is_an_ordinary_menu_row() {
+        use super::{
+            ContextMenuClick, ContextMenuItem, MediaMenuAction, MediaTarget, assign_mnemonics,
+            context_menu_item_columns, item_is_dispatchable, item_to_click, typeahead_match,
+        };
+        let target = MediaTarget {
+            pane: 3,
+            nonce: kettle_core::InlineNonce::new([1, 2, 3, 4, 5, 6]).unwrap(),
+            item: 9,
+            generation: 2,
+        };
+        let rows = [
+            ContextMenuItem::Media {
+                label: "Open",
+                target,
+                action: MediaMenuAction::View,
+            },
+            ContextMenuItem::Media {
+                label: "Open in Preview",
+                target,
+                action: MediaMenuAction::OpenOutside(crate::media::Viewer::Preview),
+            },
+        ];
+        for (index, row) in rows.iter().enumerate() {
+            assert!(item_is_dispatchable(row));
+            let Some(ContextMenuClick::Media {
+                target: clicked,
+                action,
+            }) = item_to_click(row, index)
+            else {
+                panic!("row {index} is not a media click");
+            };
+            assert_eq!(clicked, target);
+            assert_eq!(
+                action,
+                [
+                    MediaMenuAction::View,
+                    MediaMenuAction::OpenOutside(crate::media::Viewer::Preview)
+                ][index]
+            );
+        }
+        assert!(context_menu_item_columns(&rows[1], "") >= "Open in Preview".len());
+        let mnemonics = assign_mnemonics(&rows, &[]);
+        assert!(mnemonics.iter().all(Option::is_some), "{mnemonics:?}");
+        assert_ne!(mnemonics[0].map(|m| m.1), mnemonics[1].map(|m| m.1));
+        assert_eq!(typeahead_match(&rows, "open in"), Some(1));
     }
 
     /// The shared row→click mapper must recognise EVERY dispatchable row type,

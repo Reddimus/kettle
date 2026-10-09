@@ -3858,7 +3858,27 @@ while the pointer is outside the window)
 `media::sightings` tests `settles_at`. The shelf test pins that a
 replacement by key, kept in its place, is still `latest()`, and on macOS
 `macos_opens_the_media_viewer_with_ctrl_shift_cmd_i` pins the default
-chord. The tip: `media::tip` tests it shows once on the first card
+chord. The card menu: `a_card_menu_row_is_an_ordinary_menu_row` checks its
+rows dispatch with what the menu captured and take mnemonics and typing, and
+`a_card_takes_its_press_and_release_before_anything_behind_it` and
+`every_way_to_open_a_card_goes_through_one_door` guard that a right-press on a
+settled card opens it, that a row acts only while the card shows the item at
+the generation the menu named, and that its Open row is `open_card`.
+`media::external` checks the copy the viewer gets is a 0600 PNG of exactly
+the pixels shown, marked downloaded, that a third open is refused at once
+and writes nothing, that the viewer commands are fixed, that a program is
+trusted only when root owns it and its directory, and that the copy reaches
+the viewer only after every check, in order; the ignored
+`preview_opens_a_marked_copy_live` opens Preview by hand on a Mac (checked
+live: Preview passed its signature check and showed the copy with no
+warning). `paste_image` checks the viewer-copy store drops its oldest by
+count and by bytes, keeps numbering, is swept under its own prefix and
+marks copies downloaded, keeps every copy for its minute and refuses
+another while full of newer ones (`a_full_store_of_new_copies_is_busy` turns
+that into the busy notice), and still counts a copy it could not delete,
+deleting it at cleanup, and takes nothing once closed
+(`a_copy_that_will_not_go_still_counts_until_cleanup`, skipped as root), and `signing::only_preview_passes_for_preview`
+that nothing else passes for Preview. The tip: `media::tip` tests it shows once on the first card
 and is remembered, that of two Kettles that loaded before either showed it
 only the first to record it shows it, that a corrupt, oversized or empty
 record is left alone and stops the tip, and that only a regular file is read,

@@ -96,6 +96,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   card in the focused pane and opens it when picked, and a screen reader
   hears each card as a button named for its item's title, kind, size and
   sender, which opens it in the viewer. In English and Spanish.
+- Right-click an inline card for its menu: Open, and Open in Preview on
+  macOS or Open in Image Viewer on Linux with Eye of GNOME. The viewer gets
+  a PNG copy of exactly what Kettle shows, never the bytes a program sent,
+  and never through the default app for the file type: Kettle checks it is
+  Apple's own Preview, or a root-owned `/usr/bin/eog`, first. Copies are
+  private to you, marked as downloaded on macOS, kept to the newest 32 and
+  128 MiB (each for at least a minute, so its viewer can read it), and
+  deleted when Kettle quits.
 - The first inline card you see with its image shown says "Click to open"
   along its foot for ten seconds, or until you open a card, and then never
   again: Kettle records that it showed in `ui-tips.json` beside the config

@@ -8,6 +8,7 @@
 //! item is on the shelf; nothing a push does opens anything on screen.
 
 mod cards;
+mod external;
 mod inline;
 mod queue;
 mod route;
@@ -28,6 +29,7 @@ use crate::ctl_server::ReplyTx;
 #[cfg(test)]
 pub(crate) use cards::HARNESS_CARDS_PER_SECOND;
 pub(crate) use cards::{CardLedger, CardRecord};
+pub(crate) use external::{OpenFailure, Viewer, open as open_externally};
 pub(crate) use inline::{card_caption, card_message, card_size};
 pub(crate) use queue::Sender;
 pub(crate) use route::{PaneRoot, Route, nearest_pane, route};

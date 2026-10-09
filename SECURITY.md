@@ -70,6 +70,21 @@ Reports that fit any of these are welcome:
   connection, or opening anything on screen. Routing lives in `kettle-ui`'s
   `media::route`; display discovery is `kettle-ctl`'s
   `Client::discover_display`.
+- **Opening media outside Kettle** — a card menu's Open in Preview
+  (macOS) or Open in Image Viewer (Linux) handing anything but a fresh PNG
+  of the pixels Kettle shows to anything but the one permitted viewer:
+  Preview, checked against Apple's signature requirement for
+  `com.apple.Preview`, or `/usr/bin/eog` owned by root and writable only by
+  root, run with fixed arguments, no shell and no search path, never the
+  default association. The copy lives in a private per-process store
+  (owner-only directory and files, 32 copies and 128 MiB counting any it
+  could not delete, oldest dropped first once a minute old, closed and
+  deleted on exit and by the crash sweep), is marked downloaded on
+  macOS through Kettle's own handle, and is checked to still be Kettle's
+  file before the viewer starts. A copy that reaches another user, outlives
+  those bounds or is replaced before launch, or an open that no press on a
+  card asked for, is in scope. The store is `kettle-ui`'s
+  `paste_image::OPENED`; the hand-off is `media::external`.
 - **Bracketed-paste injection** — a paste payload that escapes the
   `\e[200~ … \e[201~` wrapper and runs as input.
 - **Resource exhaustion via a single PTY frame** — a parser path that
