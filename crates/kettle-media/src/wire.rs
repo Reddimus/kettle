@@ -12,9 +12,12 @@ pub const HEADER_BYTES: usize = 11;
 /// Parent/external frame cap including header, raster bytes and eight native font paths.
 pub const MAX_PARENT_FRAME_BYTES: usize =
     HEADER_BYTES + MAX_RASTER_BYTES + MAX_FALLBACK_FONTS * (MAX_PATH_BYTES + 8) + 256;
-/// Worker frame cap including pixels, display lines, saved fences, scripts and fixed fields.
+/// Worker frame cap including pixels, exact source, display lines, saved fences, scripts and
+/// fixed fields.
 pub const MAX_WORKER_FRAME_BYTES: usize = HEADER_BYTES
     + MAX_RENDERED_BYTES
+    + MAX_EXACT_SOURCE_BYTES
+    + 4
     + MAX_SOURCE_LINES * (MAX_SOURCE_LINE_BYTES + 4)
     + MAX_FENCES * (MAX_FENCE_BYTES + 4)
     + MAX_UNCOVERED_SCRIPTS * (MAX_SCRIPT_BYTES + 4)
@@ -86,7 +89,8 @@ impl Frame {
         match self {
             Self::Hello(h) => h.build_id.validate(),
             Self::Ready(r) => r.build_id.validate(),
-            Self::Rendered(r) | Self::DetectedRendered { rendered: r, .. } => r.validate(),
+            Self::Rendered(r) => r.validate(),
+            Self::DetectedRendered { kind, rendered } => rendered.validate_as(*kind),
             Self::Failure(_) => Ok(()),
             Self::Job(j) => validate_worker_job(j),
             Self::ExternalRequest(j) => {
@@ -580,6 +584,19 @@ fn put_rendered(w: &mut Writer, r: &Rendered) -> Result<(), WireError> {
     for c in &r.warnings {
         w.u8(*c as u8)?;
     }
+    let layout = &r.layout;
+    w.f64(layout.source_width)?;
+    w.f64(layout.source_height)?;
+    for crop in [layout.image_in_target, layout.result_in_target] {
+        w.u32(crop.x)?;
+        w.u32(crop.y)?;
+        w.u32(crop.width)?;
+        w.u32(crop.height)?;
+    }
+    w.u8(u8::from(r.exact_source.is_some()))?;
+    if let Some(source) = &r.exact_source {
+        w.blob(source.as_bytes())?;
+    }
     Ok(())
 }
 
@@ -843,7 +860,10 @@ impl<'a> Reader<'a> {
         }
         Ok(v)
     }
-    fn rendered(&mut self) -> Result<Rendered, WireError> {
+    /// A Rendered payload; for a reply that names its `kind`, its source is
+    /// held to that kind: within its input cap when it is text, and absent
+    /// when it is not.
+    fn rendered(&mut self, kind: Option<MediaKind>) -> Result<Rendered, WireError> {
         let width = self.u32()?;
         let height = self.u32()?;
         let expected = rgba_len(width, height, MAX_RENDERED_EDGE, MAX_RENDERED_BYTES)?;
@@ -894,6 +914,39 @@ impl<'a> Reader<'a> {
                 warnings.push(w);
             }
         }
+        let source_width = self.f64()?;
+        let source_height = self.f64()?;
+        let mut crop = || -> Result<Crop, WireError> {
+            Ok(Crop {
+                x: self.u32()?,
+                y: self.u32()?,
+                width: self.u32()?,
+                height: self.u32()?,
+            })
+        };
+        let image_in_target = crop()?;
+        let result_in_target = crop()?;
+        let layout = RenderLayout {
+            source_width,
+            source_height,
+            image_in_target,
+            result_in_target,
+        };
+        layout.validate(width, height)?;
+        let source_cap = kind.map(MediaKind::exact_source_cap);
+        let exact_source = if self.flag()? {
+            let cap_bytes = match source_cap {
+                Some(Some(cap_bytes)) => cap_bytes,
+                Some(None) => return Err(ValidationError::BadParams.into()),
+                None => MAX_EXACT_SOURCE_BYTES,
+            };
+            let source = self.text(cap_bytes)?;
+            Some(self.string_owned(source)?)
+        } else if matches!(source_cap, Some(Some(_))) {
+            return Err(ValidationError::BadParams.into());
+        } else {
+            None
+        };
         Ok(Rendered {
             width,
             height,
@@ -902,6 +955,8 @@ impl<'a> Reader<'a> {
                 sha256,
                 path_identity,
             },
+            layout,
+            exact_source,
             source_text,
             fence_sources,
             fence_count,
@@ -936,11 +991,14 @@ fn parse_frame(r: &mut Reader<'_>, kind: u8) -> Result<Frame, WireError> {
             let source = r.source(kind, false)?;
             Frame::Job(r.job_tail(kind, source)?)
         }
-        5 => Frame::Rendered(r.rendered()?),
-        7 => Frame::DetectedRendered {
-            kind: r.media_kind()?,
-            rendered: r.rendered()?,
-        },
+        5 => Frame::Rendered(r.rendered(None)?),
+        7 => {
+            let kind = r.media_kind()?;
+            Frame::DetectedRendered {
+                kind,
+                rendered: r.rendered(Some(kind))?,
+            }
+        }
         6 => Frame::Failure(Failure {
             code: failure_code(r.u8()?)?,
         }),

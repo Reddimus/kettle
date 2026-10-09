@@ -627,6 +627,8 @@ fn maximum_reply_and_requested_allocation_budget() {
     let mut r = common::rendered();
     r.width = 4096;
     r.height = 4096;
+    r.layout = common::layout(4096, 4096);
+    r.exact_source = Some("e".repeat(MAX_EXACT_SOURCE_BYTES));
     r.rgba = vec![128; MAX_RENDERED_BYTES];
     r.source_text = vec!["s".repeat(MAX_SOURCE_LINE_BYTES); MAX_SOURCE_LINES];
     r.fence_count = 32;
@@ -642,7 +644,9 @@ fn maximum_reply_and_requested_allocation_budget() {
     assert!(report.allocations.requested_bytes <= MAX_DECODE_ALLOCATION_BYTES);
     assert!(
         report.allocations.requested_bytes
-            >= MAX_RENDERED_BYTES + MAX_SOURCE_LINES * MAX_SOURCE_LINE_BYTES
+            >= MAX_RENDERED_BYTES
+                + MAX_EXACT_SOURCE_BYTES
+                + MAX_SOURCE_LINES * MAX_SOURCE_LINE_BYTES
     );
 }
 
@@ -751,7 +755,7 @@ fn streamed_auto_reply_keeps_ready_pixels_and_actual_kind() {
         let ready = Frame::Ready(common::ready());
         let rendered = Frame::DetectedRendered {
             kind,
-            rendered: common::rendered(),
+            rendered: common::rendered_as(kind),
         };
         let mut stream = Vec::new();
         write_frame(&mut stream, &ready, Direction::WorkerToParent).unwrap();
@@ -805,7 +809,7 @@ fn typed_reply_is_the_kind_then_the_plain_payload() {
 fn typed_reply_refuses_unknown_kinds_and_other_directions() {
     let frame = Frame::DetectedRendered {
         kind: MediaKind::Raster,
-        rendered: common::rendered(),
+        rendered: common::rendered_as(MediaKind::Raster),
     };
     let mut encoded = encode(&frame, Direction::WorkerToParent).unwrap();
     for direction in [Direction::ParentToWorker, Direction::ExternalToParent] {
@@ -837,20 +841,56 @@ fn actual_kind_roundtrips_without_altering_pixels_or_source() {
         roundtrip(
             Frame::DetectedRendered {
                 kind,
-                rendered: common::rendered(),
+                rendered: common::rendered_as(kind),
             },
             Direction::WorkerToParent,
         );
     }
 }
 
-/// Neither end reads the other version's frames: a version 1 worker or
+/// A reply's source goes with its kind: a textual kind returns its source
+/// as read, within that kind's input cap, and no other kind returns any,
+/// on encode and decode alike.
+#[test]
+fn a_replys_source_goes_with_its_kind() {
+    let with = |kind, source: Option<String>| {
+        let mut rendered = common::rendered();
+        rendered.exact_source = source;
+        Frame::DetectedRendered { kind, rendered }
+    };
+    let svg = Some("<svg/>".to_string());
+    for frame in [
+        with(MediaKind::Raster, svg.clone()),
+        with(MediaKind::Video, svg.clone()),
+        with(MediaKind::Svg, None),
+        with(MediaKind::Mermaid, None),
+        with(MediaKind::Mermaid, Some("x".repeat(MAX_MERMAID_BYTES + 1))),
+    ] {
+        assert!(frame.validate().is_err(), "{frame:?}");
+        assert!(encode(&frame, Direction::WorkerToParent).is_err());
+    }
+    // A raster reply that carries a source anyway is refused on decode.
+    let mut bytes = encode(&with(MediaKind::Svg, svg), Direction::WorkerToParent).unwrap();
+    let kind_at = HEADER_BYTES;
+    assert_eq!(
+        bytes[kind_at], 1,
+        "the Svg media-kind byte leads the payload"
+    );
+    bytes[kind_at] = 0;
+    assert!(decode(&bytes, Direction::WorkerToParent).is_err());
+    // And an SVG reply without its source is refused too.
+    let mut bytes = encode(&with(MediaKind::Raster, None), Direction::WorkerToParent).unwrap();
+    bytes[kind_at] = 1;
+    assert!(decode(&bytes, Direction::WorkerToParent).is_err());
+}
+
+/// Neither end reads the other version's frames: a version 2 worker or
 /// parent is restarted, never half understood, and so is a newer one.
 #[test]
 fn version_skew_either_way_is_restart_required() {
-    assert_eq!(PROTOCOL_VERSION, 2);
+    assert_eq!(PROTOCOL_VERSION, 3);
     for (_, direction, golden) in vectors() {
-        for version in [1u16, 3] {
+        for version in [1u16, 2, 4] {
             let mut skewed = bytes(golden);
             skewed[4..6].copy_from_slice(&version.to_le_bytes());
             assert_eq!(
@@ -859,4 +899,62 @@ fn version_skew_either_way_is_restart_required() {
             );
         }
     }
+}
+
+/// A reply's layout and exact source are checked before anything trusts
+/// them: finite positive extents, nonempty rectangles, pixels no more than
+/// the rectangle they cover, and source within the textual cap, on encode
+/// and on decode alike.
+#[test]
+fn rendered_layout_and_exact_source_are_checked() {
+    let good = common::rendered();
+    good.validate().unwrap();
+    let mut sparse = good.clone();
+    sparse.layout.result_in_target.width = 3;
+    sparse.layout.image_in_target.width = 3;
+    sparse
+        .validate()
+        .expect("fewer pixels than the rectangle they cover");
+    let mut none = good.clone();
+    none.exact_source = None;
+    roundtrip(Frame::Rendered(none), Direction::WorkerToParent);
+    type Spoil = fn(&mut Rendered);
+    let bad: [(&str, Spoil); 8] = [
+        ("NaN width", |r| r.layout.source_width = f64::NAN),
+        ("infinite height", |r| {
+            r.layout.source_height = f64::INFINITY
+        }),
+        ("zero width", |r| r.layout.source_width = 0.0),
+        ("empty image", |r| r.layout.image_in_target.height = 0),
+        ("empty result", |r| r.layout.result_in_target.width = 0),
+        ("pixels past the result", |r| {
+            r.width = 2;
+            r.rgba = vec![0; 8];
+        }),
+        ("rectangle past u32", |r| {
+            r.layout.image_in_target.x = u32::MAX
+        }),
+        ("oversized source", |r| {
+            r.exact_source = Some("x".repeat(MAX_EXACT_SOURCE_BYTES + 1))
+        }),
+    ];
+    for (name, spoil) in bad {
+        let mut rendered = good.clone();
+        spoil(&mut rendered);
+        assert!(rendered.validate().is_err(), "{name}");
+        assert!(
+            encode(
+                &Frame::Rendered(rendered.clone()),
+                Direction::WorkerToParent
+            )
+            .is_err(),
+            "{name} is not encoded"
+        );
+    }
+    // A reply that skips the encoder's checks is refused on decode too.
+    let mut bytes = encode(&Frame::Rendered(good.clone()), Direction::WorkerToParent).unwrap();
+    let nan = f64::NAN.to_le_bytes();
+    let at = bytes.len() - (8 * 2 + 16 * 2 + 1 + 4 + "<svg/>".len());
+    bytes[at..at + 8].copy_from_slice(&nan);
+    assert!(decode(&bytes, Direction::WorkerToParent).is_err());
 }

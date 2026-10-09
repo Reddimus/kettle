@@ -69,7 +69,7 @@ fn run(mode: &str) -> Result<(), WireError> {
             let Source::Bytes(bytes) = j.source else {
                 return fail(&mut output, FailureCode::UnsupportedMedia);
             };
-            let mut result = common::rendered();
+            let mut result = common::rendered_as(MediaKind::Raster);
             result.digest = content_digest(&bytes, None).map_err(WireError::Validation)?;
             write_frame(
                 &mut output,
