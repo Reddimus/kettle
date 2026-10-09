@@ -23,24 +23,30 @@ use std::sync::RwLock;
 /// hook matches: `mcp__plugin_kettle_kettle__kettle_show`.
 const PLUGIN_NAME: &str = "kettle";
 /// Largest file the check reads; Kettle's own are well under it.
-const MAX_PLUGIN_FILE_BYTES: u64 = 16 * 1024;
+#[cfg(test)]
+const MAX_PLUGIN_FILE_BYTES: u64 = crate::owned_dir::MAX_FILE_BYTES;
 /// The variable Claude Code (2.1.280 and later) reads extra plugin
 /// directories from.
 pub(crate) const PLUGIN_DIRS_VARIABLE: &str = "CLAUDE_CODE_PLUGIN_DIRS";
 
 /// The plugin for one Kettle executable: its files, each by its path inside
-/// the plugin directory.
+/// the plugin directory, kept as [`crate::owned_dir`] keeps them.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct PluginFiles {
-    /// The executable the plugin's server runs.
-    command: String,
-    /// The Kettle version that wrote it, as its manifest says.
-    version: String,
-    files: Vec<(&'static str, String)>,
+pub(crate) struct PluginFiles(crate::owned_dir::OwnedFiles);
+
+impl std::ops::Deref for PluginFiles {
+    type Target = crate::owned_dir::OwnedFiles;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
-/// The directories inside the plugin, which hold its files.
-const PLUGIN_SUBDIRECTORIES: [&str; 2] = [".claude-plugin", "hooks"];
+impl std::ops::DerefMut for PluginFiles {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
 
 /// Why a pane gets no plugin.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,29 +108,18 @@ impl PluginFiles {
             text.push('\n');
             text
         };
-        Ok(Self {
-            command: command.to_owned(),
-            version: version.to_owned(),
-            files: vec![
+        // A changed plugin gets a new directory, so one a running Claude
+        // Code loaded is never rewritten.
+        Ok(Self(crate::owned_dir::OwnedFiles::new(
+            PLUGIN_NAME,
+            command.to_owned(),
+            version.to_owned(),
+            vec![
                 (".claude-plugin/plugin.json", text(manifest)),
                 (".mcp.json", text(servers)),
                 ("hooks/hooks.json", text(hooks)),
             ],
-        })
-    }
-
-    /// The directory name, from the contents: a changed plugin gets a new
-    /// directory, so one a running Claude Code loaded is never rewritten.
-    pub(crate) fn directory_name(&self) -> String {
-        // FNV-1a: stable across builds, which a std hasher is not.
-        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-        for (path, contents) in &self.files {
-            for byte in path.bytes().chain([0]).chain(contents.bytes()).chain([0]) {
-                hash ^= u64::from(byte);
-                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-            }
-        }
-        format!("{PLUGIN_NAME}-{hash:016x}")
+        )))
     }
 }
 
@@ -144,248 +139,39 @@ pub(crate) fn plugins_root() -> Option<PathBuf> {
 }
 
 /// Write the plugin under `root` unless it is already there intact, and
-/// remove what is stale. Returns the plugin's directory. Kettles that share
-/// `root` install one at a time, so nothing changes between a check and what
-/// follows it, and any staging found was left by an install that ended.
-#[cfg(unix)]
+/// remove what is stale; see [`crate::owned_dir::install`]. Returns the
+/// plugin's directory.
 pub(crate) fn install(root: &Path, files: &PluginFiles) -> Result<PathBuf, PluginRefusal> {
-    kettle_state::create_private_dirs(root).map_err(|_| PluginRefusal::Unverified)?;
-    let _installing =
-        kettle_state::ExclusiveFileLock::acquire_timeout(&root.join(INSTALL_LOCK), INSTALL_WAIT)
-            .map_err(|_| PluginRefusal::Unverified)?;
-    let directory = root.join(files.directory_name());
-    if verify(&directory, files).is_err() {
-        write_plugin(root, &directory, files);
-        verify(&directory, files)?;
+    if cfg!(not(unix)) {
+        return Err(PluginRefusal::Unsupported);
     }
-    remove_stale(root, &directory, files);
-    Ok(directory)
+    crate::owned_dir::install(root, files, plugin_identity).map_err(|()| PluginRefusal::Unverified)
 }
 
-/// Replace whatever is at `directory` with the plugin, built read-only in
-/// staging under `root` and renamed into place. A failure leaves no staging
-/// and is for the check that follows to find.
-#[cfg(unix)]
+/// Replace whatever is at `directory` with the plugin.
+#[cfg(all(unix, test))]
 fn write_plugin(root: &Path, directory: &Path, files: &PluginFiles) {
-    use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
-    if directory.symlink_metadata().is_ok() && remove_tree(directory).is_err() {
-        return;
-    }
-    let mut suffix = [0u8; 8];
-    if getrandom::fill(&mut suffix).is_err() {
-        return;
-    }
-    let staging = root.join(format!(
-        ".staging-{}",
-        suffix
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    ));
-    let build = || -> std::io::Result<()> {
-        let private = |path: &Path| std::fs::DirBuilder::new().mode(0o700).create(path);
-        private(&staging)?;
-        for subdirectory in PLUGIN_SUBDIRECTORIES {
-            private(&staging.join(subdirectory))?;
-        }
-        for (path, contents) in &files.files {
-            let path = staging.join(path);
-            let mut file = kettle_state::create_private_file_new(&path)?;
-            std::io::Write::write_all(&mut file, contents.as_bytes())?;
-            file.sync_all()?;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400))?;
-        }
-        for subdirectory in PLUGIN_SUBDIRECTORIES {
-            std::fs::set_permissions(
-                staging.join(subdirectory),
-                std::fs::Permissions::from_mode(0o500),
-            )?;
-        }
-        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o500))?;
-        std::fs::rename(&staging, directory)
-    };
-    if build().is_err() {
-        let _ = remove_tree(&staging);
-    }
+    crate::owned_dir::write(root, directory, files);
 }
 
-/// The lock Kettles sharing a plugins directory install under, and the
-/// longest an install waits for another to finish.
-#[cfg(unix)]
-const INSTALL_LOCK: &str = ".install.lock";
-#[cfg(unix)]
-const INSTALL_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
-
-#[cfg(not(unix))]
-pub(crate) fn install(_: &Path, _: &PluginFiles) -> Result<PathBuf, PluginRefusal> {
-    Err(PluginRefusal::Unsupported)
-}
-
-/// Whether `directory` holds exactly `files`, with nothing that another user
-/// could change: no link anywhere, read-only modes, owned by this user or
-/// root, and no entry Kettle did not write. An access list that lets this
-/// user write adds nothing the owner could not do through the mode, and any
-/// change it allows fails the next check.
-#[cfg(unix)]
+/// Whether `directory` holds exactly the plugin; see
+/// [`crate::owned_dir::verify`].
 pub(crate) fn verify(directory: &Path, files: &PluginFiles) -> Result<(), PluginRefusal> {
-    use std::os::unix::fs::PermissionsExt as _;
-    let refused = |_| PluginRefusal::Unverified;
-    let read_only_directory = |path: &Path| -> Result<(), PluginRefusal> {
-        let metadata = path.symlink_metadata().map_err(refused)?;
-        if !metadata.is_dir() || metadata.permissions().mode() & 0o777 != 0o500 {
-            return Err(PluginRefusal::Unverified);
-        }
-        kettle_state::validate_trusted_directory(path).map_err(refused)
-    };
-    read_only_directory(directory)?;
-    for subdirectory in PLUGIN_SUBDIRECTORIES {
-        read_only_directory(&directory.join(subdirectory))?;
+    if cfg!(not(unix)) {
+        return Err(PluginRefusal::Unsupported);
     }
-    // No entry beyond the plugin's own.
-    let entries = |path: &Path| -> Result<Vec<String>, PluginRefusal> {
-        let mut names = std::fs::read_dir(path)
-            .map_err(refused)?
-            .map(|entry| {
-                entry.map_err(refused).and_then(|entry| {
-                    entry
-                        .file_name()
-                        .into_string()
-                        .map_err(|_| PluginRefusal::Unverified)
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        names.sort();
-        Ok(names)
-    };
-    let mut top: Vec<String> = files
-        .files
-        .iter()
-        .map(|(path, _)| path.split('/').next().unwrap_or(path).to_owned())
-        .collect();
-    top.sort();
-    top.dedup();
-    if entries(directory)? != top {
-        return Err(PluginRefusal::Unverified);
-    }
-    for subdirectory in PLUGIN_SUBDIRECTORIES {
-        let mut inside: Vec<String> = files
-            .files
-            .iter()
-            .filter_map(|(path, _)| path.strip_prefix(subdirectory)?.strip_prefix('/'))
-            .map(str::to_owned)
-            .collect();
-        inside.sort();
-        if entries(&directory.join(subdirectory))? != inside {
-            return Err(PluginRefusal::Unverified);
-        }
-    }
-    for (path, contents) in &files.files {
-        let file = kettle_state::open_trusted_file_read(&directory.join(path)).map_err(refused)?;
-        let metadata = file.metadata().map_err(refused)?;
-        if metadata.permissions().mode() & 0o777 != 0o400 || metadata.len() > MAX_PLUGIN_FILE_BYTES
-        {
-            return Err(PluginRefusal::Unverified);
-        }
-        let mut read = Vec::new();
-        file.take(MAX_PLUGIN_FILE_BYTES + 1)
-            .read_to_end(&mut read)
-            .map_err(refused)?;
-        if read != contents.as_bytes() {
-            return Err(PluginRefusal::Unverified);
-        }
-    }
-    Ok(())
+    crate::owned_dir::verify(directory, files).map_err(|()| PluginRefusal::Unverified)
 }
 
-#[cfg(not(unix))]
-pub(crate) fn verify(_: &Path, _: &PluginFiles) -> Result<(), PluginRefusal> {
-    Err(PluginRefusal::Unsupported)
-}
-
-/// Remove `path` and what it holds without following a link, making Kettle's
-/// read-only directories writable first. A directory whose mode this user
-/// cannot change is still removed when it is empty.
-#[cfg(unix)]
-fn remove_tree(path: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt as _;
-    let metadata = path.symlink_metadata()?;
-    if !metadata.is_dir() {
-        return std::fs::remove_file(path);
-    }
-    let writable = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
-    match std::fs::read_dir(path) {
-        Ok(entries) => {
-            for entry in entries {
-                remove_tree(&entry?.path())?;
-            }
-        }
-        // Unlisted, it can still go if it is empty.
-        Err(_) if writable.is_err() => {}
-        Err(error) => return Err(error),
-    }
-    std::fs::remove_dir(path)
-}
-
-/// Remove what is left of Kettle plugins that no pane will get again: this
-/// executable's plugins from the same or an older version, plugins whose
-/// executable is gone or that do not read as Kettle's, and staging, which
-/// under the install lock is always left over. Another installed Kettle's
-/// plugin stays, since its panes still get it, as does a newer version's for
-/// this executable, which a Kettle upgraded in place offers. A running Claude
-/// Code that loaded a removed plugin keeps what it read.
-#[cfg(unix)]
-fn remove_stale(root: &Path, keep: &Path, files: &PluginFiles) {
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return;
-    };
-    let ours = version_key(&files.version);
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path == keep {
-            continue;
-        }
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        let stale = if name.starts_with(".staging-") {
-            true
-        } else if name.starts_with(&format!("{PLUGIN_NAME}-")) {
-            match plugin_identity(&path) {
-                None => true,
-                Some((command, version)) if command == files.command => {
-                    // Kept only when it is a newer version's.
-                    !(ours.is_some() && version.as_deref().and_then(version_key) > ours)
-                }
-                Some((command, _)) => !Path::new(&command).exists(),
-            }
-        } else {
-            false
-        };
-        if stale {
-            let _ = remove_tree(&path);
-        }
-    }
-}
-
-/// A Kettle version's numbered parts, for comparing; `None` for one that is
-/// not all numbers.
-fn version_key(version: &str) -> Option<Vec<u64>> {
-    version.split('.').map(|part| part.parse().ok()).collect()
-}
+#[cfg(all(unix, test))]
+use crate::owned_dir::{INSTALL_LOCK, remove_tree, version_key};
 
 /// The executable a Kettle plugin directory's server runs and the version
 /// its manifest names, when its `.mcp.json` reads as Kettle's.
 #[cfg(unix)]
 fn plugin_identity(directory: &Path) -> Option<(String, Option<String>)> {
     let read = |path: &str| -> Option<serde_json::Value> {
-        let file = kettle_state::open_trusted_file_read(&directory.join(path)).ok()?;
-        let mut text = Vec::new();
-        file.take(MAX_PLUGIN_FILE_BYTES + 1)
-            .read_to_end(&mut text)
-            .ok()?;
-        if text.len() as u64 > MAX_PLUGIN_FILE_BYTES {
-            return None;
-        }
-        serde_json::from_slice(&text).ok()
+        serde_json::from_slice(&crate::owned_dir::read_small(directory, path)?).ok()
     };
     let servers = read(".mcp.json")?;
     let server = &servers["mcpServers"][PLUGIN_NAME];
@@ -397,6 +183,11 @@ fn plugin_identity(directory: &Path) -> Option<(String, Option<String>)> {
     let version = read(".claude-plugin/plugin.json")
         .and_then(|manifest| manifest["version"].as_str().map(str::to_owned));
     Some((command, version))
+}
+
+#[cfg(not(unix))]
+fn plugin_identity(_: &Path) -> Option<(String, Option<String>)> {
+    None
 }
 
 /// Where Claude Code reads its managed policy, the only settings that can
