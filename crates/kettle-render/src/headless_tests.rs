@@ -1490,7 +1490,10 @@ fn registered_poster_overwrite_removes_tiles_and_badges_in_the_same_frame() {
         assert_eq!(&before.0[0..3], &[250, 20, 60]);
         let badges = [
             label_rects(&renderer, crate::card_scene::CardLabelKind::Brand),
-            label_rects(&renderer, crate::card_scene::CardLabelKind::Claude),
+            label_rects(
+                &renderer,
+                crate::card_scene::CardLabelKind::Harness(crate::CardHarness::ClaudeHook),
+            ),
         ]
         .concat();
         assert_eq!(badges.len(), 2);

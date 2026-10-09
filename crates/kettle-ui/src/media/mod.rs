@@ -26,7 +26,7 @@ use crate::ctl_server::ReplyTx;
 #[cfg(test)]
 pub(crate) use cards::HARNESS_CARDS_PER_SECOND;
 pub(crate) use cards::{CardLedger, CardRecord};
-pub(crate) use inline::{CLAUDE_INDENT, card_caption, claude_card_message, claude_card_size};
+pub(crate) use inline::{card_caption, card_message, card_size};
 pub(crate) use queue::Sender;
 pub(crate) use route::{PaneRoot, Route, nearest_pane, route};
 pub(crate) use shelf::{
@@ -71,6 +71,8 @@ pub(crate) struct Draft {
 /// media came from a file, the name its caption shows.
 pub(crate) struct InlineDraft {
     pub owner: kettle_ctl::process::ProcessIdentity,
+    /// The harness that prints the card, which sets its place and size.
+    pub harness: kettle_render::CardHarness,
     pub name: Option<String>,
 }
 

@@ -23,6 +23,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Kettle edits neither the shell's startup files nor Codex's configuration.
   `--status` reports what a launch would get, and `--uninstall` prints how
   to remove the function. It is for bash, zsh and fish, on macOS and Linux.
+- Codex shows a card under the call for media it sends with `kettle_show`,
+  like Claude Code. On macOS with Codex CLI 0.162, the launch function adds a
+  `PostToolUse` hook that collects the card Kettle registers for the call, and
+  Codex prints it under the call, where Kettle paints the image. Codex asks
+  you once to trust the hook in its own hook review; until then, and with
+  other Codex versions, media goes to the pane's shelf. A card's provenance
+  tab names the harness that printed it.
 - Claude Code previews (`agent-display-claude-code`, Settings → Agents →
   Claude Code previews; off by default, needs agent previews): Claude Code
   started in a new pane gets Kettle's own plugin, the display server and the

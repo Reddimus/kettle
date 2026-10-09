@@ -468,14 +468,16 @@ to the process preview account (releasing the least recently viewed off-screen
 pixels when it is full), and only then is the push answered.
 
 A push that asks for an inline card (`ShowRequest::inline`, sent only by
-`kettle mcp --display --claude-card-hook`) gets one only when its connection
-thread found the program that asked to be Claude Code under Anthropic's
-signature (`Requirement::CLAUDE_CODE`) and the route is verified. After the
-item is published, `register_card` admits the harness against the
-`media::CardLedger` (32 live cards per harness, four a second), mints a nonce
-from the OS random source with unbiased digits and no live collision, sizes
-the card (`claude_card_size`), builds its rows and caption
-(`claude_card_message`, `card_caption`, whose file name drops control,
+`kettle mcp --display` with `--claude-card-hook` or `--codex-card-hook`)
+gets one only when its connection thread (`card_harness`) found the program
+that asked to be the harness it asked as, under its maker's signature
+(`Requirement::CLAUDE_CODE` or `Requirement::CODEX`, macOS only), and the
+route is verified. After the item is published, `register_card` admits the
+harness against the `media::CardLedger` (32 live cards per harness, four a
+second), mints a nonce from the OS random source with unbiased digits and no
+live collision, sizes the card for its harness's column and label
+(`card_size`), builds its rows and caption (`card_message`, `card_caption`,
+whose file name drops control,
 format, private-use and zero-width characters), and registers it in the
 pane's `kettle_render::InlineCards` (64 per pane) with a `CardPoster`: a weak
 reference to the shelf item's pixels, so a card never holds the preview
@@ -489,7 +491,10 @@ exited, whose pane closed, or whose item left the shelf or was replaced.
 Codex has no plugin route. `kettle`'s `agent_setup` module prints a shell
 function that hands each launch to `agent-setup --launch-codex`, which
 classifies the arguments without a shell and execs `codex`, adding
-per-launch `-c` server options to interactive sessions only.
+per-launch `-c` server options to interactive sessions only. On macOS, for
+the Codex release whose hook output Kettle has measured, it also adds a
+`PostToolUse` `mcp_tool` hook (elsewhere no card could be admitted); the display server then keys cards by Codex's call id, and
+`kettle_card` hands each to that hook once, as for Claude Code.
 
 Kettle's Claude Code plugin is `kettle-ui`'s `agent_plugin` module. With
 `agent-display-claude-code` and live agent previews, the App's

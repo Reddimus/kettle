@@ -1708,9 +1708,9 @@ fn register_card(
     now: std::time::Instant,
 ) -> Option<kettle_ctl::show::InlineDelivery> {
     cards.admit(inline.owner, now).ok()?;
-    let size = crate::media::claude_card_size(grid, cell, (image.width, image.height))?;
+    let size = crate::media::card_size(inline.harness, grid, cell, (image.width, image.height))?;
     let nonce = cards.mint(|pool| getrandom::fill(pool).is_ok())?;
-    let room = grid.0.saturating_sub(crate::media::CLAUDE_INDENT + 1);
+    let room = grid.0.saturating_sub(inline.harness.left() + 1);
     let caption = crate::media::card_caption(
         inline.name.as_deref(),
         kind,
@@ -1718,7 +1718,7 @@ fn register_card(
         room,
     );
     let delivery = kettle_ctl::show::InlineDelivery {
-        message: crate::media::claude_card_message(nonce, size, &caption)?,
+        message: crate::media::card_message(nonce, size, &caption)?,
     };
     if !delivery.fits() {
         return None;
@@ -1729,7 +1729,7 @@ fn register_card(
             kettle_render::CardSpec {
                 rows: size.0,
                 columns: size.1,
-                harness: kettle_render::CardHarness::ClaudeHook,
+                harness: inline.harness,
                 caption,
                 poster: Some(kettle_render::CardPoster::new(image)),
             },
@@ -20904,12 +20904,18 @@ impl App {
         // A card only for the harness Kettle checked, which runs in this very
         // pane; everyone else's push goes to the shelf alone.
         let inline = match (inline, harness) {
-            (Some(kettle_ctl::show::InlineTarget::ClaudeHook), Some(owner)) if route.verified => {
-                Some(crate::media::InlineDraft {
-                    owner,
-                    name: card_name,
-                })
-            }
+            (Some(target), Some(owner)) if route.verified => Some(crate::media::InlineDraft {
+                owner,
+                harness: match target {
+                    kettle_ctl::show::InlineTarget::ClaudeHook => {
+                        kettle_render::CardHarness::ClaudeHook
+                    }
+                    kettle_ctl::show::InlineTarget::CodexHook => {
+                        kettle_render::CardHarness::CodexHook
+                    }
+                },
+                name: card_name,
+            }),
             _ => None,
         };
         let job = kettle_media::Job {
@@ -39753,6 +39759,7 @@ mod tests {
         let image = kettle_core::ImageData::new(64, 48, vec![9; 64 * 48 * 4]).unwrap();
         let draft = || crate::media::InlineDraft {
             owner,
+            harness: kettle_render::CardHarness::ClaudeHook,
             name: Some("plot.png".into()),
         };
         let now = std::time::Instant::now();
@@ -39835,8 +39842,11 @@ mod tests {
                 .and_then(|rest| rest.split("\n    fn ").next())
                 .unwrap_or_else(|| panic!("{name} present"))
         };
-        assert!(body("ctl_show").contains(
-            "(Some(kettle_ctl::show::InlineTarget::ClaudeHook), Some(owner)) if route.verified =>"
+        let show = body("ctl_show");
+        assert!(show.contains("(Some(target), Some(owner)) if route.verified =>"));
+        // Each harness's card is placed and sized as that harness prints it.
+        assert!(show.contains(
+            "kettle_ctl::show::InlineTarget::CodexHook => {\n                        kettle_render::CardHarness::CodexHook"
         ));
         assert!(
             body("ctl_show").contains("name: card_name,"),

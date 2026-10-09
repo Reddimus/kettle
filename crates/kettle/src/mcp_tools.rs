@@ -558,7 +558,8 @@ fn tool_kettle_show(
         pane: None,
         inline: card
             .as_ref()
-            .map(|_| kettle_ctl::show::InlineTarget::ClaudeHook),
+            .and(session.hook())
+            .map(crate::mcp_display::CardHook::target),
     })
     .into_params()
     {
@@ -647,11 +648,7 @@ fn tool_kettle_card(
     params: &Value,
     session: &crate::mcp_display::DisplaySession,
 ) -> Value {
-    let from_model = params
-        .get("_meta")
-        .and_then(|meta| meta.get(crate::mcp_display::TOOL_USE_ID_META))
-        .is_some();
-    if from_model {
+    if crate::mcp_display::from_model(params) {
         return error_result("kettle_card is for Kettle's hook; the model does not call it.");
     }
     let Some(id) = args.get("tool_use_id").and_then(Value::as_str) else {
@@ -1036,12 +1033,15 @@ mod tests {
             .is_ok(),
             "the envelope passes; the arguments are checked when it runs"
         );
-        let session = DisplaySession::new(true);
+        let session = DisplaySession::new(Some(crate::mcp_display::CardHook::Claude));
         let now = std::time::Instant::now();
         assert!(session.store("toolu_1".into(), "\nrows\ncaption".into(), now));
         let args = json!({"tool_use_id": "toolu_1"});
         let refused =
             tool_kettle_card(&args, &call(json!({TOOL_USE_ID_META: "toolu_9"})), &session);
+        assert_eq!(refused["isError"], json!(true));
+        // Codex's model calls carry its call id.
+        let refused = tool_kettle_card(&args, &call(json!({"callId": "exec-9"})), &session);
         assert_eq!(refused["isError"], json!(true));
         let hook = tool_kettle_card(&args, &call(json!({})), &session);
         let output: Value =

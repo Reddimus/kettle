@@ -23,40 +23,72 @@ pub(crate) const PENDING_LIFETIME: Duration = Duration::from_secs(5);
 pub(crate) const MAX_TOOL_USE_ID_BYTES: usize = 128;
 /// Where Claude Code puts a model call's tool-use id in `tools/call`.
 pub(crate) const TOOL_USE_ID_META: &str = "claudecode/toolUseId";
+/// Where Codex puts a model call's id in `tools/call` (Codex CLI 0.162.0);
+/// its hooks get the same id as `${tool_use_id}`.
+pub(crate) const CODEX_CALL_ID_META: &str = "callId";
+
+/// Whose hook prints this server's cards.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CardHook {
+    /// The `PostToolUse` hook of Kettle's Claude Code plugin.
+    Claude,
+    /// The `PostToolUse` hook Kettle's Codex launch adds.
+    Codex,
+}
+
+impl CardHook {
+    /// Where the harness puts a model call's id in `tools/call`.
+    fn call_id_meta(self) -> &'static str {
+        match self {
+            Self::Claude => TOOL_USE_ID_META,
+            Self::Codex => CODEX_CALL_ID_META,
+        }
+    }
+
+    /// The card Kettle is asked for.
+    pub(crate) fn target(self) -> kettle_ctl::show::InlineTarget {
+        match self {
+            Self::Claude => kettle_ctl::show::InlineTarget::ClaudeHook,
+            Self::Codex => kettle_ctl::show::InlineTarget::CodexHook,
+        }
+    }
+}
 
 /// This server's inline-card state.
 #[derive(Debug, Default)]
 pub(crate) struct DisplaySession {
-    /// Whether the harness prints hook messages: interactive Claude Code.
-    /// Headless and SDK sessions run no hook, so they get no card.
-    claude_cli: bool,
+    /// The hook that prints this session's cards, if any. Headless and SDK
+    /// Claude Code sessions run no hook, so they get no card.
+    hook: Option<CardHook>,
     pending: Mutex<HashMap<String, (String, Instant)>>,
 }
 
 impl DisplaySession {
-    /// The session of this process: cards only when Kettle's own plugin
-    /// launched it, so a hook will print them, and only in an interactive
-    /// Claude Code session.
-    pub(crate) fn from_env(card_hook: bool) -> Self {
+    /// The session of this process: cards only when Kettle launched it with
+    /// a hook that prints them: Kettle's own Claude Code plugin, in an
+    /// interactive session, or Kettle's Codex launch.
+    pub(crate) fn from_env(hook: Option<CardHook>) -> Self {
         let entrypoint = std::env::var("CLAUDE_CODE_ENTRYPOINT").ok();
-        Self::new(cards_enabled(card_hook, entrypoint.as_deref()))
+        Self::new(cards_enabled(hook, entrypoint.as_deref()))
     }
 
-    pub(crate) fn new(claude_cli: bool) -> Self {
+    pub(crate) fn new(hook: Option<CardHook>) -> Self {
         Self {
-            claude_cli,
+            hook,
             pending: Mutex::new(HashMap::new()),
         }
     }
 
-    /// The tool-use id a `kettle_show` call may have a card for: only in a
-    /// session that prints hook messages, only with a plain bounded id, and
-    /// only while there is room to keep its delivery.
+    /// The hook that prints this session's cards.
+    pub(crate) fn hook(&self) -> Option<CardHook> {
+        self.hook
+    }
+
+    /// The call id a `kettle_show` call may have a card for: only in a
+    /// session with a hook, only with a plain bounded id, and only while
+    /// there is room to keep its delivery.
     pub(crate) fn card_for(&self, params: &Value, now: Instant) -> Option<String> {
-        if !self.claude_cli {
-            return None;
-        }
-        let id = tool_use_id(params)?;
+        let id = call_id(params, self.hook?.call_id_meta())?;
         let mut pending = self.pending.lock().ok()?;
         expire(&mut pending, now);
         (pending.len() < MAX_PENDING_CARDS && !pending.contains_key(&id)).then_some(id)
@@ -88,29 +120,43 @@ fn expire(pending: &mut HashMap<String, (String, Instant)>, now: Instant) {
     pending.retain(|_, (_, deadline)| now < *deadline);
 }
 
-/// Whether a server asks for cards: only when Kettle's plugin launched it,
-/// whose hook prints them, for an interactive Claude Code session.
-fn cards_enabled(card_hook: bool, entrypoint: Option<&str>) -> bool {
-    card_hook && entrypoint == Some("cli")
+/// The hook a server asks for cards for: Claude Code's only in an
+/// interactive session; Codex's only ever runs in one, since Kettle's launch
+/// adds it to interactive sessions alone.
+fn cards_enabled(hook: Option<CardHook>, entrypoint: Option<&str>) -> Option<CardHook> {
+    match hook? {
+        CardHook::Claude => (entrypoint == Some("cli")).then_some(CardHook::Claude),
+        CardHook::Codex => Some(CardHook::Codex),
+    }
 }
 
 static SESSION: std::sync::OnceLock<DisplaySession> = std::sync::OnceLock::new();
 
-/// Set this process's session before it serves: `card_hook` when Kettle's
-/// own plugin launched it.
-pub(crate) fn init_session(card_hook: bool) {
-    let _ = SESSION.set(DisplaySession::from_env(card_hook));
+/// Set this process's session before it serves: `hook` when Kettle
+/// launched it with one.
+pub(crate) fn init_session(hook: Option<CardHook>) {
+    let _ = SESSION.set(DisplaySession::from_env(hook));
 }
 
 /// The process's session; one that was never set asks for no card.
 pub(crate) fn session() -> &'static DisplaySession {
-    SESSION.get_or_init(|| DisplaySession::new(false))
+    SESSION.get_or_init(|| DisplaySession::new(None))
 }
 
-/// The tool-use id `tools/call` params carry in their metadata, when it is a
-/// plain bounded token. The model's arguments never supply it.
-pub(crate) fn tool_use_id(params: &Value) -> Option<String> {
-    let id = params.get("_meta")?.get(TOOL_USE_ID_META)?.as_str()?;
+/// Whether a `tools/call` came from a model: it carries a harness's call id
+/// in its metadata, which a hook's own call does not.
+pub(crate) fn from_model(params: &Value) -> bool {
+    params.get("_meta").is_some_and(|meta| {
+        [TOOL_USE_ID_META, CODEX_CALL_ID_META]
+            .iter()
+            .any(|key| meta.get(*key).is_some())
+    })
+}
+
+/// The call id `tools/call` params carry in their metadata under `key`,
+/// when it is a plain bounded token. The model's arguments never supply it.
+fn call_id(params: &Value, key: &str) -> Option<String> {
+    let id = params.get("_meta")?.get(key)?.as_str()?;
     let plain = !id.is_empty()
         && id.len() <= MAX_TOOL_USE_ID_BYTES
         && id
@@ -131,13 +177,13 @@ mod tests {
     #[test]
     fn only_an_interactive_session_with_a_plain_id_gets_a_card() {
         let now = Instant::now();
-        let session = DisplaySession::new(true);
+        let session = DisplaySession::new(Some(CardHook::Claude));
         assert_eq!(
             session.card_for(&call("toolu_01AbC-9"), now).as_deref(),
             Some("toolu_01AbC-9")
         );
         assert_eq!(
-            DisplaySession::new(false).card_for(&call("toolu_1"), now),
+            DisplaySession::new(None).card_for(&call("toolu_1"), now),
             None
         );
         for id in [
@@ -158,21 +204,54 @@ mod tests {
 
     #[test]
     fn no_card_without_kettles_hook_and_an_interactive_session() {
-        assert!(cards_enabled(true, Some("cli")));
+        let claude = Some(CardHook::Claude);
+        assert_eq!(cards_enabled(claude, Some("cli")), claude);
         // Even an interactive Claude Code session asks for none unless
         // Kettle's plugin, whose hook prints cards, launched the server.
-        assert!(!cards_enabled(false, Some("cli")));
+        assert_eq!(cards_enabled(None, Some("cli")), None);
         // Headless and SDK sessions run no hook.
         for entrypoint in [None, Some("sdk-cli"), Some("sdk-ts"), Some("")] {
-            assert!(!cards_enabled(true, entrypoint), "{entrypoint:?}");
-            assert!(!cards_enabled(false, entrypoint), "{entrypoint:?}");
+            assert_eq!(cards_enabled(claude, entrypoint), None, "{entrypoint:?}");
+            assert_eq!(cards_enabled(None, entrypoint), None, "{entrypoint:?}");
         }
+        // Kettle adds Codex's hook to interactive sessions alone, and Codex
+        // passes its server no Claude Code variable.
+        assert_eq!(
+            cards_enabled(Some(CardHook::Codex), None),
+            Some(CardHook::Codex)
+        );
+    }
+
+    /// A Codex session keys its cards by Codex's call id, and only a call
+    /// that carries one is the model's.
+    #[test]
+    fn a_codex_session_keys_cards_by_codexs_call_id() {
+        let now = Instant::now();
+        let session = DisplaySession::new(Some(CardHook::Codex));
+        let codex = json!({"name": "kettle_show", "_meta": {CODEX_CALL_ID_META: "exec-1a2b"}});
+        assert_eq!(session.card_for(&codex, now).as_deref(), Some("exec-1a2b"));
+        assert_eq!(
+            session.card_for(&call("toolu_1"), now),
+            None,
+            "Claude Code's key"
+        );
+        assert_eq!(
+            session.hook().map(CardHook::target),
+            Some(kettle_ctl::show::InlineTarget::CodexHook)
+        );
+        assert!(from_model(&codex));
+        assert!(from_model(&call("toolu_1")));
+        // A hook's own call carries only Codex's thread id.
+        assert!(!from_model(
+            &json!({"_meta": {"threadId": "t", "progressToken": 2}})
+        ));
+        assert!(!from_model(&json!({"name": "kettle_card"})));
     }
 
     #[test]
     fn a_delivery_is_taken_once_and_waits_a_few_seconds() {
         let now = Instant::now();
-        let session = DisplaySession::new(true);
+        let session = DisplaySession::new(Some(CardHook::Claude));
         assert!(session.store("toolu_1".into(), "rows".into(), now));
         assert!(
             !session.store("toolu_1".into(), "again".into(), now),
@@ -196,7 +275,7 @@ mod tests {
     #[test]
     fn pending_deliveries_are_bounded() {
         let now = Instant::now();
-        let session = DisplaySession::new(true);
+        let session = DisplaySession::new(Some(CardHook::Claude));
         for n in 0..MAX_PENDING_CARDS {
             assert!(session.store(format!("toolu_{n}"), "rows".into(), now));
         }

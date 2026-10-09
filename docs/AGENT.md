@@ -683,6 +683,18 @@ not released, nor dropped from a full shelf while another item can go
 instead. On other platforms, and without the plugin, the shelf has the
 item and the result says so.
 
+**Inline cards (Codex).** Launched by Kettle's Codex launch (with the hidden
+`--codex-card-hook`), `kettle_show` asks for a card keyed by the call's
+`_meta.callId`. Kettle gives one only to Codex as OpenAI signs it (on macOS,
+its running code validated against OpenAI's team and the identifier `codex`),
+under the same rules as Claude Code's: the same pane, the same limits, the
+same card. Codex prints the hook's message under the call after a `↳ Hook ·`
+line, its rows four columns in. The launch's own hook collects it once
+through `kettle_card`, which the server never lists; the launch enables it
+because Codex lets a hook call only an enabled tool. A call carrying the
+model's `_meta.callId` is refused, as is one carrying Claude Code's id. The
+model's result says only that the media shows below the call.
+
 ### Kettle's Claude Code plugin
 
 `agent-display-claude-code` (Settings → Agents → Claude Code previews; off by
@@ -782,8 +794,25 @@ with its arguments unchanged:
 - Codex outside a Kettle pane, or a version Kettle doesn't know, which it
   says.
 
-Codex then sends media to the shelf of the pane it runs in. A session started
-this way does not show in `codex agents`. The function names the Kettle that
+Codex then sends media to the shelf of the pane it runs in. With Codex CLI
+0.162, whose hook output Kettle's cards are placed for, the launch on macOS
+also adds:
+- `--codex-card-hook` to the server, and `kettle_card` to its enabled tools;
+- a `PostToolUse` hook (`-c hooks.PostToolUse=…`) that, after each
+  `kettle_show`, calls `kettle_card` with the call's `${tool_use_id}`, so the
+  card prints under the call.
+
+Codex adds that hook to your own hooks; it does not replace them. Codex runs
+a new hook only after you trust it, so the first such launch opens Codex's
+"Hooks need review" screen. "Review hooks" lets you trust Kettle's hook
+alone; "Trust all and continue" trusts every hook waiting for review. Codex
+saves that choice in its own configuration, and Kettle's hook stays the same
+across launches and updates, so you are asked once. Kettle never trusts it
+for you. Until it is trusted, or with another Codex version, media goes to the
+shelf alone. So does a launch that sets hooks itself with `-c hooks…`, which
+would replace Kettle's.
+
+A session started this way does not show in `codex agents`. The function names the Kettle that
 printed it, and a Kettle running from a translocated copy refuses to print
 one. `kettle agent-setup --status` reports what a launch from this shell would
 get, and `--uninstall` prints how to remove the function.
