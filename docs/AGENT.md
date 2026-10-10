@@ -301,7 +301,11 @@ Stdin is refused, never cut short, past what one request carries once
 encoded (about 768 KiB), or past 64 KiB of UTF-8 text with `--mermaid`; a
 path longer than 4 KiB is refused before anything looks for it, and the
 whole request, escapes and base64 included, is measured as a client frames
-it before it is sent.
+it before it is sent. It attests a file by opening it as the media worker
+will (read-only, without waiting on a named pipe, never as a controlling
+terminal) and sends the device and inode of what it opened, so Kettle shows
+nothing the command could not read itself: a file it may look up but not
+read is refused with `permission`.
 
 Params take exactly one source, plus optional `title` (at most 4 KiB) and
 `key` (1 to 256 bytes):

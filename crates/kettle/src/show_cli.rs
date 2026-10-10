@@ -99,8 +99,9 @@ fn stdin_source(input: &mut impl Read, mermaid: bool) -> Result<ShowSource, Stri
 }
 
 /// The file at `path`, made absolute, bounded before the file system is
-/// asked anything, and attested by the device and inode it has now: Kettle
-/// refuses it if what it opens is another file. With `mermaid` it renders
+/// asked anything, and attested by the device and inode of what this
+/// command opens there: Kettle's worker reads only that file, so it shows
+/// nothing this command could not read itself. With `mermaid` it renders
 /// as a diagram.
 pub(crate) fn file_source(path: &Path, mermaid: bool) -> Result<ShowSource, String> {
     // As given, before `absolute` drops its `.` parts: a spelling too long
@@ -115,20 +116,10 @@ pub(crate) fn file_source(path: &Path, mermaid: bool) -> Result<ShowSource, Stri
     }
     let native = NativePath::from_path(&path)
         .map_err(|_| FailureCode::BadParams.model_message().to_string())?;
-    let metadata = std::fs::metadata(&path).map_err(|error| {
-        match error.kind() {
-            std::io::ErrorKind::PermissionDenied => FailureCode::FilePermission,
-            _ => FailureCode::FileNotFound,
-        }
-        .model_message()
-        .to_string()
-    })?;
-    if !metadata.is_file() {
-        return Err(FailureCode::FileNotRegular.model_message().into());
-    }
+    let attestation = attest(&path).map_err(|failure| failure.model_message().to_string())?;
     Ok(ShowSource::File {
         path: native,
-        attestation: attestation(&metadata),
+        attestation,
         mermaid,
     })
 }
@@ -147,20 +138,43 @@ fn native_len(path: &Path) -> usize {
     }
 }
 
+/// Open `path` as the worker will, read-only, without waiting on a pipe and
+/// never as a controlling terminal, and attest what was opened if it is a
+/// regular file. A file this command may look up but not read is refused
+/// here, as the worker would refuse it.
 #[cfg(unix)]
-fn attestation(metadata: &std::fs::Metadata) -> ExternalAttested {
-    use std::os::unix::fs::MetadataExt as _;
-    ExternalAttested {
-        dev: metadata.dev(),
-        ino: metadata.ino(),
+fn attest(path: &Path) -> Result<ExternalAttested, FailureCode> {
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
+        .open(path)
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::PermissionDenied => FailureCode::FilePermission,
+            _ => FailureCode::FileNotFound,
+        })?;
+    let opened = file.metadata().map_err(|_| FailureCode::FileNotFound)?;
+    if !opened.file_type().is_file() {
+        return Err(FailureCode::FileNotRegular);
     }
+    Ok(ExternalAttested {
+        dev: opened.dev(),
+        ino: opened.ino(),
+    })
 }
 
 /// Windows has no media worker, and Kettle refuses media there before it
 /// looks at the file.
 #[cfg(not(unix))]
-fn attestation(_metadata: &std::fs::Metadata) -> ExternalAttested {
-    ExternalAttested { dev: 0, ino: 0 }
+fn attest(path: &Path) -> Result<ExternalAttested, FailureCode> {
+    let metadata = std::fs::metadata(path).map_err(|error| match error.kind() {
+        std::io::ErrorKind::PermissionDenied => FailureCode::FilePermission,
+        _ => FailureCode::FileNotFound,
+    })?;
+    if !metadata.is_file() {
+        return Err(FailureCode::FileNotRegular);
+    }
+    Ok(ExternalAttested { dev: 0, ino: 0 })
 }
 
 /// What to say when Kettle did not take the media: the fixed wording for
@@ -391,6 +405,61 @@ mod tests {
                 (metadata.dev(), metadata.ino())
             );
         }
+    }
+
+    /// The attestation is of what the command could open: a file it may
+    /// look up but not read is refused as the worker would refuse it; a
+    /// named pipe is refused at once, never waited on for a writer; a
+    /// symbolic link is attested by the file it leads to and sent by its
+    /// own name.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_is_attested_by_opening_it_as_the_worker_will() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let directory = kettle_test_support::private_tempdir("kettle-show-cli-");
+        let file = directory.path().join("plot.png");
+        std::fs::write(&file, b"png").unwrap();
+        let link = directory.path().join("link.png");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        let ShowSource::File {
+            path, attestation, ..
+        } = file_source(&link, false).unwrap()
+        else {
+            panic!("a file source");
+        };
+        assert_eq!(path, NativePath::from_path(&link).unwrap());
+        let target = std::fs::metadata(&file).unwrap();
+        assert_eq!(
+            (attestation.dev, attestation.ino),
+            (target.dev(), target.ino())
+        );
+        let pipe = directory.path().join("pipe.png");
+        let name = std::ffi::CString::new(pipe.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let (sent, opened) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sent.send(file_source(&pipe, false));
+        });
+        let opened = opened
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("a named pipe is refused without waiting for a writer");
+        assert_eq!(
+            opened.unwrap_err(),
+            FailureCode::FileNotRegular.model_message()
+        );
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipped the unreadable-file case: root reads past mode bits");
+            return;
+        }
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o200)).unwrap();
+        assert!(
+            std::fs::metadata(&file).is_ok(),
+            "it can still be looked up"
+        );
+        assert_eq!(
+            file_source(&file, false).unwrap_err(),
+            FailureCode::FilePermission.model_message()
+        );
     }
 
     /// A path too long is refused before anything asks the file system
