@@ -18,6 +18,13 @@ frame a decoder returned. They were made on 2026-10-10 with Homebrew's ffmpeg
 - `rotated.mp4`: `index.mp4` with a display matrix turning it 90 degrees
   counterclockwise to show, written by `-display_rotation 90 -i index.mp4
   -c copy -map_metadata -1 -fflags +bitexact`.
+- `segments.mp4`: nine one-second segments, segment N showing N in the same
+  blocks, H.264 with keyframes only where every other pair of segments meets
+  (0, 2, 4, 6 and 8 s), so the middle of an odd segment has a keyframe half a
+  segment after it and none before: `color=c=black:s=64x36:r=10:d=9` with
+  the blocks taken from `floor(T)`, `-c:v libx264 -preset veryslow -qp 1 -g
+  250 -bf 2 -sc_threshold 0 -force_key_frames 'expr:gte(t,n_forced*2)'` and
+  the same tags and flags as `index.mp4`.
 - `unsized.webm`: `index.webm`'s encoding written to a pipe (`-f webm
   pipe:1`), so it has no duration and no cues, as a browser's recorder
   leaves a file.
@@ -28,3 +35,4 @@ frame a decoder returned. They were made on 2026-10-10 with Homebrew's ffmpeg
 | index.webm | 2925 | `28015bb902d6f4bcc99ba3fb6819e9960965a3fe546ff1dfd9ca7f2a7d181e78` |
 | rotated.mp4 | 4117 | `fe665abfb89c63b567879cb42ba80028a9ab10df007e8c21285ac37f7052eca7` |
 | unsized.webm | 2795 | `4759f8fbd8447efcd1303c7ee101fff0737aa1a5bd4133eaf08d72f062ddd946` |
+| segments.mp4 | 4224 | `78ebea18da005ef402680afbf333bac3db4aa5e9e8f73f5c43e86d3f613705ac` |

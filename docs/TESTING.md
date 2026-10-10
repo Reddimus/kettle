@@ -1079,8 +1079,10 @@ refused; without one these tests say they were skipped.
 
 `tests/avfoundation.rs` (macOS, with the `avfoundation` feature) reads the
 same fixtures with AVFoundation: each frame shows the fixture frame starting
-at the time reported, that time within the tolerance reported (at most half
-the closest gap), and the video is described as H.264 at 10 fps, 64x36, four
+at the time reported, that time within the tolerance reported (at most a
+quarter of the closest gap), and instants whose shares meet at the clip's
+keyframes (every 1.5 s) each take a different frame inside their own share,
+where half the gap let two take the keyframe between them; the video is described as H.264 at 10 fps, 64x36, four
 seconds, no audio; a single instant is exact (666 ms is frame 6, 2050 ms
 frame 20); the rotated clip is shown upright, 36x64 at 270 degrees as ffmpeg
 reads it; WebM is `UnsupportedContainer`, which the chain passes on and,
@@ -4513,7 +4515,18 @@ several frames, no frames or seventeen, an edge of 0 or past 2560); the
 encoder keeping the best quality that fits and shrinking a quarter at a time,
 never cutting; the index's exact words, milliseconds under a second; the
 install hint only for a missing decoder; and the output written whole,
-private, never over the video and never left half-written.
+private, never over the video and never left half-written. The model
+acceptance for `kettle_video_frames` used a nine-second clip of nine
+one-second colors (red, green, blue, yellow, magenta, cyan, white, orange,
+purple) as VP8 WebM, through ffmpeg, and H.264 MP4, through AVFoundation:
+Claude Code 2.1.296 (`claude -p` with the full server and only this tool
+allowed) and Codex 0.162.1 (`codex exec` with the server, and the tool
+approved by name, as `-c` overrides) each called the tool and named all nine
+colors in order with the index's times, on both clips. An earlier run on the
+MP4 named seven, two instants having taken the same keyframe, which led to
+AVFoundation's quarter-gap tolerance. Both eras were checked by hand over
+stdio: one image and the index, no `structuredContent`, every response under
+768 KiB, a 4K sheet of 16 frames at 2560 pixels included.
 `tests/mcp_stdio.rs` runs `kettle_show` to completion through the real
 `kettle mcp`, in display and full mode, in both protocol eras, from Mermaid
 source and from a file, against a Kettle with previews on that the test

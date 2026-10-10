@@ -436,7 +436,8 @@ the sniffed MIME type, references outside the file forbidden and the VP9
 decoder registered; its properties load asynchronously within the deadline,
 and one batch request to an image generator, with the track's display
 transform applied, returns each frame with its actual time, each within
-half the gap to its neighbours (a single instant exactly). At the deadline
+a quarter of the gap to its neighbours, so inside its own share (a single
+instant exactly). At the deadline
 the batch is cancelled. Each frame is drawn at exactly the tile size in sRGB
 and un-premultiplied. A container it does not read is
 `UnsupportedContainer`, and a codec it cannot decode `CodecUnavailable`;

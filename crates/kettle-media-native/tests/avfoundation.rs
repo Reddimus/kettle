@@ -127,7 +127,32 @@ fn each_frame_is_the_one_at_the_time_it_reports() {
                 .all(|pixel| pixel[3] == 255)
         );
     }
-    assert!(stills.tolerance_ms <= 333, "half the closest gap at most");
+    assert!(
+        stills.tolerance_ms <= 166,
+        "a quarter of the closest gap at most"
+    );
+}
+
+/// Instants whose shares of the window meet at keyframes each take a frame
+/// inside their own share: `segments.mp4` has keyframes only at even
+/// seconds, so the middle of an odd one-second segment has a keyframe half a
+/// segment after it, starting the next segment, and none before; each
+/// middle still takes its own segment.
+#[test]
+fn each_frame_stays_inside_its_share() {
+    let clip = Clip::fixture("segments.mp4");
+    let times: Vec<u64> = (0..9).map(|segment| segment * 1000 + 500).collect();
+    let (result, _) = take(&AvFoundation, &clip, &times, (16, 9));
+    let stills = result.unwrap();
+    for (segment, frame) in stills.frames.iter().enumerate() {
+        let share = segment as u64 * 1000..(segment as u64 + 1) * 1000;
+        assert!(
+            share.contains(&frame.sample.actual_ms),
+            "{:?} outside {share:?}",
+            frame.sample
+        );
+        assert_eq!(frame_index(&frame.rgba, 16, 9, false), segment as u32);
+    }
 }
 
 /// A single instant is taken exactly: the frame showing then.
