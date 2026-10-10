@@ -146,7 +146,13 @@ Reports that fit any of these are welcome:
   under that authorization, never while a control request is handled, and
   keeps the result only if it has the digest the item was rendered from.
   Reloading reads the item's own file again, as the user's pull, only on the
-  user's gesture.
+  user's gesture. A zoomed lane's sharper pixels re-read a file the same
+  way: under the item's authorization, only for a view the user changed,
+  never one a control client changed last nor for a change a control
+  client made to the lane, and kept only with the item's digest; once a
+  file changed, nothing more is read for that item, whether its lane closes
+  or not, until a reload. Those pixels are charged to the same account, never evict an
+  item's, and go with their item, lane or pane.
   The lane's source view shows control, format and bidirectional characters
   as U+FFFD. Getting a preview to keep source or pixels past that account,
   to read a file for a control client, or to show a changed file as the

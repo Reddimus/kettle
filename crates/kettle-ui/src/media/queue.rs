@@ -33,6 +33,9 @@ pub(crate) enum Sender {
     /// A pane's lane rendering its item again: one at a time, and a newer
     /// one takes the waiting one's place.
     Lane(u64),
+    /// A pane's lane asking for a zoomed view's sharper pixels: apart from
+    /// its renders on another canvas, so one never takes the other's place.
+    LaneTile(u64),
 }
 
 /// What admitting a push did with it.

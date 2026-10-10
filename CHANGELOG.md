@@ -153,6 +153,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Cmd+wheel (Ctrl+wheel off macOS) at the pointer zoom the picture, the
   wheel or a drag pans it, and `⤢` fits it again. Also as
   `preview_zoom_in`, `preview_zoom_out` and `preview_fit`.
+- A zoomed preview sharpens a moment after it stops moving: the part in view
+  is drawn again at the size shown, from its file only when you moved it
+  yourself and not once the file changed.
 - Preview a file without an agent: `preview_link` (palette: "Preview a file
   in Kettle") labels the image, SVG and Mermaid files in the focused pane,
   and typing a label renders that file in its pane's lane; right-clicking a

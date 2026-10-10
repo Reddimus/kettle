@@ -623,8 +623,11 @@ reorder or hide text shown as `�`; the wheel scrolls the source, and a
 sideways swipe, or the wheel with Shift held, scrolls it sideways. The
 picture zooms with `−` and `+`, a pinch, or the wheel with Cmd held on
 macOS and Ctrl elsewhere, at the pointer, from an eighth of its fit to 32
-times it; the wheel or a drag pans it, and `⤢` shows it fitted again. A
-zoomed picture shows the pixels the lane already holds, magnified.
+times it; the wheel or a drag pans it, and `⤢` shows it fitted again.
+Zoomed past the pixels the lane holds, the picture sharpens a moment after
+it stops moving: the part in view is drawn again at the size shown (a
+raster up to its own pixels), read from its file again only when you
+zoomed or panned it yourself, and not at all once the file changed.
 `◐` puts the picture on the next background: the pane's, white,
 then a checkerboard; a diagram is drawn again for it, as its colors follow
 the background, from the same source, and if the file changed since, the

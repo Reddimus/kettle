@@ -862,6 +862,8 @@ pub(crate) struct WindowState {
     pub(crate) lane_wheel: crate::input::WheelAccum,
     /// A press on a lane's rendered item, until its release.
     pub(crate) lane_drag: Option<LaneDrag>,
+    /// Each lane's sharper pixels for its zoomed view, by pane.
+    pub(crate) lane_crops: std::collections::HashMap<u64, crate::media::LaneCrop>,
     pub(crate) selecting: bool,
     /// Pane that owns the active pointer selection gesture. Focus can
     /// move through ctl/Lua while a drag is live; pinning the id prevents the
@@ -1422,6 +1424,7 @@ impl WindowState {
             wheel: crate::input::WheelAccum::default(),
             lane_wheel: crate::input::WheelAccum::default(),
             lane_drag: None,
+            lane_crops: std::collections::HashMap::new(),
             selecting: false,
             selecting_pane: None,
             selection_autoscroll_edge: 0,

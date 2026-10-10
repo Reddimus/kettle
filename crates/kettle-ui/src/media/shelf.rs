@@ -89,6 +89,9 @@ pub(crate) struct ShelfItem {
     pub pixels: ItemPixels,
     /// What it was rendered from, and how.
     pub source: super::ItemSource,
+    /// Where the render put its pixels, and the source's own size: what a
+    /// zoomed lane plans its sharper pixels from.
+    pub layout: Option<kettle_media::RenderLayout>,
     /// When the user last looked at it, on the process-wide view clock.
     viewed: u64,
     /// When it was last published, a replacement included, on that clock.
@@ -120,6 +123,7 @@ impl ShelfItem {
             warnings,
             pixels: ItemPixels::Ready(pixels),
             source,
+            layout: None,
             viewed: 0,
             published: 0,
             seen: false,

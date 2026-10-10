@@ -9,6 +9,7 @@
 
 mod cards;
 mod copy;
+mod crop;
 mod external;
 mod inline;
 mod queue;
@@ -32,6 +33,7 @@ use crate::ctl_server::ReplyTx;
 pub(crate) use cards::HARNESS_CARDS_PER_SECOND;
 pub(crate) use cards::{CardLedger, CardRecord};
 pub(crate) use copy::{CopyContent, CopyService, CopyStarted};
+pub(crate) use crop::{LaneCrop, LaneTile, coverage as crop_coverage, plan_crop};
 pub(crate) use external::{OpenFailure, Viewer, open as open_externally};
 pub(crate) use inline::{card_caption, card_message, card_size};
 pub(crate) use queue::Sender;
@@ -81,15 +83,18 @@ pub(crate) enum Requester {
     Lane(LaneRender),
 }
 
-/// A lane rendering its item again, on another canvas: it answers no one,
-/// and what it renders replaces the item's pixels only while the item is the
-/// one it asked about, unreplaced, from the same source.
+/// A lane rendering its item again, on another canvas or sharper where it
+/// is zoomed: it answers no one, and what it renders counts only while the
+/// item is the one it asked about, unreplaced, from the same source.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LaneRender {
     pub window: u64,
     pub pane: u64,
     pub item: u64,
     pub generation: u64,
+    /// For a zoomed view's sharper pixels, the lane's ticket for them: they
+    /// stay the lane's and never replace the item's own.
+    pub tile: Option<u64>,
 }
 
 impl Requester {
@@ -403,6 +408,15 @@ impl MediaService {
         }
     }
 
+    /// Drop the renders `pane`'s lane asked for `item` that are still
+    /// waiting: its file changed, so they would read it again for nothing.
+    /// A lane's renders answer no one.
+    pub(crate) fn withdraw_lane_renders(&mut self, pane: u64, item: u64) {
+        let _ = self.queue.cancel(|push| {
+            matches!(push.requester, Requester::Lane(render) if render.pane == pane && render.item == item)
+        });
+    }
+
     /// When a waiting push next expires, if one is waiting.
     pub(crate) fn next_deadline(&self) -> Option<Instant> {
         self.queue.next_deadline()
@@ -589,6 +603,7 @@ mod tests {
             pane: 3,
             item: 9,
             generation: 2,
+            tile: None,
         };
         let later = Instant::now() + std::time::Duration::from_secs(60);
         service.admit(Sender::Lane(3), later, push_for(Requester::Lane(render)));
@@ -610,6 +625,45 @@ mod tests {
         service.pump(None, no_wake);
         assert_eq!(service.take_lane_failures(), [render]);
         assert!(service.take_user_failures().is_empty());
+    }
+
+    /// A lane's waiting renders for an item whose file changed are dropped
+    /// without a word, and nothing else that waits: not its renders for
+    /// another item, nor another pane's.
+    #[test]
+    fn a_changed_items_waiting_lane_renders_are_withdrawn() {
+        let mut service = MediaService::default();
+        let render = |pane, item, tile| LaneRender {
+            window: 1,
+            pane,
+            item,
+            generation: 0,
+            tile,
+        };
+        let later = Instant::now() + std::time::Duration::from_secs(60);
+        for (sender, lane) in [
+            (Sender::LaneTile(3), render(3, 9, Some(1))),
+            (Sender::Lane(3), render(3, 8, None)),
+            (Sender::Lane(4), render(4, 9, None)),
+        ] {
+            service.admit(sender, later, push_for(Requester::Lane(lane)));
+        }
+        service.withdraw_lane_renders(3, 9);
+        assert!(service.take_lane_failures().is_empty(), "silent");
+        let left: Vec<_> = service
+            .queue
+            .cancel(|_| true)
+            .into_iter()
+            .map(|push| push.requester)
+            .collect();
+        let left: Vec<_> = left
+            .into_iter()
+            .map(|requester| match requester {
+                Requester::Lane(lane) => (lane.pane, lane.item),
+                _ => (0, 0),
+            })
+            .collect();
+        assert_eq!(left, [(3, 8), (4, 9)]);
     }
 
     /// The lane's end of the channel closes before the App is woken, by a

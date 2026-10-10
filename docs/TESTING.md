@@ -4098,6 +4098,20 @@ an image, zoom with Cmd+wheel (Ctrl+wheel off macOS) over a corner, drag,
 and press `⤢`: `ui_geometry`'s `preview_lanes` reports `zoom` and the
 image's rectangle at each step. A pinch needs a real touchpad.
 
+Sharper pixels: `media::crop` tests pin the plan (the box at the size shown
+and the part in view with its guard, a raster never past its own pixels,
+none past 4096 on an edge, an SVG's crop within its ceiling, nothing asked
+without a quarter more detail or for another kind), what a reply covers
+from its layout, when a tile serves and suffices, and the 75/150 ms
+coalescing and who asked last. `kettle-render` pins that a tile is placed
+only while it covers the view and, on the GPU, drawn instead of the item's
+pixels, never as well; app guards pin the wiring. For a live check, show a
+large PNG with one-pixel stripes, Cmd+wheel to about two device pixels a
+source pixel: `preview_lanes` reports `sharp`, and the stripes show where
+the lane's own pixels would be grey. A control client's `preview_zoom_in`
+leaves `sharp` null; change the file and pan, and the lane says the file
+changed and keeps what it showed until `↻`.
+
 Previews the user asks for: `kettle-ui` media tests pin that the user's
 request waits in a slot of its own even with every push slot full, runs
 first, gives way to a newer one, and expires and cancels like a push; that
