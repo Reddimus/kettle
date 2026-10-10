@@ -38,6 +38,10 @@ license=('MIT')
 depends=('fontconfig' 'freetype2' 'libxkbcommon' 'libxkbcommon-x11'
          'libx11' 'libwayland-client' 'libxcb' 'vulkan-icd-loader'
          'mesa')
+# Kettle runs the user's own ffmpeg and ffprobe (from /usr/bin) inside its
+# media sandbox for videos it cannot read itself; nothing else needs it, and
+# Kettle uses no GStreamer.
+optdepends=('ffmpeg: posters, frames and paste-receipt posters for WebM, Matroska and other videos')
 # `conflicts` + `provides` lets users swap between the binary and
 # the (future) source-build `kettle` PKGBUILD without uninstalling
 # first.

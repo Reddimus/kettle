@@ -326,8 +326,21 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   file: a clone where the disk allows, otherwise a copy that leaves 2 GiB
   free, owner-only, quarantined on macOS, up to 4 GiB, and deleted when
   Kettle exits. It opens paused.
+- `kettle ctl get_state` says which video decoders a worker uses, under
+  `media.video`: AVFoundation then your ffmpeg on macOS, your ffmpeg on
+  Linux, and that no GStreamer is used.
 
 ### Changed
+
+- A pasted or dropped video's poster is made by the sandboxed media worker on
+  macOS and Linux, the same way a shown video's is, from the exact file the
+  receipt checked; Kettle itself decodes nothing. macOS no longer asks Quick
+  Look, so WebM and other videos AVFoundation cannot read get a poster when
+  ffmpeg is installed, and a generic receipt otherwise. On Linux the poster
+  now comes from your ffmpeg when it is installed; without one, or for a
+  video it cannot read, the thumbnail your file manager cached is still used
+  when it matches the file, read by the worker as any image is (so also
+  without the sandbox) rather than by Kettle.
 
 - JSON objects in Kettle's control, MCP and other JSON replies keep their
   keys in the order Kettle writes them, in every build, rather than

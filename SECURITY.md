@@ -310,6 +310,7 @@ Reports that fit any of these are welcome:
   is in scope.
 - **External video decoder** — a video's stills come from Apple's
   decoder on macOS or the user's own ffmpeg and ffprobe, never bundled.
+  Kettle ships and loads no GStreamer, on any platform; `get_state` says so.
   Kettle's launcher looks for ffmpeg only in fixed places and the Nix
   profile under `HOME`, never `PATH`; the worker uses only the binary the
   parent names in its environment, and trusts it only when
@@ -333,6 +334,29 @@ Reports that fit any of these are welcome:
   anywhere else, an argument a request or the media chose, a decoder that
   starts a process, reads another file, or outlives its job, or a frame
   accepted at the wrong size, is in scope.
+- **Video paste receipts** — a pasted or dropped video's receipt starts
+  with a check, Kettle itself run as a short-lived helper with a two-second
+  deadline: it opens the file only through a parent chain no other
+  principal can change, refusing a link, a multiply linked file or one
+  another principal can write, compares its identity and sampled contents
+  when it opens it and before it answers, and reads at most 64 KiB to see
+  that it starts like a video. On macOS and Linux it decodes nothing, and the
+  poster is then the media worker's, sandboxed as above, from a job held to
+  the device and inode the check opened, and kept only when the worker's
+  file identity still matches; on Linux, when no decoder can make one, a
+  cached freedesktop.org thumbnail the check opened the same way, which the
+  worker renders only once its `Thumb::URI` and `Thumb::MTime` name the
+  video as the check saw it. A cached thumbnail is a raster, so where the
+  sandbox cannot be applied it renders in the bounded, unconfined worker as
+  any raster does. Either poster is kept only when a second check, as
+  strict as the first, finds the same file with the same sampled contents.
+  No video or thumbnail byte is parsed in the GUI. On Windows, where no
+  worker runs, the check asks the Shell's thumbnail provider, and identity
+  and sampled contents are checked around that path-based call.
+  A receipt for a file another principal could swap, a poster of a file
+  other than the one checked, or any receipt byte parsed outside the worker
+  on macOS or Linux, is in scope. The check is `video_preview`'s
+  `run_worker`; the poster is `video_preview::worker_poster`.
 - **Model frames** — `kettle_video_frames` (full MCP only, never the
   display server or Kettle's integrations, approved by nothing Kettle
   sets) and `kettle video-frames` return a video's frames to the caller: a

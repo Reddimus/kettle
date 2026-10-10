@@ -73,6 +73,19 @@ nix develop
 Useful when you have Nix but no Rust toolchain installed system-
 wide — the dev shell is fully hermetic.
 
+### Videos (optional ffmpeg)
+
+Kettle reads GIF, APNG and animated WebP itself; other videos (WebM,
+Matroska and the rest) need ffmpeg and ffprobe, which the flake does not
+bundle. Kettle looks for them only in fixed places, never `PATH`: on NixOS
+`/run/current-system/sw/bin`, otherwise `~/.nix-profile/bin`. So install
+ffmpeg into one of those profiles (`environment.systemPackages` or
+`nix profile install nixpkgs#ffmpeg`, whose `bin` carries ffprobe beside it);
+an ffmpeg that is only on a temporary shell's `PATH` is not found. The media
+worker then runs it inside its own Landlock sandbox at run time, which is
+separate from Nix's build sandbox. Kettle uses no GStreamer, so the flake adds
+no GStreamer libraries or plugin path.
+
 ## Per-release maintenance
 
 Linux outputs include the sibling `kettle-media-worker`, built in its own

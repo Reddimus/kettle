@@ -386,7 +386,14 @@ the exact transport and smoke-test boundaries.
 Copying or dropping a video pastes its quoted path through the same channel.
 With `paste-video-preview` enabled, Kettle also shows a short-lived poster for
 the exact local file. The poster is informational; the program in the pane
-still decides whether to read the path.
+still decides whether to read the path. On macOS and Linux the poster is made
+by the media worker, which decodes a video only in its sandbox, with the same
+decoders a shown video uses (below); on Linux, a video no decoder can read
+falls back to the thumbnail your file manager cached for it (the
+freedesktop.org cache under `~/.cache/thumbnails`), when that thumbnail still
+matches the file. The worker reads that thumbnail as it reads any image, so
+it shows even on a system without the sandbox. A video
+with no poster still gets its receipt, without one.
 
 ### Video posters and frames (optional ffmpeg)
 
@@ -409,6 +416,10 @@ Kettle looks for them only in `/opt/homebrew/bin`, `/usr/local/bin`,
 `PATH`, and uses them only when they and the directories on the way to them
 belong to you or root and no one else can write them. Kettle never installs
 them, and neither should an agent.
+
+Kettle uses no GStreamer: installing GStreamer or its plugins changes
+nothing, and `kettle ctl get_state` lists the decoders it does use under
+`media.video`.
 
 ### The media sandbox
 
