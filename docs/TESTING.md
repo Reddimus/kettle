@@ -4515,7 +4515,14 @@ several frames, no frames or seventeen, an edge of 0 or past 2560); the
 encoder keeping the best quality that fits and shrinking a quarter at a time,
 never cutting; the index's exact words, milliseconds under a second; the
 install hint only for a missing decoder; and the output written whole,
-private, never over the video and never left half-written. The model
+private, never over the video and never left half-written, a folder others
+can change (0777, 0775) refused while a sticky or private one is not, and a
+failed write removing nothing it did not make, a look-alike temporary file
+included. A single frame is a labeled one-column sheet; `at_s` with any
+count, and a supplied path past 4 KiB however it normalizes, are refused;
+the encoder tries the 320-pixel minimum itself; the index rounds a tolerance
+up. MCP takes integer arguments written as 9.0, and the launcher names
+ffmpeg by the path it was found under, so the worker finds the same ffprobe. The model
 acceptance for `kettle_video_frames` used a nine-second clip of nine
 one-second colors (red, green, blue, yellow, magenta, cyan, white, orange,
 purple) as VP8 WebM, through ffmpeg, and H.264 MP4, through AVFoundation:

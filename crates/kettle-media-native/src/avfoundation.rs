@@ -15,7 +15,7 @@
 //!
 //! Containers AVFoundation does not read (WebM, Matroska, AVI and the rest)
 //! are `UnsupportedContainer`, and a codec it cannot decode is
-//! `CodecUnavailable`, which [`Decoders`] answers with the external decoder
+//! `CodecUnavailable`, which [`Decoders`](crate::Decoders) answers with the external decoder
 //! when there is one.
 
 use std::os::fd::AsRawFd as _;
@@ -161,6 +161,15 @@ fn time(ms: u64) -> CMTime {
 fn rotation(a: f64, b: f64) -> u16 {
     let degrees = b.atan2(a).to_degrees().round() as i64;
     ((degrees.rem_euclid(360) + 45) / 90 % 4 * 90) as u16
+}
+
+/// The picture as shown: the bounding box of the track's size under its
+/// display transform, each term's size taken on its own so a turn that is
+/// not a quarter still covers what it shows.
+fn shown_size(size: CGSize, transform: objc2_core_foundation::CGAffineTransform) -> (f64, f64) {
+    let width = (transform.a * size.width).abs() + (transform.c * size.height).abs();
+    let height = (transform.b * size.width).abs() + (transform.d * size.height).abs();
+    (width.round(), height.round())
 }
 
 /// Load `keys` on `object`, waiting no later than `deadline`.
@@ -368,11 +377,7 @@ impl VideoDecoder for AvFoundation {
         let duration_ms = ms(duration)
             .and_then(|duration| u64::try_from(duration).ok())
             .ok_or(FailureCode::RenderParse)?;
-        let shown = |a: f64, b: f64| (a * size.width + b * size.height).abs().round();
-        let (width, height) = (
-            shown(transform.a, transform.c),
-            shown(transform.b, transform.d),
-        );
+        let (width, height) = shown_size(size, transform);
         let side = f64::from(MAX_VIDEO_SIDE);
         if !(1.0..=side).contains(&width) || !(1.0..=side).contains(&height) {
             return Err(if width > side || height > side {
@@ -520,6 +525,44 @@ mod tests {
         assert_eq!(rotation(-1.0, 0.0), 180);
         assert_eq!(rotation(0.0, -1.0), 270);
         assert_eq!(rotation(0.9, 0.1), 0, "nearly upright");
+    }
+
+    #[test]
+    fn the_shown_size_bounds_the_transformed_picture() {
+        let transform = |a: f64, b: f64, c: f64, d: f64| objc2_core_foundation::CGAffineTransform {
+            a,
+            b,
+            c,
+            d,
+            tx: 0.0,
+            ty: 0.0,
+        };
+        let size = CGSize {
+            width: 1920.0,
+            height: 1080.0,
+        };
+        assert_eq!(
+            shown_size(size, transform(1.0, 0.0, 0.0, 1.0)),
+            (1920.0, 1080.0)
+        );
+        assert_eq!(
+            shown_size(size, transform(0.0, 1.0, -1.0, 0.0)),
+            (1080.0, 1920.0)
+        );
+        let half = std::f64::consts::FRAC_1_SQRT_2;
+        assert_eq!(
+            shown_size(size, transform(half, half, -half, half)),
+            (2121.0, 2121.0),
+            "an eighth of a turn"
+        );
+        let square = CGSize {
+            width: 100.0,
+            height: 100.0,
+        };
+        assert_eq!(
+            shown_size(square, transform(half, half, -half, half)),
+            (141.0, 141.0)
+        );
     }
 
     #[test]
