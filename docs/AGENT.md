@@ -779,6 +779,16 @@ goes to the pane tmux was started from, marked unverified, or is refused.
 Elsewhere, a Kettle that serves neither included, they say not to call it.
 The full server says the same after its own tools.
 These are guidance only: `kettle_show` still finds its Kettle the strict way.
+How much of them a harness shows its model differs. Claude Code shows the
+instructions and loads the deferred tool through its tool search when a
+turn calls for it, so it shows files, images and reply diagrams unasked
+(15 of 15 such prompts in the 2026-10-10 acceptance run, and none of 20
+ordinary ones). Codex CLI 0.162 always defers MCP tools and shows its model
+neither a server's instructions nor a tool's description, so it shows media
+when asked: "show it in Kettle" (14 of 15) or naming `kettle_show` (15 of
+15), never unasked (0 of 15). Neither model claimed to have seen what it
+showed. Kettle sets no `anthropic/alwaysLoad`: Claude Code finds the tool
+without it.
 On the 2026-07-28 revision, `server/discover` marks them `cacheScope:
 "private"` and `ttlMs: 0` in both modes, since they depend on where the
 server runs; the legacy `initialize` carries the same words.

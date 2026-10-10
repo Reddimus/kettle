@@ -4267,7 +4267,17 @@ device and inode, and the model gets one plain line saying it has not seen
 the media. It also runs the real `kettle mcp --display` in both protocol
 eras: initialize's instructions name `kettle_show`, `tools/list` is exactly
 `[kettle_show]`, a `kettle_run` call is refused as an invalid tool, and
-`server/discover` is private. For a live check, run `kettle mcp --display`
+`server/discover` is private. The model-behavior acceptance (S-G, with S3)
+ran each harness in a Kettle pane on 15 prompts that should show something
+(five that write or edit a Mermaid file, five that make an image, five whose
+reply holds a useful diagram) and 20 ordinary ones, each once in a fresh
+directory: Claude Code 2.1.296 called `kettle_show` on 15 of 15 and 0 of
+20, by path for files and images and inline for reply diagrams; Codex 0.162,
+through the launch function's server table, on 0 of 15 and 0 of 20, on 14
+of 15 with "Show it in Kettle." added and 15 of 15 when the tool was named.
+No reply in either claimed to have seen the media. The drivers, prompts and
+scores are kept outside the repository with the run's other evidence. For
+a live check, run `kettle mcp --display`
 inside a pane of `kettle --agent-server off --agent-display on` and call
 `kettle_show` on an SVG: it lands verified in that pane. Titles lose control characters,
 separators, bidirectional formatting and placeholder sequences (the

@@ -114,6 +114,7 @@ previews (`agent-display`), then:
   Kettle's plugin, and what it shows lands as a card under the call.
 - Codex: turn on Codex previews, or add the function `kettle agent-setup
   --print` prints (the palette's "Copy agent setup commands" copies it).
+  Codex shows media when asked: say "show it in Kettle".
 - Any shell: `kettle show plot.png`, or `kettle show --mermaid < flow.mmd`,
   sends media to the pane's shelf.
 
