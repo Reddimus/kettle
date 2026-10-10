@@ -432,7 +432,7 @@ fn call_tool_inner(
         // Every kettle_show failure keeps its fixed wording and says the
         // model has not seen the media, an unknown argument included.
         if call.name == "kettle_show" {
-            return show_failed(kettle_media::FailureCode::BadParams.model_message());
+            return show_failed(kettle_media::FailureCode::BadParams.into());
         }
         return error_result(&error);
     }
@@ -589,10 +589,10 @@ fn tool_kettle_show(
         (None, Some(Value::String(path))) if std::path::Path::new(path).is_absolute() => {
             match crate::show_cli::file_source(std::path::Path::new(path), false) {
                 Ok(source) => source,
-                Err(message) => return show_failed(&message),
+                Err(refusal) => return show_failed(refusal),
             }
         }
-        _ => return show_failed(FailureCode::BadParams.model_message()),
+        _ => return show_failed(FailureCode::BadParams.into()),
     };
     let name = args
         .get("path")
@@ -611,11 +611,11 @@ fn tool_kettle_show(
             .map(crate::mcp_display::CardHook::target),
     }) {
         Ok(params) => params,
-        Err(message) => return show_failed(&message),
+        Err(refusal) => return show_failed(refusal),
     };
     let mut client = match Client::discover_display(None) {
         Ok(client) => client,
-        Err(error) => return show_failed(&crate::show_cli::failure_text(&error)),
+        Err(error) => return show_failed(crate::show_cli::refusal(&error)),
     };
     let reply = match cancelled {
         Some(cancelled) => client.call_cancellable("show", params, cancelled),
@@ -635,8 +635,8 @@ fn tool_kettle_show(
                 show_sent(&result)
             }
         }
-        Ok(Err(_)) => show_failed("Kettle answered in a form this tool does not know."),
-        Err(error) => show_failed(&crate::show_cli::failure_text(&error)),
+        Ok(Err(_)) => show_failed(crate::show_cli::Refusal::UnknownReply),
+        Err(error) => show_failed(crate::show_cli::refusal(&error)),
     }
 }
 
@@ -708,11 +708,20 @@ fn tool_kettle_card(
     json!({ "content": [{ "type": "text", "text": output.to_string() }] })
 }
 
-/// A `kettle_show` that did not reach the shelf, in its fixed wording.
-fn show_failed(message: &str) -> Value {
+/// A `kettle_show` that did not reach the shelf: its fixed wording, and its
+/// fixed code and reason, which name no path, source or card.
+fn show_failed(refusal: crate::show_cli::Refusal) -> Value {
+    let mut structured = json!({
+        "status": "failed",
+        "code": refusal.code(),
+        "model_has_seen": false,
+    });
+    if let Some(reason) = refusal.reason() {
+        structured["reason"] = reason.into();
+    }
     json!({
-        "content": [{ "type": "text", "text": message }],
-        "structuredContent": {"status": "failed", "model_has_seen": false},
+        "content": [{ "type": "text", "text": refusal.text() }],
+        "structuredContent": structured,
         "isError": true,
     })
 }
@@ -1193,8 +1202,23 @@ mod tests {
             let result = show(arguments.clone());
             assert_eq!(result["isError"], json!(true), "{arguments}");
             assert_eq!(text(&result), failure.model_message(), "{arguments}");
-            assert_eq!(result["structuredContent"]["status"], "failed");
-            assert_eq!(result["structuredContent"]["model_has_seen"], false);
+            let structured = &result["structuredContent"];
+            assert_eq!(structured["status"], "failed");
+            assert_eq!(structured["code"], failure.code(), "{arguments}");
+            assert_eq!(
+                structured["reason"].as_str(),
+                failure.reason(),
+                "{arguments}"
+            );
+            assert_eq!(structured["model_has_seen"], false);
+            let fields: Vec<_> = structured.as_object().unwrap().keys().cloned().collect();
+            assert!(
+                fields
+                    .iter()
+                    .all(|field| ["status", "code", "reason", "model_has_seen"]
+                        .contains(&field.as_str())),
+                "nothing else, and nothing of the media: {fields:?}"
+            );
         }
     }
 

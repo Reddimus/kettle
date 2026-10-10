@@ -17,12 +17,62 @@ use crate::ShowArgs;
 /// once they are base64-encoded. The whole request is checked before it is
 /// sent, so a source near this is refused there with the same advice.
 const MAX_STDIN_BYTES: usize = kettle_ctl::protocol::MAX_LINE_BYTES / 4 * 3;
-/// What `kettle show` says when stdin could not be read.
-const STDIN_UNREADABLE: &str = "Could not read the media from standard input.";
-/// What it says when Kettle's reply was not one it knows.
-const UNKNOWN_REPLY: &str = "Kettle answered in a form this command does not know.";
-/// What it says when Kettle refused for a reason it does not know.
-const UNKNOWN_REFUSAL: &str = "Kettle refused the media for a reason this command does not know.";
+/// Why media was not sent, in fixed words with a fixed code: a failure from
+/// Kettle's table, or one of the client's own. Nothing in it comes from the
+/// media, its path or a reply's words.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Refusal {
+    /// A failure from Kettle's table, said in its words.
+    Kettle(FailureCode),
+    /// Stdin could not be read.
+    StdinUnreadable,
+    /// A path that is not Unicode, which has no JSON spelling.
+    PathNotUnicode,
+    /// Kettle refused with a code or reason the client does not know.
+    UnknownReason,
+    /// Kettle's reply was in a form the client does not know.
+    UnknownReply,
+}
+
+impl Refusal {
+    /// What the user, or the model, is told.
+    pub(crate) fn text(self) -> &'static str {
+        match self {
+            Self::Kettle(failure) => failure.model_message(),
+            Self::StdinUnreadable => "Could not read the media from standard input.",
+            Self::PathNotUnicode => "Media paths must be valid Unicode to send to Kettle.",
+            Self::UnknownReason => {
+                "Kettle refused the media for a reason this client does not know."
+            }
+            Self::UnknownReply => "Kettle answered in a form this client does not know.",
+        }
+    }
+
+    /// Its fixed code: Kettle's own, or one of the client's.
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::Kettle(failure) => failure.code(),
+            Self::StdinUnreadable => "stdin_unreadable",
+            Self::PathNotUnicode => "bad_params",
+            Self::UnknownReason => "unknown_refusal",
+            Self::UnknownReply => "unknown_reply",
+        }
+    }
+
+    /// Its fixed refinement of the code, for those that have one.
+    pub(crate) fn reason(self) -> Option<&'static str> {
+        match self {
+            Self::Kettle(failure) => failure.reason(),
+            _ => None,
+        }
+    }
+}
+
+impl From<FailureCode> for Refusal {
+    fn from(failure: FailureCode) -> Self {
+        Self::Kettle(failure)
+    }
+}
 
 /// Run `kettle show …`; returns the process exit code (0 shown, 1 not).
 pub fn run_show(args: ShowArgs) -> i32 {
@@ -31,14 +81,14 @@ pub fn run_show(args: ShowArgs) -> i32 {
             println!("{}", confirmation(&result));
             0
         }
-        Err(message) => {
-            eprintln!("kettle show: {message}");
+        Err(refusal) => {
+            eprintln!("kettle show: {}", refusal.text());
             1
         }
     }
 }
 
-fn show(args: ShowArgs) -> Result<ShowResult, String> {
+fn show(args: ShowArgs) -> Result<ShowResult, Refusal> {
     let source = if args.source == Path::new("-") {
         stdin_source(&mut std::io::stdin().lock(), args.mermaid)?
     } else {
@@ -51,22 +101,20 @@ fn show(args: ShowArgs) -> Result<ShowResult, String> {
         pane: None,
         inline: None,
     })?;
-    let mut client = Client::discover_display(None).map_err(|error| failure_text(&error))?;
+    let mut client = Client::discover_display(None).map_err(|error| refusal(&error))?;
     let result = client
         .call_with_timeout("show", params, SHOW_CALL_TIMEOUT)
-        .map_err(|error| failure_text(&error))?;
-    serde_json::from_value(result).map_err(|_| UNKNOWN_REPLY.into())
+        .map_err(|error| refusal(&error))?;
+    serde_json::from_value(result).map_err(|_| Refusal::UnknownReply)
 }
 
 /// `request`'s params, refused as Kettle would refuse them, and refused as
 /// too large when the whole request a client frames, its escapes and base64
 /// included, would not fit one line: a file path carries any size.
-pub(crate) fn request_params(request: ShowRequest) -> Result<serde_json::Value, String> {
-    let params = request
-        .into_params()
-        .map_err(|failure| failure.model_message().to_string())?;
+pub(crate) fn request_params(request: ShowRequest) -> Result<serde_json::Value, Refusal> {
+    let params = request.into_params()?;
     if !kettle_ctl::protocol::request_fits("show", &params) {
-        return Err(FailureCode::TooLarge.model_message().into());
+        return Err(FailureCode::TooLarge.into());
     }
     Ok(params)
 }
@@ -74,7 +122,7 @@ pub(crate) fn request_params(request: ShowRequest) -> Result<serde_json::Value, 
 /// What `input` holds, refused rather than truncated once it is more than
 /// its kind may be: with `mermaid`, UTF-8 Mermaid text of at most 64 KiB;
 /// else bytes the worker classifies, of at most [`MAX_STDIN_BYTES`].
-fn stdin_source(input: &mut impl Read, mermaid: bool) -> Result<ShowSource, String> {
+fn stdin_source(input: &mut impl Read, mermaid: bool) -> Result<ShowSource, Refusal> {
     let cap = if mermaid {
         MAX_MERMAID_BYTES
     } else {
@@ -84,15 +132,15 @@ fn stdin_source(input: &mut impl Read, mermaid: bool) -> Result<ShowSource, Stri
     input
         .take(cap as u64 + 1)
         .read_to_end(&mut bytes)
-        .map_err(|_| STDIN_UNREADABLE.to_string())?;
+        .map_err(|_| Refusal::StdinUnreadable)?;
     if bytes.len() > cap {
-        return Err(FailureCode::TooLarge.model_message().into());
+        return Err(FailureCode::TooLarge.into());
     }
     if bytes.is_empty() {
-        return Err(FailureCode::BadParams.model_message().into());
+        return Err(FailureCode::BadParams.into());
     }
     if mermaid {
-        let text = String::from_utf8(bytes).map_err(|_| FailureCode::BadParams.model_message())?;
+        let text = String::from_utf8(bytes).map_err(|_| FailureCode::BadParams)?;
         return Ok(ShowSource::Mermaid(text));
     }
     Ok(ShowSource::Image(bytes))
@@ -103,20 +151,18 @@ fn stdin_source(input: &mut impl Read, mermaid: bool) -> Result<ShowSource, Stri
 /// command opens there: Kettle's worker reads only that file, so it shows
 /// nothing this command could not read itself. With `mermaid` it renders
 /// as a diagram.
-pub(crate) fn file_source(path: &Path, mermaid: bool) -> Result<ShowSource, String> {
+pub(crate) fn file_source(path: &Path, mermaid: bool) -> Result<ShowSource, Refusal> {
     // As given, before `absolute` drops its `.` parts: a spelling too long
     // for Kettle is refused however short it would come out.
     if native_len(path) > kettle_media::MAX_PATH_BYTES {
-        return Err(FailureCode::BadParams.model_message().into());
+        return Err(FailureCode::BadParams.into());
     }
-    let path: PathBuf = std::path::absolute(path)
-        .map_err(|_| FailureCode::FileNotFound.model_message().to_string())?;
+    let path: PathBuf = std::path::absolute(path).map_err(|_| FailureCode::FileNotFound)?;
     if path.to_str().is_none() {
-        return Err("Media paths must be valid Unicode to send to Kettle.".into());
+        return Err(Refusal::PathNotUnicode);
     }
-    let native = NativePath::from_path(&path)
-        .map_err(|_| FailureCode::BadParams.model_message().to_string())?;
-    let attestation = attest(&path).map_err(|failure| failure.model_message().to_string())?;
+    let native = NativePath::from_path(&path).map_err(|_| FailureCode::BadParams)?;
+    let attestation = attest(&path)?;
     Ok(ShowSource::File {
         path: native,
         attestation,
@@ -177,25 +223,19 @@ fn attest(path: &Path) -> Result<ExternalAttested, FailureCode> {
     Ok(ExternalAttested { dev: 0, ino: 0 })
 }
 
-/// What to say when Kettle did not take the media: the fixed wording for
-/// each failure, which names no path or source and never suggests turning
-/// on full control. Kettle names a refusal by its code and reason; its
-/// words, which a stale or foreign server could make anything, are not
-/// repeated.
-pub(crate) fn failure_text(error: &CtlError) -> String {
-    let failure = match error {
-        CtlError::NotInKettle => FailureCode::NotInKettle,
-        CtlError::NoServer | CtlError::Io(_) => FailureCode::DisplayDisabled,
-        CtlError::Server { code, reason, .. } => {
-            match FailureCode::from_wire(code, reason.as_deref()) {
-                Some(failure) => failure,
-                None => return UNKNOWN_REFUSAL.into(),
-            }
-        }
-        CtlError::TimedOut | CtlError::Cancelled => FailureCode::RenderTimeout,
-        CtlError::Protocol(_) | CtlError::Unusable(_) => return UNKNOWN_REPLY.into(),
-    };
-    failure.model_message().into()
+/// Why Kettle did not take the media, as the fixed failure for each, which
+/// names no path or source and never suggests turning on full control.
+/// Kettle names a refusal by its code and reason; its words, which a stale
+/// or foreign server could make anything, are not repeated.
+pub(crate) fn refusal(error: &CtlError) -> Refusal {
+    match error {
+        CtlError::NotInKettle => FailureCode::NotInKettle.into(),
+        CtlError::NoServer | CtlError::Io(_) => FailureCode::DisplayDisabled.into(),
+        CtlError::Server { code, reason, .. } => FailureCode::from_wire(code, reason.as_deref())
+            .map_or(Refusal::UnknownReason, Refusal::Kettle),
+        CtlError::TimedOut | CtlError::Cancelled => FailureCode::RenderTimeout.into(),
+        CtlError::Protocol(_) | CtlError::Unusable(_) => Refusal::UnknownReply,
+    }
 }
 
 fn confirmation(result: &ShowResult) -> String {
@@ -222,6 +262,25 @@ mod tests {
         }
     }
 
+    /// A refusal of the client's own has its own fixed code and no reason;
+    /// one of Kettle's keeps Kettle's code and reason.
+    #[test]
+    fn a_refusal_has_a_fixed_code_and_reason() {
+        for (refusal, code) in [
+            (Refusal::StdinUnreadable, "stdin_unreadable"),
+            (Refusal::PathNotUnicode, "bad_params"),
+            (Refusal::UnknownReason, "unknown_refusal"),
+            (Refusal::UnknownReply, "unknown_reply"),
+        ] {
+            assert_eq!((refusal.code(), refusal.reason()), (code, None));
+        }
+        let missing = Refusal::Kettle(FailureCode::FileNotFound);
+        assert_eq!(
+            (missing.code(), missing.reason()),
+            ("file_refused", Some("not_found"))
+        );
+    }
+
     #[test]
     fn failures_use_fixed_wording_that_never_suggests_full_control() {
         for (error, expected) in [
@@ -238,9 +297,9 @@ mod tests {
                 FailureCode::UnknownMethod,
             ),
         ] {
-            let text = failure_text(&error);
-            assert_eq!(text, expected.model_message());
-            assert!(!text.contains("full"), "{text}");
+            let refused = refusal(&error);
+            assert_eq!(refused, Refusal::Kettle(expected));
+            assert!(!refused.text().contains("full"), "{}", refused.text());
         }
     }
 
@@ -251,8 +310,12 @@ mod tests {
     fn a_refusal_is_said_by_its_code_never_by_the_servers_words() {
         let hostile = "\u{1b}]52;c;aGk=\u{7}/home/user/secret.png";
         for failure in FailureCode::ALL {
-            let text = failure_text(&server(failure.code(), failure.reason(), hostile));
-            assert_eq!(text, failure.model_message(), "{failure:?}");
+            let refused = refusal(&server(failure.code(), failure.reason(), hostile));
+            assert_eq!(refused, Refusal::Kettle(failure), "{failure:?}");
+            assert_eq!(
+                (refused.code(), refused.reason()),
+                (failure.code(), failure.reason())
+            );
         }
         for (code, reason) in [
             ("file_refused", None),
@@ -261,17 +324,17 @@ mod tests {
             ("no_such_code", None),
         ] {
             assert_eq!(
-                failure_text(&server(code, reason, hostile)),
-                UNKNOWN_REFUSAL
+                refusal(&server(code, reason, hostile)),
+                Refusal::UnknownReason
             );
         }
         assert_eq!(
-            failure_text(&CtlError::Protocol(hostile.into())),
-            UNKNOWN_REPLY
+            refusal(&CtlError::Protocol(hostile.into())),
+            Refusal::UnknownReply
         );
         assert_eq!(
-            failure_text(&CtlError::Unusable(hostile.into())),
-            UNKNOWN_REPLY
+            refusal(&CtlError::Unusable(hostile.into())),
+            Refusal::UnknownReply
         );
     }
 
@@ -291,7 +354,7 @@ mod tests {
         over.push(b'%');
         assert_eq!(
             read(over, true).unwrap_err(),
-            FailureCode::TooLarge.model_message()
+            Refusal::Kettle(FailureCode::TooLarge)
         );
         assert_eq!(
             read(vec![0; MAX_STDIN_BYTES], false).unwrap(),
@@ -299,17 +362,17 @@ mod tests {
         );
         assert_eq!(
             read(vec![0; MAX_STDIN_BYTES + 1], false).unwrap_err(),
-            FailureCode::TooLarge.model_message()
+            Refusal::Kettle(FailureCode::TooLarge)
         );
         for mermaid in [false, true] {
             assert_eq!(
                 read(Vec::new(), mermaid).unwrap_err(),
-                FailureCode::BadParams.model_message()
+                Refusal::Kettle(FailureCode::BadParams)
             );
         }
         assert_eq!(
             read(vec![b'g', 0xff], true).unwrap_err(),
-            FailureCode::BadParams.model_message()
+            Refusal::Kettle(FailureCode::BadParams)
         );
         struct Broken;
         impl Read for Broken {
@@ -319,7 +382,7 @@ mod tests {
         }
         assert_eq!(
             stdin_source(&mut Broken, false).unwrap_err(),
-            STDIN_UNREADABLE
+            Refusal::StdinUnreadable
         );
     }
 
@@ -337,7 +400,7 @@ mod tests {
         };
         assert_eq!(
             request_params(request(ShowSource::Image(vec![0; MAX_STDIN_BYTES]))).unwrap_err(),
-            FailureCode::TooLarge.model_message()
+            Refusal::Kettle(FailureCode::TooLarge)
         );
         let escapes = "\u{1}".repeat(MAX_MERMAID_BYTES);
         assert!(request_params(request(ShowSource::Mermaid(escapes))).is_ok());
@@ -387,11 +450,11 @@ mod tests {
         };
         assert_eq!(
             file_source(directory.path(), false).unwrap_err(),
-            FailureCode::FileNotRegular.model_message()
+            Refusal::Kettle(FailureCode::FileNotRegular)
         );
         assert_eq!(
             file_source(&directory.path().join("missing.png"), false).unwrap_err(),
-            FailureCode::FileNotFound.model_message()
+            Refusal::Kettle(FailureCode::FileNotFound)
         );
         #[cfg(unix)]
         {
@@ -445,7 +508,7 @@ mod tests {
             .expect("a named pipe is refused without waiting for a writer");
         assert_eq!(
             opened.unwrap_err(),
-            FailureCode::FileNotRegular.model_message()
+            Refusal::Kettle(FailureCode::FileNotRegular)
         );
         if unsafe { libc::geteuid() } == 0 {
             eprintln!("skipped the unreadable-file case: root reads past mode bits");
@@ -458,7 +521,7 @@ mod tests {
         );
         assert_eq!(
             file_source(&file, false).unwrap_err(),
-            FailureCode::FilePermission.model_message()
+            Refusal::Kettle(FailureCode::FilePermission)
         );
     }
 
@@ -474,12 +537,12 @@ mod tests {
         assert_eq!(long.as_os_str().len(), kettle_media::MAX_PATH_BYTES + 1);
         assert_eq!(
             file_source(&long, false).unwrap_err(),
-            FailureCode::BadParams.model_message()
+            Refusal::Kettle(FailureCode::BadParams)
         );
         let at = base.join("n".repeat(kettle_media::MAX_PATH_BYTES - base_len - 1));
         assert_eq!(
             file_source(&at, false).unwrap_err(),
-            FailureCode::FileNotFound.model_message(),
+            Refusal::Kettle(FailureCode::FileNotFound),
             "at the cap, the file system is asked"
         );
         // A spelling over the cap that would shorten once made absolute.
@@ -491,7 +554,7 @@ mod tests {
         assert!(std::path::absolute(&spelled).unwrap().as_os_str().len() < 4096);
         assert_eq!(
             file_source(&spelled, false).unwrap_err(),
-            FailureCode::BadParams.model_message()
+            Refusal::Kettle(FailureCode::BadParams)
         );
     }
 

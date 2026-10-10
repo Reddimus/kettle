@@ -757,7 +757,10 @@ server runs inside, and returns one plain line and status-only structured
 content (`status`, `delivery: "shelf"`, `pane`, `window`, `item`, `verified`,
 `kind`, `width`, `height`, `warnings`, `model_has_seen: false`), never the
 media. Failures are `isError` results in the fixed wording of [Showing
-media](#showing-media). The instructions, in both modes, follow where the
+media](#showing-media), with structured content of `status: "failed"`, the
+fixed `code` and `reason` (Kettle's own, or the client's: `stdin_unreadable`,
+`unknown_refusal`, `unknown_reply`) and `model_has_seen: false`, and nothing
+else: no path, source or card. The instructions, in both modes, follow where the
 server runs. Inside a Kettle pane (a Kettle that serves agent previews or
 control and that it descends from or a live `KETTLE_PID` names, or
 `TERM_PROGRAM=kettle`) they say when to show media: after writing or editing
