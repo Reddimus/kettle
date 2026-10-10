@@ -587,10 +587,14 @@ itself; a
 .B codex
 you define still wins.
 .B \-\-status
-reports whether Codex launched from this shell would get the server, and
-whether kettle defines the function for you.
+reports whether this shell reaches the kettle it runs in with agent previews
+on, whether Codex launched from it would get the server, whether kettle
+defines the function for you, and whether this pane started with kettle's
+plugin for Claude Code (or that Claude Code's managed policy here forbids it;
+a policy managed remotely is not visible to kettle).
 .B \-\-uninstall
-prints how to remove the function.
+prints how to remove the function. Both say that Codex and Claude Code still
+write their usual history and session files.
 .TP
 .B kettle update \fR[\fB\-\-yes\fR]
 Download and install the latest authenticated stable release. Supported for

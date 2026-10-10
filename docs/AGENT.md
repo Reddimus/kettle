@@ -928,9 +928,18 @@ would replace Kettle's.
 
 A session started this way does not show in `codex agents`. The function names the Kettle that
 printed it, and a Kettle running from a translocated copy refuses to print
-one. `kettle agent-setup --status` reports what a launch from this shell would
-get and whether Kettle defines the function for you, and `--uninstall` prints
-how to remove it.
+one. `kettle agent-setup --status` reports whether this shell reaches the
+Kettle it runs in (found the strict way `kettle show` finds it) and whether
+its agent previews are on, asked with an empty `show` that shows nothing;
+what a Codex launch from it would get; whether Kettle defines the function
+for you; and whether this pane started with Kettle's plugin for Claude Code,
+or why not: Claude Code's managed policy on this machine forbids it (a
+policy your organization manages remotely is not visible to Kettle), or
+this Kettle cannot offer it, running from a translocated copy.
+`--uninstall` prints how to remove the function. Both say that Codex and
+Claude Code still write their usual history and session files, and that
+Claude Code keeps data for a plugin it loads: Kettle writes none of their
+settings or startup files, which is not the same as nothing written.
 
 ### Kettle defines it for you
 

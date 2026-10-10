@@ -27,6 +27,7 @@ pub(crate) fn test_tempdir() -> kettle_test_support::PrivateTempDir {
 
 mod activation_server;
 mod agent_plugin;
+pub use agent_plugin::{ClaudeStatus, claude_status};
 mod app;
 pub mod codex_shell;
 mod held_buttons;
