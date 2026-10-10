@@ -60,7 +60,21 @@ available; each render still requires the matching build handshake. Kettle and e
 build identity, the source hash its build script computes
 (`crates/kettle/build_support/source_id.rs`). `kettle-media-worker` is that
 worker, a separate executable shipped beside the terminal on Unix that serves
-one job per process. It renders through `kettle-media-render`: the source is read once
+one job per process. Before a job's media or fonts are read, it opens the
+files the job names (`kettle_media_render::source::hold_inputs`, checked as
+rendering checks them, and admitted on that thread: rendering then reads
+each through its own handle, positionally from its start, keeps a failed
+file's failure and refuses any path the job never named) and confines
+itself to them with
+`kettle_media_native::sandbox` (Landlock and a seccomp filter on every
+thread on Linux, a parameterized Seatbelt profile on macOS), adding a
+trusted decoder's programs and the trees they load from
+(`Decoders::sandbox_needs`, each program's package prefix from
+`tools::library_tree`); the watchdog thread confines itself to nothing when
+it starts and reports whether it did, and a job counts as confined only if
+it did. A video job whose worker could not confine every thread gets a
+decoder that answers `SandboxUnavailable`; other kinds still render. It
+renders through `kettle-media-render`: the source is read once
 through one held descriptor, the format comes from the content, the decoded
 size is checked before any pixel is decoded, and the image is fitted into the
 job's target box as straight RGBA. An SVG is parsed with no DTD, rewritten so
