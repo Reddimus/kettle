@@ -254,6 +254,49 @@ fn a_markdown_gallery_crosses_the_boundary_whole() {
     );
 }
 
+/// An animation's stills cross the worker's boundary: the sheet, with what
+/// the animation is and each frame's times; a video container, with no
+/// decoder in this worker yet, is refused by its code.
+#[test]
+fn an_animations_stills_cross_the_boundary() {
+    let stills = kettle_media::VideoStills {
+        count: 3,
+        max_edge: 256,
+        start_s: 0.0,
+        end_s: None,
+        at_s: None,
+        layout: kettle_media::StillsLayout::Sheet {
+            cols: 3,
+            labels: true,
+        },
+    };
+    let webp = include_bytes!("../../kettle-media-render/tests/fixtures/stills/anim.webp");
+    let Some(Frame::Rendered(rendered)) = only_reply(&job_of(JobKind::VideoStills(stills), webp))
+    else {
+        panic!("no reply to a stills job");
+    };
+    rendered.validate_as(MediaKind::Video).unwrap();
+    let video = rendered.video.unwrap();
+    assert_eq!(
+        (video.info.duration_ms, video.info.codec),
+        (1000, kettle_media::VideoCodec::WebP)
+    );
+    assert_eq!(
+        video
+            .samples
+            .iter()
+            .map(|sample| sample.actual_ms)
+            .collect::<Vec<_>>(),
+        [0, 300, 600]
+    );
+    let mut mp4 = vec![0, 0, 0, 24];
+    mp4.extend_from_slice(b"ftypisom\0\0\x02\0isomiso2");
+    assert_eq!(
+        only_reply(&job_of(JobKind::VideoStills(stills), &mp4)),
+        failure(FailureCode::BackendUnavailable)
+    );
+}
+
 #[test]
 fn an_explicit_kind_gets_the_plain_reply() {
     for frame in [job(&png([10, 20, 30, 255])), job_of(JobKind::Svg, SVG_1X1)] {

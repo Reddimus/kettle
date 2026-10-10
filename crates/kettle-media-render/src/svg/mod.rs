@@ -250,6 +250,53 @@ fn options(fonts: &fonts::JobFonts) -> usvg::Options<'static> {
     }
 }
 
+/// `text`, a short label of digits and punctuation, drawn white in the
+/// bundled proportional font `size` pixels high on a rounded dark box sized
+/// to it: its width and height and premultiplied RGBA, for laying over a
+/// picture.
+pub(crate) fn render_label(text: &str, size: u32) -> Result<(u32, u32, Vec<u8>), FailureCode> {
+    if text.is_empty() || text.len() > 16 || !text.chars().all(|c| c.is_ascii_graphic()) {
+        return Err(FailureCode::BadParams);
+    }
+    let fonts = fonts::for_mermaid_job(&[])?;
+    let options = options(&fonts);
+    let pad = (size / 3).max(2);
+    let height = size + 2 * pad;
+    let baseline = pad + size * 4 / 5;
+    let text_svg = |width: u32, body: &str| {
+        format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\">{body}\
+             <text x=\"{pad}\" y=\"{baseline}\" font-size=\"{size}\" fill=\"#ffffff\">{text}</text></svg>"
+        )
+    };
+    // The text's own extent decides the box: measured once, then drawn.
+    let probe = crate::guarded(FailureCode::RenderParse, || {
+        usvg::Tree::from_str(&text_svg(size * 16, ""), &options)
+            .map_err(|_| FailureCode::RenderParse)
+    })?;
+    let right = probe.root().abs_bounding_box().right();
+    if !right.is_finite() || right <= 0.0 {
+        return Err(FailureCode::RenderParse);
+    }
+    let width = (right.ceil() as u32).saturating_add(pad).min(size * 16);
+    let radius = pad;
+    let tree = crate::guarded(FailureCode::RenderParse, || {
+        usvg::Tree::from_str(
+            &text_svg(
+                width,
+                &format!(
+                    "<rect width=\"{width}\" height=\"{height}\" rx=\"{radius}\" fill=\"#000000\" fill-opacity=\"0.7\"/>"
+                ),
+            ),
+            &options,
+        )
+        .map_err(|_| FailureCode::RenderParse)
+    })?;
+    let mut pixmap = Pixmap::new(width, height).ok_or(FailureCode::RenderResource)?;
+    resvg::render(&tree, Transform::identity(), &mut pixmap.as_mut());
+    Ok((width, height, pixmap.take()))
+}
+
 /// Where the image lands: the canvas to allocate and the transform onto it,
 /// and where both sit in the target box.
 #[derive(Debug, PartialEq)]

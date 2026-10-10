@@ -59,5 +59,7 @@ ignored = ["merman-core", "merman-render", "dugong", "dugong-graphlib", "manatee
 
 [dev-dependencies]
 toml.workspace = true
+# APNG fixtures for the animation path, at the version image already locks.
+png = "=0.18.1"
 kettle-test-support.workspace = true
 tempfile = "3"
