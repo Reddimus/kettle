@@ -65,8 +65,8 @@ impl Direction {
     fn permits(self, kind: u8) -> bool {
         match self {
             Self::ExternalToParent => kind == 3,
-            Self::ParentToWorker => matches!(kind, 1 | 4),
-            Self::WorkerToParent => matches!(kind, 2 | 5 | 6 | 7),
+            Self::ParentToWorker => matches!(kind, 1 | 4 | 8 | 9),
+            Self::WorkerToParent => matches!(kind, 2 | 5 | 6 | 7 | 10 | 11 | 12),
         }
     }
 }
@@ -77,8 +77,18 @@ pub enum Frame {
     ExternalRequest(ExternalRequest),
     Job(Job),
     Rendered(Rendered),
-    DetectedRendered { kind: MediaKind, rendered: Rendered },
+    DetectedRendered {
+        kind: MediaKind,
+        rendered: Rendered,
+    },
     Failure(Failure),
+    /// A playback session: what opens it, and what the parent asks of it.
+    PlayOpen(PlayOpen),
+    PlayCommand(PlayCommand),
+    /// What it opened, each frame, and where it is.
+    Opened(Opened),
+    VideoFrame(VideoFrame),
+    PlayState(PlayState),
 }
 impl Frame {
     pub fn kind(&self) -> u8 {
@@ -90,6 +100,11 @@ impl Frame {
             Self::Rendered(_) => 5,
             Self::Failure(_) => 6,
             Self::DetectedRendered { .. } => 7,
+            Self::PlayOpen(_) => 8,
+            Self::PlayCommand(_) => 9,
+            Self::Opened(_) => 10,
+            Self::VideoFrame(_) => 11,
+            Self::PlayState(_) => 12,
         }
     }
     pub fn validate(&self) -> Result<(), ValidationError> {
@@ -98,7 +113,10 @@ impl Frame {
             Self::Ready(r) => r.build_id.validate(),
             Self::Rendered(r) => r.validate(),
             Self::DetectedRendered { kind, rendered } => rendered.validate_as(*kind),
-            Self::Failure(_) => Ok(()),
+            Self::Failure(_) | Self::PlayCommand(_) | Self::PlayState(_) => Ok(()),
+            Self::PlayOpen(open) => open.validate(),
+            Self::Opened(opened) => opened.validate(),
+            Self::VideoFrame(frame) => frame.validate(),
             Self::Job(j) => validate_worker_job(j),
             Self::ExternalRequest(j) => {
                 validate_job(j.kind, &j.fallback_fonts, j.target)?;
@@ -506,6 +524,17 @@ impl Writer {
         }
         Ok(())
     }
+    fn video_info(&mut self, info: &VideoInfo) -> Result<(), WireError> {
+        self.u64(info.duration_ms)?;
+        self.u32(info.width)?;
+        self.u32(info.height)?;
+        self.u16(info.rotation)?;
+        self.u8(info.codec as u8)?;
+        self.u8(u8::from(info.fps_milli.is_some()))?;
+        self.u32(info.fps_milli.unwrap_or(0))?;
+        self.u8(u8::from(info.has_audio))?;
+        self.u8(info.container.map_or(0, container_tag))
+    }
     fn strings(&mut self, s: &[String]) -> Result<(), WireError> {
         self.count(s.len())?;
         for s in s {
@@ -516,10 +545,14 @@ impl Writer {
 }
 fn put_job(w: &mut Writer, j: &Job) -> Result<(), WireError> {
     w.kind(j.kind)?;
-    match &j.source {
+    put_source(w, &j.source)?;
+    w.job_tail(j)
+}
+fn put_source(w: &mut Writer, source: &Source) -> Result<(), WireError> {
+    match source {
         Source::Bytes(b) => {
             w.u8(0)?;
-            w.blob(b)?;
+            w.blob(b)
         }
         Source::Path {
             path,
@@ -531,19 +564,50 @@ fn put_job(w: &mut Writer, j: &Job) -> Result<(), WireError> {
                 Authorization::ExternalAttested(a) => {
                     w.u8(0)?;
                     w.u64(a.dev)?;
-                    w.u64(a.ino)?;
+                    w.u64(a.ino)
                 }
-                Authorization::UserPull(_) => w.u8(1)?,
+                Authorization::UserPull(_) => w.u8(1),
             }
         }
     }
-    w.job_tail(j)
 }
 fn put_frame(w: &mut Writer, frame: &Frame) -> Result<(), WireError> {
     match frame {
         Frame::Hello(h) => w.build(&h.build_id),
         Frame::Ready(r) => w.build(&r.build_id),
         Frame::Failure(f) => w.u8(f.code as u8),
+        Frame::PlayOpen(open) => {
+            put_source(w, &open.source)?;
+            w.u32(open.max_width)?;
+            w.u32(open.max_height)?;
+            w.u64(open.start_ms)?;
+            w.u32(open.max_fps_milli)
+        }
+        Frame::PlayCommand(command) => w.u8(match command {
+            PlayCommand::Play => 0,
+            PlayCommand::Pause => 1,
+            PlayCommand::Heartbeat => 2,
+            PlayCommand::Close => 3,
+        }),
+        Frame::Opened(opened) => {
+            w.video_info(&opened.info)?;
+            w.u32(opened.width)?;
+            w.u32(opened.height)?;
+            w.u32(opened.fps_milli)?;
+            w.u64(opened.start_ms)
+        }
+        Frame::VideoFrame(frame) => {
+            w.u64(frame.seq)?;
+            w.u64(frame.pts_ms)?;
+            w.u32(frame.width)?;
+            w.u32(frame.height)?;
+            w.blob(&frame.rgba)
+        }
+        Frame::PlayState(state) => w.u8(match state {
+            PlayState::Playing => 0,
+            PlayState::Paused => 1,
+            PlayState::Ended => 2,
+        }),
         Frame::ExternalRequest(j) => {
             w.kind(j.kind)?;
             match &j.source {
@@ -620,16 +684,7 @@ fn put_rendered(w: &mut Writer, r: &Rendered) -> Result<(), WireError> {
     }
     w.u8(u8::from(r.video.is_some()))?;
     if let Some(video) = &r.video {
-        let info = &video.info;
-        w.u64(info.duration_ms)?;
-        w.u32(info.width)?;
-        w.u32(info.height)?;
-        w.u16(info.rotation)?;
-        w.u8(info.codec as u8)?;
-        w.u8(u8::from(info.fps_milli.is_some()))?;
-        w.u32(info.fps_milli.unwrap_or(0))?;
-        w.u8(u8::from(info.has_audio))?;
-        w.u8(info.container.map_or(0, container_tag))?;
+        w.video_info(&video.info)?;
         w.count(video.samples.len())?;
         for sample in &video.samples {
             w.u64(sample.requested_ms)?;
@@ -795,6 +850,32 @@ impl<'a> Reader<'a> {
             crate_version: self.string_owned(version)?,
             source_hash: self.string_owned(hash)?,
             protocol_version: self.u16()?,
+        })
+    }
+    fn video_info(&mut self) -> Result<VideoInfo, WireError> {
+        let duration_ms = self.u64()?;
+        let width = self.u32()?;
+        let height = self.u32()?;
+        let rotation = self.u16()?;
+        let codec = *VideoCodec::ALL
+            .get(usize::from(self.u8()?))
+            .ok_or(WireError::UnknownEnum)?;
+        let has_fps = self.flag()?;
+        let fps = self.u32()?;
+        if !has_fps && fps != 0 {
+            return Err(ValidationError::BadParams.into());
+        }
+        let has_audio = self.flag()?;
+        let container = container_of(self.u8()?)?;
+        Ok(VideoInfo {
+            duration_ms,
+            width,
+            height,
+            rotation,
+            codec,
+            fps_milli: has_fps.then_some(fps),
+            has_audio,
+            container,
         })
     }
     fn media_kind(&mut self) -> Result<MediaKind, WireError> {
@@ -1043,20 +1124,7 @@ impl<'a> Reader<'a> {
             if kind.is_some_and(|kind| kind != MediaKind::Video) {
                 return Err(ValidationError::BadParams.into());
             }
-            let duration_ms = self.u64()?;
-            let width = self.u32()?;
-            let height = self.u32()?;
-            let rotation = self.u16()?;
-            let codec = *VideoCodec::ALL
-                .get(usize::from(self.u8()?))
-                .ok_or(WireError::UnknownEnum)?;
-            let has_fps = self.flag()?;
-            let fps = self.u32()?;
-            if !has_fps && fps != 0 {
-                return Err(ValidationError::BadParams.into());
-            }
-            let has_audio = self.flag()?;
-            let container = container_of(self.u8()?)?;
+            let info = self.video_info()?;
             // At most sixteen, so both passes keep them: the borrowed pass
             // validates the whole result before any pixel is copied.
             let n = self.count(usize::from(MAX_VIDEO_STILLS))?;
@@ -1068,16 +1136,7 @@ impl<'a> Reader<'a> {
                 });
             }
             let video = VideoStillsResult {
-                info: VideoInfo {
-                    duration_ms,
-                    width,
-                    height,
-                    rotation,
-                    codec,
-                    fps_milli: has_fps.then_some(fps),
-                    has_audio,
-                    container,
-                },
+                info,
                 samples,
                 tolerance_ms: self.u32()?,
             };
@@ -1143,6 +1202,64 @@ fn parse_frame(r: &mut Reader<'_>, kind: u8) -> Result<Frame, WireError> {
         }
         6 => Frame::Failure(Failure {
             code: failure_code(r.u8()?)?,
+        }),
+        8 => {
+            // A session plays a file; inline bytes are refused, read no
+            // further than a video job's input cap.
+            let source = r.source(JobKind::VideoProbe, false)?;
+            if matches!(source, Source::Bytes(_)) {
+                return Err(ValidationError::BadParams.into());
+            }
+            let open = PlayOpen {
+                source,
+                max_width: r.u32()?,
+                max_height: r.u32()?,
+                start_ms: r.u64()?,
+                max_fps_milli: r.u32()?,
+            };
+            open.validate_bounds()?;
+            Frame::PlayOpen(open)
+        }
+        9 => Frame::PlayCommand(match r.u8()? {
+            0 => PlayCommand::Play,
+            1 => PlayCommand::Pause,
+            2 => PlayCommand::Heartbeat,
+            3 => PlayCommand::Close,
+            _ => return Err(WireError::UnknownEnum),
+        }),
+        10 => {
+            let opened = Opened {
+                info: r.video_info()?,
+                width: r.u32()?,
+                height: r.u32()?,
+                fps_milli: r.u32()?,
+                start_ms: r.u64()?,
+            };
+            opened.validate()?;
+            Frame::Opened(opened)
+        }
+        11 => {
+            let (seq, pts_ms, width, height) = (r.u64()?, r.u64()?, r.u32()?, r.u32()?);
+            // The size first, then exactly its pixels, before any is held.
+            play_frame_size(width, height)?;
+            let exact = width as usize * height as usize * 4;
+            let pixels = r.blob(exact)?;
+            if pixels.len() != exact || pts_ms > MAX_VIDEO_DURATION_MS {
+                return Err(ValidationError::BadParams.into());
+            }
+            Frame::VideoFrame(VideoFrame {
+                seq,
+                pts_ms,
+                width,
+                height,
+                rgba: r.bytes_owned(pixels)?,
+            })
+        }
+        12 => Frame::PlayState(match r.u8()? {
+            0 => PlayState::Playing,
+            1 => PlayState::Paused,
+            2 => PlayState::Ended,
+            _ => return Err(WireError::UnknownEnum),
         }),
         _ => return Err(WireError::UnknownEnum),
     })

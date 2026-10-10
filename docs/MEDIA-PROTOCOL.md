@@ -28,9 +28,9 @@ turns it into an `ExternalRequest` with an `ExternalAttested` path or inline
 bytes, and Mermaid text or `kind: "mermaid"` selects the Mermaid job kind
 rather than Auto.
 
-## Wire version 5
+## Wire version 6
 
-The header is 11 bytes: `KMED`, u16 LE protocol version 5, a frame kind, then u32 LE payload
+The header is 11 bytes: `KMED`, u16 LE protocol version 6, a frame kind, then u32 LE payload
 length. No padding or compression is permitted. Binary data and UTF-8 strings have u32 LE
 byte lengths. Lists have u32 LE counts. Integers and f64 bit patterns use LE. Boolean and
 optional-value discriminants are exactly 0 or 1. Floats must satisfy the field validators.
@@ -46,6 +46,11 @@ platform refuses the other encoding.
 | 5 Rendered | Worker to parent | Width, height, RGBA blob, 32 digest bytes, optional path identity, display lines, fence count, optional index, fence sources, script names, warning codes, layout, optional exact source, optional video result |
 | 6 Failure | Worker to parent | One fixed error-code byte |
 | 7 DetectedRendered | Worker to parent | One media-kind byte, then exactly the Rendered payload |
+| 8 PlayOpen | Parent to worker | Worker source, max width u32, max height u32, start ms u64, max frame rate u32 |
+| 9 PlayCommand | Parent to worker | One command byte: 0 play, 1 pause, 2 heartbeat, 3 close |
+| 10 Opened | Worker to parent | Video result's fixed fields, width u32, height u32, frame rate u32, start ms u64 |
+| 11 VideoFrame | Worker to parent | Sequence u64, presentation ms u64, width u32, height u32, RGBA blob |
+| 12 PlayState | Worker to parent | One state byte: 0 playing, 1 paused, 2 ended |
 
 Job-kind tags 0 through 7 are Mermaid, Svg, Raster, MarkdownDiagrams, VideoProbe,
 VideoStills, Auto and CachedThumbnail. An Auto job asks the worker to classify the source by
@@ -74,6 +79,18 @@ frames are laid out, and an actual time is the frame shown, which a decoder may 
 to the tolerance away from the time asked: every sample is within the tolerance, and the
 tolerance is within the duration. Both checks run in the borrowed pass, before any pixel is
 copied.
+
+Kinds 8 through 12 are a playback session, the only frames a worker started for
+playback reads or writes after Hello and Ready. PlayOpen names the video file as a job
+names its source (inline bytes are refused: a decoder reads a file); frames fit within its max width and height,
+a room of at most 1920 on a side, and are at most 1920 on a side and 1920 * 1080 pixels; it starts within any video's length and
+asks for 1 to 30,000 frames per thousand seconds. Opened carries the video result's fixed
+fields (duration through container, with no samples), the size frames will have and their
+rate, within the same bounds, and the time playback starts, within the duration.
+VideoFrame's size is checked against those bounds first, then its blob must be exactly
+width * height * 4 bytes, so a frame claiming more is refused before any pixel is held;
+its presentation time is at most about a year. Unknown command and state bytes do not
+decode.
 
 Source tag 0 carries a bounded byte blob. Mermaid, SVG and Markdown bytes require UTF-8.
 Tag 1 carries a native path followed by authorization tag 0 and dev/ino u64 values, or
