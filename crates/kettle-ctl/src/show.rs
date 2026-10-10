@@ -412,6 +412,38 @@ pub struct ShowResult {
     /// registered it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inline: Option<InlineDelivery>,
+    /// What a video is, beside its poster's `width` and `height`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video: Option<ShowVideo>,
+}
+
+/// A video shown: what it is, from the render of its poster. Numbers and a
+/// codec name from Kettle's own table, nothing from the media.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShowVideo {
+    pub duration_ms: u64,
+    /// The picture as shown, its rotation applied.
+    pub width: u32,
+    pub height: u32,
+    /// Kettle's name for the codec (`h264`, `vp8`, ... or `unknown`).
+    pub codec: String,
+    /// Frames per thousand seconds, when the stream says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fps_milli: Option<u32>,
+    pub has_audio: bool,
+}
+
+impl From<kettle_media::VideoInfo> for ShowVideo {
+    fn from(info: kettle_media::VideoInfo) -> Self {
+        Self {
+            duration_ms: info.duration_ms,
+            width: info.width,
+            height: info.height,
+            codec: info.codec.as_str().into(),
+            fps_milli: info.fps_milli,
+            has_audio: info.has_audio,
+        }
+    }
 }
 
 impl ShowResult {
@@ -436,6 +468,7 @@ impl ShowResult {
                 .map(|warning| warning.as_str().into())
                 .collect(),
             inline: None,
+            video: None,
         }
     }
 }
@@ -802,6 +835,38 @@ mod tests {
             let params = request.clone().into_params().unwrap();
             assert_eq!(ShowRequest::parse(params).unwrap(), request);
         }
+    }
+
+    /// A video's result carries what it is beside its poster's size, in
+    /// Kettle's own codec names; any other result says nothing of video.
+    #[test]
+    fn a_video_result_says_what_the_video_is() {
+        let info = kettle_media::VideoInfo {
+            duration_ms: 12_400,
+            width: 1280,
+            height: 720,
+            rotation: 90,
+            codec: kettle_media::VideoCodec::Vp8,
+            fps_milli: None,
+            has_audio: true,
+            container: Some(kettle_media::video::VideoContainer::WebM),
+        };
+        let mut result = ShowResult::new((1, true, 1), 2, MediaKind::Video, (400, 225), &[]);
+        let plain = serde_json::to_value(&result).unwrap();
+        assert!(plain.get("video").is_none());
+        result.video = Some(ShowVideo::from(info));
+        let value = serde_json::to_value(&result).unwrap();
+        assert_eq!(
+            value["video"],
+            serde_json::json!({"duration_ms": 12_400, "width": 1280, "height": 720,
+                "codec": "vp8", "has_audio": true})
+        );
+        assert_eq!(
+            (value["width"].clone(), value["kind"].clone()),
+            (400.into(), "video".into())
+        );
+        let back: ShowResult = serde_json::from_value(value).unwrap();
+        assert_eq!(back, result);
     }
 
     /// An inline card is asked for by name; any other value is refused.

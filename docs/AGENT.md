@@ -355,7 +355,12 @@ so does closing their pane. A file's key defaults to its path, so showing a
 file again replaces its item in place, keeping the item id.
 
 The result is `{pane, verified, window, item, kind, width, height, warnings}`,
-`kind` being what the media turned out to be. Failures carry the fixed code,
+`kind` being what the media turned out to be. A video (`kind: "video"`) is
+shown as its poster, the middle frame fitted to the lane, whose size
+`width` and `height` give; its result adds `video` with what the video is:
+`duration_ms`, its own `width` and `height` as shown, Kettle's name for the
+`codec` (`h264`, `vp8` and so on, or `unknown`), `fps_milli` when the stream
+says, and `has_audio`. Failures carry the fixed code,
 an optional fixed `reason` and wording that names no path, source or
 identifier: `not_in_kettle_pane`, `busy`, `bad_params`, `too_large`,
 `file_refused` (`not_found`, `permission`, `not_regular`, `too_large`),
