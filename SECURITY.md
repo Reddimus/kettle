@@ -212,6 +212,25 @@ Reports that fit any of these are welcome:
   that allocates past those caps, a decoder panic reached from hostile
   input, or rendered output that carries a transparent pixel's hidden color
   is in scope.
+- **External video decoder** — a video's stills come from the user's own
+  ffmpeg and ffprobe, never bundled. The worker uses only the binary the
+  parent names in its environment, never `PATH`, and trusts it only when
+  the file and every directory and link on the way to it belong to the user
+  or root and no one else can write them (a sticky directory passes; on
+  macOS the admin group counts as root, since its members are root through
+  sudo, and Homebrew's directories are writable by it). It is checked again
+  before each run. Each run is the worker's child in its process group,
+  with an empty environment, a fixed argument list into which only numbers
+  Kettle computed and the sniffed demuxer go, the `file` protocol alone, a
+  fresh descriptor of the held file (checked to be that file) as its only
+  input, stderr discarded, its output read to an exact size, and a
+  deadline. On Linux a seccomp filter stops it from starting a process or
+  leaving its process group or session; on macOS its process limit stops
+  it from starting a process, but it could still leave its group itself,
+  which only the planned worker sandbox can prevent. Running a binary from
+  anywhere else, an argument a request or the media chose, a decoder that
+  starts a process, reads another file, or outlives its job, or a frame
+  accepted at the wrong size, is in scope.
 - **Diagram rendering** — Mermaid source is parsed and laid out by merman
   0.8.0, pinned exactly, with its resource-constrained policy, a deadline,
   no network or file access, and Kettle's own text measurement from the job's

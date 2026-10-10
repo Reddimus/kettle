@@ -25,6 +25,8 @@ kettle-media.workspace = true
 libc = "0.2"
 # What renders each job, in safe code.
 kettle-media-render.workspace = true
+# The external video decoder, trusted and run contained.
+kettle-media-native.workspace = true
 
 [dev-dependencies]
 kettle-test-support.workspace = true
