@@ -305,6 +305,57 @@ def main() -> int:
                 f"{' '.join(command)} unexpectedly succeeded: {result.stdout.strip()}",
             )
 
+        # `kettle show`: its options, and refusals made before any Kettle is
+        # looked for, so the smoke never shows anything in a Kettle it may
+        # be running in.
+        show_help = run("show", "--help", environment=environment)
+        for flag in ("--mermaid", "--title", "--key"):
+            require(flag in show_help, f"show --help is missing {flag}")
+        missing_media = run(
+            "show", str(scratch / "missing.png"), environment=environment, expect=1
+        )
+        require("media file was not found" in missing_media,
+                f"show of a missing file said: {missing_media!r}")
+        long_path = ("C:\\" if os.name == "nt" else "/") + "n" * 4100
+        too_long = run("show", long_path, environment=environment, expect=1)
+        require("Invalid media request" in too_long,
+                f"show of an overlong path said: {too_long!r}")
+        not_text = subprocess.run(
+            [str(EXE), "show", "--mermaid"],
+            cwd=ROOT,
+            env=environment,
+            input=b"graph LR\n\xff",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+        require(
+            not_text.returncode == 1 and b"Invalid media request" in not_text.stdout,
+            f"show --mermaid of non-UTF-8 stdin said: {not_text.stdout!r}",
+        )
+        require("mermaid" in run("--print-completions", "zsh", environment=environment),
+                "zsh completions are missing show --mermaid")
+
+        # `kettle agent-setup`: the function, its removal and status, on the
+        # systems that have it.
+        if os.name != "nt":
+            function = run("agent-setup", "--print", "--shell", "zsh",
+                           environment=environment)
+            require("codex()" in function and "agent-setup --launch-codex" in function,
+                    f"agent-setup --print printed: {function!r}")
+            removal = run("agent-setup", "--uninstall", "--shell", "fish",
+                          environment=environment)
+            require(
+                "functions --erase codex" in removal
+                and "history and session files" in removal,
+                f"agent-setup --uninstall printed: {removal!r}",
+            )
+            status = run("agent-setup", "--status", environment=environment)
+            for line in ("Kettle:", "Codex:", "Claude Code:"):
+                require(line in status, f"agent-setup --status is missing {line}")
+        else:
+            run("agent-setup", "--status", environment=environment, expect=2)
+
         resolved = run(
             "--config", str(config_path), "--config-path", environment=environment
         ).strip()

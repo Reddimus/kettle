@@ -4256,7 +4256,15 @@ separators, bidirectional formatting and placeholder sequences (the
 placeholder and the marks after it, which `strip_placeholders` in `kettle-vt`
 tests), bounded at 256 characters.
 `kettle-vt` hands a refused image's pixels back when only the account's room
-was missing. `kettle show`'s own tests pin its fixed failure wording, every
+was missing. `just cli-smoke` runs the built `kettle show` for its options,
+a missing file, an overlong path and non-UTF-8 Mermaid on stdin, all refused
+before any Kettle is looked for, so the smoke never shows anything where it
+runs, and `kettle agent-setup` for its function, its removal text and the
+lines of its status (on Windows, that it is not available). `main`'s tests
+pin that a pending update (on Windows, where one waits for Kettle's windows
+to close) ends every `show`, `mcp` and `agent-setup` invocation without
+running it.
+`kettle show`'s own tests pin its fixed failure wording, every
 refusal said by its code and reason and never in the reply's words (a
 hostile message, an unknown code or reason), stdin taken at its cap and
 refused one byte over (64 KiB with `--mermaid`, which must be UTF-8), never

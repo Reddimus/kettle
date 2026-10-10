@@ -104,6 +104,25 @@ covers pane movement, tabs, search, and first-run troubleshooting.
 - A bundled font and more than 500 themes
 - An optional local control API and MCP server, both off by default
 
+## Agent previews
+
+Coding agents in a Kettle pane can show you images, SVG and Mermaid diagrams
+without reading your screen or typing. Turn on Settings, Agents, Agent
+previews (`agent-display`), then:
+
+- Claude Code: turn on Claude Code previews; new panes offer Claude Code
+  Kettle's plugin, and what it shows lands as a card under the call.
+- Codex: turn on Codex previews, or add the function `kettle agent-setup
+  --print` prints (the palette's "Copy agent setup commands" copies it).
+- Any shell: `kettle show plot.png`, or `kettle show --mermaid < flow.mmd`,
+  sends media to the pane's shelf.
+
+Without any agent, `/copy` a diagram and use `render_clipboard_as_diagram`,
+or select one and use `render_selection_as_diagram`. `kettle agent-setup
+--status` says what this shell would get. New panes get `kettle` on their
+`PATH` when they have none. Read [Automation and MCP](docs/AGENT.md) for the
+details and what each setting grants.
+
 ## Privacy and local automation
 
 Media paste sends a quoted local path to the pane, not the file contents. Read
