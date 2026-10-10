@@ -388,7 +388,10 @@ SVG and a checkerboard for raster, with its title, kind, size and sender,
 and `‹ ›` to browse, `▾` to collapse the lane to a one-row strip and `×` to
 close it. Where this platform permits an image viewer and the item still
 holds its pixels, the header also has `↗`, which opens it there (Preview on
-macOS, Eye of GNOME on Linux), the same hand-off as a card menu's row. The
+macOS, Eye of GNOME on Linux), the same hand-off as a card menu's row. A
+video's `↗` opens a private copy of its file in the permitted video player
+instead (QuickTime Player on macOS, mpv on Linux), its poster's pixels held
+or not. The
 terminal keeps at least 20 columns and 5 rows: with less room the lane is
 the strip, along the pane's bottom whichever side it opened on; opening one
 in a pane too small even for that shows a notice and leaves the item unseen,
@@ -469,8 +472,15 @@ viewer, Open in Preview (macOS) or Open in Image Viewer (Linux, Eye of
 GNOME at `/usr/bin/eog`). That row hands the viewer a fresh PNG of the pixels
 Kettle shows, from a private store that keeps the newest 32 copies and
 128 MiB and is deleted on exit; a row acts only while the card still shows
-the item, at the generation, the menu named. Nothing a program prints opens
-another app.
+the item, at the generation, the menu named. A video's row is Open in
+QuickTime Player (macOS) or Open in mpv (Linux, at `/usr/bin/mpv`) instead:
+it hands the player a private copy of the video's file, never its poster,
+only while the file is still the one shown and only in a format that player
+reads (QuickTime Player: H.264, HEVC, MPEG-4, ProRes and Motion JPEG in MP4
+or QuickTime; mpv: every container Kettle recognizes), from a store that
+keeps 8 copies and 8 GiB, copies videos up to 4 GiB, and is deleted on
+exit. The player opens paused. A notice says why an open did not happen.
+Nothing a program prints opens another app.
 `kettle ctl send_mouse` clicks a card the same way. Quick select (`hint_mode`) labels each card on screen in the
 focused pane, and picking its label opens it; text in a card's rows is its
 marks, so it gets no label of its own. Screen readers see each card as a

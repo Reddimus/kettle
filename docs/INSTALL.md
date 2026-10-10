@@ -388,12 +388,15 @@ With `paste-video-preview` enabled, Kettle also shows a short-lived poster for
 the exact local file. The poster is informational; the program in the pane
 still decides whether to read the path.
 
-### Reading video frames (optional ffmpeg)
+### Video posters and frames (optional ffmpeg)
 
-`kettle video-frames` and the MCP tool `kettle_video_frames` read GIF, APNG
-and animated WebP themselves, and on macOS MP4 and QuickTime through
+A shown video (`kettle show clip.webm`, `kettle_show`, or a preview from a
+pane) is drawn as a poster, its middle frame, and `kettle video-frames` and
+the MCP tool `kettle_video_frames` read its frames. Both read GIF, APNG and
+animated WebP themselves, and on macOS MP4 and QuickTime through
 AVFoundation. Other videos (WebM, Matroska, AVI and the rest, including the
-WebM that Playwright records) need ffmpeg and ffprobe:
+WebM that Playwright records) need ffmpeg and ffprobe; without them, a
+preview's notice and the frames error say what to install:
 
 ```sh
 brew install ffmpeg          # macOS (Homebrew)
@@ -406,6 +409,17 @@ Kettle looks for them only in `/opt/homebrew/bin`, `/usr/local/bin`,
 `PATH`, and uses them only when they and the directories on the way to them
 belong to you or root and no one else can write them. Kettle never installs
 them, and neither should an agent.
+
+### Opening videos outside Kettle
+
+A video card's menu, and the preview lane's `↗`, open a shown video in one
+permitted player: QuickTime Player on macOS, which every Mac has, and mpv
+on Linux, used only at `/usr/bin/mpv` (`sudo apt install mpv`,
+`sudo dnf install mpv`); without it the row is not offered. Kettle never
+uses your default video application. QuickTime Player plays H.264, HEVC,
+MPEG-4, ProRes and Motion JPEG in MP4 and QuickTime movies, so a WebM opens
+outside Kettle on Linux only. The player gets a private copy of the file,
+up to 4 GiB, deleted when Kettle exits; it opens paused.
 
 ### AI agents / MCP
 

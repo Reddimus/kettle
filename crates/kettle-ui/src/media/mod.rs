@@ -35,7 +35,11 @@ pub(crate) use cards::HARNESS_CARDS_PER_SECOND;
 pub(crate) use cards::{CardLedger, CardRecord};
 pub(crate) use copy::{CopyContent, CopyService, CopyStarted};
 pub(crate) use crop::{LaneCrop, LaneTile, coverage as crop_coverage, plan_crop};
-pub(crate) use external::{OpenFailure, Viewer, open as open_externally};
+#[cfg(test)]
+pub(crate) use external::Viewer;
+pub(crate) use external::{
+    OpenFailure, Outside, VideoCopies, VideoSource, open as open_externally, open_video,
+};
 pub(crate) use focus::{PreviewFocus, PreviewKey, preview_key};
 pub(crate) use inline::{card_caption, card_message, card_size};
 pub(crate) use queue::Sender;

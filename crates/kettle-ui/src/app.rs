@@ -7050,8 +7050,9 @@ struct MediaTarget {
 enum MediaMenuAction {
     /// Open the item in Kettle's viewer.
     View,
-    /// Open a copy of it in the permitted image viewer.
-    OpenOutside(crate::media::Viewer),
+    /// Open a copy of it in the permitted image viewer, or of a video in
+    /// the permitted video player.
+    OpenOutside(crate::media::Outside),
 }
 
 /// What the title-edit overlay edits (Terminator parity).
@@ -9132,6 +9133,10 @@ pub struct App {
     /// The PNG copies handed to the image viewer, made off the window thread.
     /// Owner-only, bounded, oldest dropped first, and removed on exit.
     viewer_copies: std::sync::Arc<std::sync::Mutex<crate::paste_image::PastedImages>>,
+    /// The private copies of videos handed to the video player, made off
+    /// the window thread. Owner-only, bounded, oldest dropped first, and
+    /// removed on exit.
+    video_copies: std::sync::Arc<crate::media::VideoCopies>,
     /// Previews the user asked for that are on their pane's shelf, waiting
     /// for that pane's window to open them: window, pane and item.
     previews_ready: Vec<(u64, u64, u64)>,
@@ -10154,6 +10159,7 @@ impl App {
             viewer_copies: std::sync::Arc::new(std::sync::Mutex::new(
                 crate::paste_image::PastedImages::new(crate::paste_image::OPENED),
             )),
+            video_copies: std::sync::Arc::new(crate::media::VideoCopies::new()),
             previews_ready: Vec::new(),
             ctl_driving: false,
             crop_tickets: 0,
@@ -10208,6 +10214,9 @@ impl App {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .close();
+        // And the copies handed to the video player; a copy on its way
+        // stops first.
+        app.video_copies.close();
         if let Err(error) = &result {
             app.runtime_tracker.record_exit(&error.to_string());
         }
@@ -12066,9 +12075,10 @@ impl App {
     }
 
     /// Open the menu of the card `nonce` in `pane` at (`px`, `py`): open its
-    /// item in Kettle, and open a copy of it in the permitted image viewer
-    /// where this platform has one. False when the card's item has left the
-    /// shelf, so the press goes where it would have.
+    /// item in Kettle, and open a copy of it in the permitted image viewer,
+    /// or of a video in the permitted video player, where this platform has
+    /// one. False when the card's item has left the shelf, so the press goes
+    /// where it would have.
     fn open_card_menu(
         &mut self,
         ws: &mut WindowState,
@@ -12078,13 +12088,13 @@ impl App {
         let Some(item) = self.media.cards.item(pane, nonce) else {
             return false;
         };
-        let Some(generation) = ws.mux.panes.get(&pane).and_then(|state| {
+        let Some((generation, outside)) = ws.mux.panes.get(&pane).and_then(|state| {
             state
                 .media_shelf
                 .items()
                 .iter()
                 .find(|it| it.id == item)
-                .map(|it| it.generation)
+                .map(|it| (it.generation, crate::media::Outside::of(it)))
         }) else {
             return false;
         };
@@ -12100,11 +12110,11 @@ impl App {
             target,
             action: MediaMenuAction::View,
         }];
-        if let Some(viewer) = crate::media::Viewer::find() {
+        if let Some(outside) = outside {
             items.push(ContextMenuItem::Media {
-                label: viewer.label(&tr),
+                label: outside.label(&tr),
                 target,
-                action: MediaMenuAction::OpenOutside(viewer),
+                action: MediaMenuAction::OpenOutside(outside),
             });
         }
         self.show_context_menu(ws, items, px, py);
@@ -12112,8 +12122,7 @@ impl App {
     }
 
     /// Act on a card menu row, if the card still shows the item the menu
-    /// named: open it as a click would, or a PNG copy of it in the permitted
-    /// image viewer.
+    /// named: open it as a click would, or a copy of it outside Kettle.
     fn act_on_media(&mut self, ws: &mut WindowState, target: MediaTarget, action: MediaMenuAction) {
         if self.media.cards.item(target.pane, target.nonce) != Some(target.item) {
             return;
@@ -12131,7 +12140,7 @@ impl App {
             MediaMenuAction::View => {
                 self.open_card(ws, target.pane, target.nonce);
             }
-            MediaMenuAction::OpenOutside(viewer) => self.open_item_outside(item, viewer),
+            MediaMenuAction::OpenOutside(outside) => self.open_item_outside(item, outside),
         }
     }
 
@@ -12152,15 +12161,17 @@ impl App {
             .find(|it| it.id == panel.item)
     }
 
-    /// The permitted image viewer `pane`'s lane offers its item to: none when
-    /// this platform has none or the item's pixels were let go.
-    fn preview_opens_outside(&self, ws: &WindowState, pane: u64) -> Option<crate::media::Viewer> {
-        self.preview_item(ws, pane)?.image()?;
-        crate::media::Viewer::find()
+    /// What `pane`'s lane offers to open its item in outside Kettle: none
+    /// when this platform has nothing permitted for it, or an image's pixels
+    /// were let go. A video opens from its file, not its poster.
+    fn preview_opens_outside(&self, ws: &WindowState, pane: u64) -> Option<crate::media::Outside> {
+        let item = self.preview_item(ws, pane)?;
+        let outside = crate::media::Outside::of(item)?;
+        (matches!(outside, crate::media::Outside::Video(_)) || item.image().is_some())
+            .then_some(outside)
     }
 
-    /// Open `pane`'s lane item in the permitted image viewer, when it offers
-    /// to.
+    /// Open `pane`'s lane item outside Kettle, when it offers to.
     fn open_preview_outside(&self, ws: &WindowState, pane: u64) {
         let Some(outside) = self.preview_opens_outside(ws, pane) else {
             return;
@@ -12170,31 +12181,37 @@ impl App {
         }
     }
 
-    /// Open a PNG copy of `item` in `viewer`; a notice says why if it does
-    /// not open.
-    fn open_item_outside(&self, item: &crate::media::ShelfItem, viewer: crate::media::Viewer) {
+    /// Open a copy of `item` `outside`: a PNG of an image's pixels in the
+    /// image viewer, or a private copy of a video's file in the video
+    /// player. A notice says why if it does not open.
+    fn open_item_outside(&self, item: &crate::media::ShelfItem, outside: crate::media::Outside) {
         let tr = self.ui_text;
+        let video = matches!(outside, crate::media::Outside::Video(_));
         let failed = move |why: crate::media::OpenFailure| {
-            fire_notify(
-                tr.text(kettle_i18n::Text::NotifyTitleOpenImage),
-                tr.text(match why {
-                    crate::media::OpenFailure::Busy => kettle_i18n::Text::NotifyBodyOpenImageBusy,
-                    crate::media::OpenFailure::Copy => kettle_i18n::Text::NotifyBodyOpenImageCopy,
-                    crate::media::OpenFailure::Viewer => {
-                        kettle_i18n::Text::NotifyBodyOpenImageViewer
-                    }
-                }),
-            );
+            let (title, body) = why.notice(video);
+            fire_notify(tr.text(title), tr.text(body));
         };
-        match item.image() {
-            Some(image) => crate::media::open_externally(
-                std::sync::Arc::clone(&self.viewer_copies),
-                image.clone(),
-                viewer,
-                failed,
-            ),
-            // Its pixels were let go to stay within the budget.
-            None => failed(crate::media::OpenFailure::Copy),
+        match outside {
+            crate::media::Outside::Image(viewer) => match item.image() {
+                Some(image) => crate::media::open_externally(
+                    std::sync::Arc::clone(&self.viewer_copies),
+                    image.clone(),
+                    viewer,
+                    failed,
+                ),
+                // Its pixels were let go to stay within the budget.
+                None => failed(crate::media::OpenFailure::Copy),
+            },
+            crate::media::Outside::Video(player) => match crate::media::VideoSource::of(item) {
+                Some(source) => crate::media::open_video(
+                    std::sync::Arc::clone(&self.video_copies),
+                    source,
+                    player,
+                    failed,
+                ),
+                // Shown from no file Kettle can name: nothing to copy.
+                None => failed(crate::media::OpenFailure::Changed),
+            },
         }
     }
 
@@ -33080,7 +33097,7 @@ impl App {
                         }
                         kettle_render::MediaLaneHit::OpenOutside => {
                             match self.preview_opens_outside(ws, lane.pane) {
-                                Some(viewer) => viewer.label(&self.ui_text),
+                                Some(outside) => outside.label(&self.ui_text),
                                 None => continue,
                             }
                         }
@@ -39153,9 +39170,10 @@ mod tests {
             run.find("app.start_first_pane_before_launch()").unwrap(),
             run.find("event_loop.run_app(&mut app)").unwrap(),
             run.find("app.pasted_images.cleanup();").unwrap(),
-            // Copies handed to the image viewer go on exit too.
+            // Copies handed to the image viewer and the video player go on
+            // exit too.
             run.find("app.viewer_copies").unwrap(),
-            run.find(".close();\n        if let Err(error) = &result {")
+            run.find("app.video_copies.close();\n        if let Err(error) = &result {")
                 .unwrap(),
             run.find("app.runtime_tracker.stop();").unwrap(),
         ];
@@ -52271,7 +52289,9 @@ mod tests {
             ContextMenuItem::Media {
                 label: "Open in Preview",
                 target,
-                action: MediaMenuAction::OpenOutside(crate::media::Viewer::Preview),
+                action: MediaMenuAction::OpenOutside(crate::media::Outside::Image(
+                    crate::media::Viewer::Preview,
+                )),
             },
         ];
         for (index, row) in rows.iter().enumerate() {
@@ -52288,7 +52308,9 @@ mod tests {
                 action,
                 [
                     MediaMenuAction::View,
-                    MediaMenuAction::OpenOutside(crate::media::Viewer::Preview)
+                    MediaMenuAction::OpenOutside(crate::media::Outside::Image(
+                        crate::media::Viewer::Preview,
+                    ))
                 ][index]
             );
         }

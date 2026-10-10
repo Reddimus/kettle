@@ -153,8 +153,38 @@ context = "crates/kettle-ui/src/media/external.rs: right-click menu row on an in
 [messages.menu_open_in_image_viewer]
 context = "crates/kettle-ui/src/media/external.rs: right-click menu row on an inline media card or in the media viewer, Linux only, that opens a copy of the image in GNOME's image viewer."
 
+[messages.menu_open_in_quicktime]
+context = "crates/kettle-ui/src/media/external/video.rs: right-click menu row on an inline media card, and the media lane button's accessible name, macOS only, that opens a private copy of a shown video in Apple's QuickTime Player. 'QuickTime Player' is the app's name and is the same in Spanish macOS."
+
+[messages.menu_open_in_mpv]
+context = "crates/kettle-ui/src/media/external/video.rs: right-click menu row on an inline media card, and the media lane button's accessible name, Linux only, that opens a private copy of a shown video in the mpv video player. 'mpv' is the program's name, lowercase."
+
 [messages.notify_title_open_image]
 context = "crates/kettle-ui/src/app.rs act_on_media: desktop notification title when opening a copy of a media item in the image viewer did not work."
+
+[messages.notify_title_open_video]
+context = "crates/kettle-ui/src/app.rs open_item_outside: desktop notification title when opening a private copy of a shown video in the permitted video player did not work. 'kettle' is the product name, lowercase as in the other notification titles."
+
+[messages.notify_body_open_video_busy]
+context = "crates/kettle-ui/src/app.rs open_item_outside: body when two opens are already under way, or Kettle's store of video copies is full of copies made in the last five minutes."
+
+[messages.notify_body_open_video_copy]
+context = "crates/kettle-ui/src/app.rs open_item_outside: body when the private copy of the video could not be made, or was changed before the player got it."
+
+[messages.notify_body_open_video_player]
+context = "crates/kettle-ui/src/app.rs open_item_outside: body when the permitted video player (QuickTime Player on macOS, mpv on Linux) is missing or failed its check."
+
+[messages.notify_body_open_video_unplayable]
+context = "crates/kettle-ui/src/app.rs open_item_outside: body when the permitted video player does not play the video's container or codec. The poster is the still frame Kettle shows for the video."
+
+[messages.notify_body_open_video_changed]
+context = "crates/kettle-ui/src/app.rs open_item_outside: body when the video's file was changed, moved or replaced after Kettle showed it, so Kettle does not copy it. Showing it again renders the current file."
+
+[messages.notify_body_open_video_room]
+context = "crates/kettle-ui/src/app.rs open_item_outside: body when the video is larger than the 4 GiB Kettle copies, or copying it would leave less than 2 GiB free on the disk. GiB is the binary unit; keep the numbers."
+
+[messages.notify_body_open_video_refused]
+context = "crates/kettle-ui/src/media/external/video.rs open: body when the video player started but exited with an error instead of opening the copy, for example because its build lacks the codec or it cannot reach the display."
 
 [messages.notify_title_preview_failed]
 context = "crates/kettle-ui/src/app.rs notify_preview_failure: title of the desktop notification when a preview the user asked for (from a file a pane's output names) could not be shown. 'kettle' is the product name, lowercase as in the other notification titles."
@@ -210,6 +240,9 @@ context = "crates/kettle-ui/src/app.rs show_media_item: title of the desktop not
 
 [messages.notify_body_open_image_busy]
 context = "crates/kettle-ui/src/app.rs act_on_media: desktop notification body when too many opens are already running."
+
+[messages.notify_body_open_image_refused]
+context = "crates/kettle-ui/src/media/external.rs open: body when the image viewer started but exited with an error instead of opening the PNG copy Kettle made."
 
 [messages.notify_body_open_image_copy]
 context = "crates/kettle-ui/src/app.rs act_on_media: desktop notification body when the private PNG copy could not be written, or the item's pixels are no longer held."

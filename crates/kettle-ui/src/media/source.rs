@@ -397,6 +397,24 @@ impl ItemSource {
         Self::new(spec, digest, true, None)
     }
 
+    /// A file `path` the worker read, whose render carried `digest`, for
+    /// tests of opening a video, which happens on Unix.
+    #[cfg(all(test, unix))]
+    pub(crate) fn sample_file(path: &std::path::Path, digest: Digest) -> Self {
+        let mut source = Self::sample(b"<svg/>");
+        source.spec.kind = JobKind::Auto;
+        source.spec.input = SourceInput::Path {
+            path: NativePath::from_path(path).expect("a short path"),
+            authorization: Authorization::ExternalAttested(kettle_media::ExternalAttested {
+                dev: digest.path_identity.map_or(0, |identity| identity.dev),
+                ino: digest.path_identity.map_or(0, |identity| identity.ino),
+            }),
+        };
+        source.digest = digest;
+        source.rows = None;
+        source
+    }
+
     /// How many display rows the source text has: its lines, a final line
     /// break ending the last rather than starting another. None without
     /// text.
