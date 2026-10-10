@@ -224,6 +224,7 @@ pub(crate) fn render_admitted_svg(
         fence_index: None,
         uncovered_scripts: coverage.scripts,
         warnings: coverage.warnings,
+        video: None,
     };
     rendered
         .validate()

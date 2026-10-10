@@ -782,6 +782,7 @@ mod tests {
             fence_index: None,
             uncovered_scripts: vec![],
             warnings: vec![],
+            video: None,
         }
     }
 

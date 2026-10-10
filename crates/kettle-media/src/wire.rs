@@ -22,7 +22,13 @@ pub const MAX_WORKER_FRAME_BYTES: usize = HEADER_BYTES
     + MAX_FENCES * (MAX_FENCE_BYTES + 4)
     + MAX_UNCOVERED_SCRIPTS * (MAX_SCRIPT_BYTES + 4)
     + MAX_WARNINGS
+    + MAX_VIDEO_RESULT_BYTES
     + 256;
+/// A stills reply's video result at its largest: the flag, the video's
+/// fixed fields, the sample count, every sample's two times and the
+/// tolerance.
+const MAX_VIDEO_RESULT_BYTES: usize =
+    1 + (8 + 4 + 4 + 2 + 1 + 5 + 1 + 1) + 4 + MAX_VIDEO_STILLS as usize * 16 + 4;
 /// The largest Ready (or Hello) frame: the header, two length-prefixed bounded strings and
 /// the protocol version. A startup Failure is smaller still.
 pub const MAX_READY_FRAME_BYTES: usize =
@@ -33,6 +39,7 @@ pub const MAX_DECODE_ALLOCATION_BYTES: usize = MAX_WORKER_FRAME_BYTES
     + MAX_FENCES * size_of::<String>()
     + MAX_UNCOVERED_SCRIPTS * size_of::<String>()
     + MAX_WARNINGS * size_of::<Warning>()
+    + MAX_VIDEO_STILLS as usize * size_of::<StillSample>()
     + MAX_FALLBACK_FONTS * size_of::<FallbackFont>();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -451,7 +458,15 @@ impl Writer {
                 self.u32(v.max_edge)?;
                 self.f64(v.start_s)?;
                 self.opt_f64(v.end_s)?;
-                self.opt_f64(v.at_s)
+                self.opt_f64(v.at_s)?;
+                match v.layout {
+                    StillsLayout::Poster => self.u8(0),
+                    StillsLayout::Sheet { cols, labels } => {
+                        self.u8(1)?;
+                        self.u8(cols)?;
+                        self.u8(u8::from(labels))
+                    }
+                }
             }
         }
     }
@@ -597,7 +612,63 @@ fn put_rendered(w: &mut Writer, r: &Rendered) -> Result<(), WireError> {
     if let Some(source) = &r.exact_source {
         w.blob(source.as_bytes())?;
     }
+    w.u8(u8::from(r.video.is_some()))?;
+    if let Some(video) = &r.video {
+        let info = &video.info;
+        w.u64(info.duration_ms)?;
+        w.u32(info.width)?;
+        w.u32(info.height)?;
+        w.u16(info.rotation)?;
+        w.u8(info.codec as u8)?;
+        w.u8(u8::from(info.fps_milli.is_some()))?;
+        w.u32(info.fps_milli.unwrap_or(0))?;
+        w.u8(u8::from(info.has_audio))?;
+        w.u8(info.container.map_or(0, container_tag))?;
+        w.count(video.samples.len())?;
+        for sample in &video.samples {
+            w.u64(sample.requested_ms)?;
+            w.u64(sample.actual_ms)?;
+        }
+        w.u32(video.tolerance_ms)?;
+    }
     Ok(())
+}
+
+/// A container's wire tag, from 1: 0 is an animated image, in no container.
+fn container_tag(container: crate::video::VideoContainer) -> u8 {
+    use crate::video::VideoContainer as C;
+    match container {
+        C::IsoBmff => 1,
+        C::QuickTime => 2,
+        C::Matroska => 3,
+        C::WebM => 4,
+        C::Avi => 5,
+        C::FlashVideo => 6,
+        C::MpegProgramStream => 7,
+        C::MpegVideo => 8,
+        C::MpegTransportStream => 9,
+        C::Ogg => 10,
+        C::Asf => 11,
+    }
+}
+
+fn container_of(tag: u8) -> Result<Option<crate::video::VideoContainer>, WireError> {
+    use crate::video::VideoContainer as C;
+    Ok(Some(match tag {
+        0 => return Ok(None),
+        1 => C::IsoBmff,
+        2 => C::QuickTime,
+        3 => C::Matroska,
+        4 => C::WebM,
+        5 => C::Avi,
+        6 => C::FlashVideo,
+        7 => C::MpegProgramStream,
+        8 => C::MpegVideo,
+        9 => C::MpegTransportStream,
+        10 => C::Ogg,
+        11 => C::Asf,
+        _ => return Err(WireError::UnknownEnum),
+    }))
 }
 
 struct Reader<'a> {
@@ -743,6 +814,14 @@ impl<'a> Reader<'a> {
                 start_s: self.f64()?,
                 end_s: self.opt_f64()?,
                 at_s: self.opt_f64()?,
+                layout: match self.u8()? {
+                    0 => StillsLayout::Poster,
+                    1 => StillsLayout::Sheet {
+                        cols: self.u8()?,
+                        labels: self.flag()?,
+                    },
+                    _ => return Err(WireError::UnknownEnum),
+                },
             }),
             6 => JobKind::Auto,
             _ => return Err(WireError::UnknownEnum),
@@ -947,6 +1026,62 @@ impl<'a> Reader<'a> {
         } else {
             None
         };
+        // Video stills return what the video is and their frames' times, and
+        // no other kind does.
+        let video = if self.flag()? {
+            if kind.is_some_and(|kind| kind != MediaKind::Video) {
+                return Err(ValidationError::BadParams.into());
+            }
+            let duration_ms = self.u64()?;
+            let width = self.u32()?;
+            let height = self.u32()?;
+            let rotation = self.u16()?;
+            let codec = *VideoCodec::ALL
+                .get(usize::from(self.u8()?))
+                .ok_or(WireError::UnknownEnum)?;
+            let has_fps = self.flag()?;
+            let fps = self.u32()?;
+            if !has_fps && fps != 0 {
+                return Err(ValidationError::BadParams.into());
+            }
+            let has_audio = self.flag()?;
+            let container = container_of(self.u8()?)?;
+            let n = self.count(usize::from(MAX_VIDEO_STILLS))?;
+            let mut samples = self.list(n)?;
+            for _ in 0..n {
+                let sample = StillSample {
+                    requested_ms: self.u64()?,
+                    actual_ms: self.u64()?,
+                };
+                if self.owned {
+                    samples.push(sample);
+                }
+            }
+            let video = VideoStillsResult {
+                info: VideoInfo {
+                    duration_ms,
+                    width,
+                    height,
+                    rotation,
+                    codec,
+                    fps_milli: has_fps.then_some(fps),
+                    has_audio,
+                    container,
+                },
+                samples,
+                tolerance_ms: self.u32()?,
+            };
+            if self.owned {
+                video.validate()?;
+            } else {
+                video.info.validate()?;
+            }
+            Some(video)
+        } else if kind == Some(MediaKind::Video) {
+            return Err(ValidationError::BadParams.into());
+        } else {
+            None
+        };
         Ok(Rendered {
             width,
             height,
@@ -963,6 +1098,7 @@ impl<'a> Reader<'a> {
             fence_index,
             uncovered_scripts,
             warnings,
+            video,
         })
     }
 }
