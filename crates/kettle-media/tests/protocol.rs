@@ -85,6 +85,11 @@ fn every_job_source_theme_target_and_result_roundtrips() {
             at_s: Some(0.25),
             layout: StillsLayout::Poster,
         }),
+        JobKind::CachedThumbnail(ThumbnailOf {
+            uri_sha256: [9; 32],
+            mtime_seconds: -5,
+            mtime_nanos: 999_999_999,
+        }),
     ] {
         for canvas in [Canvas::Theme, Canvas::White, Canvas::Checker] {
             for source in [
@@ -822,6 +827,39 @@ fn auto_job_has_its_own_tag() {
     assert_eq!(decode(&encoded, Direction::ParentToWorker).unwrap(), frame);
 }
 
+/// A cached thumbnail job is tag 7, then the URI's digest, the seconds as
+/// a signed little-endian integer and the nanoseconds; nanoseconds past a
+/// second do not decode. It renders as a raster, with a raster's cap and
+/// deadline.
+#[test]
+fn cached_thumbnail_job_has_its_own_tag() {
+    let of = ThumbnailOf {
+        uri_sha256: [0xab; 32],
+        mtime_seconds: -2,
+        mtime_nanos: 7,
+    };
+    let mut job = common::job();
+    job.kind = JobKind::CachedThumbnail(of);
+    let frame = Frame::Job(job);
+    let encoded = encode(&frame, Direction::ParentToWorker).unwrap();
+    let kind = &encoded[HEADER_BYTES..HEADER_BYTES + 45];
+    assert_eq!(kind[0], 7);
+    assert_eq!(&kind[1..33], &[0xab; 32]);
+    assert_eq!(&kind[33..41], &(-2_i64).to_le_bytes());
+    assert_eq!(&kind[41..45], &7_u32.to_le_bytes());
+    assert_eq!(decode(&encoded, Direction::ParentToWorker).unwrap(), frame);
+    let mut late = encoded.clone();
+    late[HEADER_BYTES + 41..HEADER_BYTES + 45].copy_from_slice(&1_000_000_000_u32.to_le_bytes());
+    assert_eq!(
+        decode(&late, Direction::ParentToWorker),
+        Err(WireError::Validation(ValidationError::BadParams))
+    );
+    let raster = JobKind::Raster;
+    let thumbnail = JobKind::CachedThumbnail(of);
+    assert_eq!(thumbnail.input_cap(), raster.input_cap());
+    assert_eq!(thumbnail.render_deadline(), raster.render_deadline());
+}
+
 /// A typed reply is the kind's tag and then exactly the plain reply's
 /// payload.
 #[test]
@@ -920,13 +958,13 @@ fn a_replys_source_goes_with_its_kind() {
     assert!(decode(&bytes, Direction::WorkerToParent).is_err());
 }
 
-/// Neither end reads the other version's frames: a version 3 worker or
+/// Neither end reads the other version's frames: a version 4 worker or
 /// parent is restarted, never half understood, and so is a newer one.
 #[test]
 fn version_skew_either_way_is_restart_required() {
-    assert_eq!(PROTOCOL_VERSION, 4);
+    assert_eq!(PROTOCOL_VERSION, 5);
     for (_, direction, golden) in vectors() {
-        for version in [1u16, 2, 3, 5] {
+        for version in [1u16, 2, 3, 4, 6] {
             let mut skewed = bytes(golden);
             skewed[4..6].copy_from_slice(&version.to_le_bytes());
             assert_eq!(

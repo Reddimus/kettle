@@ -2281,6 +2281,7 @@ dependencies = [
  "kettle-media-render",
  "kettle-test-support",
  "libc",
+ "png",
 ]
 
 [[package]]

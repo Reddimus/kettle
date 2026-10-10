@@ -4,7 +4,7 @@
 
 `kettle-media` is a leaf crate whose only dependency is `sha2`. It opens no files and starts no process
 itself: its client reaches the filesystem and the worker only through a platform its caller supplies.
-The public model uses seven job kinds. Input limits apply when validating or encoding a job
+The public model uses eight job kinds. Input limits apply when validating or encoding a job
 and when decoding its frame. For paths, the worker later checks the opened object's size and
 permissions using the job kind's input cap. External attestations are declarations from the
 caller, not proof established by this crate.
@@ -28,9 +28,9 @@ turns it into an `ExternalRequest` with an `ExternalAttested` path or inline
 bytes, and Mermaid text or `kind: "mermaid"` selects the Mermaid job kind
 rather than Auto.
 
-## Wire version 4
+## Wire version 5
 
-The header is 11 bytes: `KMED`, u16 LE protocol version 4, a frame kind, then u32 LE payload
+The header is 11 bytes: `KMED`, u16 LE protocol version 5, a frame kind, then u32 LE payload
 length. No padding or compression is permitted. Binary data and UTF-8 strings have u32 LE
 byte lengths. Lists have u32 LE counts. Integers and f64 bit patterns use LE. Boolean and
 optional-value discriminants are exactly 0 or 1. Floats must satisfy the field validators.
@@ -47,8 +47,11 @@ platform refuses the other encoding.
 | 6 Failure | Worker to parent | One fixed error-code byte |
 | 7 DetectedRendered | Worker to parent | One media-kind byte, then exactly the Rendered payload |
 
-Job-kind tags 0 through 6 are Mermaid, Svg, Raster, MarkdownDiagrams, VideoProbe,
-VideoStills and Auto. An Auto job asks the worker to classify the source by its bytes.
+Job-kind tags 0 through 7 are Mermaid, Svg, Raster, MarkdownDiagrams, VideoProbe,
+VideoStills, Auto and CachedThumbnail. An Auto job asks the worker to classify the source by
+its bytes. CachedThumbnail adds the SHA-256 of the video's file URI (32 bytes), the video's
+modification time in seconds as a signed i64 and its nanoseconds as a u32 below one billion;
+it has the Raster kind's input cap and deadline.
 Media-kind tags 0 through 4 are Raster, Svg, Mermaid, Markdown and Video: what a
 DetectedRendered reply actually rendered. Markdown adds one index byte. Stills adds count u8, edge u32, start f64, optional
 end f64, optional single-frame time f64 and a layout: tag 0 for a poster, which requires
@@ -411,7 +414,7 @@ bound, not the only one. An empty target box, one over 4096 pixels on an
 edge, a scale that is not a positive finite number, or a crop that is empty or
 leaves the box, is `BadParams`. Raster, SVG, Mermaid, MarkdownDiagrams and
 Auto jobs are rendered, and so are VideoStills jobs on animated images and,
-through the worker's external decoder, on video.
+through the worker's external decoder, on video, and CachedThumbnail jobs.
 VideoProbe is `UnsupportedMedia` until its renderer lands. On Windows, where
 no worker runs, every job is `UnsupportedPlatform`.
 
@@ -485,6 +488,22 @@ onto a dark gray, so the reply is opaque. A sheet asked for labels marks
 each tile's lower left with the time shown (`mm:ss`, `h:mm:ss` from an hour,
 tenths under a minute). The reply is Video, with the video result described
 above.
+
+**Cached thumbnails.** A CachedThumbnail job's source is a PNG from the
+freedesktop.org thumbnail cache, which the Linux paste receipt falls back to
+when no decoder can make a poster. It renders exactly as a raster, but only
+once it is shown to be the thumbnail of the video the job names: its
+`Thumb::URI` text, hashed, must equal the job's digest, and its
+`Thumb::MTime` must be the job's time, in whole seconds or with a fraction
+(tumbler writes one) that agrees with the nanoseconds to its own precision,
+truncated or rounded. Text after the image data is not read. A thumbnail of
+another file, of the video before it last changed, or one that names neither
+is `Changed`; anything but a PNG is `UnsupportedMedia`; one over 4096 pixels
+on a side or 16 Mi pixels, judged from its header before its text is read, is
+`RenderResource`. All of that is checked before a pixel is decoded. A
+rounding that would carry past the largest second matches nothing. Being a
+raster, a cached thumbnail renders even where the worker's sandbox cannot be
+applied, as any raster does.
 
 **Auto jobs.** The source is held, and its first 64 KiB are read through
 the held descriptor. A video container there, and no image signature, is a

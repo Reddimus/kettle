@@ -9,8 +9,10 @@
 //! Auto jobs, which are classified by their bytes as one of those. A stills
 //! job's animation (GIF, APNG, WebP) is decoded and laid out here; a video's
 //! frames come from a decoder the worker holds, which this lays out
-//! ([`stills`]). VideoProbe answers `UnsupportedMedia`, and on Windows,
-//! where no worker runs, every job answers `UnsupportedPlatform`.
+//! ([`stills`]). A video's cached thumbnail renders as a raster once it is
+//! shown to be that video's (`thumbnail`). VideoProbe answers
+//! `UnsupportedMedia`, and on Windows, where no worker runs, every job
+//! answers `UnsupportedPlatform`.
 
 use kettle_media::{FailureCode, Job, MediaKind, Rendered};
 
@@ -32,6 +34,8 @@ pub mod source;
 pub mod stills;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod svg;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod thumbnail;
 
 /// Run `work`, answering a panic inside it with `failure`. The decoders and
 /// renderers this calls may panic on input that admission did not foresee;
@@ -104,6 +108,10 @@ pub fn render_with_decoder(
             JobKind::VideoStills(stills) => stills::render(job, &stills, &mut on_kind, decoder)
                 .map(|rendered| (MediaKind::Video, rendered)),
             JobKind::VideoProbe => Err(FailureCode::UnsupportedMedia),
+            JobKind::CachedThumbnail(of) => {
+                on_kind(MediaKind::Raster);
+                thumbnail::render(job, of).map(|rendered| (MediaKind::Raster, rendered))
+            }
         }
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]

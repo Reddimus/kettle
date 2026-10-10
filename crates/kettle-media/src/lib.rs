@@ -84,7 +84,7 @@ pub const MAX_VERSION_BYTES: usize = 64;
 /// Hex digest of the source a binary was built from, up to 256 bits.
 pub const MAX_SOURCE_HASH_BYTES: usize = 64;
 /// No version negotiation. A header skew requires restart.
-pub const PROTOCOL_VERSION: u16 = 4;
+pub const PROTOCOL_VERSION: u16 = 5;
 /// Longest textual source a reply returns as it was read: the SVG input
 /// cap, the largest textual kind's.
 pub const MAX_EXACT_SOURCE_BYTES: usize = MAX_SVG_BYTES;
@@ -465,6 +465,35 @@ impl VideoStills {
     }
 }
 
+/// Which video a cached thumbnail must be of. The freedesktop.org Thumbnail
+/// Managing Standard keeps a video's thumbnail as a PNG whose `Thumb::URI`
+/// text is the video's file URI and whose `Thumb::MTime` is its modification
+/// time; a job of this kind renders its PNG source as a raster only when both
+/// are this video's. The parent takes them from the video it verified. The
+/// URI is kept as its SHA-256, so the kind stays a fixed size: equal digests
+/// are equal URIs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ThumbnailOf {
+    /// SHA-256 of the video's file URI, spelled as the standard spells it.
+    pub uri_sha256: [u8; 32],
+    pub mtime_seconds: i64,
+    pub mtime_nanos: u32,
+}
+impl ThumbnailOf {
+    /// The digest a job keeps of the video's URI `uri`.
+    pub fn uri_digest(uri: &str) -> [u8; 32] {
+        use sha2::Digest as _;
+        sha2::Sha256::digest(uri.as_bytes()).into()
+    }
+
+    pub fn validate(self) -> Result<(), ValidationError> {
+        if self.mtime_nanos >= 1_000_000_000 {
+            return Err(ValidationError::BadParams);
+        }
+        Ok(())
+    }
+}
+
 /// A video's codec, as the decoder named it; never text from the file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VideoCodec {
@@ -652,6 +681,9 @@ pub enum JobKind {
     },
     VideoProbe,
     VideoStills(VideoStills),
+    /// A video's cached thumbnail, rendered as a raster only when it is of
+    /// the video named.
+    CachedThumbnail(ThumbnailOf),
 }
 impl JobKind {
     pub fn input_cap(self) -> usize {
@@ -678,6 +710,7 @@ impl JobKind {
                 Err(ValidationError::IndexOutOfRange)
             }
             Self::VideoStills(v) => v.validate(),
+            Self::CachedThumbnail(of) => of.validate(),
             _ => Ok(()),
         }
     }
@@ -700,7 +733,7 @@ impl MediaKind {
     pub(crate) fn for_job(kind: JobKind) -> Option<Self> {
         match kind {
             JobKind::Auto => None,
-            JobKind::Raster => Some(Self::Raster),
+            JobKind::Raster | JobKind::CachedThumbnail(_) => Some(Self::Raster),
             JobKind::Svg => Some(Self::Svg),
             JobKind::Mermaid => Some(Self::Mermaid),
             JobKind::MarkdownDiagrams { .. } => Some(Self::Markdown),

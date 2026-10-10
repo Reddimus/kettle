@@ -582,6 +582,69 @@ fn a_real_decoder_crosses_the_boundary() {
     );
 }
 
+/// A video's cached thumbnail, attested as the parent found it, renders
+/// across the boundary only while it names the video and its time; the
+/// worker reads it through the sandbox like any other held file.
+#[test]
+fn a_cached_thumbnail_renders_only_for_its_video() {
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::fs::MetadataExt as _;
+    let uri = "file:///home/user/Videos/clip.mp4";
+    let cache = kettle_test_support::private_tempdir("kettle-worker-thumbnail-");
+    let path = cache.path().join("0cc175b9c0f1b6a831c399e269772661.png");
+    {
+        let file = std::fs::File::create(&path).unwrap();
+        let mut encoder = png::Encoder::new(file, 2, 1);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .add_text_chunk("Thumb::URI".into(), uri.into())
+            .unwrap();
+        encoder
+            .add_text_chunk("Thumb::MTime".into(), "1696300000.5".into())
+            .unwrap();
+        let mut writer = encoder.write_header().unwrap();
+        writer
+            .write_image_data(&[10, 20, 30, 255, 40, 50, 60, 255])
+            .unwrap();
+    }
+    let metadata = std::fs::metadata(&path).unwrap();
+    let thumbnail_of = |mtime_nanos| {
+        let Frame::Job(mut job) = job_of(
+            JobKind::CachedThumbnail(kettle_media::ThumbnailOf {
+                uri_sha256: kettle_media::ThumbnailOf::uri_digest(uri),
+                mtime_seconds: 1_696_300_000,
+                mtime_nanos,
+            }),
+            b"",
+        ) else {
+            unreachable!()
+        };
+        job.source = Source::Path {
+            path: NativePath::new(path.as_os_str().as_bytes().to_vec()).unwrap(),
+            authorization: kettle_media::Authorization::ExternalAttested(
+                kettle_media::ExternalAttested {
+                    dev: metadata.dev(),
+                    ino: metadata.ino(),
+                },
+            ),
+        };
+        job.target.width = 4;
+        Frame::Job(job)
+    };
+    let Some(Frame::Rendered(rendered)) = reply_from(worker(), &thumbnail_of(500_000_000)) else {
+        panic!("the thumbnail of the video did not render");
+    };
+    assert_eq!(
+        (rendered.width, rendered.height, rendered.rgba),
+        (2, 1, vec![10, 20, 30, 255, 40, 50, 60, 255])
+    );
+    assert_eq!(
+        reply_from(worker(), &thumbnail_of(0)),
+        failure(FailureCode::Changed)
+    );
+}
+
 #[test]
 fn an_explicit_kind_gets_the_plain_reply() {
     for frame in [job(&png([10, 20, 30, 255])), job_of(JobKind::Svg, SVG_1X1)] {
