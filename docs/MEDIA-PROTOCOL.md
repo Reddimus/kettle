@@ -395,9 +395,13 @@ both binaries of one source answer with one `BuildId`. On Linux and macOS:
    else: no message, payload, location, backtrace or crash file. The GUI will
    discard the worker's stderr anyway.
 3. **Resource limits**, each lowered to its value or to an inherited soft or
-   hard limit that is already lower, never raised: CPU 5 s, regular-file size 0,
-   descriptors 32, and on Linux address space 1 GiB (macOS does not enforce
-   one). Failure exits 8.
+   hard limit that is already lower, never raised: CPU 5 s (soft; the hard
+   limit is 12 hours until the first frame after Ready says what this worker
+   is for), regular-file size 0, descriptors 32, and on Linux address space
+   1 GiB (macOS does not enforce one). A job pins CPU to 5 s, soft and hard,
+   as it arrives, before a byte of its input is read; a playback session pins
+   it to 30 s and a second for each second of video left once it is open.
+   Failure exits 8.
 4. **A watchdog thread** that exits 4 when the current phase's deadline
    passes, whatever the main thread is blocked on: 5 s from start until Ready
    is written, 5 s from Ready until the job arrives, and the job kind's
@@ -406,10 +410,10 @@ both binaries of one source answer with one `BuildId`. On Linux and macOS:
    narrows to its kind's deadline, still counted from its arrival, so learning
    the kind never restarts the clock. A parent that stalls or dies cannot keep
    the worker alive. A watchdog that cannot start exits 8.
-5. **One job.** Hello must carry this build's identity. A different build, or
-   a frame header of another protocol version, is answered
+5. **One job, or one session.** Hello must carry this build's identity. A
+   different build, or a frame header of another protocol version, is answered
    `RestartRequired` and exits 9. Ready follows, then one Job and one reply,
-   then exit 0. The reply to an Auto job is DetectedRendered; to any other,
+   then exit 0; or one PlayOpen and the playback session below. The reply to an Auto job is DetectedRendered; to any other,
    Rendered. A frame out of order, cut short or that does not decode is
    answered `BadParams` (or `TooLarge`) and exits 2; a parent that closes stdin
    between frames ends the worker quietly with 0. stdout carries frames only, through one writer.
@@ -421,6 +425,78 @@ worker is built with the workspace but not packaged or started yet; the
 release profile pins it at `opt-level = 3`. The feature `test-faults` lets a
 test job make it panic, for the panic test, or pause either side of its
 classification, for the deadline tests; no shipped build enables it.
+
+## A playback session
+
+A video the user plays runs in a worker of its own, started as any other, whose
+first frame after Ready is PlayOpen. The worker holds the file it names, checked
+as rendering checks a source, and confines itself to that file and its decoder's
+programs before reading a byte of it, exactly as a video job does: where the
+sandbox cannot be applied the session is refused `SandboxUnavailable`, and no
+decoder runs unconfined. It sniffs the container from the file's first bytes,
+then opens it with its decoders (ffmpeg on Linux; on macOS also AVFoundation,
+first) within 5 s: Opened, then the first frame at the start asked for, then
+PlayState `Paused`. A session that cannot open answers with the failure and
+exits 0; one whose first frame is not written within 5 s (a write the parent
+held past that included) answers `RenderTimeout`, and its watchdog ends it a
+second later if that answer is held up too.
+
+The parent then sends commands, one byte each and nothing larger: Play and
+Pause, answered with the state they leave the session in, Heartbeat, and Close.
+A thread of their own reads them from the moment the worker is confined, the
+decoder's opening included, and keeps the latest Play or Pause and when the
+last command came rather than queueing them behind frames, so none waits on
+a write, a full queue or the opening. Play and Pause also move the
+decoder's gate as the reader hears them, and Close or the parent leaving ends
+it, whatever the session's thread is doing: the gate follows the latest
+command, and after a Pause only a frame already begun finishes.
+While it plays, every frame goes out in order at its time on the worker's
+clock, set when the first frame after Play is written (a Play the reader
+took before the first frame's write ended, the first of any sent again,
+counts as before that frame),
+never early; a frame
+whose write ends more than a frame past its time (a slow decoder, or a parent
+that stopped reading for a while) sets the clock again where it ended, so the
+frames after keep their spacing and the session runs behind rather than
+bursting to catch up: a silent video has nothing to keep up with. Each frame is numbered from 0, carries its time in the video, and is
+written straight from the buffer it was decoded into. The decoder takes frames into
+three buffers at most, the first at once (none once the session was closed
+while it opened) and each after it only while the session plays, asked once a buffer is free: a Pause stops it before its next
+frame (one already begun finishes), so a paused session decodes nothing and
+holds three frames. After the
+last frame comes PlayState `Ended` and exit 0. A seek is a new session.
+
+A session ends when:
+
+- the parent sends Close or closes stdin (exit 0, at once; should the
+  session's thread be held, in a write the parent no longer reads or in the
+  decoder's opening, the command reader moves the watchdog past it and ends
+  the process with 0 half a second later);
+- the parent sends anything but a command, or a frame that does not decode
+  (`BadParams` or `TooLarge`, exit 2);
+- no command comes for 5 s (the parent sends a heartbeat each second),
+  counted from when the reader took the last one, however long it then
+  waited behind a write, and held by a thread of its own so it runs out on
+  time whatever the session's thread is held on: the worker kills its own
+  process group, its decoder with it, needing nothing from the parent; a
+  worker that does not lead its group just exits. Once the parent has sent
+  Close or closed stdin the lease is over, and the session ends with 0 as
+  above;
+- the session's thread does not come round for 5 s once its first frame is
+  out (before it, the open's 5 s and a second), a frame or state the parent
+  does not read included: the watchdog exits 4;
+- a playing session gets no frame for 5 s and two frame lengths
+  (`RenderTimeout`), the decoder fails (its failure: ffmpeg exiting other
+  than 0 after a frame is `RenderParse`, and killed by a signal, its
+  processor-time limit, `RenderResource`), or the file is no longer what was
+  opened, checked on each pass of the session's loop, at least four times a
+  second, opening, paused or playing, and before Ended, and once the decoder
+  has opened it or failed to (`Changed`, whatever the decoder said). A stall
+  or a decoder's failure on a file that changed meanwhile is `Changed` too.
+
+The worker's CPU time is pinned to 30 s and a second for each second of video
+left once it is open; an ffmpeg decoder gets its own limit, set before it runs:
+30 s and four seconds for each second left.
 
 ## Rendering a job
 

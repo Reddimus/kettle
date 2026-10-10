@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 use kettle_media::wire::{Direction, Frame, encode, read_frame, write_frame};
 use kettle_media::{
     BuildId, Canvas, Failure, FailureCode, FallbackFont, Hello, Job, JobKind, MediaKind,
-    NativePath, Ready, Source, Target, Theme, Warning,
+    NativePath, PlayCommand, PlayOpen, PlayState, Ready, Source, Target, Theme, VideoFrame,
+    Warning,
 };
 
 #[path = "../../kettle-media-render/tests/support/fonts.rs"]
@@ -980,7 +981,12 @@ fn worker_rlimits_are_installed_before_read() {
         (fields[0].to_string(), fields[1].to_string())
     };
     let both = |value: &str| (value.to_string(), value.to_string());
-    assert_eq!(limit("Max cpu time"), both("5"));
+    // Soft 5 s from the start; the hard limit is pinned once the worker
+    // knows what it is for (a job's 5 s, or a session's).
+    assert_eq!(
+        limit("Max cpu time"),
+        ("5".to_string(), "43200".to_string())
+    );
     assert_eq!(limit("Max file size"), both("0"));
     assert_eq!(limit("Max core file size"), both("0"));
     assert_eq!(limit("Max address space"), both("1073741824"));
@@ -1146,4 +1152,1002 @@ fn a_watchdog_left_unconfined_refuses_videos() {
         reply_from(worker, &stills_of(&clip, sheet(4))),
         failure(FailureCode::SandboxUnavailable)
     );
+}
+
+// ---- Playback sessions ----
+
+/// A worker in a process group of its own, as Kettle starts one: a session
+/// whose parent goes quiet kills its whole group, which must not be the
+/// test's.
+fn grouped_worker() -> Child {
+    use std::os::unix::process::CommandExt as _;
+    spawn(Command::new(WORKER).process_group(0))
+}
+
+/// A file the `test-faults` worker plays with its stand-in decoder: an MP4
+/// box, then `frames fps_milli width height` and the stand-in's faults.
+#[cfg(feature = "test-faults")]
+fn fake_video(directory: &std::path::Path, spec: &str) -> std::path::PathBuf {
+    let path = directory.join("video.mp4");
+    let mut bytes = vec![0, 0, 0, 24];
+    bytes.extend_from_slice(b"ftypisom\0\0\x02\0isomiso2");
+    bytes.extend_from_slice(format!("kettle-media-worker-test-video {spec}\n").as_bytes());
+    bytes.resize(bytes.len() + 64, 0);
+    std::fs::write(&path, bytes).unwrap();
+    path
+}
+
+fn play_open(path: &std::path::Path, room: (u32, u32), start_ms: u64) -> Frame {
+    Frame::PlayOpen(PlayOpen {
+        source: Source::user_pull(
+            NativePath::from_path(path).unwrap(),
+            kettle_media::GuiActionWitness::from_explicit_gui_action(),
+        ),
+        max_width: room.0,
+        max_height: room.1,
+        start_ms,
+        max_fps_milli: 30_000,
+    })
+}
+
+fn command(child: &mut Child, command: PlayCommand) {
+    send(child, &Frame::PlayCommand(command));
+}
+
+/// The worker's frames as they come, read on a thread of their own so a
+/// test can wait for one with a deadline.
+struct Frames(std::sync::mpsc::Receiver<Option<Frame>>);
+
+impl Frames {
+    fn of(child: &mut Child) -> Self {
+        let mut stdout = child.stdout.take().unwrap();
+        let (sender, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            loop {
+                let frame = read_frame(&mut stdout, Direction::WorkerToParent).unwrap();
+                let end = frame.is_none();
+                if sender.send(frame).is_err() || end {
+                    return;
+                }
+            }
+        });
+        Self(received)
+    }
+
+    /// The next frame within `within`, or `None` when the worker closed
+    /// its output; panics when nothing comes.
+    fn next(&self, within: Duration) -> Option<Frame> {
+        self.0
+            .recv_timeout(within)
+            .unwrap_or_else(|_| panic!("no frame within {within:?}"))
+    }
+
+    /// Whether nothing comes within `within`.
+    #[cfg(feature = "test-faults")]
+    fn quiet(&self, within: Duration) -> bool {
+        self.0.recv_timeout(within).is_err()
+    }
+}
+
+fn video_frame(frame: Option<Frame>) -> VideoFrame {
+    match frame {
+        Some(Frame::VideoFrame(frame)) => frame,
+        other => panic!("expected a video frame, got {other:?}"),
+    }
+}
+
+const SECOND: Duration = Duration::from_secs(1);
+
+/// A session opens paused on its first frame, then plays every frame in
+/// order at its time, each numbered and timed, and ends after the last.
+#[cfg(feature = "test-faults")]
+#[test]
+fn a_session_opens_paused_then_plays_each_frame_at_its_time() {
+    let directory = kettle_test_support::private_tempdir("kettle-worker-session-");
+    let video = fake_video(directory.path(), "10 20000 64 36");
+    let mut child = grouped_worker();
+    handshake(&mut child);
+    send(&mut child, &play_open(&video, (32, 32), 0));
+    let frames = Frames::of(&mut child);
+    let Some(Frame::Opened(opened)) = frames.next(5 * SECOND) else {
+        panic!("not opened");
+    };
+    assert_eq!(
+        (
+            opened.width,
+            opened.height,
+            opened.fps_milli,
+            opened.start_ms
+        ),
+        (32, 18, 20_000, 0)
+    );
+    assert_eq!(opened.info.duration_ms, 500);
+    let first = video_frame(frames.next(5 * SECOND));
+    assert_eq!((first.seq, first.pts_ms, first.rgba[0]), (0, 0, 0));
+    assert_eq!(first.rgba.len(), 32 * 18 * 4);
+    assert_eq!(
+        frames.next(SECOND),
+        Some(Frame::PlayState(PlayState::Paused))
+    );
+    // Paused, nothing more comes.
+    assert!(frames.quiet(Duration::from_millis(300)));
+    let started = Instant::now();
+    command(&mut child, PlayCommand::Play);
+    assert_eq!(
+        frames.next(SECOND),
+        Some(Frame::PlayState(PlayState::Playing))
+    );
+    for index in 1..10u64 {
+        let frame = video_frame(frames.next(SECOND));
+        assert_eq!(
+            (frame.seq, frame.pts_ms, u64::from(frame.rgba[0])),
+            (index, index * 50, index)
+        );
+    }
+    // Nine frames after the first, fifty ms apart: paced, not flushed.
+    assert!(started.elapsed() >= Duration::from_millis(350));
+    assert_eq!(
+        frames.next(SECOND),
+        Some(Frame::PlayState(PlayState::Ended))
+    );
+    assert_eq!(frames.next(SECOND), None);
+    assert_eq!(exit_code(&mut child, 5 * SECOND), 0);
+}
+
+/// Pause holds the frames, Play takes them up where they stopped, and a
+/// session opened later in the video starts there.
+#[cfg(feature = "test-faults")]
+#[test]
+fn a_paused_session_holds_and_resumes_where_it_stopped() {
+    let directory = kettle_test_support::private_tempdir("kettle-worker-session-");
+    let video = fake_video(directory.path(), "1000 20000 16 16");
+    let mut child = grouped_worker();
+    handshake(&mut child);
+    send(&mut child, &play_open(&video, (16, 16), 1000));
+    let frames = Frames::of(&mut child);
+    assert!(
+        matches!(frames.next(5 * SECOND), Some(Frame::Opened(opened)) if opened.start_ms == 1000)
+    );
+    let first = video_frame(frames.next(5 * SECOND));
+    assert_eq!((first.seq, first.pts_ms), (0, 1000));
+    assert_eq!(
+        frames.next(SECOND),
+        Some(Frame::PlayState(PlayState::Paused))
+    );
+    command(&mut child, PlayCommand::Play);
+    assert_eq!(
+        frames.next(SECOND),
+        Some(Frame::PlayState(PlayState::Playing))
+    );
+    let mut last = 0;
+    for _ in 0..3 {
+        last = video_frame(frames.next(SECOND)).pts_ms;
+    }
+    command(&mut child, PlayCommand::Pause);
+    // A frame already on its way may arrive before the state does.
+    loop {
+        match frames.next(SECOND) {
+            Some(Frame::VideoFrame(frame)) => last = frame.pts_ms,
+            Some(Frame::PlayState(PlayState::Paused)) => break,
+            other => panic!("expected Paused, got {other:?}"),
+        }
+    }
+    assert!(frames.quiet(Duration::from_millis(400)));
+    command(&mut child, PlayCommand::Play);
+    assert_eq!(
+        frames.next(SECOND),
+        Some(Frame::PlayState(PlayState::Playing))
+    );
+    assert_eq!(video_frame(frames.next(SECOND)).pts_ms, last + 50);
+    command(&mut child, PlayCommand::Close);
+    let rest: Vec<Frame> = std::iter::from_fn(|| frames.next(SECOND)).collect();
+    assert!(
+        rest.iter()
+            .all(|frame| matches!(frame, Frame::VideoFrame(_)))
+    );
+    assert_eq!(exit_code(&mut child, 5 * SECOND), 0);
+}
+
+/// A parent that goes quiet, its pipes still open, loses its session: the
+/// worker kills its own group once the lease lapses, from playing or paused.
+#[cfg(feature = "test-faults")]
+#[test]
+fn a_session_ends_when_its_parent_goes_quiet() {
+    use std::os::unix::process::ExitStatusExt as _;
+    let directory = kettle_test_support::private_tempdir("kettle-worker-session-");
+    let video = fake_video(directory.path(), "100000 10000 16 16");
+    for play in [false, true] {
+        let mut child = grouped_worker();
+        handshake(&mut child);
+        send(&mut child, &play_open(&video, (16, 16), 0));
+        let frames = Frames::of(&mut child);
+        let started = Instant::now();
+        if play {
+            command(&mut child, PlayCommand::Play);
+        }
+        // Heartbeats keep it for two seconds, then stop.
+        for _ in 0..2 {
+            std::thread::sleep(SECOND);
+            command(&mut child, PlayCommand::Heartbeat);
+        }
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            assert!(
+                started.elapsed() < 10 * SECOND,
+                "the session outlived its lease"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let ended = started.elapsed();
+        // What it said besides frames, should it end otherwise.
+        std::thread::sleep(Duration::from_millis(100));
+        let said: Vec<Frame> = std::iter::from_fn(|| frames.0.try_recv().ok().flatten())
+            .filter(|frame| !matches!(frame, Frame::VideoFrame(_)))
+            .collect();
+        assert_eq!(
+            status.signal(),
+            Some(libc::SIGKILL),
+            "playing: {play}, {status:?} after {ended:?}, said {said:?}"
+        );
+        assert!(ended >= 6 * SECOND, "ended before its lease lapsed");
+    }
+}
+
+/// Open a session on `video` with room for frames of 512 a side, and take
+/// Opened, its first frame and Paused.
+#[cfg(feature = "test-faults")]
+fn opened_large(video: &std::path::Path) -> Child {
+    let mut child = grouped_worker();
+    handshake(&mut child);
+    send(&mut child, &play_open(video, (512, 512), 0));
+    assert!(matches!(receive(&mut child), Some(Frame::Opened(_))));
+    assert!(matches!(receive(&mut child), Some(Frame::VideoFrame(_))));
+    assert_eq!(
+        receive(&mut child),
+        Some(Frame::PlayState(PlayState::Paused))
+    );
+    child
+}
+
+/// A first frame whose write the parent holds past the opening deadline,
+/// heartbeats coming all the while, still fails the session as timed out:
+/// it opened late, whatever was read.
+#[cfg(feature = "test-faults")]
+#[test]
+fn a_first_frame_written_past_the_deadline_is_a_timeout() {
+    let directory = kettle_test_support::private_tempdir("kettle-worker-session-");
+    // A frame of a megabyte, far more than a pipe holds.
+    let video = fake_video(directory.path(), "100000 30000 512 512");
+    let mut child = grouped_worker();
+    handshake(&mut child);
+    send(&mut child, &play_open(&video, (512, 512), 0));
+    let opened = Instant::now();
+    assert!(matches!(receive(&mut child), Some(Frame::Opened(_))));
+    // Heartbeats keep the lease until well past the deadline; the last at
+    // 4.5 s, so none can meet a worker its watchdog has ended.
+    while opened.elapsed() < Duration::from_millis(4_500) {
+        std::thread::sleep(Duration::from_millis(500));
+        command(&mut child, PlayCommand::Heartbeat);
+    }
+    // Read just past the 5 s deadline. This clock started after the
+    // worker's, so its deadline has passed, with most of the second before
+    // its watchdog left for a slow runner.
+    let resume = opened + Duration::from_millis(5_150);
+    if let Some(wait) = resume.checked_duration_since(Instant::now()) {
+        std::thread::sleep(wait);
+    }
+    assert!(matches!(receive(&mut child), Some(Frame::VideoFrame(_))));
+    assert_eq!(
+        receive(&mut child),
+        Some(Frame::Failure(Failure {
+            code: FailureCode::RenderTimeout
+        }))
+    );
+    assert_eq!(exit_code(&mut child, 3 * SECOND), 0);
+}
+
+/// Close, or a closed stdin, ends a session at once and with 0 even while
+/// the parent reads none of its frames, its loop held in a write, and more
+/// heartbeats came first than any queue holds.
+#[cfg(feature = "test-faults")]
+#[test]
+fn a_session_closes_while_its_frames_go_unread() {
+    let directory = kettle_test_support::private_tempdir("kettle-worker-session-");
+    // Frames of a megabyte, far more than a pipe holds.
+    let video = fake_video(directory.path(), "100000 30000 512 512");
+    for by_close in [true, false] {
+        let mut child = opened_large(&video);
+        command(&mut child, PlayCommand::Play);
+        std::thread::sleep(Duration::from_millis(500));
+        for _ in 0..20 {
+            command(&mut child, PlayCommand::Heartbeat);
+        }
+        let closed = Instant::now();
+        if by_close {
+            command(&mut child, PlayCommand::Close);
+        } else {
+            drop(child.stdin.take());
+        }
+        assert_eq!(exit_code(&mut child, 3 * SECOND), 0, "close: {by_close}");
+        assert!(closed.elapsed() < 2 * SECOND, "close: {by_close}");
+    }
+}
+
+/// Close, or a closed stdin, ends a session at once and with 0 while its
+/// decoder is still opening the video.
+#[cfg(feature = "test-faults")]
+#[test]
+fn a_session_closes_while_its_decoder_opens() {
+    let directory = kettle_test_support::private_tempdir("kettle-worker-session-");
+    let video = fake_video(directory.path(), "10 10000 16 16 open 3000");
+    for by_close in [true, false] {
+        let mut child = grouped_worker();
+        handshake(&mut child);
+        send(&mut child, &play_open(&video, (16, 16), 0));
+        std::thread::sleep(Duration::from_millis(200));
+        let closed = Instant::now();
+        if by_close {
+            command(&mut child, PlayCommand::Close);
+        } else {
+            drop(child.stdin.take());
+        }
+        assert_eq!(exit_code(&mut child, 3 * SECOND), 0, "close: {by_close}");
+        assert!(
+            closed.elapsed() < Duration::from_millis(1_500),
+            "close: {by_close}, {:?}",
+            closed.elapsed()
+        );
+    }
+}
+
+/// Close that comes just before the watchdog would end a session held in a
+/// write still ends it with 0.
+#[cfg(feature = "test-faults")]
+#[test]
+fn close_just_before_the_watchdog_still_ends_with_0() {
+    let directory = kettle_test_support::private_tempdir("kettle-worker-session-");
+    let video = fake_video(directory.path(), "100000 30000 512 512");
+    let mut child = opened_large(&video);
+    command(&mut child, PlayCommand::Play);
+    // Its loop is held from about here; the watchdog would end it 5 s on.
+    std::thread::sleep(Duration::from_millis(4_600));
+    command(&mut child, PlayCommand::Close);
+    assert_eq!(exit_code(&mut child, 3 * SECOND), 0);
+}
+
+/// The parent leaving just before its lease would lapse, the session held
+/// in a write, still ends it with 0: the lease ends with the parent, and
+/// leaving renews nothing.
+#[cfg(feature = "test-faults")]
+#[test]
+fn leaving_just_before_the_lease_lapses_still_ends_with_0() {
+    let directory = kettle_test_support::private_tempdir("kettle-worker-session-");
+    let video = fake_video(directory.path(), "100000 30000 512 512");
+    let mut child = opened_large(&video);
+    command(&mut child, PlayCommand::Play);
+    // Its loop is held from about here, its lease running to 5 s.
+    std::thread::sleep(Duration::from_millis(4_700));
+    drop(child.stdin.take());
+    assert_eq!(exit_code(&mut child, 3 * SECOND), 0);
+}
+
+/// A heartbeat that comes while the session is held in a write keeps it,
+/// even with decoded frames queued before it: the session does not end on
+/// the lease of the command before.
+#[cfg(feature = "test-faults")]
+#[test]
+fn a_heartbeat_during_a_held_write_keeps_the_session() {
+    let directory = kettle_test_support::private_tempdir("kettle-worker-session-");
+    let video = fake_video(directory.path(), "100000 30000 512 512");
+    let mut child = opened_large(&video);
+    let started = Instant::now();
+    command(&mut child, PlayCommand::Play);
+    // Held in a write from about here, its lease running to 5 s.
+    std::thread::sleep(Duration::from_millis(4_000));
+    command(&mut child, PlayCommand::Heartbeat);
+    std::thread::sleep(Duration::from_millis(500));
+    // Read again just past the old lease.
+    let frames = Frames::of(&mut child);
+    while started.elapsed() < Duration::from_millis(7_000) {
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "ended at {:?}",
+            started.elapsed()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    command(&mut child, PlayCommand::Close);
+    assert_eq!(exit_code(&mut child, 3 * SECOND), 0);
+    drop(frames);
+}
+
+/// The lease runs out on time while the session is held in a write: four
+/// seconds of reading after the last command, then none, and the worker's
+/// group is killed five seconds after that command, not at the watchdog.
+#[cfg(feature = "test-faults")]
+#[test]
+fn the_lease_runs_out_during_a_held_write() {
+    use std::os::unix::process::ExitStatusExt as _;
+    let directory = kettle_test_support::private_tempdir("kettle-worker-session-");
+    let video = fake_video(directory.path(), "100000 30000 512 512");
+    let mut child = opened_large(&video);
+    command(&mut child, PlayCommand::Play);
+    let last = Instant::now();
+    while last.elapsed() < Duration::from_millis(4_000) {
+        assert!(receive(&mut child).is_some());
+    }
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            last.elapsed() < 10 * SECOND,
+            "the session outlived its lease"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(status.signal(), Some(libc::SIGKILL));
+    let ended = last.elapsed();
+    assert!(
+        ended >= Duration::from_millis(4_800) && ended <= Duration::from_millis(6_500),
+        "ended {ended:?} after the last command"
+    );
+}
+
+/// A heartbeat that waits behind a write the parent is slow to read renews
+/// the lease from when it came: the session ends five seconds after it, not
+/// five after the session took it.
+#[cfg(feature = "test-faults")]
+#[test]
+fn a_heartbeat_held_behind_a_write_counts_from_when_it_came() {
+    use std::os::unix::process::ExitStatusExt as _;
+    let directory = kettle_test_support::private_tempdir("kettle-worker-session-");
+    let video = fake_video(directory.path(), "100000 30000 512 512");
+    let mut child = opened_large(&video);
+    command(&mut child, PlayCommand::Play);
+    std::thread::sleep(Duration::from_millis(500));
+    // The last command; then three seconds of frames unread.
+    command(&mut child, PlayCommand::Heartbeat);
+    let last = Instant::now();
+    std::thread::sleep(3 * SECOND);
+    let frames = Frames::of(&mut child);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            last.elapsed() < 10 * SECOND,
+            "the session outlived its lease"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(status.signal(), Some(libc::SIGKILL));
+    let ended = last.elapsed();
+    assert!(
+        ended >= Duration::from_millis(4_500) && ended <= Duration::from_millis(6_500),
+        "ended {ended:?} after the last heartbeat"
+    );
+    drop(frames);
+}
+
+/// A session whose frames the parent stops reading ends with the process,
+/// heartbeats or not: a blocked write cannot hold its decoder.
+#[cfg(feature = "test-faults")]
+#[test]
+fn a_session_whose_frames_go_unread_ends() {
+    let directory = kettle_test_support::private_tempdir("kettle-worker-session-");
+    // Each frame is larger than a pipe holds.
+    let video = fake_video(directory.path(), "100000 30000 640 360");
+    let mut child = grouped_worker();
+    handshake(&mut child);
+    send(&mut child, &play_open(&video, (640, 360), 0));
+    let started = Instant::now();
+    let code = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status.code().unwrap_or(-1);
+        }
+        assert!(
+            started.elapsed() < 15 * SECOND,
+            "the unread session never ended"
+        );
+        // Ignored once the worker has gone.
+        let _ = write_frame(
+            child.stdin.as_mut().unwrap(),
+            &Frame::PlayCommand(PlayCommand::Heartbeat),
+            Direction::ParentToWorker,
+        );
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    assert_eq!(code, EXIT_TIMEOUT);
+}
+
+/// A decoder that stops giving frames while the session plays fails it;
+/// one that fails says why; a parent that closes its end or sends anything
+/// but a command ends it.
+#[cfg(feature = "test-faults")]
+#[test]
+fn a_session_ends_on_a_stall_a_failure_or_a_broken_parent() {
+    let directory = kettle_test_support::private_tempdir("kettle-worker-session-");
+    let open = |spec: &str| {
+        let video = fake_video(directory.path(), spec);
+        let mut child = grouped_worker();
+        handshake(&mut child);
+        send(&mut child, &play_open(&video, (16, 16), 0));
+        let frames = Frames::of(&mut child);
+        assert!(matches!(frames.next(5 * SECOND), Some(Frame::Opened(_))));
+        video_frame(frames.next(5 * SECOND));
+        assert_eq!(
+            frames.next(SECOND),
+            Some(Frame::PlayState(PlayState::Paused))
+        );
+        (child, frames)
+    };
+    let heartbeat_until = |child: &mut Child, frames: &Frames, end: fn(&Frame) -> bool| {
+        let started = Instant::now();
+        loop {
+            assert!(started.elapsed() < 15 * SECOND, "the session never ended");
+            command(child, PlayCommand::Heartbeat);
+            match frames.0.recv_timeout(Duration::from_millis(500)) {
+                Ok(Some(frame)) if end(&frame) => return frame,
+                Ok(Some(Frame::VideoFrame(_) | Frame::PlayState(_))) | Err(_) => {}
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+    };
+
+    let (mut child, frames) = open("100 20000 16 16 stall 3");
+    command(&mut child, PlayCommand::Play);
+    let stalled = Instant::now();
+    let frame = heartbeat_until(&mut child, &frames, |frame| {
+        matches!(frame, Frame::Failure(_))
+    });
+    assert_eq!(
+        frame,
+        Frame::Failure(Failure {
+            code: FailureCode::RenderTimeout
+        })
+    );
+    assert!(stalled.elapsed() >= 5 * SECOND);
+    assert_eq!(exit_code(&mut child, 5 * SECOND), 0);
+
+    let (mut child, frames) = open("100 20000 16 16 fail 2");
+    command(&mut child, PlayCommand::Play);
+    let frame = heartbeat_until(&mut child, &frames, |frame| {
+        matches!(frame, Frame::Failure(_))
+    });
+    assert_eq!(
+        frame,
+        Frame::Failure(Failure {
+            code: FailureCode::RenderParse
+        })
+    );
+    assert_eq!(exit_code(&mut child, 5 * SECOND), 0);
+
+    let (mut child, frames) = open("100 20000 16 16");
+    drop(child.stdin.take());
+    assert_eq!(frames.next(SECOND), None);
+    assert_eq!(exit_code(&mut child, 5 * SECOND), 0);
+
+    // Anything larger than a command is refused before it is read; a
+    // frame of a command's size that is no command, as it is.
+    let (mut child, frames) = open("100 20000 16 16");
+    send(&mut child, &hello(own_build()));
+    assert_eq!(frames.next(SECOND), failure(FailureCode::TooLarge));
+    assert_eq!(exit_code(&mut child, 5 * SECOND), EXIT_PROTOCOL);
+    let (mut child, frames) = open("100 20000 16 16");
+    send_bytes(
+        &mut child,
+        &encode(
+            &Frame::Failure(Failure {
+                code: FailureCode::BadParams,
+            }),
+            Direction::WorkerToParent,
+        )
+        .unwrap(),
+    );
+    assert_eq!(frames.next(SECOND), failure(FailureCode::BadParams));
+    assert_eq!(exit_code(&mut child, 5 * SECOND), EXIT_PROTOCOL);
+}
+
+/// A file changed while its session plays fails it: what plays is the file
+/// as it was opened, or nothing.
+#[cfg(feature = "test-faults")]
+#[test]
+fn a_session_whose_file_changes_fails() {
+    let directory = kettle_test_support::private_tempdir("kettle-worker-session-");
+    let video = fake_video(directory.path(), "100000 10000 16 16");
+    let mut child = grouped_worker();
+    handshake(&mut child);
+    send(&mut child, &play_open(&video, (16, 16), 0));
+    let frames = Frames::of(&mut child);
+    assert!(matches!(frames.next(5 * SECOND), Some(Frame::Opened(_))));
+    command(&mut child, PlayCommand::Play);
+    std::thread::sleep(Duration::from_millis(300));
+    {
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&video)
+            .unwrap();
+        file.write_all(b"more").unwrap();
+    }
+    let deadline = Instant::now() + 5 * SECOND;
+    loop {
+        match frames.next(5 * SECOND) {
+            Some(Frame::Failure(failure)) => {
+                assert_eq!(failure.code, FailureCode::Changed);
+                break;
+            }
+            Some(_) => assert!(Instant::now() < deadline, "the change went unnoticed"),
+            None => panic!("ended without a failure"),
+        }
+    }
+    assert_eq!(exit_code(&mut child, 5 * SECOND), 0);
+}
+
+/// A file changed while its decoder opens it is Changed, whether the
+/// decoder then opens it or fails.
+#[cfg(feature = "test-faults")]
+#[test]
+fn a_file_changed_while_its_decoder_opens_is_changed() {
+    for spec in ["10 10000 16 16 open 800", "10 10000 16 16 open 800 refuse"] {
+        let directory = kettle_test_support::private_tempdir("kettle-worker-session-");
+        let video = fake_video(directory.path(), spec);
+        let mut child = grouped_worker();
+        handshake(&mut child);
+        send(&mut child, &play_open(&video, (16, 16), 0));
+        let frames = Frames::of(&mut child);
+        std::thread::sleep(Duration::from_millis(300));
+        {
+            use std::io::Write as _;
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&video)
+                .unwrap();
+            file.write_all(b"more").unwrap();
+        }
+        assert_eq!(
+            frames.next(5 * SECOND),
+            failure(FailureCode::Changed),
+            "{spec}"
+        );
+        assert_eq!(exit_code(&mut child, 5 * SECOND), 0, "{spec}");
+    }
+}
+
+/// A session's processor time is what its video needs: half a minute and a
+/// second for each second left, set once it is open; a job's stays 5 s.
+#[cfg(all(feature = "test-faults", target_os = "linux"))]
+#[test]
+fn a_session_s_processor_time_follows_its_video() {
+    let directory = kettle_test_support::private_tempdir("kettle-worker-session-");
+    // 2000 frames at 10 fps: 200 s, opened 50 s in.
+    let video = fake_video(directory.path(), "2000 10000 16 16");
+    let mut child = grouped_worker();
+    handshake(&mut child);
+    send(&mut child, &play_open(&video, (16, 16), 50_000));
+    let frames = Frames::of(&mut child);
+    assert!(matches!(frames.next(5 * SECOND), Some(Frame::Opened(_))));
+    let limits = std::fs::read_to_string(format!("/proc/{}/limits", child.id())).unwrap();
+    let line = limits
+        .lines()
+        .find(|line| line.starts_with("Max cpu time"))
+        .unwrap();
+    let fields: Vec<&str> = line["Max cpu time".len()..].split_whitespace().collect();
+    assert_eq!((fields[0], fields[1]), ("180", "180"));
+    command(&mut child, PlayCommand::Close);
+    assert_eq!(exit_code(&mut child, 5 * SECOND), 0);
+}
+
+/// A session with no decoder to open it is refused, and so is one whose
+/// file is not a video.
+#[test]
+fn a_session_needs_a_decoder_and_a_video() {
+    let directory = kettle_test_support::private_tempdir("kettle-worker-session-");
+    let clip = mp4_file(directory.path());
+    let mut child = grouped_worker();
+    handshake(&mut child);
+    send(&mut child, &play_open(&clip, (64, 64), 0));
+    assert_eq!(
+        receive(&mut child),
+        failure(FailureCode::BackendUnavailable)
+    );
+    assert_eq!(exit_code(&mut child, 5 * SECOND), 0);
+
+    let text = directory.path().join("notes.txt");
+    std::fs::write(&text, b"not a video at all").unwrap();
+    let mut child = grouped_worker();
+    handshake(&mut child);
+    send(&mut child, &play_open(&text, (64, 64), 0));
+    assert_eq!(receive(&mut child), failure(FailureCode::UnsupportedMedia));
+    assert_eq!(exit_code(&mut child, 5 * SECOND), 0);
+}
+
+/// The trusted ffmpeg installed here, if any.
+fn installed_ffmpeg() -> Option<std::path::PathBuf> {
+    let found = kettle_media_native::ffmpeg::Ffmpeg::search(
+        std::env::var_os("HOME")
+            .as_deref()
+            .map(std::path::Path::new),
+    );
+    if found.is_none() {
+        eprintln!("skipped: no trusted ffmpeg is installed");
+    }
+    found.map(|ffmpeg| ffmpeg.named().to_path_buf())
+}
+
+/// A fixture clip whose frames carry their index, copied somewhere private.
+fn index_clip(directory: &std::path::Path) -> std::path::PathBuf {
+    let path = directory.join("index.mp4");
+    std::fs::copy(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../kettle-media-native/tests/fixtures/video/index.mp4"
+        ),
+        &path,
+    )
+    .unwrap();
+    path
+}
+
+fn grouped_worker_with_decoder(ffmpeg: &std::path::Path) -> Child {
+    use std::os::unix::process::CommandExt as _;
+    Command::new(WORKER)
+        .env_clear()
+        .env(kettle_media::video::DECODER_ENV, ffmpeg)
+        .process_group(0)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+/// With a real ffmpeg, a session plays every frame of the clip in order,
+/// confined to the file and its decoder, and ends.
+#[test]
+fn real_ffmpeg_plays_a_session_to_its_end() {
+    let Some(ffmpeg) = installed_ffmpeg() else {
+        return;
+    };
+    let directory = kettle_test_support::private_tempdir("kettle-worker-session-");
+    let clip = index_clip(directory.path());
+    let mut child = grouped_worker_with_decoder(&ffmpeg);
+    handshake(&mut child);
+    send(&mut child, &play_open(&clip, (64, 36), 2000));
+    let frames = Frames::of(&mut child);
+    let opened = match frames.next(5 * SECOND) {
+        Some(Frame::Opened(opened)) => opened,
+        other => panic!("not opened: {other:?}"),
+    };
+    assert_eq!(
+        (opened.width, opened.height, opened.start_ms),
+        (64, 36, 2000)
+    );
+    let first = video_frame(frames.next(5 * SECOND));
+    assert_eq!(first.pts_ms, 2000);
+    assert_eq!(
+        frames.next(SECOND),
+        Some(Frame::PlayState(PlayState::Paused))
+    );
+    command(&mut child, PlayCommand::Play);
+    assert_eq!(
+        frames.next(SECOND),
+        Some(Frame::PlayState(PlayState::Playing))
+    );
+    let mut times = vec![first.pts_ms];
+    loop {
+        match frames.next(5 * SECOND) {
+            Some(Frame::VideoFrame(frame)) => times.push(frame.pts_ms),
+            Some(Frame::PlayState(PlayState::Ended)) => break,
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    // Paced at ten a second, none dropped on an idle machine is not
+    // promised: every one sent is in order and on the clip's frames.
+    assert!(times.windows(2).all(|pair| pair[0] < pair[1]));
+    assert!(
+        times
+            .iter()
+            .all(|time| time % 100 == 0 && (2000..4000).contains(time))
+    );
+    assert_eq!(times.last(), Some(&3900));
+    assert_eq!(frames.next(SECOND), None);
+    assert_eq!(exit_code(&mut child, 5 * SECOND), 0);
+}
+
+/// A paused session whose parent goes quiet takes its ffmpeg with it: once
+/// the lease lapses no process of the group is left.
+#[test]
+fn a_quiet_parent_s_session_leaves_no_decoder_behind() {
+    let Some(ffmpeg) = installed_ffmpeg() else {
+        return;
+    };
+    let directory = kettle_test_support::private_tempdir("kettle-worker-session-");
+    let clip = index_clip(directory.path());
+    let mut child = grouped_worker_with_decoder(&ffmpeg);
+    let group = child.id() as libc::pid_t;
+    handshake(&mut child);
+    send(&mut child, &play_open(&clip, (64, 36), 0));
+    let frames = Frames::of(&mut child);
+    assert!(matches!(frames.next(5 * SECOND), Some(Frame::Opened(_))));
+    video_frame(frames.next(5 * SECOND));
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            started.elapsed() < 10 * SECOND,
+            "the session outlived its lease"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    use std::os::unix::process::ExitStatusExt as _;
+    assert_eq!(status.signal(), Some(libc::SIGKILL));
+    // The group is empty once its last member, killed with it, is reaped
+    // by whoever inherited it.
+    let emptied = Instant::now();
+    // SAFETY: kill with signal 0 only asks whether the group has a member.
+    while unsafe { libc::kill(-group, 0) } == 0 {
+        assert!(
+            emptied.elapsed() < 2 * SECOND,
+            "a decoder outlived its session"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    drop(frames);
+}
+
+/// A job's processor time is pinned to 5 s, soft and hard, as it arrives;
+/// before that the hard limit leaves a session room.
+#[cfg(all(feature = "test-faults", target_os = "linux"))]
+#[test]
+fn a_job_pins_its_processor_time_as_it_arrives() {
+    let mut child = worker();
+    handshake(&mut child);
+    assert_eq!(cpu_limit(&child), ("5".to_string(), "43200".to_string()));
+    // Paused a second before it is classified.
+    let Frame::Job(mut paused) = job(&png([0, 0, 0, 255])) else {
+        unreachable!()
+    };
+    paused.theme.accent = [b'K', b'T', 10, 0];
+    send(&mut child, &Frame::Job(paused));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(cpu_limit(&child), ("5".to_string(), "5".to_string()));
+    assert!(matches!(receive(&mut child), Some(Frame::Rendered(_))));
+    drop(child.stdin.take());
+    assert_eq!(exit_code(&mut child, Duration::from_secs(10)), 0);
+}
+
+/// The worker's processor-time limit, soft and hard, as /proc says.
+#[cfg(all(feature = "test-faults", target_os = "linux"))]
+fn cpu_limit(child: &Child) -> (String, String) {
+    let limits = std::fs::read_to_string(format!("/proc/{}/limits", child.id())).unwrap();
+    let line = limits
+        .lines()
+        .find(|line| line.starts_with("Max cpu time"))
+        .unwrap();
+    let fields: Vec<&str> = line["Max cpu time".len()..].split_whitespace().collect();
+    (fields[0].to_string(), fields[1].to_string())
+}
+
+/// A parent that stops reading for a while gets the frames that follow at
+/// their pace, every one in order, never in a burst to catch up: the session
+/// runs behind instead.
+#[cfg(feature = "test-faults")]
+#[test]
+fn a_late_reader_gets_frames_at_their_pace_not_in_a_burst() {
+    let directory = kettle_test_support::private_tempdir("kettle-worker-session-");
+    // Each frame a quarter of a pipe: a few fill it.
+    let video = fake_video(directory.path(), "1000 20000 64 64");
+    let mut child = grouped_worker();
+    handshake(&mut child);
+    send(&mut child, &play_open(&video, (64, 64), 0));
+    let mut times = Vec::new();
+    while times.is_empty() {
+        match receive(&mut child) {
+            Some(Frame::VideoFrame(frame)) => times.push(frame.pts_ms),
+            Some(_) => {}
+            None => panic!("the session ended before its first frame"),
+        }
+    }
+    command(&mut child, PlayCommand::Play);
+    // Not read for a second and a half, at twenty frames a second.
+    std::thread::sleep(Duration::from_millis(1500));
+    command(&mut child, PlayCommand::Heartbeat);
+    // Then read on a thread of its own, each frame timed as it is read, so
+    // the test's own scheduling neither stalls nor compresses the reading,
+    // and a session that ends or stalls fails rather than hangs.
+    let mut stdout = child.stdout.take().unwrap();
+    let (sender, read) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        loop {
+            let frame = read_frame(&mut stdout, Direction::WorkerToParent).unwrap();
+            let end = frame.is_none();
+            if sender.send((Instant::now(), frame)).is_err() || end {
+                return;
+            }
+        }
+    });
+    let mut arrived = Vec::new();
+    // A parent that reads late still keeps the lease, a heartbeat a second.
+    let mut beat = Instant::now();
+    let give_up = Instant::now() + 30 * SECOND;
+    while times.len() < 60 {
+        if beat.elapsed() >= SECOND {
+            command(&mut child, PlayCommand::Heartbeat);
+            beat = Instant::now();
+        }
+        match read.recv_timeout(Duration::from_millis(200)) {
+            Ok((at, Some(Frame::VideoFrame(frame)))) => {
+                times.push(frame.pts_ms);
+                arrived.push(at);
+            }
+            Ok((_, Some(_))) => {}
+            Ok((_, None)) => panic!("the session ended after {} frames", times.len()),
+            Err(_) => assert!(
+                Instant::now() < give_up,
+                "no frames for 30 s, after {}",
+                times.len()
+            ),
+        }
+    }
+    assert_eq!(
+        times,
+        (0..60).map(|index| index * 50).collect::<Vec<_>>(),
+        "every frame, in order"
+    );
+    // What the pipe held comes at once; the forty after it at their pace.
+    let paced = arrived[arrived.len() - 1] - arrived[arrived.len() - 41];
+    assert!(paced >= Duration::from_millis(1700), "a burst: {paced:?}");
+    command(&mut child, PlayCommand::Close);
+    assert_eq!(exit_code(&mut child, 5 * SECOND), 0);
+}
+
+/// A worker that does not lead its process group, as one started by hand
+/// does not, signals no group when its lease lapses: it exits, and only its
+/// own decoder can go with it.
+#[cfg(feature = "test-faults")]
+#[test]
+fn a_session_outside_its_own_group_just_exits() {
+    let directory = kettle_test_support::private_tempdir("kettle-worker-session-");
+    let video = fake_video(directory.path(), "100000 10000 16 16");
+    let mut child = worker();
+    handshake(&mut child);
+    send(&mut child, &play_open(&video, (16, 16), 0));
+    let frames = Frames::of(&mut child);
+    assert!(matches!(frames.next(5 * SECOND), Some(Frame::Opened(_))));
+    assert_eq!(exit_code(&mut child, 10 * SECOND), EXIT_TIMEOUT);
+    drop(frames);
+}
+
+/// A session whose first frame never comes fails as timed out, within the
+/// open's 5 s.
+#[cfg(feature = "test-faults")]
+#[test]
+fn a_session_whose_first_frame_never_comes_times_out() {
+    let directory = kettle_test_support::private_tempdir("kettle-worker-session-");
+    let video = fake_video(directory.path(), "100 20000 16 16 stall 0");
+    let mut child = grouped_worker();
+    handshake(&mut child);
+    let started = Instant::now();
+    send(&mut child, &play_open(&video, (16, 16), 0));
+    let frames = Frames::of(&mut child);
+    assert!(matches!(frames.next(5 * SECOND), Some(Frame::Opened(_))));
+    loop {
+        command(&mut child, PlayCommand::Heartbeat);
+        match frames.0.recv_timeout(Duration::from_millis(500)) {
+            Ok(Some(Frame::Failure(failure))) => {
+                assert_eq!(failure.code, FailureCode::RenderTimeout);
+                break;
+            }
+            Err(_) => assert!(started.elapsed() < 8 * SECOND, "no answer"),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    assert!(started.elapsed() >= 5 * SECOND - Duration::from_millis(100));
+    assert_eq!(exit_code(&mut child, 5 * SECOND), 0);
 }
