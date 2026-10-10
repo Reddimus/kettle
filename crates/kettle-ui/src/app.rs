@@ -10102,7 +10102,8 @@ impl App {
                     None
                 }
             };
-        let video_previewer = crate::video_preview::VideoPreviewer::new(proxy.clone());
+        let video_previewer =
+            crate::video_preview::VideoPreviewer::new(proxy.clone(), startup.media.clone());
         let plan = startup_plan(&startup, &initial_cfg);
         let ctl_policy = ctl_overrides(&startup).resolve(initial_cfg.ctl_policy());
         let mut app = App {
@@ -35636,6 +35637,7 @@ impl App {
                     return;
                 }
                 use crate::window_state::VideoPreviewOutcome;
+                let poster = preview.is_some();
                 let outcome = ws.finish_pending_video_preview(
                     pane_id,
                     generation,
@@ -35643,6 +35645,7 @@ impl App {
                     preview,
                     std::time::Instant::now(),
                 );
+                log::debug!("video paste receipt for pane {pane_id}: {outcome:?}, poster {poster}");
                 if matches!(
                     outcome,
                     VideoPreviewOutcome::Failed | VideoPreviewOutcome::Shown
