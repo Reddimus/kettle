@@ -1639,6 +1639,9 @@ context = "crates/kettle-config/src/palette.rs: command palette entry for previe
 [messages.palette_preview_reload]
 context = "crates/kettle-config/src/palette.rs: command palette entry for preview_reload, which reads the focused pane's preview from its file again and shows what the file holds now."
 
+[messages.palette_preview_play]
+context = "crates/kettle-config/src/palette.rs: command palette row that starts a silent preview of the video the focused pane's preview lane shows, or stops it."
+
 [messages.palette_preview_zoom_in]
 context = "crates/kettle-config/src/palette.rs: command palette entry for preview_zoom_in, which magnifies the image in the focused pane's preview lane by one step about its center."
 
@@ -1796,6 +1799,31 @@ context = "crates/kettle-ui/src/app.rs lane_notice_text: shown in a preview lane
 
 [messages.media_lane_notice_rendering]
 context = "crates/kettle-ui/src/app.rs lane_notice_text: shown in a preview lane's footer while a diagram is rendered again for the background the user chose; the old picture stays until then."
+
+[messages.media_lane_a11y_play_preview]
+context = "crates/kettle-ui/src/app.rs: screen-reader name and tooltip of a preview lane's button that starts a silent preview of a video: eight frames from across it, shown in turn. No sound plays."
+
+[messages.media_lane_a11y_stop_preview]
+context = "crates/kettle-ui/src/app.rs: screen-reader name and tooltip of the same button while the preview plays; pressing it shows the poster again."
+
+[messages.media_lane_notice_preview_loading]
+context = "crates/kettle-ui/src/app.rs lane_notice_text: shown in a preview lane's footer while the frames of a video's silent preview are made; the poster stays until then."
+
+[messages.media_lane_notice_preview_playing]
+context = "crates/kettle-ui/src/app.rs lane_notice_text: shown in a preview lane's footer while its silent preview plays. time is the moment of the video the frame shown comes from, and length the video's length, both as 0:03 or 1:02:05, verbatim."
+args = [{ name = "time", type = "str" }, { name = "length", type = "str" }]
+
+[messages.media_lane_notice_preview_failed]
+context = "crates/kettle-ui/src/app.rs lane_notice_text: a video's silent preview could not be made; the poster stays."
+
+[messages.media_lane_notice_preview_timed_out]
+context = "crates/kettle-ui/src/app.rs lane_notice_text: a video's silent preview was not ready within its two seconds; the poster stays."
+
+[messages.media_lane_notice_preview_needs_decoder]
+context = "crates/kettle-ui/src/app.rs lane_notice_text: no decoder Kettle may use reads this video; ffmpeg is the program to install, verbatim."
+
+[messages.media_lane_notice_preview_needs_sandbox]
+context = "crates/kettle-ui/src/app.rs lane_notice_text: Kettle decodes video only in its sandbox, and this system cannot provide one, so there is no preview."
 
 [messages.media_lane_notice_render_failed]
 context = "crates/kettle-ui/src/app.rs lane_notice_text: shown in a preview lane's footer when rendering the item again (for another background) failed; the old picture stays."
