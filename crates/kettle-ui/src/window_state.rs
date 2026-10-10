@@ -880,6 +880,8 @@ pub(crate) struct WindowState {
     pub(crate) lane_drag: Option<LaneDrag>,
     /// A press on a lane's edge, until its release.
     pub(crate) lane_resize: Option<LaneResize>,
+    /// The preview lane holding the keyboard (`focus_preview`), if one is.
+    pub(crate) preview_focus: Option<crate::media::PreviewFocus>,
     /// Each lane's sharper pixels for its zoomed view, by pane.
     pub(crate) lane_crops: std::collections::HashMap<u64, crate::media::LaneCrop>,
     pub(crate) selecting: bool,
@@ -1443,6 +1445,7 @@ impl WindowState {
             lane_wheel: crate::input::WheelAccum::default(),
             lane_drag: None,
             lane_resize: None,
+            preview_focus: None,
             lane_crops: std::collections::HashMap::new(),
             selecting: false,
             selecting_pane: None,

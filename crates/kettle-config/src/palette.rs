@@ -50,6 +50,7 @@ pub fn commands() -> Vec<(Text, Action)> {
         (T::PalettePreviewZoomIn, PreviewZoomIn),
         (T::PalettePreviewZoomOut, PreviewZoomOut),
         (T::PalettePreviewFit, PreviewFit),
+        (T::PaletteFocusPreview, FocusPreview),
         (T::PaletteOpenSettings, OpenSettings),
         (T::PaletteAbout, About),
         (T::PaletteEditConfig, EditConfig),
@@ -287,6 +288,7 @@ mod tests {
             PreviewZoomIn,
             PreviewZoomOut,
             PreviewFit,
+            FocusPreview,
             EditConfig,
             SetScrollbarAlways,
             SetScrollbarAuto,
@@ -439,6 +441,7 @@ mod tests {
                 | PreviewZoomIn
                 | PreviewZoomOut
                 | PreviewFit
+                | FocusPreview
                 | EditConfig
                 | SetScrollbarAlways
                 | SetScrollbarAuto

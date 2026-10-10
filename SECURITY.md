@@ -153,6 +153,12 @@ Reports that fit any of these are welcome:
   file changed, nothing more is read for that item, whether its lane closes
   or not, until a reload. Those pixels are charged to the same account, never evict an
   item's, and go with their item, lane or pane.
+  While the user has given a lane the keyboard (`focus_preview`), no key
+  pressed, chord, input-method text or control client's
+  `send_keys`/`send_text` reaches a pane in that window; getting one
+  through is in scope. The release of a key the terminal already had when
+  the lane took the keyboard still goes to the terminal, to the pane
+  focused when it comes, as every release does.
   The lane's source view shows control, format and bidirectional characters
   as U+FFFD. Getting a preview to keep source or pixels past that account,
   to read a file for a control client, or to show a changed file as the

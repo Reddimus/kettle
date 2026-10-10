@@ -750,6 +750,28 @@ press, a menu or dialog, or focus loss ends it. The lanes otherwise set the
 cursor too: a pointing hand over a control, a hand over a rendered item to
 pan, grabbing while it pans.
 
+`focus_preview` gives a lane the keyboard (`WindowState::preview_focus`, a
+`media::PreviewFocus` of its pane and item). It is the last `KeyModal`
+and `TextModal`, so another modal opened over it takes keys first, and
+its branch in the key path comes before keybind resolution: every key
+is the lane's, `media::preview_key` mapping Esc, the arrows, `+`/`=`,
+`-`, `0` and `c` and swallowing the rest, any Ctrl, Alt or Command chord
+included, Option on macOS too (`held_modifiers`). `ui_owns_key` keeps
+the releases of those presses from the PTY; a key the terminal already
+had when the lane took the keyboard still sends its release, to the pane
+focused when it comes, as every release does. It is no
+pointer modal and not in `any_modal_open`: the pointer, the wheel and
+file drops work elsewhere as ever. Entering ends an input method's composition and turns it off;
+preedit and commits meanwhile are dropped, and leaving bumps the
+composition generation and turns it back on. `send_keys` and `send_text`
+to a pane in that window answer `busy` before encoding anything.
+`check_preview_focus`, on each event-loop pass, gives the keyboard back
+once the lane cannot use it: another modal on top, its pane no longer
+focused, another item, or no room for its content; so do Esc, a press
+outside the lane (a side button's too), a file drop, focus loss, and any
+modal opening (`close_all_modals`, a confirmation), even one that closes
+again within the same pass.
+
 Zoomed past its own pixels, a lane asks the worker for the part in view at
 the size shown (`media::crop`). Any change to the view, or to the lanes,
 marks the lane's `LaneCrop` due once the view is quiet for 75 ms, or at

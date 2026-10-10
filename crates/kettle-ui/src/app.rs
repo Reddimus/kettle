@@ -5967,6 +5967,24 @@ fn lane_action_hit(action: &Action) -> Option<kettle_render::MediaLaneHit> {
     }
 }
 
+/// The modifiers physically held. On macOS, Option counts whether or not it
+/// composes text (`macos-option-as-alt`), so an Option chord is a chord.
+fn held_modifiers(ws: &WindowState) -> winit::keyboard::ModifiersState {
+    #[cfg(target_os = "macos")]
+    {
+        ws.macos_raw_mods
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        ws.mods
+    }
+}
+
+/// Why a control client's keys or text are refused while a preview lane in
+/// the pane's window holds the keyboard.
+const PREVIEW_HOLDS_KEYBOARD: &str =
+    "a preview lane in this pane's window holds the keyboard; nothing is typed until Esc";
+
 /// Longest copied text read as a path, in bytes.
 const MAX_COPIED_PATH: usize = 4096;
 
@@ -11523,6 +11541,145 @@ impl App {
         )
     }
 
+    /// Give the focused pane's preview lane the keyboard, while it shows its
+    /// item expanded with room for it: keys then move, zoom, fit or copy
+    /// what it shows, and reach nothing else, until Esc. An input method's
+    /// composition ends, and it stays off meanwhile.
+    fn focus_preview(&mut self, ws: &mut WindowState) {
+        let Some(pane) = ws.mux.active_focus() else {
+            return;
+        };
+        let Some(item) = ws.preview_panels.get(&pane).map(|panel| panel.item) else {
+            return;
+        };
+        if !self
+            .preview_lane_geometry_of(ws, pane)
+            .is_some_and(|geometry| geometry.full)
+        {
+            return;
+        }
+        ws.preview_focus = Some(crate::media::PreviewFocus { pane, item });
+        end_modal_composition(ws);
+        if let Some(window) = &ws.window {
+            window.set_ime_allowed(false);
+        }
+        self.lanes_changed(ws, false);
+    }
+
+    /// Give the keyboard back to the terminal, if a lane holds it. What an
+    /// input method composed meanwhile stays behind, and it comes back on.
+    fn exit_preview_focus(&mut self, ws: &mut WindowState) {
+        if ws.preview_focus.take().is_none() {
+            return;
+        }
+        end_modal_composition(ws);
+        if let Some(window) = &ws.window {
+            window.set_ime_allowed(true);
+        }
+        self.lanes_changed(ws, false);
+    }
+
+    /// A press anywhere but on the lane holding the keyboard gives the
+    /// keyboard back first, then goes where it would.
+    fn leave_preview_focus_for_press(&mut self, ws: &mut WindowState) {
+        let Some(focus) = ws.preview_focus else {
+            return;
+        };
+        let (x, y) = (ws.cursor.x as f32, ws.cursor.y as f32);
+        if self.preview_lane_at(ws, x, y).map(|(pane, _, _)| pane) != Some(focus.pane) {
+            self.exit_preview_focus(ws);
+        }
+    }
+
+    /// Whether a preview lane holds the keyboard in the window `pane` is in.
+    fn preview_holds_keyboard(&self, ws: &WindowState, pane: u64) -> bool {
+        if ws.mux.panes.contains_key(&pane) {
+            return ws.preview_focus.is_some();
+        }
+        self.windows
+            .values()
+            .find(|window| window.mux.panes.contains_key(&pane))
+            .is_some_and(|window| window.preview_focus.is_some())
+    }
+
+    /// Keep the keyboard with a lane only while it can use it: its pane
+    /// focused, showing the same item expanded with room, and no other modal
+    /// open over it. Run on each pass of the event loop.
+    fn check_preview_focus(&mut self, ws: &mut WindowState) {
+        let Some(focus) = ws.preview_focus else {
+            return;
+        };
+        let usable = top_modal(ws) == Some(KeyModal::Preview)
+            && ws.mux.active_focus() == Some(focus.pane)
+            && ws
+                .preview_panels
+                .get(&focus.pane)
+                .is_some_and(|panel| panel.item == focus.item)
+            && self
+                .preview_lane_geometry_of(ws, focus.pane)
+                .is_some_and(|geometry| geometry.full);
+        if !usable {
+            self.exit_preview_focus(ws);
+        }
+    }
+
+    /// A key while a lane holds the keyboard: Esc gives it back, arrows move
+    /// the picture or scroll a source, `+`, `-` and `0` zoom and fit, and `c`
+    /// copies; every other key does nothing. A held key that acts once a
+    /// press does not repeat.
+    fn preview_focus_key(&mut self, ws: &mut WindowState, key: &Key, repeat: bool) {
+        use crate::media::PreviewKey as K;
+        let Some(focus) = ws.preview_focus else {
+            return;
+        };
+        let pane = focus.pane;
+        let action = crate::media::preview_key(key, held_modifiers(ws));
+        if repeat && action.once() {
+            return;
+        }
+        let source = preview_item(ws, pane)
+            .zip(ws.preview_panels.get(&pane))
+            .is_some_and(|(item, panel)| {
+                lane_mode(item, panel) == kettle_render::MediaLaneMode::Source
+            });
+        match action {
+            K::Exit => self.exit_preview_focus(ws),
+            K::Move(right, down) if source => {
+                if let Some(total) = preview_item(ws, pane).map(|item| item.source.text_rows())
+                    && let Some(panel) = ws.preview_panels.get_mut(&pane)
+                {
+                    panel.scroll = scrolled_source(panel.scroll, down, right, total);
+                }
+            }
+            K::Move(right, down) => {
+                // Three cells a press, as a wheel's notch pans; the picture
+                // moves the other way, showing what lies toward the arrow.
+                let cell = self.menu_cell(ws);
+                let step = f64::from(input::LINES_PER_NOTCH);
+                let by = (
+                    -f64::from(right) * step * f64::from(cell.0),
+                    -f64::from(down) * step * f64::from(cell.1),
+                );
+                self.change_preview_view(ws, pane, |view, fit, content| {
+                    view.panned(by, fit, content)
+                });
+            }
+            K::ZoomIn => self.zoom_preview(ws, pane, kettle_render::MEDIA_ZOOM_STEP),
+            K::ZoomOut => self.zoom_preview(ws, pane, 1.0 / kettle_render::MEDIA_ZOOM_STEP),
+            K::Fit if source => {
+                if let Some(panel) = ws.preview_panels.get_mut(&pane) {
+                    panel.scroll = (0, 0);
+                }
+            }
+            K::Fit => self.fit_preview(ws, pane),
+            K::Copy => self.copy_preview(ws, pane),
+            K::Swallow => {}
+        }
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+    }
+
     /// Collapse `pane`'s lane to its strip, or expand it.
     fn toggle_preview(&mut self, ws: &mut WindowState, pane: u64) {
         let Some(lane) = ws.mux.lane(pane) else {
@@ -11894,7 +12051,17 @@ impl App {
             title: item.title.clone(),
             detail: format!("{kind} · {width}×{height}"),
             sender,
-            hint: tr.text(kettle_i18n::Text::MediaLaneHint).to_string(),
+            // Where keys go: the terminal, or this lane while it holds the
+            // keyboard.
+            hint: tr
+                .text(
+                    if ws.preview_focus.is_some_and(|focus| focus.pane == pane) {
+                        kettle_i18n::Text::MediaLaneHintFocused
+                    } else {
+                        kettle_i18n::Text::MediaLaneHint
+                    },
+                )
+                .to_string(),
             position: (index + 1, items.len()),
             image: item.image().cloned(),
             status: tr.text(kettle_i18n::Text::MediaViewerReleased).to_string(),
@@ -14270,6 +14437,8 @@ impl App {
         // silently lost.
         self.finish_selection_gesture(ws);
         ws.card_press = None;
+        // And the keyboard, from a preview lane holding it.
+        self.exit_preview_focus(ws);
         ws.confirm_dialog = Some(dialog);
     }
 
@@ -18049,6 +18218,9 @@ impl App {
         // A card held under a modal that opened is not clicked, even if the
         // modal is gone by the release.
         ws.card_press = None;
+        // The modal that opens takes the keyboard from a preview lane, even
+        // if it closes again before the event loop looks.
+        self.exit_preview_focus(ws);
         // A live title edit materialises a chrome strip (see `tab_bar_h`), so
         // dropping it here changes the content rectangle. Resize only when it
         // was actually open -- this runs before every other modal opens, and an
@@ -18339,6 +18511,10 @@ impl App {
         })
     }
 
+    /// Every modal that owns the keyboard and more: the search bar as well
+    /// as those that own the pointer too. A preview lane holding the
+    /// keyboard is not one: the pointer, the wheel and file drops still work
+    /// everywhere else.
     fn any_modal_open(&self, ws: &WindowState) -> bool {
         ws.search.open || self.non_search_modal_open(ws)
     }
@@ -20927,6 +21103,7 @@ impl App {
             Action::OpenThemePicker => self.open_theme_picker(ws),
             Action::OpenMediaShelf => self.open_media_shelf(ws),
             Action::PreviewClipboardPath => self.preview_copied_file(ws),
+            Action::FocusPreview => self.focus_preview(ws),
             Action::PreviewNext
             | Action::PreviewPrevious
             | Action::ClosePreview
@@ -24581,6 +24758,13 @@ impl App {
                         lane["image"] = geometry.image.map(rect_json).into();
                         lane["sharp"] = geometry.tile.map(rect_json).into();
                         lane["edge"] = geometry.resize.map(rect_json).into();
+                        lane["keyboard"] =
+                            if target.preview_focus.is_some_and(|focus| focus.pane == *id) {
+                                "preview"
+                            } else {
+                                "terminal"
+                            }
+                            .into();
                         let controls: serde_json::Map<String, serde_json::Value> =
                             lane_controls(&geometry)
                                 .into_iter()
@@ -25470,6 +25654,7 @@ impl App {
                         self.search_bar_shortcut(ws, key, None, false, event_loop);
                     }
                 }
+                TextModal::Preview => self.preview_focus_key(ws, key, false),
             }
             applied += 1;
             // Stop as soon as the modal this batch addressed is gone (Esc,
@@ -25802,6 +25987,7 @@ impl App {
         // receives it. Focus leaves any card.
         self.end_lane_resize(ws);
         ws.lane_drag = None;
+        self.leave_preview_focus_for_press(ws);
         if bcode == 0 {
             ws.card_press = None;
         }
@@ -26547,6 +26733,9 @@ impl App {
         let Some(text) = req.params.get("text").and_then(|v| v.as_str()) else {
             return Response::err(req.id, ec::BAD_PARAMS, "missing 'text' string");
         };
+        if self.preview_holds_keyboard(ws, pane) {
+            return Response::err(req.id, ec::BUSY, PREVIEW_HOLDS_KEYBOARD);
+        }
         let Some(p) = Self::ctl_pane_ref(ws, &self.windows, pane) else {
             return Response::err(req.id, ec::NO_SUCH_PANE, "pane vanished");
         };
@@ -26603,6 +26792,11 @@ impl App {
             Ok(parsed) => parsed,
             Err(message) => return Response::err(req.id, ec::BAD_PARAMS, message),
         };
+        // The user gave the keyboard to a preview in that window: nothing
+        // is typed into it until they take it back.
+        if self.preview_holds_keyboard(ws, pane) {
+            return Response::err(req.id, ec::BUSY, PREVIEW_HOLDS_KEYBOARD);
+        }
         let Some(p) = Self::ctl_pane_ref(ws, &self.windows, pane) else {
             return Response::err(req.id, ec::NO_SUCH_PANE, "pane vanished");
         };
@@ -27396,6 +27590,7 @@ enum TextModal {
     Ssh,
     TitleEdit,
     Search,
+    Preview,
 }
 
 /// Editor text and toggles that an open search bar brings along when it
@@ -27460,6 +27655,7 @@ impl TextModal {
             Self::Ssh => "ssh",
             Self::TitleEdit => "title_edit",
             Self::Search => "search",
+            Self::Preview => "preview",
         }
     }
 }
@@ -27490,6 +27686,8 @@ fn open_text_modal(ws: &WindowState) -> Option<TextModal> {
         Some(TextModal::TitleEdit)
     } else if ws.search.open {
         Some(TextModal::Search)
+    } else if ws.preview_focus.is_some() {
+        Some(TextModal::Preview)
     } else {
         None
     }
@@ -30133,6 +30331,8 @@ enum KeyModal {
     Ssh,
     TitleEdit,
     Search,
+    /// A preview lane holding the keyboard (`focus_preview`).
+    Preview,
 }
 
 fn top_modal(ws: &WindowState) -> Option<KeyModal> {
@@ -30162,6 +30362,8 @@ fn top_modal(ws: &WindowState) -> Option<KeyModal> {
         KeyModal::TitleEdit
     } else if ws.search.open {
         KeyModal::Search
+    } else if ws.preview_focus.is_some() {
+        KeyModal::Preview
     } else {
         return None;
     })
@@ -35523,6 +35725,8 @@ impl App {
                     // Any press ends a lane's drag or edge drag, as below.
                     self.end_lane_resize(ws);
                     ws.lane_drag = None;
+                    // One away from a lane holding the keyboard gives it back.
+                    self.leave_preview_focus_for_press(ws);
                     // A press of a button still noted as held means its
                     // release went elsewhere: its program gets it now. The
                     // press is Kettle's until a program receives it.
@@ -35566,6 +35770,7 @@ impl App {
                 // card still holds one: the card's gesture is over.
                 self.end_lane_resize(ws);
                 ws.lane_drag = None;
+                self.leave_preview_focus_for_press(ws);
                 if bcode == 0 {
                     ws.card_press = None;
                 }
@@ -36272,6 +36477,9 @@ impl App {
                 self.dispatch_wheel(ws, steps);
             }
             WindowEvent::DroppedFile(path) => {
+                // A drop is the pointer's, as a press elsewhere: the keyboard
+                // goes back to the terminal first.
+                self.exit_preview_focus(ws);
                 // A file dropped while a modal (search /
                 // palette / settings / confirm dialog / inline title-edit / vi
                 // copy-mode / …) is open must NOT inject its path into the PTY
@@ -36319,6 +36527,8 @@ impl App {
                     // Its release may never come here.
                     ws.lane_drag = None;
                     self.end_lane_resize(ws);
+                    // The keyboard goes back to the terminal.
+                    self.exit_preview_focus(ws);
                 }
                 // Non-interactive UI-state marker (OS-driven focus
                 // change — a transition the PTY output stream can't show).
@@ -36459,10 +36669,20 @@ impl App {
                 if typing && ws.card_focus.take().is_some() {
                     ws.accessibility_pending = true;
                 }
+                // A preview lane holding the keyboard takes no text: what an
+                // input method composes or commits meanwhile goes nowhere.
+                if ws.preview_focus.is_some()
+                    && matches!(
+                        ime,
+                        winit::event::Ime::Preedit(..) | winit::event::Ime::Commit(_)
+                    )
+                {
+                    return;
+                }
                 let redraw = match ime {
                     winit::event::Ime::Enabled => {
                         if let Some(window) = &ws.window {
-                            window.set_ime_allowed(true);
+                            window.set_ime_allowed(ws.preview_focus.is_none());
                         }
                         self.update_ime_cursor_area(ws);
                         false
@@ -36531,6 +36751,7 @@ impl App {
                     || ws.confirm_dialog.is_some()
                     || ws.editing_title.is_some()
                     || ws.search.open
+                    || ws.preview_focus.is_some()
                     || ws.ime_preedit.is_some();
                 // The modal that gets this press, if any; a press after which
                 // it is no longer the top modal closed or replaced it.
@@ -36878,6 +37099,14 @@ impl App {
                     if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
+                    return;
+                }
+
+                // A preview lane holding the keyboard takes every key, the
+                // application's shortcuts included: Esc gives it back.
+                if ws.preview_focus.is_some() {
+                    self.preview_focus_key(ws, &event.logical_key, event.repeat);
+                    remember_closing_key(ws, key_modal, event.physical_key);
                     return;
                 }
 
@@ -37286,6 +37515,8 @@ impl App {
         if self.cards_tip.until().is_some_and(|until| until <= now) {
             self.end_cards_tip(ws);
         }
+        // A lane that can no longer use the keyboard gives it back.
+        self.check_preview_focus(ws);
         // Zoomed lanes whose view settled ask for sharper pixels, and a
         // lane's edge drag that paused resizes its PTYs.
         let lane_crop_wait = self.ask_due_lane_crops(ws, now);
@@ -42695,20 +42926,25 @@ mod tests {
         assert!(capped.is_char_boundary(capped.len()));
     }
 
-    /// A preview lane takes no keys: while lanes show, every key goes on to
-    /// the terminal beside them, so nothing typed is lost to a lane.
+    /// A preview lane takes no keys until the user gives it the keyboard
+    /// with `focus_preview`: while lanes show, every key goes on to the
+    /// terminal beside them, so nothing typed is lost to a lane.
     #[test]
-    fn a_preview_lane_takes_no_keys() {
+    fn a_preview_lane_takes_no_keys_until_given_the_keyboard() {
         let source = super::production_source();
         let owns = source
             .split("let ui_owns_key = ")
             .nth(1)
             .and_then(|rest| rest.split(';').next())
             .expect("ui_owns_key");
-        assert!(
-            !owns.contains("preview") && !owns.contains("lane"),
-            "{owns}"
+        assert!(owns.contains("|| ws.preview_focus.is_some()"), "{owns}");
+        assert!(!owns.contains("lane"), "{owns}");
+        assert_eq!(
+            source.matches("ws.preview_focus = Some(").count(),
+            1,
+            "only focus_preview gives a lane the keyboard"
         );
+        assert!(source.contains("Action::FocusPreview => self.focus_preview(ws),"));
         assert!(
             !source.contains("fn media_viewer_takes_key("),
             "no key list of its own"
@@ -46744,9 +46980,10 @@ mod tests {
         assert_eq!(
             src.matches("remember_closing_key(ws, key_modal, event.physical_key);")
                 .count(),
-            12,
+            13,
             "confirm, context menu, vi, hint, palette, theme picker, settings \
-             text, settings, layout picker, ssh, title edit and search"
+             text, settings, layout picker, ssh, title edit, search and a \
+             preview lane holding the keyboard"
         );
         for gate in [
             "ModalRepeat::ConfirmDialog,",
@@ -56751,8 +56988,8 @@ mod lane_control_tests {
             // Any press ends a drag whose release went elsewhere, natively
             // and from a control client, as does a menu opening; a menu or
             // dialog open since takes the pointer from it.
-            "the card's gesture is over. self.end_lane_resize(ws); ws.lane_drag = None; if bcode == 0 { ws.card_press = None; }",
-            "// receives it. Focus leaves any card. self.end_lane_resize(ws); ws.lane_drag = None; if bcode == 0 { ws.card_press = None; }",
+            "the card's gesture is over. self.end_lane_resize(ws); ws.lane_drag = None; self.leave_preview_focus_for_press(ws); if bcode == 0 { ws.card_press = None; }",
+            "// receives it. Focus leaves any card. self.end_lane_resize(ws); ws.lane_drag = None; self.leave_preview_focus_for_press(ws); if bcode == 0 { ws.card_press = None; }",
             "ws.pane_drag = None; ws.lane_drag = None; self.end_lane_resize(ws); ws.reuse_pane_snapshots_once = false;",
             // A press on the edge drags it; the PTYs follow at most every
             // interval, and once more when it ends or when a paused drag's
@@ -56812,6 +57049,77 @@ mod lane_control_tests {
             "tile.serves(item.id, item.generation, item.source.spec.canvas)",
         ] {
             assert!(flat.contains(needle), "{needle}");
+        }
+    }
+
+    /// A lane given the keyboard owns every key ahead of the application's
+    /// shortcuts and the terminal, natively and through `dispatch_ui_key`;
+    /// a control client's keys and text are refused before anything is
+    /// written; an input method composes nothing meanwhile; and it gives
+    /// the keyboard back on Esc, a press elsewhere, focus loss, or whenever
+    /// its lane can no longer use it.
+    #[test]
+    fn a_lane_holding_the_keyboard_is_wired_as_a_modal() {
+        let src = super::production_source();
+        let flat = src.split_whitespace().collect::<Vec<_>>().join(" ");
+        let preview = flat
+            .find("if ws.preview_focus.is_some() { self.preview_focus_key(ws, &event.logical_key, event.repeat); remember_closing_key(ws, key_modal, event.physical_key); return; }")
+            .expect("the key path");
+        let keybinds = flat
+            .find("if let Some((trigger, act)) = resolve_keybind_action(")
+            .expect("keybinds");
+        assert!(preview < keybinds, "before the application's shortcuts");
+        for needle in [
+            "} else if ws.preview_focus.is_some() { KeyModal::Preview } else { return None; })",
+            "} else if ws.preview_focus.is_some() { Some(TextModal::Preview) } else { None }",
+            "TextModal::Preview => self.preview_focus_key(ws, key, false),",
+            "if self.preview_holds_keyboard(ws, pane) { return Response::err(req.id, ec::BUSY, PREVIEW_HOLDS_KEYBOARD); } let Some(p) = Self::ctl_pane_ref(ws, &self.windows, pane) else {",
+            "if ws.preview_focus.is_some() && matches!( ime, winit::event::Ime::Preedit(..) | winit::event::Ime::Commit(_) ) { return; }",
+            "window.set_ime_allowed(ws.preview_focus.is_none());",
+            "// The keyboard goes back to the terminal. self.exit_preview_focus(ws);",
+            "// A lane that can no longer use the keyboard gives it back. self.check_preview_focus(ws);",
+            // The pointer, the wheel and drops still work: a lane holding
+            // the keyboard is no pointer modal, and a drop gives it back.
+            "fn any_modal_open(&self, ws: &WindowState) -> bool { ws.search.open || self.non_search_modal_open(ws) }",
+            "// goes back to the terminal first. self.exit_preview_focus(ws);",
+            // Option counts on macOS, and any modal opening takes the
+            // keyboard, a confirmation too.
+            "let action = crate::media::preview_key(key, held_modifiers(ws));",
+            "// if it closes again before the event loop looks. self.exit_preview_focus(ws);",
+            "// And the keyboard, from a preview lane holding it. self.exit_preview_focus(ws);",
+        ] {
+            assert!(flat.contains(needle), "{needle}");
+        }
+        assert_eq!(
+            flat.matches("if self.preview_holds_keyboard(ws, pane) {")
+                .count(),
+            2,
+            "send_keys and send_text"
+        );
+        assert_eq!(
+            flat.matches("self.leave_preview_focus_for_press(ws);")
+                .count(),
+            3,
+            "native, side button and control presses"
+        );
+        let body = |name: &str| {
+            src.split(&format!("fn {name}("))
+                .nth(1)
+                .and_then(|rest| rest.split("\n    fn ").next())
+                .unwrap_or_else(|| panic!("{name}"))
+        };
+        let focus = body("focus_preview");
+        assert!(focus.contains(".is_some_and(|geometry| geometry.full)"));
+        assert!(focus.contains("end_modal_composition(ws);"));
+        assert!(focus.contains("window.set_ime_allowed(false);"));
+        let check = body("check_preview_focus");
+        for condition in [
+            "top_modal(ws) == Some(KeyModal::Preview)",
+            "ws.mux.active_focus() == Some(focus.pane)",
+            ".is_some_and(|panel| panel.item == focus.item)",
+            ".is_some_and(|geometry| geometry.full);",
+        ] {
+            assert!(check.contains(condition), "{condition}");
         }
     }
 
