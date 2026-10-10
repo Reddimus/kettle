@@ -109,7 +109,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Each pane keeps its last eight items; `list_panes` reports them. A push
   never opens anything on screen.
 - `kettle_show` takes inline Mermaid source (`mermaid`) as well as a file
-  `path`, and the full MCP server (`kettle mcp`) offers it too.
+  `path`, and the full MCP server (`kettle mcp`) offers it too. Its
+  instructions follow where the server runs: inside a Kettle pane they say
+  when to show media and that showing is not seeing, in tmux what happens to
+  the pane, and elsewhere not to call it.
 - `kettle mcp --display` offers agents one tool, `kettle_show`, which sends
   an image, SVG or Mermaid diagram file to the media shelf of the pane the agent runs in. It
   needs only Agent previews and cannot read the screen, type or run

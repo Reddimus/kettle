@@ -757,11 +757,23 @@ server runs inside, and returns one plain line and status-only structured
 content (`status`, `delivery: "shelf"`, `pane`, `window`, `item`, `verified`,
 `kind`, `width`, `height`, `warnings`, `model_has_seen: false`), never the
 media. Failures are `isError` results in the fixed wording of [Showing
-media](#showing-media). The instructions say to use `kettle_show` when the
-server runs inside a Kettle that can show media, and not to call it
-otherwise; on the 2026-07-28 revision, `server/discover` marks them
-`cacheScope: "private"` and `ttlMs: 0`, since they depend on where the server
-runs.
+media](#showing-media). The instructions, in both modes, follow where the
+server runs. Inside a Kettle pane (a Kettle that serves agent previews or
+control and that it descends from or a live `KETTLE_PID` names, or
+`TERM_PROGRAM=kettle`) they say when to show media: after writing or editing
+a Mermaid file or making an image the user should see, by its absolute path;
+a useful diagram in the reply by its source in `mermaid`, keeping the source
+in the reply; not trivial diagrams. They also say to reuse `key`, that
+showing is not seeing, to tell the user once and not retry, and never to
+change configuration or install software. In tmux inside a Kettle pane,
+known only by a live `KETTLE_PID` naming such a Kettle, they add that media
+goes to the pane tmux was started from, marked unverified, or is refused.
+Elsewhere, a Kettle that serves neither included, they say not to call it.
+The full server says the same after its own tools.
+These are guidance only: `kettle_show` still finds its Kettle the strict way.
+On the 2026-07-28 revision, `server/discover` marks them `cacheScope:
+"private"` and `ttlMs: 0` in both modes, since they depend on where the
+server runs; the legacy `initialize` carries the same words.
 
 ```sh
 claude mcp add kettle-display -- kettle mcp --display
