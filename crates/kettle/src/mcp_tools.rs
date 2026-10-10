@@ -71,8 +71,9 @@ const ABSOLUTE_PATH_PATTERN: &str = if cfg!(windows) {
 fn show_tool_spec() -> Value {
     json!({
         "name": "kettle_show",
-        "description": "Send an image, SVG, Mermaid file or Markdown Mermaid gallery path to the \
-            user's Kettle display, or render inline Mermaid source. Interactive supported harnesses get a card under \
+        "description": "Send an image, SVG, Mermaid file, Markdown Mermaid gallery or video path \
+            to the user's Kettle display, or render inline Mermaid source. A video shows as its \
+            poster, with its length. Interactive supported harnesses get a card under \
             the call and a shelf entry; other modes use the shelf. Clicking opens it in the \
             viewer or preview lane. Tested diagram families: flowchart, sequence, state, class, \
             ER, gantt, pie, mindmap, gitGraph, timeline, journey and quadrant. Returns delivery \
@@ -91,7 +92,7 @@ fn show_tool_spec() -> Value {
                     "minLength": 1,
                     "maxLength": kettle_media::MAX_PATH_BYTES,
                     "pattern": ABSOLUTE_PATH_PATTERN,
-                    "description": "absolute path of an image, SVG, Mermaid or Markdown file, at most 4 KiB"
+                    "description": "absolute path of an image, SVG, Mermaid, Markdown or video file, at most 4 KiB"
                 },
                 "title": {
                     "type": "string",
@@ -722,11 +723,12 @@ fn show_sent(result: &kettle_ctl::show::ShowResult) -> Value {
         ", from an unverified sender"
     };
     let text = format!(
-        "Sent to the Kettle media shelf of pane {} ({} {}x{}{sender}); the user can open it \
+        "Sent to the Kettle media shelf of pane {} ({}{sender}); the user can open it \
          there. You have not seen its contents.",
-        result.pane, result.kind, result.width, result.height
+        result.pane,
+        result.summary()
     );
-    json!({
+    let mut sent = json!({
         "content": [{ "type": "text", "text": text }],
         "structuredContent": {
             "status": "sent",
@@ -741,7 +743,11 @@ fn show_sent(result: &kettle_ctl::show::ShowResult) -> Value {
             "warnings": result.warnings,
             "model_has_seen": false,
         },
-    })
+    });
+    if let Some(video) = &result.video {
+        sent["structuredContent"]["video"] = serde_json::to_value(video).unwrap_or_default();
+    }
+    sent
 }
 
 /// A `kettle_show` whose card waits for this call's hook: the line says it
@@ -750,9 +756,9 @@ fn show_sent(result: &kettle_ctl::show::ShowResult) -> Value {
 fn show_sent_card(result: &kettle_ctl::show::ShowResult, name: &str) -> Value {
     let mut sent = show_sent(result);
     let text = format!(
-        "Sent to Kettle for display below this call: {name} ({} {}x{}). You have not seen its \
+        "Sent to Kettle for display below this call: {name} ({}). You have not seen its \
          contents.",
-        result.kind, result.width, result.height
+        result.summary()
     );
     sent["content"][0]["text"] = Value::String(text);
     sent["structuredContent"]["delivery"] = Value::String("card".into());
@@ -1882,6 +1888,48 @@ mod tests {
         let none = frames_fitting(&sheet, &|_| false);
         assert_eq!(none["isError"], json!(true));
         assert_eq!(none["structuredContent"]["code"], json!("too_large"));
+    }
+
+    /// A video's result says what it is, in the line and in structured
+    /// content, beside its poster's size, and still that it was not seen.
+    #[test]
+    fn a_shown_videos_result_says_what_it_is() {
+        let mut result = kettle_ctl::show::ShowResult::new(
+            (4, true, 2),
+            9,
+            kettle_media::MediaKind::Video,
+            (400, 225),
+            &[],
+        );
+        result.video = Some(kettle_ctl::show::ShowVideo {
+            duration_ms: 12_400,
+            width: 1280,
+            height: 720,
+            codec: "vp8".into(),
+            fps_milli: Some(25_000),
+            has_audio: false,
+        });
+        let sent = show_sent(&result);
+        let text = sent["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("(video 1280x720 VP8 0:12, no audio)"),
+            "{text}"
+        );
+        assert!(text.contains("not seen"));
+        assert_eq!(
+            sent["structuredContent"]["video"],
+            json!({"duration_ms": 12_400, "width": 1280, "height": 720, "codec": "vp8",
+                "fps_milli": 25_000, "has_audio": false})
+        );
+        assert_eq!(sent["structuredContent"]["width"], json!(400));
+        assert_eq!(sent["structuredContent"]["model_has_seen"], json!(false));
+        let card = show_sent_card(&result, "clip.webm");
+        assert!(
+            card["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("below this call: clip.webm (video 1280x720 VP8 0:12, no audio)")
+        );
     }
 
     /// A missing decoder's failure carries the install hint, which tells the

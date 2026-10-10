@@ -4577,6 +4577,12 @@ video's caption gives its own size and length, its detail line its own size
 (not its poster's), codec, length and sound (no codec name when Kettle does
 not know it), and its failure notices say to install ffmpeg for a missing
 container, codec or decoder only; each fails without its change.
+A shown video's lines say what it is (`video 1280x720 VP8 0:12, no audio`,
+no codec name a sender made up) in `kettle show`, `kettle_show`'s shelf line
+and its card line, and `kettle_show`'s structured content adds the `video`
+block beside the poster's size, still with `model_has_seen: false`. Quick
+select and the menus offer common video files (`.webm`, `.mp4`, `.mov`,
+`.mkv` and the like, never `.ts`) for a preview.
 A video's Show result carries `video` (duration, its own size, codec name,
 rate when known, audio) beside its poster's size and round-trips; other
 results carry none. `media::shelf` keeps a video's metadata when its

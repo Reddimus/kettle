@@ -5999,9 +5999,10 @@ fn hint_action(kind: kettle_core::hints::Kind, alternate: bool, unsafe_path: boo
 }
 
 /// Whether a file named `name` is one a lane can preview, by its extension:
-/// the raster formats the media worker decodes, SVG, Mermaid, and Markdown,
-/// whose Mermaid diagrams are a gallery. The worker still decides by the
-/// bytes; this only picks what to offer.
+/// the raster formats the media worker decodes, SVG, Mermaid, Markdown,
+/// whose Mermaid diagrams are a gallery, and the common video containers,
+/// shown as a poster (`.ts` is left out: it names TypeScript far more often).
+/// The worker still decides by the bytes; this only picks what to offer.
 fn previewable_name(name: &str) -> bool {
     let extension = name
         .rsplit_once('.')
@@ -6020,6 +6021,19 @@ fn previewable_name(name: &str) -> bool {
                 | "mermaid"
                 | "md"
                 | "markdown"
+                | "mp4"
+                | "m4v"
+                | "mov"
+                | "webm"
+                | "mkv"
+                | "avi"
+                | "mpg"
+                | "mpeg"
+                | "m2ts"
+                | "mts"
+                | "ogv"
+                | "wmv"
+                | "flv"
         )
     )
 }
@@ -55806,6 +55820,10 @@ mod hint_action_tests {
             "h.mermaid",
             "README.md",
             "plan.Markdown",
+            "run.webm",
+            "clip.MP4",
+            "take.mov",
+            "screen.mkv",
         ] {
             assert!(previewable_name(name), "{name}");
         }
@@ -55817,6 +55835,7 @@ mod hint_action_tests {
             "plot.",
             "",
             "notes.mdx",
+            "index.ts",
         ] {
             assert!(!previewable_name(name), "{name}");
         }

@@ -291,9 +291,10 @@ off applies at the next launch. `get_state` reports the policy in force as
 
 ### Showing media
 
-`show` sends an image, SVG, Mermaid diagram or Markdown diagram gallery (a
-Markdown file's Mermaid diagrams, paged in the lane) to the media shelf of the
-pane its caller runs in. It needs only Display, so `agent-display` is enough; it grants no reads
+`show` sends an image, SVG, Mermaid diagram, Markdown diagram gallery (a
+Markdown file's Mermaid diagrams, paged in the lane) or video (its poster,
+the middle frame, with what the video is; nothing plays) to the media shelf
+of the pane its caller runs in. It needs only Display, so `agent-display` is enough; it grants no reads
 or mutations, and a display-only client learns nothing about the screen from
 it. `kettle show PATH` and `kettle show` (or `kettle show -`, bytes on
 stdin) send it from a shell; `--mermaid` renders either as a Mermaid diagram.
