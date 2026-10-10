@@ -8,7 +8,9 @@
 //! decoder: ffmpeg and ffprobe, run as the worker's children with a fixed
 //! argument list, exactly sized output and a deadline, contained so they
 //! start no process of their own. [`acl`] reads macOS extended ACLs, which
-//! can let another user write a file its mode says is private.
+//! can let another user write a file its mode says is private. [`sandbox`]
+//! is the worker's self-sandbox: Landlock and seccomp on Linux, a Seatbelt
+//! profile on macOS.
 //!
 //! The unsafe code here is libc calls, each with its own SAFETY comment: the
 //! user id, a descriptor's path, ACLs, and the containment hook that runs
@@ -27,6 +29,8 @@ pub mod ffmpeg;
 mod reopen;
 #[cfg(unix)]
 mod run;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod sandbox;
 #[cfg(unix)]
 pub mod tools;
 
