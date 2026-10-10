@@ -68,8 +68,14 @@ impl Running {
 impl Drop for Running {
     fn drop(&mut self) {
         if let Some(mut child) = self.0.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+            // A sandbox may refuse the kill (Linux before Landlock can scope
+            // signals): the job has failed anyway, and the decoder, which
+            // cannot leave the worker's process group, goes when Kettle kills
+            // that group after the worker exits. Waiting for it here would
+            // only hold the worker up.
+            if child.kill().is_ok() {
+                let _ = child.wait();
+            }
         }
     }
 }

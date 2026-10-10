@@ -39,6 +39,9 @@ pub(crate) fn report_panic() {
 /// parent, so a parent that stalls or dies cannot keep the worker alive.
 pub(crate) struct Watchdog {
     deadline: Arc<(Mutex<Instant>, Condvar)>,
+    /// Whether its thread confined itself to nothing. A job counts as
+    /// confined only if it did: a signal handler could otherwise run there.
+    confined: bool,
 }
 
 impl Watchdog {
@@ -47,9 +50,14 @@ impl Watchdog {
     pub(crate) fn start(first: Duration) -> std::io::Result<Self> {
         let deadline = Arc::new((Mutex::new(Instant::now() + first), Condvar::new()));
         let watched = Arc::clone(&deadline);
+        let (told, hear) = std::sync::mpsc::sync_channel(1);
         std::thread::Builder::new()
             .name("kettle-media-watchdog".into())
             .spawn(move || {
+                // Started before the job's sandbox exists, it confines itself
+                // to nothing: it only waits and ends the process.
+                let confined = kettle_media_native::sandbox::confine_thread_to_nothing().is_ok();
+                let _ = told.send(confined);
                 let (at, changed) = &*watched;
                 let mut at = at.lock().unwrap_or_else(PoisonError::into_inner);
                 loop {
@@ -64,7 +72,10 @@ impl Watchdog {
                         .0;
                 }
             })?;
-        Ok(Self { deadline })
+        let confined = hear.recv().unwrap_or(false);
+        #[cfg(feature = "test-faults")]
+        let confined = confined && !faults::watchdog_unconfined();
+        Ok(Self { deadline, confined })
     }
 
     /// Give the next phase `budget` from now.
@@ -121,7 +132,7 @@ pub(crate) fn serve(input: &mut impl Read, output: &mut impl Write, watchdog: &W
             watchdog.narrow(arrived + kind.render_deadline());
         }
     };
-    match answer(&job, classified) {
+    match answer(&job, classified, watchdog.confined) {
         Ok((kind, rendered)) => {
             // Only an Auto job's reply says what it was; an explicit kind's
             // reply stays the plain frame, so it cannot claim another kind.
@@ -144,18 +155,41 @@ pub(crate) fn serve(input: &mut impl Read, output: &mut impl Write, watchdog: &W
 fn answer(
     job: &Job,
     mut classified: impl FnMut(MediaKind),
+    watchdog_confined: bool,
 ) -> Result<(MediaKind, Rendered), FailureCode> {
     #[cfg(feature = "test-faults")]
     faults::inject(job);
     // A video's stills need a decoder: Apple's own for MP4 and QuickTime on
     // macOS, then the external one the parent named, trusted again here.
     // With neither they are `BackendUnavailable`.
-    let decoder = matches!(
+    let decoders = matches!(
         job.kind,
         kettle_media::JobKind::VideoStills(_) | kettle_media::JobKind::Auto
     )
     .then(kettle_media_native::Decoders::configured)
     .filter(|decoders| !decoders.is_empty());
+    #[cfg(not(feature = "test-faults"))]
+    let confined = confine(job, decoders.as_ref());
+    #[cfg(feature = "test-faults")]
+    let confined = if faults::unconfined(job) {
+        Err(kettle_media_native::sandbox::SandboxError::Unavailable)
+    } else {
+        confine(job, decoders.as_ref())
+    };
+    // Every thread must be confined: the watchdog confined itself earlier.
+    let confined = confined.and(if watchdog_confined {
+        Ok(())
+    } else {
+        Err(kettle_media_native::sandbox::SandboxError::Failed)
+    });
+    let refusing = Refusing(FailureCode::SandboxUnavailable);
+    // A video is never decoded unconfined. Raster, SVG and Mermaid, which
+    // only Kettle's own code parses, still render in this bounded process.
+    let decoder: Option<&dyn kettle_media::video::VideoDecoder> = match (&decoders, confined) {
+        (Some(decoders), Ok(())) => Some(decoders),
+        (Some(_), Err(_)) => Some(&refusing),
+        (None, _) => None,
+    };
     kettle_media_render::render_with_decoder(
         job,
         |kind| {
@@ -163,10 +197,44 @@ fn answer(
             #[cfg(feature = "test-faults")]
             faults::after_classification(job);
         },
-        decoder
-            .as_ref()
-            .map(|decoder| decoder as &dyn kettle_media::video::VideoDecoder),
+        decoder,
     )
+}
+
+/// Confine this process to what `job` needs, before any byte of its media or
+/// fonts is read: the files it names, opened and checked as rendering opens
+/// them, and, for a video, the external decoder's programs and the trees
+/// they load from.
+fn confine(
+    job: &Job,
+    decoders: Option<&kettle_media_native::Decoders>,
+) -> Result<(), kettle_media_native::sandbox::SandboxError> {
+    let files = kettle_media_render::source::hold_inputs(job);
+    let (programs, trees) = decoders
+        .map(|decoders| decoders.sandbox_needs())
+        .unwrap_or_default();
+    kettle_media_native::sandbox::confine(&kettle_media_native::sandbox::Policy {
+        files: files.iter().collect(),
+        programs,
+        trees,
+    })
+}
+
+/// A decoder that decodes nothing, answering every video with `code`: what a
+/// job gets in place of the real ones when the sandbox could not be applied.
+struct Refusing(FailureCode);
+
+impl kettle_media::video::VideoDecoder for Refusing {
+    fn stills(
+        &self,
+        _input: kettle_media::video::VideoInput<'_>,
+        _plan: &mut dyn FnMut(
+            &kettle_media::VideoInfo,
+        ) -> Result<kettle_media::video::StillsPlan, FailureCode>,
+        _deadline: Instant,
+    ) -> Result<kettle_media::video::DecodedStills, FailureCode> {
+        Err(self.0)
+    }
 }
 
 /// Answer a frame other than the one expected, or one that could not be read.
@@ -204,6 +272,10 @@ mod faults {
 
     const PANIC: &[u8] = b"kettle-media-worker-test-panic:";
     const PAUSE: [u8; 2] = *b"KT";
+    /// Try, from inside the job, to read the file beside its source.
+    const PEEK: [u8; 2] = *b"KS";
+    /// Act as a system with no sandbox.
+    const UNCONFINED: [u8; 2] = *b"KN";
 
     pub(super) fn inject(job: &Job) {
         if let Source::Bytes(bytes) = &job.source
@@ -216,6 +288,31 @@ mod faults {
 
     pub(super) fn after_classification(job: &Job) {
         pause(job, 3);
+        peek(job);
+    }
+
+    pub(super) fn unconfined(job: &Job) -> bool {
+        job.theme.accent[..2] == UNCONFINED
+    }
+
+    /// Act as a worker whose watchdog could not confine itself.
+    pub(super) fn watchdog_unconfined() -> bool {
+        std::env::var_os("KETTLE_MEDIA_TEST_UNCONFINED_WATCHDOG").is_some()
+    }
+
+    /// Reading the source's neighbor `secret` succeeding is a panic: the job
+    /// then fails where a confined one renders.
+    fn peek(job: &Job) {
+        use std::os::unix::ffi::OsStrExt as _;
+        if job.theme.accent[..2] != PEEK {
+            return;
+        }
+        if let Source::Path { path, .. } = &job.source {
+            let source = std::path::Path::new(std::ffi::OsStr::from_bytes(path.as_bytes()));
+            if std::fs::read(source.with_file_name("secret")).is_ok() {
+                panic!("the job read a file it does not hold");
+            }
+        }
     }
 
     fn pause(job: &Job, which: usize) {

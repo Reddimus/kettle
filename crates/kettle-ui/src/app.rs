@@ -6229,6 +6229,8 @@ fn preview_failure_body(failure: kettle_media::FailureCode) -> kettle_i18n::Text
         F::UnsupportedContainer | F::CodecUnavailable | F::BackendUnavailable => {
             T::NotifyBodyPreviewNeedsDecoder
         }
+        // Installing anything would not help: the system has no sandbox.
+        F::SandboxUnavailable => T::NotifyBodyPreviewNeedsSandbox,
         F::UnsupportedMedia | F::RenderParse | F::IndexOutOfRange => {
             T::NotifyBodyPreviewUnsupported
         }
@@ -57741,6 +57743,11 @@ mod lane_control_tests {
                 T::NotifyBodyPreviewNeedsDecoder
             );
         }
+        assert_eq!(
+            super::preview_failure_body(F::SandboxUnavailable),
+            T::NotifyBodyPreviewNeedsSandbox,
+            "no decoder to install fixes a missing sandbox"
+        );
         assert_eq!(
             super::preview_failure_body(F::RenderParse),
             T::NotifyBodyPreviewUnsupported

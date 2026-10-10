@@ -134,6 +134,7 @@ notify_body_preview_too_large = "El archivo es demasiado grande para previsualiz
 notify_body_preview_unsupported = "Kettle previsualiza imágenes, SVG, diagramas Mermaid y vídeos, y no pudo leer esto como uno de ellos."
 notify_body_preview_unavailable = "Las vistas previas no están disponibles ahora. Reiniciar Kettle puede devolverlas."
 notify_body_preview_needs_decoder = "Este vídeo necesita ffmpeg, que Kettle no instala. En macOS: brew install ffmpeg; en Linux, desde los paquetes de tu sistema."
+notify_body_preview_needs_sandbox = "Kettle decodifica vídeos solo dentro de su entorno aislado, que este sistema no puede proporcionar. Las imágenes y los diagramas se siguen mostrando."
 notify_body_preview_failed = "La vista previa tardó demasiado, necesitó demasiada memoria o Kettle estaba ocupado. Vuelve a intentarlo."
 notify_body_preview_unplaced = "Kettle no pudo saber qué archivo de este equipo nombra la ruta."
 notify_title_preview_nothing = "kettle: nada que previsualizar"

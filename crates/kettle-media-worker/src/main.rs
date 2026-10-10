@@ -79,7 +79,14 @@ mod tests {
     #[test]
     fn worker_early_setup_precedes_all_reads() {
         let main = code_only(&production_source(include_str!("main.rs")));
-        let worker = code_only(&production_source(include_str!("worker.rs")));
+        // The `test-faults` hooks, last in the file and built only for the
+        // fault tests, are not production code.
+        let worker = code_only(&production_source(
+            include_str!("worker.rs")
+                .split("#[cfg(feature = \"test-faults\")]\nmod faults")
+                .next()
+                .expect("the worker's code"),
+        ));
         let early = code_only(&production_source(include_str!("early_unix.rs")));
 
         let unix_main = body(&main, "main()");
@@ -140,6 +147,28 @@ mod tests {
                 assert!(!code.contains(forbidden), "{name} uses {forbidden}");
             }
         }
+        // The watchdog, started before any job's sandbox, confines itself
+        // first; a job confines the worker before rendering.
+        assert!(
+            body(&worker, "start(")
+                .split("std::thread::Builder::new()")
+                .nth(1)
+                .is_some_and(
+                    |thread| thread
+                        .split(".spawn(move || {")
+                        .nth(1)
+                        .is_some_and(|body| body.trim_start().starts_with(
+                            "let confined = kettle_media_native::sandbox::confine_thread_to_nothing().is_ok();"
+                        ))
+                )
+        );
+        let answer = body(&worker, "answer(");
+        assert!(
+            answer.find("confine(job, decoders.as_ref())").unwrap()
+                < answer
+                    .find("kettle_media_render::render_with_decoder(")
+                    .unwrap()
+        );
         // One writer owns stdout; stderr carries only the panic line.
         assert_eq!(main.matches("stdout()").count(), 1);
         assert_eq!(

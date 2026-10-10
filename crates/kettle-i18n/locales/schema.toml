@@ -207,6 +207,9 @@ context = "crates/kettle-ui/src/app.rs notify_preview_failure: body when Kettle'
 [messages.notify_body_preview_needs_decoder]
 context = "crates/kettle-ui/src/app.rs notify_preview_failure: body when a video could not be previewed because no decoder on this computer reads its format or codec. ffmpeg is a program name; brew install ffmpeg is a command typed exactly. Kettle never installs it."
 
+[messages.notify_body_preview_needs_sandbox]
+context = "crates/kettle-ui/src/app.rs preview_failure_body: body when a video could not be previewed because Kettle's media worker could not confine itself (no Landlock on this Linux kernel, or no sandbox on this macOS), and Kettle never decodes video unconfined. Installing software does not help; images and diagrams are unaffected. 'sandbox' is the security sense: a confined process."
+
 [messages.notify_body_preview_failed]
 context = "crates/kettle-ui/src/app.rs notify_preview_failure: body for any other failure: the render timed out, needed too much memory, or Kettle was rendering something else."
 

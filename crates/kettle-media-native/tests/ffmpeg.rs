@@ -602,3 +602,30 @@ fn real_ffmpeg_refuses_a_truncated_clip() {
         "{result:?}"
     );
 }
+
+/// A decoder's sandbox needs both of its programs and each one's own library
+/// tree: ffprobe may come from another package than ffmpeg.
+#[test]
+fn each_program_brings_its_own_library_tree() {
+    let root = kettle_test_support::private_tempdir("kettle-ffmpeg-trees-");
+    let root = std::fs::canonicalize(root.path()).unwrap();
+    for (package, program) in [("a", "ffmpeg"), ("b", "ffprobe")] {
+        let bin = root.join(package).join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(root.join(package).join("lib")).unwrap();
+        let path = bin.join(program);
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let named = root.join("named");
+    std::fs::create_dir_all(&named).unwrap();
+    std::os::unix::fs::symlink(root.join("a/bin/ffmpeg"), named.join("ffmpeg")).unwrap();
+    std::os::unix::fs::symlink(root.join("b/bin/ffprobe"), named.join("ffprobe")).unwrap();
+    let ffmpeg = Ffmpeg::trust(&named.join("ffmpeg")).expect("trusted");
+    let (programs, trees) = kettle_media_native::Decoders::external(Some(ffmpeg)).sandbox_needs();
+    assert_eq!(
+        programs,
+        [root.join("a/bin/ffmpeg"), root.join("b/bin/ffprobe")]
+    );
+    assert_eq!(trees, [root.join("a/lib"), root.join("b/lib")]);
+}

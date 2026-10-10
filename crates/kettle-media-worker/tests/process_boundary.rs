@@ -387,7 +387,9 @@ fn stand_in_decoder(directory: &std::path::Path) -> std::path::PathBuf {
         while [ \"$i\" -lt \"$n\" ]; do printf '\\000\\200\\377\\377'; i=$((i + 1)); done";
     for (name, body) in [("ffprobe", ffprobe.as_str()), ("ffmpeg", ffmpeg)] {
         let path = directory.join(name);
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        // Bash itself: macOS's /bin/sh starts another shell, which the
+        // worker's sandbox, running only the decoder's programs, does not.
+        std::fs::write(&path, format!("#!/bin/bash\n{body}\n")).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
     directory.join("ffmpeg")
@@ -416,10 +418,9 @@ fn a_videos_stills_come_from_the_decoder_the_parent_named() {
     let clips = kettle_test_support::private_tempdir("kettle-worker-clip-");
     let clip = mp4_file(clips.path());
 
-    let Some(Frame::Rendered(rendered)) =
-        reply_from(worker_with_decoder(&ffmpeg), &stills_of(&clip, sheet(4)))
-    else {
-        panic!("no stills from the decoder");
+    let reply = reply_from(worker_with_decoder(&ffmpeg), &stills_of(&clip, sheet(4)));
+    let Some(Frame::Rendered(rendered)) = reply else {
+        panic!("no stills from the decoder: {reply:?}");
     };
     rendered.validate_as(MediaKind::Video).unwrap();
     let video = rendered.video.unwrap();
@@ -1006,4 +1007,80 @@ fn classification_does_not_restart_the_render_clock() {
         })
     ));
     assert_eq!(reply_or_timeout(&paused(JobKind::Auto, &png, 12, 12)), None);
+}
+
+/// `frame` with the `test-faults` worker's marker `marker` in its accent.
+#[cfg(feature = "test-faults")]
+fn marked(frame: Frame, marker: [u8; 2]) -> Frame {
+    let Frame::Job(mut job) = frame else {
+        unreachable!()
+    };
+    job.theme.accent = [marker[0], marker[1], 0, 0];
+    Frame::Job(job)
+}
+
+/// A job runs confined: the file beside its source, the user's own and
+/// readable, cannot be read from inside the job, whose video still renders
+/// from the decoder (an unconfined worker reads it and fails the job).
+#[cfg(feature = "test-faults")]
+#[test]
+fn a_job_cannot_read_beyond_what_it_holds() {
+    let decoders = kettle_test_support::private_tempdir("kettle-worker-decoder-");
+    let ffmpeg = stand_in_decoder(decoders.path());
+    let clips = kettle_test_support::private_tempdir("kettle-worker-clip-");
+    let clip = mp4_file(clips.path());
+    std::fs::write(clips.path().join("secret"), b"not for the job").unwrap();
+    let reply = reply_from(
+        worker_with_decoder(&ffmpeg),
+        &marked(stills_of(&clip, sheet(4)), *b"KS"),
+    );
+    assert!(matches!(reply, Some(Frame::Rendered(_))), "{reply:?}");
+}
+
+/// Where the worker cannot confine itself, a video is refused, never decoded
+/// unconfined, while an image, which only Kettle's own code parses, still
+/// renders.
+#[cfg(feature = "test-faults")]
+#[test]
+fn without_a_sandbox_videos_are_refused_and_images_render() {
+    let decoders = kettle_test_support::private_tempdir("kettle-worker-decoder-");
+    let ffmpeg = stand_in_decoder(decoders.path());
+    let clips = kettle_test_support::private_tempdir("kettle-worker-clip-");
+    let clip = mp4_file(clips.path());
+    assert_eq!(
+        reply_from(
+            worker_with_decoder(&ffmpeg),
+            &marked(stills_of(&clip, sheet(4)), *b"KN"),
+        ),
+        failure(FailureCode::SandboxUnavailable)
+    );
+    let png = png([10, 20, 30, 255]);
+    assert!(matches!(
+        reply_from(worker(), &marked(job(&png), *b"KN")),
+        Some(Frame::Rendered(_))
+    ));
+}
+
+/// A job counts as confined only if the watchdog, started earlier, confined
+/// itself too: a worker whose watchdog could not refuses a video.
+#[cfg(feature = "test-faults")]
+#[test]
+fn a_watchdog_left_unconfined_refuses_videos() {
+    let decoders = kettle_test_support::private_tempdir("kettle-worker-decoder-");
+    let ffmpeg = stand_in_decoder(decoders.path());
+    let clips = kettle_test_support::private_tempdir("kettle-worker-clip-");
+    let clip = mp4_file(clips.path());
+    let worker = Command::new(WORKER)
+        .env_clear()
+        .env(kettle_media::video::DECODER_ENV, &ffmpeg)
+        .env("KETTLE_MEDIA_TEST_UNCONFINED_WATCHDOG", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    assert_eq!(
+        reply_from(worker, &stills_of(&clip, sheet(4))),
+        failure(FailureCode::SandboxUnavailable)
+    );
 }

@@ -1166,6 +1166,7 @@ fn failure_code(v: u8) -> Result<FailureCode, WireError> {
         24 => ReadOnly,
         25 => OverBudget,
         26 => WorkerUnavailable,
+        27 => SandboxUnavailable,
         _ => return Err(WireError::UnknownEnum),
     })
 }
