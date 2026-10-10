@@ -49,6 +49,7 @@ pub fn commands() -> Vec<(Text, Action)> {
         (T::PalettePreviewCanvas, PreviewCanvas),
         (T::PalettePreviewCopy, PreviewCopy),
         (T::PalettePreviewReload, PreviewReload),
+        (T::PalettePreviewPlay, PreviewPlay),
         (T::PalettePreviewZoomIn, PreviewZoomIn),
         (T::PalettePreviewZoomOut, PreviewZoomOut),
         (T::PalettePreviewFit, PreviewFit),
@@ -292,6 +293,7 @@ mod tests {
             PreviewCanvas,
             PreviewCopy,
             PreviewReload,
+            PreviewPlay,
             PreviewZoomIn,
             PreviewZoomOut,
             PreviewFit,
@@ -450,6 +452,7 @@ mod tests {
                 | PreviewCanvas
                 | PreviewCopy
                 | PreviewReload
+                | PreviewPlay
                 | PreviewZoomIn
                 | PreviewZoomOut
                 | PreviewFit

@@ -778,6 +778,26 @@ pub(crate) enum LaneNotice {
     RenderFailed,
     /// The file changed since the item was rendered.
     Changed,
+    /// A video's silent preview could not be made.
+    PreviewFailed,
+    /// Its frames did not come within their two seconds.
+    PreviewTimedOut,
+    /// No decoder Kettle may use reads the video.
+    PreviewNeedsDecoder,
+    /// The system has no sandbox to decode the video in.
+    PreviewNeedsSandbox,
+}
+
+/// The real pointer resting on a lane's picture: where, since when, and
+/// whether a hover loop already started from this rest. Another starts only
+/// after the pointer leaves and comes back.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct LaneHover {
+    pub(crate) pane: u64,
+    /// Where the pointer rests, so that moving starts the rest again.
+    pub(crate) at: Option<(f64, f64)>,
+    pub(crate) since: std::time::Instant,
+    pub(crate) used: bool,
 }
 
 pub(crate) struct WindowState {
@@ -889,6 +909,12 @@ pub(crate) struct WindowState {
     pub(crate) preview_focus: Option<crate::media::PreviewFocus>,
     /// Each lane's sharper pixels for its zoomed view, by pane.
     pub(crate) lane_crops: std::collections::HashMap<u64, crate::media::LaneCrop>,
+    /// Each lane's silent video preview, by pane: being made, playing, or
+    /// its frames held while the poster shows.
+    pub(crate) lane_previews: std::collections::HashMap<u64, crate::media::LanePreview>,
+    /// The lane whose picture the real pointer rests on: what starts a
+    /// hover preview.
+    pub(crate) lane_hover: Option<LaneHover>,
     pub(crate) selecting: bool,
     /// Pane that owns the active pointer selection gesture. Focus can
     /// move through ctl/Lua while a drag is live; pinning the id prevents the
@@ -1452,6 +1478,8 @@ impl WindowState {
             lane_resize: None,
             preview_focus: None,
             lane_crops: std::collections::HashMap::new(),
+            lane_previews: std::collections::HashMap::new(),
+            lane_hover: None,
             selecting: false,
             selecting_pane: None,
             selection_autoscroll_edge: 0,
