@@ -4258,7 +4258,13 @@ Kettle), the instructions for each (the triggers, keeping the source,
 showing is not seeing, no retry and no changes inside; the tmux addition;
 not calling it outside; the full server saying the same after its tools),
 and both protocol eras carrying the same words.
-`tests/mcp_stdio.rs` runs the real `kettle mcp --display` in both protocol
+`tests/mcp_stdio.rs` runs `kettle_show` to completion through the real
+`kettle mcp`, in display and full mode, in both protocol eras, from Mermaid
+source and from a file, against a Kettle with previews on that the test
+itself registers and serves (the server descends from it, so the strict
+lookup picks it): the source arrives as sent, or the file's path with its
+device and inode, and the model gets one plain line saying it has not seen
+the media. It also runs the real `kettle mcp --display` in both protocol
 eras: initialize's instructions name `kettle_show`, `tools/list` is exactly
 `[kettle_show]`, a `kettle_run` call is refused as an invalid tool, and
 `server/discover` is private. For a live check, run `kettle mcp --display`
