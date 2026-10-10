@@ -1066,6 +1066,21 @@ pub enum PreviewLaneSide {
     Right,
 }
 
+/// Whether Kettle avoids motion it would start on its own (`reduce-motion`).
+/// Today that is a video's preview looping while the pointer rests on its
+/// lane; a preview the user starts plays either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReduceMotion {
+    /// Follow the system: macOS's Reduce Motion setting. Where the system
+    /// does not say (Linux), motion is avoided.
+    #[default]
+    Auto,
+    /// Always avoid it.
+    On,
+    /// Never avoid it.
+    Off,
+}
+
 /// When the per-pane scrollback scrollbar is shown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScrollbarMode {
@@ -1243,6 +1258,14 @@ pub struct Config {
     /// Show a short-lived receipt for an explicitly copied or dropped video
     /// file. Kettle never scans terminal text or path-like output for media.
     pub paste_video_preview: bool,
+    /// `video-preview-hover`: loop a video's silent preview while the pointer
+    /// rests on its lane, for at most four seconds, from frames the lane
+    /// already holds. Off by default; [`Config::reduce_motion`] can hold it
+    /// back.
+    pub video_preview_hover: bool,
+    /// `reduce-motion`: whether Kettle avoids motion it would start on its
+    /// own. See [`ReduceMotion`].
+    pub reduce_motion: ReduceMotion,
     /// Arm the GUI session recorder at launch (`record = on`). Off by default.
     /// Recording captures on-screen output verbatim; typed keystrokes are
     /// redacted to tokens unless [`Config::record_raw_input`] is on. The window
@@ -2743,6 +2766,8 @@ impl Default for Config {
             paste_images: PasteImages::On,
             paste_image_preview: true,
             paste_video_preview: true,
+            video_preview_hover: false,
+            reduce_motion: ReduceMotion::Auto,
             record: RecordMode::Off,
             record_dir: None,
             record_raw_input: false,
@@ -3389,6 +3414,8 @@ impl Config {
         "paste_image_preview",
         "paste-video-preview",
         "paste_video_preview",
+        "video-preview-hover",
+        "video_preview_hover",
         "new-tab-after-current-tab",
         "new_tab_after_current_tab",
         "putty-paste-style",
@@ -3918,6 +3945,10 @@ impl Config {
                     v.trim().to_ascii_lowercase().as_str(),
                     "bottom" | "right"
                 ),
+                "reduce-motion" | "reduce_motion" => matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "auto" | "on" | "true" | "yes" | "off" | "false" | "no"
+                ),
                 "add-kettle-to-path" | "add_kettle_to_path" => matches!(
                     v.trim().to_ascii_lowercase().as_str(),
                     "auto" | "on" | "true" | "yes" | "off" | "false" | "no"
@@ -4440,6 +4471,19 @@ impl Config {
                 "paste-video-preview" | "paste_video_preview" => {
                     if let Some(value) = parse_bool(&e.value) {
                         cfg.paste_video_preview = value;
+                    }
+                }
+                "video-preview-hover" | "video_preview_hover" => {
+                    if let Some(value) = parse_bool(&e.value) {
+                        cfg.video_preview_hover = value;
+                    }
+                }
+                "reduce-motion" | "reduce_motion" => {
+                    match e.value.trim().to_ascii_lowercase().as_str() {
+                        "auto" => cfg.reduce_motion = ReduceMotion::Auto,
+                        "on" | "true" | "yes" => cfg.reduce_motion = ReduceMotion::On,
+                        "off" | "false" | "no" => cfg.reduce_motion = ReduceMotion::Off,
+                        _ => {}
                     }
                 }
                 "record" => {
@@ -7259,6 +7303,28 @@ cell-height = 1.2\n";
         );
         assert!(Config::BOOL_KEYS.contains(&"paste-video-preview"));
         assert!(Config::BOOL_KEYS.contains(&"paste_video_preview"));
+    }
+
+    /// A video's hover preview is off until asked for; motion follows the
+    /// system until set either way, and a value it does not know changes
+    /// nothing.
+    #[test]
+    fn video_preview_hover_and_reduce_motion_parse() {
+        let default = Config::default();
+        assert!(!default.video_preview_hover);
+        assert_eq!(default.reduce_motion, ReduceMotion::Auto);
+        assert!(Config::parse_text("video-preview-hover = on").video_preview_hover);
+        assert!(Config::parse_text("video_preview_hover = true").video_preview_hover);
+        assert!(Config::BOOL_KEYS.contains(&"video-preview-hover"));
+        for (text, motion) in [
+            ("reduce-motion = on", ReduceMotion::On),
+            ("reduce-motion = off", ReduceMotion::Off),
+            ("reduce_motion = Yes", ReduceMotion::On),
+            ("reduce-motion = auto", ReduceMotion::Auto),
+            ("reduce-motion = sometimes", ReduceMotion::Auto),
+        ] {
+            assert_eq!(Config::parse_text(text).reduce_motion, motion, "{text}");
+        }
     }
 
     #[test]
