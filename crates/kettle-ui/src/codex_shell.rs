@@ -17,6 +17,27 @@ pub enum CodexShell {
     Fish,
 }
 
+impl CodexShell {
+    /// The shell a program is, by its name: `/bin/zsh`, `fish`, `bash.exe`.
+    pub fn from_program(program: &Path) -> Option<Self> {
+        match program.file_stem()?.to_str()? {
+            "bash" => Some(Self::Bash),
+            "zsh" => Some(Self::Zsh),
+            "fish" => Some(Self::Fish),
+            _ => None,
+        }
+    }
+
+    /// The shell's program name.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Bash => "bash",
+            Self::Zsh => "zsh",
+            Self::Fish => "fish",
+        }
+    }
+}
+
 /// Why Kettle's path cannot go into the function.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FunctionError {
@@ -241,6 +262,31 @@ pub(crate) fn for_new_pane() -> Option<kettle_core::shell_startup::ShellStartup>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A shell is known by its program's name, wherever it lives and with
+    /// any extension; another shell is none, and each name reads back.
+    #[test]
+    fn a_shell_is_known_by_its_programs_name() {
+        for (program, shell) in [
+            ("/bin/zsh", Some(CodexShell::Zsh)),
+            ("/opt/homebrew/bin/fish", Some(CodexShell::Fish)),
+            ("bash.exe", Some(CodexShell::Bash)),
+            ("/usr/bin/nu", None),
+            ("/bin/zshell", None),
+        ] {
+            assert_eq!(
+                CodexShell::from_program(Path::new(program)),
+                shell,
+                "{program}"
+            );
+        }
+        for shell in [CodexShell::Bash, CodexShell::Zsh, CodexShell::Fish] {
+            assert_eq!(
+                CodexShell::from_program(Path::new(shell.name())),
+                Some(shell)
+            );
+        }
+    }
 
     /// The startup equals the fixtures the shell-integration check runs under
     /// every supported zsh and fish, for a stand-in Kettle at

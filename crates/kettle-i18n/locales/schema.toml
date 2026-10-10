@@ -1592,6 +1592,31 @@ context = "crates/kettle-config/src/palette.rs: command palette entry for previe
 [messages.palette_preview_zoom_out]
 context = "crates/kettle-config/src/palette.rs: command palette entry for preview_zoom_out, which shrinks the image in the focused pane's preview lane by one step about its center."
 
+[messages.palette_copy_agent_setup]
+context = "crates/kettle-config/src/palette.rs: command palette entry for copy_agent_setup, which puts on the clipboard the shell function that starts Codex with Kettle's display server, for the user to paste into their shell's startup file. 'agent' means AI coding agents such as Codex and Claude Code."
+
+[messages.notify_title_agent_setup_copied]
+context = "crates/kettle-ui/src/app.rs copy_agent_setup: title of the desktop notification once the codex shell function is on the clipboard. 'kettle' is the product name, lowercase as in the other notification titles."
+
+[messages.notify_body_agent_setup_copied]
+context = "crates/kettle-ui/src/app.rs copy_agent_setup: body under notify_title_agent_setup_copied. shell is the shell's program name (bash, zsh or fish), never translated; 'codex' is the function's name and stays as is."
+args = [{ name = "shell", type = "str" }]
+
+[messages.notify_title_agent_setup_not_copied]
+context = "crates/kettle-ui/src/app.rs copy_agent_setup: title of the desktop notification when the codex shell function could not be put on the clipboard. 'kettle' is the product name, lowercase as in the other notification titles."
+
+[messages.notify_body_agent_setup_shell]
+context = "crates/kettle-ui/src/app.rs copy_agent_setup: body when new panes start a shell other than bash, zsh or fish, or on a system without agent setup. bash, zsh, fish and 'kettle agent-setup --print --shell' are literal and stay as is."
+
+[messages.notify_body_agent_setup_translocated]
+context = "crates/kettle-ui/src/app.rs copy_agent_setup: body when Kettle runs from a copy macOS moved to a temporary location (App Translocation), whose path would not last in the function. /Applications is the literal folder name."
+
+[messages.notify_body_agent_setup_clipboard]
+context = "crates/kettle-ui/src/app.rs copy_agent_setup: body under notify_title_agent_setup_not_copied when the system clipboard could not be reached or written."
+
+[messages.notify_body_agent_setup_unnamed]
+context = "crates/kettle-ui/src/app.rs copy_agent_setup: body when Kettle's own path cannot be written into the function because it is not a plain absolute path."
+
 [messages.palette_render_clipboard_as_diagram]
 context = "crates/kettle-config/src/palette.rs: command palette entry for render_clipboard_as_diagram, which renders the Mermaid diagram on the clipboard (as /copy in Claude Code or Codex leaves it) in the focused pane's preview lane. 'Kettle' is the product name."
 

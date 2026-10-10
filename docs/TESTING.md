@@ -3929,7 +3929,12 @@ where on, disabled where off, anything else unknown), Claude Code's plugin
 in the pane, a local policy forbidding it, a Kettle that cannot offer it,
 and that a remote one is not visible, and that status and removal name what the harnesses still
 write, and names a system `zshenv` that keeps Kettle out of zsh;
-`agent_plugin` pins a pane counted as having the plugin by its variable; `owned_dir` checks a nested layout installs
+`agent_plugin` pins a pane counted as having the plugin by its variable;
+`codex_shell` pins a shell known by its program's name; the palette and
+keybind tests pin `copy_agent_setup` without a default binding, and an App
+guard pins it copying the function for the configured shell or `SHELL` from
+this Kettle's path, with a notification for a translocated copy and for a
+clipboard it could not reach; `owned_dir` checks a nested layout installs
 read-only at every level and that an extra entry deep inside fails the
 check; the App tests pin that the startup files are offered before the first
 pane and on reload, gated on both settings, and the Codex row's note. Checked

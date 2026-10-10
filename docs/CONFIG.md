@@ -685,8 +685,14 @@ menu offers "Preview Selected Diagram" when the selection holds a diagram,
 and Shift+right-click offers "Preview Copied Diagram" when the clipboard
 does. Neither has a default binding, and a control client cannot have either
 read the clipboard or a selection, nor have a menu it opens look at them for
-its rows. The palette lists them as "Preview the copied
-diagram in Kettle" and "Preview the selected diagram in Kettle". `preview_next`,
+its rows. The palette lists them as "Preview the copied diagram in Kettle"
+and "Preview the selected diagram in Kettle". `copy_agent_setup`
+(`copy-agent-setup`, palette: "Copy agent setup commands", no default
+binding) puts on the clipboard the `codex` function `kettle agent-setup
+--print` prints, for the shell new panes start (`shell`, else `SHELL`; bash,
+zsh or fish, on macOS and Linux), naming this Kettle's own path; a
+notification says it was copied, or why not: another shell, a translocated
+copy whose path would not last, or a clipboard Kettle could not reach. `preview_next`,
 `preview_previous` and `close_preview` browse and close the focused pane's
 lane as its `›`, `‹` and `×` do ("Next preview", "Previous preview" and
 "Close preview lane" in the palette), and `preview_source`,
