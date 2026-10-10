@@ -153,6 +153,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Cmd+wheel (Ctrl+wheel off macOS) at the pointer zoom the picture, the
   wheel or a drag pans it, and `⤢` fits it again. Also as
   `preview_zoom_in`, `preview_zoom_out` and `preview_fit`.
+- Preview a diagram an agent printed: `/copy` it in Claude Code or Codex and
+  use `render_clipboard_as_diagram`, or select the reply and use
+  `render_selection_as_diagram` (also on right-click), and the lane renders
+  it, with the agent's labels, notices and wrapping taken back off.
 - `focus_preview` ("Focus preview") gives a preview lane the keyboard until
   Esc: arrows, `+`, `-`, `0` and `c` move, zoom, fit and copy, and nothing
   else typed reaches the program in the pane.

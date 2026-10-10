@@ -51,6 +51,8 @@ pub fn commands() -> Vec<(Text, Action)> {
         (T::PalettePreviewZoomOut, PreviewZoomOut),
         (T::PalettePreviewFit, PreviewFit),
         (T::PaletteFocusPreview, FocusPreview),
+        (T::PaletteRenderClipboardAsDiagram, RenderClipboardAsDiagram),
+        (T::PaletteRenderSelectionAsDiagram, RenderSelectionAsDiagram),
         (T::PaletteOpenSettings, OpenSettings),
         (T::PaletteAbout, About),
         (T::PaletteEditConfig, EditConfig),
@@ -289,6 +291,8 @@ mod tests {
             PreviewZoomOut,
             PreviewFit,
             FocusPreview,
+            RenderClipboardAsDiagram,
+            RenderSelectionAsDiagram,
             EditConfig,
             SetScrollbarAlways,
             SetScrollbarAuto,
@@ -442,6 +446,8 @@ mod tests {
                 | PreviewZoomOut
                 | PreviewFit
                 | FocusPreview
+                | RenderClipboardAsDiagram
+                | RenderSelectionAsDiagram
                 | EditConfig
                 | SetScrollbarAlways
                 | SetScrollbarAuto

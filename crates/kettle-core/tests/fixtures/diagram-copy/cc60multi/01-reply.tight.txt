@@ -1,0 +1,6 @@
+  mermaid
+  flowchart LR
+      subgraph S[Normalizer]
+          A[Clipboard] --> B[Strip]
+      end
+      B --> C[Render]

@@ -395,6 +395,12 @@ the keyboard (`focus_preview`; `preview_lanes` reports `keyboard` as
 view settles, but a view a control client changed last reads no file for
 it. A control client may press these like any control, but no file is
 read again while Kettle handles a control request.
+The user can also preview a Mermaid diagram an agent printed:
+`render_clipboard_as_diagram` after `/copy`, or `render_selection_as_diagram`
+on the selected reply, with what the agent's UI added and wrapped taken back
+off. A control client cannot trigger either: they read the clipboard or a
+selection only on the user's own key press or click, and a menu a control
+client opens does not look at them to offer its rows.
 The user can also preview an image, SVG or Mermaid file a pane names
 without any agent: `preview_link` (the palette's "Preview a file in
 Kettle") labels such files in the focused pane as quick select does, and the

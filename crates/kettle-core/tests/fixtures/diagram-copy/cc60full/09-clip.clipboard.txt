@@ -1,0 +1,25 @@
+Here's the pull normalizer roundtrip capture flowchart:
+
+```mermaid
+flowchart TD
+    %% S6 capture diagram for the pull normalizer at sixty, seventy and eighty columns
+    A[Receive pull request] --> B[Strip surrounding fences]
+    B --> C[Drop harness label line]
+    C --> D{Codex notice present?}
+    D -->|yes| E[Remove notice lines]
+    D -->|no| F[Keep leading lines]
+    E --> G[Remove common indentation]
+    F --> G
+    G --> H{Hard wrap detected?}
+    H -->|yes| I[Rejoin continuation rows]
+    H -->|no| J[Pass through unchanged]
+    I --> K[Validate joined DSL]
+    J --> K
+    K --> L{Parser accepts source?}
+    L -->|yes| M[Render diagram in lane]
+    L -->|no| N[Report typed error]
+    M --> O[Done]
+    N --> O
+```
+
+The diagram is saved at `/private/tmp/kettle-s6/deeply/nested/workspace/agent-visuals/diagrams/generated/2026-09-30/pull-normalizer-roundtrip-capture-flowchart-v15.mmd`.

@@ -1,0 +1,6 @@
+  This Mermaid diagram uses features the terminal renderer doesn't support.
+  flowchart LR
+      subgraph S[Normalizer]
+      A[Clipboard] --> B[Strip]
+      end
+      B --> C[Render]

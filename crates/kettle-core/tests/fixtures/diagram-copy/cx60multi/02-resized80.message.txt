@@ -1,0 +1,28 @@
+• The first diagram shows the normalizer flow.
+
+  This Mermaid diagram uses features the terminal renderer doesn't support.
+  flowchart LR
+      subgraph S[Normalizer]
+      A[Clipboard] --> B[Strip]
+      end
+      B --> C[Render]
+
+  The second diagram shows the decision flow.
+
+  ┌───────┐
+  │ Start │
+  │       ├────────┐
+  └───────┘        │
+                   │
+                   │
+  ┌───────┐        │
+  │ ◇ OK? │        │
+  │       ├◄───────┘
+  │       ├──yes─────┐
+  └───────┘          │
+                     │
+                     │
+  ┌───────┐          │
+  │ Done  │          │
+  │       ├◄─────────┘
+  └───────┘

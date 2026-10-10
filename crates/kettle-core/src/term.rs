@@ -9372,6 +9372,129 @@ impl Terminal {
     }
 }
 
+/// The selection could not be read within the limit asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SelectionTextTooLarge;
+
+/// The selected text, or `None` with nothing selected, when it fits in
+/// `cap` bytes. The cells are counted first, a conservative bound with
+/// combining marks and wide characters' cells, so a huge selection is
+/// refused before the engine builds its string.
+pub fn selection_text_bounded(
+    term: &Term<EventProxy>,
+    cap: usize,
+) -> Result<Option<String>, SelectionTextTooLarge> {
+    let Some(range) = term
+        .selection
+        .as_ref()
+        .and_then(|selection| selection.to_range(term))
+    else {
+        return Ok(None);
+    };
+    cells_within(term, &range, cap)?;
+    let text = term.selection_to_string();
+    if text.as_ref().is_some_and(|text| text.len() > cap) {
+        return Err(SelectionTextTooLarge);
+    }
+    Ok(text)
+}
+
+/// Whether the text of `range`'s cells is sure to fit in `cap` bytes, by a
+/// conservative count of each cell's character, its combining marks, and a
+/// line break and what a wrapped wide character adds per line.
+fn cells_within(
+    term: &Term<EventProxy>,
+    range: &alacritty_terminal::selection::SelectionRange,
+    cap: usize,
+) -> Result<(), SelectionTextTooLarge> {
+    use alacritty_terminal::index::{Column, Line, Point};
+    let columns = term.columns();
+    if columns == 0 {
+        return Err(SelectionTextTooLarge);
+    }
+    let mut bytes = 0usize;
+    let mut add = |more: usize| {
+        bytes = bytes.saturating_add(more);
+        if bytes > cap {
+            Err(SelectionTextTooLarge)
+        } else {
+            Ok(())
+        }
+    };
+    for line in range.start.line.0..=range.end.line.0 {
+        // A line break, and what a wrapped wide character adds.
+        add(8)?;
+        let first = if range.is_block || line == range.start.line.0 {
+            range.start.column.0
+        } else {
+            0
+        }
+        .saturating_sub(1)
+        .min(columns - 1);
+        let last = if range.is_block || line == range.end.line.0 {
+            range.end.column.0
+        } else {
+            columns - 1
+        }
+        .min(columns - 1);
+        for column in first..=last {
+            let cell = &term.grid()[Point::new(Line(line), Column(column))];
+            add(cell.c.len_utf8())?;
+            for mark in cell.zerowidth().into_iter().flatten() {
+                add(mark.len_utf8())?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The Mermaid sources in the selection, or `None` with nothing selected,
+/// joined back across hard wraps at the terminal's width. A selection
+/// that starts inside a row leaves that row's leading columns out; they
+/// are put back as spaces, so the first row keeps its indentation against
+/// the rows below. A rectangle cuts every row at its sides, losing the
+/// indentation and the ends a diagram's rows need, so the lines it spans
+/// are taken whole.
+pub fn selected_diagram_sources(
+    term: &Term<EventProxy>,
+) -> Result<Option<Vec<String>>, crate::DiagramCopyError> {
+    let Some(range) = term
+        .selection
+        .as_ref()
+        .and_then(|selection| selection.to_range(term))
+    else {
+        return Ok(None);
+    };
+    let too_large = |_| crate::DiagramCopyError::TooLarge;
+    let text = if range.is_block {
+        use alacritty_terminal::index::{Column, Point};
+        let lines = alacritty_terminal::selection::SelectionRange::new(
+            Point::new(range.start.line, Column(0)),
+            Point::new(range.end.line, term.last_column()),
+            false,
+        );
+        cells_within(term, &lines, crate::MAX_DIAGRAM_COPY_BYTES).map_err(too_large)?;
+        term.bounds_to_string(lines.start, lines.end)
+    } else {
+        let Some(text) =
+            selection_text_bounded(term, crate::MAX_DIAGRAM_COPY_BYTES).map_err(too_large)?
+        else {
+            return Ok(None);
+        };
+        text
+    };
+    let text = if range.is_block || range.start.column.0 == 0 {
+        text
+    } else {
+        let padding = range.start.column.0;
+        if padding.saturating_add(text.len()) > crate::MAX_DIAGRAM_COPY_BYTES {
+            return Err(crate::DiagramCopyError::TooLarge);
+        }
+        format!("{:padding$}{text}", "")
+    };
+    crate::diagram_sources(&text, Some(term.columns())).map(Some)
+}
+
 /// Pure body of [`Terminal::screen_text`], factored on a raw `Term` so the
 /// no-PTY conformance harness can exercise it without spawning a child.
 pub fn screen_text_of(t: &Term<EventProxy>, scrollback_lines: usize) -> ScreenText {
@@ -14194,6 +14317,82 @@ mod conformance {
     // stops), DECSCA/DECSEL selective-erase and LNM LF→CRLF *output*
     // translation are not applied by alacritty_terminal, so no conformance
     // test asserts those behaviors (only LNM's mode bit) — see ROADMAP.
+
+    /// A selection fits a byte limit or is refused before its text is
+    /// built; nothing selected is no text.
+    #[test]
+    fn a_selection_is_read_only_within_its_limit() {
+        let (mut t, mut p) = harness(20, 4);
+        feed(&mut t, &mut p, b"hello world\r\nsecond");
+        assert_eq!(selection_text_bounded(&t, 1024), Ok(None));
+        let mut selection = Selection::new(
+            SelectionType::Simple,
+            Point::new(Line(0), Column(0)),
+            Side::Left,
+        );
+        selection.update(Point::new(Line(1), Column(5)), Side::Right);
+        t.selection = Some(selection);
+        assert_eq!(
+            selection_text_bounded(&t, 1024),
+            Ok(Some("hello world\nsecond".to_owned()))
+        );
+        assert_eq!(selection_text_bounded(&t, 8), Err(SelectionTextTooLarge));
+    }
+
+    /// A diagram selected from a reply is joined back across the wraps at
+    /// the terminal's width; a selection starting inside its first row
+    /// keeps that row's indentation.
+    #[test]
+    fn a_selected_diagram_is_joined_back_at_the_terminal_width() {
+        let (mut t, mut p) = harness(30, 8);
+        feed(
+            &mut t,
+            &mut p,
+            b"\xe2\x8f\xba Here:\r\n  mermaid\r\n  flowchart TD\r\n      A[Receive the pull\r\n  request] --> B\r\n      B --> C",
+        );
+        assert_eq!(selected_diagram_sources(&t), Ok(None));
+        let select = |t: &mut Term<EventProxy>, from: (i32, usize)| {
+            let mut selection = Selection::new(
+                SelectionType::Simple,
+                Point::new(Line(from.0), Column(from.1)),
+                Side::Left,
+            );
+            selection.update(Point::new(Line(5), Column(29)), Side::Right);
+            t.selection = Some(selection);
+        };
+        let want =
+            vec!["flowchart TD\n    A[Receive the pull request] --> B\n    B --> C".to_owned()];
+        select(&mut t, (0, 0));
+        assert_eq!(selected_diagram_sources(&t), Ok(Some(want.clone())));
+        select(&mut t, (2, 2));
+        assert_eq!(selected_diagram_sources(&t), Ok(Some(want)));
+    }
+
+    /// A rectangle selected over a diagram takes the lines it spans whole:
+    /// cut at its left side, a wrapped row would look like source at the
+    /// left edge, and a comment's wrap would become a statement.
+    #[test]
+    fn a_rectangle_over_a_diagram_takes_its_lines_whole() {
+        let (mut t, mut p) = harness(30, 8);
+        feed(
+            &mut t,
+            &mut p,
+            b"\xe2\x8f\xba Here:\r\n  flowchart TD\r\n      %% This is an example of\r\n  A --> B\r\n      C --> D",
+        );
+        let mut selection = Selection::new(
+            SelectionType::Block,
+            Point::new(Line(1), Column(2)),
+            Side::Left,
+        );
+        selection.update(Point::new(Line(4), Column(20)), Side::Right);
+        t.selection = Some(selection);
+        assert_eq!(
+            selected_diagram_sources(&t),
+            Ok(Some(vec![
+                "flowchart TD\n    %% This is an example of A --> B\n    C --> D".to_owned()
+            ]))
+        );
+    }
 }
 
 #[cfg(test)]
