@@ -300,6 +300,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   the most similar one, and tags each row dark or light. Open it from the
   Settings Theme row (Enter or a click), right-click → Theme…, the command
   palette's "Choose theme…", or the bindable `open_theme_picker` action.
+- `kettle video-frames clip.webm -o sheet.jpg` and the full MCP server's
+  `kettle_video_frames` return a contact sheet of a video's frames for a
+  model to read, each labeled with its time, with an index of the times.
+  Kettle reads GIF, APNG and animated WebP itself, and on macOS MP4 and
+  QuickTime through AVFoundation; any other video needs your own ffmpeg and
+  ffprobe, which Kettle finds only in fixed places, trusts only when no one
+  else could have changed them, and runs contained, with a deadline. Kettle
+  never installs them. The display server never offers the tool.
 
 ### Changed
 
