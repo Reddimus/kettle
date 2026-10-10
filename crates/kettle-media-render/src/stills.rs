@@ -194,78 +194,12 @@ pub(crate) fn poster(info: &VideoInfo, target: kettle_media::Target) -> VideoSti
     }
 }
 
-/// Space between frames and around them on a sheet, in pixels.
-const GAP: u32 = 4;
 /// A sheet's background: dark, so a frame's edge shows against it.
 const BACKGROUND: [u8; 4] = [24, 24, 24, 255];
 
-/// The instants `stills` asks for in a video `duration_ms` long, in the order
-/// they are laid out: the one at `at_s`, or `count` evenly through the window
-/// from `start_s` to `end_s` (the end without one), each the middle of its
-/// share. Past the end is the end.
-pub fn sample_times(duration_ms: u64, stills: &VideoStills) -> Vec<u64> {
-    let ms = |seconds: f64| {
-        let ms = (seconds * 1000.0).round();
-        if ms >= duration_ms as f64 {
-            duration_ms
-        } else {
-            ms.max(0.0) as u64
-        }
-    };
-    if let Some(at) = stills.at_s {
-        return vec![ms(at)];
-    }
-    let start = ms(stills.start_s);
-    let end = stills.end_s.map_or(duration_ms, ms).max(start);
-    let count = u64::from(stills.count.max(1));
-    let span = end - start;
-    (0..count)
-        .map(|index| start + (span * (2 * index + 1)) / (2 * count))
-        .collect()
-}
-
-/// The layout's grid, columns by rows.
-pub fn grid(stills: &VideoStills) -> (u32, u32) {
-    match stills.layout {
-        StillsLayout::Poster => (1, 1),
-        StillsLayout::Sheet { cols, .. } => {
-            let cols = u32::from(cols.max(1));
-            (cols, u32::from(stills.count).div_ceil(cols))
-        }
-    }
-}
-
-/// The size each frame of a picture `width` by `height` (as shown) is drawn
-/// at: as large as the grid and its gaps allow within `max_edge` on a side,
-/// never larger than the picture itself, its shape kept. `None` for an empty
-/// picture.
-pub fn tile_size(width: u32, height: u32, stills: &VideoStills) -> Option<(u32, u32)> {
-    if width == 0 || height == 0 {
-        return None;
-    }
-    let (cols, rows) = grid(stills);
-    let gap = gap(stills);
-    let room = |count: u32| {
-        stills
-            .max_edge
-            .checked_sub(gap * (count + 1))
-            .map(|left| left / count)
-            .filter(|&room| room > 0)
-    };
-    let (room_w, room_h) = (room(cols)?, room(rows)?);
-    let scale = (f64::from(room_w) / f64::from(width))
-        .min(f64::from(room_h) / f64::from(height))
-        .min(1.0);
-    let tile = |side: u32| ((f64::from(side) * scale).floor() as u32).max(1);
-    Some((tile(width), tile(height)))
-}
-
-fn gap(stills: &VideoStills) -> u32 {
-    match stills.layout {
-        StillsLayout::Poster => 0,
-        StillsLayout::Sheet { .. } => GAP,
-    }
-}
+/// The geometry of a sheet, shared with the GUI, which slices one.
+pub use kettle_media::video::{SHEET_GAP as GAP, grid, sample_times, tile_size};
+use kettle_media::video::{sheet_size, tile_origin};
 
 /// One frame taken: when it was asked for and when the frame shown is, and
 /// its straight RGBA at the tile size.
@@ -302,17 +236,12 @@ pub fn compose(
     {
         return Err(FailureCode::RenderResource);
     }
-    let (cols, rows) = grid(stills);
-    let gap = gap(stills);
-    let width = cols * tile_w + gap * (cols + 1);
-    let height = rows * tile_h + gap * (rows + 1);
+    let (width, height) = sheet_size(stills, (tile_w, tile_h));
     let mut rgba = BACKGROUND.repeat(width as usize * height as usize);
     let labels = matches!(stills.layout, StillsLayout::Sheet { labels: true, .. });
     let label_size = (tile_h / 12).clamp(10, 28);
     for (index, frame) in frames.iter().enumerate() {
-        let index = index as u32;
-        let x = gap + (index % cols) * (tile_w + gap);
-        let y = gap + (index / cols) * (tile_h + gap);
+        let (x, y) = tile_origin(stills, (tile_w, tile_h), index as u32);
         // A frame's transparency shows the sheet's background, so the sheet
         // stays opaque.
         for row in 0..tile_h {
