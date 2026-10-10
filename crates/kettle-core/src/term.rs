@@ -5663,6 +5663,46 @@ fn default_prog() -> CommandBuilder {
     CommandBuilder::new_default_prog()
 }
 
+/// The shell a pane started with no command runs, `shell` being the
+/// `SHELL` its configured environment sets, if any. As the PTY picks it:
+/// its `SHELL` (that one, else Kettle's own, else the user's passwd shell)
+/// if it can run, else the passwd shell, else `/bin/sh`.
+#[cfg(unix)]
+pub fn default_pane_shell(shell: Option<&std::ffi::OsStr>) -> String {
+    let mut cmd = default_prog();
+    if let Some(shell) = shell {
+        cmd.env("SHELL", shell);
+    }
+    cmd.get_shell()
+}
+
+#[cfg(all(test, unix))]
+mod default_pane_shell_tests {
+    use super::default_pane_shell;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    /// A configured `SHELL` that can run is the one; one that cannot is
+    /// passed over for a shell that can, as the PTY passes it over.
+    #[test]
+    fn a_default_pane_runs_the_shell_the_pty_picks() {
+        let dir = kettle_test_support::private_tempdir("kettle-pane-shell-");
+        let runnable = dir.path().join("bash");
+        std::fs::write(&runnable, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&runnable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            default_pane_shell(Some(runnable.as_os_str())),
+            runnable.to_str().unwrap()
+        );
+        let unrunnable = dir.path().join("zsh");
+        std::fs::write(&unrunnable, "").unwrap();
+        let picked = default_pane_shell(Some(unrunnable.as_os_str()));
+        assert_ne!(picked, unrunnable.to_str().unwrap());
+        let mode = std::fs::metadata(&picked).unwrap().permissions().mode();
+        assert_ne!(mode & 0o111, 0, "{picked}");
+        assert!(!default_pane_shell(None).is_empty());
+    }
+}
+
 /// The default-shell `CommandBuilder`, optionally auto-injecting
 /// kettle's shell integration so the shell reports its working directory
 /// (OSC 7) + prompt marks (OSC 133) with zero `$PROFILE` setup. This is what

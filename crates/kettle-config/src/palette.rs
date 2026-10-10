@@ -53,6 +53,7 @@ pub fn commands() -> Vec<(Text, Action)> {
         (T::PaletteFocusPreview, FocusPreview),
         (T::PaletteRenderClipboardAsDiagram, RenderClipboardAsDiagram),
         (T::PaletteRenderSelectionAsDiagram, RenderSelectionAsDiagram),
+        (T::PaletteCopyAgentSetup, CopyAgentSetup),
         (T::PaletteOpenSettings, OpenSettings),
         (T::PaletteAbout, About),
         (T::PaletteEditConfig, EditConfig),
@@ -293,6 +294,7 @@ mod tests {
             FocusPreview,
             RenderClipboardAsDiagram,
             RenderSelectionAsDiagram,
+            CopyAgentSetup,
             EditConfig,
             SetScrollbarAlways,
             SetScrollbarAuto,
@@ -448,6 +450,7 @@ mod tests {
                 | FocusPreview
                 | RenderClipboardAsDiagram
                 | RenderSelectionAsDiagram
+                | CopyAgentSetup
                 | EditConfig
                 | SetScrollbarAlways
                 | SetScrollbarAuto

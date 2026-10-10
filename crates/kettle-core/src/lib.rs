@@ -76,6 +76,8 @@ pub use search::{
     SearchBatch, SearchBounds, SearchCompileError, SearchDirection, SearchLayout, SearchOutcome,
     SearchPoint, SearchScanToken, SearchSpan, search, search_with,
 };
+#[cfg(unix)]
+pub use term::default_pane_shell;
 pub use term::{
     CommandFinished, KeyboardClaims, ProtocolNotification, PtyEofProgress, PtyGeometry,
     PtyInputTail, PtyOutputSender, PtyReadProgress, PtyReadStatus, PtyStdin, PtyWriter, ScreenText,

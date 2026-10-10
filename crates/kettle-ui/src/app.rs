@@ -21144,6 +21144,7 @@ impl App {
             Action::FocusPreview => self.focus_preview(ws),
             Action::RenderClipboardAsDiagram => self.preview_copied_diagram(ws, false),
             Action::RenderSelectionAsDiagram => self.preview_copied_diagram(ws, true),
+            Action::CopyAgentSetup => self.copy_agent_setup(),
             Action::PreviewNext
             | Action::PreviewPrevious
             | Action::ClosePreview
@@ -23678,6 +23679,71 @@ impl App {
             None,
             title,
             kettle_media::Canvas::Theme,
+        );
+    }
+
+    /// Put on the clipboard the `codex` function `kettle agent-setup --print`
+    /// prints, for the shell new panes start (the configured `shell`, else
+    /// the one the PTY picks for a pane with no command, from the configured
+    /// `env`'s `SHELL`, Kettle's own or the user's passwd shell), and say
+    /// so; or say why there is none to copy.
+    fn copy_agent_setup(&mut self) {
+        use kettle_i18n::Text as T;
+        let tr = self.ui_text;
+        let not_copied =
+            |body: T| fire_notify(tr.text(T::NotifyTitleAgentSetupNotCopied), tr.text(body));
+        let program = match self.cfg.shell.clone() {
+            Some(shell) => Some(std::ffi::OsString::from(shell)),
+            #[cfg(unix)]
+            None => {
+                let configured = self
+                    .cfg
+                    .env
+                    .iter()
+                    .rev()
+                    .find(|(name, _)| name == "SHELL")
+                    .map(|(_, value)| std::ffi::OsStr::new(value.as_str()));
+                Some(kettle_core::default_pane_shell(configured).into())
+            }
+            #[cfg(not(unix))]
+            None => None,
+        };
+        let shell = program
+            .as_deref()
+            .map(std::path::Path::new)
+            .and_then(crate::codex_shell::CodexShell::from_program)
+            .filter(|_| cfg!(unix));
+        let Some(shell) = shell else {
+            return not_copied(T::NotifyBodyAgentSetupShell);
+        };
+        let Ok(kettle) = std::env::current_exe() else {
+            return not_copied(T::NotifyBodyAgentSetupUnnamed);
+        };
+        let function = match crate::codex_shell::codex_function(&kettle, shell) {
+            Ok(function) => function,
+            Err(crate::codex_shell::FunctionError::Translocated) => {
+                return not_copied(T::NotifyBodyAgentSetupTranslocated);
+            }
+            Err(crate::codex_shell::FunctionError::UnnamedKettle) => {
+                return not_copied(T::NotifyBodyAgentSetupUnnamed);
+            }
+        };
+        let copied =
+            self.clipboard
+                .as_mut()
+                .is_some_and(|clipboard| match clipboard.set_text(function) {
+                    Ok(()) => true,
+                    Err(error) => {
+                        log::warn!("clipboard set_text failed (agent setup): {error}");
+                        false
+                    }
+                });
+        if !copied {
+            return not_copied(T::NotifyBodyAgentSetupClipboard);
+        }
+        fire_notify(
+            tr.text(T::NotifyTitleAgentSetupCopied),
+            &tr.notify_body_agent_setup_copied(shell.name()),
         );
     }
 
@@ -57341,6 +57407,31 @@ mod lane_control_tests {
     /// Mermaid, and offered in the menu, the clipboard's only on
     /// Shift+right-click and neither probed for a menu a control client
     /// opens. A path pull shares the same admission.
+    /// "Copy agent setup commands" copies the function `kettle agent-setup
+    /// --print` prints, for the configured shell or `SHELL`, from this
+    /// Kettle's own path, and says why when it cannot.
+    #[test]
+    fn copy_agent_setup_is_wired() {
+        let src = super::production_source();
+        let flat = src.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(flat.contains("Action::CopyAgentSetup => self.copy_agent_setup(),"));
+        let body = flat
+            .split("fn copy_agent_setup(&mut self) {")
+            .nth(1)
+            .and_then(|rest| rest.split(" fn ").next())
+            .expect("copy_agent_setup");
+        for needle in [
+            ".cfg .env .iter() .rev() .find(|(name, _)| name == \"SHELL\")",
+            "Some(kettle_core::default_pane_shell(configured).into())",
+            "crate::codex_shell::codex_function(&kettle, shell)",
+            "Err(crate::codex_shell::FunctionError::Translocated) => { return not_copied(T::NotifyBodyAgentSetupTranslocated); }",
+            "&tr.notify_body_agent_setup_copied(shell.name()),",
+            "if !copied { return not_copied(T::NotifyBodyAgentSetupClipboard); }",
+        ] {
+            assert!(body.contains(needle), "{needle}");
+        }
+    }
+
     #[test]
     fn copied_diagrams_are_wired() {
         let src = super::production_source();

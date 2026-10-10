@@ -348,6 +348,9 @@ pub enum Action {
     /// Preview, in the focused pane's lane, the Mermaid diagram on the
     /// clipboard, as `/copy` in Claude Code or Codex puts it there.
     RenderClipboardAsDiagram,
+    /// Copy the `codex` function `kettle agent-setup --print` prints, for the
+    /// shell new panes start, to add to its startup file.
+    CopyAgentSetup,
     /// Preview the Mermaid diagram in the selection, joined back across the
     /// rows its harness wrapped.
     RenderSelectionAsDiagram,
@@ -766,6 +769,7 @@ pub fn action_names() -> Vec<&'static str> {
         "focus_preview",
         "render_clipboard_as_diagram",
         "render_selection_as_diagram",
+        "copy_agent_setup",
         "preferences",
         "edit_config",
         "settings",
@@ -1076,6 +1080,7 @@ impl Action {
             "render_selection_as_diagram" | "render-selection-as-diagram" => {
                 RenderSelectionAsDiagram
             }
+            "copy_agent_setup" | "copy-agent-setup" => CopyAgentSetup,
             "preferences"
             | "preferences_keybindings"
             | "preferences-keybindings"
@@ -1776,7 +1781,7 @@ mod tests {
     /// The copied and selected diagram previews parse by either spelling
     /// and claim no default shortcut.
     #[test]
-    fn diagram_previews_parse_without_a_default_shortcut() {
+    fn diagram_previews_and_agent_setup_parse_without_a_default_shortcut() {
         for (names, action) in [
             (
                 ["render_clipboard_as_diagram", "render-clipboard-as-diagram"],
@@ -1785,6 +1790,10 @@ mod tests {
             (
                 ["render_selection_as_diagram", "render-selection-as-diagram"],
                 Action::RenderSelectionAsDiagram,
+            ),
+            (
+                ["copy_agent_setup", "copy-agent-setup"],
+                Action::CopyAgentSetup,
             ),
         ] {
             for name in names {

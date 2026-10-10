@@ -882,8 +882,10 @@ codex() {
 }
 ```
 
-Review it, then add it to your shell's startup file. Kettle edits no file and
-none of Codex's configuration, and runs nothing to set it up. The function
+Review it, then add it to your shell's startup file. The palette's "Copy
+agent setup commands" (`copy_agent_setup`) puts the same function, for the
+shell new panes start, on the clipboard. Kettle edits no file and none of
+Codex's configuration, and runs nothing to set it up. The function
 hands its arguments to Kettle as they are; nothing in them is evaluated. In a
 Kettle pane, with Codex CLI 0.159 or a later 0.x, an interactive session (a
 fresh one, `codex resume` or `codex fork`) then starts with these, for that
