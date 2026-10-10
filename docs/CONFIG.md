@@ -614,7 +614,10 @@ about 40% of the pane along its bottom (`preview-lane-side`), and the
 terminal shrinks to make room, never below 20 columns and 5 rows: with less
 room the lane is a one-row strip along the pane's bottom (a right lane
 too), and a pane too small even for that gets a notice instead.
-Keys still go to the terminal while a lane shows. The lane's header browses
+Keys still go to the terminal while a lane shows. Drag the lane's edge
+beside the terminal, marked by a short grip, to give it more or less of the
+pane: the terminal keeps its 20 columns and 5 rows and the lane its least,
+and the program in the pane sees its new size as you drag. The lane's header browses
 the shelf (`‹`/`›`), opens the item outside (`↗`), collapses or expands the
 lane (`▾`/`▴`) and closes it (`×`). For an SVG or a Mermaid diagram it also
 shows the source the item was rendered from (`≡`, and `▣` back to the

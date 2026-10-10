@@ -4098,6 +4098,15 @@ an image, zoom with Cmd+wheel (Ctrl+wheel off macOS) over a corner, drag,
 and press `⤢`: `ui_geometry`'s `preview_lanes` reports `zoom` and the
 image's rectangle at each step. A pinch needs a real touchpad.
 
+Lane edge: `pane_partition` tests pin that a dragged edge gives the lane the
+share past it, held so the terminal keeps its floor and the lane its least,
+always expanded, and the body without its titlebar on either side; `mux`
+tests drag both sides, past both ends, and a collapsed lane that does not
+move; `kettle-render` pins the edge strip as the lane's padding, clear of
+every control and the content. For a live check, drag the edge
+(`preview_lanes`' `edge`) up and to both ends: `stty size` in the pane
+follows, down to 5 rows.
+
 Sharper pixels: `media::crop` tests pin the plan (the box at the size shown
 and the part in view with its guard, a raster never past its own pixels,
 none past 4096 on an edge, an SVG's crop within its ceiling, nothing asked

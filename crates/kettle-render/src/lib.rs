@@ -1307,8 +1307,8 @@ pub type Rect4 = (f32, f32, f32, f32);
 const MAX_LANE_IMAGES: usize = 64;
 
 pub use media_lane::{
-    MediaCanvas, MediaLaneGeometry, MediaLaneHit, MediaLaneMode, MediaLanePanel, MediaLaneSender,
-    MediaLaneSource, MediaLaneTile, media_lane_geometry,
+    MediaCanvas, MediaLaneEdge, MediaLaneGeometry, MediaLaneHit, MediaLaneMode, MediaLanePanel,
+    MediaLaneSender, MediaLaneSource, MediaLaneTile, media_lane_geometry,
 };
 pub use media_viewport::{MAX_MEDIA_ZOOM, MEDIA_ZOOM_STEP, MIN_MEDIA_ZOOM, MediaViewport};
 
@@ -8855,6 +8855,17 @@ impl Renderer {
                     palette.divider,
                     1.0,
                 ));
+            }
+            // A short grip in the middle of the edge that resizes the lane
+            // says it can be dragged.
+            if let Some((rx, ry, rw, rh)) = geometry.resize {
+                let (long, thick) = (32.0 * self.scale, (2.0 * self.scale).max(1.0));
+                let grip = if rw > rh {
+                    (rx + (rw - long) / 2.0, ry + (rh - thick) / 2.0, long, thick)
+                } else {
+                    (rx + (rw - thick) / 2.0, ry + (rh - long) / 2.0, thick, long)
+                };
+                lane_q.push(rect(grip.0, grip.1, grip.2, grip.3, palette.divider, 1.0));
             }
             // A zoomed image reaches past the content, which clips it; its
             // canvas is drawn behind the part that shows.

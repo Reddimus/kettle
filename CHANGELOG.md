@@ -153,6 +153,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Cmd+wheel (Ctrl+wheel off macOS) at the pointer zoom the picture, the
   wheel or a drag pans it, and `⤢` fits it again. Also as
   `preview_zoom_in`, `preview_zoom_out` and `preview_fit`.
+- Drag a preview lane's edge to resize it; the terminal keeps at least 20
+  columns and 5 rows, and its program sees the new size as you drag.
 - A zoomed preview sharpens a moment after it stops moving: the part in view
   is drawn again at the size shown, from its file only when you moved it
   yourself and not once the file changed.

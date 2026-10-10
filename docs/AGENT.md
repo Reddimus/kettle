@@ -376,7 +376,8 @@ its `mode` (`rendered` or `source`), `canvas` (`theme`, `white` or
 `checker`), `zoom` (relative to the item's fit), `content` and `image` (the
 content area's rectangle and where the item is drawn in it, past it when
 zoomed in), `sharp` (where sharper pixels for the part in view are drawn,
-or null) and `controls`, each shown control's rectangle by name; never a
+or null), `edge` (the strip a drag resizes an expanded lane by, or null)
+and `controls`, each shown control's rectangle by name; never a
 title, source, path or pixel). An SVG's or a diagram's lane can show the
 source it was rendered from (`≡`), put the picture on another background
 (`◐`; a diagram is rendered again for it, from the same source), copy the

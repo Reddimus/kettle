@@ -55,10 +55,61 @@ impl LaneRequest {
         }
     }
 
+    /// The same request for `fraction`, held within the allowed range.
+    pub(crate) fn with_fraction(self, fraction: f32) -> Self {
+        Self::new(self.side, fraction, self.expanded)
+    }
+
     #[cfg(test)]
     pub(crate) fn fraction(self) -> f32 {
         self.fraction
     }
+}
+
+/// The share of `body` an expanded lane on `side` takes with its edge at
+/// `edge`, a y for a bottom lane and an x for a right one: held to what
+/// leaves the terminal its floor and the lane its least, within the allowed
+/// range, so dragging the edge never turns the lane into a strip. `None`
+/// when the body has no room for an expanded lane at all.
+pub(crate) fn fraction_at_edge(
+    body: Rect,
+    metrics: Metrics,
+    side: LaneSide,
+    edge: f32,
+) -> Option<f32> {
+    let vertical = side == LaneSide::Bottom;
+    let (start, along) = if vertical {
+        (body.1, body.3)
+    } else {
+        (body.0, body.2)
+    };
+    if !(along > 0.0 && along.is_finite() && start.is_finite() && edge.is_finite()) {
+        return None;
+    }
+    let floor = metrics.extent(if vertical { FLOOR.1 } else { FLOOR.0 }, vertical);
+    let lane_min = if vertical {
+        LANE_MIN_CELLS.1 * metrics.cell.1
+    } else {
+        LANE_MIN_CELLS.0 * metrics.cell.0
+    };
+    let least = (lane_min / along).max(MIN_FRACTION);
+    let most = ((along - floor) / along).min(MAX_FRACTION);
+    if least > most {
+        return None;
+    }
+    let mut fraction = ((start + along - edge) / along).clamp(least, most);
+    // `carve` counts the terminal's whole cells from `along * fraction`,
+    // which may round past what leaves the floor: step down to a fraction
+    // that leaves it, as `carve` will count it.
+    let floor_cells = if vertical { FLOOR.1 } else { FLOOR.0 };
+    for _ in 0..64 {
+        if fraction <= least || metrics.cells_in(along - along * fraction, vertical) >= floor_cells
+        {
+            break;
+        }
+        fraction = fraction.next_down();
+    }
+    Some(fraction)
 }
 
 /// The fixed sizes a partition is made from, checked once so the partition
@@ -220,6 +271,19 @@ pub(crate) struct PanePartition {
     pub(crate) terminal: Rect,
     /// The lane, when the pane has one.
     pub(crate) lane: Option<LaneShare>,
+}
+
+impl PanePartition {
+    /// The leaf below or above its titlebar: what the terminal and the lane
+    /// share.
+    pub(crate) fn body(&self) -> Rect {
+        let (x, y, w, h) = self.leaf;
+        match self.titlebar {
+            None => self.leaf,
+            Some(bar) if bar.1 > y => (x, y, w, (h - bar.3).max(0.0)),
+            Some(bar) => (x, y + bar.3, w, (h - bar.3).max(0.0)),
+        }
+    }
 }
 
 /// Divide `leaf` between its titlebar, terminal and the lane `request` asks
@@ -570,6 +634,13 @@ mod tests {
             LaneRequest::new(LaneSide::Bottom, 5.0, true).fraction(),
             MAX_FRACTION
         );
+        assert_eq!(
+            LaneRequest::new(LaneSide::Right, 0.4, false)
+                .with_fraction(0.01)
+                .fraction(),
+            MIN_FRACTION,
+            "held within the range"
+        );
         let p = partition_leaf(
             (f32::NAN, 0.0, -5.0, f32::INFINITY),
             metrics(24.0, false),
@@ -577,5 +648,67 @@ mod tests {
         );
         assert_eq!(p.leaf, (0.0, 0.0, 0.0, 0.0));
         assert_eq!(p.lane, Some(LaneShare::Badge));
+    }
+
+    /// A dragged edge gives the lane the share past it, held so the
+    /// terminal keeps its floor and the lane its least, on either side; a
+    /// body with no room for an expanded lane has no share, and the body is
+    /// the leaf without its titlebar, wherever that sits.
+    #[test]
+    fn a_dragged_edge_gives_the_lane_what_is_past_it_within_its_bounds() {
+        let m = metrics(0.0, false);
+        let body = (0.0, 100.0, 900.0, 600.0);
+        let at = |side, edge| fraction_at_edge(body, m, side, edge).unwrap();
+        assert!((at(LaneSide::Bottom, 400.0) - 0.5).abs() < 1e-6);
+        assert!((at(LaneSide::Right, 675.0) - 0.25).abs() < 1e-6);
+        let floor_rows = m.extent(FLOOR.1, true);
+        assert!((at(LaneSide::Bottom, -1e6) - (600.0 - floor_rows) / 600.0).abs() < 1e-6);
+        assert!((at(LaneSide::Bottom, 1e6) - LANE_MIN_CELLS.1 * 18.0 / 600.0).abs() < 1e-6);
+        assert!(
+            (at(LaneSide::Right, 1e6) - MIN_FRACTION.max(LANE_MIN_CELLS.0 * 9.0 / 900.0)).abs()
+                < 1e-6
+        );
+        for edge in [100.0, 700.0, -1e6, 1e6] {
+            let fraction = at(LaneSide::Bottom, edge);
+            let partition = partition_leaf(
+                body,
+                m,
+                Some(LaneRequest::new(LaneSide::Bottom, fraction, true)),
+            );
+            assert!(
+                matches!(partition.lane, Some(LaneShare::Expanded(_))),
+                "{edge}: {partition:?}"
+            );
+            assert!(partition.terminal.3 >= floor_rows);
+        }
+        // A share whose product rounds past the floor still leaves it, and
+        // the lane expanded: 319 pixels with a 94-pixel floor.
+        let tight = (0.0, 0.0, 900.0, 319.0);
+        let fraction = fraction_at_edge(tight, m, LaneSide::Bottom, -1e6).unwrap();
+        let partition = partition_leaf(
+            tight,
+            m,
+            Some(LaneRequest::new(LaneSide::Bottom, fraction, true)),
+        );
+        assert!(
+            matches!(partition.lane, Some(LaneShare::Expanded(_))),
+            "{partition:?}"
+        );
+        assert!(partition.terminal.3 >= floor_rows, "{partition:?}");
+        assert_eq!(
+            fraction_at_edge((0.0, 0.0, 900.0, 100.0), m, LaneSide::Bottom, 50.0),
+            None
+        );
+        assert_eq!(fraction_at_edge(body, m, LaneSide::Bottom, f32::NAN), None);
+        assert_eq!(
+            fraction_at_edge((0.0, 0.0, 0.0, 0.0), m, LaneSide::Right, 1.0),
+            None
+        );
+        let top = partition_leaf((0.0, 0.0, 900.0, 600.0), metrics(24.0, false), None);
+        assert_eq!(top.body(), (0.0, 24.0, 900.0, 576.0));
+        let bottom = partition_leaf((0.0, 0.0, 900.0, 600.0), metrics(24.0, true), None);
+        assert_eq!(bottom.body(), (0.0, 0.0, 900.0, 576.0));
+        let bare = partition_leaf((5.0, 5.0, 900.0, 600.0), metrics(0.0, false), None);
+        assert_eq!(bare.body(), (5.0, 5.0, 900.0, 600.0));
     }
 }

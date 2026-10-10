@@ -2061,6 +2061,7 @@ fn a_lane_draws_its_open_outside_button_only_when_offered() {
         notice: None,
         view: crate::MediaViewport::FIT,
         tile: None,
+        edge: None,
     };
     let geometry = media_lane_geometry(
         &viewer(true),
@@ -2184,6 +2185,7 @@ fn a_lane_in_source_mode_shows_rows_instead_of_the_image() {
         notice: None,
         view: crate::MediaViewport::FIT,
         tile: None,
+        edge: None,
     };
     let reds = |image: &image::RgbaImage| {
         image
@@ -2263,6 +2265,7 @@ fn a_zoomed_lane_covers_its_content_and_stays_inside_it() {
         notice: None,
         view,
         tile: None,
+        edge: None,
     };
     let geometry = |view| {
         media_lane_geometry(
@@ -2339,6 +2342,7 @@ fn a_tile_that_covers_the_view_is_drawn_instead_of_the_image() {
         notice: None,
         view,
         tile,
+        edge: None,
     };
     let fitted = media_lane_geometry(
         &lane(crate::MediaViewport::FIT, None),
@@ -2421,6 +2425,7 @@ fn a_preview_lane_paints_its_panel_and_leaves_the_terminal() {
         notice: None,
         view: crate::MediaViewport::FIT,
         tile: None,
+        edge: None,
     };
     let without = capture(&mut renderer, &cfg, &[view()], &focused(false));
     let overlay = Overlay {
