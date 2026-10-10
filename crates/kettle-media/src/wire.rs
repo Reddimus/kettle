@@ -8,8 +8,11 @@ use std::mem::size_of;
 
 pub const MAGIC: [u8; 4] = *b"KMED";
 pub const HEADER_BYTES: usize = 11;
-/// A session frame's kind, which [`write_video_frame`] writes without a [`Frame`].
+/// A session frame's kind, which [`write_video_frame`] writes and
+/// [`read_session_frame`] reads without a [`Frame`], and the bytes of its
+/// fields before its pixels: sequence, time, width, height, pixel length.
 const VIDEO_FRAME: u8 = 11;
+const VIDEO_FRAME_FIELDS: usize = 8 + 8 + 4 + 4 + 4;
 // Fixed job fields, font lengths/indices and the largest optional fields fit in 256 bytes.
 /// Parent/external frame cap including header, raster bytes and eight native font paths.
 pub const MAX_PARENT_FRAME_BYTES: usize =
@@ -365,6 +368,14 @@ pub fn read_frame_within(
     direction: Direction,
     max_frame_bytes: usize,
 ) -> Result<Option<Frame>, WireError> {
+    let Some(head) = read_header(reader)? else {
+        return Ok(None);
+    };
+    let (_, len) = header_prefix(&head, direction)?;
+    read_rest(reader, head, len, direction, max_frame_bytes).map(Some)
+}
+/// A frame's header, or `None` at end of file before its first byte.
+fn read_header(reader: &mut impl Read) -> Result<Option<[u8; HEADER_BYTES]>, WireError> {
     let mut head = [0; HEADER_BYTES];
     loop {
         match reader.read(&mut head[..1]) {
@@ -375,7 +386,17 @@ pub fn read_frame_within(
         }
     }
     reader.read_exact(&mut head[1..]).map_err(read_error)?;
-    let (_, len) = header_prefix(&head, direction)?;
+    Ok(Some(head))
+}
+/// The rest of the frame `head` begins, `len` payload bytes refused over
+/// `max_frame_bytes` in all before any is held, decoded.
+fn read_rest(
+    reader: &mut impl Read,
+    head: [u8; HEADER_BYTES],
+    len: usize,
+    direction: Direction,
+    max_frame_bytes: usize,
+) -> Result<Frame, WireError> {
     cap(len, max_frame_bytes.saturating_sub(HEADER_BYTES))?;
     let total = len
         .checked_add(HEADER_BYTES)
@@ -386,7 +407,65 @@ pub fn read_frame_within(
     reader
         .read_exact(&mut bytes[HEADER_BYTES..])
         .map_err(read_error)?;
-    decode(&bytes, direction).map(Some)
+    decode(&bytes, direction)
+}
+/// What [`read_session_frame`] read: a video frame, whose pixels are now in
+/// the caller's buffer, or any other frame, whole.
+#[derive(Debug, PartialEq)]
+pub enum SessionRead {
+    Pixels { seq: u64, pts_ms: u64 },
+    Frame(Box<Frame>),
+}
+/// The next frame a playback session's worker sends, `None` at end of file.
+/// A video frame must be `width` by `height`, the size the session opened
+/// at: its pixels are read straight into `pixels`, resized to them, with no
+/// other copy, and a header claiming any other size or length is refused
+/// before a byte of them is read. Any other frame is read under
+/// `max_other_bytes` and decoded.
+pub fn read_session_frame(
+    reader: &mut impl Read,
+    width: u32,
+    height: u32,
+    pixels: &mut Vec<u8>,
+    max_other_bytes: usize,
+) -> Result<Option<SessionRead>, WireError> {
+    play_frame_size(width, height)?;
+    let Some(head) = read_header(reader)? else {
+        return Ok(None);
+    };
+    let (kind, len) = header_prefix(&head, Direction::WorkerToParent)?;
+    if kind != VIDEO_FRAME {
+        return read_rest(
+            reader,
+            head,
+            len,
+            Direction::WorkerToParent,
+            max_other_bytes,
+        )
+        .map(|frame| Some(SessionRead::Frame(Box::new(frame))));
+    }
+    let size = width as usize * height as usize * 4;
+    if len != VIDEO_FRAME_FIELDS + size {
+        return Err(ValidationError::BadParams.into());
+    }
+    let mut fields = [0; VIDEO_FRAME_FIELDS];
+    reader.read_exact(&mut fields).map_err(read_error)?;
+    let mut fields = Reader {
+        bytes: &fields,
+        pos: 0,
+        owned: false,
+        allocation_limit: 0,
+        stats: AllocationStats::default(),
+    };
+    let (seq, pts_ms) = (fields.u64()?, fields.u64()?);
+    let size_said = (fields.u32()?, fields.u32()?);
+    let blob = fields.u32()?;
+    if size_said != (width, height) || blob as usize != size || pts_ms > MAX_VIDEO_DURATION_MS {
+        return Err(ValidationError::BadParams.into());
+    }
+    pixels.resize(size, 0);
+    reader.read_exact(pixels).map_err(read_error)?;
+    Ok(Some(SessionRead::Pixels { seq, pts_ms }))
 }
 fn read_error(e: io::Error) -> WireError {
     if e.kind() == io::ErrorKind::UnexpectedEof {
@@ -402,9 +481,9 @@ pub fn write_video_frame(
     frame: VideoFrameRef<'_>,
 ) -> Result<(), WireError> {
     frame.validate()?;
-    let payload = 8 + 8 + 4 + 4 + 4 + frame.rgba.len();
+    let payload = VIDEO_FRAME_FIELDS + frame.rgba.len();
     let mut head = Writer {
-        bytes: Some(Vec::with_capacity(HEADER_BYTES + 28)),
+        bytes: Some(Vec::with_capacity(HEADER_BYTES + VIDEO_FRAME_FIELDS)),
         len: 0,
         max: MAX_WORKER_FRAME_BYTES,
     };
