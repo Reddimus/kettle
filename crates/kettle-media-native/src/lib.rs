@@ -78,6 +78,26 @@ mod decoders {
             }
         }
 
+        /// What these decoders need a sandbox to let them do: the programs
+        /// they run, and the trees those load from. Apple's decoder runs in
+        /// the worker and needs neither.
+        pub fn sandbox_needs(&self) -> (Vec<std::path::PathBuf>, Vec<std::path::PathBuf>) {
+            self.ffmpeg
+                .as_ref()
+                .map_or_else(Default::default, |ffmpeg| {
+                    let programs = ffmpeg.programs().map(std::path::Path::to_path_buf).to_vec();
+                    // Each program's own: ffprobe may come from another
+                    // package.
+                    let mut trees: Vec<_> = programs
+                        .iter()
+                        .filter_map(|program| crate::tools::library_tree(program))
+                        .collect();
+                    trees.sort();
+                    trees.dedup();
+                    (programs, trees)
+                })
+        }
+
         /// Whether there is any decoder to try.
         pub fn is_empty(&self) -> bool {
             #[cfg(all(target_os = "macos", feature = "avfoundation"))]

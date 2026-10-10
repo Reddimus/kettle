@@ -30,6 +30,46 @@ const ROOT_EQUIVALENT_GROUP: Option<u32> = Some(80);
 #[cfg(not(target_os = "macos"))]
 const ROOT_EQUIVALENT_GROUP: Option<u32> = None;
 
+/// Where Homebrew installs: its `Cellar` is directly inside each.
+const HOMEBREW_PREFIXES: [&str; 3] = ["/opt/homebrew", "/usr/local", "/home/linuxbrew/.linuxbrew"];
+
+/// The tree a trusted program at `program` (every link resolved) loads its
+/// libraries and data from, read only, beyond the system's own: Homebrew's
+/// prefix when it is in a real Homebrew `Cellar`; the Nix store;
+/// `/usr/local`; MacPorts' `/opt/local`. Anywhere else, only the `lib`
+/// directory beside its `bin`, as itself (a link out of that directory, such
+/// as one to a home, grants nothing), and never the directory above, which
+/// could be a home. `None` for a program of the system's own (`/usr/bin`,
+/// `/bin`), whose libraries are the system's.
+pub fn library_tree(program: &Path) -> Option<PathBuf> {
+    if program.starts_with("/nix/store") {
+        return Some(PathBuf::from("/nix/store"));
+    }
+    if let Some(prefix) = HOMEBREW_PREFIXES
+        .iter()
+        .map(Path::new)
+        .find(|prefix| program.starts_with(prefix.join("Cellar")))
+    {
+        return Some(prefix.to_path_buf());
+    }
+    let bin = program.parent()?;
+    if bin.file_name() != Some(std::ffi::OsStr::new("bin")) {
+        return None;
+    }
+    let prefix = bin.parent()?;
+    if prefix == Path::new("/usr/local") || prefix == Path::new("/opt/local") {
+        return Some(prefix.to_path_buf());
+    }
+    if prefix == Path::new("/usr") || prefix == Path::new("/") {
+        return None;
+    }
+    // Only the real directory: a `lib` that is a link, even to a sibling such
+    // as `Documents`, grants nothing.
+    let lib = std::fs::canonicalize(prefix.join("lib")).ok()?;
+    let prefix = std::fs::canonicalize(prefix).ok()?;
+    (lib == prefix.join("lib") && lib.is_dir()).then_some(lib)
+}
+
 /// Why a binary is not trusted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
@@ -418,5 +458,56 @@ mod tests {
         assert_eq!(found.named(), profile.join(name));
         assert_eq!(search(name, Some(Path::new("relative"))), None);
         assert_eq!(search(name, None), None);
+    }
+
+    /// A program's library tree is its package manager's prefix, or the
+    /// directory above its `bin`, and none for the system's own programs.
+    #[test]
+    fn a_program_loads_from_its_own_prefix() {
+        for (program, tree) in [
+            (
+                "/opt/homebrew/Cellar/ffmpeg/9.0.2/bin/ffmpeg",
+                Some("/opt/homebrew"),
+            ),
+            (
+                "/home/linuxbrew/.linuxbrew/Cellar/ffmpeg/8/bin/ffprobe",
+                Some("/home/linuxbrew/.linuxbrew"),
+            ),
+            ("/nix/store/abc-ffmpeg-8/bin/ffmpeg", Some("/nix/store")),
+            ("/usr/local/bin/ffmpeg", Some("/usr/local")),
+            ("/opt/local/bin/ffmpeg", Some("/opt/local")),
+            ("/usr/bin/ffmpeg", None),
+            ("/bin/ffmpeg", None),
+            ("/opt/ffmpeg", None),
+        ] {
+            assert_eq!(
+                library_tree(Path::new(program)),
+                tree.map(PathBuf::from),
+                "{program}"
+            );
+        }
+        // Anywhere else, only a `lib` beside its `bin`, never the directory
+        // above, which may be a home.
+        let home = tempfile::tempdir().unwrap();
+        let home = std::fs::canonicalize(home.path()).unwrap();
+        std::fs::create_dir_all(home.join("bin")).unwrap();
+        assert_eq!(library_tree(&home.join("bin/ffmpeg")), None);
+        // A `lib` that leads back to the home, or to a sibling, grants
+        // nothing.
+        std::fs::create_dir_all(home.join("Documents")).unwrap();
+        for target in [home.clone(), home.join("Documents")] {
+            std::os::unix::fs::symlink(&target, home.join("lib")).unwrap();
+            assert_eq!(library_tree(&home.join("bin/ffmpeg")), None, "{target:?}");
+            std::fs::remove_file(home.join("lib")).unwrap();
+        }
+        std::fs::create_dir_all(home.join("lib")).unwrap();
+        assert_eq!(
+            library_tree(&home.join("bin/ffmpeg")),
+            Some(home.join("lib"))
+        );
+        // A `Cellar` of one's own is no Homebrew.
+        let cellar = home.join("Cellar/ffmpeg/9/bin");
+        std::fs::create_dir_all(&cellar).unwrap();
+        assert_eq!(library_tree(&cellar.join("ffmpeg")), None);
     }
 }

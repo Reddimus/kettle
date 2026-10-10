@@ -115,10 +115,119 @@ pub(crate) fn load_regular_path(
     })
 }
 
+/// Each admitted path, by the bytes the job names it by, and what opening it
+/// gave.
+type Admission = Vec<(Vec<u8>, Result<File, FailureCode>)>;
+
+thread_local! {
+    /// The files a worker admitted for its job before confining itself, by
+    /// the path the job names each by, and what opening each gave. Once set,
+    /// rendering on this thread opens nothing else: an admitted file is read
+    /// through a fresh description of itself, a file that failed keeps its
+    /// failure, and any other path is refused. Unset outside a worker, where
+    /// paths open by name. Rendering never leaves the calling thread.
+    static ADMITTED: std::cell::RefCell<Option<Admission>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Admit the files `job` reads, opened and checked as rendering checks them
+/// (its source, when it names a file, then its fallback fonts), so the
+/// worker's sandbox can grant exactly these before a byte of any is read,
+/// and rendering on this thread then reads these same files, whatever later
+/// takes their names. A file that cannot be opened keeps its failure.
+/// Returns another handle on each opened file, for the sandbox.
+pub fn hold_inputs(job: &kettle_media::Job) -> Vec<File> {
+    let source = match &job.source {
+        Source::Path {
+            path,
+            authorization,
+        } => {
+            let attested = match authorization {
+                Authorization::ExternalAttested(attested) => Some((attested.dev, attested.ino)),
+                Authorization::UserPull(_) => None,
+            };
+            Some((path.as_bytes(), attested))
+        }
+        Source::Bytes(_) => None,
+    };
+    let fonts = job
+        .fallback_fonts
+        .iter()
+        .map(|font| (font.path.as_bytes(), None));
+    let mut admitted = Vec::new();
+    let mut files = Vec::new();
+    for (path, attested) in source.into_iter().chain(fonts) {
+        let opened = open_by_name(Path::new(std::ffi::OsStr::from_bytes(path)), attested)
+            .map(|(file, _)| file);
+        if let Ok(copy) = opened.as_ref().map(File::try_clone) {
+            match copy {
+                Ok(copy) => files.push(copy),
+                Err(_) => continue,
+            }
+        }
+        admitted.push((path.to_vec(), opened));
+    }
+    ADMITTED.with(|cell| *cell.borrow_mut() = Some(admitted));
+    files
+}
+
+/// What this thread's admission says about `path`: `None` outside a worker;
+/// otherwise another handle on the admitted file (read from its start, as
+/// every read here is), its recorded failure, or a refusal for a path the
+/// job never named.
+fn admitted(path: &Path) -> Option<Result<File, FailureCode>> {
+    ADMITTED.with(|cell| {
+        let admitted = cell.borrow();
+        let admitted = admitted.as_ref()?;
+        let entry = admitted
+            .iter()
+            .find(|(name, _)| name.as_slice() == path.as_os_str().as_bytes());
+        Some(match entry {
+            Some((_, Ok(file))) => file.try_clone().map_err(|_| FailureCode::Changed),
+            Some((_, Err(failure))) => Err(*failure),
+            None => Err(FailureCode::FileNotFound),
+        })
+    })
+}
+
+/// A reader over a file from its start that keeps its own position, so it
+/// never moves, or depends on, the offset other handles on the same open file
+/// share: an admitted file's handles are duplicates of one another.
+struct FromStart<'a> {
+    file: &'a File,
+    at: u64,
+}
+
+impl<'a> FromStart<'a> {
+    fn new(file: &'a File) -> Self {
+        Self { file, at: 0 }
+    }
+}
+
+impl std::io::Read for FromStart<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        use std::os::unix::fs::FileExt as _;
+        let read = self.file.read_at(buffer, self.at)?;
+        self.at += read as u64;
+        Ok(read)
+    }
+}
+
 /// `path` opened read-only, without waiting on a FIFO or becoming a
 /// controlling terminal, and what the open descriptor says it is: a regular
 /// file, the attested one when an attestation is given.
 fn open_regular(
+    path: &Path,
+    attested: Option<(u64, u64)>,
+) -> Result<(File, Metadata), FailureCode> {
+    match admitted(path) {
+        Some(file) => checked(file?, attested),
+        None => open_by_name(path, attested),
+    }
+}
+
+/// `path` opened by its name, as [`open_regular`] describes.
+fn open_by_name(
     path: &Path,
     attested: Option<(u64, u64)>,
 ) -> Result<(File, Metadata), FailureCode> {
@@ -127,6 +236,12 @@ fn open_regular(
         .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
         .open(path)
         .map_err(open_failure)?;
+    checked(file, attested)
+}
+
+/// `file` and what it says it is, once it is a regular file, the attested
+/// one when an attestation is given.
+fn checked(file: File, attested: Option<(u64, u64)>) -> Result<(File, Metadata), FailureCode> {
     let opened = file.metadata().map_err(|_| FailureCode::FileNotFound)?;
     if !opened.file_type().is_file() {
         return Err(FailureCode::FileNotRegular);
@@ -169,7 +284,7 @@ pub fn hold(source: &Source, prefix_cap: usize) -> Result<Held<'_>, FailureCode>
             let identity = identity(&opened)?;
             let cap = u64::try_from(prefix_cap).map_err(|_| FailureCode::TooLarge)?;
             let mut prefix = Vec::new();
-            (&file)
+            FromStart::new(&file)
                 .take(cap)
                 .read_to_end(&mut prefix)
                 .map_err(|_| FailureCode::Changed)?;
@@ -243,10 +358,7 @@ impl Held<'_> {
                     return Err(FailureCode::FileTooLarge);
                 }
                 let mut bytes = Vec::new();
-                let mut reader = file;
-                std::io::Seek::seek(&mut reader, std::io::SeekFrom::Start(0))
-                    .map_err(|_| FailureCode::Changed)?;
-                reader
+                FromStart::new(file)
                     .take(cap_bytes.saturating_add(1))
                     .read_to_end(&mut bytes)
                     .map_err(|_| FailureCode::Changed)?;
@@ -267,7 +379,8 @@ impl Held<'_> {
 /// without reading the rest.
 fn read_capped(file: &File, cap: u64) -> Result<Vec<u8>, FailureCode> {
     let mut bytes = Vec::new();
-    file.take(cap.saturating_add(1))
+    FromStart::new(file)
+        .take(cap.saturating_add(1))
         .read_to_end(&mut bytes)
         .map_err(|_| FailureCode::Changed)?;
     Ok(bytes)
@@ -313,6 +426,75 @@ mod tests {
         })
         .unwrap();
         assert_eq!(&*snapshot.bytes, b"first");
+    }
+
+    /// What a worker admitted for its job is what rendering reads, from its
+    /// start and with its own offset each time, even once another file has
+    /// taken its name. A file that could not be opened keeps that failure,
+    /// even once its name leads to an admitted file, and a path the job never
+    /// named is refused.
+    #[test]
+    fn rendering_reads_only_what_was_admitted() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("held.svg");
+        let font = directory.path().join("font.ttf");
+        let missing = directory.path().join("missing.ttf");
+        let other = directory.path().join("other.svg");
+        std::fs::write(&path, b"held bytes").unwrap();
+        std::fs::write(&font, b"font bytes").unwrap();
+        std::fs::write(&other, b"bytes that took its name").unwrap();
+        let native = |path: &Path| kettle_media::NativePath::from_path(path).unwrap();
+        let fallback = |path: &Path| kettle_media::FallbackFont {
+            path: native(path),
+            face_index: 0,
+        };
+        let job = kettle_media::Job {
+            kind: kettle_media::JobKind::Svg,
+            source: Source::Path {
+                path: native(&path),
+                authorization: user_pull(),
+            },
+            theme: kettle_media::Theme {
+                background: [0; 4],
+                foreground: [255; 4],
+                palette: [[0; 4]; 16],
+                accent: [0; 4],
+                is_dark: true,
+            },
+            canvas: kettle_media::Canvas::Theme,
+            target: kettle_media::Target {
+                width: 1,
+                height: 1,
+                scale: 1.0,
+                crop: None,
+            },
+            fallback_fonts: vec![fallback(&font), fallback(&missing)],
+        };
+        let files = hold_inputs(&job);
+        assert_eq!(files.len(), 2, "the source and the font that opened");
+        std::fs::rename(&other, &path).unwrap();
+        for _ in 0..2 {
+            let snapshot = load_path(&path, &user_pull(), 1024, || {}).unwrap();
+            assert_eq!(&*snapshot.bytes, b"held bytes");
+        }
+        std::os::unix::fs::symlink(&font, &missing).unwrap();
+        assert_eq!(
+            load_path(&missing, &user_pull(), 1024, || {}).unwrap_err(),
+            FailureCode::FileNotFound,
+            "its failure, not the admitted font its name now leads to"
+        );
+        let fresh = directory.path().join("fresh.svg");
+        std::fs::write(&fresh, b"never named").unwrap();
+        assert_eq!(
+            load_path(&fresh, &user_pull(), 1024, || {}).unwrap_err(),
+            FailureCode::FileNotFound
+        );
+        ADMITTED.with(|cell| cell.borrow_mut().take());
+        let snapshot = load_path(&fresh, &user_pull(), 1024, || {}).unwrap();
+        assert_eq!(
+            &*snapshot.bytes, b"never named",
+            "outside a worker, by name"
+        );
     }
 
     #[test]
