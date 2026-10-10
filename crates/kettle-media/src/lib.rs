@@ -581,6 +581,24 @@ pub struct VideoStillsResult {
     /// within it, and it is within the duration.
     pub tolerance_ms: u32,
 }
+/// A still's time as its label says it, and as a text index lists it:
+/// `mm:ss`, `h:mm:ss` from an hour, with tenths for a video shorter than a
+/// minute, where whole seconds would repeat.
+pub fn still_label(ms: u64, duration_ms: u64) -> String {
+    let seconds = ms / 1000;
+    let (h, m, s) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
+    let base = if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m:02}:{s:02}")
+    };
+    if duration_ms < 60_000 {
+        format!("{base}.{}", ms / 100 % 10)
+    } else {
+        base
+    }
+}
+
 impl VideoStillsResult {
     pub fn validate(&self) -> Result<(), ValidationError> {
         self.info.validate()?;

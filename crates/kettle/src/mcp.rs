@@ -468,6 +468,15 @@ const SHOW_INSIDE: &str = "Use kettle_show to send the user images and rendered 
     the media. If it is unavailable, outside Kettle, busy or needs a restart, tell the user \
     once and do not retry. Never change Kettle configuration or install software yourself.";
 
+/// What a model with the full server is told about reading video, which it
+/// has wherever it runs: Appendix A's words for `kettle_video_frames`.
+const FRAMES: &str = "To inspect a video or animation, use kettle_video_frames; the video \
+    cannot be read as images by Read or view_image. Narrow start_s and end_s around the \
+    failure time, or use at_s for one frame. The returned contact sheet is what you have \
+    seen, not the entire video. Do not request the same window twice. Never run mpv or timg \
+    in a shell tool. Showing media to the user and reading frames for yourself are separate \
+    operations with separate permissions.";
+
 /// What one in tmux inside Kettle is told besides.
 const SHOW_TMUX: &str = " This session runs in tmux, where Kettle cannot verify the pane: \
     media goes to the pane tmux was started from, marked as from an unverified sender, or is \
@@ -496,7 +505,7 @@ fn instructions_for(selection: ToolSelection, here: Placement) -> String {
     match selection {
         ToolSelection::Full => format!(
             "Use kettle_run for bounded one-shot PTY commands. Other tools inspect or drive a \
-             running Kettle control server. {show}"
+             running Kettle control server. {show} {FRAMES}"
         ),
         ToolSelection::Display => show,
     }
@@ -769,8 +778,13 @@ fn tool_worker(jobs: crossbeam_channel::Receiver<ToolJob>, responses: Responder,
         let response = if job.cancelled.load(Ordering::Acquire) {
             None
         } else {
-            let result =
-                crate::mcp_tools::call_tool_cancellable(job.selection, &job.params, &job.cancelled);
+            let fits = |result: &Value| response_fits(&job.id, job.modern, result);
+            let result = crate::mcp_tools::call_tool_cancellable(
+                job.selection,
+                &job.params,
+                &job.cancelled,
+                &fits,
+            );
             if job.cancelled.load(Ordering::Acquire) {
                 None
             } else {
@@ -1004,6 +1018,18 @@ fn modernize(mut result: Value) -> Value {
 
 fn success(id: Value, result: Value) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "result": result})
+}
+
+/// Whether `result` fits the response cap once answered to `id` in its era:
+/// what a tool sizing an image to its response checks.
+pub(crate) fn response_fits(id: &Value, modern: bool, result: &Value) -> bool {
+    let result = if modern {
+        modernize(result.clone())
+    } else {
+        result.clone()
+    };
+    serde_json::to_vec(&success(id.clone(), result))
+        .is_ok_and(|bytes| bytes.len() <= MAX_MCP_RESPONSE_BYTES)
 }
 
 fn bounded_tool_success(id: Value, result: Value, modern: bool) -> Value {
@@ -1289,8 +1315,21 @@ mod tests {
         );
         for here in [Placement::Inside, Placement::InsideTmux, Placement::Outside] {
             let full = instructions_for(ToolSelection::Full, here);
+            let display = instructions_for(ToolSelection::Display, here);
             assert!(full.starts_with("Use kettle_run"));
-            assert!(full.ends_with(&instructions_for(ToolSelection::Display, here)));
+            // The full server reads video wherever it runs; display never.
+            assert!(full.ends_with(&format!("{display} {FRAMES}")), "{full}");
+            assert!(!display.contains("kettle_video_frames"));
+        }
+        for words in [
+            "use kettle_video_frames",
+            "Narrow start_s and end_s",
+            "is what you have seen, not the entire video",
+            "Do not request the same window twice",
+            "Never run mpv or timg",
+            "separate operations with separate permissions",
+        ] {
+            assert!(FRAMES.contains(words), "{words}");
         }
     }
 

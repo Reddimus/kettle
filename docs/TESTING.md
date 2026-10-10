@@ -2706,7 +2706,11 @@ deadline (`check_failed`); a child still running after its grace leaves the
 guard set, no run starts (a marker command never runs) until a reaper
 collects it, and then runs start again; and a finished one reports its exit
 status and stderr. In kettle-ui,
-`media_platform`'s process tests spawn stand-in workers: `/usr/bin/env` prints
+`media_platform`'s process tests spawn stand-in workers: a worker that has
+exited but is not yet reaped measures as holding nothing rather than failing
+the measurement (macOS answers ESRCH for it; a large reply read after the
+worker exits made this a live race; counting it fatal fails the test);
+`/usr/bin/env` prints
 nothing inherited, only `KETTLE_MEDIA_DECODER` naming the trusted ffmpeg the
 search finds when one is installed (dropping it fails the test there),
 `/bin/pwd` prints `/`, and a script leads its
@@ -4486,8 +4490,30 @@ pins where the server runs (a Kettle found the strict way, `TERM_PROGRAM`
 saying Kettle, tmux, and tmux's own `TERM_PROGRAM` saying nothing of
 Kettle), the instructions for each (the triggers, keeping the source,
 showing is not seeing, no retry and no changes inside; the tmux addition;
-not calling it outside; the full server saying the same after its tools),
+not calling it outside; the full server saying the same after its tools,
+then Appendix A's frames guidance, which the display server never gives),
 and both protocol eras carrying the same words.
+`mcp_tools` pins `kettle_video_frames` to the full server: listed and
+callable there, refused by the display server, its schema requiring only an
+absolute path with `count` up to 16, `max_edge` up to 2560 and `select` only
+`even`. Bad arguments (a relative path, another selection, an unknown
+argument, a count past 16 or fractional, `at_s` beside a window, none at
+all) come back as the fixed `bad_params` failure with no image, and a
+missing file is found missing before any worker starts. A sheet's result is
+exactly one JPEG image (base64 that decodes to a JPEG) and then the index,
+with no `structuredContent` and no `isError`; with a 40 KB request id it fits
+the 768 KiB response in both eras; under a quarter of its size it shrinks
+and stays whole, its index uncut; fitting nowhere is `too_large`. A missing
+decoder's failure adds the install hint; a parse failure does not.
+`video_frames` pins the request rules (nine frames, three across, on a 1568
+edge by default; `at_s` as one frame; a window narrowing the sheet; columns
+the fewest that hold the frames) and the refusals (times not finite or
+negative, a window ending at or before its start, `at_s` beside a window or
+several frames, no frames or seventeen, an edge of 0 or past 2560); the
+encoder keeping the best quality that fits and shrinking a quarter at a time,
+never cutting; the index's exact words, milliseconds under a second; the
+install hint only for a missing decoder; and the output written whole,
+private, never over the video and never left half-written.
 `tests/mcp_stdio.rs` runs `kettle_show` to completion through the real
 `kettle mcp`, in display and full mode, in both protocol eras, from Mermaid
 source and from a file, against a Kettle with previews on that the test
@@ -4517,7 +4543,8 @@ tests), bounded at 256 characters.
 was missing. `just cli-smoke` runs the built `kettle show` for its options,
 a missing file, an overlong path and non-UTF-8 Mermaid on stdin, all refused
 before any Kettle is looked for, so the smoke never shows anything where it
-runs, and `kettle agent-setup` for its function, its removal text and the
+runs, `kettle video-frames` for its options and a missing file (refused, no
+sheet written, the command in the completions), and `kettle agent-setup` for its function, its removal text and the
 lines of its status (on Windows, that it is not available). `main`'s tests
 pin that a pending update (on Windows, where one waits for Kettle's windows
 to close) ends every `show`, `mcp` and `agent-setup` invocation without

@@ -237,6 +237,18 @@ Reports that fit any of these are welcome:
   anywhere else, an argument a request or the media chose, a decoder that
   starts a process, reads another file, or outlives its job, or a frame
   accepted at the wrong size, is in scope.
+- **Model frames** — `kettle_video_frames` (full MCP only, never the
+  display server or Kettle's integrations, approved by nothing Kettle
+  sets) and `kettle video-frames` return a video's frames to the caller: a
+  separate, deliberate read, unlike showing. The file is opened by the
+  caller's own process, inside its sandbox, and decoded in a worker that
+  process starts. The image goes to the model, and the harness may keep it
+  in its session files (Claude Code does); the command writes its JPEG
+  privately (mode 0600), whole, and never over the video. Failures name no
+  path and carry no media. A frames result reaching a caller that did not
+  ask for it, the display server or an integration offering or approving
+  it, a read outside the caller's own permissions, or the command writing
+  anywhere but where it was told, is in scope.
 - **Diagram rendering** — Mermaid source is parsed and laid out by merman
   0.8.0, pinned exactly, with its resource-constrained policy, a deadline,
   no network or file access, and Kettle's own text measurement from the job's
