@@ -1571,6 +1571,12 @@ context = "crates/kettle-config/src/palette.rs: command palette entry that shows
 [messages.palette_preview_previous]
 context = "crates/kettle-config/src/palette.rs: command palette entry that shows the previous item of the focused pane's media shelf in its preview lane."
 
+[messages.palette_preview_next_diagram]
+context = "crates/kettle-config/src/palette.rs: command palette entry that shows the next diagram of the gallery in the focused pane's preview lane: the Mermaid diagrams of one Markdown file, or several copied together."
+
+[messages.palette_preview_previous_diagram]
+context = "crates/kettle-config/src/palette.rs: command palette entry that shows the previous diagram of the gallery in the focused pane's preview lane: the Mermaid diagrams of one Markdown file, or several copied together."
+
 [messages.palette_close_preview]
 context = "crates/kettle-config/src/palette.rs: command palette entry that closes the focused pane's preview lane, giving its terminal the room back."
 
@@ -1709,6 +1715,16 @@ context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of
 
 [messages.media_lane_a11y_fit]
 context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of a preview lane's button that shows the image whole again, fitted to the lane, after zooming or panning. An infinitive in Spanish; the lane is the panel beside the terminal."
+
+[messages.media_lane_a11y_previous_diagram]
+context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of a preview lane's button that shows the diagram before this one in a gallery: the Mermaid diagrams of one Markdown file, or several copied together. Unavailable on the first diagram."
+
+[messages.media_lane_a11y_next_diagram]
+context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of a preview lane's button that shows the diagram after this one in a gallery: the Mermaid diagrams of one Markdown file, or several copied together. Unavailable on the last diagram."
+
+[messages.media_lane_a11y_diagram]
+context = "crates/kettle-ui/src/app.rs media_lane_accessibility: part of a preview lane's screen-reader name for a gallery of diagrams: which diagram it shows (index of count, counting from 1). Lowercase, as it sits between other parts separated by middle dots."
+args = [{ name = "index", type = "u64" }, { name = "count", type = "u64" }]
 
 [messages.media_lane_notice_image_copied]
 context = "crates/kettle-ui/src/app.rs lane_notice_text: shown in a preview lane's footer after its image was copied to the clipboard."

@@ -45,7 +45,7 @@ pub(crate) use shelf::{
     signer_name,
 };
 pub(crate) use sightings::{CardSightings, MAX_CARD_INSTANCE};
-pub(crate) use source::{ItemSource, JobSpec, SourceInput, display_rows};
+pub(crate) use source::{Gallery, ItemSource, JobSpec, SourceInput, display_rows};
 pub(crate) use tip::CardsTip;
 
 use queue::{Admitted, Queue};
@@ -97,6 +97,17 @@ pub(crate) struct LaneRender {
     /// For a zoomed view's sharper pixels, the lane's ticket for them: they
     /// stay the lane's and never replace the item's own.
     pub tile: Option<u64>,
+    /// For another page of the item's gallery, that page: it becomes the
+    /// item's own once it renders.
+    pub page: Option<PageAsk>,
+}
+
+/// A gallery page a lane asked for, and the request's ticket, which tells
+/// two requests for the same page apart: only the latest is waited on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PageAsk {
+    pub page: u8,
+    pub ticket: u64,
 }
 
 impl Requester {
@@ -606,6 +617,7 @@ mod tests {
             item: 9,
             generation: 2,
             tile: None,
+            page: None,
         };
         let later = Instant::now() + std::time::Duration::from_secs(60);
         service.admit(Sender::Lane(3), later, push_for(Requester::Lane(render)));
@@ -641,6 +653,7 @@ mod tests {
             item,
             generation: 0,
             tile,
+            page: None,
         };
         let later = Instant::now() + std::time::Duration::from_secs(60);
         for (sender, lane) in [

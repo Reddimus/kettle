@@ -1,8 +1,8 @@
 //! A preview lane holding the keyboard (`focus_preview`). While it does,
-//! every key is the lane's: a few move, zoom, fit or copy what it shows, Esc
-//! gives the keyboard back to the terminal, and every other key and chord,
-//! Enter, digits and the application's shortcuts included, does nothing, so
-//! none reaches the program in the pane by accident.
+//! every key is the lane's: a few move, zoom, fit, page or copy what it
+//! shows, Esc gives the keyboard back to the terminal, and every other key
+//! and chord, Enter, digits and the application's shortcuts included, does
+//! nothing, so none reaches the program in the pane by accident.
 
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
@@ -24,6 +24,9 @@ pub(crate) enum PreviewKey {
     ZoomOut,
     /// Fit the picture again, or show a source from its start.
     Fit,
+    /// A gallery's page before (`-1`) or after (`1`) the one shown, as
+    /// Page Up and Page Down.
+    Page(i32),
     Copy,
     /// Nothing: the key is the lane's all the same.
     Swallow,
@@ -51,6 +54,8 @@ pub(crate) fn preview_key(key: &Key, mods: ModifiersState) -> PreviewKey {
             NamedKey::ArrowRight => PreviewKey::Move(1, 0),
             NamedKey::ArrowUp => PreviewKey::Move(0, -1),
             NamedKey::ArrowDown => PreviewKey::Move(0, 1),
+            NamedKey::PageUp => PreviewKey::Page(-1),
+            NamedKey::PageDown => PreviewKey::Page(1),
             _ => PreviewKey::Swallow,
         },
         Key::Character(text) => match (text.as_str(), shift) {
@@ -72,7 +77,8 @@ mod tests {
         Key::Character(text.into())
     }
 
-    /// Esc, the arrows, `+`, `-`, `0` and `c` act; Shift only makes `+`,
+    /// Esc, the arrows, Page Up and Page Down, `+`, `-`, `0` and `c` act;
+    /// Shift only makes `+`,
     /// and with Ctrl, Alt or Command held nothing acts. Enter, digits, y and
     /// n, Tab and every other key are swallowed.
     #[test]
@@ -97,6 +103,18 @@ mod tests {
         );
         assert_eq!(
             preview_key(&Key::Named(NamedKey::ArrowUp), shift),
+            PreviewKey::Swallow
+        );
+        assert_eq!(
+            preview_key(&Key::Named(NamedKey::PageUp), none),
+            PreviewKey::Page(-1)
+        );
+        assert_eq!(
+            preview_key(&Key::Named(NamedKey::PageDown), none),
+            PreviewKey::Page(1)
+        );
+        assert_eq!(
+            preview_key(&Key::Named(NamedKey::PageDown), shift),
             PreviewKey::Swallow
         );
         assert_eq!(preview_key(&character("+"), shift), PreviewKey::ZoomIn);

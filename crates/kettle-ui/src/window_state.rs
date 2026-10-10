@@ -714,6 +714,10 @@ pub(crate) struct PreviewPanel {
     pub(crate) notice: Option<LaneNotice>,
     /// How the rendered item is zoomed and panned.
     pub(crate) view: kettle_render::MediaViewport,
+    /// The page of the item's gallery asked for last and not yet shown, with
+    /// the item's generation then: only that request's render is taken, and
+    /// the next step counts from its page.
+    pub(crate) page: Option<(u64, crate::media::PageAsk)>,
 }
 
 impl PreviewPanel {
@@ -726,6 +730,7 @@ impl PreviewPanel {
             scroll: (0, 0),
             notice: None,
             view: kettle_render::MediaViewport::FIT,
+            page: None,
         }
     }
 }

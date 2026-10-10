@@ -638,15 +638,23 @@ the background, from the same source, and if the file changed since, the
 lane says so and keeps the picture as it was. `⧉` copies the picture, or the
 source while the source shows, exactly as it was read. An item read from a
 file has `↻`, which reads the file again and shows what it holds now, in the
-same place on the shelf. Where the header is too narrow, these give way,
+same place on the shelf. A gallery (the Mermaid diagrams of a Markdown file,
+or several diagrams copied together) shows one diagram at a time, its place
+at the end of the detail line between `‹` and `›`, which show the one
+before or after; another diagram is drawn from the gallery as it was read,
+never the file again, on the background you chose, replaces the one shown
+only once it is ready (the place shows the one asked for meanwhile), starts
+fitted and its source from the top, and stays put if it cannot be drawn.
+`↻` reads a Markdown file's gallery again at the diagram shown. Where the header is too narrow, these give way,
 open outside first, then zoom out, zoom in and fit, copy, browsing, the
 background and the source, and reload last. A press or the wheel over a lane never
 reaches the terminal, and menus and dialogs open over it without closing it.
 The command palette lists it as "Open media shelf". On macOS its default
 chord is `Ctrl+Shift+Cmd+I`; elsewhere it has no default binding.
 `preview_link` (`preview-link`) is quick select for previews: it labels the
-image (PNG, JPEG, WebP, BMP, GIF), SVG and Mermaid (`.mmd`, `.mermaid`)
-files the focused pane names, by their extension, as a whole path (not on
+image (PNG, JPEG, WebP, BMP, GIF), SVG, Mermaid (`.mmd`, `.mermaid`) and
+Markdown (`.md`, `.markdown`, whose Mermaid diagrams are a gallery) files the
+focused pane names, by their extension, as a whole path (not on
 Windows, where path hints are never resolved) or a local `file://` link.
 Type a label to render that file in its pane's lane, which opens when it is
 ready; a link from another machine's pane is refused, and behind tmux,
@@ -658,8 +666,8 @@ previews unavailable) is explained in a notification. The right-click menu
 offers the same as "Preview in Kettle" on a link to such a file. The command
 palette lists it as "Preview a file in Kettle"; it has no default binding.
 `preview_clipboard_path` (`preview-clipboard-path`) previews the file the
-clipboard names in the focused pane's lane: the first image, SVG or Mermaid
-file a file manager copied, or else one copied path (resolved from the
+clipboard names in the focused pane's lane: the first image, SVG, Mermaid or
+Markdown file a file manager copied, or else one copied path (resolved from the
 pane's folder; quotes and a shell's backslash escapes around it are undone)
 or `file://` link. A copied path or link meets the focused pane's gate, as
 one in its output would; a file a file manager copied is this computer's. On
@@ -695,15 +703,20 @@ notification says it was copied, or why not: another shell, a translocated
 copy whose path would not last, or a clipboard Kettle could not reach. `preview_next`,
 `preview_previous` and `close_preview` browse and close the focused pane's
 lane as its `›`, `‹` and `×` do ("Next preview", "Previous preview" and
-"Close preview lane" in the palette), and `preview_source`,
+"Close preview lane" in the palette), `preview_next_diagram` and
+`preview_previous_diagram` show a gallery's next or previous diagram (a
+Markdown file's Mermaid diagrams, or several copied together) as the `›` and
+`‹` on its detail line do ("Next diagram in preview" and "Previous diagram
+in preview"), and `preview_source`,
 `preview_canvas`, `preview_copy`, `preview_reload`, `preview_zoom_in`,
 `preview_zoom_out` and `preview_fit` as its `≡`, `◐`, `⧉`, `↻`, `+`, `−` and
 `⤢` do ("Show preview source", "Next preview canvas", "Copy preview",
 "Reload preview", "Zoom preview in", "Zoom preview out" and "Fit preview to
 lane"). `focus_preview` ("Focus preview") gives the focused pane's expanded
 lane the keyboard, and its footer says "Keyboard: preview": the arrows move
-the picture (or scroll a source), `+` and `-` zoom, `0` fits it (or shows a
-source from its start), `c` copies, and every other key and chord, Enter,
+the picture (or scroll a source), Page Up and Page Down show a gallery's
+previous and next diagram, `+` and `-` zoom, `0` fits it (or shows a source
+from its start), `c` copies, and every other key and chord, Enter,
 digits and Kettle's own shortcuts included, does nothing, so nothing typed
 reaches the program in the pane (Option chords count on macOS). Esc, a
 click outside the lane, a file drop, another menu or dialog opening, or the

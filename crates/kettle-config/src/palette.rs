@@ -42,6 +42,8 @@ pub fn commands() -> Vec<(Text, Action)> {
         (T::PalettePreviewClipboardPath, PreviewClipboardPath),
         (T::PalettePreviewNext, PreviewNext),
         (T::PalettePreviewPrevious, PreviewPrevious),
+        (T::PalettePreviewNextDiagram, PreviewNextDiagram),
+        (T::PalettePreviewPreviousDiagram, PreviewPreviousDiagram),
         (T::PaletteClosePreview, ClosePreview),
         (T::PalettePreviewSource, PreviewSource),
         (T::PalettePreviewCanvas, PreviewCanvas),
@@ -283,6 +285,8 @@ mod tests {
             PreviewClipboardPath,
             PreviewNext,
             PreviewPrevious,
+            PreviewNextDiagram,
+            PreviewPreviousDiagram,
             ClosePreview,
             PreviewSource,
             PreviewCanvas,
@@ -439,6 +443,8 @@ mod tests {
                 | PreviewClipboardPath
                 | PreviewNext
                 | PreviewPrevious
+                | PreviewNextDiagram
+                | PreviewPreviousDiagram
                 | ClosePreview
                 | PreviewSource
                 | PreviewCanvas
