@@ -4249,7 +4249,13 @@ the validator agree (whatever the validator sends on the schema accepts,
 and for ASCII text the two agree exactly, at each cap and one past it, in
 ASCII and four-byte characters), that a sent result is one plain
 line plus status-only structured content saying the model has not seen it,
-and that display discovery is private with no cache lifetime.
+and that discovery is private with no cache lifetime in both modes. `mcp`
+pins where the server runs (a Kettle found the strict way, `TERM_PROGRAM`
+saying Kettle, tmux, and tmux's own `TERM_PROGRAM` saying nothing of
+Kettle), the instructions for each (the triggers, keeping the source,
+showing is not seeing, no retry and no changes inside; the tmux addition;
+not calling it outside; the full server saying the same after its tools),
+and both protocol eras carrying the same words.
 `tests/mcp_stdio.rs` runs the real `kettle mcp --display` in both protocol
 eras: initialize's instructions name `kettle_show`, `tools/list` is exactly
 `[kettle_show]`, a `kettle_run` call is refused as an invalid tool, and
