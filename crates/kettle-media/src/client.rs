@@ -156,6 +156,7 @@ pub trait WorkerPlatform: Send + Sync {
 pub struct RenderControl {
     cancelled: Arc<AtomicBool>,
     deadline: Option<Instant>,
+    reply_limit: Option<usize>,
 }
 
 impl RenderControl {
@@ -167,9 +168,23 @@ impl RenderControl {
         }
     }
 
+    /// Refuse a reply frame, header included, longer than `bytes`, before a
+    /// byte of its payload is held: for a caller that knows how large a
+    /// right answer can be, a tighter bound than every reply's. A longer
+    /// reply is `RenderResource`.
+    pub fn limit_reply(mut self, bytes: usize) -> Self {
+        self.reply_limit = Some(bytes);
+        self
+    }
+
     /// The absolute deadline, if there is one.
     pub fn deadline(&self) -> Option<Instant> {
         self.deadline
+    }
+
+    /// The longest reply frame accepted, if the caller set one.
+    pub fn reply_limit(&self) -> Option<usize> {
+        self.reply_limit
     }
 
     pub fn cancel(&self) {
