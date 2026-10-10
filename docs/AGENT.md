@@ -925,8 +925,11 @@ launch only:
   not get this launch's server;
 - `-c mcp_servers.kettle=…`: this Kettle's `mcp --display`, forwarding
   `KETTLE_PANE_ID` and `KETTLE_PID` (Codex passes a server only the
-  variables it is told to) and enabling `kettle_show` alone. It approves
-  nothing, so Codex asks before a call as its own policy says.
+  variables it is told to) and enabling `kettle_show` alone, approved by its
+  own name (`tools.kettle_show.approval_mode = "approve"`), never the server
+  as a whole: it only puts media on the pane's shelf and returns no
+  contents, and a Codex whose approval policy is `never` refuses every call
+  that would ask, so without it nothing would show.
 
 Kettle's options go right after `resume` or `fork`, or first, never after a
 prompt or `--`, and `--no-daemon` is not added twice. Everything else runs

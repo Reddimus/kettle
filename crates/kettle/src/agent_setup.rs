@@ -231,11 +231,13 @@ fn toml_list(items: &[&str]) -> String {
 }
 
 /// The server table Codex gets for this launch: this Kettle's display
-/// server, the pane's two variables, and `kettle_show` alone for the model.
-/// With `cards`, the server serves Kettle's card hook, and `kettle_card`,
-/// which Codex lets only an enabled tool's hook call, is enabled for it;
-/// the server never lists it, so the model never sees it. It sets no
-/// approval, so Codex asks as its own policy says.
+/// server, the pane's two variables, and `kettle_show` alone for the model,
+/// approved for this launch by its own name, never the server as a whole: it
+/// only puts media on the user's shelf and returns no contents, and a Codex
+/// whose approval policy is `never` refuses every call that would ask. With
+/// `cards`, the server serves Kettle's card hook, and `kettle_card`, which
+/// Codex lets only an enabled tool's hook call, is enabled for it; the
+/// server never lists it, so the model never sees it.
 fn server_table(kettle: &str, cards: bool) -> String {
     let (args, tools): (&[&str], &[&str]) = if cards {
         (
@@ -246,7 +248,8 @@ fn server_table(kettle: &str, cards: bool) -> String {
         (&["mcp", "--display"], &["kettle_show"])
     };
     format!(
-        "{{command = {}, args = [{}], enabled = true, env_vars = [{}], enabled_tools = [{}]}}",
+        "{{command = {}, args = [{}], enabled = true, env_vars = [{}], enabled_tools = [{}], \
+         tools = {{kettle_show = {{approval_mode = \"approve\"}}}}}}",
         toml_string(kettle),
         toml_list(args),
         toml_list(&["KETTLE_PANE_ID", "KETTLE_PID"]),
@@ -975,12 +978,26 @@ mod tests {
         assert_eq!(strings("env_vars"), ["KETTLE_PANE_ID", "KETTLE_PID"]);
         assert_eq!(strings("enabled_tools"), ["kettle_show"]);
         assert_eq!(server["enabled"].as_bool(), Some(true));
-        // No approval: Codex asks as its own policy says.
+        // kettle_show alone is approved, by its own name: no server-wide
+        // approval, and nothing else.
         let mut keys: Vec<_> = server.keys().map(String::as_str).collect();
         keys.sort_unstable();
         assert_eq!(
             keys,
-            ["args", "command", "enabled", "enabled_tools", "env_vars"]
+            [
+                "args",
+                "command",
+                "enabled",
+                "enabled_tools",
+                "env_vars",
+                "tools"
+            ]
+        );
+        let tools = server["tools"].as_table().unwrap();
+        assert_eq!(tools.keys().collect::<Vec<_>>(), ["kettle_show"]);
+        assert_eq!(
+            tools["kettle_show"].as_table().unwrap(),
+            &toml::Table::from_iter([("approval_mode".to_owned(), "approve".into())])
         );
         // A control character is escaped, never written raw.
         assert_eq!(toml_string("a\u{1}b\n"), "\"a\\u0001b\\u000A\"");
@@ -1013,6 +1030,12 @@ mod tests {
         };
         assert_eq!(strings("args"), ["mcp", "--display", "--codex-card-hook"]);
         assert_eq!(strings("enabled_tools"), ["kettle_show", "kettle_card"]);
+        assert_eq!(
+            server["server"]["tools"]["kettle_show"]["approval_mode"].as_str(),
+            Some("approve"),
+            "the model's tool, not the hook's"
+        );
+        assert!(server["server"]["tools"].get("kettle_card").is_none());
         let (key, value) = values[1].split_once('=').unwrap();
         assert_eq!(key, "hooks.PostToolUse");
         let hook: toml::Table = toml::from_str(&format!("groups = {value}")).unwrap();
