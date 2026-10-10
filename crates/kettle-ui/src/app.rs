@@ -24328,6 +24328,7 @@ impl App {
         }
         let (width, height, layout) = (rendered.width, rendered.height, rendered.layout);
         let warnings = rendered.warnings;
+        let video = rendered.video.as_ref().map(|video| video.info);
         let image = match self.admit_preview_pixels(ws, width, height, rendered.rgba) {
             Ok(image) => image,
             Err(_) => return tell(self, ws, LaneNotice::RenderFailed),
@@ -24368,6 +24369,9 @@ impl App {
         item.size = (width, height);
         item.layout = Some(layout);
         item.warnings = warnings;
+        if video.is_some() {
+            item.video = video;
+        }
         item.source.spec.canvas = spec.canvas;
         if let Some(panel) = window
             .preview_panels
@@ -24528,6 +24532,7 @@ impl App {
         let (width, height) = (rendered.width, rendered.height);
         let layout = rendered.layout;
         let warnings = rendered.warnings;
+        let video = rendered.video.as_ref().map(|video| video.info);
         let image = match self.admit_preview_pixels(ws, width, height, rendered.rgba) {
             Ok(image) => image,
             Err(failure) => return notify_preview_failure(tr, origin.refuse(failure)),
@@ -24584,6 +24589,7 @@ impl App {
             source,
         );
         item.layout = Some(layout);
+        item.video = video;
         let Some(window) = window_with_pane(ws, &mut self.windows, route.pane) else {
             let _ = origin.refuse(FailureCode::NotInKettlePane);
             return;
@@ -24674,6 +24680,7 @@ impl App {
             &warnings,
         );
         result.inline = delivery;
+        result.video = video.map(kettle_ctl::show::ShowVideo::from);
         let id = origin.request_id;
         origin.answer(kettle_ctl::protocol::Response::ok(
             id,
@@ -57588,6 +57595,36 @@ mod lane_control_tests {
                 LaneRenderVerdict::Gone,
                 "a canvas render of the page shown before"
             );
+        }
+    }
+
+    /// A video's metadata, from its poster's render, goes onto its shelf
+    /// item and into the Show result, and a re-render keeps it.
+    #[test]
+    fn videos_keep_what_they_are() {
+        let src = super::production_source();
+        let flat = src.split_whitespace().collect::<Vec<_>>().join(" ");
+        let body = |name: &str| {
+            flat.split(&format!("fn {name}("))
+                .nth(1)
+                .and_then(|rest| rest.split(" fn ").next())
+                .unwrap_or_else(|| panic!("{name}"))
+                .to_owned()
+        };
+        let finish = body("finish_show");
+        for needle in [
+            "let video = rendered.video.as_ref().map(|video| video.info);",
+            "item.layout = Some(layout); item.video = video;",
+            "result.video = video.map(kettle_ctl::show::ShowVideo::from);",
+        ] {
+            assert!(finish.contains(needle), "finish_show: {needle}");
+        }
+        let lane = body("finish_lane_render");
+        for needle in [
+            "let video = rendered.video.as_ref().map(|video| video.info);",
+            "if video.is_some() { item.video = video; }",
+        ] {
+            assert!(lane.contains(needle), "finish_lane_render: {needle}");
         }
     }
 

@@ -92,6 +92,9 @@ pub(crate) struct ShelfItem {
     /// Where the render put its pixels, and the source's own size: what a
     /// zoomed lane plans its sharper pixels from.
     pub layout: Option<kettle_media::RenderLayout>,
+    /// What a video is, from its poster's render: its own size, duration,
+    /// codec, rate and audio, kept when the pixels go.
+    pub video: Option<kettle_media::VideoInfo>,
     /// When the user last looked at it, on the process-wide view clock.
     viewed: u64,
     /// When it was last published, a replacement included, on that clock.
@@ -124,6 +127,7 @@ impl ShelfItem {
             pixels: ItemPixels::Ready(pixels),
             source,
             layout: None,
+            video: None,
             viewed: 0,
             published: 0,
             seen: false,
@@ -364,6 +368,31 @@ mod tests {
         let evicted = shelf.get(1).unwrap();
         assert!(evicted.image().is_none());
         assert_eq!(evicted.source.text(), None);
+    }
+
+    /// A video's metadata stays with its item when its poster's pixels go,
+    /// so the lane can still say what it is.
+    #[test]
+    fn a_videos_metadata_outlives_its_pixels() {
+        let mut shelf = Shelf::default();
+        let mut video = item(1, None);
+        video.kind = MediaKind::Video;
+        let info = kettle_media::VideoInfo {
+            duration_ms: 12_000,
+            width: 1280,
+            height: 720,
+            rotation: 0,
+            codec: kettle_media::VideoCodec::Vp8,
+            fps_milli: Some(25_000),
+            has_audio: false,
+            container: Some(kettle_media::video::VideoContainer::WebM),
+        };
+        video.video = Some(info);
+        shelf.publish(video, None, &[]);
+        assert!(shelf.evict_pixels(1));
+        let evicted = shelf.get(1).unwrap();
+        assert!(evicted.image().is_none());
+        assert_eq!(evicted.video, Some(info));
     }
 
     fn ids(shelf: &Shelf) -> Vec<u64> {

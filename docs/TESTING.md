@@ -4569,6 +4569,12 @@ inside a pane of `kettle --agent-server off --agent-display on` and call
 separators, bidirectional formatting and placeholder sequences (the
 placeholder and the marks after it, which `strip_placeholders` in `kettle-vt`
 tests), bounded at 256 characters.
+A video's Show result carries `video` (duration, its own size, codec name,
+rate when known, audio) beside its poster's size and round-trips; other
+results carry none. `media::shelf` keeps a video's metadata when its
+poster's pixels are evicted, and `app`'s `videos_keep_what_they_are` holds
+`finish_show` and `finish_lane_render` to storing it and the Show result to
+sending it.
 `kettle-vt` hands a refused image's pixels back when only the account's room
 was missing. `just cli-smoke` runs the built `kettle show` for its options,
 a missing file, an overlong path and non-UTF-8 Mermaid on stdin, all refused

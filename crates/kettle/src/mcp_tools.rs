@@ -1488,6 +1488,7 @@ mod tests {
             height: 480,
             warnings: vec!["font_fallback".into()],
             inline: None,
+            video: None,
         };
         let sent = show_sent(&result);
         let text = sent["content"][0]["text"].as_str().unwrap();
