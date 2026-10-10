@@ -19,7 +19,7 @@ use crate::source::{self, Held};
 
 /// How long a stills job may take from its start, inside the worker's own
 /// deadline for video.
-const DEADLINE: Duration = Duration::from_millis(2500);
+pub(crate) const DEADLINE: Duration = Duration::from_millis(2500);
 
 /// What a stills job's source is, by its first bytes, never its name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,69 +65,132 @@ pub(crate) fn render(
             compose(stills, info, frames, tolerance, digest)
         }
         StillsSource::Video(container) => {
-            // A decoder reads a file; inline bytes would have to be written
-            // somewhere first, and the worker writes nothing.
-            let Held::File {
-                file,
-                identity,
-                prefix,
-            } = &held
-            else {
-                return Err(FailureCode::UnsupportedMedia);
-            };
-            let decoder = decoder.ok_or(FailureCode::BackendUnavailable)?;
-            on_kind(MediaKind::Video);
-            let input = VideoInput {
-                file,
-                identity: *identity,
-                container,
-            };
-            let mut planned = None;
-            let decoded = decoder.stills(
-                input,
-                &mut |info| {
-                    let times_ms = sample_times(info.duration_ms, stills);
-                    let (width, height) = tile_size(info.width, info.height, stills)
-                        .ok_or(FailureCode::RenderResource)?;
-                    let plan = StillsPlan {
-                        times_ms,
-                        width,
-                        height,
-                    };
-                    planned = Some(plan.clone());
-                    Ok(plan)
-                },
-                deadline,
-            )?;
-            held.unchanged()?;
-            let plan = planned.ok_or(FailureCode::RenderParse)?;
-            if decoded.frames.len() != plan.times_ms.len()
-                || decoded
-                    .frames
-                    .iter()
-                    .zip(&plan.times_ms)
-                    .any(|(frame, &asked)| frame.sample.requested_ms != asked)
-            {
-                return Err(FailureCode::RenderParse);
-            }
-            let frames = decoded
-                .frames
-                .into_iter()
-                .map(|frame| Still {
-                    sample: frame.sample,
-                    width: plan.width,
-                    height: plan.height,
-                    rgba: frame.rgba,
-                })
-                .collect();
-            // A video is too large to hash whole: its first bytes and the
-            // held file's identity stand for it, and the file is checked
-            // unchanged after decoding.
-            let digest = kettle_media::content_digest(prefix, Some(*identity))
-                .map_err(|_| FailureCode::BadParams)?;
-            compose(stills, decoded.info, frames, decoded.tolerance_ms, digest)
+            render_video(&held, container, decoder, &|_| *stills, on_kind, deadline)
         }
         StillsSource::Unsupported => Err(FailureCode::UnsupportedMedia),
+    }
+}
+
+/// A video's stills from `decoder`, laid out as `layout` says once the video
+/// is known: a stills job's own layout, or an Auto job's poster fitted to its
+/// box. The held file is what the decoder reads, and it is checked unchanged
+/// after.
+pub(crate) fn render_video(
+    held: &Held<'_>,
+    container: VideoContainer,
+    decoder: Option<&dyn VideoDecoder>,
+    layout: &dyn Fn(&VideoInfo) -> VideoStills,
+    on_kind: &mut impl FnMut(MediaKind),
+    deadline: Instant,
+) -> Result<Rendered, FailureCode> {
+    // A decoder reads a file; inline bytes would have to be written
+    // somewhere first, and the worker writes nothing.
+    let Held::File {
+        file,
+        identity,
+        prefix,
+    } = held
+    else {
+        return Err(FailureCode::UnsupportedMedia);
+    };
+    let decoder = decoder.ok_or(FailureCode::BackendUnavailable)?;
+    on_kind(MediaKind::Video);
+    let input = VideoInput {
+        file,
+        identity: *identity,
+        container,
+    };
+    let mut planned = None;
+    let decoded = decoder.stills(
+        input,
+        &mut |info| {
+            let stills = layout(info);
+            stills.validate().map_err(|_| FailureCode::BadParams)?;
+            let times_ms = sample_times(info.duration_ms, &stills);
+            let (width, height) =
+                tile_size(info.width, info.height, &stills).ok_or(FailureCode::RenderResource)?;
+            let plan = StillsPlan {
+                times_ms,
+                width,
+                height,
+            };
+            planned = Some(plan.clone());
+            Ok(plan)
+        },
+        deadline,
+    )?;
+    held.unchanged()?;
+    let plan = planned.ok_or(FailureCode::RenderParse)?;
+    if decoded.frames.len() != plan.times_ms.len()
+        || decoded
+            .frames
+            .iter()
+            .zip(&plan.times_ms)
+            .any(|(frame, &asked)| frame.sample.requested_ms != asked)
+    {
+        return Err(FailureCode::RenderParse);
+    }
+    let frames = decoded
+        .frames
+        .into_iter()
+        .map(|frame| Still {
+            sample: frame.sample,
+            width: plan.width,
+            height: plan.height,
+            rgba: frame.rgba,
+        })
+        .collect();
+    // A video is too large to hash whole: its first bytes and the held
+    // file's identity stand for it, and the file is checked unchanged after
+    // decoding.
+    let digest = kettle_media::content_digest(prefix, Some(*identity))
+        .map_err(|_| FailureCode::BadParams)?;
+    let stills = layout(&decoded.info);
+    compose(&stills, decoded.info, frames, decoded.tolerance_ms, digest)
+}
+
+/// A poster placed in `target`'s box as a raster is: centered, cut to the
+/// box rectangle a crop asks for, and laid out against the video's own size,
+/// so a zoomed lane plans its sharper pixels from the picture, not the poster.
+pub(crate) fn place_poster(
+    mut rendered: Rendered,
+    target: kettle_media::Target,
+) -> Result<Rendered, FailureCode> {
+    let info = rendered
+        .video
+        .as_ref()
+        .ok_or(FailureCode::RenderParse)?
+        .info;
+    let poster = image::RgbaImage::from_raw(
+        rendered.width,
+        rendered.height,
+        std::mem::take(&mut rendered.rgba),
+    )
+    .ok_or(FailureCode::RenderResource)?;
+    let (width, height, rgba, mut layout) = crate::raster::fit(poster, target)?;
+    layout.source_width = f64::from(info.width);
+    layout.source_height = f64::from(info.height);
+    rendered.width = width;
+    rendered.height = height;
+    rendered.rgba = rgba;
+    rendered.layout = layout;
+    Ok(rendered)
+}
+
+/// An Auto job's poster: the frame in the middle of the video, fitted into
+/// `target`'s box as a raster is, never larger than the picture.
+pub(crate) fn poster(info: &VideoInfo, target: kettle_media::Target) -> VideoStills {
+    let scale = (f64::from(target.width) / f64::from(info.width.max(1)))
+        .min(f64::from(target.height) / f64::from(info.height.max(1)))
+        .min(1.0);
+    let fitted = |side: u32| ((f64::from(side) * scale).floor() as u32).max(1);
+    VideoStills {
+        count: 1,
+        max_edge: fitted(info.width).max(fitted(info.height)),
+        start_s: 0.0,
+        end_s: None,
+        at_s: None,
+        layout: StillsLayout::Poster,
     }
 }
 

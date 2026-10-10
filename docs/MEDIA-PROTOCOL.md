@@ -485,11 +485,19 @@ each tile's lower left with the time shown (`mm:ss`, `h:mm:ss` from an hour,
 tenths under a minute). The reply is Video, with the video result described
 above.
 
-**Auto jobs.** The source is read once, under the larger of the raster and
-SVG caps, and that one snapshot is both classified and rendered, so a file
-replaced in between cannot be classified as one thing and rendered as
-another. Content with a raster signature is a raster, whatever the file is
-called. Otherwise UTF-8 markup whose first element, past an optional
+**Auto jobs.** The source is held, and its first 64 KiB are read through
+the held descriptor. A video container there, and no image signature, is a
+video: its poster is the frame in the middle of the video, fitted into the
+job's box as a raster is and never larger than the picture, taken by the
+worker's decoders from the held file exactly as a stills job's are, and the
+reply is Video with the video result; it is reported as video once a
+decoder takes it, and without one it is `BackendUnavailable`. However large
+the video, it is never read whole. Anything else is read once, through the
+same descriptor, under the larger of the raster and SVG caps, and that one
+snapshot is both classified and rendered, so a file replaced in between
+cannot be classified as one thing and rendered as another. Content with a
+raster signature is a raster, whatever the file is called; an animated GIF,
+PNG or WebP shown this way is its first frame. Otherwise UTF-8 markup whose first element, past an optional
 byte-order mark and the prolog (the XML declaration, processing
 instructions, comments and a document type declaration), is `svg` is SVG.
 That root is found by one scan, before the SVG cap applies or the parser

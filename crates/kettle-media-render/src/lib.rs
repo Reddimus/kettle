@@ -84,7 +84,7 @@ pub fn render_with_decoder(
         use kettle_media::JobKind;
         job.target.validate().map_err(|_| FailureCode::BadParams)?;
         match job.kind {
-            JobKind::Auto => auto::render(job, &mut on_kind),
+            JobKind::Auto => auto::render(job, &mut on_kind, decoder),
             JobKind::Raster => {
                 on_kind(MediaKind::Raster);
                 raster::render(job).map(|rendered| (MediaKind::Raster, rendered))

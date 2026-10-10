@@ -502,6 +502,46 @@ fn apples_decoder_reads_mp4_in_the_worker() {
     }
 }
 
+/// A video shown as it is (an Auto job) comes back as a video: its poster
+/// fitted to the job's box and its metadata, from the decoder the parent
+/// named, whatever the file is called.
+#[test]
+fn an_auto_job_on_a_video_replies_with_its_poster() {
+    use std::os::unix::ffi::OsStrExt as _;
+    let decoders = kettle_test_support::private_tempdir("kettle-worker-decoder-");
+    let ffmpeg = stand_in_decoder(decoders.path());
+    let clips = kettle_test_support::private_tempdir("kettle-worker-clip-");
+    let clip = mp4_file(clips.path());
+    let named = clips.path().join("clip.png");
+    std::fs::rename(&clip, &named).unwrap();
+    let Frame::Job(mut job) = job_of(JobKind::Auto, b"") else {
+        unreachable!()
+    };
+    job.source = Source::user_pull(
+        NativePath::new(named.as_os_str().as_bytes().to_vec()).unwrap(),
+        kettle_media::GuiActionWitness::from_explicit_gui_action(),
+    );
+    job.target.width = 20;
+    job.target.height = 20;
+    let Some(Frame::DetectedRendered { kind, rendered }) =
+        reply_from(worker_with_decoder(&ffmpeg), &Frame::Job(job))
+    else {
+        panic!("no poster for a video");
+    };
+    assert_eq!(kind, MediaKind::Video);
+    assert_eq!(
+        (rendered.width, rendered.height),
+        (20, 15),
+        "40x30 fitted into 20x20"
+    );
+    let video = rendered.video.unwrap();
+    assert_eq!(
+        (video.info.duration_ms, video.samples[0].requested_ms),
+        (1000, 500),
+        "the middle frame"
+    );
+}
+
 /// A real ffmpeg, when one is installed, decodes through the worker under
 /// its limits and returns the frames showing at each instant.
 #[test]

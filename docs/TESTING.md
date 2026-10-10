@@ -984,7 +984,10 @@ both pages, the document as read and the first page rendered; an explicit
 page comes back with its index and the same digest, and one past the last is
 `IndexOutOfRange`. An animation's stills cross too: a labeled sheet of the
 WebP fixture comes back as a Video reply with its duration, codec and each
-frame's time, and inline MP4 bytes are `UnsupportedMedia`. So do a
+frame's time, and inline MP4 bytes are `UnsupportedMedia`. An Auto job on
+an MP4 named `.png` comes back, through the stand-in decoder, as a detected
+Video reply, its poster the 40x30 picture fitted into a 20x20 box and its
+middle frame's time; without decoders for Auto jobs it fails. So do a
 video's: with stand-in ffmpeg and ffprobe named in `KETTLE_MEDIA_DECODER`,
 shell built-ins only, a held MP4 comes back as a Video reply with the
 stand-in's description and the time of each frame shown, and its digest
@@ -1158,6 +1161,13 @@ a video's file not checked after decoding, a decoder's frames taken
 without checking their count and times, and an animation frame shrunk in
 straight alpha.
 
+Unit tests in `src/auto.rs` also show a video to an Auto job: an MP4 named
+`.mp4`, `.png` or nothing is a video, reported once, its poster the middle
+frame fitted into a 400x400 box (1280x720 becomes 400x225) or kept at the
+picture's size in a larger box, with the video result; without a decoder it
+is `BackendUnavailable` with no kind heard, and a 48 MiB video, past every
+snapshot cap, is held and decoded, not read. Dropping the video branch fails
+them.
 Unit tests in `src/auto.rs` classify Auto jobs: a PNG is raster whatever the
 file is called (`.svg`, `.bin`, no suffix), and a declared SVG with a
 byte-order mark, an XML declaration and a comment is SVG named `.png`; each

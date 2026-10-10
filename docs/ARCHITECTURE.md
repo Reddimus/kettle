@@ -104,7 +104,10 @@ only input, stderr discarded, its output read up to an exact size and a
 deadline. ffprobe describes the streams and lists the packets around each
 instant, which gives the frame actually showing there; ffmpeg then decodes
 each frame by its own timestamp. The renderer lays the frames out and checks
-the held file is unchanged afterwards. The `kettle` crate's `video_frames`
+the held file is unchanged afterwards. An Auto job, what Show sends for a
+file, classifies a held file's first bytes, so a video shown to the user
+becomes its poster (the middle frame fitted to the lane's box) with the same
+decoders and its metadata, never read whole. The `kettle` crate's `video_frames`
 module takes those stills for a model to read: `kettle video-frames` and the
 full MCP server's `kettle_video_frames` open the file in their own process,
 start their own worker through the same client and launcher the GUI uses,
