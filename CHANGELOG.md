@@ -179,6 +179,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   use `render_clipboard_as_diagram`, or select the reply and use
   `render_selection_as_diagram` (also on right-click), and the lane renders
   it, with the agent's labels, notices and wrapping taken back off.
+- Markdown diagram galleries: `kettle show notes.md`, an agent's
+  `kettle_show`, a link or quick select opens a Markdown file's Mermaid
+  diagrams (up to 32, each up to 64 KiB, in a file up to 1 MiB) as one
+  gallery, as do several diagrams copied or selected together. The lane's
+  detail line pages it with `‹` and `›`, as do Page Up and Page Down in a
+  focused lane and `preview_previous_diagram` and `preview_next_diagram`;
+  every page comes from the file as it was read, and `↻` reads it again at
+  the diagram shown. The `show` control method's `markdown_index` opens a
+  file's gallery at a page. In English and Spanish.
 - `focus_preview` ("Focus preview") gives a preview lane the keyboard until
   Esc: arrows, `+`, `-`, `0` and `c` move, zoom, fit and copy, and nothing
   else typed reaches the program in the pane.

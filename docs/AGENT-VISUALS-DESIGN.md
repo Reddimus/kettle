@@ -10,9 +10,10 @@ independent preview accounting, registered by production callers for Claude
 Code and Codex; a Mermaid diagram's card carries its rendered poster, from
 source or a file, and keeps showing the item when the lane draws it again on
 another background. Preview lanes show, zoom, sharpen, resize and take the
-keyboard on request; Mermaid renders natively; and a diagram an agent printed
-can be previewed from the clipboard or a selection. Audio/video playback
-remains later work.
+keyboard on request; Mermaid renders natively, a Markdown file's Mermaid
+diagrams as one gallery paged from the bytes read once; and a diagram an
+agent printed, or several, can be previewed from the clipboard or a
+selection. Audio/video playback remains later work.
 The existing poster worker also uses the shared content-based video container
 classifier; this does not add a decoder or playback.
 
