@@ -198,6 +198,25 @@ impl ImageData {
         })
     }
 
+    /// The pixels back, when this is their only owner: what a caller that
+    /// fills a buffer per frame reuses for the next one, its account's
+    /// reservation released. Shared pixels stay with their other owners.
+    pub fn into_pixels(self) -> Result<Vec<u8>, ImageData> {
+        let Self {
+            width,
+            height,
+            rgba,
+        } = self;
+        match Arc::try_unwrap(rgba) {
+            Ok(buffer) => Ok(buffer.pixels),
+            Err(rgba) => Err(Self {
+                width,
+                height,
+                rgba,
+            }),
+        }
+    }
+
     pub fn byte_len(&self) -> usize {
         self.rgba.len()
     }
@@ -456,6 +475,23 @@ impl std::fmt::Debug for ImageData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The sole owner takes the pixels back and the account gets their
+    /// room back; a second owner keeps them, and a weak cache pin does not
+    /// count as one.
+    #[test]
+    fn the_sole_owner_takes_its_pixels_back() {
+        let budget = GraphicsBudget::isolated(crate::GraphicsLimits::default()).unwrap();
+        let image = ImageData::new_with_budget(2, 1, vec![7; 8], &budget).unwrap();
+        assert_eq!(budget.retained_cpu_bytes(), 8);
+        let shared = image.clone();
+        let image = image.into_pixels().unwrap_err();
+        drop(shared);
+        let pin = Arc::downgrade(&image.rgba);
+        assert_eq!(image.into_pixels().unwrap(), vec![7; 8]);
+        assert_eq!(budget.retained_cpu_bytes(), 0);
+        assert!(pin.upgrade().is_none());
+    }
 
     #[test]
     fn staged_pixels_move_scopes_without_copying_or_double_charging() {
