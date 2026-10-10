@@ -25,6 +25,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   on, what a launch would get, and Claude Code's plugin and policy state for
   the pane, and `--uninstall` prints how
   to remove the function. It is for bash, zsh and fish, on macOS and Linux.
+- The Codex launch function approves `kettle_show` by its own name for the
+  launch, never the whole server, so media shows under any approval policy:
+  with `approval_policy = "never"`, Codex refused every call that would ask.
 - Codex shows a card under the call for media it sends with `kettle_show`,
   like Claude Code. On macOS with Codex CLI 0.162, the launch function adds a
   `PostToolUse` hook that collects the card Kettle registers for the call, and
