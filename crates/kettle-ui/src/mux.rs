@@ -678,7 +678,8 @@ fn unnegotiated_modified_enter(mode: ModifyOtherKeysMode) -> bool {
 }
 
 use crate::pane_partition::{
-    DEFAULT_FRACTION, LaneRequest, LaneSide, LayoutStyle, PanePartition, partition_leaf,
+    DEFAULT_FRACTION, LaneRequest, LaneSide, LayoutStyle, PanePartition, fraction_at_edge,
+    partition_leaf,
 };
 use crate::session::{MAX_RESTORE_PANES, SNode, STab, Session};
 
@@ -2771,6 +2772,47 @@ impl Mux {
             .iter_mut()
             .find_map(|tab| tab.lanes.get_mut(&pane))
             .is_some_and(|lane| std::mem::replace(&mut lane.expanded, expanded) != expanded)
+    }
+
+    /// Move the edge of `pane`'s expanded lane to `pointer`, in the window's
+    /// `area`: the lane takes the share of its pane that leaves, held so the
+    /// terminal keeps its floor and the lane its least. Measured in the
+    /// pane's own tab, as [`Self::partition_of`] does. Returns whether the
+    /// share changed.
+    pub(crate) fn drag_lane_edge(
+        &mut self,
+        pane: u64,
+        area: Rect,
+        style: LayoutStyle,
+        pointer: (f32, f32),
+    ) -> bool {
+        let Some(tab) = self.tab_of(pane) else {
+            return false;
+        };
+        let mut leaves = Vec::new();
+        let tab = &mut self.tabs[tab];
+        if tab.zoomed && tab.focus == pane {
+            leaves.push((pane, area));
+        } else {
+            tab.root.layout(area, &mut leaves);
+        }
+        let metrics = style.metrics(leaves.len());
+        let (Some((_, leaf)), Some(lane)) = (
+            leaves.into_iter().find(|(id, _)| *id == pane),
+            tab.lanes.get_mut(&pane).filter(|lane| lane.expanded),
+        ) else {
+            return false;
+        };
+        let body = partition_leaf(leaf, metrics, None).body();
+        let edge = match lane.side {
+            LaneSide::Bottom => pointer.1,
+            LaneSide::Right => pointer.0,
+        };
+        let Some(fraction) = fraction_at_edge(body, metrics, lane.side, edge) else {
+            return false;
+        };
+        let next = lane.with_fraction(fraction);
+        std::mem::replace(lane, next) != next
     }
 
     /// Close `pane`'s lane. Returns whether it had one.
@@ -5263,6 +5305,60 @@ mod node_tests {
         assert!(m.close_lane(1));
         assert!(!m.close_lane(1));
         assert_eq!(m.layout(0, area, style), before);
+    }
+
+    /// Dragging a lane's edge gives it the share the pointer leaves, to
+    /// within a cell, on either side; held so the terminal keeps its floor
+    /// and the lane stays expanded however far the edge goes; a collapsed
+    /// lane, or a pane without one, does not move.
+    #[test]
+    fn dragging_a_lanes_edge_resizes_it_and_never_makes_a_strip() {
+        use crate::pane_partition::{FLOOR, LaneShare, LaneSide, LayoutStyle};
+        let style = LayoutStyle::new((9.0, 18.0), (4.0, 2.0), Some(24.0), false).unwrap();
+        let area = (0.0, 0.0, 1200.0, 800.0);
+        let mut m = Mux::new();
+        let mut root = Node::Leaf(1);
+        root.split_leaf(1, 2, Dir::Horizontal);
+        push_tab(&mut m, root, 1);
+        assert!(!m.drag_lane_edge(1, area, style, (100.0, 300.0)), "no lane");
+        assert!(m.open_lane(1, LaneSide::Bottom));
+        let lane_of = |m: &Mux, pane| {
+            let layout = m.layout(0, area, style);
+            let (_, partition) = layout.into_iter().find(|(id, _)| *id == pane).unwrap();
+            (partition.terminal, partition.lane.unwrap())
+        };
+        assert!(m.drag_lane_edge(1, area, style, (100.0, 300.0)));
+        let (terminal, LaneShare::Expanded(lane)) = lane_of(&m, 1) else {
+            panic!("expanded");
+        };
+        assert!((lane.1 - 300.0).abs() <= 18.0, "{lane:?}");
+        assert_eq!(terminal.1 + terminal.3, lane.1);
+        assert!(
+            !m.drag_lane_edge(1, area, style, (100.0, 300.0)),
+            "unchanged"
+        );
+        // Past the top, the terminal keeps its floor of rows.
+        assert!(m.drag_lane_edge(1, area, style, (100.0, -5000.0)));
+        let (terminal, share) = lane_of(&m, 1);
+        assert!(matches!(share, LaneShare::Expanded(_)), "{share:?}");
+        assert!(terminal.3 >= FLOOR.1 * 18.0, "{terminal:?}");
+        // Past the bottom, the lane keeps its least.
+        assert!(m.drag_lane_edge(1, area, style, (100.0, 5000.0)));
+        assert!(matches!(lane_of(&m, 1).1, LaneShare::Expanded(_)));
+        // A right lane follows the pointer's x.
+        assert!(m.close_lane(1));
+        assert!(m.open_lane(1, LaneSide::Right));
+        assert!(m.drag_lane_edge(1, area, style, (400.0, 10.0)));
+        let (terminal, LaneShare::Expanded(lane)) = lane_of(&m, 1) else {
+            panic!("expanded");
+        };
+        assert!((lane.0 - 400.0).abs() <= 9.0, "{lane:?}");
+        assert_eq!(terminal.0 + terminal.2, lane.0);
+        assert!(m.set_lane_expanded(1, false));
+        assert!(
+            !m.drag_lane_edge(1, area, style, (200.0, 10.0)),
+            "collapsed"
+        );
     }
 
     /// Zoom shows the focused pane's lane in the whole area and keeps a

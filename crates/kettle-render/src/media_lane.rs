@@ -46,6 +46,16 @@ pub struct MediaLaneSource {
     pub total_rows: usize,
 }
 
+/// The edge of an expanded lane that borders its terminal, which a drag
+/// moves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaLaneEdge {
+    /// A lane along the bottom of its pane.
+    Top,
+    /// A lane along the right of its pane.
+    Left,
+}
+
 /// Sharper pixels for part of a zoomed item, and the part they cover as
 /// fractions of the image's width and height: left, top, right, bottom.
 #[derive(Clone)]
@@ -106,6 +116,8 @@ pub struct MediaLanePanel {
     /// Sharper pixels for the part of the zoomed item in view, when the
     /// lane holds some.
     pub tile: Option<MediaLaneTile>,
+    /// The edge a drag resizes the lane by, while it is expanded.
+    pub edge: Option<MediaLaneEdge>,
 }
 
 /// Who sent an item, in the UI language, with where the sending program's
@@ -205,6 +217,9 @@ pub struct MediaLaneGeometry {
     pub zoom_out: Option<Rect4>,
     pub zoom_in: Option<Rect4>,
     pub zoom_fit: Option<Rect4>,
+    /// The strip along the edge that resizes the lane: its padding there,
+    /// clear of every control and of the content.
+    pub resize: Option<Rect4>,
     /// Collapses an expanded lane to its header, or expands a collapsed one.
     pub toggle: Rect4,
     pub close: Rect4,
@@ -253,6 +268,8 @@ pub enum MediaLaneHit {
     ZoomIn,
     /// Back to the fit.
     Fit,
+    /// The edge that resizes the lane, for a drag.
+    Resize,
     /// Anywhere else in the lane: nothing happens, and nothing reaches the
     /// terminal.
     Inside,
@@ -295,6 +312,8 @@ impl MediaLaneGeometry {
             None
         } else if contains(self.close, x, y) {
             Some(MediaLaneHit::Close)
+        } else if self.resize.is_some_and(|rect| contains(rect, x, y)) {
+            Some(MediaLaneHit::Resize)
         } else if contains(self.toggle, x, y) {
             Some(MediaLaneHit::Toggle)
         } else if self.reload.is_some_and(|rect| contains(rect, x, y)) {
@@ -436,6 +455,12 @@ pub fn media_lane_geometry(
             zoom_out,
             zoom_in,
             zoom_fit,
+            // An expanded lane too short for its rows still resizes by its
+            // edge, which its centered header leaves clear.
+            resize: lane.edge.map(|edge| match edge {
+                MediaLaneEdge::Top => (rect.0, rect.1, rect.2, pad),
+                MediaLaneEdge::Left => (rect.0, rect.1, pad, rect.3),
+            }),
             toggle,
             close,
             full,
@@ -486,6 +511,12 @@ pub fn media_lane_geometry(
         zoom_out,
         zoom_in,
         zoom_fit,
+        // The padding along the edge that borders the terminal: nothing
+        // else in the lane reaches into it.
+        resize: lane.edge.map(|edge| match edge {
+            MediaLaneEdge::Top => (rect.0, rect.1, rect.2, pad),
+            MediaLaneEdge::Left => (rect.0, rect.1, pad, rect.3),
+        }),
         toggle,
         close,
         full,
@@ -911,6 +942,7 @@ mod tests {
             notice: None,
             view: crate::MediaViewport::FIT,
             tile: None,
+            edge: None,
         }
     }
 
@@ -1364,6 +1396,78 @@ mod tests {
             None,
             "a source shows no image"
         );
+    }
+
+    /// An expanded lane resizes by the padding along the edge it shares with
+    /// its terminal: the top of a bottom lane, the left of a right one. A
+    /// press there is a resize, and the strip reaches no control or content.
+    #[test]
+    fn a_lane_resizes_by_the_padding_along_its_terminal_edge() {
+        let mut lane = viewer((2, 5), Some((64, 48)));
+        lane.copy = true;
+        lane.open_outside = true;
+        assert_eq!(media_lane_geometry(&lane, CELL, CELL).unwrap().resize, None);
+        // Too short for its rows, it still has its edge, clear of the
+        // header centered down it.
+        let short = MediaLanePanel {
+            rect: (0.0, 0.0, 800.0, 74.0),
+            edge: Some(MediaLaneEdge::Top),
+            ..lane.clone()
+        };
+        let geometry = media_lane_geometry(&short, CELL, CELL).unwrap();
+        assert!(!geometry.full);
+        let strip = geometry.resize.expect("an edge");
+        assert!(
+            strip.1 + strip.3 <= geometry.title.1,
+            "{strip:?} {:?}",
+            geometry.title
+        );
+        assert_eq!(
+            geometry.hit_test(strip.0 + 1.0, strip.1 + 1.0),
+            Some(MediaLaneHit::Resize)
+        );
+        for edge in [MediaLaneEdge::Top, MediaLaneEdge::Left] {
+            lane.edge = Some(edge);
+            let geometry = media_lane_geometry(&lane, CELL, CELL).unwrap();
+            let strip = geometry.resize.expect("an edge");
+            match edge {
+                MediaLaneEdge::Top => {
+                    assert_eq!(
+                        (strip.0, strip.1, strip.2),
+                        (lane.rect.0, lane.rect.1, lane.rect.2)
+                    );
+                    assert!(strip.3 > 0.0 && strip.3 <= geometry.title.1 - lane.rect.1);
+                }
+                MediaLaneEdge::Left => {
+                    assert_eq!(
+                        (strip.0, strip.1, strip.3),
+                        (lane.rect.0, lane.rect.1, lane.rect.3)
+                    );
+                    assert!(strip.2 > 0.0 && strip.2 <= geometry.title.0 - lane.rect.0);
+                }
+            }
+            assert_eq!(
+                geometry.hit_test(strip.0 + strip.2 / 2.0, strip.1 + strip.3 / 2.0),
+                Some(MediaLaneHit::Resize)
+            );
+            let overlaps = |a: Rect4, b: Rect4| {
+                a.0 < b.0 + b.2 && b.0 < a.0 + a.2 && a.1 < b.1 + b.3 && b.1 < a.1 + a.3
+            };
+            for part in [
+                Some(geometry.close),
+                Some(geometry.toggle),
+                Some(geometry.title),
+                Some(geometry.content),
+                geometry.copy,
+                geometry.open_outside,
+                geometry.previous,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                assert!(!overlaps(strip, part), "{edge:?}: {strip:?} {part:?}");
+            }
+        }
     }
 
     /// However narrow the lane, every control and the counter lie inside it:

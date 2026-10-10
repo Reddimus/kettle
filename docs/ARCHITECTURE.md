@@ -737,6 +737,19 @@ the release, another press, a menu or dialog opening, or focus loss. A
 control client's whole wheel steps zoom and pan as the wheel's lines do
 (`lane_wheel_steps`).
 
+An expanded lane resizes by the padding along the edge it shares with its
+terminal (`MediaLaneGeometry::resize`, marked by a grip, with resize arrows
+for the cursor). A press there arms a `LaneResize`; its motion moves the
+edge through `Mux::drag_lane_edge`, which measures the pane in its own tab
+and holds the share with `pane_partition::fraction_at_edge` so the terminal
+keeps its floor and the lane its least: a drag never turns the lane into a
+strip. The lane repaints at once, and the PTYs are resized at most every
+33 ms, once more when the drag ends, and when a paused drag's interval is
+up (`flush_lane_resize`, on the event loop's wait). A release, another
+press, a menu or dialog, or focus loss ends it. The lanes otherwise set the
+cursor too: a pointing hand over a control, a hand over a rendered item to
+pan, grabbing while it pans.
+
 Zoomed past its own pixels, a lane asks the worker for the part in view at
 the size shown (`media::crop`). Any change to the view, or to the lanes,
 marks the lane's `LaneCrop` due once the view is quiet for 75 ms, or at

@@ -1198,6 +1198,7 @@ fn lane_control_name(hit: kettle_render::MediaLaneHit) -> &'static str {
         Hit::ZoomOut => "zoom_out",
         Hit::ZoomIn => "zoom_in",
         Hit::Fit => "fit",
+        Hit::Resize => "resize",
         Hit::Inside => "inside",
     }
 }
@@ -10803,6 +10804,8 @@ impl App {
             // A card takes a press before a split seam does, so its hand
             // wins where the two overlap.
             .or(card_hover)
+            // A lane takes every press over it.
+            .or_else(|| self.lane_cursor_icon(ws))
             .or_else(|| self.split_seam_hover_icon(ws))
             .unwrap_or_else(|| {
                 let want_pointer = (ws.mods.control_key() || ws.mods.super_key())
@@ -11424,6 +11427,102 @@ impl App {
         true
     }
 
+    /// Follow the pointer for a press on a lane's edge: the lane takes the
+    /// share of its pane the pointer leaves it, repainting at once and
+    /// resizing the PTYs at most every [`LANE_RESIZE_PTY_INTERVAL`]. Whether
+    /// such a press is held, which then owns the pointer's motion.
+    ///
+    /// [`LANE_RESIZE_PTY_INTERVAL`]: crate::window_state::LANE_RESIZE_PTY_INTERVAL
+    fn resize_preview_lane(&mut self, ws: &mut WindowState) -> bool {
+        let Some(mut resize) = ws.lane_resize else {
+            return false;
+        };
+        // A menu or dialog that opened since owns the pointer.
+        if ws.context_menu.is_some() || self.pointer_modal_open(ws) {
+            self.end_lane_resize(ws);
+            return false;
+        }
+        let (area, style) = (self.area(ws), self.layout_style(ws));
+        let pointer = (ws.cursor.x as f32, ws.cursor.y as f32);
+        if ws.mux.drag_lane_edge(resize.pane, area, style, pointer) {
+            let now = std::time::Instant::now();
+            if now.duration_since(resize.resized) >= crate::window_state::LANE_RESIZE_PTY_INTERVAL {
+                self.resize_all(ws);
+                resize.resized = now;
+                resize.pending = false;
+            } else {
+                resize.pending = true;
+            }
+            self.lanes_changed(ws, false);
+        }
+        ws.lane_resize = Some(resize);
+        true
+    }
+
+    /// End a lane's edge drag, resizing the PTYs for where it ended.
+    fn end_lane_resize(&mut self, ws: &mut WindowState) {
+        if ws.lane_resize.take().is_some_and(|resize| resize.pending) {
+            self.resize_all(ws);
+        }
+    }
+
+    /// Resize the PTYs for a lane's edge drag that has waited its interval
+    /// at `now`; how long until one that has not is due.
+    fn flush_lane_resize(
+        &mut self,
+        ws: &mut WindowState,
+        now: std::time::Instant,
+    ) -> Option<std::time::Duration> {
+        let resize = ws.lane_resize.as_mut().filter(|resize| resize.pending)?;
+        let due = resize.resized + crate::window_state::LANE_RESIZE_PTY_INTERVAL;
+        if due > now {
+            return Some(due - now);
+        }
+        resize.resized = now;
+        resize.pending = false;
+        self.resize_all(ws);
+        None
+    }
+
+    /// The cursor over a lane: resize arrows over its edge or while it is
+    /// dragged, a pointing hand over a control, a hand over a rendered item
+    /// that zooms, grabbing while it pans, and the arrow elsewhere in it.
+    fn lane_cursor_icon(&self, ws: &WindowState) -> Option<CursorIcon> {
+        let edge_icon = |pane: u64| match ws.mux.lane(pane).map(|lane| lane.side) {
+            Some(crate::pane_partition::LaneSide::Right) => CursorIcon::ColResize,
+            _ => CursorIcon::RowResize,
+        };
+        if let Some(resize) = ws.lane_resize {
+            return Some(edge_icon(resize.pane));
+        }
+        if ws.lane_drag.is_some_and(|drag| drag.panning) {
+            return Some(CursorIcon::Grabbing);
+        }
+        let (x, y) = (ws.cursor.x as f32, ws.cursor.y as f32);
+        let (pane, rect, collapsed) = self.preview_lane_at(ws, x, y)?;
+        let geometry = self
+            .preview_lane_panel(ws, pane, rect, collapsed)
+            .and_then(|lane| self.preview_lane_geometry(ws, &lane));
+        Some(
+            match geometry
+                .as_ref()
+                .and_then(|geometry| geometry.hit_test(x, y))
+            {
+                Some(kettle_render::MediaLaneHit::Resize) => edge_icon(pane),
+                Some(kettle_render::MediaLaneHit::Inside) => match geometry {
+                    Some(geometry)
+                        if geometry.fit.is_some() && rect_contains(geometry.content, x, y) =>
+                    {
+                        CursorIcon::Grab
+                    }
+                    _ => CursorIcon::Default,
+                },
+                Some(_) => CursorIcon::Pointer,
+                None => CursorIcon::Default,
+            },
+        )
+    }
+
     /// Collapse `pane`'s lane to its strip, or expand it.
     fn toggle_preview(&mut self, ws: &mut WindowState, pane: u64) {
         let Some(lane) = ws.mux.lane(pane) else {
@@ -11814,6 +11913,16 @@ impl App {
             view: panel.view,
             // Sharper pixels for this item as it is now, if the lane holds
             // them.
+            // An expanded lane resizes by the edge it shares with its
+            // terminal.
+            edge: ws
+                .mux
+                .lane(pane)
+                .filter(|_| !collapsed)
+                .map(|lane| match lane.side {
+                    crate::pane_partition::LaneSide::Bottom => kettle_render::MediaLaneEdge::Top,
+                    crate::pane_partition::LaneSide::Right => kettle_render::MediaLaneEdge::Left,
+                }),
             tile: ws
                 .lane_crops
                 .get(&pane)
@@ -11966,6 +12075,15 @@ impl App {
         let hit = geometry
             .as_ref()
             .and_then(|geometry| geometry.hit_test(x, y));
+        // A press on the lane's edge drags it.
+        if hit == Some(kettle_render::MediaLaneHit::Resize) {
+            ws.lane_resize = Some(crate::window_state::LaneResize {
+                pane,
+                resized: std::time::Instant::now() - crate::window_state::LANE_RESIZE_PTY_INTERVAL,
+                pending: false,
+            });
+            return true;
+        }
         // A press on the content of a lane showing a rendered item may
         // become a drag that pans it.
         if hit == Some(kettle_render::MediaLaneHit::Inside)
@@ -12008,7 +12126,8 @@ impl App {
             Hit::ZoomOut => self.zoom_preview(ws, pane, 1.0 / kettle_render::MEDIA_ZOOM_STEP),
             Hit::ZoomIn => self.zoom_preview(ws, pane, kettle_render::MEDIA_ZOOM_STEP),
             Hit::Fit => self.fit_preview(ws, pane),
-            Hit::Inside => {}
+            // The edge moves with a drag, not a click.
+            Hit::Resize | Hit::Inside => {}
         }
     }
 
@@ -18792,6 +18911,7 @@ impl App {
         ws.drag_press = None;
         ws.pane_drag = None;
         ws.lane_drag = None;
+        self.end_lane_resize(ws);
         ws.reuse_pane_snapshots_once = false;
         if self.torn_drag.as_ref().is_some_and(|drag| {
             drag.seq == ws.seq
@@ -24460,6 +24580,7 @@ impl App {
                         lane["content"] = rect_json(geometry.content);
                         lane["image"] = geometry.image.map(rect_json).into();
                         lane["sharp"] = geometry.tile.map(rect_json).into();
+                        lane["edge"] = geometry.resize.map(rect_json).into();
                         let controls: serde_json::Map<String, serde_json::Value> =
                             lane_controls(&geometry)
                                 .into_iter()
@@ -25632,7 +25753,7 @@ impl App {
         // sources keeps scrolling even though the latest pointer coordinate is
         // back over the pane.
         ws.selection_autoscroll_edge = 0;
-        if self.drag_preview_lane(ws) {
+        if self.resize_preview_lane(ws) || self.drag_preview_lane(ws) {
             return;
         }
         // Like the media receipt below, the search lane's hover follows
@@ -25679,6 +25800,7 @@ impl App {
         // a lane's drag, a program still holding this button gets its
         // release, and the press is Kettle's own gesture until a program
         // receives it. Focus leaves any card.
+        self.end_lane_resize(ws);
         ws.lane_drag = None;
         if bcode == 0 {
             ws.card_press = None;
@@ -25831,6 +25953,10 @@ impl App {
     fn ctl_mouse_release(&mut self, ws: &mut WindowState, bcode: u8) -> bool {
         // As natively: a gesture of Kettle's own ends with its release.
         ws.held_buttons.end_own(bcode);
+        if bcode == 0 && ws.lane_resize.is_some() {
+            self.end_lane_resize(ws);
+            return true;
+        }
         if bcode == 0 && ws.lane_drag.take().is_some() {
             return true;
         }
@@ -32134,7 +32260,8 @@ impl App {
                         kettle_render::MediaLaneHit::Fit => {
                             self.ui_text.text(kettle_i18n::Text::MediaLaneA11yFit)
                         }
-                        kettle_render::MediaLaneHit::Inside => continue,
+                        kettle_render::MediaLaneHit::Resize
+                        | kettle_render::MediaLaneHit::Inside => continue,
                     };
                     let mut button = Node::new(Role::Button);
                     button.set_label(text);
@@ -35055,8 +35182,10 @@ impl App {
                 ws.native_pointer = Some(position);
                 ws.selection_autoscroll_edge = 0;
                 // A press the lane took owns the pointer's motion until its
-                // release: it pans the lane's item, and nothing else sees it.
-                if self.drag_preview_lane(ws) {
+                // release: it resizes the lane or pans its item, and nothing
+                // else sees it.
+                if self.resize_preview_lane(ws) || self.drag_preview_lane(ws) {
+                    self.sync_cursor_icon(ws);
                     return;
                 }
                 self.update_search_hover(ws);
@@ -35391,6 +35520,9 @@ impl App {
                     ws.accessibility_pending = true;
                 }
                 if let Some(sgr) = extra_mouse_sgr(button) {
+                    // Any press ends a lane's drag or edge drag, as below.
+                    self.end_lane_resize(ws);
+                    ws.lane_drag = None;
                     // A press of a button still noted as held means its
                     // release went elsewhere: its program gets it now. The
                     // press is Kettle's until a program receives it.
@@ -35432,6 +35564,7 @@ impl App {
                 // release went elsewhere, or another gesture takes the
                 // pointer: the drag is over. Likewise a primary press while a
                 // card still holds one: the card's gesture is over.
+                self.end_lane_resize(ws);
                 ws.lane_drag = None;
                 if bcode == 0 {
                     ws.card_press = None;
@@ -35905,7 +36038,13 @@ impl App {
                     return;
                 }
                 // The release of a press a lane took is the lane's.
+                if bcode == 0 && ws.lane_resize.is_some() {
+                    self.end_lane_resize(ws);
+                    self.sync_cursor_icon(ws);
+                    return;
+                }
                 if bcode == 0 && ws.lane_drag.take().is_some() {
+                    self.sync_cursor_icon(ws);
                     return;
                 }
                 // The release of a press a card took is the card's too.
@@ -36179,6 +36318,7 @@ impl App {
                     Self::hide_cursor_layer(ws);
                     // Its release may never come here.
                     ws.lane_drag = None;
+                    self.end_lane_resize(ws);
                 }
                 // Non-interactive UI-state marker (OS-driven focus
                 // change — a transition the PTY output stream can't show).
@@ -37146,8 +37286,18 @@ impl App {
         if self.cards_tip.until().is_some_and(|until| until <= now) {
             self.end_cards_tip(ws);
         }
-        // Zoomed lanes whose view settled ask for sharper pixels.
+        // Zoomed lanes whose view settled ask for sharper pixels, and a
+        // lane's edge drag that paused resizes its PTYs.
         let lane_crop_wait = self.ask_due_lane_crops(ws, now);
+        let lane_resize_wait = self.flush_lane_resize(ws, now);
+        // A menu or dialog opened from the keyboard ends a lane's drag now,
+        // not at the pointer's next motion.
+        if (ws.lane_drag.is_some() || ws.lane_resize.is_some())
+            && (ws.context_menu.is_some() || self.pointer_modal_open(ws))
+        {
+            ws.lane_drag = None;
+            self.end_lane_resize(ws);
+        }
         let cards_tip_wait = self.cards_tip.until().map(|until| {
             until
                 .saturating_duration_since(now)
@@ -37405,6 +37555,9 @@ impl App {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         if let Some(next) = lane_crop_wait {
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
+        if let Some(next) = lane_resize_wait {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         if let Some(next) = pending_video_receipt_wait {
@@ -43013,7 +43166,7 @@ mod tests {
         ));
         assert!(source.contains(".and_then(|card| ws.card_sightings.settles_at(&card, now));"));
         assert!(source.contains(
-            ".or(chrome) // A card takes a press before a split seam does, so its hand // wins where the two overlap. .or(card_hover) .or_else(|| self.split_seam_hover_icon(ws)) .unwrap_or_else("
+            ".or(chrome) // A card takes a press before a split seam does, so its hand // wins where the two overlap. .or(card_hover) // A lane takes every press over it. .or_else(|| self.lane_cursor_icon(ws)) .or_else(|| self.split_seam_hover_icon(ws)) .unwrap_or_else("
         ));
         assert!(source.contains(
             "if ws.card_hover_stale || ws.card_settle_wake.is_some_and(|at| at <= now) { ws.card_hover_stale = false; self.sync_cursor_icon(ws); }"
@@ -43372,6 +43525,7 @@ mod tests {
             notice: None,
             view: kettle_render::MediaViewport::FIT,
             tile: None,
+            edge: None,
         };
         let (label, description) = super::media_lane_accessibility(&lane, &tr);
         assert!(
@@ -56589,17 +56743,29 @@ mod lane_control_tests {
             "if self.lane_takes_wheel(ws) { ws.wheel.reset(); self.wheel_over_lane( ws, &winit::event::MouseScrollDelta::LineDelta(0.0, notches as f32), ); return true; }",
             "if self.lane_takes_wheel(ws) { self.wheel_steps_over_lane(ws, steps); return true; }",
             "WindowEvent::PinchGesture { delta, .. } => { ws.resume_native_pointer(); if self.lane_takes_wheel(ws) { self.pinch_over_lane(ws, delta); } }",
-            "ws.selection_autoscroll_edge = 0; // A press the lane took owns the pointer's motion until its // release: it pans the lane's item, and nothing else sees it. if self.drag_preview_lane(ws) { return; }",
-            "ws.selection_autoscroll_edge = 0; if self.drag_preview_lane(ws) { return; }",
-            "// The release of a press a lane took is the lane's. if bcode == 0 && ws.lane_drag.take().is_some() { return; } // The release of a press a card took is the card's too.",
-            "ws.held_buttons.end_own(bcode); if bcode == 0 && ws.lane_drag.take().is_some() { return true; }",
-            "Self::hide_cursor_layer(ws); // Its release may never come here. ws.lane_drag = None;",
+            "ws.selection_autoscroll_edge = 0; // A press the lane took owns the pointer's motion until its // release: it resizes the lane or pans its item, and nothing // else sees it. if self.resize_preview_lane(ws) || self.drag_preview_lane(ws) { self.sync_cursor_icon(ws); return; }",
+            "ws.selection_autoscroll_edge = 0; if self.resize_preview_lane(ws) || self.drag_preview_lane(ws) { return; }",
+            "// The release of a press a lane took is the lane's. if bcode == 0 && ws.lane_resize.is_some() { self.end_lane_resize(ws); self.sync_cursor_icon(ws); return; } if bcode == 0 && ws.lane_drag.take().is_some() { self.sync_cursor_icon(ws); return; } // The release of a press a card took is the card's too.",
+            "ws.held_buttons.end_own(bcode); if bcode == 0 && ws.lane_resize.is_some() { self.end_lane_resize(ws); return true; } if bcode == 0 && ws.lane_drag.take().is_some() { return true; }",
+            "Self::hide_cursor_layer(ws); // Its release may never come here. ws.lane_drag = None; self.end_lane_resize(ws);",
             // Any press ends a drag whose release went elsewhere, natively
             // and from a control client, as does a menu opening; a menu or
             // dialog open since takes the pointer from it.
-            "the card's gesture is over. ws.lane_drag = None; if bcode == 0 { ws.card_press = None; }",
-            "// receives it. Focus leaves any card. ws.lane_drag = None; if bcode == 0 { ws.card_press = None; }",
-            "ws.pane_drag = None; ws.lane_drag = None; ws.reuse_pane_snapshots_once = false;",
+            "the card's gesture is over. self.end_lane_resize(ws); ws.lane_drag = None; if bcode == 0 { ws.card_press = None; }",
+            "// receives it. Focus leaves any card. self.end_lane_resize(ws); ws.lane_drag = None; if bcode == 0 { ws.card_press = None; }",
+            "ws.pane_drag = None; ws.lane_drag = None; self.end_lane_resize(ws); ws.reuse_pane_snapshots_once = false;",
+            // A press on the edge drags it; the PTYs follow at most every
+            // interval, and once more when it ends or when a paused drag's
+            // interval is up.
+            "if hit == Some(kettle_render::MediaLaneHit::Resize) { ws.lane_resize = Some(crate::window_state::LaneResize {",
+            "if ws.mux.drag_lane_edge(resize.pane, area, style, pointer) {",
+            "if ws.lane_resize.take().is_some_and(|resize| resize.pending) { self.resize_all(ws); }",
+            "let lane_resize_wait = self.flush_lane_resize(ws, now);",
+            // A menu or dialog opened from the keyboard ends a drag at
+            // once, and so does a side button's press.
+            "if (ws.lane_drag.is_some() || ws.lane_resize.is_some()) && (ws.context_menu.is_some() || self.pointer_modal_open(ws)) { ws.lane_drag = None; self.end_lane_resize(ws); }",
+            "if let Some(sgr) = extra_mouse_sgr(button) { // Any press ends a lane's drag or edge drag, as below. self.end_lane_resize(ws); ws.lane_drag = None;",
+            "if let Some(next) = lane_resize_wait { wait = Some(wait.map_or(next, |current| current.min(next))); }",
             "if ws.context_menu.is_some() || self.pointer_modal_open(ws) { ws.lane_drag = None; return false; }",
             "if hit == Some(kettle_render::MediaLaneHit::Inside) && let Some(geometry) = geometry && geometry.fit.is_some() && rect_contains(geometry.content, x, y)",
         ] {

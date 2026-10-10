@@ -730,6 +730,22 @@ impl PreviewPanel {
     }
 }
 
+/// A primary press on a lane's edge, which resizes the lane as it moves. The
+/// lane repaints at once; its terminal's PTY is resized at most every
+/// [`LANE_RESIZE_PTY_INTERVAL`], and once more when the drag ends.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct LaneResize {
+    pub(crate) pane: u64,
+    /// When the PTYs were last resized for it.
+    pub(crate) resized: std::time::Instant,
+    /// Whether the lane moved since.
+    pub(crate) pending: bool,
+}
+
+/// How often a lane's edge drag resizes the PTYs.
+pub(crate) const LANE_RESIZE_PTY_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(33);
+
 /// A primary press on a lane's rendered item, which pans it once it moves
 /// past a few pixels. The release is the lane's, wherever it lands.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -862,6 +878,8 @@ pub(crate) struct WindowState {
     pub(crate) lane_wheel: crate::input::WheelAccum,
     /// A press on a lane's rendered item, until its release.
     pub(crate) lane_drag: Option<LaneDrag>,
+    /// A press on a lane's edge, until its release.
+    pub(crate) lane_resize: Option<LaneResize>,
     /// Each lane's sharper pixels for its zoomed view, by pane.
     pub(crate) lane_crops: std::collections::HashMap<u64, crate::media::LaneCrop>,
     pub(crate) selecting: bool,
@@ -1424,6 +1442,7 @@ impl WindowState {
             wheel: crate::input::WheelAccum::default(),
             lane_wheel: crate::input::WheelAccum::default(),
             lane_drag: None,
+            lane_resize: None,
             lane_crops: std::collections::HashMap::new(),
             selecting: false,
             selecting_pane: None,
