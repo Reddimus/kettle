@@ -131,10 +131,11 @@ content while reading. SHA-256 here does not establish file authorization or wor
 
 ## Fixed failures and unspecified bounds
 
-Failure bytes 0 through 26 are pinned in `FailureCode` and round-trip tests. `code`, `reason`
+Failure bytes 0 through 27 are pinned in `FailureCode` and round-trip tests. `code`, `reason`
 and `model_message` map applicable cases to the model-facing error contract. Failures carry
 no source, path, parser diagnostic or other input. WorkerUnavailable is the added fixed
-reason for a missing or unverifiable worker. Codec/backend identities and platform package
+reason for a missing or unverifiable worker. SandboxUnavailable (27) is `backend_unavailable`
+with reason `sandbox`: the worker could not confine itself, so it decodes no video. Codec/backend identities and platform package
 hints are future bounded provider data, not free-form strings accepted in P1 failures.
 
 The plan leaves some small metadata bounds unspecified. P1 chooses 64 bytes each for version
