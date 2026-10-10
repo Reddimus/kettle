@@ -795,6 +795,79 @@ fn lane_mode(
     }
 }
 
+/// Whether a lane showing `item` as `panel` says offers a silent preview: a
+/// video with a length, shown rendered, whose source the lane can read
+/// again.
+fn lane_previews_item(
+    item: &crate::media::ShelfItem,
+    panel: &crate::window_state::PreviewPanel,
+) -> Option<()> {
+    let info = item.video?;
+    (info.duration_ms > 0
+        && item.kind == kettle_media::MediaKind::Video
+        && lane_mode(item, panel) == kettle_render::MediaLaneMode::Rendered
+        && !matches!(item.source.spec.input, crate::media::SourceInput::Released))
+    .then_some(())
+}
+
+/// The rest the real pointer makes on a lane's picture after `current`:
+/// `hovered` is the lane whose picture it is on, at `at`, at `now`. A rest
+/// is a pointer that stays put, so moving starts it again, until a loop
+/// started from it; leaving ends it.
+fn next_hover(
+    current: Option<crate::window_state::LaneHover>,
+    hovered: Option<u64>,
+    at: Option<(f64, f64)>,
+    now: std::time::Instant,
+) -> Option<crate::window_state::LaneHover> {
+    match (hovered, current) {
+        (Some(pane), Some(hover)) if hover.pane == pane && (hover.at == at || hover.used) => {
+            Some(hover)
+        }
+        (Some(pane), _) => Some(crate::window_state::LaneHover {
+            pane,
+            at,
+            since: now,
+            used: false,
+        }),
+        (None, _) => None,
+    }
+}
+
+/// The earlier of two optional instants.
+fn earliest(
+    a: Option<std::time::Instant>,
+    b: Option<std::time::Instant>,
+) -> Option<std::time::Instant> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, None) => a,
+        (None, b) => b,
+    }
+}
+
+/// Whether the system lets apps start motion on their own: macOS's Reduce
+/// Motion setting. Elsewhere there is no setting Kettle reads, so motion is
+/// held back.
+fn system_allows_motion() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_app_kit::NSWorkspace;
+        if objc2_foundation::MainThreadMarker::new().is_some() {
+            // SAFETY: a property read on the shared workspace, on the main
+            // thread.
+            return !unsafe {
+                NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
+            };
+        }
+        false
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
 /// Whether `item` can be read again: it came from a file, or its gallery
 /// did, not from bytes a request carried or text copied.
 fn preview_reloads(item: &crate::media::ShelfItem) -> bool {
@@ -1164,15 +1237,55 @@ fn lane_notice_text(
         N::Rendering => T::MediaLaneNoticeRendering,
         N::RenderFailed => T::MediaLaneNoticeRenderFailed,
         N::Changed => T::MediaLaneNoticeChanged,
+        N::PreviewFailed => T::MediaLaneNoticePreviewFailed,
+        N::PreviewTimedOut => T::MediaLaneNoticePreviewTimedOut,
+        N::PreviewNeedsDecoder => T::MediaLaneNoticePreviewNeedsDecoder,
+        N::PreviewNeedsSandbox => T::MediaLaneNoticePreviewNeedsSandbox,
     })
+}
+
+/// What a screen reader hears that a lane last did, given its `preview` and
+/// its `notice`: that a preview is being made, else the notice. A preview
+/// that plays is said by its button's name, never frame by frame.
+fn lane_announced(
+    preview: Option<&crate::media::LanePreview>,
+    notice: Option<crate::window_state::LaneNotice>,
+    tr: &kettle_i18n::Translator,
+) -> Option<String> {
+    if preview.is_some_and(|preview| preview.waits_on().is_some()) {
+        return Some(
+            tr.text(kettle_i18n::Text::MediaLaneNoticePreviewLoading)
+                .to_string(),
+        );
+    }
+    notice.map(|notice| lane_notice_text(notice, tr).to_string())
+}
+
+/// What a lane says when its video's preview fails with `failure`: which
+/// decoder to install, that there is no sandbox, that the file changed, or
+/// that it could not be made.
+fn preview_failure_notice(failure: kettle_media::FailureCode) -> crate::window_state::LaneNotice {
+    use crate::window_state::LaneNotice as N;
+    use kettle_media::FailureCode as F;
+    match failure {
+        F::UnsupportedContainer | F::CodecUnavailable | F::BackendUnavailable => {
+            N::PreviewNeedsDecoder
+        }
+        F::SandboxUnavailable => N::PreviewNeedsSandbox,
+        F::Changed => N::Changed,
+        F::RenderTimeout => N::PreviewTimedOut,
+        _ => N::PreviewFailed,
+    }
 }
 
 /// What a screen reader hears for a preview lane: its name, with the item's
 /// place on the shelf, title and detail line, and a description that says
-/// when the pixels were released and where keys go.
+/// what the lane last did (`announced`), else when the pixels were released
+/// and where keys go.
 fn media_lane_accessibility(
     lane: &kettle_render::MediaLanePanel,
     tr: &kettle_i18n::Translator,
+    announced: Option<&str>,
 ) -> (String, String) {
     let (index, count) = lane.position;
     let detail = match lane.page.filter(|&(_, pages)| pages > 1) {
@@ -1185,10 +1298,10 @@ fn media_lane_accessibility(
         None => format!("{} · {}", lane.detail, lane.sender.text),
     };
     let label = tr.media_lane_a11y(index as u64, count as u64, &lane.title, &detail);
-    let description = if lane.image.is_some() {
-        lane.hint.clone()
-    } else {
-        format!("{} {}", lane.status, lane.hint)
+    let description = match announced {
+        Some(announced) => announced.to_owned(),
+        None if lane.image.is_some() || lane.frame.is_some() => lane.hint.clone(),
+        None => format!("{} {}", lane.status, lane.hint),
     };
     (label, description)
 }
@@ -1222,7 +1335,7 @@ fn lane_controls(
     u64,
     Option<kettle_render::Rect4>,
     kettle_render::MediaLaneHit,
-); 14] {
+); 15] {
     use kettle_render::MediaLaneHit as Hit;
     [
         (1, geometry.previous, Hit::Previous),
@@ -1239,6 +1352,7 @@ fn lane_controls(
         (12, geometry.zoom_fit, Hit::Fit),
         (13, geometry.page_previous, Hit::PreviousPage),
         (14, geometry.page_next, Hit::NextPage),
+        (15, geometry.play, Hit::Play),
     ]
 }
 
@@ -1257,6 +1371,7 @@ fn lane_control_name(hit: kettle_render::MediaLaneHit) -> &'static str {
         Hit::Canvas => "canvas",
         Hit::Copy => "copy",
         Hit::Reload => "reload",
+        Hit::Play => "play",
         Hit::ZoomOut => "zoom_out",
         Hit::ZoomIn => "zoom_in",
         Hit::Fit => "fit",
@@ -6091,6 +6206,7 @@ fn lane_action_hit(action: &Action) -> Option<kettle_render::MediaLaneHit> {
         Action::PreviewCanvas => Some(Hit::Canvas),
         Action::PreviewCopy => Some(Hit::Copy),
         Action::PreviewReload => Some(Hit::Reload),
+        Action::PreviewPlay => Some(Hit::Play),
         Action::PreviewZoomIn => Some(Hit::ZoomIn),
         Action::PreviewZoomOut => Some(Hit::ZoomOut),
         Action::PreviewFit => Some(Hit::Fit),
@@ -9153,11 +9269,16 @@ pub struct App {
     /// Whether a control client's request is being handled: what it
     /// drives is never the user's own gesture.
     ctl_driving: bool,
+    /// Whether a Lua script's action is being run: such an action is no
+    /// gesture of the user's, and starts no preview that reads a file.
+    lua_driving: bool,
     /// The last ticket a lane took for sharper pixels.
     crop_tickets: u64,
     /// The last gallery page request a lane made, counting from 0, so two
     /// requests for one page are told apart.
     page_tickets: u64,
+    /// The last ticket a lane took for a video's silent preview.
+    preview_tickets: u64,
     /// The thread that copies a lane's image or source, from the first copy.
     preview_copy: Option<crate::media::CopyService>,
     /// Bounded native-poster jobs. Paths cross only the private child-worker
@@ -10173,8 +10294,10 @@ impl App {
             video_copies: std::sync::Arc::new(crate::media::VideoCopies::new()),
             previews_ready: Vec::new(),
             ctl_driving: false,
+            lua_driving: false,
             crop_tickets: 0,
             page_tickets: 0,
+            preview_tickets: 0,
             preview_copy: None,
             video_previewer,
             next_video_preview_generation: 1,
@@ -10447,7 +10570,9 @@ impl App {
             processed += 1;
             match command {
                 PendingLuaCommand::ExecAction { action, .. } => {
+                    self.lua_driving = true;
                     self.handle_action(ws, action, event_loop);
+                    self.lua_driving = false;
                     if self.window_close_pending(ws.seq) || self.quit_requested {
                         break;
                     }
@@ -11143,10 +11268,394 @@ impl App {
         // release, which is the lane's.
         ws.lane_wheel.reset();
         ws.lane_crops.remove(&pane);
+        self.end_lane_preview(ws, pane);
         let had_panel = ws.preview_panels.remove(&pane).is_some();
         let resized = ws.mux.close_lane(pane);
         if had_panel || resized {
             self.lanes_changed(ws, resized);
+        }
+    }
+
+    /// The stills job a silent preview of what `pane`'s lane shows asks
+    /// for: the item, its generation, the job and the longest reply it can
+    /// send. `None` unless the lane shows a video with a length, rendered,
+    /// whose source it can read again.
+    fn lane_preview_job(
+        &self,
+        ws: &WindowState,
+        pane: u64,
+    ) -> Option<(u64, u64, crate::media::JobSpec, usize)> {
+        let panel = ws.preview_panels.get(&pane)?;
+        let item = preview_item(ws, pane)?;
+        lane_previews_item(item, panel)?;
+        let info = item.video?;
+        let stills = crate::media::preview_stills(&info)?;
+        let limit = crate::media::preview_reply_limit(&stills)?;
+        let mut spec = item.source.spec.clone();
+        spec.kind = kettle_media::JobKind::VideoStills(stills);
+        Some((item.id, item.generation, spec, limit))
+    }
+
+    /// Start `pane`'s silent preview, or stop the one that is made or plays:
+    /// the lane's button, key and action.
+    fn toggle_lane_preview(&mut self, ws: &mut WindowState, pane: u64) {
+        if ws
+            .lane_previews
+            .get(&pane)
+            .is_some_and(crate::media::LanePreview::active)
+        {
+            if let Some(preview) = ws.lane_previews.get_mut(&pane)
+                && !preview.stop()
+            {
+                ws.lane_previews.remove(&pane);
+                self.media.withdraw_lane_preview(pane);
+            }
+            if let Some(panel) = ws.preview_panels.get_mut(&pane) {
+                panel.notice = None;
+            }
+            return self.lanes_changed(ws, false);
+        }
+        self.start_lane_preview(ws, pane);
+    }
+
+    /// Start a silent preview of the video `pane`'s lane shows: from frames
+    /// it holds for the item as it is, else from one stills job, which reads
+    /// the item's source again. That happens only on the user's own
+    /// gesture, never while a control client's request or a Lua script's
+    /// action is handled, and never for a file found changed, which a
+    /// reload reads again.
+    fn start_lane_preview(&mut self, ws: &mut WindowState, pane: u64) {
+        if self.ctl_driving || self.lua_driving {
+            return;
+        }
+        let start = crate::media::PreviewStart::User;
+        let Some((item, generation, spec, limit)) = self.lane_preview_job(ws, pane) else {
+            return;
+        };
+        let reads_a_file = matches!(spec.input, crate::media::SourceInput::Path { .. });
+        if reads_a_file && preview_item(ws, pane).is_some_and(|item| item.source.changed) {
+            if let Some(panel) = ws.preview_panels.get_mut(&pane) {
+                panel.notice = Some(crate::window_state::LaneNotice::Changed);
+            }
+            return self.lanes_changed(ws, false);
+        }
+        let now = std::time::Instant::now();
+        if let Some(panel) = ws.preview_panels.get_mut(&pane) {
+            panel.notice = None;
+        }
+        // Frames held for the item as it is play again without a job.
+        if ws
+            .lane_previews
+            .get_mut(&pane)
+            .filter(|preview| preview.serves(item, generation))
+            .is_some_and(|preview| preview.replay(now, start))
+        {
+            return self.lanes_changed(ws, false);
+        }
+        self.end_lane_preview(ws, pane);
+        self.preview_tickets += 1;
+        let ticket = self.preview_tickets;
+        let deadline = now + crate::media::PREVIEW_FIRST_FRAME_WITHIN;
+        let control =
+            kettle_media::client::RenderControl::with_deadline(deadline).limit_reply(limit);
+        let render = crate::media::LaneRender {
+            window: ws.seq,
+            pane,
+            item,
+            generation,
+            tile: None,
+            page: None,
+            preview: Some(ticket),
+        };
+        let push = crate::media::Push::new(
+            crate::media::Requester::Lane(render),
+            crate::media::Route {
+                pane,
+                window: ws.seq,
+                verified: true,
+            },
+            crate::media::Draft {
+                key: None,
+                title: String::new(),
+                provenance: crate::media::Provenance::User,
+                inline: None,
+                gallery: None,
+            },
+            spec,
+            control.clone(),
+        );
+        ws.lane_previews.insert(
+            pane,
+            crate::media::LanePreview::loading(item, generation, ticket, control, now, start),
+        );
+        self.media
+            .admit(crate::media::Sender::LanePreview(pane), deadline, push);
+        self.media_tick(ws);
+        self.lanes_changed(ws, false);
+    }
+
+    /// Let `pane`'s preview go, frames and all: a job still making frames is
+    /// cancelled, and one still waiting is withdrawn.
+    fn end_lane_preview(&mut self, ws: &mut WindowState, pane: u64) {
+        if let Some(mut preview) = ws.lane_previews.remove(&pane) {
+            preview.stop();
+            self.media.withdraw_lane_preview(pane);
+        }
+    }
+
+    /// Take a lane's silent preview frames. They stay the lane's, shown in
+    /// the poster's place, only while the lane still waits on this job for
+    /// the item as it was, read from the source the item came from, and
+    /// only a sheet laid out as the job asked; the item and its cards keep
+    /// their poster. A failure says why in the lane, and the poster stays.
+    fn finish_lane_preview(
+        &mut self,
+        ws: &mut WindowState,
+        render: crate::media::LaneRender,
+        ticket: u64,
+        spec: crate::media::JobSpec,
+        result: Result<kettle_media::RenderOutput, kettle_media::client::RenderError>,
+    ) {
+        use crate::window_state::LaneNotice;
+        use kettle_media::FailureCode;
+        use kettle_media::client::RenderError;
+        let waited = self
+            .window_by_seq(ws, render.window)
+            .and_then(|window| window.lane_previews.get(&render.pane))
+            .is_some_and(|preview| {
+                preview.waits_on() == Some(ticket) && preview.serves(render.item, render.generation)
+            });
+        if !waited {
+            return;
+        }
+        let fail = |app: &mut Self, ws: &mut WindowState, notice| {
+            if let Some(window) = app.window_by_seq(ws, render.window) {
+                window.lane_previews.remove(&render.pane);
+            }
+            app.tell_lane(ws, render.window, render.pane, render.item, notice);
+        };
+        let output = match result {
+            Ok(output) => output,
+            // Stopped: its lane already let it go.
+            Err(RenderError::Cancelled) => return,
+            Err(RenderError::Failure(FailureCode::Changed)) => {
+                self.mark_preview_changed(ws, &render);
+                return fail(self, ws, LaneNotice::Changed);
+            }
+            Err(RenderError::Failure(failure)) => {
+                return fail(self, ws, preview_failure_notice(failure));
+            }
+        };
+        let rendered = output.rendered;
+        let verdict = self
+            .window_by_seq(ws, render.window)
+            .and_then(|window| window.mux.panes.get(&render.pane))
+            .map_or(LaneRenderVerdict::Gone, |pane| {
+                lane_render_verdict(pane.media_shelf.items(), &render, &rendered.digest)
+            });
+        match verdict {
+            LaneRenderVerdict::Gone => {
+                if let Some(window) = self.window_by_seq(ws, render.window) {
+                    window.lane_previews.remove(&render.pane);
+                }
+                return;
+            }
+            LaneRenderVerdict::Changed => {
+                self.mark_preview_changed(ws, &render);
+                return fail(self, ws, LaneNotice::Changed);
+            }
+            LaneRenderVerdict::Same => {}
+        }
+        // Frames that came after their two seconds are as late as none.
+        let now = std::time::Instant::now();
+        if self
+            .window_by_seq(ws, render.window)
+            .and_then(|window| window.lane_previews.get(&render.pane))
+            .is_some_and(|preview| preview.overdue(now))
+        {
+            return fail(self, ws, LaneNotice::PreviewTimedOut);
+        }
+        let kettle_media::JobKind::VideoStills(stills) = spec.kind else {
+            return fail(self, ws, LaneNotice::PreviewFailed);
+        };
+        let Some(layout) = crate::media::PreviewLayout::of(&stills, &rendered) else {
+            return fail(self, ws, LaneNotice::PreviewFailed);
+        };
+        let Ok(sheet) =
+            self.admit_preview_pixels(ws, rendered.width, rendered.height, rendered.rgba)
+        else {
+            return fail(self, ws, LaneNotice::PreviewFailed);
+        };
+        let Some(frames) = crate::media::PreviewFrames::new(sheet, layout) else {
+            return fail(self, ws, LaneNotice::PreviewFailed);
+        };
+        let Some(window) = self.window_by_seq(ws, render.window) else {
+            return;
+        };
+        if window
+            .lane_previews
+            .get_mut(&render.pane)
+            .is_some_and(|preview| preview.ready(ticket, frames, now))
+        {
+            window.accessibility_pending = true;
+            if let Some(handle) = &window.window {
+                handle.request_redraw();
+            }
+        }
+    }
+
+    /// Move every lane preview on to `now` and say how long until one next
+    /// needs it. A preview goes when its lane closes, shows another item,
+    /// or its item changes; one whose frames are late says so; frames play
+    /// only while their lane shows its picture in a visible window; and,
+    /// with `video-preview-hover` on and motion allowed, the real pointer
+    /// resting on a video lane's picture starts a hover loop, once a rest.
+    fn tick_lane_previews(
+        &mut self,
+        ws: &mut WindowState,
+        now: std::time::Instant,
+    ) -> Option<std::time::Duration> {
+        if ws.lane_previews.is_empty() && !self.cfg.video_preview_hover {
+            ws.lane_hover = None;
+            return None;
+        }
+        let stale: Vec<u64> = ws
+            .lane_previews
+            .iter()
+            .filter(|(pane, preview)| {
+                preview_item(ws, **pane)
+                    .is_none_or(|item| !preview.serves(item.id, item.generation))
+            })
+            .map(|(pane, _)| *pane)
+            .collect();
+        for pane in stale {
+            self.end_lane_preview(ws, pane);
+        }
+        let hidden = window_is_render_hidden(ws);
+        let hovered = self.hovered_lane_picture(ws);
+        let at = ws.native_pointer.map(|pointer| (pointer.x, pointer.y));
+        ws.lane_hover = next_hover(ws.lane_hover, hovered, at, now);
+        let motion = self.cfg.video_preview_hover && self.motion_allowed();
+        let visible: std::collections::HashSet<u64> = if hidden {
+            std::collections::HashSet::new()
+        } else {
+            ws.lane_previews
+                .keys()
+                .copied()
+                .filter(|&pane| {
+                    self.preview_lane_geometry_of(ws, pane)
+                        .is_some_and(|geometry| geometry.full && geometry.image.is_some())
+                })
+                .collect()
+        };
+        let mut wake: Option<std::time::Instant> = None;
+        let mut redraw = false;
+        let mut late = Vec::new();
+        for (&pane, preview) in &mut ws.lane_previews {
+            let tick = preview.tick(
+                now,
+                crate::media::PreviewSeen {
+                    visible: visible.contains(&pane),
+                    hovered: hovered == Some(pane),
+                    motion,
+                },
+            );
+            redraw |= tick.redraw;
+            if tick.timed_out {
+                late.push(pane);
+            }
+            wake = earliest(wake, preview.wake());
+        }
+        for pane in late {
+            if let Some(item) = ws.lane_previews.remove(&pane).map(|preview| preview.item) {
+                self.media.withdraw_lane_preview(pane);
+                self.tell_lane(
+                    ws,
+                    ws.seq,
+                    pane,
+                    item,
+                    crate::window_state::LaneNotice::PreviewTimedOut,
+                );
+                redraw = true;
+            }
+        }
+        // A rest long enough loops the frames a preview the user started
+        // left, once; a hover never makes frames, which would read the file.
+        if motion
+            && let Some(hover) = ws.lane_hover.filter(|hover| !hover.used)
+            && ws
+                .lane_previews
+                .get(&hover.pane)
+                .is_some_and(|preview| !preview.active())
+        {
+            let due = hover.since + crate::media::PREVIEW_HOVER_DWELL;
+            if now >= due {
+                ws.lane_hover = Some(crate::window_state::LaneHover {
+                    used: true,
+                    ..hover
+                });
+                if let Some(preview) = ws.lane_previews.get_mut(&hover.pane)
+                    && preview.replay(now, crate::media::PreviewStart::Hover)
+                {
+                    wake = earliest(wake, preview.wake());
+                    redraw = true;
+                }
+            } else {
+                wake = earliest(wake, Some(due));
+            }
+        }
+        if redraw {
+            ws.accessibility_pending = true;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        }
+        wake.map(|at| {
+            at.saturating_duration_since(now)
+                .max(std::time::Duration::from_millis(1))
+        })
+    }
+
+    /// The lane whose video picture the real pointer rests on, never a
+    /// position a control client moved.
+    fn hovered_lane_picture(&self, ws: &WindowState) -> Option<u64> {
+        // Nothing under a dialog or a menu, or in a window not drawn, is in
+        // reach of the pointer.
+        if window_is_render_hidden(ws) || self.pointer_modal_open(ws) || ws.context_menu.is_some() {
+            return None;
+        }
+        let pointer = ws.native_pointer?;
+        let (x, y) = (pointer.x as f32, pointer.y as f32);
+        let (pane, _, _) = self.preview_lane_at(ws, x, y)?;
+        let geometry = self.preview_lane_geometry_of(ws, pane)?;
+        let picture = geometry.shown()?;
+        let offered = ws
+            .preview_panels
+            .get(&pane)
+            .zip(preview_item(ws, pane))
+            .is_some_and(|(panel, item)| lane_previews_item(item, panel).is_some());
+        (offered && rect_contains(picture, x, y)).then_some(pane)
+    }
+
+    /// What a screen reader hears that `pane`'s lane last did: its notice,
+    /// or that a silent preview is being made. A preview that plays is said
+    /// by its button's name, never frame by frame.
+    fn lane_announcement(&self, ws: &WindowState, pane: u64) -> Option<String> {
+        lane_announced(
+            ws.lane_previews.get(&pane),
+            ws.preview_panels.get(&pane).and_then(|panel| panel.notice),
+            &self.ui_text,
+        )
+    }
+
+    /// Whether Kettle may start motion on its own: `reduce-motion`, and for
+    /// `auto` the system's Reduce Motion where it has one; where it has
+    /// none, motion is held back.
+    fn motion_allowed(&self) -> bool {
+        match self.cfg.reduce_motion {
+            kettle_config::ReduceMotion::On => false,
+            kettle_config::ReduceMotion::Off => true,
+            kettle_config::ReduceMotion::Auto => system_allows_motion(),
         }
     }
 
@@ -11255,6 +11764,7 @@ impl App {
             pane,
             item: id,
             generation,
+            preview: None,
             tile: None,
             page,
         };
@@ -11354,6 +11864,7 @@ impl App {
             pane,
             item: id,
             generation,
+            preview: None,
             tile: None,
             page: Some(ask),
         };
@@ -11614,6 +12125,7 @@ impl App {
             pane,
             item: id,
             generation,
+            preview: None,
             tile: Some(ticket),
             page: None,
         };
@@ -11977,6 +12489,7 @@ impl App {
             K::Fit => self.fit_preview(ws, pane),
             K::Page(step) => self.page_preview(ws, pane, step),
             K::Copy => self.copy_preview(ws, pane),
+            K::Play => self.toggle_lane_preview(ws, pane),
             K::Swallow => {}
         }
         if let Some(window) = &ws.window {
@@ -12322,6 +12835,15 @@ impl App {
             .collect();
         ws.preview_panels.retain(|pane, _| live.contains(pane));
         ws.lane_crops.retain(|pane, _| live.contains(pane));
+        let gone: Vec<u64> = ws
+            .lane_previews
+            .keys()
+            .copied()
+            .filter(|pane| !live.contains(pane))
+            .collect();
+        for pane in gone {
+            self.end_lane_preview(ws, pane);
+        }
         let resized = ws.mux.retain_lanes(|pane| live.contains(&pane));
         if resized || ws.preview_panels.len() != before {
             self.lanes_changed(ws, resized);
@@ -12359,6 +12881,8 @@ impl App {
         let text = item.source.text();
         let mode = lane_mode(item, panel);
         let mut lane = kettle_render::MediaLanePanel {
+            play: None,
+            frame: None,
             pane,
             rect,
             collapsed,
@@ -12420,6 +12944,39 @@ impl App {
                     coverage: tile.coverage,
                 }),
         };
+        // A video's silent preview: its button, its frame in the poster's
+        // place while it plays, and what it is doing in the footer.
+        if lane_previews_item(item, panel).is_some() {
+            let preview = ws
+                .lane_previews
+                .get(&pane)
+                .filter(|preview| preview.serves(item.id, item.generation));
+            lane.play = Some(match preview {
+                Some(preview) if preview.active() => kettle_render::MediaLanePlay::Stop,
+                _ => kettle_render::MediaLanePlay::Play,
+            });
+            if let Some(preview) = preview.filter(|preview| preview.active()) {
+                match preview.frame() {
+                    Some(frame) => {
+                        lane.frame = Some(kettle_render::MediaLaneFrame {
+                            sheet: frame.sheet.clone(),
+                            source: frame.source,
+                            size: item.size,
+                        });
+                        lane.notice = Some(tr.media_lane_notice_preview_playing(
+                            &kettle_render::duration_label(frame.at_ms),
+                            &kettle_render::duration_label(frame.length_ms),
+                        ));
+                    }
+                    None => {
+                        lane.notice = Some(
+                            tr.text(kettle_i18n::Text::MediaLaneNoticePreviewLoading)
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+        }
         // The source rows in view, for the room the lane has: only those are
         // read out of the text.
         if mode == kettle_render::MediaLaneMode::Source
@@ -12613,6 +13170,7 @@ impl App {
             Hit::Canvas => self.next_preview_canvas(ws, pane),
             Hit::Copy => self.copy_preview(ws, pane),
             Hit::Reload => self.reload_preview(ws, pane),
+            Hit::Play => self.toggle_lane_preview(ws, pane),
             Hit::ZoomOut => self.zoom_preview(ws, pane, 1.0 / kettle_render::MEDIA_ZOOM_STEP),
             Hit::ZoomIn => self.zoom_preview(ws, pane, kettle_render::MEDIA_ZOOM_STEP),
             Hit::Fit => self.fit_preview(ws, pane),
@@ -21477,6 +22035,7 @@ impl App {
             | Action::PreviewCanvas
             | Action::PreviewCopy
             | Action::PreviewReload
+            | Action::PreviewPlay
             | Action::PreviewZoomIn
             | Action::PreviewZoomOut
             | Action::PreviewFit => {
@@ -23793,6 +24352,28 @@ impl App {
         // A lane's render that could not run, and each copy that ended, are
         // said in the lane that asked.
         for render in self.media.take_lane_failures() {
+            // A preview that could not even start says so; the poster stays.
+            if let Some(ticket) = render.preview {
+                let failed = self
+                    .window_by_seq(ws, render.window)
+                    .and_then(|window| {
+                        window
+                            .lane_previews
+                            .remove(&render.pane)
+                            .filter(|preview| preview.waits_on() == Some(ticket))
+                    })
+                    .is_some();
+                if failed {
+                    self.tell_lane(
+                        ws,
+                        render.window,
+                        render.pane,
+                        render.item,
+                        LaneNotice::PreviewFailed,
+                    );
+                }
+                continue;
+            }
             // Sharper pixels that could not be asked for leave the lane
             // showing its own, without a word.
             if let Some(ticket) = render.tile {
@@ -24374,6 +24955,9 @@ impl App {
         use crate::window_state::LaneNotice;
         use kettle_media::FailureCode;
         use kettle_media::client::RenderError;
+        if let Some(ticket) = render.preview {
+            return self.finish_lane_preview(ws, render, ticket, spec, result);
+        }
         if let Some(ticket) = render.tile {
             return self.finish_lane_crop(ws, render, ticket, spec, result);
         }
@@ -33073,7 +33657,9 @@ impl App {
             };
             children.push(lane_id);
             let mut node = Node::new(Role::Group);
-            let (label, description) = media_lane_accessibility(lane, &self.ui_text);
+            let announced = self.lane_announcement(ws, lane.pane);
+            let (label, description) =
+                media_lane_accessibility(lane, &self.ui_text, announced.as_deref());
             node.set_label(label);
             node.set_description(description);
             node.set_bounds(ax_rect(lane.rect));
@@ -33129,6 +33715,15 @@ impl App {
                         kettle_render::MediaLaneHit::Reload => {
                             self.ui_text.text(kettle_i18n::Text::MediaLaneA11yReload)
                         }
+                        kettle_render::MediaLaneHit::Play
+                            if lane.play == Some(kettle_render::MediaLanePlay::Stop) =>
+                        {
+                            self.ui_text
+                                .text(kettle_i18n::Text::MediaLaneA11yStopPreview)
+                        }
+                        kettle_render::MediaLaneHit::Play => self
+                            .ui_text
+                            .text(kettle_i18n::Text::MediaLaneA11yPlayPreview),
                         kettle_render::MediaLaneHit::ZoomOut => {
                             self.ui_text.text(kettle_i18n::Text::MediaLaneA11yZoomOut)
                         }
@@ -33558,7 +34153,8 @@ impl App {
             lane.pane.hash(&mut hasher);
             lane.collapsed.hash(&mut hasher);
             lane.open_outside.hash(&mut hasher);
-            media_lane_accessibility(lane, &self.ui_text).hash(&mut hasher);
+            let announced = self.lane_announcement(ws, lane.pane);
+            media_lane_accessibility(lane, &self.ui_text, announced.as_deref()).hash(&mut hasher);
             let (x, y, width, height) = lane.rect;
             for component in [x, y, width, height] {
                 component.to_bits().hash(&mut hasher);
@@ -38209,6 +38805,8 @@ impl App {
         // lane's edge drag that paused resizes its PTYs.
         let lane_crop_wait = self.ask_due_lane_crops(ws, now);
         let lane_resize_wait = self.flush_lane_resize(ws, now);
+        // Lane previews step their frames, time out, or start on a rest.
+        let lane_preview_wait = self.tick_lane_previews(ws, now);
         // A menu or dialog opened from the keyboard ends a lane's drag now,
         // not at the pointer's next motion.
         if (ws.lane_drag.is_some() || ws.lane_resize.is_some())
@@ -38477,6 +39075,9 @@ impl App {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         if let Some(next) = lane_resize_wait {
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
+        if let Some(next) = lane_preview_wait {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         if let Some(next) = pending_video_receipt_wait {
@@ -44459,6 +45060,8 @@ mod tests {
     fn a_preview_lane_speaks_its_place_and_republishes_on_change() {
         let tr = kettle_i18n::Translator::new(kettle_i18n::Language::En);
         let mut lane = kettle_render::MediaLanePanel {
+            play: None,
+            frame: None,
             pane: 7,
             rect: (0.0, 360.0, 800.0, 240.0),
             collapsed: false,
@@ -44487,14 +45090,18 @@ mod tests {
             tile: None,
             edge: None,
         };
-        let (label, description) = super::media_lane_accessibility(&lane, &tr);
+        let (label, description) = super::media_lane_accessibility(&lane, &tr, None);
         assert!(
             label.contains("2 of 3") && label.contains("Plot"),
             "{label}"
         );
         assert_eq!(description, "Keys still go to the terminal");
+        // What the lane last did is said in place of where keys go.
+        let (_, description) =
+            super::media_lane_accessibility(&lane, &tr, Some("The preview took too long"));
+        assert_eq!(description, "The preview took too long");
         lane.image = None;
-        let (_, description) = super::media_lane_accessibility(&lane, &tr);
+        let (_, description) = super::media_lane_accessibility(&lane, &tr, None);
         assert!(description.starts_with("Released."), "{description}");
         let source = super::production_source();
         let key = source
@@ -44502,7 +45109,10 @@ mod tests {
             .nth(1)
             .and_then(|rest| rest.split("\n    fn ").next())
             .expect("accessibility_key");
-        assert!(key.contains("media_lane_accessibility(lane, &self.ui_text).hash(&mut hasher);"));
+        assert!(key.contains(
+            "media_lane_accessibility(lane, &self.ui_text, announced.as_deref()).hash(&mut hasher);"
+        ));
+        assert!(key.contains("let announced = self.lane_announcement(ws, lane.pane);"));
         assert!(key.contains("lane.collapsed.hash(&mut hasher);"));
 
         // Lane node ids round-trip, keep clear of every other kind of node,
@@ -57420,8 +58030,9 @@ mod settings_footer_text_tests {
 #[cfg(test)]
 mod lane_control_tests {
     use super::{
-        LaneRenderVerdict, MAX_SOURCE_COLUMN, gallery_step, lane_control_name, lane_render_verdict,
-        lane_source, preview_canvas, scrolled_source, source_scroll_by,
+        LaneRenderVerdict, MAX_SOURCE_COLUMN, earliest, gallery_step, lane_announced,
+        lane_control_name, lane_previews_item, lane_render_verdict, lane_source, next_hover,
+        preview_canvas, preview_failure_notice, scrolled_source, source_scroll_by,
     };
     use std::sync::Arc;
 
@@ -57489,6 +58100,199 @@ mod lane_control_tests {
             kettle_core::ImageData::new(1, 1, vec![0, 0, 0, 255]).unwrap(),
             crate::media::ItemSource::sample(svg),
         )
+    }
+
+    fn video(seconds: u64) -> kettle_media::VideoInfo {
+        kettle_media::VideoInfo {
+            duration_ms: seconds * 1000,
+            width: 640,
+            height: 360,
+            rotation: 0,
+            codec: kettle_media::VideoCodec::H264,
+            fps_milli: Some(30_000),
+            has_audio: true,
+            container: Some(kettle_media::video::VideoContainer::IsoBmff),
+        }
+    }
+
+    /// A lane offers a silent preview only for a video with a length, shown
+    /// rendered, whose source it can read again: not for an image, a video
+    /// without length, or one whose bytes went back to the account.
+    #[test]
+    fn only_a_video_lane_offers_a_preview() {
+        let digest = kettle_media::content_digest(b"clip", None).unwrap();
+        let mut clip = with_source(
+            1,
+            crate::media::ItemSource::new(spec(file(b"/clip.mp4")), digest, false, None),
+        );
+        clip.kind = kettle_media::MediaKind::Video;
+        clip.video = Some(video(9));
+        let panel = crate::window_state::PreviewPanel::new(1);
+        assert!(lane_previews_item(&clip, &panel).is_some());
+        let mut still = clip.clone();
+        still.video = Some(video(0));
+        assert!(lane_previews_item(&still, &panel).is_none());
+        let mut image = clip.clone();
+        image.kind = kettle_media::MediaKind::Raster;
+        assert!(lane_previews_item(&image, &panel).is_none());
+        let mut unknown = clip.clone();
+        unknown.video = None;
+        assert!(lane_previews_item(&unknown, &panel).is_none());
+        let mut released = clip;
+        released.source.spec.input = crate::media::SourceInput::Released;
+        assert!(lane_previews_item(&released, &panel).is_none());
+    }
+
+    /// A failed preview says which decoder to install, that there is no
+    /// sandbox, that the file changed, that it took too long, or that it
+    /// could not be made.
+    #[test]
+    fn a_failed_preview_says_why() {
+        use crate::window_state::LaneNotice as N;
+        use kettle_media::FailureCode as F;
+        for (failure, notice) in [
+            (F::BackendUnavailable, N::PreviewNeedsDecoder),
+            (F::CodecUnavailable, N::PreviewNeedsDecoder),
+            (F::UnsupportedContainer, N::PreviewNeedsDecoder),
+            (F::SandboxUnavailable, N::PreviewNeedsSandbox),
+            (F::Changed, N::Changed),
+            (F::RenderTimeout, N::PreviewTimedOut),
+            (F::RenderResource, N::PreviewFailed),
+            (F::WorkerUnavailable, N::PreviewFailed),
+            (F::Busy, N::PreviewFailed),
+        ] {
+            assert_eq!(preview_failure_notice(failure), notice, "{failure:?}");
+        }
+        let now = std::time::Instant::now();
+        let later = now + std::time::Duration::from_secs(1);
+        assert_eq!(earliest(Some(later), Some(now)), Some(now));
+        assert_eq!(earliest(None, Some(now)), Some(now));
+        assert_eq!(earliest(Some(later), None), Some(later));
+        assert_eq!(earliest(None, None), None);
+    }
+
+    /// A screen reader hears that a preview is being made, else the lane's
+    /// notice, and nothing while frames play.
+    #[test]
+    fn a_lane_announces_its_notice_or_a_preview_being_made() {
+        use crate::window_state::LaneNotice;
+        let tr = kettle_i18n::Translator::new(kettle_i18n::Language::En);
+        let now = std::time::Instant::now();
+        let loading = crate::media::LanePreview::loading(
+            1,
+            0,
+            7,
+            kettle_media::client::RenderControl::default(),
+            now,
+            crate::media::PreviewStart::User,
+        );
+        assert_eq!(
+            lane_announced(Some(&loading), Some(LaneNotice::Changed), &tr).as_deref(),
+            Some("Making a silent preview…")
+        );
+        assert_eq!(
+            lane_announced(None, Some(LaneNotice::PreviewTimedOut), &tr).as_deref(),
+            Some("The preview took too long")
+        );
+        assert_eq!(lane_announced(None, None, &tr), None);
+    }
+
+    /// A rest on a lane's picture starts when the pointer arrives or moves,
+    /// keeps its time while the pointer stays put or once a loop started
+    /// from it, and ends when the pointer leaves the picture.
+    #[test]
+    fn a_hover_rest_is_a_pointer_that_stays_put() {
+        let now = std::time::Instant::now();
+        let later = now + std::time::Duration::from_millis(300);
+        let arrived = next_hover(None, Some(4), Some((10.0, 10.0)), now).unwrap();
+        assert_eq!((arrived.pane, arrived.since, arrived.used), (4, now, false));
+        let still = next_hover(Some(arrived), Some(4), Some((10.0, 10.0)), later).unwrap();
+        assert_eq!(still.since, now);
+        let moved = next_hover(Some(arrived), Some(4), Some((11.0, 10.0)), later).unwrap();
+        assert_eq!(moved.since, later, "moving starts the rest again");
+        let used = crate::window_state::LaneHover {
+            used: true,
+            ..arrived
+        };
+        let after = next_hover(Some(used), Some(4), Some((50.0, 10.0)), later).unwrap();
+        assert!(
+            after.used && after.since == now,
+            "a loop started is not started again"
+        );
+        let other = next_hover(Some(used), Some(5), Some((50.0, 10.0)), later).unwrap();
+        assert!(!other.used && other.pane == 5);
+        assert_eq!(
+            next_hover(Some(used), None, Some((50.0, 10.0)), later),
+            None
+        );
+    }
+
+    /// A preview's frames are the lane's: they are routed before any other
+    /// lane render, never become the item's pixels or its cards' poster,
+    /// start only on the user's gesture and not for a changed file, end
+    /// with their lane, and tick with the event loop.
+    #[test]
+    fn the_silent_preview_is_wired() {
+        let source = kettle_test_support::production_source(include_str!("app.rs"));
+        let code = kettle_test_support::code_only(&source);
+        let flat = code.split_whitespace().collect::<Vec<_>>().join(" ");
+        let body = |name: &str| {
+            flat.split(&format!("fn {name}("))
+                .nth(1)
+                .and_then(|rest| rest.split(" fn ").next())
+                .unwrap_or_else(|| panic!("{name}"))
+                .to_owned()
+        };
+        assert!(body("finish_lane_render").contains(
+            "if let Some(ticket) = render.preview { return self.finish_lane_preview(ws, render, ticket, spec, result); } if let Some(ticket) = render.tile {"
+        ));
+        let finish = body("finish_lane_preview");
+        for kept in ["item.pixels", "set_poster", "item.size", "item.video"] {
+            assert!(!finish.contains(kept), "a preview touched {kept}");
+        }
+        assert!(finish.contains(
+            "preview.waits_on() == Some(ticket) && preview.serves(render.item, render.generation)"
+        ));
+        assert!(
+            finish.contains(
+                "lane_render_verdict(pane.media_shelf.items(), &render, &rendered.digest)"
+            )
+        );
+        let start = body("start_lane_preview");
+        assert!(
+            start.split_once(") {").is_some_and(|(_, rest)| rest
+                .trim_start()
+                .starts_with("if self.ctl_driving || self.lua_driving { return; }")),
+            "a preview reads the file only on the user's own gesture"
+        );
+        assert!(start.contains("item.source.changed"));
+        assert!(start.contains(".limit_reply(limit)"));
+        assert!(start.contains("crate::media::Sender::LanePreview(pane)"));
+        assert!(finish.contains(
+            ".is_some_and(|preview| preview.overdue(now)) { return fail(self, ws, LaneNotice::PreviewTimedOut); }"
+        ));
+        assert!(body("close_preview").contains("self.end_lane_preview(ws, pane);"));
+        assert!(flat.contains(
+            "self.lua_driving = true; self.handle_action(ws, action, event_loop); self.lua_driving = false;"
+        ));
+        let tick = body("tick_lane_previews");
+        assert!(
+            !tick.contains("start_lane_preview"),
+            "a hover never makes frames"
+        );
+        assert!(tick.contains("preview.replay(now, crate::media::PreviewStart::Hover)"));
+        assert!(body("hovered_lane_picture").contains(
+            "if window_is_render_hidden(ws) || self.pointer_modal_open(ws) || ws.context_menu.is_some()"
+        ));
+        assert!(body("prune_previews").contains("self.end_lane_preview(ws, pane);"));
+        assert!(body("hovered_lane_picture").contains("let pointer = ws.native_pointer?;"));
+        let wait = body("about_to_wait_inner");
+        assert!(wait.contains("let lane_preview_wait = self.tick_lane_previews(ws, now);"));
+        assert!(wait.contains(
+            "if let Some(next) = lane_preview_wait { wait = Some(wait.map_or(next, |current| current.min(next))); }"
+        ));
+        assert!(body("lane_controls").contains("(15, geometry.play, Hit::Play),"));
+        assert_eq!(lane_control_name(kettle_render::MediaLaneHit::Play), "play");
     }
 
     /// The wheel up scrolls a source back and the wheel down on. A swipe
@@ -57629,6 +58433,7 @@ mod lane_control_tests {
             pane: 2,
             item: 4,
             generation: 0,
+            preview: None,
             tile: None,
             page: None,
         };
@@ -57689,6 +58494,7 @@ mod lane_control_tests {
                 pane: 2,
                 item: 4,
                 generation: 0,
+                preview: None,
                 tile: None,
                 page: page.map(|page| crate::media::PageAsk { page, ticket: 1 }),
             };
@@ -57921,6 +58727,7 @@ mod lane_control_tests {
             pane: 2,
             item: 4,
             generation: 7,
+            preview: None,
             tile: None,
             page: Some(ask),
         };

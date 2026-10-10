@@ -13,6 +13,7 @@ mod crop;
 mod external;
 mod focus;
 mod inline;
+mod preview;
 mod queue;
 mod route;
 mod shelf;
@@ -42,6 +43,11 @@ pub(crate) use external::{
 };
 pub(crate) use focus::{PreviewFocus, PreviewKey, preview_key};
 pub(crate) use inline::{card_caption, card_message, card_size};
+pub(crate) use preview::{
+    FIRST_FRAME_WITHIN as PREVIEW_FIRST_FRAME_WITHIN, Frames as PreviewFrames,
+    HOVER_DWELL as PREVIEW_HOVER_DWELL, LanePreview, Layout as PreviewLayout, Seen as PreviewSeen,
+    Start as PreviewStart, reply_limit as preview_reply_limit, stills as preview_stills,
+};
 pub(crate) use queue::Sender;
 pub(crate) use route::{PaneRoot, Route, nearest_pane, route};
 pub(crate) use shelf::{
@@ -101,6 +107,9 @@ pub(crate) struct LaneRender {
     /// For a zoomed view's sharper pixels, the lane's ticket for them: they
     /// stay the lane's and never replace the item's own.
     pub tile: Option<u64>,
+    /// For a video's silent preview, its ticket: the frames stay the lane's
+    /// and never replace the item's poster.
+    pub preview: Option<u64>,
     /// For another page of the item's gallery, that page: it becomes the
     /// item's own once it renders.
     pub page: Option<PageAsk>,
@@ -431,6 +440,14 @@ impl MediaService {
     /// Drop the renders `pane`'s lane asked for `item` that are still
     /// waiting: its file changed, so they would read it again for nothing.
     /// A lane's renders answer no one.
+    /// Withdraw what `pane`'s lane asked for a preview and still waits; a
+    /// render under way is cancelled by its control.
+    pub(crate) fn withdraw_lane_preview(&mut self, pane: u64) {
+        let _ = self.queue.cancel(|push| {
+            matches!(push.requester, Requester::Lane(render) if render.pane == pane && render.preview.is_some())
+        });
+    }
+
     pub(crate) fn withdraw_lane_renders(&mut self, pane: u64, item: u64) {
         let _ = self.queue.cancel(|push| {
             matches!(push.requester, Requester::Lane(render) if render.pane == pane && render.item == item)
@@ -625,6 +642,7 @@ mod tests {
             pane: 3,
             item: 9,
             generation: 2,
+            preview: None,
             tile: None,
             page: None,
         };
@@ -663,6 +681,7 @@ mod tests {
             generation: 0,
             tile,
             page: None,
+            preview: None,
         };
         let later = Instant::now() + std::time::Duration::from_secs(60);
         for (sender, lane) in [

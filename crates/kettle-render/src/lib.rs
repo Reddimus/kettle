@@ -1308,8 +1308,9 @@ pub type Rect4 = (f32, f32, f32, f32);
 const MAX_LANE_IMAGES: usize = 64;
 
 pub use media_lane::{
-    MediaCanvas, MediaLaneEdge, MediaLaneGeometry, MediaLaneHit, MediaLaneMode, MediaLanePanel,
-    MediaLaneSender, MediaLaneSource, MediaLaneTile, media_lane_geometry,
+    MediaCanvas, MediaLaneEdge, MediaLaneFrame, MediaLaneGeometry, MediaLaneHit, MediaLaneMode,
+    MediaLanePanel, MediaLanePlay, MediaLaneSender, MediaLaneSource, MediaLaneTile,
+    media_lane_geometry,
 };
 pub use media_viewport::{MAX_MEDIA_ZOOM, MEDIA_ZOOM_STEP, MIN_MEDIA_ZOOM, MediaViewport};
 
@@ -8871,9 +8872,14 @@ impl Renderer {
                 lane_q.push(rect(grip.0, grip.1, grip.2, grip.3, palette.divider, 1.0));
             }
             // A zoomed image reaches past the content, which clips it; its
-            // canvas is drawn behind the part that shows.
-            if let (Some(image_rect), Some(shown), Some(image)) =
-                (geometry.image, geometry.shown(), lane.image.as_ref())
+            // canvas is drawn behind the part that shows. A preview's frame
+            // is part of its sheet, in the item's place.
+            let pixels = match &lane.frame {
+                Some(frame) => Some((&frame.sheet, Some(frame.source))),
+                None => lane.image.as_ref().map(|image| (image, None)),
+            };
+            if let (Some(image_rect), Some(shown), Some((image, source))) =
+                (geometry.image, geometry.shown(), pixels)
             {
                 let (ix, iy, iw, ih) = shown;
                 match lane.canvas {
@@ -8898,10 +8904,16 @@ impl Renderer {
                     _ => (image_rect, image),
                 };
                 let content = geometry.content;
+                let source = source.map(|(x, y, width, height)| kettle_core::ImageSourceRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                });
                 lane_items.push(imgpipe::ImageItem::placement(
                     [rect.0, rect.1, rect.2, rect.3],
                     pixels.clone(),
-                    None,
+                    source,
                     None,
                     [content.0, content.1, content.2, content.3],
                 ));
@@ -8917,6 +8929,7 @@ impl Renderer {
                     lane.collapsed || !geometry.full,
                     lane.mode,
                     lane.page,
+                    lane.play,
                     (
                         gc(palette.label),
                         gc(palette.description),

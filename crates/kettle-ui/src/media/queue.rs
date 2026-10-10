@@ -36,6 +36,9 @@ pub(crate) enum Sender {
     /// A pane's lane asking for a zoomed view's sharper pixels: apart from
     /// its renders on another canvas, so one never takes the other's place.
     LaneTile(u64),
+    /// A pane's lane asking for a video's silent preview: apart from its
+    /// other renders, so a preview never displaces them, nor they it.
+    LanePreview(u64),
 }
 
 /// What admitting a push did with it.

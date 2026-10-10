@@ -344,6 +344,9 @@ pub enum Action {
     PreviewCopy,
     /// Read the focused pane's preview from its file again.
     PreviewReload,
+    /// Start or stop a silent preview of the video the focused pane's lane
+    /// shows.
+    PreviewPlay,
     /// Zoom the focused pane's rendered preview in a step.
     PreviewZoomIn,
     /// Zoom the focused pane's rendered preview out a step.
@@ -770,6 +773,7 @@ pub fn action_names() -> Vec<&'static str> {
         "preview_canvas",
         "preview_copy",
         "preview_reload",
+        "preview_play",
         "preview_zoom_in",
         "preview_zoom_out",
         "preview_fit",
@@ -1079,6 +1083,7 @@ impl Action {
             "preview_canvas" | "preview-canvas" => PreviewCanvas,
             "preview_copy" | "preview-copy" => PreviewCopy,
             "preview_reload" | "preview-reload" => PreviewReload,
+            "preview_play" | "preview-play" => PreviewPlay,
             "preview_zoom_in" | "preview-zoom-in" => PreviewZoomIn,
             "preview_zoom_out" | "preview-zoom-out" => PreviewZoomOut,
             "preview_fit" | "preview-fit" => PreviewFit,

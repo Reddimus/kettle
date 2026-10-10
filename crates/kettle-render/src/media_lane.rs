@@ -65,6 +65,34 @@ pub struct MediaLaneTile {
     pub coverage: (f64, f64, f64, f64),
 }
 
+/// The silent-preview button a video's lane offers: play while the poster
+/// shows, stop while a preview is made or plays.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaLanePlay {
+    Play,
+    Stop,
+}
+
+/// A frame of a silent preview, shown in the item's place: part of the
+/// preview's sheet, in its pixels (x, y, width, height), drawn where an
+/// image `size` large would be.
+#[derive(Clone)]
+pub struct MediaLaneFrame {
+    pub sheet: kettle_core::ImageData,
+    pub source: (u32, u32, u32, u32),
+    pub size: (u32, u32),
+}
+
+impl std::fmt::Debug for MediaLaneFrame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MediaLaneFrame")
+            .field("sheet", &(self.sheet.width, self.sheet.height))
+            .field("source", &self.source)
+            .field("size", &self.size)
+            .finish()
+    }
+}
+
 impl std::fmt::Debug for MediaLaneTile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MediaLaneTile")
@@ -122,6 +150,11 @@ pub struct MediaLanePanel {
     pub tile: Option<MediaLaneTile>,
     /// The edge a drag resizes the lane by, while it is expanded.
     pub edge: Option<MediaLaneEdge>,
+    /// The silent-preview button the header offers, for a video.
+    pub play: Option<MediaLanePlay>,
+    /// While a silent preview plays, the frame shown instead of the
+    /// item's pixels: fitted where they would be, and never zoomed.
+    pub frame: Option<MediaLaneFrame>,
 }
 
 /// Who sent an item, in the UI language, with where the sending program's
@@ -217,6 +250,8 @@ pub struct MediaLaneGeometry {
     pub copy: Option<Rect4>,
     /// Reads the item's file again.
     pub reload: Option<Rect4>,
+    /// Starts or stops a video's silent preview.
+    pub play: Option<Rect4>,
     /// Zoom the rendered item out, in, and back to its fit.
     pub zoom_out: Option<Rect4>,
     pub zoom_in: Option<Rect4>,
@@ -277,6 +312,8 @@ pub enum MediaLaneHit {
     Copy,
     /// Read the item's file again.
     Reload,
+    /// Start or stop a video's silent preview.
+    Play,
     ZoomOut,
     ZoomIn,
     /// Back to the fit.
@@ -329,6 +366,8 @@ impl MediaLaneGeometry {
             Some(MediaLaneHit::Resize)
         } else if contains(self.toggle, x, y) {
             Some(MediaLaneHit::Toggle)
+        } else if self.play.is_some_and(|rect| contains(rect, x, y)) {
+            Some(MediaLaneHit::Play)
         } else if self.reload.is_some_and(|rect| contains(rect, x, y)) {
             Some(MediaLaneHit::Reload)
         } else if self.mode.is_some_and(|rect| contains(rect, x, y)) {
@@ -402,9 +441,9 @@ pub fn media_lane_geometry(
     };
     // Controls take the header from the right, close first; each one past
     // collapse appears only while the title keeps its few columns, in order
-    // of need: reload, the mode, the canvas, browsing, copy, fit, zoom in,
-    // zoom out, open outside, then the counter. One that does not fit
-    // leaves the rest to try.
+    // of need: a video's preview, reload, the mode, the canvas, browsing,
+    // copy, fit, zoom in, zoom out, open outside, then the counter. One that
+    // does not fit leaves the rest to try.
     let title_floor = left + MIN_TITLE_COLUMNS * tw + pad;
     let mut edge = right;
     let mut take = |width: f32, always: bool| {
@@ -415,6 +454,11 @@ pub fn media_lane_geometry(
     };
     let close = take(button, true).unwrap_or_default();
     let toggle = take(button, true).unwrap_or_default();
+    let play = if lane.play.is_some() {
+        take(button, false)
+    } else {
+        None
+    };
     let reload = if lane.reload {
         take(button, false)
     } else {
@@ -442,8 +486,11 @@ pub fn media_lane_geometry(
         (None, None)
     };
     let copy = if lane.copy { take(button, false) } else { None };
-    // Zooming is for a rendered image the lane shows.
-    let zooms = full && lane.mode == MediaLaneMode::Rendered && lane.image.is_some();
+    // Zooming is for a rendered image the lane shows, not a preview's frame.
+    let zooms = full
+        && lane.mode == MediaLaneMode::Rendered
+        && lane.image.is_some()
+        && lane.frame.is_none();
     let mut zoom_control = || if zooms { take(button, false) } else { None };
     let zoom_fit = zoom_control();
     let zoom_in = zoom_control();
@@ -469,6 +516,7 @@ pub fn media_lane_geometry(
             canvas,
             copy,
             reload,
+            play,
             zoom_out,
             zoom_in,
             zoom_fit,
@@ -520,16 +568,21 @@ pub fn media_lane_geometry(
         (area_bottom - area_top).max(0.0),
     );
     let content = whole_pixels(image_area);
-    let (fit, source_rows) = match lane.mode {
-        MediaLaneMode::Rendered => (
+    // A preview's frame takes the place the item's pixels would, unzoomed.
+    let (fit, source_rows) = match (lane.mode, &lane.frame) {
+        (MediaLaneMode::Rendered, Some(frame)) => (fit_size(frame.size, content), 0),
+        (MediaLaneMode::Rendered, None) => (
             lane.image
                 .as_ref()
-                .and_then(|image| fit_image(image, content)),
+                .and_then(|image| fit_size((image.width, image.height), content)),
             0,
         ),
-        MediaLaneMode::Source => (None, (image_area.3 / lh).floor() as usize),
+        (MediaLaneMode::Source, _) => (None, (image_area.3 / lh).floor() as usize),
     };
-    let image = fit.and_then(|fit| lane.view.place(fit, content));
+    let image = match &lane.frame {
+        Some(_) => fit,
+        None => fit.and_then(|fit| lane.view.place(fit, content)),
+    };
     let mut geometry = MediaLaneGeometry {
         rect,
         title,
@@ -541,6 +594,7 @@ pub fn media_lane_geometry(
         canvas,
         copy,
         reload,
+        play,
         zoom_out,
         zoom_in,
         zoom_fit,
@@ -569,6 +623,7 @@ pub fn media_lane_geometry(
     geometry.tile = lane
         .tile
         .as_ref()
+        .filter(|_| lane.frame.is_none())
         .zip(geometry.image)
         .zip(geometry.visible())
         .and_then(|((tile, image), visible)| tile_rect(tile.coverage, visible, image));
@@ -619,9 +674,10 @@ fn whole_pixels(area: Rect4) -> Rect4 {
     )
 }
 
-/// Where `image` sits fitted in `content`, which is in whole pixels.
-fn fit_image(image: &kettle_core::ImageData, content: Rect4) -> Option<Rect4> {
-    let (width, height) = (image.width as f32, image.height as f32);
+/// Where an image `size` large sits fitted in `content`, which is in whole
+/// pixels.
+fn fit_size(size: (u32, u32), content: Rect4) -> Option<Rect4> {
+    let (width, height) = (size.0 as f32, size.1 as f32);
     let (left, top, room) = (content.0, content.1, (content.2, content.3));
     if width <= 0.0 || height <= 0.0 || room.0 < 1.0 || room.1 < 1.0 {
         return None;
@@ -668,9 +724,9 @@ pub(crate) struct LaneText {
     status: TextBuffer,
     page_counter: TextBuffer,
     /// Previous, next, open outside, collapse, expand, close, show source,
-    /// show rendered, canvas, copy, reload, zoom out, zoom in, fit, and a
-    /// gallery's page before and after.
-    controls: [TextBuffer; 16],
+    /// show rendered, canvas, copy, reload, zoom out, zoom in, fit, a
+    /// gallery's page before and after, and a video's play and stop.
+    controls: [TextBuffer; 18],
     /// What each line buffer was last shaped with; `None` until it is, or
     /// once a font change means it must be again.
     shaped: [Option<String>; 7],
@@ -721,6 +777,8 @@ impl LaneText {
                 control(font_system, "⤢"),
                 control(font_system, "‹"),
                 control(font_system, "›"),
+                control(font_system, "▶"),
+                control(font_system, "■"),
             ],
             shaped: Default::default(),
             rows: Vec::new(),
@@ -767,7 +825,7 @@ impl LaneText {
                 String::new()
             }
         };
-        let status = if lane.image.is_some() {
+        let status = if lane.image.is_some() || lane.frame.is_some() {
             String::new()
         } else {
             full(&lane.status)
@@ -852,6 +910,7 @@ impl LaneText {
         collapsed: bool,
         mode: MediaLaneMode,
         page: Option<(usize, usize)>,
+        play: Option<MediaLanePlay>,
         colors: (GColor, GColor, GColor),
         glyph_width: f32,
         line_height: f32,
@@ -923,6 +982,8 @@ impl LaneText {
             geometry.zoom_fit,
             geometry.page_previous,
             geometry.page_next,
+            geometry.play.filter(|_| play == Some(MediaLanePlay::Play)),
+            geometry.play.filter(|_| play == Some(MediaLanePlay::Stop)),
         ];
         let (first, last) =
             page.map_or((true, true), |(shown, count)| (shown <= 1, shown >= count));
@@ -974,6 +1035,8 @@ mod tests {
 
     fn viewer(position: (usize, usize), image: Option<(u32, u32)>) -> MediaLanePanel {
         MediaLanePanel {
+            play: None,
+            frame: None,
             pane: 1,
             rect: (0.0, 0.0, 800.0, 600.0),
             collapsed: false,
@@ -1050,6 +1113,8 @@ mod tests {
             Some(MediaLaneHit::OpenOutside)
         );
         let single = MediaLanePanel {
+            play: None,
+            frame: None,
             position: (1, 1),
             page: None,
             ..offered.clone()
@@ -1064,6 +1129,61 @@ mod tests {
         let canvas = plain.canvas.unwrap();
         assert_eq!(plain.next.unwrap().0 + plain.next.unwrap().2, canvas.0);
         assert_eq!(canvas.0 + canvas.2, plain.toggle.0);
+    }
+
+    /// A video's lane offers its preview button right of the rest, after
+    /// collapse, and a press on it says so; without one the header is as
+    /// before.
+    #[test]
+    fn a_video_lane_offers_its_preview_button_first() {
+        let mut video = viewer((2, 5), Some((640, 360)));
+        video.reload = true;
+        video.play = Some(MediaLanePlay::Play);
+        let geometry = media_lane_geometry(&video, CELL, CELL).unwrap();
+        let play = geometry.play.expect("offered");
+        let reload = geometry.reload.unwrap();
+        assert!(reload.0 + reload.2 <= play.0 && play.0 + play.2 <= geometry.toggle.0);
+        assert_eq!(play.1, geometry.close.1);
+        let center = (play.0 + play.2 / 2.0, play.1 + play.3 / 2.0);
+        assert_eq!(
+            geometry.hit_test(center.0, center.1),
+            Some(MediaLaneHit::Play)
+        );
+        video.play = None;
+        assert_eq!(media_lane_geometry(&video, CELL, CELL).unwrap().play, None);
+    }
+
+    /// A preview's frame is drawn where the item's pixels would be, at
+    /// their size whatever its own, unzoomed, with no zoom controls and no
+    /// sharper tile; with the pixels released it still shows.
+    #[test]
+    fn a_preview_frame_takes_the_items_place_unzoomed() {
+        let mut lane = viewer((1, 1), Some((640, 360)));
+        let poster = media_lane_geometry(&lane, CELL, CELL).unwrap();
+        lane.view = crate::MediaViewport::FIT.zoomed(2.0, poster.fit.unwrap(), poster.content);
+        lane.tile = Some(MediaLaneTile {
+            image: kettle_core::ImageData::new(2, 2, vec![0; 16]).unwrap(),
+            coverage: (0.0, 0.0, 1.0, 1.0),
+        });
+        lane.play = Some(MediaLanePlay::Stop);
+        lane.frame = Some(MediaLaneFrame {
+            sheet: kettle_core::ImageData::new(1556, 444, vec![0; 1556 * 444 * 4]).unwrap(),
+            source: (4, 4, 384, 216),
+            size: (640, 360),
+        });
+        let playing = media_lane_geometry(&lane, CELL, CELL).unwrap();
+        assert_eq!(playing.fit, poster.fit);
+        assert_eq!(playing.image, poster.fit, "never zoomed or panned");
+        assert_eq!(playing.tile, None);
+        assert_eq!(
+            (playing.zoom_in, playing.zoom_out, playing.zoom_fit),
+            (None, None, None)
+        );
+        lane.image = None;
+        assert_eq!(
+            media_lane_geometry(&lane, CELL, CELL).unwrap().image,
+            poster.fit
+        );
     }
 
     #[test]
@@ -1391,15 +1511,21 @@ mod tests {
         assert_eq!(zoomed.shown(), Some(zoomed.content));
         for offered in [
             MediaLanePanel {
+                play: None,
+                frame: None,
                 mode: MediaLaneMode::Source,
                 source: Some(MediaLaneSource::default()),
                 ..lane.clone()
             },
             MediaLanePanel {
+                play: None,
+                frame: None,
                 image: None,
                 ..lane.clone()
             },
             MediaLanePanel {
+                play: None,
+                frame: None,
                 collapsed: true,
                 ..lane.clone()
             },
@@ -1471,6 +1597,8 @@ mod tests {
         // Too short for its rows, it still has its edge, clear of the
         // header centered down it.
         let short = MediaLanePanel {
+            play: None,
+            frame: None,
             rect: (0.0, 0.0, 800.0, 74.0),
             edge: Some(MediaLaneEdge::Top),
             ..lane.clone()
@@ -1566,19 +1694,27 @@ mod tests {
             ) == (None, None, None)
         };
         assert!(none(&MediaLanePanel {
+            play: None,
+            frame: None,
             page: Some((1, 1)),
             ..lane.clone()
         }));
         assert!(none(&MediaLanePanel {
+            play: None,
+            frame: None,
             collapsed: true,
             ..lane.clone()
         }));
         assert!(none(&MediaLanePanel {
+            play: None,
+            frame: None,
             page: None,
             ..lane.clone()
         }));
         // The detail keeps four columns beside the controls, or they go.
         let room = |width: f32| MediaLanePanel {
+            play: None,
+            frame: None,
             rect: (0.0, 0.0, width, 600.0),
             ..lane.clone()
         };
@@ -1681,6 +1817,8 @@ mod tests {
         let mut collapsed = viewer((2, 3), Some((64, 48)));
         collapsed.collapsed = true;
         let short = MediaLanePanel {
+            play: None,
+            frame: None,
             rect: (0.0, 100.0, 800.0, 30.0),
             collapsed: false,
             ..collapsed.clone()
