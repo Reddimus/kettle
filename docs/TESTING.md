@@ -4850,9 +4850,12 @@ now-stale receipt.
 real Paste action, and captures the receipt lane in expanded, compact,
 hover, and dismiss states. It requires `ffmpeg` plus a graphical session, Swift on macOS, and
 `wl-copy` on Wayland or `xclip` on X11. Windows needs no extra clipboard
-helper. macOS and Windows exercise their native poster providers. The Linux
-run seeds a private, metadata-matched Freedesktop cache PNG so the same
-worker path is covered without adding a video decoder. The smoke rejects
+helper. On macOS and Linux the poster comes from the media worker, so the
+smoke first waits for `get_state` to report it available beside the Kettle
+under test, and stops with a build hint when it is not (on macOS the worker
+must also be signed); Windows exercises its Shell provider. The Linux run
+starts Kettle with an empty `XDG_CACHE_HOME`, so the poster comes from the
+user's ffmpeg rather than a cached thumbnail. The smoke rejects
 leaked paths or pixels, a path-based open action, a lost batch count, a
 missing poster, unchanged card states, or a dismiss target that does not
 close the receipt. A final re-paste proves later key input clears both the
@@ -4866,13 +4869,15 @@ Native CI also runs `video_preview_native`. Its tests start one worker at a
 time: run in parallel, two workers asking the Windows Shell thumbnail
 provider at once could each overrun the two-second deadline on a loaded
 runner, although each passes alone. Every platform leaves worker
-stdin open and proves the child exits at its own deadline. macOS requires a
-bounded opaque poster from the checked-in MP4. Windows retries only an
-explicit first-worker timeout, matching production's cold-provider retry.
-Quick Look can cold-return a valid empty poster before its deadline, so the
-macOS provider-capability test also gets one warm attempt for that response;
-production keeps the empty result as a valid generic receipt. Neither path
-retries malformed output, read errors, or trust failures. Windows validates
+stdin open and proves the child exits at its own deadline. On macOS and
+Linux the check answers with the file's own device, inode, size and
+modification time and no pixels
+(`shipped_check_answers_with_the_file_s_identity_and_no_pixels`); on Linux,
+given an isolated `XDG_CACHE_HOME`, it names the video's cached thumbnail with
+the file it opened (`shipped_check_names_the_video_s_cached_thumbnails`).
+Windows retries only an explicit first-worker timeout, matching production's
+cold-provider retry, and never retries malformed output, read errors, or
+trust failures. Windows validates
 the response when its shell thumbnail provider supports that fixture; set
 `KETTLE_REQUIRE_NATIVE_VIDEO_POSTER=1` on a capable Windows host to make a
 missing poster fail. `a_preview_child_that_exits_unread_cannot_end_kettle`
@@ -4902,15 +4907,47 @@ request from another build and an old-frame request (both exit with the skew
 code, stdout empty) and one from its own build (not skew).
 Red checks: ignoring the identity, reading an older frame as garbage,
 retrying skew, and dropping the skew exit mapping each fail a test.
-A cached Linux poster's `Thumb::MTime` matches in whole seconds or with
-tumbler's fraction when it agrees with the file's nanoseconds to its own
-precision, truncated or rounded, a rounding that carries into the next second
-included (`thumbnail_mtime_matches`); another second, another fraction,
-signs, exponents, spaces, leading zeros, over nine digits and a fraction
-before 1970 (where the sign makes it ambiguous) do not, and the Linux cache test accepts a tumbler-style poster while
-rejecting a stale time and another URI.
-Linux unit coverage invokes its complete Freedesktop
-cache resolver in an isolated child environment. Portable state tests also
+The poster step's unit tests drive it with injected worker replies and read
+back the jobs it sent: the Auto job is held to the checked device and inode
+and fitted inside 256 by 160; a render of a changed file, of anything but a
+video, or past the receipt's bounds is no poster, and so is one a second check
+does not agree with (contents rewritten with the time restored, another
+inode, or a check that now fails); every render is held to the receipt's
+deadline. On Linux the failures a
+cached thumbnail can stand in for (no decoder, no codec or container, no
+sandbox, a stream the decoder fails on) try each checked thumbnail in turn as
+a CachedThumbnail job held to its inode and to the video's URI and time,
+stopping at the first that renders or at the deadline, while a changed video,
+a passed deadline, a missing worker or a gone file get no stand-in, nor does
+any failure on macOS, and a stand-in for a video rewritten before the worker
+read it is dropped by the second check. The check names only thumbnails
+opened through a trusted
+chain, largest first: never a link, a file others can write, or one under a
+directory others can swap (`the_check_names_only_trusted_cached_thumbnails`),
+and it looks in `XDG_CACHE_HOME` when set, in an isolated child. Check
+attempts end by the receipt's 20-second deadline: a job past it starts none,
+each attempt waits its own two seconds or less, and a timeout is retried only
+while time is left (`check_attempts_end_by_the_receipt_s_deadline`); a helper
+that stalls without reading a request larger than a pipe holds stops the
+attempt at its cutoff, since the request is written on its own thread; a reply
+seen after the cutoff counts as a timeout; and a second check whose helper
+cannot be reaped stops its queue thread, which answers the checked receipt
+without a poster. The
+shipped check gives the same fingerprint for the same file twice. The thumbnail's own rules
+are the worker's, in `kettle-media-render`'s `thumbnail` tests: it renders
+only when `Thumb::URI` and `Thumb::MTime` name the video, the time in whole
+seconds or with tumbler's fraction when it agrees with the file's nanoseconds
+to its own precision, truncated or rounded, a rounding that carries into the
+next second included; another second, another fraction, signs, exponents,
+spaces, leading zeros, over nine digits and a fraction before 1970 (where the
+sign makes it ambiguous) do not; anything but a PNG, or one past 4096 pixels
+on a side, or a header too large to size, is refused before a pixel is
+decoded, and a rounding past the largest second matches nothing. The worker's
+`a_cached_thumbnail_renders_only_for_its_video` crosses the real worker
+boundary, sandboxed where the system has a sandbox; a raster, it renders
+unconfined where none can be applied. There is no GStreamer acceptance test because Kettle uses no
+GStreamer: the plan's spike did not meet its go/no-go rule, so it does not
+apply, rather than passing. Portable state tests also
 prove that a missing worker response expires and that the event loop
 schedules the cleanup deadline instead of retaining a pending path forever.
 

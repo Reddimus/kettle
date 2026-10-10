@@ -55,7 +55,9 @@ The `kettle` binary supplies one (`media_platform`): the worker beside the
 running executable, recorded at startup, never from `PATH` or the working
 directory, with its file checked and, on macOS, its code signature checked
 against Kettle's own requirement. `kettle-ui` receives the configured client
-and reports it in `get_state`. A worker that passes these checks reads as
+and reports it in `get_state`, with the video decoders a worker here has
+(`kettle_media::video::DECODERS`: AVFoundation then ffmpeg on macOS, ffmpeg on
+Linux) and that no GStreamer is used. A worker that passes these checks reads as
 available; each render still requires the matching build handshake. Kettle and every worker share one
 build identity, the source hash its build script computes
 (`crates/kettle/build_support/source_id.rs`). `kettle-media-worker` is that
@@ -326,42 +328,76 @@ Explicit video file lists use the same receipt geometry without sharing the
 managed-image trust root. The event loop only classifies absolute path syntax
 and pastes it normally. Once the initiating pane accepts the paste, one of two
 background threads sends the first video path through a bounded eight-job queue
-to the current executable's hidden worker. The child requires a non-link regular
-file whose file and parent chain reject mutation by an untrusted principal. It
-holds the file open and compares kernel identity, timestamps, size, and a bounded
-first/middle/last SHA-256 sample before and after extraction. Each child has a
-two-second deadline and can return at most 256 by 160 RGBA pixels. A deadline
-failure gets one fresh-child retry, so a job can spend at most four seconds in
-worker deadlines. Other failures remain final. If a child cannot be reaped, its
-queue thread sends a failure for the current receipt and retires instead of
-risking another job beside an unbounded child. A changed, missing, or untrusted
-source gets no receipt. The video card has no open action, so the parent never
-reopens the path after validation. A primary press on its body or dismiss target
-consumes the hidden terminal click and removes the card. Pending window state
-has a 38-second deadline, long enough for one surviving thread to drain the full
-queue at the bounded retry limit, with finite slack for dispatch. An unusually
-loaded host drops the optional receipt rather than retaining pending state
-indefinitely. The hidden worker dispatches before update recovery and
-application startup, so poster work never takes install locks or launches an
-update helper.
+to a receipt check: the current executable, run as a hidden helper. The check
+requires a non-link regular file whose file and parent chain reject mutation by
+an untrusted principal. It holds the file open and compares kernel identity,
+timestamps, size, and a bounded first/middle/last SHA-256 sample when it opens
+the file and again before it answers. On macOS and Linux it decodes nothing;
+on Windows it also asks the Shell for the poster (below). Each check has a
+two-second deadline. A deadline failure gets one fresh-child retry; other
+failures remain final. If a child cannot be reaped, its queue thread sends a
+failure for the current receipt and retires instead of risking another job
+beside an unbounded child. A changed, missing, or untrusted source gets no
+receipt. The check answers with the file's size and its device, inode and
+modification time and the sampled fingerprint; on Linux also the video's
+cached thumbnails (below), and on Windows the poster itself, at most 256 by
+160 RGBA pixels. The parent reads
+the answer up to the longest frame the check can send.
 
-The worker must be the same build as the GUI that starts it, and an update can
+On macOS and Linux the poster comes from the media worker
+(`kettle-media-worker`, see [Crates](#crates)), never from the GUI or the
+check. The GUI sends an
+Auto job on the checked path, attested by the device and inode the check
+opened, so the worker reads only that file, under its sandbox, with its
+decoders: AVFoundation on macOS, then the user's ffmpeg. The GUI keeps the
+result only when it is a video's and the worker's path identity equals the
+check's, so a file changed in between gets no poster. On Linux, when no
+decoder can make one (none installed, the codec or container unsupported, no
+sandbox, or a stream the decoder fails on), the video's cached thumbnails
+stand in. The check computes the video's file URI and its MD5, as the
+[Freedesktop thumbnail standard](https://specifications.freedesktop.org/thumbnail-spec/latest/)
+names cache entries, opens each size's PNG through the same held, trusted
+parent chain, and names each with the device and inode it opened, largest
+first. The GUI sends each in turn as a CachedThumbnail job held to that inode
+and to the video's URI and the modification time the check saw. The worker
+reads the PNG's `Thumb::URI` and `Thumb::MTime` before it decodes a pixel; a
+cached thumbnail is a raster, so, like any raster, it renders in the bounded
+worker even where the sandbox cannot be applied. Either poster is kept only
+when a second check finds the same file, device, inode, size, modification
+time and sampled contents, still held as the first check held it: the worker
+read the file on its own, so a video rewritten in place with its time
+restored, replaced, or made writable by another user since gets no poster. No
+PNG or video byte is parsed in the GUI. On Windows, where no media worker
+runs, the check asks
+[IShellItemImageFactory](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nn-shobjidl_core-ishellitemimagefactory)
+in a fresh STA. A checked video without a poster keeps a generic receipt.
+
+One deadline, 20 seconds from the request, bounds a receipt's queue wait,
+checks and poster: no check attempt or render starts after it, and each waits
+no longer than it. Pending window state has a 22-second deadline: that
+deadline and finite slack for cleanup and dispatch. An unusually loaded host drops the optional receipt rather than retaining pending
+state indefinitely. The video card has no open action, so the parent never
+reopens the path after validation. A primary press on its body or dismiss
+target consumes the hidden terminal click and removes the card. The hidden
+check dispatches before update recovery and application startup, so receipt
+work never takes install locks or launches an update helper.
+
+The check must be the same build as the GUI that starts it, and an update can
 replace Kettle's executable while it runs. On Linux the GUI starts
 `/proc/self/exe`, which names the running image even after its file was
 renamed or deleted. Elsewhere it starts the path it was launched from, so
 every request carries the GUI's source identity in a versioned frame
-(`KTLVPIN2`), which `main` records before the worker dispatch: the version and
+(`KTLVPIN2`), which `main` records before the check dispatch: the version and
 a hash of the Rust sources (every file under `crates/`, the workspace
 `Cargo.toml` and `Cargo.lock`), computed by kettle's build script without git
 (`KETTLE_SOURCE_ID`), so builds of different sources differ while a rebuild or
 reinstall of the same source, in a checkout, a tarball or a Nix sandbox, does
-not. A worker of another
-build, or one that sees an older frame, exits with its own skew code; the GUI
-does not retry it, logs once that previews wait for a restart, and shows no
-video card.
+not. A check of another build, or one that sees an older frame, exits with its
+own skew code; the GUI does not retry it, logs once that previews wait for a
+restart, and shows no video card. Its answer is a versioned frame too
+(`KTLVPOU2`).
 
-Before delegating thumbnail extraction to a platform provider, the child
-reads at most 64 KiB from its retained file and
+Before answering, the check reads at most 64 KiB from its retained file and
 uses `kettle_media::video::sniff_video_container`. This pure, allocation-free
 classifier recognizes ISO-BMFF/QuickTime, Matroska/WebM by their EBML DocType,
 RIFF AVI, FLV, MPEG program/elementary/transport streams, Ogg and ASF. Work is
@@ -372,16 +408,6 @@ background caller owns the prefix buffer and file I/O. Filename extensions
 still schedule receipt candidates cheaply on the event loop, but text or
 still-image containers with video suffixes receive no card. Movie content with
 another supported video suffix can receive a card.
-
-The child uses
-[Quick Look Thumbnailing](https://developer.apple.com/documentation/quicklookthumbnailing)
-on macOS, [IShellItemImageFactory](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nn-shobjidl_core-ishellitemimagefactory)
-in a fresh Windows STA, and the
-[Freedesktop thumbnail cache](https://specifications.freedesktop.org/thumbnail-spec/latest/)
-on Linux. Linux opens one PNG through a held, trusted parent chain, verifies its
-owner, mode, `Thumb::URI`, and `Thumb::MTime`, then decodes that same descriptor.
-A missing or untrusted cache entry leaves the generic poster visible. No
-platform path runs a video codec inside the Kettle process.
 
 The same store, as a second `PastedImages` of kind `paste_image::OPENED`,
 holds the PNG copies a card menu hands to the image viewer: prefix
