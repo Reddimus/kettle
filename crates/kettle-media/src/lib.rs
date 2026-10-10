@@ -84,7 +84,7 @@ pub const MAX_VERSION_BYTES: usize = 64;
 /// Hex digest of the source a binary was built from, up to 256 bits.
 pub const MAX_SOURCE_HASH_BYTES: usize = 64;
 /// No version negotiation. A header skew requires restart.
-pub const PROTOCOL_VERSION: u16 = 5;
+pub const PROTOCOL_VERSION: u16 = 6;
 /// Longest textual source a reply returns as it was read: the SVG input
 /// cap, the largest textual kind's.
 pub const MAX_EXACT_SOURCE_BYTES: usize = MAX_SVG_BYTES;
@@ -492,6 +492,133 @@ impl ThumbnailOf {
         }
         Ok(())
     }
+}
+
+/// The largest frame a playback session sends: 1920 pixels on a side and
+/// 1080p's pixels.
+pub const MAX_PLAY_EDGE: u32 = 1920;
+pub const MAX_PLAY_PIXELS: u32 = 1920 * 1080;
+/// The most frames a session sends a second, in frames per thousand
+/// seconds: thirty.
+pub const MAX_PLAY_FPS_MILLI: u32 = 30_000;
+
+/// Whether `width` by `height` is a frame a session may send.
+pub(crate) fn play_frame_size(width: u32, height: u32) -> Result<(), ValidationError> {
+    let pixels = u64::from(width) * u64::from(height);
+    if width == 0
+        || height == 0
+        || width > MAX_PLAY_EDGE
+        || height > MAX_PLAY_EDGE
+        || pixels > u64::from(MAX_PLAY_PIXELS)
+    {
+        return Err(ValidationError::BadParams);
+    }
+    Ok(())
+}
+
+/// What opens a playback session: the video file, named as a worker job
+/// names its source; the room its picture has, at most 1920 on a side, which
+/// frames fit within as [`play_size`] fits them; where to start; and the
+/// most frames a second.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlayOpen {
+    pub source: Source,
+    pub max_width: u32,
+    pub max_height: u32,
+    pub start_ms: u64,
+    pub max_fps_milli: u32,
+}
+impl PlayOpen {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        self.validate_bounds()?;
+        match &self.source {
+            // A decoder reads a file: inline bytes would have to be written
+            // somewhere first, and a worker writes nothing.
+            Source::Bytes(_) => Err(ValidationError::BadParams),
+            Source::Path { path, .. } => validate_path(path.as_bytes()),
+        }
+    }
+    /// Everything but the source, which a decoder checks as it reads it.
+    pub(crate) fn validate_bounds(&self) -> Result<(), ValidationError> {
+        // The room is a bound only: its pixels may be more than a frame's,
+        // which [`play_size`] holds to a session's.
+        if self.max_width == 0
+            || self.max_height == 0
+            || self.max_width > MAX_PLAY_EDGE
+            || self.max_height > MAX_PLAY_EDGE
+            || self.max_fps_milli == 0
+            || self.max_fps_milli > MAX_PLAY_FPS_MILLI
+            || self.start_ms > MAX_VIDEO_DURATION_MS
+        {
+            return Err(ValidationError::BadParams);
+        }
+        Ok(())
+    }
+}
+
+/// What the parent asks of an open session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlayCommand {
+    Play,
+    Pause,
+    /// Still here: a session that hears nothing for a few seconds ends.
+    Heartbeat,
+    Close,
+}
+
+/// A session that opened: the video, and the size and rate of the frames
+/// to come, from `start_ms`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Opened {
+    pub info: VideoInfo,
+    pub width: u32,
+    pub height: u32,
+    pub fps_milli: u32,
+    pub start_ms: u64,
+}
+impl Opened {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        self.info.validate()?;
+        play_frame_size(self.width, self.height)?;
+        if self.fps_milli == 0
+            || self.fps_milli > MAX_PLAY_FPS_MILLI
+            || self.start_ms > self.info.duration_ms
+        {
+            return Err(ValidationError::BadParams);
+        }
+        Ok(())
+    }
+}
+
+/// One frame of a session, numbered from 0 and stamped with its moment of
+/// the video: straight RGBA, `width` by `height`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VideoFrame {
+    pub seq: u64,
+    pub pts_ms: u64,
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+impl VideoFrame {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        play_frame_size(self.width, self.height)?;
+        if self.pts_ms > MAX_VIDEO_DURATION_MS
+            || self.rgba.len() != self.width as usize * self.height as usize * 4
+        {
+            return Err(ValidationError::BadParams);
+        }
+        Ok(())
+    }
+}
+
+/// Where a session is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlayState {
+    Playing,
+    Paused,
+    /// The last frame came; it stays.
+    Ended,
 }
 
 /// A video's codec, as the decoder named it; never text from the file.
