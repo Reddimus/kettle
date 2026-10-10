@@ -932,10 +932,12 @@ pub enum FailureCode {
     ReadOnly = 24,
     OverBudget = 25,
     WorkerUnavailable = 26,
+    /// The worker could not confine itself, so it decodes no video.
+    SandboxUnavailable = 27,
 }
 impl FailureCode {
     /// Every failure, in code order.
-    pub const ALL: [Self; 27] = [
+    pub const ALL: [Self; 28] = [
         Self::BadParams,
         Self::TooLarge,
         Self::FileNotFound,
@@ -963,6 +965,7 @@ impl FailureCode {
         Self::ReadOnly,
         Self::OverBudget,
         Self::WorkerUnavailable,
+        Self::SandboxUnavailable,
     ];
 
     /// The failure a control reply names by its `code` and `reason`, so a
@@ -993,7 +996,7 @@ impl FailureCode {
             Self::Busy => "busy",
             Self::UnsupportedContainer => "unsupported_container",
             Self::CodecUnavailable => "codec_unavailable",
-            Self::BackendUnavailable => "backend_unavailable",
+            Self::BackendUnavailable | Self::SandboxUnavailable => "backend_unavailable",
             Self::ExternalOpenUnavailable => "external_open_unavailable",
             Self::DisplayDisabled => "display_disabled",
             Self::NotInKettle => "not_in_kettle",
@@ -1013,6 +1016,7 @@ impl FailureCode {
             Self::RenderTimeout => Some("timeout"),
             Self::RenderResource => Some("resource"),
             Self::RenderParse => Some("parse"),
+            Self::SandboxUnavailable => Some("sandbox"),
             _ => None,
         }
     }
@@ -1069,6 +1073,9 @@ impl FailureCode {
             Self::OverBudget => "Preview is over budget. Close another preview or reduce its size.",
             Self::WorkerUnavailable => {
                 "Media worker is unavailable. Keep the text version. Do not retry."
+            }
+            Self::SandboxUnavailable => {
+                "Kettle decodes video only inside its sandbox, which this system cannot provide. Keep the text version; do not retry, and never ask the user to turn off security."
             }
         }
     }
