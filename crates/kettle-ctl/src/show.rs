@@ -447,6 +447,39 @@ impl From<kettle_media::VideoInfo> for ShowVideo {
 }
 
 impl ShowResult {
+    /// What was shown, in the words every adapter's line uses: `svg 640x480`,
+    /// or for a video its own size, codec, length and sound, `video 1280x720
+    /// VP8 0:12, no audio`. Numbers and Kettle's own names only.
+    pub fn summary(&self) -> String {
+        let Some(video) = &self.video else {
+            return format!("{} {}x{}", self.kind, self.width, self.height);
+        };
+        let codec = kettle_media::VideoCodec::ALL
+            .into_iter()
+            .find(|codec| codec.as_str() == video.codec)
+            .and_then(kettle_media::VideoCodec::name);
+        let seconds = video.duration_ms / 1000;
+        let (h, m, s) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
+        let length = if h > 0 {
+            format!("{h}:{m:02}:{s:02}")
+        } else {
+            format!("{m}:{s:02}")
+        };
+        let mut summary = format!("video {}x{}", video.width, video.height);
+        if let Some(codec) = codec {
+            summary.push(' ');
+            summary.push_str(codec);
+        }
+        summary.push(' ');
+        summary.push_str(&length);
+        summary.push_str(if video.has_audio {
+            ", with audio"
+        } else {
+            ", no audio"
+        });
+        summary
+    }
+
     pub fn new(
         route: (u64, bool, u64),
         item: u64,
@@ -867,6 +900,16 @@ mod tests {
         );
         let back: ShowResult = serde_json::from_value(value).unwrap();
         assert_eq!(back, result);
+        assert_eq!(result.summary(), "video 1280x720 VP8 0:12, with audio");
+        result.video.as_mut().unwrap().codec = "made-up".into();
+        result.video.as_mut().unwrap().has_audio = false;
+        assert_eq!(
+            result.summary(),
+            "video 1280x720 0:12, no audio",
+            "no name a sender made up"
+        );
+        result.video = None;
+        assert_eq!(result.summary(), "video 400x225");
     }
 
     /// An inline card is asked for by name; any other value is refused.
