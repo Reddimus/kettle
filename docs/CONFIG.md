@@ -678,8 +678,9 @@ that. As with `preview_link`, a control client cannot have it read a file.
 The palette lists it as "Preview the copied file in Kettle".
 `render_clipboard_as_diagram` (`render-clipboard-as-diagram`) renders the
 Mermaid diagram on the clipboard in the focused pane's lane, as `/copy` in
-Claude Code or Codex leaves it: each ```` ```mermaid ```` fence as written
-(the first shows, and the title says how many there were), or else the
+Claude Code or Codex leaves it: each ```` ```mermaid ```` fence as written,
+several as one gallery paged with the `‹` and `›` on the lane's detail line
+(at most 32: more are refused, never cut short), or else the
 diagram in the text, from its front matter, directives or header to its end,
 with the harness's bullet, label, notice, leading and trailing prose and
 common indentation taken off. `render_selection_as_diagram`

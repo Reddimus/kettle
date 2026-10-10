@@ -4212,7 +4212,8 @@ as the first, and `media::cards` that an item's cards are those at its
 generation in its pane.
 
 Copied diagrams: `kettle-core`'s `diagram_copy` tests pin fences (any
-indentation, verbatim, in order, at most 16, closed by their own mark indented
+indentation, verbatim, in order, up to 32 with blank ones not counting and a
+33rd refused as `TooMany`, never cut short, closed by their own mark indented
 at most three columns past the opening, a tab counting to the next multiple of
 four, an unclosed one running to the end, a fence of another language
 consuming its body, so a Mermaid fence inside it is its text and no diagram is
@@ -4242,7 +4243,11 @@ the 1 MiB cap, shaped to make the search revisit rows, takes about as long as
 any other. Term tests pin the bounded selection, a selection that starts
 inside a row, and a rectangle over a diagram taking its lines whole. App
 guards pin the control-client refusal before any read, menus a control client
-opens reading neither, Mermaid bytes as the user's pull, and the menu rows.
+opens reading neither, Mermaid bytes as the user's pull, several diagrams as
+one gallery carried with the first (refused as over budget without room),
+more than 32 refused by name, and the menu rows. Red checks: no `TooMany`
+and a scan that stops at the limit, so a 33rd is never seen, each fail a
+test.
 For a live check, `/copy` a diagram (or put a capture on the clipboard), press
 the bound chord: the lane shows "Copied diagram"; select a wrapped reply and
 press the selection chord: its source view shows the wrap joined back; the

@@ -198,6 +198,10 @@ context = "crates/kettle-ui/src/app.rs preview_copied_diagram: body, under notif
 [messages.notify_body_preview_diagram_unbounded]
 context = "crates/kettle-ui/src/app.rs preview_copied_diagram: body, under notify_title_preview_nothing, when a selected or copied reply holds a diagram whose rows are not indented and more text follows it after a blank row, so Kettle cannot tell whether that text is more of the diagram or the agent's prose."
 
+[messages.notify_body_preview_diagram_too_many]
+context = "crates/kettle-ui/src/app.rs preview_copied_diagram: body, under notify_title_preview_nothing, when copied or selected text holds more than count Mermaid diagrams, more than one preview gallery shows, so none is previewed."
+args = [{ name = "count", type = "u64" }]
+
 [messages.notify_title_preview_no_room]
 context = "crates/kettle-ui/src/app.rs show_media_item: title of the desktop notification when the user opens a pane's preview lane but the pane is too small to hold even its one-row strip beside the terminal. 'kettle' is the product name, lowercase as in the other notification titles."
 
@@ -1547,11 +1551,15 @@ context = "crates/kettle-render/src/card_scene.rs: a short, one-time tip drawn o
 context = "crates/kettle-ui/src/app.rs preview_copied_diagram: title of the shelf item for a diagram the user previewed from the clipboard, shown in the preview lane's header."
 
 [messages.media_shelf_copied_diagrams]
-context = "crates/kettle-ui/src/app.rs preview_copied_diagram: title of the shelf item when the clipboard held several Mermaid diagrams and the first is shown; count is how many there were."
+context = "crates/kettle-ui/src/app.rs preview_copied_diagram: title of the shelf item when the clipboard held several Mermaid diagrams, shown as one gallery the user pages through in the preview lane; count is how many there are. It stays the same on every page."
 args = [{ name = "count", type = "u64" }]
 
 [messages.media_shelf_selected_diagram]
 context = "crates/kettle-ui/src/app.rs preview_copied_diagram: title of the shelf item for a diagram the user previewed from selected text, shown in the preview lane's header."
+
+[messages.media_shelf_selected_diagrams]
+context = "crates/kettle-ui/src/app.rs preview_copied_diagram: title of the shelf item when selected text held several Mermaid diagrams, shown as one gallery the user pages through in the preview lane; count is how many there are. It stays the same on every page."
+args = [{ name = "count", type = "u64" }]
 
 [messages.media_shelf_untitled]
 context = "crates/kettle-ui/src/app.rs ctl_show: title of a media shelf item an agent sent as inline image or SVG bytes without a title. The item is a picture; keep it short."
