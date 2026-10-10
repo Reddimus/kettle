@@ -150,9 +150,12 @@ fn answer(
     // A video's stills need a decoder: Apple's own for MP4 and QuickTime on
     // macOS, then the external one the parent named, trusted again here.
     // With neither they are `BackendUnavailable`.
-    let decoder = matches!(job.kind, kettle_media::JobKind::VideoStills(_))
-        .then(kettle_media_native::Decoders::configured)
-        .filter(|decoders| !decoders.is_empty());
+    let decoder = matches!(
+        job.kind,
+        kettle_media::JobKind::VideoStills(_) | kettle_media::JobKind::Auto
+    )
+    .then(kettle_media_native::Decoders::configured)
+    .filter(|decoders| !decoders.is_empty());
     kettle_media_render::render_with_decoder(
         job,
         |kind| {

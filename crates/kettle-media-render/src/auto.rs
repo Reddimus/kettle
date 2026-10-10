@@ -1,23 +1,46 @@
-//! Auto jobs: one held snapshot of a file, classified by its bytes rather than
-//! its name, then rendered as what it is. The snapshot is read once, within
-//! the largest input cap of the kinds it can be, and the actual kind's own cap
-//! applies before anything decodes it. Raster is recognized by its magic
-//! bytes; SVG is UTF-8 markup whose root element is `svg`; other UTF-8 text
+//! Auto jobs: one held file, classified by its bytes rather than its name,
+//! then rendered as what it is. Its first bytes are read through the held
+//! descriptor; a video container there (and no image) is a video, whose
+//! poster, the middle frame fitted to the job's box, the worker's decoder
+//! takes from the held file with the video's metadata. Anything else is one
+//! snapshot read through the same descriptor, within the largest input cap of
+//! the kinds it can be, and the actual kind's own cap applies before anything
+//! decodes it. Raster is recognized by its magic bytes; SVG is UTF-8 markup whose root element is `svg`; other UTF-8 text
 //! holding a Mermaid fence, as CommonMark reads it, is a Markdown gallery,
 //! whatever it starts with (a README's HTML block or an autolink is no SVG);
 //! other markup is `UnsupportedMedia`, and any other UTF-8 text goes to the
 //! Mermaid renderer, which recognizes a diagram with its own preprocessing as
 //! it parses and refuses anything else. Anything else is `UnsupportedMedia`.
 
+use std::time::Instant;
+
+use kettle_media::video::{MAX_VIDEO_PREFIX_BYTES, VideoDecoder, sniff_video_container};
 use kettle_media::{FailureCode, Job, JobKind, MAX_MARKDOWN_BYTES, MediaKind, Rendered};
 
-use crate::{markdown, mermaid, raster, source, svg};
+use crate::{markdown, mermaid, raster, source, stills, svg};
 
 pub(crate) fn render(
     job: &Job,
     on_kind: &mut impl FnMut(MediaKind),
+    decoder: Option<&dyn VideoDecoder>,
 ) -> Result<(MediaKind, Rendered), FailureCode> {
-    let snapshot = source::load(&job.source, job.kind.input_cap())?;
+    let held = source::hold(&job.source, MAX_VIDEO_PREFIX_BYTES)?;
+    if image::guess_format(held.prefix()).is_err()
+        && let Some(container) = sniff_video_container(held.prefix(), held.size())
+    {
+        let deadline = Instant::now() + stills::DEADLINE;
+        let rendered = stills::render_video(
+            &held,
+            container,
+            decoder,
+            &|info| stills::poster(info, job.target),
+            on_kind,
+            deadline,
+        )?;
+        return stills::place_poster(rendered, job.target)
+            .map(|rendered| (MediaKind::Video, rendered));
+    }
+    let snapshot = held.snapshot(job.kind.input_cap())?;
     render_loaded(job, &snapshot, on_kind)
 }
 
@@ -118,7 +141,7 @@ mod tests {
     /// Every kind this reports, in order, beside the result.
     fn classify(job: &Job) -> (Vec<MediaKind>, Result<(MediaKind, Rendered), FailureCode>) {
         let mut kinds = Vec::new();
-        let result = render(job, &mut |kind| kinds.push(kind));
+        let result = render(job, &mut |kind| kinds.push(kind), None);
         (kinds, result)
     }
 
@@ -421,5 +444,137 @@ mod tests {
         let (kinds, result) = classify(&job);
         assert_eq!(result.unwrap().0, MediaKind::Svg);
         assert_eq!(kinds, [MediaKind::Svg]);
+    }
+
+    /// A decoder in process standing in for the worker's: a 1280x720,
+    /// twelve-second video, each frame solid at its instant.
+    struct Clip;
+
+    impl kettle_media::video::VideoDecoder for Clip {
+        fn stills(
+            &self,
+            input: kettle_media::video::VideoInput<'_>,
+            plan: &mut dyn FnMut(
+                &kettle_media::VideoInfo,
+            )
+                -> Result<kettle_media::video::StillsPlan, FailureCode>,
+            _deadline: std::time::Instant,
+        ) -> Result<kettle_media::video::DecodedStills, FailureCode> {
+            let info = kettle_media::VideoInfo {
+                duration_ms: 12_000,
+                width: 1280,
+                height: 720,
+                rotation: 0,
+                codec: kettle_media::VideoCodec::H264,
+                fps_milli: Some(30_000),
+                has_audio: true,
+                container: Some(input.container),
+            };
+            let plan = plan(&info)?;
+            let frames = plan
+                .times_ms
+                .iter()
+                .map(|&at| kettle_media::video::DecodedFrame {
+                    sample: kettle_media::StillSample {
+                        requested_ms: at,
+                        actual_ms: at,
+                    },
+                    rgba: [200, 40, 40, 255].repeat((plan.width * plan.height) as usize),
+                })
+                .collect();
+            Ok(kettle_media::video::DecodedStills {
+                info,
+                frames,
+                tolerance_ms: 0,
+            })
+        }
+    }
+
+    fn mp4(path: &Path) {
+        let mut bytes = vec![0, 0, 0, 24];
+        bytes.extend_from_slice(b"ftypisom\0\0\x02\0isomiso2");
+        bytes.extend_from_slice(&[0; 32]);
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    /// A video container is a video whatever the file is called: its poster
+    /// is the middle frame fitted into the job's box as a raster is, with the
+    /// video's metadata, reported as video before it decodes. Without a
+    /// decoder it is `BackendUnavailable`; a video too large for any
+    /// snapshot is still held, not read.
+    #[test]
+    fn a_video_is_a_poster_fitted_to_the_box() {
+        let directory = tempfile::tempdir().unwrap();
+        for name in ["clip.mp4", "clip.png", "clip"] {
+            let path = directory.path().join(name);
+            mp4(&path);
+            let mut job = job(&path);
+            job.target.width = 400;
+            job.target.height = 400;
+            let mut kinds = Vec::new();
+            let (kind, rendered) = render(&job, &mut |kind| kinds.push(kind), Some(&Clip)).unwrap();
+            assert_eq!((kind, kinds), (MediaKind::Video, vec![MediaKind::Video]));
+            assert_eq!((rendered.width, rendered.height), (400, 225), "{name}");
+            rendered.validate_as(MediaKind::Video).unwrap();
+            let video = rendered.video.unwrap();
+            assert_eq!(video.samples[0].requested_ms, 6_000, "the middle frame");
+            assert_eq!(video.info.duration_ms, 12_000);
+            assert_eq!(rendered.rgba[..4], [200, 40, 40, 255]);
+        }
+        let path = directory.path().join("clip.mp4");
+        let (kinds, result) = classify(&job(&path));
+        assert_eq!(result.unwrap_err(), FailureCode::BackendUnavailable);
+        assert!(kinds.is_empty(), "no decoder: no kind is heard");
+        // Placed as a raster is: centered in the box, laid out against the
+        // video's own size, and cut to the box rectangle a crop asks for,
+        // which a zoomed lane plans from.
+        let mut boxed = job(&path);
+        boxed.target.width = 400;
+        boxed.target.height = 400;
+        let (_, rendered) = render(&boxed, &mut |_| {}, Some(&Clip)).unwrap();
+        let fitted = kettle_media::Crop {
+            x: 0,
+            y: 87,
+            width: 400,
+            height: 225,
+        };
+        assert_eq!(rendered.layout.image_in_target, fitted);
+        assert_eq!(rendered.layout.result_in_target, fitted);
+        assert_eq!(
+            (rendered.layout.source_width, rendered.layout.source_height),
+            (1280.0, 720.0)
+        );
+        let crop = kettle_media::Crop {
+            x: 100,
+            y: 80,
+            width: 20,
+            height: 20,
+        };
+        boxed.target.crop = Some(crop);
+        let (_, rendered) = render(&boxed, &mut |_| {}, Some(&Clip)).unwrap();
+        assert_eq!((rendered.width, rendered.height), (20, 20));
+        assert_eq!(rendered.layout.image_in_target, fitted);
+        assert_eq!(rendered.layout.result_in_target, crop);
+        rendered.validate_as(MediaKind::Video).unwrap();
+        // Its top rows are above the picture, so clear; the rest is the frame.
+        assert_eq!(rendered.rgba[..4], [0, 0, 0, 0]);
+        let inside = (8 * 20) * 4;
+        assert_eq!(rendered.rgba[inside..inside + 4], [200, 40, 40, 255]);
+        // A box larger than the picture keeps the picture's own size.
+        let mut wide = job(&path);
+        wide.target.width = 4000;
+        wide.target.height = 4000;
+        let (_, rendered) = render(&wide, &mut |_| {}, Some(&Clip)).unwrap();
+        assert_eq!((rendered.width, rendered.height), (1280, 720));
+        // Grown past every snapshot cap, it is still held and decoded.
+        let large = directory.path().join("large.mp4");
+        mp4(&large);
+        let file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&large)
+            .unwrap();
+        file.set_len(48 << 20).unwrap();
+        let (kind, _) = render(&job(&large), &mut |_| {}, Some(&Clip)).unwrap();
+        assert_eq!(kind, MediaKind::Video);
     }
 }
