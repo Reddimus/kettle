@@ -36,7 +36,7 @@ graph TD
     update["kettle-update<br/>signed feed verification · bounded archive extraction<br/>transactional managed-install updates"] --> state
     state["kettle-state<br/>durable atomic replacement · private state files<br/>cross-platform advisory file locks"]
     media["kettle-media<br/>bounded jobs and results · theme · caps<br/>source authorization · build handshake · binary frames<br/>worker availability client"]
-    worker["kettle-media-worker (bin)<br/>early fd sweep · non-dumpable · rlimits<br/>watchdog · one job per process"] --> media
+    worker["kettle-media-worker (bin)<br/>early fd sweep · non-dumpable · rlimits<br/>watchdog · one job or playback session per process"] --> media
     worker --> mrender
     worker --> mnative
     mnative["kettle-media-native<br/>trusted user ffmpeg/ffprobe · contained runs<br/>exact frames by timestamp · deadlines"] --> media

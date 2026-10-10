@@ -137,7 +137,26 @@ thread_local! {
 /// takes their names. A file that cannot be opened keeps its failure.
 /// Returns another handle on each opened file, for the sandbox.
 pub fn hold_inputs(job: &kettle_media::Job) -> Vec<File> {
-    let source = match &job.source {
+    let fonts = job
+        .fallback_fonts
+        .iter()
+        .map(|font| (font.path.as_bytes(), None));
+    admit(source_path(&job.source).into_iter().chain(fonts))
+}
+
+/// Admit the file a playback session plays, as [`hold_inputs`] admits a
+/// job's.
+pub fn hold_source(source: &Source) -> Vec<File> {
+    admit(source_path(source).into_iter())
+}
+
+/// A file to admit: its path's bytes, and the device and inode it was
+/// attested with, if it was.
+type Named<'a> = (&'a [u8], Option<(u64, u64)>);
+
+/// The file `source` names, and the identity it was attested with.
+fn source_path(source: &Source) -> Option<Named<'_>> {
+    match source {
         Source::Path {
             path,
             authorization,
@@ -149,14 +168,14 @@ pub fn hold_inputs(job: &kettle_media::Job) -> Vec<File> {
             Some((path.as_bytes(), attested))
         }
         Source::Bytes(_) => None,
-    };
-    let fonts = job
-        .fallback_fonts
-        .iter()
-        .map(|font| (font.path.as_bytes(), None));
+    }
+}
+
+/// Admit each of `paths` on this thread, as [`hold_inputs`] describes.
+fn admit<'a>(paths: impl Iterator<Item = Named<'a>>) -> Vec<File> {
     let mut admitted = Vec::new();
     let mut files = Vec::new();
-    for (path, attested) in source.into_iter().chain(fonts) {
+    for (path, attested) in paths {
         let opened = open_by_name(Path::new(std::ffi::OsStr::from_bytes(path)), attested)
             .map(|(file, _)| file);
         if let Ok(copy) = opened.as_ref().map(File::try_clone) {

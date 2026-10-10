@@ -303,6 +303,20 @@ Reports that fit any of these are welcome:
   reaching the network, running another program, leaving its group, or
   decoding a video unconfined, is in scope. The policy is `kettle-media-native`'s
   `sandbox`; the barrier is the worker's `answer`.
+- **Video playback sessions** — a video the user plays runs in a media
+  worker of its own, which confines itself to the one file and its decoder,
+  exactly as a video job does, before reading a byte of it, and stays
+  confined for the whole session. It reads nothing from the parent but
+  one-byte commands, writes frames only of the size it opened at, decodes
+  only while playing into three buffers, and ends when the parent closes
+  it, leaves, or sends nothing for 5 s (it then kills its own process
+  group, decoder and all), when a frame goes unread for 5 s, when a playing
+  decoder gives no frame for 5 s and two frame lengths, or when the file
+  changes at any point before it ends. Its CPU time, and its
+  ffmpeg's, is limited to what the video's remaining length needs. A
+  session that outlives its parent, decodes unconfined, reads another file,
+  or holds more than its buffers, is in scope. The session is
+  `kettle-media-worker`'s `play`.
 - **Media rendering** — the worker renders with `kettle-media-render`, safe
   code that writes nothing. A source path is opened once, read-only and
   non-blocking, and decided from that open file: it must be a regular file

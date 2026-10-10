@@ -1007,6 +1007,73 @@ an Auto raster job's classification end it too, while one alone does not, so
 learning the kind does not restart the clock. The workspace commands do not
 enable that feature, so `just media-protocol-test` and ci.yml run it.
 
+Playback sessions cross the same binary. With `test-faults`, a file whose
+MP4 box is followed by `kettle-media-worker-test-video` and a frame count,
+rate and size plays through a stand-in decoder that fills frame N with N:
+a session opens paused on its first frame, then plays every frame in order,
+numbered and timed, paced rather than flushed, and ends with Ended and exit
+0; Pause holds the frames, Play takes them up where they stopped, and a
+session opened later in the video starts there. A parent that goes quiet
+with its pipes open loses its session to a SIGKILL of the worker's group
+once the 5 s lease lapses, paused or playing, while a worker outside its own
+group just exits 4; frames the parent stops reading end the session at the
+watchdog (exit 4) whatever heartbeats it sends; a reader that stops for a
+second and a half gets every frame after, in order and at its pace, never a
+burst. With frames of a megabyte left unread, Close or a closed stdin still
+ends the session with 0 within two seconds, twenty heartbeats ahead of it
+or not; Close 4.6 s into a held write ends it with 0, before the watchdog
+could, and so does a closed stdin 4.7 s in, before the lease would
+(`leaving_just_before_the_lease_lapses_still_ends_with_0`); a heartbeat that waited three seconds behind the unread write counts
+from when it came, so the session ends five seconds after it, not after the
+session took it; and one that came during a held write keeps the session
+past the lease of the command before. Close or a closed stdin while the
+stand-in decoder takes three seconds to open ends the session with 0 within
+a second and a half. A stall while playing is `RenderTimeout` after 5 s and two frame
+lengths, a decoder failure
+is its failure, a first frame that never comes is `RenderTimeout` within the
+open's 5 s, and so is one whose write the parent holds past them, heartbeats
+or not (`a_first_frame_written_past_the_deadline_is_a_timeout`), a file appended to while playing is `Changed`, and so is one
+appended to while a slow stand-in decoder opens it, whether that then opens
+or fails; closed stdin ends
+the session with 0, a frame larger than a command is `TooLarge` and a
+command-sized frame of another kind `BadParams`, both exit 2. Without a
+decoder a session is `BackendUnavailable`, and a file that is not a video
+`UnsupportedMedia`. On Linux a job's CPU limit is pinned to 5 s, soft and
+hard, while it is held up, and a session's is 30 s and a second for each
+second of video left. When a trusted ffmpeg is installed, the index fixture
+plays from 2 s through the confined worker to its end, every frame on the
+clip's own times, and a paused session whose parent goes quiet leaves no
+process in its group.
+
+A session read for four seconds after its last command, then held in an
+unread write, has its group killed five seconds after that command, not at
+the watchdog; the worker waits for that kill rather than exiting first,
+which under load could beat it (four of these test binaries run at once
+failed nine runs of twelve before, none after). Play and Pause move the
+decoder's gate as the command reader hears them, in order, with no session
+thread coming round (`the_decoder_s_gate_follows_the_latest_command`), and
+a session closed while its decoder opened takes not even its first frame
+(`a_closed_session_s_decoder_takes_no_frame`). The session's loop also
+runs inside the worker's own test binary, with its
+events sent in an order the test picks and its output read from a pipe as
+the parent reads it. The opening's allowance ends with the first frame:
+anything written after it, a state the parent will not read included, is
+held to the 5 s watchdog (`the_first_frame_ends_the_opening_s_allowance`).
+Play sent before the first frame sets the clock at that
+frame, so the next waits its time, and so does Play taken while the first
+frame's write is held (`play_during_the_first_write_sets_the_clock_there`);
+Play after the first frame was written paused, even within its length,
+leaves the clock to the next frame, which goes out at once
+(`play_after_the_first_write_leaves_the_clock_to_the_next`, at a second a
+frame); a megabyte frame whose write the reader
+holds up for 600 ms sets the clock again where the write ends, so the frames
+after it stay a tenth of a second apart; a session whose file is appended
+to, paused, before its first frame or while its last frame's write is held
+up, ends as `Changed`, not `Ended`; a decoder that fails just after the file
+changes fails the session as `Changed`; and a decoder handed a buffer after a
+Pause decodes nothing until Play. What the parent asked keeps its latest
+Play or Pause, taken once, and the moment of its last command.
+
 Red checks: no sweep, a sweep after the hook or not first in its function,
 a call moved with a comment left in its place, a sweep that closes nothing,
 core dumps left on, the dumpable flag left set, no CPU or address-space
