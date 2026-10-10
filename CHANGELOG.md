@@ -30,6 +30,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   you once to trust the hook in its own hook review; until then, and with
   other Codex versions, media goes to the pane's shelf. A card's provenance
   tab names the harness that printed it.
+- A new pane on macOS or Linux whose `PATH` has no `kettle` gets the running
+  Kettle's folder appended, after your own commands, so agents and setup
+  commands there find it (`add-kettle-to-path`, Settings → Agents; `off`
+  leaves the `PATH` as configured).
 - Codex previews (`agent-display-codex`, Settings → Agents → Codex previews;
   off by default, needs agent previews): the zsh or fish a new pane starts
   defines `codex` itself, as the function `kettle agent-setup --print`

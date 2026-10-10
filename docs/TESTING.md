@@ -3715,6 +3715,18 @@ nowhere, and a dead server's alias is withdrawn while its entry is left to its
 own registry. A real connection is accepted only when the kernel names the
 entry's pid and the live start matches its token.
 
+`kettle` on a pane's `PATH`: `mux` tests pin that the running Kettle's
+folder is appended last to a `PATH` none of whose absolute entries holds an
+`kettle` this user may run, and that the `PATH` is left alone when one does
+(a `kettle` that cannot run, or that only other users may run, is none, as
+is one in a relative entry, which is not looked in), when it is empty, and
+for a folder that is translocated, relative or holds a `:`; that a pane's `PATH` starts from the configured `env`, and stays as
+configured with `add-kettle-to-path = off`. `kettle-config` pins the default,
+the values, and a malformed value reported; Settings pins the Agents row.
+For a live check, start Kettle from a Finder launch on macOS: `command -v
+kettle` in a new pane names `kettle.app/Contents/MacOS/kettle` unless one is
+installed elsewhere on the `PATH`.
+
 Showing media. `kettle-ctl`'s `show` tests: exactly one nonempty source;
 bounded, typed options (a key or title one byte over its cap is
 `too_large`); inline SVG moves rather than copies and is refused over 2 MiB;

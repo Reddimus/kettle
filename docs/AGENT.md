@@ -856,6 +856,18 @@ directory, and Claude Code's `/plugin` and `/mcp` list `kettle`. To remove
 it, turn the setting off. The directory stays in Kettle's data directory;
 delete it with `chmod -R u+w` and then `rm -r`.
 
+### `kettle` on a pane's `PATH`
+
+`kettle show`, `kettle mcp` and `kettle agent-setup` run in a pane by name.
+With `add-kettle-to-path = auto` (the default) on macOS and Linux, a new pane
+whose `PATH`, after the configured `env`, has no executable `kettle` in any
+absolute entry gets the running Kettle's folder appended, after every entry,
+so a `kettle` you installed yourself always wins. A translocated copy's
+folder is never added, since it does not last: run Kettle from
+`/Applications` first. An empty `PATH`, which means the working directory,
+is left as it is, and `off` leaves the `PATH` as configured. A shell startup
+file that sets `PATH` outright still replaces it.
+
 ### Codex's launch function
 
 Codex gets Kettle's display server one launch at a time, through a shell
