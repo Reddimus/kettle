@@ -8,6 +8,8 @@ use std::mem::size_of;
 
 pub const MAGIC: [u8; 4] = *b"KMED";
 pub const HEADER_BYTES: usize = 11;
+/// A session frame's kind, which [`write_video_frame`] writes without a [`Frame`].
+const VIDEO_FRAME: u8 = 11;
 // Fixed job fields, font lengths/indices and the largest optional fields fit in 256 bytes.
 /// Parent/external frame cap including header, raster bytes and eight native font paths.
 pub const MAX_PARENT_FRAME_BYTES: usize =
@@ -103,7 +105,7 @@ impl Frame {
             Self::PlayOpen(_) => 8,
             Self::PlayCommand(_) => 9,
             Self::Opened(_) => 10,
-            Self::VideoFrame(_) => 11,
+            Self::VideoFrame(_) => VIDEO_FRAME,
             Self::PlayState(_) => 12,
         }
     }
@@ -392,6 +394,36 @@ fn read_error(e: io::Error) -> WireError {
     } else {
         WireError::Io
     }
+}
+/// Write one session frame straight from the buffer its pixels are in: the
+/// bytes [`encode`] gives the same [`VideoFrame`], with no copy of them.
+pub fn write_video_frame(
+    writer: &mut impl Write,
+    frame: VideoFrameRef<'_>,
+) -> Result<(), WireError> {
+    frame.validate()?;
+    let payload = 8 + 8 + 4 + 4 + 4 + frame.rgba.len();
+    let mut head = Writer {
+        bytes: Some(Vec::with_capacity(HEADER_BYTES + 28)),
+        len: 0,
+        max: MAX_WORKER_FRAME_BYTES,
+    };
+    head.raw(&MAGIC)?;
+    head.u16(PROTOCOL_VERSION)?;
+    head.u8(VIDEO_FRAME)?;
+    head.count(payload)?;
+    head.u64(frame.seq)?;
+    head.u64(frame.pts_ms)?;
+    head.u32(frame.width)?;
+    head.u32(frame.height)?;
+    head.count(frame.rgba.len())?;
+    cap(HEADER_BYTES + payload, MAX_WORKER_FRAME_BYTES)?;
+    let head = head.bytes.unwrap_or_default();
+    writer
+        .write_all(&head)
+        .and_then(|()| writer.write_all(frame.rgba))
+        .and_then(|()| writer.flush())
+        .map_err(|_| WireError::Io)
 }
 pub fn write_frame(
     writer: &mut impl Write,
