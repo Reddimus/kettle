@@ -384,6 +384,12 @@ mod cache_lifetime_tests {
 }
 
 impl ImageItem {
+    /// Where it is placed, for tests that check what is drawn over it.
+    #[cfg(test)]
+    pub(crate) fn test_rect(&self) -> [f32; 4] {
+        self.rect
+    }
+
     fn instance(&self) -> Option<Inst> {
         let (origin, size) = self
             .uv_override

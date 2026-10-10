@@ -438,6 +438,14 @@ menu row or a confirmation it sends previews nothing.
 A Mermaid diagram an agent shows gets a card like an image, with its
 rendered poster, whether it came as source or as a file; when the lane
 draws it again on another background, the card shows that too.
+A video gets a card with its poster, a play glyph over the middle and its
+length on the poster's foot, and a caption with its own size and length
+(`clip.webm - video 1280x720 0:12`); the lane's detail line gives its own
+size, codec, length and whether it has sound, and a screen reader hears the
+same. Nothing plays: a card or the lane never starts a video or a sound.
+When no decoder reads a video, its notice says the user can install ffmpeg
+(`brew install ffmpeg` on macOS, the system's packages on Linux); Kettle
+never installs it.
 Clicking an inline card opens its pane's lane on that card's item. A card
 takes a primary press, and its release, before anything else in the window
 except open dialogs and the lanes, so the program behind it sees neither.

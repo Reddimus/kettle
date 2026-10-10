@@ -524,6 +524,28 @@ impl VideoCodec {
             Self::WebP => "webp",
         }
     }
+
+    /// The codec as people name it, the same in every language; `None` for
+    /// one Kettle does not know.
+    pub fn name(self) -> Option<&'static str> {
+        Some(match self {
+            Self::Unknown => return None,
+            Self::H264 => "H.264",
+            Self::Hevc => "HEVC",
+            Self::Vp8 => "VP8",
+            Self::Vp9 => "VP9",
+            Self::Av1 => "AV1",
+            Self::Mpeg4 => "MPEG-4",
+            Self::Mpeg2 => "MPEG-2",
+            Self::ProRes => "ProRes",
+            Self::Mjpeg => "Motion JPEG",
+            Self::QuickTimeAnimation => "QuickTime Animation",
+            Self::Theora => "Theora",
+            Self::Gif => "GIF",
+            Self::Apng => "APNG",
+            Self::WebP => "WebP",
+        })
+    }
 }
 
 /// What a video or animation is, as the frames were taken from it.

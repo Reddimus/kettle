@@ -174,6 +174,9 @@ context = "crates/kettle-ui/src/app.rs notify_preview_failure: body when the fil
 [messages.notify_body_preview_unavailable]
 context = "crates/kettle-ui/src/app.rs notify_preview_failure: body when Kettle's media worker, which renders previews in a separate process, is not available."
 
+[messages.notify_body_preview_needs_decoder]
+context = "crates/kettle-ui/src/app.rs notify_preview_failure: body when a video could not be previewed because no decoder on this computer reads its format or codec. ffmpeg is a program name; brew install ffmpeg is a command typed exactly. Kettle never installs it."
+
 [messages.notify_body_preview_failed]
 context = "crates/kettle-ui/src/app.rs notify_preview_failure: body for any other failure: the render timed out, needed too much memory, or Kettle was rendering something else."
 
@@ -1651,6 +1654,15 @@ context = "crates/kettle-ui/src/app.rs media_viewer_projection: kind of an SVG i
 
 [messages.media_viewer_kind_mermaid]
 context = "crates/kettle-ui/src/app.rs media_item_kind_and_sender: the kind of a media shelf item that is a rendered Mermaid diagram, in the viewer's detail line and a card's screen-reader label. Mermaid is a product name."
+
+[messages.media_viewer_kind_video]
+context = "crates/kettle-ui/src/app.rs media_item_kind_and_sender: the kind of a media shelf item that is a video, shown as its poster, in the preview lane's detail line and a card's screen-reader label."
+
+[messages.media_video_with_audio]
+context = "crates/kettle-ui/src/app.rs video_detail: in a video's detail line after its size, codec and length, saying it has a sound track. Kettle plays no sound from a preview."
+
+[messages.media_video_no_audio]
+context = "crates/kettle-ui/src/app.rs video_detail: in a video's detail line after its size, codec and length, saying it has no sound track."
 
 [messages.media_viewer_kind_media]
 context = "crates/kettle-ui/src/app.rs media_viewer_projection: kind of any other media item in the media viewer's detail line."

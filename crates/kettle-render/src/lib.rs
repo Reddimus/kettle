@@ -30,6 +30,7 @@ impl PaintedCard {
     }
 }
 
+pub use card_scene::duration_label;
 pub use inline_cards::{
     CardHarness, CardPlacement, CardPoster, CardRefusal, CardSpec, InlineCards, MAX_CARD_COLUMNS,
     MAX_PANE_CARDS,
@@ -9600,7 +9601,7 @@ impl Renderer {
             let [_, _, width, height] = label.rect;
             let scale = label.scale;
             let columns = (width / (cw * scale).max(1.0)).floor().max(1.0) as usize;
-            let text = fit_single_line_label(label.text(), columns);
+            let text = fit_single_line_label(&label.text(), columns);
             let buffer = &mut self.card_label_buffers[index];
             buffer.set_metrics(metrics);
             buffer.set_wrap(Wrap::None);

@@ -43,17 +43,60 @@ pub(crate) enum CardLabelKind {
     Unavailable,
     /// The one-time tip that a click opens the card.
     Tip,
+    /// A video's length, in ms, on its poster's foot.
+    Duration(u64),
 }
 impl CardLabel {
-    pub fn text(&self) -> &'static str {
+    pub fn text(&self) -> std::borrow::Cow<'static, str> {
         match self.kind {
-            CardLabelKind::Brand => "Kettle",
-            CardLabelKind::Harness(harness) => harness.name(),
-            CardLabelKind::Pending => self.tr.text(kettle_i18n::Text::InlineCardPending),
-            CardLabelKind::Unavailable => self.tr.text(kettle_i18n::Text::InlineCardUnavailable),
-            CardLabelKind::Tip => self.tr.text(kettle_i18n::Text::InlineCardTip),
+            CardLabelKind::Brand => "Kettle".into(),
+            CardLabelKind::Harness(harness) => harness.name().into(),
+            CardLabelKind::Pending => self.tr.text(kettle_i18n::Text::InlineCardPending).into(),
+            CardLabelKind::Unavailable => self
+                .tr
+                .text(kettle_i18n::Text::InlineCardUnavailable)
+                .into(),
+            CardLabelKind::Tip => self.tr.text(kettle_i18n::Text::InlineCardTip).into(),
+            CardLabelKind::Duration(ms) => duration_label(ms).into(),
         }
     }
+}
+
+/// A video's length as a player shows it: `m:ss`, or `h:mm:ss` from an hour.
+pub fn duration_label(ms: u64) -> String {
+    let seconds = ms / 1000;
+    let (h, m, s) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
+}
+
+/// A play glyph centred on `target`: a square plate, then a right-pointing
+/// triangle drawn a pixel row at a time. `None` when the poster is too small
+/// to hold it.
+fn play_glyph([x, y, width, height]: [f32; 4]) -> Option<([f32; 4], Vec<[f32; 4]>)> {
+    let side = (width.min(height) * 0.3).clamp(14.0, 56.0);
+    if width < side || height < side {
+        return None;
+    }
+    let (cx, cy) = (x + width * 0.5, y + height * 0.5);
+    let plate = [cx - side * 0.5, cy - side * 0.5, side, side];
+    let (tri_w, tri_h) = (side * 0.42, side * 0.5);
+    // A triangle's centre of mass is a third of its width from its base.
+    let left = cx - tri_w / 3.0;
+    let top = cy - tri_h * 0.5;
+    let rows = tri_h.ceil().clamp(1.0, 64.0) as usize;
+    let row_h = tri_h / rows as f32;
+    let bars = (0..rows)
+        .map(|row| {
+            let middle = (row as f32 + 0.5) / rows as f32;
+            let reach = 1.0 - (2.0 * middle - 1.0).abs();
+            [left, top + row as f32 * row_h, tri_w * reach, row_h]
+        })
+        .collect();
+    Some((plate, bars))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -208,6 +251,9 @@ impl CardScene {
                                 scale: 1.0,
                             });
                         self.poster_failures.push(failure);
+                        if let Some(ms) = cards.duration(block.nonce) {
+                            self.append_video(target, ms, ch, cw, geometry, colors);
+                        }
                     }
                     CardBadgeState::Ready
                 }
@@ -317,6 +363,49 @@ impl CardScene {
                     self.decoration.push(quad(edge, colors.frame, 1.0));
                 }
             }
+        }
+    }
+}
+
+impl CardScene {
+    /// A video poster's play glyph over its middle, and its duration on its
+    /// foot's right, each over a backdrop so it reads on any picture.
+    fn append_video(
+        &mut self,
+        target: [f32; 4],
+        ms: u64,
+        ch: f32,
+        cw: f32,
+        geometry: &CardGeometry,
+        colors: &CardColors,
+    ) {
+        if let Some((plate, bars)) = play_glyph(target) {
+            if let Some(plate) = intersect(plate, geometry.clip) {
+                self.decoration.push(quad(plate, colors.background, 0.6));
+            }
+            for bar in bars {
+                if let Some(bar) = intersect(bar, geometry.clip) {
+                    self.decoration.push(quad(bar, colors.frame, 0.95));
+                }
+            }
+        }
+        let scale = 0.8;
+        let text = duration_label(ms);
+        let width = (text.len() as f32 + 1.0) * cw * scale;
+        let height = ch * scale;
+        let [x, y, w, h] = target;
+        if w < width + 4.0 || h < height + 4.0 {
+            return;
+        }
+        let rect = [x + w - width - 2.0, y + h - height - 2.0, width, height];
+        if let Some(clipped) = intersect(rect, geometry.clip) {
+            self.decoration.push(quad(clipped, colors.background, 0.75));
+            self.labels.push(CardLabel {
+                rect: clipped,
+                kind: CardLabelKind::Duration(ms),
+                tr: geometry.tr,
+                scale,
+            });
         }
     }
 }
@@ -617,6 +706,113 @@ mod tests {
         );
     }
 
+    /// A video card shows a play glyph inside its poster and its duration on
+    /// the poster's foot; any other card shows neither.
+    #[test]
+    fn a_video_card_shows_play_and_its_length() {
+        let (mut cards, snap, nonce) = crate::inline_cards::tests::fixture();
+        let mut frame = CardFrame::default();
+        cards.recognize_into(&snap, &mut frame);
+        let poster = kettle_core::ImageData::new_with_budget(
+            160,
+            90,
+            vec![255; 160 * 90 * 4],
+            &kettle_core::GraphicsBudget::previews(),
+        );
+        let scene_for = |cards: &InlineCards| {
+            let mut scene = CardScene::default();
+            scene.append(
+                cards,
+                &frame,
+                &snap,
+                &CardGeometry {
+                    grid_origin: [0.0, 0.0],
+                    cell: [8.0, 16.0],
+                    clip: [0.0, 0.0, 2000.0, 2000.0],
+                    tr: kettle_i18n::Translator::default(),
+                },
+                &CardColors {
+                    background: Rgb::new(10, 10, 10),
+                    frame: Rgb::new(255, 0, 0),
+                    selection: Rgb::new(0, 0, 255),
+                },
+            );
+            scene
+        };
+        cards.set_poster(nonce, poster.as_ref());
+        let plain = scene_for(&cards);
+        assert!(
+            plain
+                .labels
+                .iter()
+                .all(|label| !matches!(label.kind, CardLabelKind::Duration(_)))
+        );
+        cards.remove(nonce);
+        cards
+            .insert(
+                nonce,
+                crate::CardSpec {
+                    rows: 3,
+                    columns: 12,
+                    harness: crate::CardHarness::ClaudeHook,
+                    // The caption the fixture's terminal printed.
+                    caption: "diagram.png - raster 640x480".into(),
+                    poster: poster.as_ref().map(crate::CardPoster::new),
+                    duration_ms: Some(12_400),
+                },
+            )
+            .unwrap();
+        let mut frame = CardFrame::default();
+        cards.recognize_into(&snap, &mut frame);
+        let mut scene = CardScene::default();
+        scene.append(
+            &cards,
+            &frame,
+            &snap,
+            &CardGeometry {
+                grid_origin: [0.0, 0.0],
+                cell: [8.0, 16.0],
+                clip: [0.0, 0.0, 2000.0, 2000.0],
+                tr: kettle_i18n::Translator::default(),
+            },
+            &CardColors {
+                background: Rgb::new(10, 10, 10),
+                frame: Rgb::new(255, 0, 0),
+                selection: Rgb::new(0, 0, 255),
+            },
+        );
+        let duration: Vec<_> = scene
+            .labels
+            .iter()
+            .filter(|label| matches!(label.kind, CardLabelKind::Duration(_)))
+            .collect();
+        assert_eq!(duration.len(), 1);
+        assert_eq!(duration[0].text(), "0:12");
+        let target = scene.posters[0].test_rect();
+        let inside = |[x, y, w, h]: [f32; 4]| {
+            x >= target[0] - 0.01
+                && y >= target[1] - 0.01
+                && x + w <= target[0] + target[2] + 0.01
+                && y + h <= target[1] + target[3] + 0.01
+        };
+        assert!(inside(duration[0].rect), "on the poster");
+        let red: Vec<_> = scene
+            .decoration
+            .iter()
+            .filter(|quad| quad.color == [1.0, 0.0, 0.0, 0.95])
+            .collect();
+        assert!(red.len() >= 7, "a triangle a row at a time: {}", red.len());
+        assert!(red.iter().all(|quad| inside([
+            quad.pos[0],
+            quad.pos[1],
+            quad.size[0],
+            quad.size[1]
+        ])));
+        assert!(scene.decoration.len() > plain.decoration.len());
+        assert_eq!(duration_label(3_725_000), "1:02:05");
+        assert_eq!(duration_label(400), "0:00");
+    }
+
     /// The tip that a click opens a card shows on its foot, over a
     /// backdrop, only on the card holding it and only once its image is
     /// ready; only a registered card can hold it, and removing the card
@@ -691,6 +887,7 @@ mod tests {
                     harness: crate::CardHarness::ClaudeHook,
                     caption: "other.png - raster 2x1".into(),
                     poster: None,
+                    duration_ms: None,
                 },
             )
             .unwrap();
