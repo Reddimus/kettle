@@ -1850,10 +1850,13 @@ fn a_session_needs_a_decoder_and_a_video() {
     let mut child = grouped_worker();
     handshake(&mut child);
     send(&mut child, &play_open(&clip, (64, 64), 0));
-    assert_eq!(
-        receive(&mut child),
-        failure(FailureCode::BackendUnavailable)
-    );
+    // macOS tries Apple's decoder, which cannot read the stand-in file.
+    let without = failure(if cfg!(target_os = "macos") {
+        FailureCode::UnsupportedContainer
+    } else {
+        FailureCode::BackendUnavailable
+    });
+    assert_eq!(receive(&mut child), without);
     assert_eq!(exit_code(&mut child, 5 * SECOND), 0);
 
     let text = directory.path().join("notes.txt");
@@ -1878,14 +1881,21 @@ fn installed_ffmpeg() -> Option<std::path::PathBuf> {
     found.map(|ffmpeg| ffmpeg.named().to_path_buf())
 }
 
-/// A fixture clip whose frames carry their index, copied somewhere private.
+/// A fixture clip whose frames carry their index, copied somewhere private:
+/// the MP4, which Apple's decoder reads on macOS.
+#[cfg(target_os = "macos")]
 fn index_clip(directory: &std::path::Path) -> std::path::PathBuf {
-    let path = directory.join("index.mp4");
+    fixture_clip(directory, "index.mp4")
+}
+
+/// A fixture clip copied somewhere private: the WebM, which only ffmpeg
+/// reads, on macOS too.
+fn fixture_clip(directory: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let path = directory.join(name);
     std::fs::copy(
-        concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../kettle-media-native/tests/fixtures/video/index.mp4"
-        ),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../kettle-media-native/tests/fixtures/video")
+            .join(name),
         &path,
     )
     .unwrap();
@@ -1905,15 +1915,16 @@ fn grouped_worker_with_decoder(ffmpeg: &std::path::Path) -> Child {
         .unwrap()
 }
 
-/// With a real ffmpeg, a session plays every frame of the clip in order,
-/// confined to the file and its decoder, and ends.
+/// With a real ffmpeg, a session plays every frame of the WebM clip in
+/// order, confined to the file and its decoder, and ends; on macOS it gets
+/// there after Apple's decoder turns WebM down.
 #[test]
 fn real_ffmpeg_plays_a_session_to_its_end() {
     let Some(ffmpeg) = installed_ffmpeg() else {
         return;
     };
     let directory = kettle_test_support::private_tempdir("kettle-worker-session-");
-    let clip = index_clip(directory.path());
+    let clip = fixture_clip(directory.path(), "index.webm");
     let mut child = grouped_worker_with_decoder(&ffmpeg);
     handshake(&mut child);
     send(&mut child, &play_open(&clip, (64, 36), 2000));
@@ -1966,7 +1977,7 @@ fn a_quiet_parent_s_session_leaves_no_decoder_behind() {
         return;
     };
     let directory = kettle_test_support::private_tempdir("kettle-worker-session-");
-    let clip = index_clip(directory.path());
+    let clip = fixture_clip(directory.path(), "index.webm");
     let mut child = grouped_worker_with_decoder(&ffmpeg);
     let group = child.id() as libc::pid_t;
     handshake(&mut child);
@@ -2149,5 +2160,62 @@ fn a_session_whose_first_frame_never_comes_times_out() {
         }
     }
     assert!(started.elapsed() >= 5 * SECOND - Duration::from_millis(100));
+    assert_eq!(exit_code(&mut child, 5 * SECOND), 0);
+}
+
+/// On macOS a session plays an MP4 through Apple's decoder inside the
+/// confined worker, with no external decoder: every frame in order, each on
+/// the clip's own time, and its index where it should be.
+#[cfg(target_os = "macos")]
+#[test]
+fn apples_decoder_plays_a_session_in_the_worker() {
+    let directory = kettle_test_support::private_tempdir("kettle-worker-session-");
+    let clip = index_clip(directory.path());
+    let mut child = grouped_worker();
+    handshake(&mut child);
+    send(&mut child, &play_open(&clip, (32, 32), 1000));
+    let frames = Frames::of(&mut child);
+    let opened = match frames.next(5 * SECOND) {
+        Some(Frame::Opened(opened)) => opened,
+        other => panic!("not opened: {other:?}"),
+    };
+    assert_eq!(
+        (opened.width, opened.height, opened.start_ms),
+        (32, 18, 1000)
+    );
+    let first = video_frame(frames.next(5 * SECOND));
+    assert_eq!(first.pts_ms, 1000);
+    assert_eq!(
+        frames.next(SECOND),
+        Some(Frame::PlayState(PlayState::Paused))
+    );
+    command(&mut child, PlayCommand::Play);
+    assert_eq!(
+        frames.next(SECOND),
+        Some(Frame::PlayState(PlayState::Playing))
+    );
+    let mut shown = vec![first];
+    loop {
+        match frames.next(5 * SECOND) {
+            Some(Frame::VideoFrame(frame)) => shown.push(frame),
+            Some(Frame::PlayState(PlayState::Ended)) => break,
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    assert_eq!(
+        shown.iter().map(|frame| frame.pts_ms).collect::<Vec<_>>(),
+        (10..40).map(|index| index * 100).collect::<Vec<_>>()
+    );
+    for frame in &shown {
+        // Bit 0 of the index: the top-left block, white for odd.
+        let (x, y) = (32 / 6, 18 / 4);
+        let red = frame.rgba[((y * 32 + x) * 4) as usize];
+        assert_eq!(
+            red > 128,
+            (frame.pts_ms / 100) % 2 == 1,
+            "frame at {}",
+            frame.pts_ms
+        );
+    }
     assert_eq!(exit_code(&mut child, 5 * SECOND), 0);
 }

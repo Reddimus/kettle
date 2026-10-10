@@ -1,7 +1,8 @@
 //! Apple's decoder on the shared fixtures: each frame is the one at the
 //! time it reports, within the tolerance it reports; a single instant is
 //! exact; a rotated track is shown upright, read as ffmpeg reads it; WebM is
-//! left to the next decoder, and the chain hands it there.
+//! left to the next decoder, and the chain hands it there. A session plays
+//! each frame in order, timed as the frame it is, at its size and rate.
 #![cfg(all(target_os = "macos", feature = "avfoundation"))]
 
 use std::fs::File;
@@ -9,13 +10,14 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use kettle_media::video::{
-    DecodedStills, StillsPlan, VideoContainer, VideoDecoder, VideoInput, sniff_video_container,
+    DecodedStills, PlayGate, PlayRequest, StillsPlan, VideoContainer, VideoDecoder, VideoInput,
+    VideoPlayer, sniff_video_container,
 };
 use kettle_media::{FailureCode, PathIdentity, VideoCodec, VideoInfo};
 use kettle_media_native::avfoundation::AvFoundation;
 
 mod support;
-use support::frame_index;
+use support::{frame_index, frame_index_mirrored};
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -180,6 +182,17 @@ fn a_rotated_track_is_shown_upright() {
     assert_eq!(frame_index(&frame.rgba, 18, 32, true), 20);
 }
 
+/// A track whose display transform mirrors it shows mirrored, upright.
+#[test]
+fn a_mirrored_track_is_shown_mirrored() {
+    let clip = Clip::fixture("mirrored.mp4");
+    let (result, seen) = take(&AvFoundation, &clip, &[2000], (64, 36));
+    let info = seen.unwrap();
+    assert_eq!((info.width, info.height, info.rotation), (64, 36, 0));
+    let frame = &result.unwrap().frames[0];
+    assert_eq!(frame_index_mirrored(&frame.rgba, 64, 36), 20);
+}
+
 /// WebM is not AVFoundation's: it is left to the next decoder, which the
 /// chain hands it to; with none, the chain says it has no decoder for it.
 #[test]
@@ -209,4 +222,140 @@ fn a_truncated_clip_is_refused() {
         ),
         "{result:?}"
     );
+}
+
+/// Every frame of a session opened on `name`, within `room`, from
+/// `start_ms`, at most `max_fps_milli`: its size, and each frame's time and
+/// index.
+fn played(
+    name: &str,
+    room: (u32, u32),
+    start_ms: u64,
+    max_fps_milli: u32,
+) -> ((u32, u32), Vec<(u64, u32)>) {
+    let clip = Clip::fixture(name);
+    let mut playback = AvFoundation
+        .play(
+            clip.input(),
+            PlayRequest {
+                max_width: room.0,
+                max_height: room.1,
+                start_ms,
+                max_fps_milli,
+            },
+            Instant::now() + Duration::from_secs(10),
+        )
+        .unwrap_or_else(|failure| panic!("{name}: {failure:?}"));
+    let size = (playback.opened.width, playback.opened.height);
+    assert_eq!(playback.opened.start_ms, start_ms, "{name}");
+    let gate = PlayGate::default();
+    gate.play();
+    let mut frames = Vec::new();
+    let mut rgba = vec![0; size.0 as usize * size.1 as usize * 4];
+    while let Some(pts) = playback.frames.next_frame(&mut rgba, &gate).unwrap() {
+        assert!(rgba.as_chunks::<4>().0.iter().all(|pixel| pixel[3] == 255));
+        let index = match name {
+            "rotated.mp4" => frame_index(&rgba, size.0, size.1, true),
+            "mirrored.mp4" => frame_index_mirrored(&rgba, size.0, size.1),
+            _ => frame_index(&rgba, size.0, size.1, false),
+        };
+        frames.push((pts, index));
+        assert!(frames.len() <= 100, "a session that never ends");
+    }
+    (size, frames)
+}
+
+/// A session plays every frame from where it starts, each timed as the
+/// frame it shows, fitted to its room, upright, and at most the rate asked.
+#[test]
+fn a_session_plays_each_frame_in_order() {
+    let all: Vec<(u64, u32)> = (0..40)
+        .map(|index| (u64::from(index) * 100, index))
+        .collect();
+    assert_eq!(
+        played("index.mp4", (64, 64), 0, 30_000),
+        ((64, 36), all.clone())
+    );
+    assert_eq!(
+        played("index.mp4", (32, 32), 2000, 30_000),
+        ((32, 18), all[20..].to_vec())
+    );
+    assert_eq!(
+        played("rotated.mp4", (64, 64), 0, 10_000),
+        ((36, 64), all.clone())
+    );
+    // Mirrored left to right, as the stills show it too.
+    assert_eq!(
+        played("mirrored.mp4", (64, 64), 0, 10_000),
+        ((64, 36), all.clone())
+    );
+    let (size, halved) = played("index.mp4", (64, 36), 0, 5_000);
+    assert_eq!(size, (64, 36));
+    assert_eq!(
+        halved.iter().map(|(pts, _)| *pts).collect::<Vec<_>>(),
+        (0..20).map(|index| index * 200).collect::<Vec<_>>()
+    );
+    assert!(halved.iter().all(
+        |(pts, index)| u64::from(*index) * 100 <= *pts && *pts < u64::from(*index) * 100 + 200
+    ));
+}
+
+/// A session asked to start past the last frame starts on it, the video's
+/// last frame when the clip's sound runs six seconds longer, and at a rate
+/// slower than the video's too.
+#[test]
+fn a_session_past_the_end_shows_the_last_frame() {
+    // AVFoundation counts the sound's length a little short of ffprobe's.
+    for (name, start_ms, at_least_ms, max_fps_milli) in [
+        ("index.mp4", 9000, 4000, 30_000),
+        ("long-audio.mp4", 9900, 9000, 30_000),
+        ("index.mp4", 9000, 4000, 5_000),
+        ("long-audio.mp4", 9900, 9000, 5_000),
+    ] {
+        let clip = Clip::fixture(name);
+        let mut playback = AvFoundation
+            .play(
+                clip.input(),
+                PlayRequest {
+                    max_width: 64,
+                    max_height: 36,
+                    start_ms,
+                    max_fps_milli,
+                },
+                Instant::now() + Duration::from_secs(10),
+            )
+            .unwrap();
+        assert!(playback.opened.info.duration_ms >= at_least_ms, "{name}");
+        assert_eq!(playback.opened.start_ms, 3900, "{name}");
+        let gate = PlayGate::default();
+        let mut rgba = vec![0; 64 * 36 * 4];
+        assert_eq!(
+            playback.frames.next_frame(&mut rgba, &gate),
+            Ok(Some(3900)),
+            "{name}"
+        );
+        assert_eq!(frame_index(&rgba, 64, 36, false), 39, "{name}");
+        assert_eq!(
+            playback.frames.next_frame(&mut rgba, &gate),
+            Ok(None),
+            "{name}"
+        );
+    }
+}
+
+/// A session on WebM is left to the next decoder.
+#[test]
+fn a_webm_session_is_left_to_the_next_decoder() {
+    let clip = Clip::fixture("index.webm");
+    let opened = AvFoundation.play(
+        clip.input(),
+        PlayRequest {
+            max_width: 64,
+            max_height: 36,
+            start_ms: 0,
+            max_fps_milli: 30_000,
+        },
+        Instant::now() + Duration::from_secs(10),
+    );
+    assert_eq!(opened.err(), Some(FailureCode::UnsupportedContainer));
 }

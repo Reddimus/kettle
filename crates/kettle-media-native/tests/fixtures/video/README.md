@@ -1,6 +1,6 @@
 # Video fixtures
 
-Five clips of the same picture: 64x36, 10 frames a second for 4 s (40
+Six clips of the same picture: 64x36, 10 frames a second for 4 s (40
 frames). Frame N shows its index in six blocks, three across and two down,
 read left to right and top to bottom as bits 0 to 5 of N: white (luma 235)
 for a one, black (16) for a zero. A block's centre survives scaling, and its
@@ -18,6 +18,9 @@ frame a decoder returned. They were made on 2026-10-10 with Homebrew's ffmpeg
 - `rotated.mp4`: `index.mp4` with a display matrix turning it 90 degrees
   counterclockwise to show, written by `-display_rotation 90 -i index.mp4
   -c copy -map_metadata -1 -fflags +bitexact`.
+- `mirrored.mp4`: `index.mp4` with a display matrix mirroring it left to
+  right, written by `-display_hflip -i index.mp4 -c copy -map_metadata -1
+  -fflags +bitexact`.
 - `segments.mp4`: nine one-second segments, segment N showing N in the same
   blocks, H.264 with keyframes only where every other pair of segments meets
   (0, 2, 4, 6 and 8 s), so the middle of an odd segment has a keyframe half a
@@ -41,4 +44,5 @@ frame a decoder returned. They were made on 2026-10-10 with Homebrew's ffmpeg
 | rotated.mp4 | 4117 | `fe665abfb89c63b567879cb42ba80028a9ab10df007e8c21285ac37f7052eca7` |
 | unsized.webm | 2795 | `4759f8fbd8447efcd1303c7ee101fff0737aa1a5bd4133eaf08d72f062ddd946` |
 | segments.mp4 | 4224 | `78ebea18da005ef402680afbf333bac3db4aa5e9e8f73f5c43e86d3f613705ac` |
+| mirrored.mp4 | 4117 | `3e7ee2243962b9cc7fc3ffa6c6459499660be6cee2b9a8fb783290e671234ffc` |
 | long-audio.mp4 | 5462 | `6f5b60a7e3ba603cd9052093893df960f3c8c77bc93a1ea700fe6720096d0e09` |

@@ -354,7 +354,9 @@ Reports that fit any of these are welcome:
   `setpgid`, so it cannot leave its group either. On macOS, MP4 and QuickTime
   are read first by AVFoundation inside the worker, opened by descriptor
   with references outside the file forbidden; decoding runs in Apple's
-  decoder service, demuxing in the worker under its limits. A video the user
+  decoder service, demuxing in the worker under its limits. A session reads
+  them the same way, the decoder service scaling each frame, so nothing is
+  drawn in the worker and its sandbox grants no GPU. A video the user
   plays streams from one ffmpeg run per session, held to all of the above
   but the deadline: video only, read a whole frame at a time (output ending
   inside a frame fails the session), and within a processor-time limit set
