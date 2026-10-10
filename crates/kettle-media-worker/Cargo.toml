@@ -25,8 +25,9 @@ kettle-media.workspace = true
 libc = "0.2"
 # What renders each job, in safe code.
 kettle-media-render.workspace = true
-# The external video decoder, trusted and run contained.
-kettle-media-native.workspace = true
+# The video decoders: Apple's own on macOS, and the external one, trusted
+# and run contained.
+kettle-media-native = { workspace = true, features = ["avfoundation"] }
 
 [dev-dependencies]
 kettle-test-support.workspace = true

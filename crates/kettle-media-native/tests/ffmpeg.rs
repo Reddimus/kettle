@@ -16,6 +16,9 @@ use kettle_media::video::{
 use kettle_media::{FailureCode, PathIdentity, VideoCodec, VideoInfo};
 use kettle_media_native::ffmpeg::Ffmpeg;
 
+mod support;
+use support::frame_index;
+
 fn later() -> Instant {
     Instant::now() + Duration::from_secs(20)
 }
@@ -68,6 +71,10 @@ struct Answer {
     decodes: bool,
     /// Never answers.
     hangs: bool,
+    /// Its codec list fails, empty.
+    codecs_fail: bool,
+    /// Its codec list never comes.
+    codecs_hang: bool,
 }
 
 const GOOD: Answer = Answer {
@@ -76,6 +83,8 @@ const GOOD: Answer = Answer {
     status: 0,
     decodes: true,
     hangs: false,
+    codecs_fail: false,
+    codecs_hang: false,
 };
 
 impl Fake {
@@ -88,16 +97,17 @@ impl Fake {
             quoted(packets),
             quoted(description),
         );
-        let codecs = if answer.decodes {
-            " DEV.LS h264 H.264"
-        } else {
-            " ..V.L. h264 H.264"
+        let codecs = match (answer.codecs_fail, answer.decodes) {
+            _ if answer.codecs_hang => "exec /bin/sleep 30",
+            (true, _) => "exit 1",
+            (false, true) => "printf '%s\\n' ' DEV.LS h264 H.264'; exit 0",
+            (false, false) => "printf '%s\\n' ' ..V.L. h264 H.264'; exit 0",
         };
         let ffmpeg = if answer.hangs {
             format!("{}\nexec /bin/sleep 30", log("ffmpeg"))
         } else {
             format!(
-                "{log}\ncase \"$*\" in *-codecs*) printf '%s\\n' '{codecs}'; exit 0 ;; esac\n\
+                "{log}\ncase \"$*\" in *-codecs*) {codecs} ;; esac\n\
                  w=0; h=0\n\
                  for arg in \"$@\"; do case \"$arg\" in scale=*) v=${{arg#scale=}}; w=${{v%%:*}}; v=${{v#*:}}; h=${{v%%:*}} ;; esac; done\n\
                  n=$((w * h - {short})); i=0\n\
@@ -261,7 +271,8 @@ fn stills_take_the_frame_showing_by_its_own_timestamp() {
     assert_eq!(probes.len(), 2, "a description, then the packets");
     assert_eq!(
         arg_after(&probes[1], "-read_intervals"),
-        Some("0.125000%1.125000,0.375000%1.375000,0.625000%1.625000,0.875000%1.875000")
+        Some("0.125000%3.325000,0.375000%3.575000,0.625000%3.825000,0.875000%4.075000"),
+        "32 frames past each instant"
     );
     let decodes = fake.calls("ffmpeg");
     assert_eq!(
@@ -327,11 +338,66 @@ fn misframed_output_is_refused() {
             },
             FailureCode::CodecUnavailable,
         ),
+        // A codec list that fails says nothing about the codec.
+        (
+            Answer {
+                short: 1,
+                decodes: false,
+                codecs_fail: true,
+                ..GOOD
+            },
+            FailureCode::RenderParse,
+        ),
     ] {
         let fake = Fake::new(DESCRIPTION, PACKETS, answer);
         let (result, _) = take(&fake.decoder(), &clip, &[125], (8, 6), later());
         assert_eq!(result.unwrap_err(), failure);
     }
+}
+
+/// At one frame a second the packets are read 32 seconds past an instant,
+/// so frames a reordered stream stores late are still seen.
+#[test]
+fn slow_streams_read_further_past_each_instant() {
+    let slow: Vec<String> = DESCRIPTION
+        .iter()
+        .map(|line| line.replace("\"10/1\"", "\"1/1\""))
+        .collect();
+    let slow: Vec<&str> = slow.iter().map(String::as_str).collect();
+    let fake = Fake::new(&slow, PACKETS, GOOD);
+    let clip = Clip::mp4();
+    let (result, _) = take(&fake.decoder(), &clip, &[500], (8, 6), later());
+    result.unwrap();
+    assert_eq!(
+        arg_after(&fake.calls("ffprobe")[1], "-read_intervals"),
+        Some("0.500000%32.500000")
+    );
+}
+
+/// A codec list still coming at the deadline makes the failure a timeout,
+/// not a guess about the codec.
+#[test]
+fn an_explanation_past_the_deadline_is_a_timeout() {
+    let fake = Fake::new(
+        DESCRIPTION,
+        PACKETS,
+        Answer {
+            short: 1,
+            codecs_hang: true,
+            ..GOOD
+        },
+    );
+    let clip = Clip::mp4();
+    let started = Instant::now();
+    let (result, _) = take(
+        &fake.decoder(),
+        &clip,
+        &[125],
+        (8, 6),
+        started + Duration::from_millis(1500),
+    );
+    assert_eq!(result.unwrap_err(), FailureCode::RenderTimeout);
+    assert!(started.elapsed() < Duration::from_secs(6));
 }
 
 /// A decoder still running at the deadline is stopped there.
@@ -455,12 +521,6 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// The frame a fixture pixel's red channel came from: luma `N*5+20`.
-fn frame_index(red: u8) -> i64 {
-    let luma = f64::from(red) * 219.0 / 255.0 + 16.0;
-    ((luma - 20.0) / 5.0).round() as i64
-}
-
 fn installed() -> Option<Ffmpeg> {
     let found = Ffmpeg::search(std::env::var_os("HOME").as_deref().map(Path::new));
     if found.is_none() {
@@ -511,7 +571,7 @@ fn real_ffmpeg_takes_the_frames_showing() {
             stills
                 .frames
                 .iter()
-                .map(|frame| frame_index(frame.rgba[0]))
+                .map(|frame| frame_index(&frame.rgba, size.0, size.1, name == "rotated.mp4"))
                 .collect::<Vec<_>>(),
             [6, 20, 33, 39],
             "{name}"

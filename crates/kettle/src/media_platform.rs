@@ -102,8 +102,18 @@ fn guard_pipe_writes() -> std::io::Result<()> {
     crate::exec::block_sigpipe_for_current_thread()
 }
 
+/// The external video decoder the worker is told of: the user's own ffmpeg,
+/// found only in the fixed places and the Nix profile under `HOME`, never in
+/// `PATH`, and only when trusted. The worker trusts it again before use.
+#[cfg(unix)]
+fn decoder() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    kettle_media_native::ffmpeg::Ffmpeg::search(home.as_deref())
+        .map(|found| found.path().to_path_buf())
+}
+
 /// Start the worker with `kettle_media`'s command, leading a process group of
-/// its own.
+/// its own, its environment empty but for the decoder it may use.
 #[cfg(unix)]
 fn spawn(path: &Path) -> std::io::Result<SpawnedWorker> {
     if children_reap_themselves()? {
@@ -111,7 +121,11 @@ fn spawn(path: &Path) -> std::io::Result<SpawnedWorker> {
             "SIGCHLD is ignored, so a worker could be reaped before its group is killed",
         ));
     }
-    let mut child = kettle_media::client::worker_command(path).spawn()?;
+    let mut command = kettle_media::client::worker_command(path);
+    if let Some(decoder) = decoder() {
+        command.env(kettle_media::video::DECODER_ENV, decoder);
+    }
+    let mut child = command.spawn()?;
     let pipes = (child.stdin.take(), child.stdout.take());
     let mut process = GroupProcess {
         child,
@@ -1149,9 +1163,17 @@ mod tests {
 
         #[test]
         fn the_worker_starts_with_nothing_inherited() {
-            // `env` itself as the worker: an empty environment prints nothing.
+            // `env` itself as the worker: nothing is inherited, and the only
+            // variable is the decoder, when a trusted one is installed.
             let mut worker = spawn(Path::new("/usr/bin/env")).unwrap();
-            assert_eq!(all_output(&mut worker), "");
+            let expected = decoder().map_or_else(String::new, |decoder| {
+                format!(
+                    "{}={}\n",
+                    kettle_media::video::DECODER_ENV,
+                    decoder.display()
+                )
+            });
+            assert_eq!(all_output(&mut worker), expected);
             assert_eq!(wait_exit(worker.process.as_mut()), WorkerExit::Code(0));
             // `pwd`: the working directory is the root.
             let mut worker = spawn(Path::new("/bin/pwd")).unwrap();

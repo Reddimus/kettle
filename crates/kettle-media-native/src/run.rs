@@ -109,8 +109,10 @@ pub(crate) fn run<A: AsRef<OsStr>>(
     let remaining = deadline.saturating_duration_since(Instant::now());
     let read = received.recv_timeout(remaining);
     let Ok(read) = read else {
+        // Killed and reaped; the reader is left to end with the pipe rather
+        // than waited for, in case anything else still holds it open.
         drop(running);
-        let _ = reader.join();
+        drop(reader);
         return Err(RunError::Deadline);
     };
     let _ = reader.join();

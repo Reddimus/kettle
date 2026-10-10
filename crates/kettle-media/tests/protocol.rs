@@ -997,9 +997,10 @@ fn a_stills_reply_carries_its_video_and_frame_times() {
             "fps",
             with(&|v| v.info.fps_milli = Some(MAX_VIDEO_FPS_MILLI + 1)),
         ),
+        ("a frame past its tolerance", with(&|v| v.tolerance_ms = 27)),
         (
-            "tolerance",
-            with(&|v| v.tolerance_ms = MAX_STILL_TOLERANCE_MS + 1),
+            "tolerance past the duration",
+            with(&|v| v.tolerance_ms = 12_001),
         ),
         ("zero width", with(&|v| v.info.width = 0)),
         ("wide", with(&|v| v.info.height = MAX_VIDEO_SIDE + 1)),
@@ -1027,9 +1028,11 @@ fn a_stills_reply_carries_its_video_and_frame_times() {
         bytes.extend_from_slice(&worse);
         let length = u32::try_from(bytes.len() - HEADER_BYTES).unwrap();
         bytes[7..11].copy_from_slice(&length.to_le_bytes());
-        assert!(
-            decode(&bytes, Direction::WorkerToParent).is_err(),
-            "{name} decodes"
+        let report = decode_with_stats(&bytes, Direction::WorkerToParent);
+        assert!(report.result.is_err(), "{name} decodes");
+        assert_eq!(
+            report.allocations.requested_bytes, 0,
+            "{name}: refused before any pixel is copied"
         );
     }
     // Unknown codec and container tags are refused.

@@ -20,6 +20,67 @@ kettle-media.workspace = true
 # decoder runs under (its seccomp filter or process limit).
 libc = "0.2"
 
+# AVFoundation, for the worker only: the GUI links this crate for its ACL
+# check and must not load the frameworks. Defaults off, with only the
+# classes the decoder calls.
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = { version = "0.6", optional = true }
+objc2 = { version = "0.6", optional = true }
+objc2-av-foundation = { version = "0.3.2", optional = true, default-features = false, features = [
+    "std",
+    "block2",
+    "objc2-core-foundation",
+    "objc2-core-graphics",
+    "objc2-core-media",
+    "AVAsset",
+    "AVAssetImageGenerator",
+    "AVAssetTrack",
+    "AVAsynchronousKeyValueLoading",
+    "AVMediaFormat",
+    "AVTime",
+] }
+objc2-core-foundation = { version = "0.3.2", optional = true, default-features = false, features = [
+    "std",
+    "CFCGTypes",
+] }
+objc2-core-graphics = { version = "0.3.2", optional = true, default-features = false, features = [
+    "std",
+    "CGBitmapContext",
+    "CGColorSpace",
+    "CGContext",
+    "CGImage",
+] }
+objc2-core-media = { version = "0.3.2", optional = true, default-features = false, features = [
+    "std",
+    "CMBase",
+    "CMFormatDescription",
+    "CMTime",
+] }
+objc2-foundation = { version = "0.3.2", optional = true, default-features = false, features = [
+    "std",
+    "NSArray",
+    "NSDictionary",
+    "NSEnumerator",
+    "NSError",
+    "NSObject",
+    "NSString",
+    "NSURL",
+    "NSValue",
+] }
+
+[features]
+# Apple's decoder for MP4 and QuickTime, tried before the external one.
+# Only the worker turns it on.
+avfoundation = [
+    "dep:block2",
+    "dep:objc2",
+    "dep:objc2-av-foundation",
+    "dep:objc2-core-foundation",
+    "dep:objc2-core-graphics",
+    "dep:objc2-core-media",
+    "dep:objc2-foundation",
+]
+
 [dev-dependencies]
 kettle-test-support.workspace = true
 tempfile = "3"

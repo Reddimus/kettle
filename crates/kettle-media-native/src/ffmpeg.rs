@@ -27,8 +27,7 @@ use kettle_media::video::{
     DECODER_ENV, DecodedFrame, DecodedStills, StillsPlan, VideoContainer, VideoDecoder, VideoInput,
 };
 use kettle_media::{
-    FailureCode, MAX_STILL_TOLERANCE_MS, MAX_VIDEO_FPS_MILLI, MAX_VIDEO_SIDE, StillSample,
-    VideoCodec, VideoInfo,
+    FailureCode, MAX_VIDEO_FPS_MILLI, MAX_VIDEO_SIDE, StillSample, VideoCodec, VideoInfo,
 };
 
 use crate::reopen::reopen;
@@ -53,8 +52,11 @@ const MAX_SCAN_BYTES: usize = 6 << 20;
 /// Most packets a list may hold.
 const MAX_PACKETS: usize = 400_000;
 /// How far past an instant its packets are read, to take in frames stored
-/// out of order.
+/// out of order: a second, or 32 frames when that is longer, past the 16
+/// frames H.264 and HEVC may reorder. ffprobe stops at the first packet past
+/// the window, which a reordered stream stores ahead of earlier frames.
 const WINDOW_US: i64 = 1_000_000;
+const WINDOW_FRAMES: u64 = 32;
 /// Most bytes of ffmpeg's codec list, read only to explain a failure.
 const MAX_CODECS_BYTES: usize = 1 << 20;
 /// Decoder threads per run. More multiplies memory under the worker's
@@ -138,12 +140,15 @@ fn codec(name: &str) -> VideoCodec {
     }
 }
 
-/// A rational number from ffprobe, `a/b` or `a:b`, both parts positive.
+/// A rational number from ffprobe, `a/b` or `a:b`, both parts positive and
+/// within 32 bits, as ffmpeg's own rationals are; anything wider is no
+/// rational ffmpeg wrote. The bound keeps every product below in range.
 fn ratio(value: &str) -> Option<(u64, u64)> {
     let (numerator, denominator) = value.split_once(['/', ':'])?;
     let numerator: u64 = numerator.parse().ok()?;
     let denominator: u64 = denominator.parse().ok()?;
-    (numerator > 0 && denominator > 0).then_some((numerator, denominator))
+    let part = 1..=u64::from(i32::MAX.unsigned_abs());
+    (part.contains(&numerator) && part.contains(&denominator)).then_some((numerator, denominator))
 }
 
 /// Seconds from ffprobe as whole microseconds, truncated past the sixth
@@ -415,6 +420,17 @@ impl Timeline {
         self.starts[after.saturating_sub(1)]
     }
 
+    /// The earliest frame starting in the same whole microsecond as the one
+    /// at `tick`, which a seek to that microsecond returns.
+    fn first_in_microsecond(&self, tick: i64, clock: &Clock) -> i64 {
+        let mut at = self.starts.partition_point(|&start| start < tick);
+        let micro = clock.micros(tick);
+        while at > 0 && clock.micros(self.starts[at - 1]) == micro {
+            at -= 1;
+        }
+        self.starts.get(at).copied().unwrap_or(tick)
+    }
+
     /// The keyframe at or before `tick`, or the frame itself when none is.
     fn keyframe(&self, tick: i64) -> i64 {
         let after = self.keys.partition_point(|&key| key <= tick);
@@ -625,14 +641,14 @@ impl Ffmpeg {
     /// stream itself.
     fn explain(&self, codec: &str, deadline: Instant) -> FailureCode {
         let args = ["-hide_banner", "-loglevel", "error", "-codecs"];
-        let Ok(ran) = run(&self.ffmpeg, &args, None, MAX_CODECS_BYTES, deadline) else {
-            return FailureCode::RenderParse;
-        };
-        let text = String::from_utf8_lossy(&ran.stdout);
-        if decodes(&text, codec) {
-            FailureCode::RenderParse
-        } else {
-            FailureCode::CodecUnavailable
+        match run(&self.ffmpeg, &args, None, MAX_CODECS_BYTES, deadline) {
+            Err(error) => failure(error),
+            // A list that did not come back whole says nothing either way.
+            Ok(ran) if !ran.success || ran.overran => FailureCode::RenderParse,
+            Ok(ran) if decodes(&String::from_utf8_lossy(&ran.stdout), codec) => {
+                FailureCode::RenderParse
+            }
+            Ok(_) => FailureCode::CodecUnavailable,
         }
     }
 }
@@ -715,6 +731,9 @@ impl VideoDecoder for Ffmpeg {
         let timeline = match (scanned, clock) {
             (Some(timeline), _) => Some(timeline),
             (None, Some(clock)) => {
+                let window_us = i64::try_from(probe.frame_ms() * WINDOW_FRAMES * 1000)
+                    .unwrap_or(i64::MAX)
+                    .max(WINDOW_US);
                 let mut instants: Vec<u64> = wanted.times_ms.clone();
                 instants.sort_unstable();
                 instants.dedup();
@@ -722,7 +741,7 @@ impl VideoDecoder for Ffmpeg {
                     .iter()
                     .map(|&ms| {
                         let at = clock.micros(clock.tick_at(ms));
-                        format!("{}%{}", seconds(at), seconds(at.saturating_add(WINDOW_US)))
+                        format!("{}%{}", seconds(at), seconds(at.saturating_add(window_us)))
                     })
                     .collect();
                 self.packets(&input, index, &intervals, deadline)?
@@ -747,6 +766,9 @@ impl VideoDecoder for Ffmpeg {
                     } else {
                         shown
                     };
+                    // A seek in whole microseconds cannot pass over a frame
+                    // starting earlier in the same microsecond.
+                    let tick = timeline.first_in_microsecond(tick, &clock);
                     (Seek::Frame(tick), clock.ms(tick, duration_ms))
                 }
                 None => {
@@ -793,9 +815,9 @@ impl VideoDecoder for Ffmpeg {
         Ok(DecodedStills {
             info,
             frames,
-            tolerance_ms: u32::try_from(tolerance_ms)
-                .unwrap_or(u32::MAX)
-                .min(MAX_STILL_TOLERANCE_MS),
+            // Within the duration: every time is, and an untimed stream's
+            // frame length may not be.
+            tolerance_ms: u32::try_from(tolerance_ms.min(duration_ms)).unwrap_or(u32::MAX),
         })
     }
 }
@@ -817,7 +839,16 @@ mod tests {
         assert_eq!(seconds(-1_500_000), "-1.500000");
         assert_eq!(ratio("30000/1001"), Some((30000, 1001)));
         assert_eq!(ratio("1:1"), Some((1, 1)));
-        for bad in ["0/0", "30/0", "0:1", "N/A", "30"] {
+        assert_eq!(ratio("2147483647/1"), Some((2_147_483_647, 1)));
+        for bad in [
+            "0/0",
+            "30/0",
+            "0:1",
+            "N/A",
+            "30",
+            "2147483648/1",
+            "18446744073709551615/18446744073709551615",
+        ] {
             assert_eq!(ratio(bad), None, "{bad}");
         }
     }
@@ -953,6 +984,20 @@ format.duration="10.000000"
         assert_eq!(timeline.keyframe(3000), 0);
         assert_eq!(timeline.keyframe(6000), 5000);
         assert_eq!(parse_packets("N/A,K__\n0,___\n").unwrap(), None);
+        // Frames under a microsecond apart: a seek cannot tell them apart,
+        // so the earlier is the one asked for, and said.
+        let fine = Timeline {
+            starts: vec![0, 999_000, 999_900],
+            keys: vec![0],
+        };
+        let nanos = Clock {
+            numerator: 1,
+            denominator: 1_000_000_000,
+            start_us: 0,
+        };
+        assert_eq!(fine.shown(nanos.tick_at(1)), 999_900);
+        assert_eq!(fine.first_in_microsecond(999_900, &nanos), 999_000);
+        assert_eq!(fine.first_in_microsecond(0, &nanos), 0);
         assert_eq!(parse_packets("\n").unwrap(), None);
     }
 

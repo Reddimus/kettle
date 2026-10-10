@@ -1,10 +1,13 @@
 # Video fixtures
 
 Four clips of the same picture: 64x36, 10 frames a second for 4 s (40
-frames). Frame N is a flat gray whose luma is `N*5+20`, so a test can tell
-from one pixel which frame a decoder returned. They were made on 2026-10-10
-with Homebrew's ffmpeg 9.0.2 (libx264, libvpx) from the lavfi source
-`color=c=black:s=64x36:r=10:d=4,format=yuv420p,geq=lum='N*5+20':cb=128:cr=128`:
+frames). Frame N shows its index in six blocks, three across and two down,
+read left to right and top to bottom as bits 0 to 5 of N: white (luma 235)
+for a one, black (16) for a zero. A block's centre survives scaling, and its
+white or black survives any decoder's tone curve, so a test can tell which
+frame a decoder returned. They were made on 2026-10-10 with Homebrew's ffmpeg
+9.0.2 (libx264, libvpx) from the lavfi source
+`color=c=black:s=64x36:r=10:d=4,format=yuv420p,geq=lum='if(mod(floor(N/pow(2,floor(X*3/W)+3*floor(Y*2/H))),2),235,16)':cb=128:cr=128`:
 
 - `index.mp4`: H.264 High in MP4, keyframes every 15 frames, two B-frames:
   `-c:v libx264 -preset veryslow -qp 1 -g 15 -bf 2 -pix_fmt yuv420p -tag:v avc1
@@ -21,7 +24,7 @@ with Homebrew's ffmpeg 9.0.2 (libx264, libvpx) from the lavfi source
 
 | File | Bytes | SHA-256 |
 | --- | --- | --- |
-| index.mp4 | 2608 | `3781d0ef705adb66a0fbec071130a0c798d878e0c265596e0f8139c350be8b8f` |
-| index.webm | 1901 | `552167ead9ec04762f13fc27c4a805c81f487e88d9e7203fddd8a9fc8d4b72f5` |
-| rotated.mp4 | 2608 | `231033eff1d60b79fec78c86301b9ef596696e3905b6717f484492d96a0b3331` |
-| unsized.webm | 1694 | `6d8912bb3b11f3f97c0a81a0df22faaa68fbeff9ae18429c7cd998f6e59165a1` |
+| index.mp4 | 4117 | `4ac5bc7783ee1e305f32272fbab83fbdc46c2a96bb72a992cf326f914c0d9b42` |
+| index.webm | 2925 | `28015bb902d6f4bcc99ba3fb6819e9960965a3fe546ff1dfd9ca7f2a7d181e78` |
+| rotated.mp4 | 4117 | `fe665abfb89c63b567879cb42ba80028a9ab10df007e8c21285ac37f7052eca7` |
+| unsized.webm | 2795 | `4759f8fbd8447efcd1303c7ee101fff0737aa1a5bd4133eaf08d72f062ddd946` |

@@ -1046,16 +1046,15 @@ impl<'a> Reader<'a> {
             }
             let has_audio = self.flag()?;
             let container = container_of(self.u8()?)?;
+            // At most sixteen, so both passes keep them: the borrowed pass
+            // validates the whole result before any pixel is copied.
             let n = self.count(usize::from(MAX_VIDEO_STILLS))?;
-            let mut samples = self.list(n)?;
+            let mut samples = Vec::with_capacity(n);
             for _ in 0..n {
-                let sample = StillSample {
+                samples.push(StillSample {
                     requested_ms: self.u64()?,
                     actual_ms: self.u64()?,
-                };
-                if self.owned {
-                    samples.push(sample);
-                }
+                });
             }
             let video = VideoStillsResult {
                 info: VideoInfo {
@@ -1071,11 +1070,7 @@ impl<'a> Reader<'a> {
                 samples,
                 tolerance_ms: self.u32()?,
             };
-            if self.owned {
-                video.validate()?;
-            } else {
-                video.info.validate()?;
-            }
+            video.validate()?;
             Some(video)
         } else if kind == Some(MediaKind::Video) {
             return Err(ValidationError::BadParams.into());

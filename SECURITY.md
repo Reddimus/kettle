@@ -212,9 +212,11 @@ Reports that fit any of these are welcome:
   that allocates past those caps, a decoder panic reached from hostile
   input, or rendered output that carries a transparent pixel's hidden color
   is in scope.
-- **External video decoder** — a video's stills come from the user's own
-  ffmpeg and ffprobe, never bundled. The worker uses only the binary the
-  parent names in its environment, never `PATH`, and trusts it only when
+- **External video decoder** — a video's stills come from Apple's
+  decoder on macOS or the user's own ffmpeg and ffprobe, never bundled.
+  Kettle's launcher looks for ffmpeg only in fixed places and the Nix
+  profile under `HOME`, never `PATH`; the worker uses only the binary the
+  parent names in its environment, and trusts it only when
   the file and every directory and link on the way to it belong to the user
   or root and no one else can write them (a sticky directory passes; on
   macOS the admin group counts as root, since its members are root through
@@ -226,8 +228,12 @@ Reports that fit any of these are welcome:
   input, stderr discarded, its output read to an exact size, and a
   deadline. On Linux a seccomp filter stops it from starting a process or
   leaving its process group or session; on macOS its process limit stops
-  it from starting a process, but it could still leave its group itself,
-  which only the planned worker sandbox can prevent. Running a binary from
+  it from starting a process (a decoder is never run as root, whom the
+  limit does not bind), but it could still leave its group itself, which
+  only the planned worker sandbox can prevent. On macOS, MP4 and QuickTime
+  are read first by AVFoundation inside the worker, opened by descriptor
+  with references outside the file forbidden; decoding runs in Apple's
+  decoder service, demuxing in the worker under its limits. Running a binary from
   anywhere else, an argument a request or the media chose, a decoder that
   starts a process, reads another file, or outlives its job, or a frame
   accepted at the wrong size, is in scope.

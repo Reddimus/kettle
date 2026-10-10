@@ -289,11 +289,12 @@ fn an_animations_stills_cross_the_boundary() {
             .collect::<Vec<_>>(),
         [0, 300, 600]
     );
+    // Inline video bytes: no decoder reads them, decoders reading files.
     let mut mp4 = vec![0, 0, 0, 24];
     mp4.extend_from_slice(b"ftypisom\0\0\x02\0isomiso2");
     assert_eq!(
         only_reply(&job_of(JobKind::VideoStills(stills), &mp4)),
-        failure(FailureCode::BackendUnavailable)
+        failure(FailureCode::UnsupportedMedia)
     );
 }
 
@@ -446,10 +447,14 @@ fn a_videos_stills_come_from_the_decoder_the_parent_named() {
         "the held file's identity stands for the video"
     );
 
-    assert_eq!(
-        reply_from(worker(), &stills_of(&clip, sheet(4))),
-        failure(FailureCode::BackendUnavailable)
-    );
+    // With no external decoder: Linux has none; macOS tries Apple's, which
+    // cannot read this stand-in file.
+    let without = failure(if cfg!(target_os = "macos") {
+        FailureCode::UnsupportedContainer
+    } else {
+        FailureCode::BackendUnavailable
+    });
+    assert_eq!(reply_from(worker(), &stills_of(&clip, sheet(4))), without);
     let Frame::Job(mut inline) = stills_of(&clip, sheet(4)) else {
         unreachable!()
     };
@@ -461,8 +466,40 @@ fn a_videos_stills_come_from_the_decoder_the_parent_named() {
     std::fs::set_permissions(&ffmpeg, std::fs::Permissions::from_mode(0o777)).unwrap();
     assert_eq!(
         reply_from(worker_with_decoder(&ffmpeg), &stills_of(&clip, sheet(4))),
-        failure(FailureCode::BackendUnavailable)
+        without,
+        "an untrusted decoder is no decoder"
     );
+}
+
+/// On macOS, Apple's decoder reads an MP4 inside the worker, under its
+/// limits, with no external decoder: each frame's time is a frame's own
+/// start, within the tolerance reported.
+#[cfg(target_os = "macos")]
+#[test]
+fn apples_decoder_reads_mp4_in_the_worker() {
+    let clips = kettle_test_support::private_tempdir("kettle-worker-clip-");
+    let clip = clips.path().join("index.mp4");
+    std::fs::copy(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../kettle-media-native/tests/fixtures/video/index.mp4"
+        ),
+        &clip,
+    )
+    .unwrap();
+    let Some(Frame::Rendered(rendered)) = reply_from(worker(), &stills_of(&clip, sheet(3))) else {
+        panic!("no stills from AVFoundation");
+    };
+    rendered.validate_as(MediaKind::Video).unwrap();
+    let video = rendered.video.unwrap();
+    assert_eq!(
+        (video.info.codec, video.info.duration_ms, video.info.width),
+        (kettle_media::VideoCodec::H264, 4000, 64)
+    );
+    for sample in &video.samples {
+        assert_eq!(sample.actual_ms % 100, 0, "{sample:?}");
+        assert!(sample.requested_ms.abs_diff(sample.actual_ms) <= u64::from(video.tolerance_ms));
+    }
 }
 
 /// A real ffmpeg, when one is installed, decodes through the worker under

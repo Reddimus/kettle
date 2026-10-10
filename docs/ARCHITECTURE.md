@@ -87,12 +87,17 @@ its first bytes, which classify it. An animated GIF, APNG or WebP is decoded
 here (`animation.rs`); a video container needs a decoder this crate does not
 have and returns `BackendUnavailable` unless the worker supplies one.
 
-`kettle-media-native` is that decoder, and the only crate besides the
-worker's early setup with unsafe code (libc calls, each with a SAFETY
-comment). It runs the user's own ffmpeg and ffprobe, never bundled or
-linked, found only where the parent names them in the worker's environment
-(`KETTLE_MEDIA_DECODER`), which no request can set, and trusted only when
-no one but the user or root could have put them there. Each run is a child
+`kettle-media-native` supplies the decoders, as `Decoders`: on macOS
+AVFoundation first for MP4 and QuickTime, behind the `avfoundation`
+feature only the worker turns on (the GUI links the crate for its ACL check
+and must not load the frameworks), then the user's own ffmpeg and ffprobe.
+Its unsafe code is libc and Objective-C calls, each with a SAFETY comment.
+AVFoundation demuxes in the worker and decodes in Apple's decoder service;
+it opens the held file by descriptor and returns each frame's actual time.
+ffmpeg and ffprobe are never bundled or linked: Kettle's launcher finds them
+in fixed places and names them in the worker's environment
+(`KETTLE_MEDIA_DECODER`), which no request can set, and they are trusted
+only when no one but the user or root could have put them there. Each run is a child
 of the worker in its process group, contained so it starts no process of its
 own, with a fixed argument list, a fresh descriptor of the held file as its
 only input, stderr discarded, its output read up to an exact size and a
