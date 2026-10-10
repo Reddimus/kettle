@@ -49,6 +49,18 @@ slowed down.
   is a JPEG tried at qualities 90 down to 50, then shrunk a quarter at a
   time to 320 pixels, until its whole MCP response fits 768 KiB.
 
+- **A lane's silent preview:** one stills job of eight frames, each at most
+  384 pixels on its longer side, laid four by two: at most 1556 by 780 pixels
+  (a square video), 4.9 MB of RGBA, 2.8 MB for a 16:9 one, held once per lane
+  on the preview account and drawn by UV rectangle, so its texture uploads
+  once. The reply is refused from its header past that sheet's size plus
+  64 KiB. Frames must come within two seconds of the user's gesture, queueing
+  and the worker's start included; a frame shows for between a twelfth of a
+  second and half a second, with no catching up, and none while the lane is
+  hidden. These are bounds, not measurements: the plan's S-K latency, CPU and
+  memory measurement of the preview was skipped for this release (no quiet
+  machine, as decided on 2026-10-02), so no budget is claimed to pass.
+
 Area is not a time model: filter cost per pixel varies by primitive, and
 path tessellation, font shaping/outline scratch and filter scratch buffers
 are not counted. File byte limits do not measure allocator capacity. The deadline
