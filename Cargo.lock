@@ -2235,6 +2235,7 @@ dependencies = [
  "merman",
  "merman-core",
  "merman-render",
+ "png",
  "pulldown-cmark",
  "resvg",
  "roughr-merman",

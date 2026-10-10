@@ -77,7 +77,13 @@ of one CommonMark document (pulldown-cmark, the version merman-render
 already locks), at most 32 of at most 64 KiB each in at most 1 MiB; its
 reply carries every page, the document as read and its digest beside the
 one page rendered, so later pages render from those bytes and one gallery
-is one version of the file.
+is one version of the file. Video stills are laid out here too
+(`stills.rs`): which instants a job asks for, each frame's tile size, and the
+poster or sheet with each frame's time. The source is held rather than read
+(`source::Held`): an open descriptor, the identity it had when opened and
+its first bytes, which classify it. An animated GIF, APNG or WebP is decoded
+here (`animation.rs`); a video container needs a decoder this crate does not
+have and returns `BackendUnavailable` until the worker supplies one.
 Mermaid goes through merman 0.8.0, pinned exactly with its layout and
 painting family, under a resource-constrained policy and a two-second
 `OperationControl` deadline that starts before its fonts load. Kettle
