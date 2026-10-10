@@ -135,8 +135,14 @@ moves to it; and relative font sizes, from attributes and style sheets alike,
 are resolved against the inherited size to absolute pixels within the number
 bound, or left out; and admission, the layer checks and
 resvg follow unchanged. The rendered item keeps the Mermaid source as its
-source text and digest. Video is refused as unsupported until its
-renderer lands. The client's `render` runs one job in a
+source text and digest. A video's item keeps its file as its source and,
+as its digest, the first 64 KiB and the file's identity, with the
+`VideoInfo` the worker read (its own size, length, codec, rate, sound and
+container) beside the poster; no codec runs in the GUI, which only draws the
+poster, its play glyph and length, and compares bytes when it copies the
+file for the permitted player. Nothing plays in Kettle yet: the separate
+`VideoProbe` job, whose answer says whether Kettle can play a video, waits
+for the playback worker. The client's `render` runs one job in a
 fresh worker under startup and job deadlines, with the worker in its own
 process group, killed before it is reaped; `render_with_control` adds
 cancellation and one absolute deadline its caller owns. Nothing in the GUI

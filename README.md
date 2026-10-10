@@ -107,8 +107,8 @@ covers pane movement, tabs, search, and first-run troubleshooting.
 ## Agent previews
 
 Coding agents in a Kettle pane can show you images, SVG and Mermaid diagrams,
-and a Markdown file's diagrams as a gallery, without reading your screen or
-typing. Turn on Settings, Agents, Agent
+a Markdown file's diagrams as a gallery, and videos as their posters, without
+reading your screen or typing. Turn on Settings, Agents, Agent
 previews (`agent-display`), then:
 
 - Claude Code: turn on Claude Code previews; new panes offer Claude Code
@@ -116,8 +116,10 @@ previews (`agent-display`), then:
 - Codex: turn on Codex previews, or add the function `kettle agent-setup
   --print` prints (the palette's "Copy agent setup commands" copies it).
   Codex shows media when asked: say "show it in Kettle".
-- Any shell: `kettle show plot.png`, `kettle show notes.md`, or `kettle show
-  --mermaid < flow.mmd`, sends media to the pane's shelf.
+- Any shell: `kettle show plot.png`, `kettle show notes.md`, `kettle show
+  clip.webm`, or `kettle show --mermaid < flow.mmd`, sends media to the
+  pane's shelf. A video shows its middle frame, its length and what it is; a
+  card's menu opens it in QuickTime Player (macOS) or mpv (Linux).
 - Reading a video yourself: the full MCP server's `kettle_video_frames`, or
   `kettle video-frames clip.webm -o sheet.jpg`, returns a contact sheet of its
   frames, each labeled with its time, and an index of what each shows.
