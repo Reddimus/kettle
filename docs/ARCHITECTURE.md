@@ -688,7 +688,7 @@ has just shrunk paints nothing in its lane.
 Every shelf item keeps what it was rendered from (`media::ItemSource`): the
 job as a `JobSpec` (kind, theme, canvas, target, fonts, and its input), the
 source's digest, and, for an SVG or a diagram read from a file, its text as
-the worker read it (protocol 3's `exact_source`). Bytes a request carried
+the worker read it (the protocol's `exact_source`). Bytes a request carried
 are kept once, charged to the process preview account through
 `GraphicsBudget::reserve_retained_cpu`, and shared by the queue, the render
 lane and the shelf; a push whose bytes do not fit is refused as over

@@ -68,10 +68,14 @@ fn every_job_source_theme_target_and_result_roundtrips() {
         JobKind::VideoProbe,
         JobKind::VideoStills(VideoStills {
             count: 16,
-            max_edge: 2560,
+            max_edge: 4096,
             start_s: 2.0,
             end_s: Some(8.0),
             at_s: None,
+            layout: StillsLayout::Sheet {
+                cols: 4,
+                labels: true,
+            },
         }),
         JobKind::VideoStills(VideoStills {
             count: 1,
@@ -79,6 +83,7 @@ fn every_job_source_theme_target_and_result_roundtrips() {
             start_s: 0.0,
             end_s: None,
             at_s: Some(0.25),
+            layout: StillsLayout::Poster,
         }),
     ] {
         for canvas in [Canvas::Theme, Canvas::White, Canvas::Checker] {
@@ -449,13 +454,44 @@ fn input_caps_fonts_and_video_options() {
         start_s: 0.0,
         end_s: Some(9.0),
         at_s: None,
+        layout: StillsLayout::Sheet {
+            cols: 3,
+            labels: true,
+        },
     };
     assert!(good.validate().is_ok());
+    assert!(
+        VideoStills {
+            max_edge: kettle_media::MAX_VIDEO_JOB_EDGE,
+            ..good
+        }
+        .validate()
+        .is_ok(),
+        "a lane's edge, past a model's"
+    );
     for bad in [
         VideoStills { count: 0, ..good },
         VideoStills { count: 17, ..good },
         VideoStills {
-            max_edge: 2561,
+            max_edge: kettle_media::MAX_VIDEO_JOB_EDGE + 1,
+            ..good
+        },
+        VideoStills {
+            layout: StillsLayout::Poster,
+            ..good
+        },
+        VideoStills {
+            layout: StillsLayout::Sheet {
+                cols: 0,
+                labels: false,
+            },
+            ..good
+        },
+        VideoStills {
+            layout: StillsLayout::Sheet {
+                cols: 10,
+                labels: false,
+            },
             ..good
         },
         VideoStills {
@@ -884,13 +920,13 @@ fn a_replys_source_goes_with_its_kind() {
     assert!(decode(&bytes, Direction::WorkerToParent).is_err());
 }
 
-/// Neither end reads the other version's frames: a version 2 worker or
+/// Neither end reads the other version's frames: a version 3 worker or
 /// parent is restarted, never half understood, and so is a newer one.
 #[test]
 fn version_skew_either_way_is_restart_required() {
-    assert_eq!(PROTOCOL_VERSION, 3);
+    assert_eq!(PROTOCOL_VERSION, 4);
     for (_, direction, golden) in vectors() {
-        for version in [1u16, 2, 4] {
+        for version in [1u16, 2, 3, 5] {
             let mut skewed = bytes(golden);
             skewed[4..6].copy_from_slice(&version.to_le_bytes());
             assert_eq!(
@@ -899,6 +935,145 @@ fn version_skew_either_way_is_restart_required() {
             );
         }
     }
+}
+
+/// A stills reply carries what the video is and each frame's times, round
+/// trip and all; only a video reply does, and a video reply always does.
+/// Its values are checked on encode and on decode alike: a rotation off the
+/// right angles, an empty or oversized frame list, a time past the end, a
+/// zero or excessive frame rate, a tolerance past its bound and an unknown
+/// codec or container are refused.
+#[test]
+fn a_stills_reply_carries_its_video_and_frame_times() {
+    let video = common::rendered_as(MediaKind::Video);
+    roundtrip(
+        Frame::DetectedRendered {
+            kind: MediaKind::Video,
+            rendered: video.clone(),
+        },
+        Direction::WorkerToParent,
+    );
+    roundtrip(Frame::Rendered(video.clone()), Direction::WorkerToParent);
+    assert!(video.validate_as(MediaKind::Video).is_ok());
+    assert!(
+        common::rendered_as(MediaKind::Raster)
+            .validate_as(MediaKind::Video)
+            .is_err(),
+        "a video reply always has its video"
+    );
+    let mut raster = common::rendered_as(MediaKind::Raster);
+    raster.video = Some(common::video_result());
+    assert!(
+        raster.validate_as(MediaKind::Raster).is_err(),
+        "and only it"
+    );
+    let typed = |rendered: Rendered, kind| {
+        encode(
+            &Frame::DetectedRendered { kind, rendered },
+            Direction::WorkerToParent,
+        )
+    };
+    assert!(typed(raster, MediaKind::Raster).is_err());
+    assert!(typed(common::rendered_as(MediaKind::Raster), MediaKind::Video).is_err());
+    let with = |change: &dyn Fn(&mut VideoStillsResult)| {
+        let mut rendered = common::rendered_as(MediaKind::Video);
+        change(rendered.video.as_mut().unwrap());
+        rendered
+    };
+    for (name, bad) in [
+        ("rotation", with(&|v| v.info.rotation = 45)),
+        ("no frames", with(&|v| v.samples.clear())),
+        (
+            "too many frames",
+            with(&|v| v.samples = vec![v.samples[0]; 17]),
+        ),
+        ("past the end", with(&|v| v.samples[1].actual_ms = 12_001)),
+        (
+            "asked past the end",
+            with(&|v| v.samples[1].requested_ms = 13_000),
+        ),
+        ("zero fps", with(&|v| v.info.fps_milli = Some(0))),
+        (
+            "fps",
+            with(&|v| v.info.fps_milli = Some(MAX_VIDEO_FPS_MILLI + 1)),
+        ),
+        (
+            "tolerance",
+            with(&|v| v.tolerance_ms = MAX_STILL_TOLERANCE_MS + 1),
+        ),
+        ("zero width", with(&|v| v.info.width = 0)),
+        ("wide", with(&|v| v.info.height = MAX_VIDEO_SIDE + 1)),
+        (
+            "long",
+            with(&|v| v.info.duration_ms = MAX_VIDEO_DURATION_MS + 1),
+        ),
+    ] {
+        assert!(
+            typed(bad.clone(), MediaKind::Video).is_err(),
+            "{name} encodes"
+        );
+        // Written past the encoder's checks, the decoder refuses it too.
+        let mut bytes = typed(common::rendered_as(MediaKind::Video), MediaKind::Video).unwrap();
+        let good = common::rendered_as(MediaKind::Video).video.unwrap();
+        let tail = video_tail(&good);
+        let at = bytes.len() - tail.len();
+        assert_eq!(
+            &bytes[at..],
+            tail.as_slice(),
+            "{name}: the tail is the video"
+        );
+        let worse = video_tail(bad.video.as_ref().unwrap());
+        bytes.truncate(at);
+        bytes.extend_from_slice(&worse);
+        let length = u32::try_from(bytes.len() - HEADER_BYTES).unwrap();
+        bytes[7..11].copy_from_slice(&length.to_le_bytes());
+        assert!(
+            decode(&bytes, Direction::WorkerToParent).is_err(),
+            "{name} decodes"
+        );
+    }
+    // Unknown codec and container tags are refused.
+    let mut bytes = typed(common::rendered_as(MediaKind::Video), MediaKind::Video).unwrap();
+    let tail = video_tail(&common::video_result());
+    let codec_at = bytes.len() - tail.len() + 1 + 8 + 4 + 4 + 2;
+    let mut unknown_codec = bytes.clone();
+    unknown_codec[codec_at] = VideoCodec::ALL.len() as u8;
+    assert_eq!(
+        decode(&unknown_codec, Direction::WorkerToParent).unwrap_err(),
+        WireError::UnknownEnum
+    );
+    let container_at = codec_at + 1 + 5 + 1;
+    bytes[container_at] = 12;
+    assert_eq!(
+        decode(&bytes, Direction::WorkerToParent).unwrap_err(),
+        WireError::UnknownEnum
+    );
+}
+
+/// The bytes a video result takes at the end of a reply, as the codec
+/// writes them.
+fn video_tail(video: &VideoStillsResult) -> Vec<u8> {
+    let mut out = vec![1];
+    out.extend(video.info.duration_ms.to_le_bytes());
+    out.extend(video.info.width.to_le_bytes());
+    out.extend(video.info.height.to_le_bytes());
+    out.extend(video.info.rotation.to_le_bytes());
+    out.push(video.info.codec as u8);
+    out.push(u8::from(video.info.fps_milli.is_some()));
+    out.extend(video.info.fps_milli.unwrap_or(0).to_le_bytes());
+    out.push(u8::from(video.info.has_audio));
+    out.push(match video.info.container {
+        None => 0,
+        Some(kettle_media::video::VideoContainer::IsoBmff) => 1,
+        Some(other) => panic!("fixture container {other:?}"),
+    });
+    out.extend(u32::try_from(video.samples.len()).unwrap().to_le_bytes());
+    for sample in &video.samples {
+        out.extend(sample.requested_ms.to_le_bytes());
+        out.extend(sample.actual_ms.to_le_bytes());
+    }
+    out.extend(video.tolerance_ms.to_le_bytes());
+    out
 }
 
 /// A reply's layout and exact source are checked before anything trusts

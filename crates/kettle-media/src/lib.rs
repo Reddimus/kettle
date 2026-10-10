@@ -62,8 +62,20 @@ pub const MAX_SOURCE_LINE_BYTES: usize = 4 * 1024;
 pub const MAX_SOURCE_LINES: usize = 2000;
 /// Video still count limit from Appendix A.3.
 pub const MAX_VIDEO_STILLS: u8 = 16;
-/// Largest requested still edge from Appendix A.3.
+/// Largest still edge a model may ask for, from Appendix A.3.
 pub const MAX_VIDEO_EDGE: u32 = 2560;
+/// Largest still edge a worker job may ask for: a lane's poster or sheet,
+/// past what a model may ask for.
+pub const MAX_VIDEO_JOB_EDGE: u32 = 4096;
+/// Largest picture side a video may report.
+pub const MAX_VIDEO_SIDE: u32 = 16384;
+/// Longest duration a video may report, in milliseconds: about a year.
+pub const MAX_VIDEO_DURATION_MS: u64 = 366 * 24 * 60 * 60 * 1000;
+/// Highest frame rate a video may report, in frames per thousand seconds.
+pub const MAX_VIDEO_FPS_MILLI: u32 = 1_000_000;
+/// Widest tolerance a still may report between the time asked and the
+/// frame shown, in milliseconds.
+pub const MAX_STILL_TOLERANCE_MS: u32 = 60_000;
 /// P1 bounded metadata choices. The plan does not specify script count or name length.
 pub const MAX_UNCOVERED_SCRIPTS: usize = 32;
 /// UTF-8 bytes per uncovered Unicode script name.
@@ -75,7 +87,7 @@ pub const MAX_VERSION_BYTES: usize = 64;
 /// Hex digest of the source a binary was built from, up to 256 bits.
 pub const MAX_SOURCE_HASH_BYTES: usize = 64;
 /// No version negotiation. A header skew requires restart.
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 4;
 /// Longest textual source a reply returns as it was read: the SVG input
 /// cap, the largest textual kind's.
 pub const MAX_EXACT_SOURCE_BYTES: usize = MAX_SVG_BYTES;
@@ -408,6 +420,19 @@ impl From<ExternalSource> for Source {
         }
     }
 }
+/// How a stills job lays its frames out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StillsLayout {
+    /// One frame, alone.
+    Poster,
+    /// A grid `cols` frames wide, as many rows as the frames need, each
+    /// frame labeled with the time it shows when `labels`.
+    Sheet { cols: u8, labels: bool },
+}
+
+/// Frames of a video or an animation: `count` evenly across the window from
+/// `start_s` to `end_s` (the end when `None`), or the one at `at_s`, laid
+/// out as `layout` within `max_edge` on a side.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VideoStills {
     pub count: u8,
@@ -415,13 +440,19 @@ pub struct VideoStills {
     pub start_s: f64,
     pub end_s: Option<f64>,
     pub at_s: Option<f64>,
+    pub layout: StillsLayout,
 }
 impl VideoStills {
     pub fn validate(&self) -> Result<(), ValidationError> {
+        let layout = match self.layout {
+            StillsLayout::Poster => self.count == 1,
+            StillsLayout::Sheet { cols, .. } => cols >= 1 && cols <= self.count,
+        };
         if self.count == 0
             || self.count > MAX_VIDEO_STILLS
+            || !layout
             || self.max_edge == 0
-            || self.max_edge > MAX_VIDEO_EDGE
+            || self.max_edge > MAX_VIDEO_JOB_EDGE
             || !self.start_s.is_finite()
             || self.start_s < 0.0
             || self
@@ -430,6 +461,138 @@ impl VideoStills {
             || self.at_s.is_some_and(|t| !t.is_finite() || t < 0.0)
             || (self.at_s.is_some()
                 && (self.count != 1 || self.end_s.is_some() || self.start_s != 0.0))
+        {
+            return Err(ValidationError::BadParams);
+        }
+        Ok(())
+    }
+}
+
+/// A video's codec, as the decoder named it; never text from the file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VideoCodec {
+    Unknown = 0,
+    H264 = 1,
+    Hevc = 2,
+    Vp8 = 3,
+    Vp9 = 4,
+    Av1 = 5,
+    Mpeg4 = 6,
+    Mpeg2 = 7,
+    ProRes = 8,
+    Mjpeg = 9,
+    QuickTimeAnimation = 10,
+    Theora = 11,
+    Gif = 12,
+    Apng = 13,
+    WebP = 14,
+}
+impl VideoCodec {
+    /// Every codec, in code order.
+    pub const ALL: [Self; 15] = [
+        Self::Unknown,
+        Self::H264,
+        Self::Hevc,
+        Self::Vp8,
+        Self::Vp9,
+        Self::Av1,
+        Self::Mpeg4,
+        Self::Mpeg2,
+        Self::ProRes,
+        Self::Mjpeg,
+        Self::QuickTimeAnimation,
+        Self::Theora,
+        Self::Gif,
+        Self::Apng,
+        Self::WebP,
+    ];
+
+    /// The codec's word in replies to models and control clients.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::H264 => "h264",
+            Self::Hevc => "hevc",
+            Self::Vp8 => "vp8",
+            Self::Vp9 => "vp9",
+            Self::Av1 => "av1",
+            Self::Mpeg4 => "mpeg4",
+            Self::Mpeg2 => "mpeg2",
+            Self::ProRes => "prores",
+            Self::Mjpeg => "mjpeg",
+            Self::QuickTimeAnimation => "qtrle",
+            Self::Theora => "theora",
+            Self::Gif => "gif",
+            Self::Apng => "apng",
+            Self::WebP => "webp",
+        }
+    }
+}
+
+/// What a video or animation is, as the frames were taken from it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VideoInfo {
+    pub duration_ms: u64,
+    /// The picture as shown, its rotation applied.
+    pub width: u32,
+    pub height: u32,
+    /// Degrees clockwise the coded picture is turned to show it: 0, 90, 180
+    /// or 270.
+    pub rotation: u16,
+    pub codec: VideoCodec,
+    /// Frames per thousand seconds, when the stream says.
+    pub fps_milli: Option<u32>,
+    pub has_audio: bool,
+    /// The container its bytes are, `None` for an animated image.
+    pub container: Option<crate::video::VideoContainer>,
+}
+impl VideoInfo {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if self.duration_ms > MAX_VIDEO_DURATION_MS
+            || self.width == 0
+            || self.height == 0
+            || self.width > MAX_VIDEO_SIDE
+            || self.height > MAX_VIDEO_SIDE
+            || !matches!(self.rotation, 0 | 90 | 180 | 270)
+            || self
+                .fps_milli
+                .is_some_and(|fps| fps == 0 || fps > MAX_VIDEO_FPS_MILLI)
+        {
+            return Err(ValidationError::BadParams);
+        }
+        Ok(())
+    }
+}
+
+/// One frame of a stills result: the time it was asked for, and the time of
+/// the frame shown, which a decoder may take from up to the result's
+/// tolerance away.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StillSample {
+    pub requested_ms: u64,
+    pub actual_ms: u64,
+}
+
+/// What a stills render returns beside its pixels: the video, each frame's
+/// times, in the order they are laid out, and how far a frame's time may
+/// be from the one asked for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VideoStillsResult {
+    pub info: VideoInfo,
+    pub samples: Vec<StillSample>,
+    pub tolerance_ms: u32,
+}
+impl VideoStillsResult {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        self.info.validate()?;
+        cap(self.samples.len(), usize::from(MAX_VIDEO_STILLS))?;
+        let in_range = |ms: u64| ms <= self.info.duration_ms;
+        if self.samples.is_empty()
+            || self.tolerance_ms > MAX_STILL_TOLERANCE_MS
+            || self
+                .samples
+                .iter()
+                .any(|sample| !in_range(sample.requested_ms) || !in_range(sample.actual_ms))
         {
             return Err(ValidationError::BadParams);
         }
@@ -969,6 +1132,8 @@ pub struct Rendered {
     pub fence_index: Option<u8>,
     pub uncovered_scripts: Vec<String>,
     pub warnings: Vec<Warning>,
+    /// For video stills: the video, and the times of the frames shown.
+    pub video: Option<VideoStillsResult>,
 }
 /// A rendered job and what it turned out to be.
 #[derive(Clone, Debug, PartialEq)]
@@ -1006,14 +1171,22 @@ impl Rendered {
             cap(s.len(), MAX_SCRIPT_BYTES)?;
         }
         cap(self.warnings.len(), MAX_WARNINGS)?;
+        if let Some(video) = &self.video {
+            video.validate()?;
+        }
         Ok(())
     }
 }
 impl Rendered {
     /// [`Self::validate`], and as a render of `kind`: a textual kind returns
     /// its source as read, within the kind's input cap; any other kind none.
+    /// Video stills return what the video is and their frames' times; no
+    /// other kind does.
     pub fn validate_as(&self, kind: MediaKind) -> Result<(), ValidationError> {
         self.validate()?;
+        if (kind == MediaKind::Video) != self.video.is_some() {
+            return Err(ValidationError::BadParams);
+        }
         match (kind.exact_source_cap(), &self.exact_source) {
             (Some(cap_bytes), Some(source)) => cap(source.len(), cap_bytes),
             (None, None) => Ok(()),
