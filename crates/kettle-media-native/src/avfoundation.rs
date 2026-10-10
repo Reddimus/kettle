@@ -401,12 +401,14 @@ impl VideoDecoder for AvFoundation {
         let mut times = wanted.times_ms.clone();
         times.sort_unstable();
         times.dedup();
-        // Each frame may be taken from within half the gap to its
-        // neighbours, which decodes far less than an exact time; a single
-        // instant is exact. The time reported is the frame's own.
+        // Each frame may be taken from within a quarter of the gap to its
+        // neighbours, which decodes less than an exact time and keeps it
+        // inside its own share of the window (half the gap would let two
+        // instants take the keyframe between them); a single instant is
+        // exact. The time reported is the frame's own.
         let tolerance = times
             .windows(2)
-            .map(|pair| (pair[1] - pair[0]) / 2)
+            .map(|pair| (pair[1] - pair[0]) / 4)
             .min()
             .unwrap_or(0)
             .min(1000);
