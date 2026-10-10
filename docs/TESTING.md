@@ -4240,8 +4240,11 @@ refused one byte over (64 KiB with `--mermaid`, which must be UTF-8), never
 cut short, a path at 4 KiB looked for and one byte more refused before the
 file system is asked, the whole request measured as a client frames it (the
 largest image whose base64 fits the line, and the next refused; escape-heavy
-Mermaid always fits), the absolute attested path, `--mermaid` on a file, and
-its confirmation. `kettle-ctl` pins `request_fits` against the line a client
+Mermaid always fits), the absolute attested path, `--mermaid` on a file, the
+attestation taken by opening the file (one it may look up but not read is
+refused with `permission`, unless the suite runs as root; a named pipe is
+refused at once, never waited on; a symbolic link is attested by its target
+and sent by its own name), and its confirmation. `kettle-ctl` pins `request_fits` against the line a client
 frames, to the byte with escapes, the inline `mermaid` source at 64 KiB and
 one byte over, `kind: "mermaid"` on a path only, and a path at 4 KiB in
 native units. For a live check on macOS, the
