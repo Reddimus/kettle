@@ -50,6 +50,10 @@ kettle-i18n.workspace = true
 kettle-media.workspace = true
 kettle-render.workspace = true
 kettle-state.workspace = true
+# The JPEG contact sheet `kettle video-frames` and kettle_video_frames return,
+# the latter as base64 image content.
+image = { workspace = true, features = ["jpeg"] }
+base64 = { version = "0.23", default-features = false, features = ["alloc"] }
 kettle-update.workspace = true
 kettle-ui.workspace = true
 tracing-subscriber.workspace = true

@@ -347,7 +347,11 @@ mod footprint {
                     }
                     // Gone, or a reused pid now outside the group.
                     Ok(None) => self.forget(pid),
-                    Err(error) if pid != leader && gone(&error) => self.forget(pid),
+                    // Gone: for the worker itself, exited but not yet reaped
+                    // (no one else reaps it), which holds nothing while its
+                    // group, still its own, is measured on. A large reply
+                    // read after the worker exits makes this common.
+                    Err(error) if gone(&error) => self.forget(pid),
                     Err(error) => return Err(error),
                 }
             }
@@ -1476,6 +1480,19 @@ mod tests {
             assert!(footprint::of_member(leader, leader).unwrap().is_some());
             worker.process.kill();
             wait_exit(worker.process.as_mut());
+        }
+
+        #[test]
+        fn an_exited_worker_not_yet_reaped_holds_nothing() {
+            let directory = tempfile::tempdir().unwrap();
+            let path = script(directory.path(), "echo $$");
+            let mut worker = spawn_script(&path);
+            let line = first_line(&mut worker);
+            let leader: libc::pid_t = line.parse().unwrap();
+            // Exited, and not reaped: nothing here waits on it yet.
+            assert!(gone(&line), "the worker did not exit");
+            assert_eq!(footprint::Probe::default().measure(leader).unwrap(), 0);
+            assert_eq!(wait_exit(worker.process.as_mut()), WorkerExit::Code(0));
         }
 
         #[test]
