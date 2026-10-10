@@ -1136,6 +1136,9 @@ context = "crates/kettle-ui/src/settings.rs categories(): Settings row under Age
 [messages.settings_field_agent_previews_codex]
 context = "crates/kettle-ui/src/settings.rs: Settings → Agents toggle (agent-display-codex) that makes the zsh or fish a new pane starts define a codex function starting Codex with Kettle's display server. Codex is a product name."
 
+[messages.settings_field_add_kettle_to_path]
+context = "crates/kettle-ui/src/settings.rs: Settings → Agents choice (add-kettle-to-path) whose Automatic value appends the running Kettle's folder to the PATH of a new pane that has no kettle command on it, so agents and setup commands there find it. 'kettle' is the lowercase command name and PATH is the environment variable; both stay as is."
+
 [messages.settings_field_background_animation]
 context = "crates/kettle-ui/src/settings.rs categories(): Settings row label. When the animated background moves."
 

@@ -540,6 +540,15 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                     "agent-display-claude-code",
                 ),
                 toggle(T::SettingsFieldAgentPreviewsCodex, "agent-display-codex"),
+                choice(
+                    T::SettingsFieldAddKettleToPath,
+                    "add-kettle-to-path",
+                    &["auto", "off"],
+                    &[
+                        Label::Text(T::SettingsValueAutomatic),
+                        Label::Text(T::SettingsValueOff),
+                    ],
+                ),
             ],
         },
         Category {
@@ -899,6 +908,11 @@ fn read_choice(cfg: &Config, key: &str) -> String {
             kettle_config::CompletionOverlayMode::Off => "off",
         }
         .to_string(),
+        "add-kettle-to-path" => match cfg.add_kettle_to_path {
+            kettle_config::AddKettleToPath::Auto => "auto",
+            kettle_config::AddKettleToPath::Off => "off",
+        }
+        .to_string(),
         // Background controls.
         "background-type" => match cfg.background_type {
             kettle_config::BackgroundType::Solid => "solid",
@@ -1074,7 +1088,8 @@ mod tests {
 
     /// Agents → Agent previews and its Claude Code and Codex rows edit
     /// `agent-display`, `agent-display-claude-code` and
-    /// `agent-display-codex` as ordinary toggles.
+    /// `agent-display-codex` as ordinary toggles; its last row chooses
+    /// `add-kettle-to-path`, Automatic or Off.
     #[test]
     fn agent_previews_rows_round_trip() {
         let cats = categories(&[]);
@@ -1082,7 +1097,7 @@ mod tests {
             .iter()
             .find(|cat| cat.name == Text::SettingsCategoryAgents)
             .expect("Agents category");
-        assert_eq!(agents.fields.len(), 3);
+        assert_eq!(agents.fields.len(), 4);
         let rows = [
             (
                 "agent-display",
@@ -1113,6 +1128,15 @@ mod tests {
             assert_eq!(read(&on, field, &EN), "On");
             assert_eq!(next_value(&on, field, 1), "false");
         }
+        let path = &agents.fields[3];
+        assert_eq!(path.key, "add-kettle-to-path");
+        assert_eq!(path.label, Text::SettingsFieldAddKettleToPath);
+        let auto = Config::default();
+        assert_eq!(read(&auto, path, &EN), "Automatic");
+        assert_eq!(next_value(&auto, path, 1), "off");
+        let off = Config::parse_text("add-kettle-to-path = off");
+        assert_eq!(read(&off, path, &EN), "Off");
+        assert_eq!(next_value(&off, path, 1), "auto");
         // Agent control stays out of Settings: it grants reading and typing.
         assert!(
             cats.iter()
