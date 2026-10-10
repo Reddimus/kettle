@@ -1550,3 +1550,102 @@ fn a_session_fits_its_picture_to_the_room() {
         }
     }
 }
+
+/// A session's reader takes a frame's pixels straight into the buffer it is
+/// given, at the size the session opened at; other frames come whole, under
+/// their cap; a frame of another size is refused before its pixels are read.
+#[test]
+fn a_session_reads_its_frames_into_one_buffer() {
+    use std::io::Cursor;
+
+    let frame = VideoFrame {
+        seq: 3,
+        pts_ms: 300,
+        width: 2,
+        height: 1,
+        rgba: vec![9, 8, 7, 6, 5, 4, 3, 2],
+    };
+    let mut stream = Vec::new();
+    write_video_frame(&mut stream, frame.borrowed()).unwrap();
+    write_frame(
+        &mut stream,
+        &Frame::PlayState(PlayState::Ended),
+        Direction::WorkerToParent,
+    )
+    .unwrap();
+    let mut reader = Cursor::new(stream);
+    let mut pixels = Vec::with_capacity(64);
+    assert_eq!(
+        read_session_frame(&mut reader, 2, 1, &mut pixels, 256).unwrap(),
+        Some(SessionRead::Pixels {
+            seq: 3,
+            pts_ms: 300
+        })
+    );
+    assert_eq!(pixels, frame.rgba);
+    assert_eq!(
+        read_session_frame(&mut reader, 2, 1, &mut pixels, 256).unwrap(),
+        Some(SessionRead::Frame(Box::new(Frame::PlayState(
+            PlayState::Ended
+        ))))
+    );
+    assert_eq!(
+        read_session_frame(&mut reader, 2, 1, &mut pixels, 256).unwrap(),
+        None
+    );
+
+    // Another size, by its length or only by its fields: nothing of its
+    // pixels is read.
+    let other = VideoFrame {
+        width: 1,
+        height: 2,
+        ..frame.clone()
+    };
+    let mut swapped = Vec::new();
+    write_video_frame(&mut swapped, other.borrowed()).unwrap();
+    let mut reader = Cursor::new(swapped);
+    assert_eq!(
+        read_session_frame(&mut reader, 2, 1, &mut pixels, 256),
+        Err(WireError::Validation(ValidationError::BadParams))
+    );
+    assert_eq!(reader.position() as usize, HEADER_BYTES + 28);
+    let wider = VideoFrame {
+        width: 3,
+        rgba: vec![0; 12],
+        ..frame.clone()
+    };
+    let mut longer = Vec::new();
+    write_video_frame(&mut longer, wider.borrowed()).unwrap();
+    let mut reader = Cursor::new(longer);
+    assert_eq!(
+        read_session_frame(&mut reader, 2, 1, &mut pixels, 256),
+        Err(WireError::Validation(ValidationError::BadParams))
+    );
+    assert_eq!(reader.position() as usize, HEADER_BYTES);
+
+    // Pixels cut short; another frame over its cap; a size no session has.
+    let mut cut = Vec::new();
+    write_video_frame(&mut cut, frame.borrowed()).unwrap();
+    cut.truncate(cut.len() - 1);
+    assert_eq!(
+        read_session_frame(&mut Cursor::new(cut), 2, 1, &mut pixels, 256),
+        Err(WireError::Truncated)
+    );
+    let opened = encode(
+        &Frame::Opened(Opened {
+            info: video_info(),
+            width: 2,
+            height: 1,
+            fps_milli: 30_000,
+            start_ms: 0,
+        }),
+        Direction::WorkerToParent,
+    )
+    .unwrap();
+    assert_eq!(
+        read_session_frame(&mut Cursor::new(opened.clone()), 2, 1, &mut pixels, 32),
+        Err(WireError::Validation(ValidationError::TooLarge))
+    );
+    assert!(read_session_frame(&mut Cursor::new(opened), 2, 1, &mut pixels, 256).is_ok());
+    assert!(read_session_frame(&mut Cursor::new(Vec::new()), 1921, 1, &mut pixels, 256).is_err());
+}

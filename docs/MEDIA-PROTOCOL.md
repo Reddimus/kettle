@@ -374,6 +374,34 @@ not proof: an allocation can cross the limit briefly between samples.
 Not yet: the GUI's preview account and admission, and cancellation follow in
 later slices.
 
+### Playing a video
+
+`WorkerClient::play` opens a playback session (`kettle_media::session`) in a
+fresh worker of its own and returns at once: three threads of the session's,
+never the caller's, and never the render slot, start the worker within the
+same startup deadline, send Hello, then PlayOpen once Ready matches, and wait
+6 s for Opened. For the rest of the session the worker's process group is
+measured every 25 ms and killed above 768 MiB, as a render's is. At most two
+sessions are open at once (a third is `WorkerUnavailable`); one being closed
+no longer counts. The reader takes each frame straight into a buffer of the
+size the session opened at, keeps only the newest one the caller has not
+taken (with two spare buffers for those to come), and wakes the caller once
+until it looks. Play and Pause replace any command not yet sent, so only the
+latest wish goes out. The writer sends a heartbeat each second while the
+caller has kept the session within 3 s: a caller whose event loop stalls lets
+the worker's 5 s lease lapse, and the worker ends the session. Dropping the
+session sends Close and lets the worker exit within the cleanup budget, or
+kills its group; until it exits it decodes at most the frame it had begun,
+and another session or job may start beside it, as beside a cancelled
+render's worker on its way out. A refusal keeps the worker's code as a
+render's does, through the same functions: before Ready only a handshake
+refusal's, from a worker that then exits rather than crashes, and after it
+only from a worker that then exits 0; only with nothing after it; otherwise
+the worker's exit says why. A worker whose
+output closes before the session ends fails it, even with exit 0, as one
+that exits without a reply fails a render; a frame of another size, or a
+footprint over the limit, is what it is for a render.
+
 ## The worker executable
 
 `crates/kettle-media-worker` builds `kettle-media-worker`, a separate
