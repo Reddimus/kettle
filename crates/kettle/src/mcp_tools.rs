@@ -54,20 +54,58 @@ pub fn tool_specs(selection: ToolSelection) -> Vec<Value> {
     }
 }
 
+/// An absolute path as this platform spells one, for the schema: rooted
+/// here; a drive or a UNC share on Windows.
+const ABSOLUTE_PATH_PATTERN: &str = if cfg!(windows) {
+    r"^([A-Za-z]:[\\/]|[\\/]{2}[^\\/])"
+} else {
+    "^/"
+};
+
+/// `kettle_show`'s specification. The schema says what the validator
+/// checks: exactly one source, nonempty strings, an absolute path, and no
+/// other argument. JSON Schema counts characters where Kettle's caps count
+/// bytes, so each `maxLength` is the byte cap, which no string within it
+/// exceeds, and the descriptions name the caps in bytes.
 fn show_tool_spec() -> Value {
     json!({
         "name": "kettle_show",
-        "description": "Send an image, SVG or Mermaid diagram file to the media shelf of the \
-            Kettle pane this session runs in, where the user can open it. Returns delivery status and metadata, \
-            not the image contents.",
+        "description": "Send an image, SVG or Mermaid file path to the user's Kettle display, \
+            or render inline Mermaid source. Interactive supported harnesses get a card under \
+            the call and a shelf entry; other modes use the shelf. Clicking opens it in the \
+            viewer or preview lane. Tested diagram families: flowchart, sequence, state, class, \
+            ER, gantt, pie, mindmap, gitGraph, timeline, journey and quadrant. Returns delivery \
+            status and metadata, not the image contents.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "absolute path of the image, SVG or Mermaid file"},
-                "title": {"type": "string", "maxLength": kettle_ctl::show::MAX_SHOW_TITLE_BYTES, "description": "title for the shelf item (default: the file name)"},
-                "key": {"type": "string", "minLength": 1, "maxLength": kettle_ctl::show::MAX_SHOW_KEY_BYTES, "description": "replace the shelf item with this key instead of adding another (default: the file's path)"}
+                "mermaid": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": kettle_media::MAX_MERMAID_BYTES,
+                    "description": "Mermaid source to render, at most 64 KiB of UTF-8; keep the source in your reply too"
+                },
+                "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": kettle_media::MAX_PATH_BYTES,
+                    "pattern": ABSOLUTE_PATH_PATTERN,
+                    "description": "absolute path of an image, SVG or Mermaid file, at most 4 KiB"
+                },
+                "title": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": kettle_ctl::show::MAX_SHOW_TITLE_BYTES,
+                    "description": "title for the shelf item (default: the file name), at most 4 KiB"
+                },
+                "key": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": kettle_ctl::show::MAX_SHOW_KEY_BYTES,
+                    "description": "replace the shelf item with this key instead of adding another (default: the file's path), at most 256 bytes"
+                }
             },
-            "required": ["path"],
+            "oneOf": [{"required": ["mermaid"]}, {"required": ["path"]}],
             "additionalProperties": false
         }
     })
@@ -75,6 +113,7 @@ fn show_tool_spec() -> Value {
 
 fn full_tool_specs() -> Vec<Value> {
     vec![
+        show_tool_spec(),
         json!({
             "name": "kettle_run",
             "description": "Run a command headlessly under a real PTY (no window) and return its \
@@ -361,7 +400,8 @@ fn is_known_tool(selection: ToolSelection, name: &str) -> bool {
     }
     matches!(
         name,
-        "kettle_run"
+        "kettle_show"
+            | "kettle_run"
             | "kettle_list_panes"
             | "kettle_read_screen"
             | "kettle_read_cells"
@@ -528,10 +568,10 @@ fn call_tool_inner(
     }
 }
 
-/// `kettle_show`: send an absolute file path to the media shelf of the pane
-/// this server runs in, through the same strict discovery and wording as
-/// `kettle show`. The result says where it went and what it was, never what
-/// it shows.
+/// `kettle_show`: send an absolute file path, or Mermaid source, to the
+/// media shelf of the pane this server runs in, through the same strict
+/// discovery and wording as `kettle show`. The result says where it went
+/// and what it was, never what it shows.
 fn tool_kettle_show(
     args: &Value,
     params: &Value,
@@ -542,14 +582,23 @@ fn tool_kettle_show(
     // A card only where this call's hook can collect it; Kettle decides
     // whether the caller may have one.
     let card = session.card_for(params, std::time::Instant::now());
-    let path = match args.get("path").and_then(Value::as_str) {
-        Some(path) if std::path::Path::new(path).is_absolute() => std::path::Path::new(path),
+    // Exactly one source: Mermaid text, which the request checks as Kettle
+    // does, or an absolute path.
+    let source = match (args.get("mermaid"), args.get("path")) {
+        (Some(Value::String(text)), None) => kettle_ctl::show::ShowSource::Mermaid(text.clone()),
+        (None, Some(Value::String(path))) if std::path::Path::new(path).is_absolute() => {
+            match crate::show_cli::file_source(std::path::Path::new(path), false) {
+                Ok(source) => source,
+                Err(message) => return show_failed(&message),
+            }
+        }
         _ => return show_failed(FailureCode::BadParams.model_message()),
     };
-    let source = match crate::show_cli::file_source(path, false) {
-        Ok(source) => source,
-        Err(message) => return show_failed(&message),
-    };
+    let name = args
+        .get("path")
+        .and_then(Value::as_str)
+        .and_then(|path| std::path::Path::new(path).file_name())
+        .map(|name| name.to_string_lossy().into_owned());
     let text = |name: &str| args.get(name).and_then(Value::as_str).map(str::to_owned);
     let params = match crate::show_cli::request_params(kettle_ctl::show::ShowRequest {
         source,
@@ -581,8 +630,7 @@ fn tool_kettle_show(
                 _ => false,
             };
             if stored {
-                let name = path.file_name().map(|name| name.to_string_lossy());
-                show_sent_card(&result, name.as_deref().unwrap_or("media"))
+                show_sent_card(&result, name.as_deref().unwrap_or("diagram"))
             } else {
                 show_sent(&result)
             }
@@ -800,6 +848,7 @@ fn forwarded_ctl_arguments(name: &str, args: &Value) -> Value {
 fn tool_argument_fields(name: &str) -> Option<&'static [(&'static str, ArgKind)]> {
     Some(match name {
         "kettle_show" => &[
+            ("mermaid", ArgKind::String),
             ("path", ArgKind::String),
             ("title", ArgKind::String),
             ("key", ArgKind::String),
@@ -941,18 +990,25 @@ mod tests {
     #[test]
     fn display_mode_offers_exactly_kettle_show() {
         assert_eq!(names(ToolSelection::Display), ["kettle_show"]);
-        assert!(
-            !names(ToolSelection::Full)
-                .iter()
-                .any(|name| name == "kettle_show")
+        assert_eq!(names(ToolSelection::Full)[0], "kettle_show");
+        assert_eq!(
+            tool_specs(ToolSelection::Full)[0],
+            tool_specs(ToolSelection::Display)[0],
+            "one kettle_show for both"
         );
         let schema = &tool_specs(ToolSelection::Display)[0]["inputSchema"];
-        assert_eq!(schema["required"], json!(["path"]));
+        assert_eq!(
+            schema["oneOf"],
+            json!([{"required": ["mermaid"]}, {"required": ["path"]}])
+        );
         assert_eq!(schema["additionalProperties"], json!(false));
         let properties: Vec<_> = schema["properties"].as_object().unwrap().keys().collect();
         // In the order the schema lists them, as JSON objects keep it.
-        assert_eq!(properties, ["path", "title", "key"]);
-        for name in names(ToolSelection::Full) {
+        assert_eq!(properties, ["mermaid", "path", "title", "key"]);
+        for name in names(ToolSelection::Full)
+            .into_iter()
+            .filter(|name| name != "kettle_show")
+        {
             assert!(
                 validate_tool_call(
                     ToolSelection::Display,
@@ -962,13 +1018,131 @@ mod tests {
                 "display mode must refuse {name}"
             );
         }
-        assert!(
-            validate_tool_call(
-                ToolSelection::Full,
-                &json!({"name": "kettle_show", "arguments": {"path": "/x.png"}})
-            )
-            .is_err()
-        );
+        for selection in [ToolSelection::Display, ToolSelection::Full] {
+            assert!(
+                validate_tool_call(
+                    selection,
+                    &json!({"name": "kettle_show", "arguments": {"path": "/x.png"}})
+                )
+                .is_ok()
+            );
+        }
+    }
+
+    /// Whether `args` meets `schema`, for the part of JSON Schema
+    /// `kettle_show`'s uses: an object of string properties with lengths in
+    /// characters and its absolute-path pattern, `oneOf` of required names,
+    /// and no other property.
+    fn schema_accepts(schema: &Value, args: &Value) -> bool {
+        let Some(object) = args.as_object() else {
+            return false;
+        };
+        let properties = schema["properties"].as_object().unwrap();
+        let fits = object.iter().all(|(name, value)| {
+            let Some(property) = properties.get(name) else {
+                return false;
+            };
+            let Some(text) = value.as_str() else {
+                return false;
+            };
+            let length = text.chars().count() as u64;
+            let pattern = match property["pattern"].as_str() {
+                None => true,
+                Some(pattern) => {
+                    assert_eq!(pattern, ABSOLUTE_PATH_PATTERN);
+                    let path = std::path::Path::new(text);
+                    path.is_absolute() && (cfg!(windows) || text.starts_with('/'))
+                }
+            };
+            property["minLength"]
+                .as_u64()
+                .is_none_or(|least| length >= least)
+                && property["maxLength"]
+                    .as_u64()
+                    .is_none_or(|most| length <= most)
+                && pattern
+        });
+        let matching = schema["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|branch| {
+                branch["required"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|name| object.contains_key(name.as_str().unwrap()))
+            })
+            .count();
+        fits && matching == 1
+    }
+
+    /// The schema says what the validator checks: a request the validator
+    /// sends on is one the schema accepts, and for text of one byte per
+    /// character the two agree exactly. Lengths are tried at each cap and
+    /// one past it, in ASCII and in four-byte characters, which JSON Schema
+    /// counts as one.
+    #[test]
+    fn the_schema_and_the_validator_agree() {
+        use kettle_media::FailureCode;
+        let schema = show_tool_spec()["inputSchema"].clone();
+        let directory = kettle_test_support::private_tempdir("kettle-mcp-parity-");
+        let file = directory.path().join("plot.png");
+        std::fs::write(&file, b"png").unwrap();
+        let file = file.to_str().unwrap().to_owned();
+        // Refused before anything is sent, or sent on (and, with no Kettle
+        // in a test, refused there for another reason).
+        let sent_on = |args: &Value| {
+            let result = call_tool(
+                ToolSelection::Display,
+                &json!({"name": "kettle_show", "arguments": args}),
+            );
+            let text = result["content"][0]["text"].as_str().unwrap_or_default();
+            text != FailureCode::BadParams.model_message()
+                && text != FailureCode::TooLarge.model_message()
+        };
+        let text = |unit: &str, count: usize| unit.repeat(count);
+        let mut cases = vec![
+            json!({}),
+            json!({"mermaid": "graph LR", "path": file}),
+            json!({"mermaid": ""}),
+            json!({"path": ""}),
+            json!({"path": "relative/plot.png"}),
+            json!({"path": file, "title": ""}),
+            json!({"path": file, "key": ""}),
+            json!({"path": file, "pane": 1}),
+            json!({"mermaid": 7}),
+            json!({"mermaid": null}),
+        ];
+        let mermaid = kettle_media::MAX_MERMAID_BYTES;
+        let title = kettle_ctl::show::MAX_SHOW_TITLE_BYTES;
+        let key = kettle_ctl::show::MAX_SHOW_KEY_BYTES;
+        for (unit, width) in [("m", 1), ("\u{1f600}", 4)] {
+            for count in [mermaid / width, mermaid / width + 1] {
+                cases.push(json!({"mermaid": text(unit, count)}));
+            }
+            for count in [title / width, title / width + 1] {
+                cases.push(json!({"path": file, "title": text(unit, count)}));
+            }
+            for count in [key / width, key / width + 1] {
+                cases.push(json!({"path": file, "key": text(unit, count)}));
+            }
+        }
+        for args in &cases {
+            let ascii = args.as_object().is_some_and(|object| {
+                object
+                    .values()
+                    .all(|value| value.as_str().is_none_or(str::is_ascii))
+            });
+            let (schema_says, validator_says) = (schema_accepts(&schema, args), sent_on(args));
+            assert!(
+                schema_says || !validator_says,
+                "the schema refuses what is sent: {args}"
+            );
+            if ascii {
+                assert_eq!(schema_says, validator_says, "{args}");
+            }
+        }
     }
 
     /// Requests Kettle would refuse are refused here in its fixed wording,
@@ -1005,6 +1179,16 @@ mod tests {
             (json!({"path": file, "title": ""}), FailureCode::BadParams),
             (json!({"path": file, "pane": 3}), FailureCode::BadParams),
             (json!({"path": file, "title": 7}), FailureCode::BadParams),
+            (
+                json!({"mermaid": "graph LR", "path": file}),
+                FailureCode::BadParams,
+            ),
+            (json!({"mermaid": ""}), FailureCode::BadParams),
+            (json!({"mermaid": null}), FailureCode::BadParams),
+            (
+                json!({"mermaid": "%".repeat(kettle_media::MAX_MERMAID_BYTES + 1)}),
+                FailureCode::TooLarge,
+            ),
         ] {
             let result = show(arguments.clone());
             assert_eq!(result["isError"], json!(true), "{arguments}");
