@@ -300,8 +300,9 @@ file. The caller's thread watches the clock:
   typed one of that same kind; a typed reply naming another kind is
   `WorkerUnavailable` too.
 - **A refusal** keeps the worker's code only when a worker can mean it (input,
-  file, render, skew and unavailability codes); a code naming GUI or agent
-  state becomes `WorkerUnavailable`.
+  file, render, skew and unavailability codes, a video's container, codec,
+  decoder and sandbox among them); a code naming GUI or agent state becomes
+  `WorkerUnavailable`.
 - **An exit without a usable reply** says why: 4 (the worker's watchdog) is
   `RenderTimeout`, 9 is `RestartRequired`, a signal (a CPU, file-size or memory
   limit, or a crash) is `RenderResource`, and anything else, including a
