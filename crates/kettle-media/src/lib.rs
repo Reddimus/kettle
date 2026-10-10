@@ -73,9 +73,6 @@ pub const MAX_VIDEO_SIDE: u32 = 16384;
 pub const MAX_VIDEO_DURATION_MS: u64 = 366 * 24 * 60 * 60 * 1000;
 /// Highest frame rate a video may report, in frames per thousand seconds.
 pub const MAX_VIDEO_FPS_MILLI: u32 = 1_000_000;
-/// Widest tolerance a still may report between the time asked and the
-/// frame shown, in milliseconds.
-pub const MAX_STILL_TOLERANCE_MS: u32 = 60_000;
 /// P1 bounded metadata choices. The plan does not specify script count or name length.
 pub const MAX_UNCOVERED_SCRIPTS: usize = 32;
 /// UTF-8 bytes per uncovered Unicode script name.
@@ -580,6 +577,8 @@ pub struct StillSample {
 pub struct VideoStillsResult {
     pub info: VideoInfo,
     pub samples: Vec<StillSample>,
+    /// The farthest any frame's time is from its instant: every sample is
+    /// within it, and it is within the duration.
     pub tolerance_ms: u32,
 }
 impl VideoStillsResult {
@@ -587,12 +586,14 @@ impl VideoStillsResult {
         self.info.validate()?;
         cap(self.samples.len(), usize::from(MAX_VIDEO_STILLS))?;
         let in_range = |ms: u64| ms <= self.info.duration_ms;
+        let tolerance = u64::from(self.tolerance_ms);
         if self.samples.is_empty()
-            || self.tolerance_ms > MAX_STILL_TOLERANCE_MS
-            || self
-                .samples
-                .iter()
-                .any(|sample| !in_range(sample.requested_ms) || !in_range(sample.actual_ms))
+            || tolerance > self.info.duration_ms
+            || self.samples.iter().any(|sample| {
+                !in_range(sample.requested_ms)
+                    || !in_range(sample.actual_ms)
+                    || sample.requested_ms.abs_diff(sample.actual_ms) > tolerance
+            })
         {
             return Err(ValidationError::BadParams);
         }

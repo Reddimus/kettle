@@ -11,11 +11,10 @@ use std::time::Instant;
 use image::codecs::gif::GifDecoder;
 use image::codecs::png::PngDecoder;
 use image::codecs::webp::WebPDecoder;
-use image::imageops::FilterType;
 use image::{AnimationDecoder, Frames, ImageDecoder as _, ImageError, ImageFormat, Limits};
 use kettle_media::{
-    FailureCode, MAX_DECODED_BYTES, MAX_DECODED_EDGE, MAX_STILL_TOLERANCE_MS, StillSample,
-    VideoCodec, VideoInfo, VideoStills, rgba_len,
+    FailureCode, MAX_DECODED_BYTES, MAX_DECODED_EDGE, StillSample, VideoCodec, VideoInfo,
+    VideoStills, rgba_len,
 };
 
 use crate::stills::{Still, sample_times, tile_size};
@@ -31,8 +30,8 @@ const GIF_SHORT_DELAY_MS: u64 = 100;
 const ZERO_DELAY_MS: u64 = 100;
 
 /// The animation's frames `stills` asks for, at its tile size, with what it
-/// is and how far a frame's start may be from the time asked: its longest
-/// frame. A PNG that does not animate is no animation.
+/// is and the farthest any frame's start is from its instant. A PNG that
+/// does not animate is no animation.
 pub(crate) fn frames(
     bytes: &[u8],
     stills: &VideoStills,
@@ -110,8 +109,9 @@ pub(crate) fn frames(
         let frame = next(&mut again)?.ok_or(FailureCode::RenderParse)?;
         spend(deadline)?;
         if shown.contains(&index) {
-            let tile =
-                image::imageops::resize(frame.buffer(), tile_w, tile_h, FilterType::Triangle);
+            // Premultiplied, so a transparent pixel's hidden color stays
+            // out of its neighbours.
+            let tile = crate::raster::resample(frame.buffer(), tile_w, tile_h)?;
             *slot = Some(tile.into_raw());
         }
     }
@@ -131,7 +131,6 @@ pub(crate) fn frames(
             })
         })
         .collect::<Result<Vec<_>, FailureCode>>()?;
-    let longest = delays.iter().copied().max().unwrap_or(0);
     let even = delays.iter().all(|&delay| delay == delays[0]);
     let info = VideoInfo {
         duration_ms,
@@ -146,10 +145,12 @@ pub(crate) fn frames(
         has_audio: false,
         container: None,
     };
-    let tolerance = u32::try_from(longest)
-        .unwrap_or(u32::MAX)
-        .min(MAX_STILL_TOLERANCE_MS);
-    Ok((info, stills, tolerance))
+    let farthest = stills
+        .iter()
+        .map(|still| still.sample.requested_ms.abs_diff(still.sample.actual_ms))
+        .max()
+        .unwrap_or(0);
+    Ok((info, stills, u32::try_from(farthest).unwrap_or(u32::MAX)))
 }
 
 /// The next frame, decoded under the panic guard: a decoder's bug on input
@@ -313,7 +314,7 @@ mod tests {
             (1000, 8, 6, VideoCodec::Gif, None)
         );
         assert_eq!(info.fps_milli, None, "uneven delays have no rate");
-        assert_eq!(tolerance, 400);
+        assert_eq!(tolerance, 275, "875 ms shows the frame starting at 600");
         // Midpoints 125, 375, 625 and 875 fall in the second, third, fourth
         // and fourth frames.
         assert_eq!(
@@ -355,7 +356,7 @@ mod tests {
         let (info, _, tolerance) = frames(&short, &sheet(2), later()).unwrap();
         assert_eq!(
             (info.duration_ms, tolerance, info.fps_milli),
-            (200, 100, Some(10_000))
+            (200, 50, Some(10_000))
         );
         let one = gif(&[(BLUE, 500)]);
         let (info, stills, _) = frames(&one, &sheet(3), later()).unwrap();
@@ -366,6 +367,53 @@ mod tests {
         let (info, stills, _) = frames(&animated, &sheet(2), later()).unwrap();
         assert_eq!((info.codec, info.duration_ms), (VideoCodec::Apng, 350));
         assert_eq!(&stills[1].rgba[..4], &GREEN[..]);
+    }
+
+    /// A frame is scaled with premultiplied alpha: what a transparent
+    /// pixel's hidden color is changes nothing shown.
+    #[test]
+    fn hidden_colors_stay_hidden_when_frames_shrink() {
+        let frame = |hidden: [u8; 3]| {
+            let mut out = Vec::new();
+            {
+                let mut encoder = png::Encoder::new(&mut out, 4, 2);
+                encoder.set_color(png::ColorType::Rgba);
+                encoder.set_animated(2, 0).unwrap();
+                let mut writer = encoder.write_header().unwrap();
+                let pixel = |x: usize| {
+                    if x.is_multiple_of(2) {
+                        [0, 0, 255, 255]
+                    } else {
+                        [hidden[0], hidden[1], hidden[2], 0]
+                    }
+                };
+                let image: Vec<u8> = (0..8).flat_map(|at| pixel(at % 4)).collect();
+                for _ in 0..2 {
+                    writer.set_frame_delay(100, 1000).unwrap();
+                    writer.write_image_data(&image).unwrap();
+                }
+            }
+            out
+        };
+        let poster = VideoStills {
+            count: 1,
+            max_edge: 2,
+            start_s: 0.0,
+            end_s: None,
+            at_s: Some(0.0),
+            layout: StillsLayout::Poster,
+        };
+        let (_, white, _) = frames(&frame([255, 255, 255]), &poster, later()).unwrap();
+        let (_, red, _) = frames(&frame([255, 0, 0]), &poster, later()).unwrap();
+        assert_eq!(white[0].rgba, red[0].rgba);
+        assert!(
+            white[0]
+                .rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| pixel[..3] == [0, 0, 255])
+        );
     }
 
     /// An animated WebP plays like the others; a PNG that does not animate

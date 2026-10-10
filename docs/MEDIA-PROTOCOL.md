@@ -66,9 +66,11 @@ rate in frames per thousand seconds (its flag, then u32, which must be 0 without
 an audio boolean, a container byte (0 for an animated image, then the sniffed families in
 `video::VideoContainer` order from 1), a count of 1 to 16 samples, each a requested and an
 actual time in ms u64 within the duration, and a tolerance ms u32. Sides are at most 16384,
-the duration about a year, the frame rate 1000 fps and the tolerance a minute. The samples
-are in the order the frames are laid out, and an actual time is the frame shown, which a
-decoder may take from up to the tolerance away from the time asked.
+the duration about a year and the frame rate 1000 fps. The samples are in the order the
+frames are laid out, and an actual time is the frame shown, which a decoder may take from up
+to the tolerance away from the time asked: every sample is within the tolerance, and the
+tolerance is within the duration. Both checks run in the borrowed pass, before any pixel is
+copied.
 
 Source tag 0 carries a bounded byte blob. Mermaid, SVG and Markdown bytes require UTF-8.
 Tag 1 carries a native path followed by authorization tag 0 and dev/ino u64 values, or
@@ -421,36 +423,58 @@ tile as it is kept. A GIF delay under 20 ms shows for 100 ms, as browsers
 show it, and a delay of 0 in an APNG or WebP shows for 100 ms too. A single
 frame lasts 0 ms, and a PNG that does not animate is `UnsupportedMedia`.
 More than 10,000 frames, or more than two billion decoded pixels over both
-passes, is `RenderResource`, and the job has 2.5 s. Other bytes are
+passes, is `RenderResource`, and the job has 2.5 s. A frame is scaled to
+its tile with premultiplied alpha, so a transparent pixel's hidden color
+never shows. Other bytes are
 `UnsupportedMedia`.
 
-A sniffed video container is decoded by the external decoder the parent
+A sniffed video container is decoded from the held file; inline video
+bytes are `UnsupportedMedia`, since a decoder reads a file and the worker
+writes none. On macOS, MP4 and QuickTime go first to AVFoundation, in the
+worker: the asset is opened through `/dev/fd/N` on a fresh descriptor with
+the sniffed MIME type, references outside the file forbidden and the VP9
+decoder registered; its properties load asynchronously within the deadline,
+and one batch request to an image generator, with the track's display
+transform applied, returns each frame with its actual time, each within
+half the gap to its neighbours (a single instant exactly). At the deadline
+the batch is cancelled. Each frame is drawn at exactly the tile size in sRGB
+and un-premultiplied. A container it does not read is
+`UnsupportedContainer`, and a codec it cannot decode `CodecUnavailable`;
+either, or a stream it fails on, goes to the external decoder when there is
+one.
+
+The external decoder is the user's own ffmpeg, with ffprobe beside it,
+which Kettle finds in the fixed places (Homebrew, `/usr/local/bin`,
+`/usr/bin`, NixOS's system profile, then the Nix profile under `HOME`) and
 names when it starts the worker, in the worker's environment as
-`KETTLE_MEDIA_DECODER` (an ffmpeg binary, with ffprobe beside it); no job
-or request names one. Without it, or when the binaries are not trusted,
-the job is `BackendUnavailable`. Inline video bytes are `UnsupportedMedia`:
-a decoder reads a file, and the worker writes none. ffprobe describes the
-streams (the first video stream that is not cover art; the size as shown,
-its pixel aspect and display rotation applied; the codec, frame rate and
-whether there is audio) and lists the packets around each instant, or the
-whole stream's when it has no duration, which then gives its length. Each
-still is the frame showing at its instant, the last frame starting at or
-before it, decoded by that frame's own timestamp, so its actual time is
-that frame's start. When the remaining instants would miss the deadline at
+`KETTLE_MEDIA_DECODER`; no job or request names one, and the worker trusts it
+again. With no decoder to try, the job is `BackendUnavailable`. ffprobe
+describes the streams (the first video stream that is not cover art; the
+size as shown, its pixel aspect and display rotation applied; the codec,
+frame rate and whether there is audio) and lists the packets from the
+keyframe before each instant to a second, or 32 frames when that is longer,
+past it, so frames a stream stores out of order are seen; with no duration it
+lists the whole stream's, which then gives its length. Time bases wider than
+32 bits are no time base. Each still is the frame showing at its instant,
+the last frame starting at or before it (the first of any starting in the
+same microsecond), decoded by that frame's own timestamp, so its actual time
+is that frame's start. When the remaining instants would miss the deadline at
 the pace so far, each takes its frame's keyframe instead, with the
 keyframe's time. A stream whose packets carry no timestamps is sought by
 time: each frame's actual time is its instant, and the tolerance is one
-frame's length. A frame that is not exactly the tile size in RGBA, a byte
-short or over, is `RenderParse`, or `CodecUnavailable` when ffmpeg's codec
-list says it cannot decode the codec. A decoder past the deadline is
-`RenderTimeout`; a file changed while it was decoded is `Changed`. A video's
-digest covers its first 64 KiB and the held file's identity, since hashing
-the whole file would cost more than the job has.
+frame's length, or the duration when that is shorter. A frame that is not
+exactly the tile size in RGBA, a byte short or over, is `RenderParse`, or
+`CodecUnavailable` when ffmpeg's codec list says it cannot decode the codec;
+a codec list that fails says nothing. A decoder past the deadline, or a codec
+list still coming at it, is `RenderTimeout`; a file changed while it was
+decoded is `Changed`. A video's digest covers its first 64 KiB and the held
+file's identity, since hashing the whole file would cost more than the job
+has.
 
 Each still is the frame showing at the middle of its equal share of the
 window (`start_s` to `end_s`, the duration by default), or at `at_s`, clamped
 to the duration. Its actual time is that frame's start, and the tolerance
-is the longest frame. A tile keeps the picture's shape and is as large as
+is the farthest any frame's start is from its instant. A tile keeps the picture's shape and is as large as
 the edge allows after 4-pixel gaps around and between tiles, never larger
 than the picture; a poster has no gaps. Transparent pixels are flattened
 onto a dark gray, so the reply is opaque. A sheet asked for labels marks

@@ -11,8 +11,8 @@ use kettle_media::video::{
     sniff_video_container,
 };
 use kettle_media::{
-    Crop, Digest, FailureCode, Job, MAX_RASTER_BYTES, MAX_STILL_TOLERANCE_MS, MediaKind,
-    RenderLayout, Rendered, StillSample, StillsLayout, VideoInfo, VideoStills, VideoStillsResult,
+    Crop, Digest, FailureCode, Job, MAX_RASTER_BYTES, MediaKind, RenderLayout, Rendered,
+    StillSample, StillsLayout, VideoInfo, VideoStills, VideoStillsResult,
 };
 
 use crate::source::{self, Held};
@@ -65,7 +65,6 @@ pub(crate) fn render(
             compose(stills, info, frames, tolerance, digest)
         }
         StillsSource::Video(container) => {
-            let decoder = decoder.ok_or(FailureCode::BackendUnavailable)?;
             // A decoder reads a file; inline bytes would have to be written
             // somewhere first, and the worker writes nothing.
             let Held::File {
@@ -76,6 +75,7 @@ pub(crate) fn render(
             else {
                 return Err(FailureCode::UnsupportedMedia);
             };
+            let decoder = decoder.ok_or(FailureCode::BackendUnavailable)?;
             on_kind(MediaKind::Video);
             let input = VideoInput {
                 file,
@@ -328,7 +328,7 @@ pub fn compose(
         video: Some(VideoStillsResult {
             info,
             samples: frames.iter().map(|frame| frame.sample).collect(),
-            tolerance_ms: tolerance_ms.min(MAX_STILL_TOLERANCE_MS),
+            tolerance_ms,
         }),
     };
     rendered
@@ -560,8 +560,8 @@ mod tests {
     }
 
     /// A stills job renders an animation through the crate's entry point as
-    /// video; a video container waits for the worker's decoder, and other
-    /// bytes are unsupported.
+    /// video; inline video bytes, which no decoder reads, and other bytes are
+    /// unsupported.
     #[test]
     fn a_stills_job_renders_animations_and_leaves_video_to_the_worker() {
         let job = |bytes: Vec<u8>| Job {
@@ -593,7 +593,7 @@ mod tests {
         mp4.extend_from_slice(b"ftypisom\0\0\x02\0isomiso2");
         assert_eq!(
             crate::render(&job(mp4)).unwrap_err(),
-            FailureCode::BackendUnavailable
+            FailureCode::UnsupportedMedia
         );
         assert_eq!(
             crate::render(&job(b"plain text".to_vec())).unwrap_err(),

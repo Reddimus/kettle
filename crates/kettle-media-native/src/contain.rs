@@ -5,7 +5,8 @@
 //!
 //! On macOS the decoder's process limit is set to one, so every fork or
 //! spawn it attempts fails: the limit counts the user's processes, and the
-//! decoder is one of them. Threads are not processes and still work. It
+//! decoder is one of them. Threads are not processes and still work. Root is
+//! not bound by the limit, so a decoder is not run as root at all. It
 //! could still call `setsid` or `setpgid` to leave the group itself; only
 //! the self-sandbox planned for the worker can take that away.
 //!
@@ -38,14 +39,20 @@ pub(crate) fn contain(command: &mut Command) {
     };
     // SAFETY: the hook runs in the forked child before exec. It allocates
     // nothing and takes no lock: it reads a filter built before the fork and
-    // makes only prctl and setrlimit calls, which are async-signal-safe.
+    // makes only prctl, geteuid and setrlimit calls, which are
+    // async-signal-safe.
     unsafe { command.pre_exec(hook) };
 }
 
 #[cfg(target_os = "macos")]
 mod macos {
-    /// Lower the process limit to one, soft and hard.
+    /// Lower the process limit to one, soft and hard. The limit does not
+    /// bind root, so a decoder is never run as root.
     pub(super) fn no_processes() -> std::io::Result<()> {
+        // SAFETY: geteuid has no preconditions and is async-signal-safe.
+        if unsafe { libc::geteuid() } == 0 {
+            return Err(std::io::Error::from_raw_os_error(libc::EPERM));
+        }
         let one = libc::rlimit {
             rlim_cur: 1,
             rlim_max: 1,
@@ -238,9 +245,51 @@ mod tests {
             Some("session") => (unsafe { libc::setsid() }) != -1,
             // SAFETY: setpgid takes no pointers.
             Some("group") => (unsafe { libc::setpgid(0, 0) }) == 0,
+            #[cfg(target_os = "linux")]
+            Some(raw) => linux_raw(raw),
             _ => false,
         };
         println!("made={made}");
+    }
+
+    /// The raw system calls the filter judges by number and flag, each
+    /// built to fail in the kernel without creating anything: whether the
+    /// answer is the one the check names.
+    #[cfg(target_os = "linux")]
+    fn linux_raw(check: &str) -> bool {
+        let errno = |result: libc::c_long| {
+            (result == -1)
+                .then(|| std::io::Error::last_os_error().raw_os_error())
+                .flatten()
+        };
+        let zero: libc::c_long = 0;
+        match check {
+            // SAFETY: a null argument block of size zero is refused before
+            // anything is read.
+            "clone3-enosys" => {
+                errno(unsafe { libc::syscall(libc::SYS_clone3, zero, zero) }) == Some(libc::ENOSYS)
+            }
+            // SAFETY: CLONE_SIGHAND without CLONE_VM is refused before any
+            // process is made.
+            "clone-eperm" => {
+                let flags = libc::CLONE_SIGHAND as libc::c_long;
+                errno(unsafe { libc::syscall(libc::SYS_clone, flags, zero, zero, zero, zero) })
+                    == Some(libc::EPERM)
+            }
+            // SAFETY: CLONE_THREAD without CLONE_SIGHAND is refused before
+            // any thread is made; the filter lets it reach the kernel.
+            "clone-thread-einval" => {
+                let flags = libc::CLONE_THREAD as libc::c_long;
+                errno(unsafe { libc::syscall(libc::SYS_clone, flags, zero, zero, zero, zero) })
+                    == Some(libc::EINVAL)
+            }
+            // SAFETY: getpid in the x32 numbering takes no arguments.
+            #[cfg(target_arch = "x86_64")]
+            "x32-eperm" => {
+                errno(unsafe { libc::syscall(0x4000_0000 | libc::SYS_getpid) }) == Some(libc::EPERM)
+            }
+            _ => false,
+        }
     }
 
     /// Whether the child could make `check`, contained or not.
@@ -288,6 +337,35 @@ mod tests {
         ] {
             assert_eq!(child_made(check, true), contained, "{check}, contained");
             assert!(child_made(check, false), "{check}, uncontained");
+        }
+    }
+
+    /// On Linux the filter answers by number and flag: `clone3` with
+    /// `ENOSYS`, a `clone` that is no thread with `EPERM`, while a thread's
+    /// `clone` reaches the kernel (which refuses these malformed ones);
+    /// x32 numbers are refused on x86_64. Uncontained, the kernel answers,
+    /// except that a container runtime's own filter (Docker's default) may
+    /// already answer `clone3` with `ENOSYS`, so that one is not asked.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_filter_answers_by_number_and_flag() {
+        let mut checks = vec![
+            ("clone3-enosys", true, None),
+            ("clone-eperm", true, Some(false)),
+            ("clone-thread-einval", true, Some(true)),
+        ];
+        if cfg!(target_arch = "x86_64") {
+            checks.push(("x32-eperm", true, Some(false)));
+        }
+        for (check, contained, uncontained) in checks {
+            assert_eq!(child_made(check, true), contained, "{check}, contained");
+            if let Some(uncontained) = uncontained {
+                assert_eq!(
+                    child_made(check, false),
+                    uncontained,
+                    "{check}, uncontained"
+                );
+            }
         }
     }
 }
