@@ -156,9 +156,31 @@ as its digest, the first 64 KiB and the file's identity, with the
 `VideoInfo` the worker read (its own size, length, codec, rate, sound and
 container) beside the poster; no codec runs in the GUI, which only draws the
 poster, its play glyph and length, and compares bytes when it copies the
-file for the permitted player. Nothing plays in Kettle yet: the separate
-`VideoProbe` job, whose answer says whether Kettle can play a video, waits
-for the playback worker. The client's `render` runs one job in a
+file for the permitted player. The lane can play a silent preview the user
+starts (`media::preview`): one VideoStills job asks for eight frames from
+across the video as a four-by-two sheet, each frame within 384 pixels
+(`kettle_media::video::edge_for_tiles` finds the sheet's edge), under a
+two-second `RenderControl` with a reply limit of that sheet's size, through
+its own queue sender (`Sender::LanePreview`), so it never displaces the
+lane's other renders. The reply is checked against the job (a sheet laid out
+as asked, one to eight frames, each within the edge), charged to the preview
+account and held by the lane, never the item: frames are UV rectangles of
+that one sheet, drawn where the poster is, so the texture uploads once. A
+frame shows for its eighth of the video, between a twelfth of a second and
+half a second, one step at a time with no catching up, paused while the
+lane is hidden; the preview ends when the lane closes, shows another item,
+or the item changes, and a stopped one keeps its frames to play again; one
+let go while its frames are made cancels their job however it goes, its
+window included, and frames that come after their two seconds are refused.
+A new preview starts only from the user's own gesture, never while a
+control request or a Lua script's action is handled. A hover loop
+(`video-preview-hover`, held back by `reduce-motion`) only replays frames a
+user-started preview left: the real pointer (`native_pointer`) resting still
+on the picture, out from under any menu or dialog, plays them for at most
+four seconds, once a rest. Screen readers hear the lane's notices and that a
+preview is being made, but not each frame's time. Real playback
+is V2a's: the separate `VideoProbe` job, whose answer says whether Kettle can
+play a video, waits for the playback worker. The client's `render` runs one job in a
 fresh worker under startup and job deadlines, with the worker in its own
 process group, killed before it is reaped; `render_with_control` adds
 cancellation and one absolute deadline its caller owns. Nothing in the GUI

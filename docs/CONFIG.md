@@ -715,11 +715,15 @@ in preview"), and `preview_source`,
 `preview_zoom_out` and `preview_fit` as its `≡`, `◐`, `⧉`, `↻`, `+`, `−` and
 `⤢` do ("Show preview source", "Next preview canvas", "Copy preview",
 "Reload preview", "Zoom preview in", "Zoom preview out" and "Fit preview to
-lane"). `focus_preview` ("Focus preview") gives the focused pane's expanded
+lane"), and `preview_play` as a video's `▶` and `■` do ("Play or stop the
+silent preview"): a silent preview of eight frames from across the video,
+shown in turn, which never starts while Kettle handles a control request or
+a Lua script's action. `focus_preview` ("Focus preview") gives the focused pane's expanded
 lane the keyboard, and its footer says "Keyboard: preview": the arrows move
 the picture (or scroll a source), Page Up and Page Down show a gallery's
 previous and next diagram, `+` and `-` zoom, `0` fits it (or shows a source
-from its start), `c` copies, and every other key and chord, Enter,
+from its start), `c` copies, Space plays or stops a video's silent preview,
+and every other key and chord, Enter,
 digits and Kettle's own shortcuts included, does nothing, so nothing typed
 reaches the program in the pane (Option chords count on macOS). Esc, a
 click outside the lane, a file drop, another menu or dialog opening, or the

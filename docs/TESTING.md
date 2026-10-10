@@ -4173,7 +4173,49 @@ that nothing else passes for Preview. In a preview lane,
 `the_open_outside_button_sits_before_close` places the `↗` button between
 browsing and the collapse toggle and hit-tests it, and
 `a_lane_draws_its_open_outside_button_only_when_offered` renders it on the
-GPU as a button cell with its glyph only when offered. The tip: `media::tip` tests it shows once on the first card
+GPU as a button cell with its glyph only when offered. A video's silent
+preview: `a_video_lane_offers_its_preview_button_first` places `▶` right of
+the other controls after collapse and hit-tests it;
+`a_preview_frame_takes_the_items_place_unzoomed` draws a frame where the
+poster is, at its size, never zoomed or panned, without zoom controls or a
+sharper tile, and with the poster's pixels released. `media::preview` asks
+for eight frames four by two, each within 384 pixels and never past the
+picture, with a reply limit of that sheet; shows each for its eighth of the
+video between a twelfth and half a second; takes only a sheet laid out as
+asked (one to eight samples, the size and shape the job gives, each frame
+within the edge, a same-area sheet of another shape refused); steps one
+frame an interval apart without catching up, pauses while hidden, times out
+and cancels its job at two seconds, takes only its own ticket's frames,
+holds stopped frames to play again, refuses frames that come after their
+deadline (`late_frames_are_refused_and_a_dropped_preview_cancels`, which
+also lets a preview go while its frames are made and sees the job
+cancelled), and ends a hover loop at four seconds, when the pointer leaves
+or motion is no longer allowed; its reply limit holds the largest sheet the
+checks allow, so a worker that finds the video a little taller still fits.
+`a_hover_rest_is_a_pointer_that_stays_put` starts a rest on arrival or
+movement and never twice from one rest.
+`kettle_media`'s `an_edge_for_tiles_fits_them_to_the_longest_side` sweeps
+picture shapes to show the sheet edge it finds is the largest whose frames
+fit (a closed form overshot to 385 pixels), and the client's
+`a_reply_past_the_caller_s_limit_is_refused` refuses a reply one byte past
+the caller's limit and renders one exactly at it.
+`only_a_video_lane_offers_a_preview`, `a_failed_preview_says_why` and
+`the_silent_preview_is_wired` cover which items offer one, the footer for
+each failure, and the wiring (routed before any other lane render, never the
+item's pixels or its cards' poster, never while a control request or a Lua
+action is handled or for a changed file, a hover that only replays held
+frames and only within reach of the pointer, ended with its lane, ticked
+with the event loop); the lane's accessibility test hears a notice in place
+of where keys go. `kettle_media`'s edge search starts at the smallest edge
+with room for the margins, where a picture's frames begin. Checked live on macOS 27 with a signed worker: `▶` played the
+nine-color MP4's frames in turn (green at 0:01, yellow at 0:03, cyan at
+0:05) with "Silent preview · 0:03 of 0:09" in the footer, `■` brought the
+poster back still, a control client's `preview_play` started nothing, the
+real pointer resting on the picture with `video-preview-hover` on looped it
+for four seconds and again after leaving and coming back, and with
+`reduce-motion = on` resting did nothing. The plan's S-K latency, CPU and
+memory measurement was skipped for this release (no quiet machine); the
+bounds in PERFORMANCE are policy, not measurements. The tip: `media::tip` tests it shows once on the first card
 and is remembered, that of two Kettles that loaded before either showed it
 only the first to record it shows it, that a corrupt, oversized or empty
 record is left alone and stops the tip, and that only a regular file is read,

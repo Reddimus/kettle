@@ -293,7 +293,8 @@ off applies at the next launch. `get_state` reports the policy in force as
 
 `show` sends an image, SVG, Mermaid diagram, Markdown diagram gallery (a
 Markdown file's Mermaid diagrams, paged in the lane) or video (its poster,
-the middle frame, with what the video is; nothing plays) to the media shelf
+the middle frame, with what the video is; it plays only as a silent preview
+the user starts in the lane) to the media shelf
 of the pane its caller runs in. It needs only Display, so `agent-display` is enough; it grants no reads
 or mutations, and a display-only client learns nothing about the screen from
 it. `kettle show PATH` and `kettle show` (or `kettle show -`, bytes on
@@ -446,7 +447,20 @@ A video gets a card with its poster, a play glyph over the middle and its
 length on the poster's foot, and a caption with its own size and length
 (`clip.webm - video 1280x720 0:12`); the lane's detail line gives its own
 size, codec, length and whether it has sound, and a screen reader hears the
-same. Nothing plays: a card or the lane never starts a video or a sound.
+same. Nothing plays on its own and nothing makes a sound: a card never
+starts a video, and the lane's `▶` (Space while it holds the keyboard;
+`perform_action` `preview_play`) plays a silent preview the user starts,
+eight frames from across the video shown in turn for its eighth of the
+length, at most twelve a second and two at the least, until `■` stops it.
+Its footer says "Silent preview" with the moment each frame shows. The
+frames come from the sandboxed worker within two seconds, or the poster
+stays and the footer says why. A control client may press `▶`, but no
+preview starts while Kettle handles a control request or a Lua script's
+action: making one reads the file again. With `video-preview-hover` on, and
+motion allowed (`reduce-motion`, macOS's Reduce Motion), the real pointer
+resting on the lane's picture loops the frames a preview the user started
+left, for at most four seconds, reading nothing; a pointer a control client
+moves does not count.
 When no decoder reads a video, its notice says the user can install ffmpeg
 (`brew install ffmpeg` on macOS, the system's packages on Linux); Kettle
 never installs it.
