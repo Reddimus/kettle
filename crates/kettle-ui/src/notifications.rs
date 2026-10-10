@@ -34,7 +34,42 @@ static DISPATCHER: OnceLock<Option<Dispatcher>> = OnceLock::new();
 static QUEUE_FULL: AtomicBool = AtomicBool::new(false);
 static DISCONNECTED: AtomicBool = AtomicBool::new(false);
 
+/// Kettle's bundle identifier, as `packaging/macos/Info.plist` declares it.
+#[cfg(any(target_os = "macos", test))]
+const KETTLE_BUNDLE_ID: &str = "org.kettle.terminal";
+
+/// The application macOS delivers Kettle's notifications as: the running
+/// bundle's own identifier, or Kettle's when it runs outside a bundle, as a
+/// build from source does.
+#[cfg(any(target_os = "macos", test))]
+fn notification_application(main_bundle: Option<String>) -> String {
+    main_bundle
+        .filter(|identifier| !identifier.is_empty())
+        .unwrap_or_else(|| KETTLE_BUNDLE_ID.to_owned())
+}
+
+/// Name, once and before the first notification, the application macOS
+/// delivers them as. Left to itself, the notification library asks
+/// AppleScript for the application called `use_default`, and macOS answers
+/// by asking the user, in a "Choose Application" window, where that is.
+/// Naming one, even one macOS cannot find, settles it for the process.
+#[cfg(target_os = "macos")]
+fn claim_application() {
+    static CLAIMED: std::sync::Once = std::sync::Once::new();
+    CLAIMED.call_once(|| {
+        let main_bundle = objc2_core_foundation_03::CFBundle::main_bundle()
+            .and_then(|bundle| bundle.identifier())
+            .map(|identifier| identifier.to_string());
+        let application = notification_application(main_bundle);
+        if let Err(error) = notify_rust::set_application(&application) {
+            log::debug!("kettle.notify: notifications are not delivered as {application}: {error}");
+        }
+    });
+}
+
 fn show(notification: DesktopNotification) {
+    #[cfg(target_os = "macos")]
+    claim_application();
     let mut native = notify_rust::Notification::new();
     native.summary(&notification.title);
     if !notification.body.is_empty() {
@@ -166,9 +201,46 @@ pub fn flush_desktop_notifications(timeout: Duration) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Dispatcher, Message, flush_sender, spawn_dispatcher, try_queue};
+    use super::{
+        Dispatcher, KETTLE_BUNDLE_ID, Message, flush_sender, notification_application,
+        spawn_dispatcher, try_queue,
+    };
     use std::sync::mpsc;
     use std::time::Duration;
+
+    /// Notifications go out as the running bundle when there is one, else
+    /// as Kettle, whose identifier is the one its bundle declares.
+    #[test]
+    fn notifications_go_out_as_the_running_bundle_or_kettle() {
+        assert_eq!(
+            notification_application(Some("org.example.app".into())),
+            "org.example.app"
+        );
+        for none in [None, Some(String::new())] {
+            assert_eq!(notification_application(none), KETTLE_BUNDLE_ID);
+        }
+        let plist = include_str!("../../../packaging/macos/Info.plist");
+        let declared = plist
+            .split("<key>CFBundleIdentifier</key>")
+            .nth(1)
+            .and_then(|rest| rest.split("<string>").nth(1))
+            .and_then(|rest| rest.split("</string>").next());
+        assert_eq!(declared, Some(KETTLE_BUNDLE_ID));
+    }
+
+    /// The application is named before the first notification is sent, on
+    /// macOS, so the library never asks AppleScript for `use_default`.
+    #[test]
+    fn the_application_is_named_before_the_first_notification() {
+        let src = include_str!("notifications.rs");
+        let show = src
+            .split("fn show(notification: DesktopNotification) {")
+            .nth(1)
+            .expect("show");
+        let claim = show.find("claim_application();").expect("claimed");
+        let sent = show.find("native.show()").expect("sent");
+        assert!(claim < sent);
+    }
 
     #[test]
     fn admission_is_bounded_and_nonblocking() {
