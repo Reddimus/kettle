@@ -981,7 +981,9 @@ it rendered, a PNG as raster and an SVG as SVG, prose is
 Markdown gallery crosses whole: an Auto job's reply says Markdown and carries
 both pages, the document as read and the first page rendered; an explicit
 page comes back with its index and the same digest, and one past the last is
-`IndexOutOfRange`. With
+`IndexOutOfRange`. An animation's stills cross too: a labeled sheet of the
+WebP fixture comes back as a Video reply with its duration, codec and each
+frame's time, and an MP4's first bytes are `BackendUnavailable`. With
 `test-faults`, a job can pause either side of its classification: a 2.2 s
 pause after it ends a raster job, explicit or Auto, at the watchdog (exit 4)
 while an SVG job of either kind answers; and two 1.2 s pauses either side of
@@ -1013,7 +1015,39 @@ keeps it pure blue. An 8x8 box fits a 4x2 image at 8x4; a crop in box
 coordinates is transparent where the centered image does not reach; a box
 over the rendered edge or a crop outside it is `BadParams`. A file's digest
 covers its bytes and the open file's identity, the same bytes inline carry
-none, and video kinds are `UnsupportedMedia` for now.
+none, and a video probe is `UnsupportedMedia` for now.
+
+Stills: `src/stills.rs` pins the instants, the middles of equal shares of
+the window or of `start_s` to `end_s`, past the end the end, `at_s` on its
+own and clamped, and all at 0 for a still image; a sheet's grid; a tile as
+large as the edge allows after the gaps, its shape kept, never larger than
+the picture, and no tile when the gaps leave no room; labels in `mm:ss`,
+`h:mm:ss` and tenths under a minute. A sheet lays frames out in reading
+order with the gap around each, a transparent frame showing the background,
+the result opaque, a Video reply with each frame's times and the tolerance;
+a label marks a tile's lower left only when asked for, the upper right
+staying the frame; frames off the tile size, none or one too many are
+`RenderResource`. Through the crate's entry point a stills job on the WebP
+fixture renders as Video, reported once, an MP4's first bytes are
+`BackendUnavailable` and text is `UnsupportedMedia`.
+`src/animation.rs` decodes GIFs and APNGs built in the test and the
+`tests/fixtures/stills/anim.webp` fixture (provenance in its README): each
+still is the frame showing at its time, with that frame's start as its time
+and the longest frame as the tolerance, an `at_s` poster too; a GIF delay
+under 20 ms shows for 100 ms and an APNG's 0 ms delay for 100 ms, even
+delays give a frame rate and uneven none, a single frame is a still image
+of no duration; WebP frames come back within 2 of their colors (the decoder
+blends each onto the last), a PNG that does not animate is
+`UnsupportedMedia`, a spent deadline is `RenderTimeout` and a broken GIF is
+`RenderParse`. `src/source.rs`'s `a_held_file_reads_through_its_descriptor`
+holds a file by its first bytes, reads it whole through the same descriptor
+whatever is renamed over its path, and calls it `Changed` once it is
+appended to or rewritten in place at the same size; inline bytes are their
+own prefix, and either over its cap is refused as a load refuses it. Red
+checks: samples at the ends of the shares, tiles grown past the picture,
+alpha kept rather than flattened, labels drawn unasked, the frame after the
+time taken, GIF short delays kept, no deadline between frames, still PNGs
+allowed and a held file not checked after reading each fail a test.
 
 Unit tests in `src/auto.rs` classify Auto jobs: a PNG is raster whatever the
 file is called (`.svg`, `.bin`, no suffix), and a declared SVG with a

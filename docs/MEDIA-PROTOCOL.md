@@ -406,8 +406,34 @@ worker's limits and the client's deadlines and memory limit are a second
 bound, not the only one. An empty target box, one over 4096 pixels on an
 edge, a scale that is not a positive finite number, or a crop that is empty or
 leaves the box, is `BadParams`. Raster, SVG, Mermaid, MarkdownDiagrams and
-Auto jobs are rendered; a video kind is `UnsupportedMedia` until its renderer
-lands. On Windows, where no worker runs, every job is `UnsupportedPlatform`.
+Auto jobs are rendered, and so are VideoStills jobs on animated images.
+VideoProbe is `UnsupportedMedia` until its renderer lands. On Windows, where
+no worker runs, every job is `UnsupportedPlatform`.
+
+**Stills jobs.** The source is held, not read: a file is opened as any other
+is and only its first 64 KiB are read, which say what it is by content,
+never by name. A GIF, PNG or WebP is an animation. It is read whole, under
+the raster cap, through the held descriptor, and checked unchanged after;
+it is decoded by the image crate's animation decoders twice, first for its
+frame delays and then for the frames the stills show, each resized to its
+tile as it is kept. A GIF delay under 20 ms shows for 100 ms, as browsers
+show it, and a delay of 0 in an APNG or WebP shows for 100 ms too. A single
+frame lasts 0 ms, and a PNG that does not animate is `UnsupportedMedia`.
+More than 10,000 frames, or more than two billion decoded pixels over both
+passes, is `RenderResource`, and the job has 2.5 s. A sniffed video
+container is `BackendUnavailable` until the worker's decoder arrives; other
+bytes are `UnsupportedMedia`.
+
+Each still is the frame showing at the middle of its equal share of the
+window (`start_s` to `end_s`, the duration by default), or at `at_s`, clamped
+to the duration. Its actual time is that frame's start, and the tolerance
+is the longest frame. A tile keeps the picture's shape and is as large as
+the edge allows after 4-pixel gaps around and between tiles, never larger
+than the picture; a poster has no gaps. Transparent pixels are flattened
+onto a dark gray, so the reply is opaque. A sheet asked for labels marks
+each tile's lower left with the time shown (`mm:ss`, `h:mm:ss` from an hour,
+tenths under a minute). The reply is Video, with the video result described
+above.
 
 **Auto jobs.** The source is read once, under the larger of the raster and
 SVG caps, and that one snapshot is both classified and rendered, so a file
