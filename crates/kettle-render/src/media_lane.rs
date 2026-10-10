@@ -1,7 +1,8 @@
 //! A pane's preview lane: one shelf item, shown in the lane the user opened
 //! beside the pane's terminal. A header names the item and offers previous,
 //! next, open outside, collapse and close; below it, when the lane is
-//! expanded, the item's kind and sender, the image fitted on its canvas and
+//! expanded, the item's kind and sender, with a gallery's page before and
+//! after it on the same line, the image fitted on its canvas and
 //! never scaled past its own pixels until the user zooms it, and a footer
 //! saying where keys go. A
 //! collapsed lane is its header alone. The renderer gets only display text
@@ -92,6 +93,9 @@ pub struct MediaLanePanel {
     pub hint: String,
     /// The item's place on its shelf, 1-based, and the shelf's length.
     pub position: (usize, usize),
+    /// For a page of a gallery: the page shown, 1-based, and how many there
+    /// are. The detail line offers the others when there is more than one.
+    pub page: Option<(usize, usize)>,
     /// The pixels, or `None` when they were released.
     pub image: Option<kettle_core::ImageData>,
     /// Shown in the image's place when there are no pixels.
@@ -227,6 +231,12 @@ pub struct MediaLaneGeometry {
     /// empty rectangles when it does not.
     pub full: bool,
     pub detail: Rect4,
+    /// A gallery's controls at the end of the detail line, in an expanded
+    /// lane with room for them: the page before, which page it is, and the
+    /// page after.
+    pub page_previous: Option<Rect4>,
+    pub page_counter: Option<Rect4>,
+    pub page_next: Option<Rect4>,
     pub sender: Rect4,
     pub hint: Rect4,
     /// Where the image area is: the fitted image, or the whole area when
@@ -254,6 +264,9 @@ pub enum MediaLaneHit {
     Close,
     Previous,
     Next,
+    /// A gallery's page before the one shown, or after it.
+    PreviousPage,
+    NextPage,
     OpenOutside,
     /// Collapse or expand.
     Toggle,
@@ -336,6 +349,10 @@ impl MediaLaneGeometry {
             Some(MediaLaneHit::Previous)
         } else if self.next.is_some_and(|rect| contains(rect, x, y)) {
             Some(MediaLaneHit::Next)
+        } else if self.page_previous.is_some_and(|rect| contains(rect, x, y)) {
+            Some(MediaLaneHit::PreviousPage)
+        } else if self.page_next.is_some_and(|rect| contains(rect, x, y)) {
+            Some(MediaLaneHit::NextPage)
         } else {
             Some(MediaLaneHit::Inside)
         }
@@ -465,6 +482,9 @@ pub fn media_lane_geometry(
             close,
             full,
             detail: empty,
+            page_previous: None,
+            page_counter: None,
+            page_next: None,
             sender: empty,
             hint: empty,
             image_area: empty,
@@ -475,7 +495,20 @@ pub fn media_lane_geometry(
             source_rows: 0,
         });
     }
-    let detail = (left, header_y + lh, right - left, lh);
+    let mut detail = (left, header_y + lh, right - left, lh);
+    // A gallery's page before, its counter and the page after end the detail
+    // line, when the detail keeps its few columns beside them.
+    let (mut page_previous, mut page_counter, mut page_next) = (None, None, None);
+    if let Some(page) = lane.page.filter(|&(_, count)| count > 1) {
+        let counter = (media_lane_counter(page).chars().count() as f32 + 1.0) * tw;
+        let start = right - 2.0 * button - counter;
+        if start - pad - left >= MIN_TITLE_COLUMNS * tw {
+            page_previous = Some((start, detail.1, button, lh));
+            page_counter = Some((start + button, detail.1, counter, lh));
+            page_next = Some((start + button + counter, detail.1, button, lh));
+            detail.2 = start - pad - left;
+        }
+    }
     let sender = (left, detail.1 + lh, right - left, lh);
     let hint = (left, rect.1 + rect.3 - pad - lh, right - left, lh);
     let area_top = sender.1 + lh + pad;
@@ -521,6 +554,9 @@ pub fn media_lane_geometry(
         close,
         full,
         detail,
+        page_previous,
+        page_counter,
+        page_next,
         sender,
         hint,
         image_area,
@@ -621,8 +657,8 @@ fn fit_image(image: &kettle_core::ImageData, content: Rect4) -> Option<Rect4> {
     ))
 }
 
-/// A lane's text, shaped once per change: its six lines, the source rows in
-/// view and the control glyphs.
+/// A lane's text, shaped once per change: its seven lines, the source rows
+/// in view and the control glyphs.
 pub(crate) struct LaneText {
     title: TextBuffer,
     detail: TextBuffer,
@@ -630,12 +666,14 @@ pub(crate) struct LaneText {
     counter: TextBuffer,
     hint: TextBuffer,
     status: TextBuffer,
+    page_counter: TextBuffer,
     /// Previous, next, open outside, collapse, expand, close, show source,
-    /// show rendered, canvas, copy, reload, zoom out, zoom in and fit.
-    controls: [TextBuffer; 14],
+    /// show rendered, canvas, copy, reload, zoom out, zoom in, fit, and a
+    /// gallery's page before and after.
+    controls: [TextBuffer; 16],
     /// What each line buffer was last shaped with; `None` until it is, or
     /// once a font change means it must be again.
-    shaped: [Option<String>; 6],
+    shaped: [Option<String>; 7],
     /// One buffer per source row in view, and what each was shaped with.
     rows: Vec<TextBuffer>,
     rows_shaped: Vec<String>,
@@ -665,6 +703,7 @@ impl LaneText {
             counter: line(font_system),
             hint: line(font_system),
             status: line(font_system),
+            page_counter: line(font_system),
             controls: [
                 control(font_system, "‹"),
                 control(font_system, "›"),
@@ -680,6 +719,8 @@ impl LaneText {
                 control(font_system, "−"),
                 control(font_system, "+"),
                 control(font_system, "⤢"),
+                control(font_system, "‹"),
+                control(font_system, "›"),
             ],
             shaped: Default::default(),
             rows: Vec::new(),
@@ -690,7 +731,7 @@ impl LaneText {
     /// What each line and source row was last shaped with, for the
     /// renderer's text damage key: buffers keep their addresses when the
     /// lane changes item.
-    pub(crate) fn shaped(&self) -> (&[Option<String>; 6], &[String]) {
+    pub(crate) fn shaped(&self) -> (&[Option<String>; 7], &[String]) {
         (&self.shaped, &self.rows_shaped)
     }
 
@@ -715,6 +756,10 @@ impl LaneText {
         glyph_width: f32,
     ) {
         let counter = media_lane_counter(lane.position);
+        let page_counter = match (lane.page, geometry.page_counter) {
+            (Some(page), Some(_)) => media_lane_counter(page),
+            _ => String::new(),
+        };
         let full = |text: &'_ str| {
             if geometry.full {
                 text.to_owned()
@@ -765,13 +810,15 @@ impl LaneText {
             }
             buffer.shape_until_scroll(font_system, false);
         }
-        let lines: [(&mut TextBuffer, &str, Rect4, bool); 6] = [
+        let page_rect = geometry.page_counter.unwrap_or_default();
+        let lines: [(&mut TextBuffer, &str, Rect4, bool); 7] = [
             (&mut self.title, &lane.title, geometry.title, true),
             (&mut self.detail, &detail, geometry.detail, false),
             (&mut self.counter, &counter, geometry.counter, false),
             (&mut self.hint, &hint, geometry.hint, false),
             (&mut self.status, &status, geometry.image_area, false),
             (&mut self.sender, &sender, geometry.sender, false),
+            (&mut self.page_counter, &page_counter, page_rect, false),
         ];
         for ((buffer, text, rect, bold), shaped) in lines.into_iter().zip(&mut self.shaped) {
             buffer.set_metrics(metrics);
@@ -795,12 +842,16 @@ impl LaneText {
     }
 
     /// The text areas to paint, in `label`, `description` and `emphasis`
-    /// colors. Control glyphs are centered in their cells by `glyph_width`.
+    /// colors. Control glyphs are centered in their cells by `glyph_width`;
+    /// a gallery's page control with no page that way, at `page`'s first or
+    /// last, is in the description color.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn areas<'a>(
         &'a self,
         geometry: &MediaLaneGeometry,
         collapsed: bool,
         mode: MediaLaneMode,
+        page: Option<(usize, usize)>,
         colors: (GColor, GColor, GColor),
         glyph_width: f32,
         line_height: f32,
@@ -825,6 +876,9 @@ impl LaneText {
                 area(&self.sender, geometry.sender, description),
                 area(&self.hint, geometry.hint, description),
             ]);
+        }
+        if let Some(rect) = geometry.page_counter {
+            areas.push(area(&self.page_counter, rect, description));
         }
         if let Some(status) = self.shaped[4]
             .as_deref()
@@ -867,10 +921,15 @@ impl LaneText {
             geometry.zoom_out,
             geometry.zoom_in,
             geometry.zoom_fit,
+            geometry.page_previous,
+            geometry.page_next,
         ];
-        for (buffer, rect) in self.controls.iter().zip(buttons) {
+        let (first, last) =
+            page.map_or((true, true), |(shown, count)| (shown <= 1, shown >= count));
+        for (at, (buffer, rect)) in self.controls.iter().zip(buttons).enumerate() {
             if let Some(rect) = rect {
-                let mut glyph = area(buffer, rect, emphasis);
+                let idle = (at == 14 && first) || (at == 15 && last);
+                let mut glyph = area(buffer, rect, if idle { description } else { emphasis });
                 glyph.left = rect.0 + ((rect.2 - glyph_width) / 2.0).max(0.0);
                 glyph.top = rect.1 + ((rect.3 - line_height) / 2.0).max(0.0);
                 areas.push(glyph);
@@ -927,6 +986,7 @@ mod tests {
             },
             hint: "Esc closes".into(),
             position,
+            page: None,
             image: image.map(|(w, h)| {
                 kettle_core::ImageData::new(w, h, vec![0; (w * h * 4) as usize]).unwrap()
             }),
@@ -991,6 +1051,7 @@ mod tests {
         );
         let single = MediaLanePanel {
             position: (1, 1),
+            page: None,
             ..offered.clone()
         };
         let geometry = media_lane_geometry(&single, CELL, CELL).unwrap();
@@ -1470,6 +1531,63 @@ mod tests {
         }
     }
 
+    /// A gallery's page before and after, with its counter between, end the
+    /// detail line of an expanded lane, which keeps a few columns before
+    /// them; a press on either says which, and one on the counter does
+    /// nothing. One page, a collapsed lane or too little room offer none.
+    #[test]
+    fn a_gallery_pages_from_the_end_of_the_detail_line() {
+        let mut lane = viewer((1, 1), Some((640, 480)));
+        lane.page = Some((2, 5));
+        let geometry = media_lane_geometry(&lane, CELL, CELL).unwrap();
+        let (previous, counter, next) = (
+            geometry.page_previous.unwrap(),
+            geometry.page_counter.unwrap(),
+            geometry.page_next.unwrap(),
+        );
+        let (_, line, _, _) = geometry.detail;
+        assert!([previous, counter, next].iter().all(|rect| rect.1 == line));
+        assert_eq!(previous.0 + previous.2, counter.0);
+        assert_eq!(counter.0 + counter.2, next.0);
+        assert_eq!(next.0 + next.2, geometry.sender.0 + geometry.sender.2);
+        assert_eq!(counter.2, 4.0 * CELL.0, "\"2/5\" and a column");
+        assert!(geometry.detail.0 + geometry.detail.2 < previous.0);
+        let at = |rect: Rect4| geometry.hit_test(rect.0 + 1.0, rect.1 + 1.0);
+        assert_eq!(at(previous), Some(MediaLaneHit::PreviousPage));
+        assert_eq!(at(next), Some(MediaLaneHit::NextPage));
+        assert_eq!(at(counter), Some(MediaLaneHit::Inside));
+
+        let none = |lane: &MediaLanePanel| {
+            let geometry = media_lane_geometry(lane, CELL, CELL).unwrap();
+            (
+                geometry.page_previous,
+                geometry.page_counter,
+                geometry.page_next,
+            ) == (None, None, None)
+        };
+        assert!(none(&MediaLanePanel {
+            page: Some((1, 1)),
+            ..lane.clone()
+        }));
+        assert!(none(&MediaLanePanel {
+            collapsed: true,
+            ..lane.clone()
+        }));
+        assert!(none(&MediaLanePanel {
+            page: None,
+            ..lane.clone()
+        }));
+        // The detail keeps four columns beside the controls, or they go.
+        let room = |width: f32| MediaLanePanel {
+            rect: (0.0, 0.0, width, 600.0),
+            ..lane.clone()
+        };
+        let pad = (CELL.0 * 0.75).round().max(4.0);
+        let least = 2.0 * pad + 6.0 * CELL.0 + 4.0 * CELL.0 + pad + MIN_TITLE_COLUMNS * CELL.0;
+        assert!(!none(&room(least)));
+        assert!(none(&room(least - 1.0)));
+    }
+
     /// However narrow the lane, every control and the counter lie inside it:
     /// controls past close and collapse give way, in order, so the title
     /// keeps a few columns, and a lane too narrow even for those has none.
@@ -1484,6 +1602,7 @@ mod tests {
         let mut previous_controls = usize::MAX;
         for width in (60..=900).rev().step_by(10) {
             let mut lane = viewer((2, 5), Some((64, 48)));
+            lane.page = Some((3, 12));
             lane.open_outside = true;
             lane.copy = true;
             lane.reload = true;
@@ -1532,6 +1651,9 @@ mod tests {
                 Some(geometry.close),
                 Some(geometry.toggle),
                 Some(geometry.counter),
+                geometry.page_previous,
+                geometry.page_counter,
+                geometry.page_next,
             ]
             .into_iter()
             .chain(optional)

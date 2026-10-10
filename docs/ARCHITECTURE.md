@@ -699,6 +699,37 @@ item's pixels releases its charged bytes too. The render lane builds each
 thread. A shelf key is a `ShelfKey`: the key a `show` named, or a file's
 native path, so two paths that print alike never replace each other.
 
+A Markdown gallery's reply becomes a Mermaid item (`ItemSource::page`): a
+`media::Gallery` keeps every page, each a `ChargedBytes` of its own behind
+an `Arc`, and the item's source is the page shown, its spec a Mermaid job
+over those bytes on the reply's theme, canvas and target, its digest that
+page's, so canvas renders, sharper crops, the source view and a source copy
+all work on the page as on any diagram the item carried. No room for the
+pages refuses the reply as over budget. A gallery read from a file keeps
+its path and the page shown (`reload_file`), which a reload reads again as
+`MarkdownDiagrams { index }`; evicting the item's pixels gives back the
+pages but keeps that path. `‹` and `›` on the detail line, Page Up and Page
+Down in a focused lane, and the palette's diagram actions call
+`page_preview`, which asks for a page (`gallery_step`, counting from the
+page asked for and not yet shown, `PreviewPanel::page` with the item's
+generation, `page_waited_on`) as a lane render carrying it with a ticket
+of its own (`LaneRender::page`, a `PageAsk`) from the bytes kept, never the
+file, on the canvas the user chose; the counter shows that page while it
+renders. A canvas change while a page is waited on asks for that page again
+on the new canvas under a new ticket, taking the waiting request's place,
+since a newer lane render displaces a waiting one unsaid; the request it
+supersedes, if already running, can then neither clear the wait nor stand
+for it. `finish_lane_render` takes a page render only for the request its
+lane waits on, or for the page it shows drawn again (`lane_takes_page`),
+for that item and generation, and only if its digest is that page's (`lane_render_verdict`);
+then the page becomes the item's source (`ItemSource::select`), with the
+render's warnings, its cards show the new pixels, and, for another page,
+the lane fits it and shows its source from the top, with no sharper pixels
+of the last page. A page that fails, is withdrawn, or comes
+back for a lane that moved on lets the wait go and leaves the page shown as
+it was. Only a render that read a file can find it changed: a render of
+bytes kept with another digest is of a page gone by, and is dropped.
+
 A lane's header can switch to the item's source (`MediaLaneMode::Source`),
 whose visible rows `media::display_rows` takes out of the text for the
 room the lane has, with tabs expanded and characters that act shown as
@@ -867,8 +898,8 @@ as Mermaid bytes through `admit_user_pull`, the same admission a path pull
 uses.
 
 The user can pull a file into a lane too: `preview_link` runs quick select
-with `hint_previews` keeping only the image, SVG and Mermaid files a pane
-names (a whole path, off Windows, or a local `file://` link), and the
+with `hint_previews` keeping only the image, SVG, Mermaid and Markdown files
+a pane names (a whole path, off Windows, or a local `file://` link), and the
 right-click menu adds a "Preview in Kettle" row (`UrlHow::Preview`) on a
 link to one. Both reach `preview_pane_link`, which passes the pane's
 `link_gate` as opening the link would: a remote pane, or one that has gone,

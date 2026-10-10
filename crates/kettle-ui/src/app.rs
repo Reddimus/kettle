@@ -795,13 +795,10 @@ fn lane_mode(
     }
 }
 
-/// Whether `item` can be read again: it came from a file, not bytes a
-/// request carried.
+/// Whether `item` can be read again: it came from a file, or its gallery
+/// did, not from bytes a request carried or text copied.
 fn preview_reloads(item: &crate::media::ShelfItem) -> bool {
-    matches!(
-        item.source.spec.input,
-        crate::media::SourceInput::Path { .. }
-    )
+    item.source.reload_file().is_some()
 }
 
 /// What a reload keeps of the item it replaces.
@@ -809,19 +806,20 @@ struct ReloadOf {
     key: crate::media::ShelfKey,
     title: String,
     canvas: kettle_media::Canvas,
+    /// The gallery page shown, which the file is read again at.
+    page: Option<u8>,
 }
 
 /// What reloading `item`, shown in `panel`, reads and keeps: its file, and
-/// its key, title and the canvas the user chose for its lane, which a file
-/// that now holds a diagram is rendered for. None for bytes a request
-/// carried, or a path this platform cannot name.
+/// its key, title, the canvas the user chose for its lane, which a file
+/// that now holds a diagram is rendered for, and a gallery's page shown.
+/// None for bytes a request carried, text copied, or a path this platform
+/// cannot name.
 fn reload_of(
     item: &crate::media::ShelfItem,
     panel: &crate::window_state::PreviewPanel,
 ) -> Option<(std::path::PathBuf, ReloadOf)> {
-    let crate::media::SourceInput::Path { path, .. } = &item.source.spec.input else {
-        return None;
-    };
+    let (path, page) = item.source.reload_file()?;
     let native = native_path_buf(path)?;
     let reload = ReloadOf {
         key: item
@@ -830,6 +828,7 @@ fn reload_of(
             .unwrap_or_else(|| crate::media::ShelfKey::Path(path.clone())),
         title: item.title.clone(),
         canvas: media_canvas(chosen_canvas(item, panel)),
+        page,
     };
     Some((native, reload))
 }
@@ -872,29 +871,80 @@ fn preview_item(ws: &WindowState, pane: u64) -> Option<&crate::media::ShelfItem>
 /// What a lane's render of its item is worth when it comes back.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LaneRenderVerdict {
-    /// The item left the shelf or was replaced: the render is dropped.
+    /// The item left the shelf or was replaced, or the render is of a
+    /// gallery page it no longer shows: the render is dropped.
     Gone,
     /// What was read is not what the item was rendered from.
     Changed,
-    /// The same item from the same source: the render replaces its pixels.
+    /// The same item from the same source, or the gallery page asked for:
+    /// the render replaces its pixels.
     Same,
 }
 
 /// Judge a lane's render, which read a source with `digest`, against the
-/// shelf `items` it asked about.
+/// shelf `items` it asked about: the item's own source, or for another page
+/// of its gallery, that page. Only a file read again can have changed;
+/// bytes kept cannot, so a render of other bytes is of a page gone by.
 fn lane_render_verdict(
     items: &[crate::media::ShelfItem],
     render: &crate::media::LaneRender,
     digest: &kettle_media::Digest,
 ) -> LaneRenderVerdict {
-    match items
+    let Some(item) = items
         .iter()
         .find(|item| item.id == render.item && item.generation == render.generation)
-    {
-        None => LaneRenderVerdict::Gone,
-        Some(item) if item.source.digest != *digest => LaneRenderVerdict::Changed,
-        Some(_) => LaneRenderVerdict::Same,
+    else {
+        return LaneRenderVerdict::Gone;
+    };
+    let expected = match render.page {
+        Some(ask) => item.source.page_digest(ask.page),
+        None => Some(item.source.digest.clone()),
+    };
+    if expected.as_ref() == Some(digest) {
+        LaneRenderVerdict::Same
+    } else if render.page.is_none() && item.source.reads_file() {
+        LaneRenderVerdict::Changed
+    } else {
+        LaneRenderVerdict::Gone
     }
+}
+
+/// The gallery page request `panel` waits on for its item at `generation`,
+/// asked for last and not yet shown: what the lane will show, and where a
+/// step counts from.
+fn page_waited_on(
+    panel: &crate::window_state::PreviewPanel,
+    generation: u64,
+) -> Option<crate::media::PageAsk> {
+    panel
+        .page
+        .filter(|&(asked_of, _)| asked_of == generation)
+        .map(|(_, ask)| ask)
+}
+
+/// Whether a lane with `panel` takes `render` of gallery page request `ask`,
+/// its item showing page `shown`: the request it waits on, or one of the
+/// page it shows drawn again on another canvas, for the item and generation
+/// it shows. A request for the page it waits on that was asked again since
+/// is not taken.
+fn lane_takes_page(
+    panel: &crate::window_state::PreviewPanel,
+    render: &crate::media::LaneRender,
+    ask: crate::media::PageAsk,
+    shown: Option<u8>,
+) -> bool {
+    panel.item == render.item
+        && (page_waited_on(panel, render.generation) == Some(ask) || shown == Some(ask.page))
+}
+
+/// The gallery page `step` pages from the one asked for and not yet shown,
+/// else from the one shown, of `count`: `None` past the first or last, as a
+/// gallery does not wrap.
+fn gallery_step(shown: u8, count: usize, asked: Option<u8>, step: i32) -> Option<u8> {
+    let from = i32::from(asked.unwrap_or(shown));
+    from.checked_add(step)
+        .filter(|&page| page >= 0 && (page as usize) < count)
+        .and_then(|page| u8::try_from(page).ok())
 }
 
 /// Most columns a source scrolls sideways: past any line a source can hold.
@@ -1125,7 +1175,15 @@ fn media_lane_accessibility(
     tr: &kettle_i18n::Translator,
 ) -> (String, String) {
     let (index, count) = lane.position;
-    let detail = format!("{} · {}", lane.detail, lane.sender.text);
+    let detail = match lane.page.filter(|&(_, pages)| pages > 1) {
+        Some((page, pages)) => format!(
+            "{} · {} · {}",
+            lane.detail,
+            tr.media_lane_a11y_diagram(page as u64, pages as u64),
+            lane.sender.text
+        ),
+        None => format!("{} · {}", lane.detail, lane.sender.text),
+    };
     let label = tr.media_lane_a11y(index as u64, count as u64, &lane.title, &detail);
     let description = if lane.image.is_some() {
         lane.hint.clone()
@@ -1164,7 +1222,7 @@ fn lane_controls(
     u64,
     Option<kettle_render::Rect4>,
     kettle_render::MediaLaneHit,
-); 12] {
+); 14] {
     use kettle_render::MediaLaneHit as Hit;
     [
         (1, geometry.previous, Hit::Previous),
@@ -1179,6 +1237,8 @@ fn lane_controls(
         (10, geometry.zoom_out, Hit::ZoomOut),
         (11, geometry.zoom_in, Hit::ZoomIn),
         (12, geometry.zoom_fit, Hit::Fit),
+        (13, geometry.page_previous, Hit::PreviousPage),
+        (14, geometry.page_next, Hit::NextPage),
     ]
 }
 
@@ -1188,6 +1248,8 @@ fn lane_control_name(hit: kettle_render::MediaLaneHit) -> &'static str {
     match hit {
         Hit::Previous => "previous",
         Hit::Next => "next",
+        Hit::PreviousPage => "previous_page",
+        Hit::NextPage => "next_page",
         Hit::OpenOutside => "open_outside",
         Hit::Toggle => "toggle",
         Hit::Close => "close",
@@ -5905,15 +5967,28 @@ fn hint_action(kind: kettle_core::hints::Kind, alternate: bool, unsafe_path: boo
 }
 
 /// Whether a file named `name` is one a lane can preview, by its extension:
-/// the raster formats the media worker decodes, SVG, and Mermaid. The
-/// worker still decides by the bytes; this only picks what to offer.
+/// the raster formats the media worker decodes, SVG, Mermaid, and Markdown,
+/// whose Mermaid diagrams are a gallery. The worker still decides by the
+/// bytes; this only picks what to offer.
 fn previewable_name(name: &str) -> bool {
     let extension = name
         .rsplit_once('.')
         .map(|(_, extension)| extension.to_ascii_lowercase());
     matches!(
         extension.as_deref(),
-        Some("png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif" | "svg" | "mmd" | "mermaid")
+        Some(
+            "png"
+                | "jpg"
+                | "jpeg"
+                | "webp"
+                | "bmp"
+                | "gif"
+                | "svg"
+                | "mmd"
+                | "mermaid"
+                | "md"
+                | "markdown"
+        )
     )
 }
 
@@ -5955,6 +6030,8 @@ fn lane_action_hit(action: &Action) -> Option<kettle_render::MediaLaneHit> {
     match action {
         Action::PreviewNext => Some(Hit::Next),
         Action::PreviewPrevious => Some(Hit::Previous),
+        Action::PreviewNextDiagram => Some(Hit::NextPage),
+        Action::PreviewPreviousDiagram => Some(Hit::PreviousPage),
         Action::ClosePreview => Some(Hit::Close),
         Action::PreviewSource => Some(Hit::Mode),
         Action::PreviewCanvas => Some(Hit::Canvas),
@@ -9009,6 +9086,9 @@ pub struct App {
     ctl_driving: bool,
     /// The last ticket a lane took for sharper pixels.
     crop_tickets: u64,
+    /// The last gallery page request a lane made, counting from 0, so two
+    /// requests for one page are told apart.
+    page_tickets: u64,
     /// The thread that copies a lane's image or source, from the first copy.
     preview_copy: Option<crate::media::CopyService>,
     /// Bounded native-poster jobs. Paths cross only the private child-worker
@@ -10023,6 +10103,7 @@ impl App {
             previews_ready: Vec::new(),
             ctl_driving: false,
             crop_tickets: 0,
+            page_tickets: 0,
             preview_copy: None,
             video_previewer,
             next_video_preview_generation: 1,
@@ -10927,6 +11008,7 @@ impl App {
         let panel = match ws.preview_panels.get(&pane) {
             Some(panel) if panel.item == item => crate::window_state::PreviewPanel {
                 notice: None,
+                page: None,
                 ..*panel
             },
             // Another item: the sharper pixels were the last one's.
@@ -11069,14 +11151,52 @@ impl App {
             }
             return;
         }
+        // A gallery page asked for and not yet shown is what the lane will
+        // show: it is asked for again on this canvas, taking the waiting
+        // request's place rather than leaving it to be dropped unsaid.
+        let (id, generation) = (item.id, item.generation);
+        let waited = ws
+            .preview_panels
+            .get(&pane)
+            .and_then(|panel| page_waited_on(panel, generation))
+            .and_then(|ask| item.source.page_spec(ask.page).map(|spec| (ask.page, spec)));
+        let page = match waited {
+            Some((page, page_spec)) => {
+                spec = page_spec;
+                self.page_tickets += 1;
+                let ask = crate::media::PageAsk {
+                    page,
+                    ticket: self.page_tickets,
+                };
+                if let Some(panel) = ws.preview_panels.get_mut(&pane) {
+                    panel.page = Some((generation, ask));
+                }
+                Some(ask)
+            }
+            None => None,
+        };
         spec.canvas = canvas;
         let render = crate::media::LaneRender {
             window: ws.seq,
             pane,
-            item: item.id,
-            generation: item.generation,
+            item: id,
+            generation,
             tile: None,
+            page,
         };
+        self.render_for_lane(ws, render, spec);
+    }
+
+    /// Ask the worker for `render` of `spec`, for `pane`'s lane, which says
+    /// it is rendering until it comes back. A newer render for the lane
+    /// takes the place of one still waiting.
+    fn render_for_lane(
+        &mut self,
+        ws: &mut WindowState,
+        render: crate::media::LaneRender,
+        spec: crate::media::JobSpec,
+    ) {
+        let pane = render.pane;
         let deadline = std::time::Instant::now() + kettle_ctl::show::SHOW_SERVER_DEADLINE;
         let push = crate::media::Push::new(
             crate::media::Requester::Lane(render),
@@ -11100,6 +11220,111 @@ impl App {
         self.media
             .admit(crate::media::Sender::Lane(pane), deadline, push);
         self.media_tick(ws);
+    }
+
+    /// Ask for the page of `pane`'s gallery `step` pages from the one asked
+    /// for last and not yet shown, else from the one shown. It renders from
+    /// the pages kept, never the file, on the canvas shown, and replaces the
+    /// shown page once it comes back (see [`Self::finish_lane_render`]);
+    /// until then the lane shows its page and says it is rendering. Past the
+    /// first or last page nothing happens; back to the page shown, what was
+    /// asked for is let go.
+    fn page_preview(&mut self, ws: &mut WindowState, pane: u64, step: i32) {
+        let Some(item) = preview_item(ws, pane) else {
+            return;
+        };
+        let Some((shown, count)) = item.source.gallery_page() else {
+            return;
+        };
+        let (id, generation) = (item.id, item.generation);
+        let asked = ws
+            .preview_panels
+            .get(&pane)
+            .and_then(|panel| page_waited_on(panel, generation))
+            .map(|ask| ask.page);
+        let Some(page) = gallery_step(shown, count, asked, step) else {
+            return;
+        };
+        // On the canvas the user chose, which a canvas render still waiting
+        // would have drawn: this request takes its place.
+        let canvas = ws
+            .preview_panels
+            .get(&pane)
+            .map(|panel| media_canvas(chosen_canvas(item, panel)));
+        let spec = item.source.page_spec(page).map(|mut spec| {
+            if let Some(canvas) = canvas {
+                spec.canvas = canvas;
+            }
+            spec
+        });
+        let Some(panel) = ws.preview_panels.get_mut(&pane) else {
+            return;
+        };
+        if page == shown {
+            panel.page = None;
+            panel.notice = None;
+            return self.lanes_changed(ws, false);
+        }
+        let Some(spec) = spec else {
+            return;
+        };
+        self.page_tickets += 1;
+        let ask = crate::media::PageAsk {
+            page,
+            ticket: self.page_tickets,
+        };
+        panel.page = Some((generation, ask));
+        let render = crate::media::LaneRender {
+            window: ws.seq,
+            pane,
+            item: id,
+            generation,
+            tile: None,
+            page: Some(ask),
+        };
+        self.render_for_lane(ws, render, spec);
+        self.lanes_changed(ws, false);
+    }
+
+    /// Whether `render` is of the gallery page `pane`'s lane asked for last,
+    /// or of the page it shows (drawn again on another canvas), for the item
+    /// and generation it shows; true for any other render.
+    fn lane_wants(&mut self, ws: &mut WindowState, render: &crate::media::LaneRender) -> bool {
+        let Some(ask) = render.page else {
+            return true;
+        };
+        let Some(window) = self.window_by_seq(ws, render.window) else {
+            return false;
+        };
+        let shown = window
+            .mux
+            .panes
+            .get(&render.pane)
+            .and_then(|pane| pane.media_shelf.get(render.item))
+            .filter(|item| item.generation == render.generation)
+            .and_then(|item| item.source.gallery_page())
+            .map(|(shown, _)| shown);
+        window
+            .preview_panels
+            .get(&render.pane)
+            .is_some_and(|panel| lane_takes_page(panel, render, ask, shown))
+    }
+
+    /// Let go of the gallery page request `render` made, if it is the one
+    /// its lane still waits on; a request asked again since is not.
+    fn forget_lane_page(&mut self, ws: &mut WindowState, render: &crate::media::LaneRender) {
+        let Some(ask) = render.page else {
+            return;
+        };
+        if let Some(panel) = self
+            .window_by_seq(ws, render.window)
+            .and_then(|window| window.preview_panels.get_mut(&render.pane))
+            .filter(|panel| {
+                panel.item == render.item && page_waited_on(panel, render.generation) == Some(ask)
+            })
+        {
+            panel.page = None;
+        }
     }
 
     /// Copy what `pane`'s lane shows: the item's image, or its source in
@@ -11315,6 +11540,7 @@ impl App {
             item: id,
             generation,
             tile: Some(ticket),
+            page: None,
         };
         let deadline = std::time::Instant::now() + kettle_ctl::show::SHOW_SERVER_DEADLINE;
         let push = crate::media::Push::new(
@@ -11624,7 +11850,8 @@ impl App {
     }
 
     /// A key while a lane holds the keyboard: Esc gives it back, arrows move
-    /// the picture or scroll a source, `+`, `-` and `0` zoom and fit, and `c`
+    /// the picture or scroll a source, Page Up and Page Down show a gallery's
+    /// diagram before or after, `+`, `-` and `0` zoom and fit, and `c`
     /// copies; every other key does nothing. A held key that acts once a
     /// press does not repeat.
     fn preview_focus_key(&mut self, ws: &mut WindowState, key: &Key, repeat: bool) {
@@ -11672,6 +11899,7 @@ impl App {
                 }
             }
             K::Fit => self.fit_preview(ws, pane),
+            K::Page(step) => self.page_preview(ws, pane, step),
             K::Copy => self.copy_preview(ws, pane),
             K::Swallow => {}
         }
@@ -12063,6 +12291,12 @@ impl App {
                 )
                 .to_string(),
             position: (index + 1, items.len()),
+            // The page asked for and not yet shown, else the one shown: where
+            // a step counts from.
+            page: item.source.gallery_page().map(|(shown, count)| {
+                let asked = page_waited_on(panel, item.generation).map_or(shown, |ask| ask.page);
+                (usize::from(asked) + 1, count)
+            }),
             image: item.image().cloned(),
             status: tr.text(kettle_i18n::Text::MediaViewerReleased).to_string(),
             open_outside: self.preview_opens_outside(ws, pane).is_some(),
@@ -12285,6 +12519,8 @@ impl App {
             Hit::Toggle => self.toggle_preview(ws, pane),
             Hit::Previous => self.step_preview(ws, pane, -1),
             Hit::Next => self.step_preview(ws, pane, 1),
+            Hit::PreviousPage => self.page_preview(ws, pane, -1),
+            Hit::NextPage => self.page_preview(ws, pane, 1),
             Hit::OpenOutside => self.open_preview_outside(ws, pane),
             Hit::Mode => self.switch_preview_mode(ws, pane),
             Hit::Canvas => self.next_preview_canvas(ws, pane),
@@ -21147,6 +21383,8 @@ impl App {
             Action::CopyAgentSetup => self.copy_agent_setup(),
             Action::PreviewNext
             | Action::PreviewPrevious
+            | Action::PreviewNextDiagram
+            | Action::PreviewPreviousDiagram
             | Action::ClosePreview
             | Action::PreviewSource
             | Action::PreviewCanvas
@@ -23479,6 +23717,11 @@ impl App {
                 }
                 continue;
             }
+            // A gallery page the lane no longer waits on goes unsaid.
+            if !self.lane_wants(ws, &render) {
+                continue;
+            }
+            self.forget_lane_page(ws, &render);
             self.tell_lane(
                 ws,
                 render.window,
@@ -23837,9 +24080,10 @@ impl App {
             return notify_preview_failure(tr, Some(kettle_media::FailureCode::FileNotFound));
         };
         // A reload replaces its item in place, under the item's key and
-        // title, on the canvas it shows; a new pull is keyed by its file.
-        let (key, title, canvas) = match reload {
-            Some(item) => (item.key, item.title, item.canvas),
+        // title, on the canvas it shows, a gallery at the page it shows; a
+        // new pull is keyed by its file.
+        let (key, title, canvas, page) = match reload {
+            Some(item) => (item.key, item.title, item.canvas, item.page),
             None => (
                 crate::media::ShelfKey::Path(native.clone()),
                 native
@@ -23848,21 +24092,18 @@ impl App {
                     .filter(|title| !title.is_empty())
                     .unwrap_or_else(|| tr.text(kettle_i18n::Text::MediaShelfUntitled).into()),
                 kettle_media::Canvas::Theme,
+                None,
             ),
+        };
+        let kind = match page {
+            Some(index) => kettle_media::JobKind::MarkdownDiagrams { index },
+            None => kettle_media::JobKind::Auto,
         };
         let source = kettle_media::Source::user_pull(
             native,
             kettle_media::GuiActionWitness::from_explicit_gui_action(),
         );
-        self.admit_user_pull(
-            ws,
-            pane,
-            kettle_media::JobKind::Auto,
-            source,
-            Some(key),
-            title,
-            canvas,
-        );
+        self.admit_user_pull(ws, pane, kind, source, Some(key), title, canvas);
     }
 
     /// Queue the user's own pull for `pane`'s lane: `source` as `kind`,
@@ -24011,13 +24252,18 @@ impl App {
         if let Some(ticket) = render.tile {
             return self.finish_lane_crop(ws, render, ticket, spec, result);
         }
+        // A gallery page the lane no longer waits on is dropped unsaid.
+        if !self.lane_wants(ws, &render) {
+            return;
+        }
         let control = self.ctl_driving;
         let tell = |app: &mut Self, ws: &mut WindowState, notice| {
+            app.forget_lane_page(ws, &render);
             app.tell_lane(ws, render.window, render.pane, render.item, notice);
         };
         let output = match result {
             Ok(output) => output,
-            Err(RenderError::Cancelled) => return,
+            Err(RenderError::Cancelled) => return self.forget_lane_page(ws, &render),
             Err(RenderError::Failure(FailureCode::Changed)) => {
                 self.mark_preview_changed(ws, &render);
                 return tell(self, ws, LaneNotice::Changed);
@@ -24033,7 +24279,7 @@ impl App {
             });
         match verdict {
             // Replaced or gone: nothing to say.
-            LaneRenderVerdict::Gone => return,
+            LaneRenderVerdict::Gone => return self.forget_lane_page(ws, &render),
             LaneRenderVerdict::Changed => {
                 self.mark_preview_changed(ws, &render);
                 return tell(self, ws, LaneNotice::Changed);
@@ -24041,6 +24287,7 @@ impl App {
             LaneRenderVerdict::Same => {}
         }
         let (width, height, layout) = (rendered.width, rendered.height, rendered.layout);
+        let warnings = rendered.warnings;
         let image = match self.admit_preview_pixels(ws, width, height, rendered.rgba) {
             Ok(image) => image,
             Err(_) => return tell(self, ws, LaneNotice::RenderFailed),
@@ -24067,9 +24314,20 @@ impl App {
         else {
             return;
         };
+        // Another page of the gallery becomes the item's source; the page
+        // shown, drawn again, stays it.
+        let paged = render.page.is_some_and(|ask| {
+            item.source.gallery_page().map(|(shown, _)| shown) != Some(ask.page)
+        });
+        if let Some(ask) = render.page
+            && !item.source.select(ask.page)
+        {
+            return;
+        }
         item.pixels = crate::media::ItemPixels::Ready(image);
         item.size = (width, height);
         item.layout = Some(layout);
+        item.warnings = warnings;
         item.source.spec.canvas = spec.canvas;
         if let Some(panel) = window
             .preview_panels
@@ -24077,9 +24335,18 @@ impl App {
             .filter(|panel| panel.item == render.item)
         {
             panel.notice = None;
-            // Sharper pixels for the old canvas no longer serve: a zoomed
-            // lane asks again.
-            if !panel.view.is_fit() {
+            if render.page.is_some() && page_waited_on(panel, render.generation) == render.page {
+                panel.page = None;
+            }
+            if paged {
+                // Another page starts fitted, its source from the top, with
+                // no sharper pixels of the last.
+                panel.view = kettle_render::MediaViewport::FIT;
+                panel.scroll = (0, 0);
+                window.lane_crops.remove(&render.pane);
+            } else if !panel.view.is_fit() {
+                // Sharper pixels for the old canvas no longer serve: a zoomed
+                // lane asks again.
                 window
                     .lane_crops
                     .entry(render.pane)
@@ -24237,14 +24504,34 @@ impl App {
             kind,
             kettle_media::MediaKind::Svg | kettle_media::MediaKind::Mermaid
         );
-        let source =
-            crate::media::ItemSource::new(spec, rendered.digest, textual, rendered.exact_source);
+        // A Markdown gallery's item is the page rendered, as the Mermaid it
+        // is, with every page kept to show the others from.
+        let (item_kind, source) = if kind == kettle_media::MediaKind::Markdown {
+            let page = rendered
+                .fence_index
+                .zip(crate::media::Gallery::new(rendered.fence_sources))
+                .and_then(|(index, gallery)| {
+                    crate::media::ItemSource::page(&spec, Arc::new(gallery), index)
+                });
+            let Some(page) = page else {
+                return notify_preview_failure(tr, origin.refuse(FailureCode::OverBudget));
+            };
+            (kettle_media::MediaKind::Mermaid, page)
+        } else {
+            let source = crate::media::ItemSource::new(
+                spec,
+                rendered.digest,
+                textual,
+                rendered.exact_source,
+            );
+            (kind, source)
+        };
         let mut item = crate::media::ShelfItem::new(
             item_id,
             key,
             title,
             provenance,
-            kind,
+            item_kind,
             warnings.clone(),
             image,
             source,
@@ -32665,6 +32952,12 @@ impl App {
                         kettle_render::MediaLaneHit::Next => {
                             self.ui_text.text(kettle_i18n::Text::MediaLaneA11yNext)
                         }
+                        kettle_render::MediaLaneHit::PreviousPage => self
+                            .ui_text
+                            .text(kettle_i18n::Text::MediaLaneA11yPreviousDiagram),
+                        kettle_render::MediaLaneHit::NextPage => self
+                            .ui_text
+                            .text(kettle_i18n::Text::MediaLaneA11yNextDiagram),
                         kettle_render::MediaLaneHit::Toggle if lane.collapsed => {
                             self.ui_text.text(kettle_i18n::Text::MediaLaneA11yExpand)
                         }
@@ -32713,6 +33006,16 @@ impl App {
                     button.set_label(text);
                     button.add_action(AccessibilityAction::Click);
                     button.set_bounds(ax_rect(rect));
+                    // A gallery has no page before its first or after its
+                    // last.
+                    let (first, last) = lane
+                        .page
+                        .map_or((true, true), |(shown, count)| (shown <= 1, shown >= count));
+                    if (hit == kettle_render::MediaLaneHit::PreviousPage && first)
+                        || (hit == kettle_render::MediaLaneHit::NextPage && last)
+                    {
+                        button.set_disabled();
+                    }
                     controls.push(id);
                     nodes.push((id, button));
                 }
@@ -44026,6 +44329,7 @@ mod tests {
             },
             hint: "Keys still go to the terminal".into(),
             position: (2, 3),
+            page: None,
             image: Some(kettle_core::ImageData::new(1, 1, vec![0; 4]).unwrap()),
             status: "Released.".into(),
             canvas: kettle_render::MediaCanvas::Theme,
@@ -55150,6 +55454,14 @@ mod hint_action_tests {
             lane_action_hit(&Action::PreviewPrevious),
             Some(Hit::Previous)
         );
+        assert_eq!(
+            lane_action_hit(&Action::PreviewNextDiagram),
+            Some(Hit::NextPage)
+        );
+        assert_eq!(
+            lane_action_hit(&Action::PreviewPreviousDiagram),
+            Some(Hit::PreviousPage)
+        );
         assert_eq!(lane_action_hit(&Action::ClosePreview), Some(Hit::Close));
         assert_eq!(lane_action_hit(&Action::OpenMediaShelf), None);
     }
@@ -55395,10 +55707,20 @@ mod hint_action_tests {
             "f.Svg",
             "g.mmd",
             "h.mermaid",
+            "README.md",
+            "plan.Markdown",
         ] {
             assert!(previewable_name(name), "{name}");
         }
-        for name in ["notes.txt", "png", "plot.png.zip", "Makefile", "plot.", ""] {
+        for name in [
+            "notes.txt",
+            "png",
+            "plot.png.zip",
+            "Makefile",
+            "plot.",
+            "",
+            "notes.mdx",
+        ] {
             assert!(!previewable_name(name), "{name}");
         }
         let text = |kind, text: &str, bounded| HintWhat::Text {
@@ -56926,9 +57248,63 @@ mod settings_footer_text_tests {
 #[cfg(test)]
 mod lane_control_tests {
     use super::{
-        LaneRenderVerdict, MAX_SOURCE_COLUMN, lane_control_name, lane_render_verdict, lane_source,
-        preview_canvas, scrolled_source, source_scroll_by,
+        LaneRenderVerdict, MAX_SOURCE_COLUMN, gallery_step, lane_control_name, lane_render_verdict,
+        lane_source, preview_canvas, scrolled_source, source_scroll_by,
     };
+    use std::sync::Arc;
+
+    fn spec(source: kettle_media::Source) -> crate::media::JobSpec {
+        crate::media::JobSpec::from_job(kettle_media::Job {
+            kind: kettle_media::JobKind::Auto,
+            source,
+            theme: kettle_media::Theme {
+                background: [0; 4],
+                foreground: [255; 4],
+                palette: [[0; 4]; 16],
+                accent: [0; 4],
+                is_dark: true,
+            },
+            canvas: kettle_media::Canvas::Theme,
+            target: kettle_media::Target {
+                width: 8,
+                height: 8,
+                scale: 1.0,
+                crop: None,
+            },
+            fallback_fonts: Vec::new(),
+        })
+        .unwrap()
+    }
+
+    fn file(path: &[u8]) -> kettle_media::Source {
+        kettle_media::Source::Path {
+            path: kettle_media::NativePath::new(path.to_vec()).unwrap(),
+            authorization: kettle_media::Authorization::ExternalAttested(
+                kettle_media::ExternalAttested { dev: 1, ino: 2 },
+            ),
+        }
+    }
+
+    fn with_source(id: u64, source: crate::media::ItemSource) -> crate::media::ShelfItem {
+        crate::media::ShelfItem::new(
+            id,
+            None,
+            "plan".into(),
+            crate::media::Provenance::User,
+            kettle_media::MediaKind::Mermaid,
+            Vec::new(),
+            kettle_core::ImageData::new(1, 1, vec![0, 0, 0, 255]).unwrap(),
+            source,
+        )
+    }
+
+    const PAGES: [&str; 2] = ["flowchart LR\n  A --> B\n", "pie\n  \"a\" : 1\n"];
+
+    fn gallery_item(id: u64, source: kettle_media::Source) -> crate::media::ShelfItem {
+        let gallery = crate::media::Gallery::new(PAGES.map(String::from).to_vec()).unwrap();
+        let page = crate::media::ItemSource::page(&spec(source), Arc::new(gallery), 0).unwrap();
+        with_source(id, page)
+    }
 
     fn item(id: u64, kind: kettle_media::MediaKind, svg: &[u8]) -> crate::media::ShelfItem {
         crate::media::ShelfItem::new(
@@ -57082,6 +57458,7 @@ mod lane_control_tests {
             item: 4,
             generation: 0,
             tile: None,
+            page: None,
         };
         let same = shelf[0].source.digest.clone();
         let other = kettle_media::content_digest(b"flowchart TD", None).unwrap();
@@ -57089,9 +57466,26 @@ mod lane_control_tests {
             lane_render_verdict(&shelf, &render, &same),
             LaneRenderVerdict::Same
         );
+        // Bytes kept cannot change: another digest is of bytes gone by.
         assert_eq!(
             lane_render_verdict(&shelf, &render, &other),
+            LaneRenderVerdict::Gone
+        );
+        // A file read again can.
+        let read = crate::media::ItemSource::new(
+            spec(file(b"/tmp/flow.mmd")),
+            same.clone(),
+            true,
+            Some("flowchart LR".into()),
+        );
+        let from_file = [with_source(4, read)];
+        assert_eq!(
+            lane_render_verdict(&from_file, &render, &other),
             LaneRenderVerdict::Changed
+        );
+        assert_eq!(
+            lane_render_verdict(&from_file, &render, &same),
+            LaneRenderVerdict::Same
         );
         let replaced = crate::media::LaneRender {
             generation: 1,
@@ -57105,6 +57499,201 @@ mod lane_control_tests {
             lane_render_verdict(&[], &render, &same),
             LaneRenderVerdict::Gone
         );
+    }
+
+    /// A gallery page's render counts for that page's bytes, never as a
+    /// changed file, whatever the gallery was read from; a render of the
+    /// page shown before paging, or of a page the gallery lacks, is gone.
+    #[test]
+    fn a_gallery_page_render_counts_for_its_own_bytes() {
+        let digest = |text: &str| kettle_media::content_digest(text.as_bytes(), None).unwrap();
+        for source in [
+            file(b"/tmp/plan.md"),
+            kettle_media::Source::Bytes(PAGES[0].into()),
+        ] {
+            let mut shelf = [gallery_item(4, source)];
+            let render = |page: Option<u8>| crate::media::LaneRender {
+                window: 1,
+                pane: 2,
+                item: 4,
+                generation: 0,
+                tile: None,
+                page: page.map(|page| crate::media::PageAsk { page, ticket: 1 }),
+            };
+            assert_eq!(
+                lane_render_verdict(&shelf, &render(Some(1)), &digest(PAGES[1])),
+                LaneRenderVerdict::Same
+            );
+            for (asked, read) in [(Some(1), PAGES[0]), (Some(2), PAGES[1]), (None, PAGES[1])] {
+                assert_eq!(
+                    lane_render_verdict(&shelf, &render(asked), &digest(read)),
+                    LaneRenderVerdict::Gone,
+                    "{asked:?}"
+                );
+            }
+            assert_eq!(
+                lane_render_verdict(&shelf, &render(None), &digest(PAGES[0])),
+                LaneRenderVerdict::Same
+            );
+            assert!(shelf[0].source.select(1));
+            assert_eq!(
+                lane_render_verdict(&shelf, &render(None), &digest(PAGES[0])),
+                LaneRenderVerdict::Gone,
+                "a canvas render of the page shown before"
+            );
+        }
+    }
+
+    /// A Markdown gallery arrives as its page rendered, a Mermaid item that
+    /// keeps every page; a page asked for renders from those bytes, is taken
+    /// only while its lane still waits on it, becomes the item's source then,
+    /// and starts fitted from the top; one that fails or is not wanted lets
+    /// the lane's wait go.
+    #[test]
+    fn galleries_are_wired() {
+        let src = super::production_source();
+        let flat = src.split_whitespace().collect::<Vec<_>>().join(" ");
+        let body = |name: &str| {
+            flat.split(&format!("fn {name}("))
+                .nth(1)
+                .and_then(|rest| rest.split(" fn ").next())
+                .unwrap_or_else(|| panic!("{name}"))
+                .to_owned()
+        };
+        let finish = body("finish_show");
+        for needle in [
+            "let (item_kind, source) = if kind == kettle_media::MediaKind::Markdown {",
+            ".zip(crate::media::Gallery::new(rendered.fence_sources))",
+            "crate::media::ItemSource::page(&spec, Arc::new(gallery), index)",
+            "return notify_preview_failure(tr, origin.refuse(FailureCode::OverBudget));",
+            "(kettle_media::MediaKind::Mermaid, page)",
+            "provenance, item_kind, warnings.clone(),",
+        ] {
+            assert!(finish.contains(needle), "finish_show: {needle}");
+        }
+        let page = body("page_preview");
+        for needle in [
+            "let Some(page) = gallery_step(shown, count, asked, step) else {",
+            "let spec = item.source.page_spec(page).map(|mut spec| { if let Some(canvas) = canvas { spec.canvas = canvas; } spec });",
+            "if page == shown { panel.page = None; panel.notice = None;",
+            "self.page_tickets += 1; let ask = crate::media::PageAsk { page, ticket: self.page_tickets, }; panel.page = Some((generation, ask));",
+            "page: Some(ask), }; self.render_for_lane(ws, render, spec);",
+        ] {
+            assert!(page.contains(needle), "page_preview: {needle}");
+        }
+        let lane = body("finish_lane_render");
+        for needle in [
+            "if !self.lane_wants(ws, &render) { return; }",
+            "app.forget_lane_page(ws, &render); app.tell_lane(",
+            "Err(RenderError::Cancelled) => return self.forget_lane_page(ws, &render),",
+            "LaneRenderVerdict::Gone => return self.forget_lane_page(ws, &render),",
+            "if let Some(ask) = render.page && !item.source.select(ask.page) { return; }",
+            "item.warnings = warnings;",
+            "if render.page.is_some() && page_waited_on(panel, render.generation) == render.page { panel.page = None; } if paged {",
+        ] {
+            assert!(lane.contains(needle), "finish_lane_render: {needle}");
+        }
+        assert!(flat.contains(
+            "if !self.lane_wants(ws, &render) { continue; } self.forget_lane_page(ws, &render); self.tell_lane("
+        ));
+        assert!(body("preview_lane_panel").contains(
+            "let asked = page_waited_on(panel, item.generation).map_or(shown, |ask| ask.page); (usize::from(asked) + 1, count)"
+        ));
+        let again = body("render_preview_again");
+        for needle in [
+            ".and_then(|panel| page_waited_on(panel, generation)) .and_then(|ask| item.source.page_spec(ask.page).map(|spec| (ask.page, spec)));",
+            "spec = page_spec; self.page_tickets += 1;",
+            "panel.page = Some((generation, ask));",
+            "tile: None, page, }; self.render_for_lane(ws, render, spec);",
+        ] {
+            assert!(again.contains(needle), "render_preview_again: {needle}");
+        }
+        assert!(
+            body("lane_wants")
+                .contains(".is_some_and(|panel| lane_takes_page(panel, render, ask, shown))")
+        );
+        assert!(body("forget_lane_page").contains(
+            "panel.item == render.item && page_waited_on(panel, render.generation) == Some(ask)"
+        ));
+        assert!(body("act_on_preview").contains(
+            "Hit::PreviousPage => self.page_preview(ws, pane, -1), Hit::NextPage => self.page_preview(ws, pane, 1),"
+        ));
+        assert!(
+            body("preview_focus_key")
+                .contains("K::Page(step) => self.page_preview(ws, pane, step),")
+        );
+    }
+
+    /// A lane takes a page render for the page it waits on, at the
+    /// generation it was asked at, or for the page it shows, drawn again;
+    /// never for another item, generation or page.
+    #[test]
+    fn a_lane_takes_the_page_it_waits_on_or_shows() {
+        let ask = |page, ticket| crate::media::PageAsk { page, ticket };
+        let mut panel = crate::window_state::PreviewPanel::new(4);
+        let render = |ask| crate::media::LaneRender {
+            window: 1,
+            pane: 2,
+            item: 4,
+            generation: 7,
+            tile: None,
+            page: Some(ask),
+        };
+        let takes = |panel: &crate::window_state::PreviewPanel, asked| {
+            super::lane_takes_page(panel, &render(asked), asked, Some(0))
+        };
+        assert!(!takes(&panel, ask(1, 1)));
+        assert!(takes(&panel, ask(0, 1)), "the page shown, drawn again");
+        panel.page = Some((7, ask(1, 2)));
+        assert_eq!(super::page_waited_on(&panel, 7), Some(ask(1, 2)));
+        assert_eq!(super::page_waited_on(&panel, 8), None, "another generation");
+        assert!(takes(&panel, ask(1, 2)));
+        // The same page asked again since: the older request is not taken,
+        // so its failure or late pixels cannot stand for the newer one.
+        assert!(!takes(&panel, ask(1, 1)));
+        assert!(!takes(&panel, ask(2, 2)));
+        panel.page = Some((6, ask(1, 2)));
+        assert!(!takes(&panel, ask(1, 2)), "asked of another generation");
+        let other = crate::window_state::PreviewPanel::new(5);
+        assert!(
+            !super::lane_takes_page(&other, &render(ask(0, 1)), ask(0, 1), Some(0)),
+            "another item"
+        );
+    }
+
+    /// A step pages from the page asked for, else the one shown, and stops
+    /// at either end.
+    #[test]
+    fn a_gallery_steps_without_wrapping() {
+        assert_eq!(gallery_step(0, 3, None, 1), Some(1));
+        assert_eq!(gallery_step(0, 3, Some(1), 1), Some(2), "from the asked");
+        assert_eq!(gallery_step(0, 3, Some(2), 1), None, "past the last");
+        assert_eq!(gallery_step(0, 3, None, -1), None, "before the first");
+        assert_eq!(gallery_step(2, 3, Some(1), -1), Some(0));
+        assert_eq!(
+            gallery_step(1, 3, Some(2), -1),
+            Some(1),
+            "back to the shown"
+        );
+        assert_eq!(gallery_step(0, 1, None, 1), None);
+        assert_eq!(gallery_step(255, 300, None, 1), None, "no page past u8");
+    }
+
+    /// A gallery read from a file reloads that file at the page shown; one
+    /// copied together has no file to read.
+    #[test]
+    fn a_gallery_reloads_its_file_at_the_page_shown() {
+        let panel = crate::window_state::PreviewPanel::new(4);
+        let mut read = gallery_item(4, file(b"/tmp/plan.md"));
+        assert!(super::preview_reloads(&read));
+        let (native, reload) = super::reload_of(&read, &panel).unwrap();
+        assert_eq!(native, std::path::Path::new("/tmp/plan.md"));
+        assert_eq!(reload.page, Some(0));
+        assert!(read.source.select(1));
+        assert_eq!(super::reload_of(&read, &panel).unwrap().1.page, Some(1));
+        let copied = gallery_item(5, kettle_media::Source::Bytes(PAGES[0].into()));
+        assert!(!super::preview_reloads(&copied));
+        assert!(super::reload_of(&copied, &panel).is_none());
     }
 
     /// Each lane control has its own name over ctl and its own node id.
@@ -57124,16 +57713,18 @@ mod lane_control_tests {
             Hit::ZoomOut,
             Hit::ZoomIn,
             Hit::Fit,
+            Hit::PreviousPage,
+            Hit::NextPage,
             Hit::Inside,
         ];
         let names: std::collections::HashSet<_> =
             hits.iter().map(|hit| lane_control_name(*hit)).collect();
         assert_eq!(names.len(), hits.len());
-        let ids: std::collections::HashSet<_> = (0..=12)
+        let ids: std::collections::HashSet<_> = (0..=14)
             .map(|part| super::accessibility_lane_id(7, part).expect("in range"))
             .collect();
-        assert_eq!(ids.len(), 13);
-        for part in 0..=12 {
+        assert_eq!(ids.len(), 15);
+        for part in 0..=14 {
             let id = super::accessibility_lane_id(7, part).unwrap();
             assert_eq!(super::accessibility_lane_part(id), Some((7, part)));
         }
@@ -57303,7 +57894,10 @@ mod lane_control_tests {
             ".filter(|(_, panel)| !panel.view.is_fit()) .map(|(pane, _)| *pane) .collect(); let control = self.ctl_driving; let now = std::time::Instant::now(); for pane in zoomed { ws.lane_crops.entry(pane).or_default().again(now, control); }",
             // A finished render on another canvas asks again for a zoomed
             // lane, as the old canvas's pixels no longer serve.
-            "if !panel.view.is_fit() { window .lane_crops .entry(render.pane) .or_default() .again(std::time::Instant::now(), control); }",
+            "} else if !panel.view.is_fit() { // Sharper pixels for the old canvas no longer serve: a zoomed // lane asks again. window .lane_crops .entry(render.pane) .or_default() .again(std::time::Instant::now(), control); }",
+            // Another page of a gallery starts fitted, with no sharper pixels
+            // of the last.
+            "if paged { // Another page starts fitted, its source from the top, with // no sharper pixels of the last. panel.view = kettle_render::MediaViewport::FIT; panel.scroll = (0, 0); window.lane_crops.remove(&render.pane);",
             // A file found changed stays so with its item, not its lane.
             "// still wants these pixels. if verdict == LaneRenderVerdict::Changed { self.mark_preview_changed(ws, &render); } let Some(window) = self.window_by_seq(ws, render.window) else {",
             "// The window, its font or its splits changed what a zoomed lane // shows. self.lanes_moved(ws);",
@@ -57318,7 +57912,7 @@ mod lane_control_tests {
             "if let Some(next) = lane_crop_wait { wait = Some(wait.map_or(next, |current| current.min(next))); }",
             "if (reads_file && (changed || control)) || matches!(spec.input, crate::media::SourceInput::Released)",
             ".admit(crate::media::Sender::LaneTile(pane), deadline, push);",
-            "if let Some(ticket) = render.tile { return self.finish_lane_crop(ws, render, ticket, spec, result); } let control = self.ctl_driving; let tell =",
+            "if let Some(ticket) = render.tile { return self.finish_lane_crop(ws, render, ticket, spec, result); } // A gallery page the lane no longer waits on is dropped unsaid. if !self.lane_wants(ws, &render) { return; } let control = self.ctl_driving; let tell =",
             ".filter(|crop| crop.asked == Some(ticket)) else { return; }; crop.asked = None;",
             "if let Some(ticket) = render.tile { if let Some(crop) = self",
             "ws.lane_wheel.reset(); ws.lane_crops.remove(&pane);",
@@ -57515,9 +58109,13 @@ mod lane_control_tests {
             .find("if self.ctl_driving && reads_a_file")
             .expect("no file read for a control client");
         let admitted = again
-            .find(".admit(crate::media::Sender::Lane(pane), deadline, push);")
+            .find("self.render_for_lane(ws, render, spec);")
             .expect("queued as the lane");
         assert!(refused < admitted);
+        assert!(
+            body("render_for_lane")
+                .contains(".admit(crate::media::Sender::Lane(pane), deadline, push);")
+        );
         let finish = body("finish_show");
         let lane = finish
             .find("return self.finish_lane_render(ws, render, spec, result);")
@@ -57629,10 +58227,14 @@ mod lane_control_tests {
             .find("if self.ctl_driving {")
             .expect("no read for a control client");
         let kept = pull
-            .find("Some(item) => (item.key, item.title, item.canvas),")
-            .expect("a reload keeps its item's key, title and canvas");
+            .find("Some(item) => (item.key, item.title, item.canvas, item.page),")
+            .expect("a reload keeps its item's key, title, canvas and page");
         assert!(refused < kept);
-        assert!(body("show_media_item").contains("notice: None,\n                ..*panel"));
+        assert!(pull.contains("Some(index) => kettle_media::JobKind::MarkdownDiagrams { index },"));
+        assert!(
+            body("show_media_item")
+                .contains("notice: None,\n                page: None,\n                ..*panel")
+        );
         assert_eq!(
             super::lane_action_hit(&kettle_config::Action::PreviewReload),
             Some(kettle_render::MediaLaneHit::Reload)

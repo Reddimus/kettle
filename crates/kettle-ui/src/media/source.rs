@@ -8,13 +8,18 @@
 //! file's text comes back from the worker as it was read, from the
 //! snapshot the digest covers, and is kept, charged, for a textual kind.
 //! When an item's pixels are evicted its charged bytes go too.
+//!
+//! A gallery (a Markdown document's Mermaid fences, or diagrams copied
+//! together) keeps every page, each charged on its own, and its item shows
+//! one: that page is the item's source, rendered from the bytes kept, so
+//! paging never reads the file again and one gallery is one version of it.
 
 use std::sync::Arc;
 
 use kettle_core::{GraphicsBudget, GraphicsReservation};
 use kettle_media::{
-    Authorization, Canvas, Digest, FailureCode, FallbackFont, Job, JobKind, NativePath, Source,
-    Target, Theme,
+    Authorization, Canvas, Digest, FailureCode, FallbackFont, Job, JobKind, MAX_FENCES, NativePath,
+    Source, Target, Theme,
 };
 
 /// Bytes a preview keeps, charged to the process preview account for as
@@ -46,6 +51,39 @@ impl ChargedBytes {
 impl std::fmt::Debug for ChargedBytes {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "ChargedBytes({} bytes)", self.bytes.len())
+    }
+}
+
+/// The pages of a gallery, in order, each kept and charged on its own, so
+/// the page an item shows shares its bytes with the job that renders it and
+/// a copy of its source.
+#[derive(Debug)]
+pub(crate) struct Gallery {
+    pages: Vec<Arc<ChargedBytes>>,
+}
+
+impl Gallery {
+    /// A gallery of `pages`, each kept and charged: `None` for none, for more
+    /// than [`MAX_FENCES`], or when the account has no room for them all.
+    pub(crate) fn new(pages: Vec<String>) -> Option<Self> {
+        if pages.is_empty() || pages.len() > MAX_FENCES {
+            return None;
+        }
+        let pages = pages
+            .into_iter()
+            .map(|page| ChargedBytes::new(page.into_bytes()).map(Arc::new))
+            .collect::<Option<Vec<_>>>()?;
+        Some(Self { pages })
+    }
+
+    /// How many pages it has.
+    pub(crate) fn len(&self) -> usize {
+        self.pages.len()
+    }
+
+    /// Page `index`, from 0.
+    pub(crate) fn page(&self, index: usize) -> Option<&Arc<ChargedBytes>> {
+        self.pages.get(index)
     }
 }
 
@@ -165,6 +203,12 @@ pub(crate) struct ItemSource {
     /// Whether the file changed since it was read: nothing more is read for
     /// the item unasked, until a reload replaces it.
     pub changed: bool,
+    /// For a page of a gallery: every page, and the one shown. Given back
+    /// with the item's other charged bytes.
+    gallery: Option<(Arc<Gallery>, u8)>,
+    /// For a page of a gallery read from a file: that file, and the page
+    /// shown, which a reload reads again. Kept when the pages go.
+    origin: Option<(NativePath, u8)>,
 }
 
 /// What holds an item's text, if any: the bytes a request carried, or else
@@ -212,6 +256,103 @@ impl ItemSource {
             rows,
             file_text,
             changed: false,
+            gallery: None,
+            origin: None,
+        }
+    }
+
+    /// Page `index` of `gallery`, the pages a render by `spec` returned or
+    /// that were copied together, as an item's source: the page renders as
+    /// Mermaid from the bytes kept, on `spec`'s theme, canvas and target.
+    /// `None` past the last page.
+    pub(crate) fn page(spec: &JobSpec, gallery: Arc<Gallery>, index: u8) -> Option<Self> {
+        let origin = match &spec.input {
+            SourceInput::Path { path, .. } => Some((path.clone(), index)),
+            _ => None,
+        };
+        let mut source = Self {
+            spec: spec.clone(),
+            digest: Digest {
+                sha256: [0; 32],
+                path_identity: None,
+            },
+            rows: None,
+            file_text: None,
+            changed: false,
+            gallery: Some((gallery, index)),
+            origin,
+        };
+        source.select(index).then_some(source)
+    }
+
+    /// Show page `index` of the item's gallery: its source, digest and rows
+    /// become that page's. False, changing nothing, past the last page or
+    /// once the pages are gone.
+    pub(crate) fn select(&mut self, index: u8) -> bool {
+        let Some(spec) = self.page_spec(index) else {
+            return false;
+        };
+        let SourceInput::Bytes(bytes) = &spec.input else {
+            return false;
+        };
+        let Ok(digest) = kettle_media::content_digest(bytes.as_slice(), None) else {
+            return false;
+        };
+        self.rows = std::str::from_utf8(bytes.as_slice())
+            .ok()
+            .map(display_row_count);
+        self.digest = digest;
+        self.spec = spec;
+        if let Some((_, shown)) = &mut self.gallery {
+            *shown = index;
+        }
+        if let Some((_, page)) = &mut self.origin {
+            *page = index;
+        }
+        true
+    }
+
+    /// The job that renders page `index` of the item's gallery as it
+    /// renders now: on its canvas, theme and target. `None` past the last
+    /// page, without a gallery, or once the pages are gone.
+    pub(crate) fn page_spec(&self, index: u8) -> Option<JobSpec> {
+        let (gallery, _) = self.gallery.as_ref()?;
+        let bytes = gallery.page(usize::from(index))?;
+        Some(JobSpec {
+            kind: JobKind::Mermaid,
+            input: SourceInput::Bytes(Arc::clone(bytes)),
+            ..self.spec.clone()
+        })
+    }
+
+    /// The digest a render of page `index` of the item's gallery has: its
+    /// bytes', which no file can change. `None` past the last page, without
+    /// a gallery, or once the pages are gone.
+    pub(crate) fn page_digest(&self, index: u8) -> Option<Digest> {
+        let (gallery, _) = self.gallery.as_ref()?;
+        kettle_media::content_digest(gallery.page(usize::from(index))?.as_slice(), None).ok()
+    }
+
+    /// Whether rendering the item again reads its file.
+    pub(crate) fn reads_file(&self) -> bool {
+        matches!(self.spec.input, SourceInput::Path { .. })
+    }
+
+    /// The page shown, from 0, and how many there are, for a page of a
+    /// gallery whose pages are still held.
+    pub(crate) fn gallery_page(&self) -> Option<(u8, usize)> {
+        self.gallery
+            .as_ref()
+            .map(|(gallery, shown)| (*shown, gallery.len()))
+    }
+
+    /// The file a reload reads again: the one the item was read from, or
+    /// the one its gallery was; with the gallery page shown, for a gallery.
+    pub(crate) fn reload_file(&self) -> Option<(&NativePath, Option<u8>)> {
+        match (&self.spec.input, &self.origin) {
+            (SourceInput::Path { path, .. }, _) => Some((path, None)),
+            (_, Some((path, page))) => Some((path, Some(*page))),
+            _ => None,
         }
     }
 
@@ -270,6 +411,7 @@ impl ItemSource {
             self.spec.input = SourceInput::Released;
         }
         self.file_text = None;
+        self.gallery = None;
     }
 }
 
@@ -470,6 +612,87 @@ mod tests {
             None,
         );
         assert_eq!(carried_raster.text(), None, "a raster's bytes are no text");
+    }
+
+    /// A gallery holds one to [`MAX_FENCES`] pages.
+    #[test]
+    fn a_gallery_holds_its_page_limit() {
+        let pages = |count: usize| {
+            (0..count)
+                .map(|n| format!("pie\n  \"{n}\" : 1\n"))
+                .collect()
+        };
+        assert!(Gallery::new(Vec::new()).is_none());
+        assert_eq!(Gallery::new(pages(MAX_FENCES)).unwrap().len(), MAX_FENCES);
+        assert!(Gallery::new(pages(MAX_FENCES + 1)).is_none());
+    }
+
+    /// A page of a gallery is its item's source: it renders as Mermaid from
+    /// the bytes kept, which a copy of its source shares, on the job's own
+    /// canvas and target; another page takes its place whole, and a page
+    /// past the last changes nothing. A gallery read from a file reloads
+    /// that file at the page shown, still once its pages are given back.
+    #[test]
+    fn a_gallery_page_is_its_items_source_until_released() {
+        let gallery = Arc::new(
+            Gallery::new(vec![
+                "flowchart LR\n  A --> B\n".into(),
+                "pie\n  \"a\" : 1\n".into(),
+            ])
+            .unwrap(),
+        );
+        let path = NativePath::new(b"/tmp/plan.md".to_vec()).unwrap();
+        let mut markdown = spec(Source::Path {
+            path: path.clone(),
+            authorization: Authorization::ExternalAttested(kettle_media::ExternalAttested {
+                dev: 1,
+                ino: 2,
+            }),
+        });
+        markdown.kind = JobKind::Auto;
+        let mut page = ItemSource::page(&markdown, Arc::clone(&gallery), 0).unwrap();
+        assert_eq!(page.text(), Some("flowchart LR\n  A --> B\n"));
+        assert_eq!(page.text_rows(), 2);
+        assert_eq!(page.digest, digest(b"flowchart LR\n  A --> B\n"));
+        assert_eq!(page.gallery_page(), Some((0, 2)));
+        assert_eq!(page.reload_file(), Some((&path, Some(0))));
+        assert!(Arc::ptr_eq(
+            page.text_backing().unwrap(),
+            gallery.page(0).unwrap()
+        ));
+        let job = page.spec.job().unwrap().job;
+        assert_eq!(job.kind, JobKind::Mermaid);
+        assert_eq!(
+            job.source,
+            Source::Bytes(b"flowchart LR\n  A --> B\n".to_vec())
+        );
+        assert_eq!((job.canvas, job.target.width), (Canvas::White, 64));
+
+        assert!(page.select(1));
+        assert_eq!(page.text(), Some("pie\n  \"a\" : 1\n"));
+        assert_eq!(page.digest, digest(b"pie\n  \"a\" : 1\n"));
+        assert_eq!(page.gallery_page(), Some((1, 2)));
+        assert_eq!(page.reload_file(), Some((&path, Some(1))));
+        assert!(!page.select(2));
+        assert_eq!(page.gallery_page(), Some((1, 2)));
+        assert!(ItemSource::page(&markdown, Arc::clone(&gallery), 2).is_none());
+        assert_eq!(
+            page.page_spec(0).unwrap().job().unwrap().job.source,
+            Source::Bytes(b"flowchart LR\n  A --> B\n".to_vec())
+        );
+
+        page.release();
+        assert_eq!((page.text(), page.gallery_page()), (None, None));
+        assert!(!page.select(0));
+        assert_eq!(page.reload_file(), Some((&path, Some(1))));
+
+        let copied = ItemSource::page(
+            &spec(Source::Bytes(b"flowchart LR\n  A --> B\n".to_vec())),
+            gallery,
+            0,
+        )
+        .unwrap();
+        assert_eq!(copied.reload_file(), None, "copied pages have no file");
     }
 
     /// Nothing to keep needs no room in the account.

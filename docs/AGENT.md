@@ -418,9 +418,10 @@ on the selected reply, with what the agent's UI added and wrapped taken back
 off. A control client cannot trigger either: they read the clipboard or a
 selection only on the user's own key press or click, and a menu a control
 client opens does not look at them to offer its rows.
-The user can also preview an image, SVG or Mermaid file a pane names
-without any agent: `preview_link` (the palette's "Preview a file in
-Kettle") labels such files in the focused pane as quick select does, and the
+The user can also preview an image, SVG, Mermaid or Markdown file a pane
+names without any agent (a Markdown file's Mermaid diagrams are a gallery,
+paged in the lane with `‹` and `›`): `preview_link` (the palette's "Preview
+a file in Kettle") labels such files in the focused pane as quick select does, and the
 right-click menu offers "Preview in Kettle" on a link to one. The file
 opens in that pane's lane once it renders, its sender reading "You opened
 this from the pane", and the shelf report marks it `from_user`. A link from

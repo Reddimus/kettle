@@ -4133,7 +4133,9 @@ releases it, that native path keys never merge by their printed form, that
 a lane shows only the source rows in view with nothing that acts, scrolls
 within its rows, shows a raster's or an SVG's canvas as chosen but a
 diagram's as rendered until a render for the choice comes back, takes a
-lane's render only for the same item and source, queues it as its own
+lane's render only for the same item and source (a render of bytes kept with
+another digest is gone by, never a changed file; only a file read again
+changes), queues it as its own
 sender that fails to its lane, copies on a thread that runs one copy and
 holds one more, and never reads a file for a control client's canvas
 change; and that reload pulls the item's own file under its key, title and
@@ -4142,6 +4144,39 @@ item shows again. `kettle-render` tests pin where the new controls sit, how they
 way in a narrow header, and, on the GPU, that source mode draws rows and not
 the image. For a live check, preview an SVG and click `≡`, `◐` and `⧉`
 (their rectangles are in `ui_geometry`'s `preview_lanes`).
+
+Galleries: `media::source` tests pin that a gallery holds one to 32 pages,
+that a page is its item's source (a Mermaid job over the bytes kept, which a
+source copy shares, on the job's canvas and target), that another page
+replaces it whole and one past the last changes nothing, and that a gallery
+read from a file reloads that file at the page shown, still once its pages
+are given back, while copied pages have none. App tests pin that a page's
+render counts only for that page's bytes and a canvas render of the page
+shown before paging is gone, for a gallery from a file and from bytes alike;
+that a step counts from the page asked for, else the one shown, and stops at
+either end; that a lane takes a page render for the request it waits on,
+at the generation asked, or for the page it shows, never another item,
+generation or page, nor an older request for the page it waits on; that reload reads a gallery's file at the page shown as
+`MarkdownDiagrams`; that the page controls have their own ctl names and
+node ids; and that the wiring holds: a Markdown reply becomes a Mermaid item
+with its pages, refused as over budget without room; a page is asked for
+from the bytes kept on the chosen canvas and taken only while its lane waits
+on it, then fitted from the top with the render's warnings; a canvas change
+while one is waited on asks for that page again; the counter shows the page
+asked for; a failure, a withdrawal or a lane that moved on lets the wait
+go. Page Up and Page Down page a focused lane and the palette's diagram
+actions work as the lane's `‹` and `›`. `kettle-render` pins the page
+controls at the end of the detail line, which keeps four columns beside
+them, their presses, and none for one page, a collapsed lane or too little
+room, and on the GPU that they are drawn as button cells with their glyphs
+and the counter between, the page before quieter on the first page. Red checks: a bytes render read as changed, any digest taken for a
+page, a step that wraps or ignores the page asked for, a page whose digest
+is not taken, pages kept when released, a reload page that does not follow
+the page shown, a missing page press, the detail's columns ignored, no
+button cells, no quieter edge, the page shown not taken again, the
+generation ignored, a canvas change that drops the page waited on, warnings
+kept from the last page, a counter that ignores the page asked for, a
+ticket ignored and a canvas change reusing the old ticket each fail a test.
 
 Zoom and pan: `kettle-render`'s `media_viewport` tests pin that zooming at a
 point keeps the image point under it, that an axis longer than the content

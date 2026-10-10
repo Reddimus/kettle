@@ -2048,6 +2048,7 @@ fn a_lane_draws_its_open_outside_button_only_when_offered() {
         },
         hint: "Keys still go to the terminal".into(),
         position: (1, 1),
+        page: None,
         image: Some(kettle_core::ImageData::new(4, 4, vec![200; 64]).unwrap()),
         status: String::new(),
         canvas: MediaCanvas::Theme,
@@ -2098,6 +2099,107 @@ fn a_lane_draws_its_open_outside_button_only_when_offered() {
         "no button where none is offered"
     );
     eprintln!("MEDIA_LANE_GPU_ACCEPTANCE: open-outside button");
+}
+
+/// A gallery's page controls are drawn at the end of the detail line, button
+/// cells like close with their glyphs and the counter between; the control
+/// with no page that way is drawn in the quieter color.
+#[test]
+fn a_lane_draws_a_gallerys_page_controls() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(800, 600) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let snap = snapshot_of(80, 30, b"");
+    let viewer = |page| MediaLanePanel {
+        pane: 1,
+        rect: (0.0, 0.0, 800.0, 600.0),
+        collapsed: false,
+        title: "Plan".into(),
+        detail: "Mermaid diagram · 4×4".into(),
+        sender: MediaLaneSender {
+            text: "You opened this from the pane".into(),
+            program: None,
+            signer: None,
+        },
+        hint: "Keys still go to the terminal".into(),
+        position: (1, 1),
+        page,
+        image: Some(kettle_core::ImageData::new(4, 4, vec![200; 64]).unwrap()),
+        status: String::new(),
+        canvas: MediaCanvas::Theme,
+        open_outside: false,
+        mode: MediaLaneMode::Rendered,
+        source: None,
+        copy: false,
+        reload: false,
+        notice: None,
+        view: crate::MediaViewport::FIT,
+        tile: None,
+        edge: None,
+    };
+    let cells = (
+        (renderer.cell_w, renderer.cell_h),
+        (
+            renderer.overlay_text_cell_width(),
+            renderer.metrics.line_height,
+        ),
+    );
+    let geometry = media_lane_geometry(&viewer(Some((1, 3))), cells.0, cells.1).unwrap();
+    let (previous, counter, next) = (
+        geometry.page_previous.expect("a gallery of three"),
+        geometry.page_counter.unwrap(),
+        geometry.page_next.unwrap(),
+    );
+    let corner = |frame: &image::RgbaImage, rect: (f32, f32, f32, f32)| {
+        let p = frame.get_pixel(rect.0.ceil() as u32 + 1, rect.1.ceil() as u32 + 1);
+        (p[0], p[1], p[2])
+    };
+    let area = |rect: (f32, f32, f32, f32)| [rect.0, rect.1, rect.2, rect.3];
+    let mut frame = |page| {
+        let mut overlay = focused(false);
+        overlay.media_lanes = vec![viewer(page)];
+        capture(&mut renderer, &cfg, &[pane(&snap, 800, 600)], &overlay)
+    };
+    let first = frame(Some((1, 3)));
+    for (name, rect) in [("previous", previous), ("next", next)] {
+        assert_eq!(
+            corner(&first, rect),
+            corner(&first, geometry.close),
+            "{name}: a button cell like close"
+        );
+        assert!(distinct_colors(&first, area(rect)) > 1, "{name}: its glyph");
+    }
+    assert!(distinct_colors(&first, area(counter)) > 1, "the counter");
+    // On the first page the page before is quiet and the page after is not;
+    // on the second both speak.
+    let second = frame(Some((2, 3)));
+    let pixels = |frame: &image::RgbaImage, rect: (f32, f32, f32, f32)| {
+        let (x0, y0) = (rect.0.ceil() as u32, rect.1.ceil() as u32);
+        let (x1, y1) = ((rect.0 + rect.2) as u32, (rect.1 + rect.3) as u32);
+        (y0..y1)
+            .flat_map(|y| (x0..x1).map(move |x| (x, y)))
+            .map(|(x, y)| *frame.get_pixel(x, y))
+            .collect::<Vec<_>>()
+    };
+    assert_ne!(
+        pixels(&first, previous),
+        pixels(&second, previous),
+        "the page before is drawn quieter on the first page"
+    );
+    assert_eq!(
+        pixels(&first, next),
+        pixels(&second, next),
+        "the page after speaks on both"
+    );
+    let single = frame(Some((1, 1)));
+    assert_ne!(
+        corner(&single, previous),
+        corner(&single, geometry.close),
+        "no page controls for one page"
+    );
+    eprintln!("MEDIA_LANE_GPU_ACCEPTANCE: gallery page controls");
 }
 
 /// A pane's terminal paints nothing outside its rectangle: a snapshot left
@@ -2168,6 +2270,7 @@ fn a_lane_in_source_mode_shows_rows_instead_of_the_image() {
         },
         hint: "Keys still go to the terminal".into(),
         position: (1, 1),
+        page: None,
         image: Some(kettle_core::ImageData::new(16, 16, red.repeat(16 * 16)).unwrap()),
         status: String::new(),
         canvas: MediaCanvas::Theme,
@@ -2254,6 +2357,7 @@ fn a_zoomed_lane_covers_its_content_and_stays_inside_it() {
         },
         hint: "Keys still go to the terminal".into(),
         position: (1, 1),
+        page: None,
         image: Some(kettle_core::ImageData::new(16, 16, red.repeat(16 * 16)).unwrap()),
         status: String::new(),
         canvas: MediaCanvas::Theme,
@@ -2331,6 +2435,7 @@ fn a_tile_that_covers_the_view_is_drawn_instead_of_the_image() {
         },
         hint: "Keys still go to the terminal".into(),
         position: (1, 1),
+        page: None,
         image: Some(kettle_core::ImageData::new(16, 16, red.repeat(16 * 16)).unwrap()),
         status: String::new(),
         canvas: MediaCanvas::Theme,
@@ -2412,6 +2517,7 @@ fn a_preview_lane_paints_its_panel_and_leaves_the_terminal() {
         },
         hint: "Keys still go to the terminal".into(),
         position: (1, 1),
+        page: None,
         image: Some(kettle_core::ImageData::new(2, 2, vec![255; 16]).unwrap()),
         status: String::new(),
         canvas: MediaCanvas::Theme,

@@ -328,6 +328,11 @@ pub enum Action {
     PreviewNext,
     /// Show the previous item on the shelf in the focused pane's lane.
     PreviewPrevious,
+    /// Show the next diagram of the gallery the focused pane's lane shows.
+    PreviewNextDiagram,
+    /// Show the previous diagram of the gallery the focused pane's lane
+    /// shows.
+    PreviewPreviousDiagram,
     /// Close the focused pane's preview lane.
     ClosePreview,
     /// Show the source of the focused pane's preview, or the rendered item
@@ -758,6 +763,8 @@ pub fn action_names() -> Vec<&'static str> {
         "preview_clipboard_path",
         "preview_next",
         "preview_previous",
+        "preview_next_diagram",
+        "preview_previous_diagram",
         "close_preview",
         "preview_source",
         "preview_canvas",
@@ -1065,6 +1072,8 @@ impl Action {
             "preview_clipboard_path" | "preview-clipboard-path" => PreviewClipboardPath,
             "preview_next" | "preview-next" => PreviewNext,
             "preview_previous" | "preview-previous" => PreviewPrevious,
+            "preview_next_diagram" | "preview-next-diagram" => PreviewNextDiagram,
+            "preview_previous_diagram" | "preview-previous-diagram" => PreviewPreviousDiagram,
             "close_preview" | "close-preview" => ClosePreview,
             "preview_source" | "preview-source" => PreviewSource,
             "preview_canvas" | "preview-canvas" => PreviewCanvas,
