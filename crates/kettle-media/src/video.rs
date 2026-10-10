@@ -4,7 +4,7 @@
 use std::fs::File;
 use std::time::Instant;
 
-use crate::{FailureCode, PathIdentity, StillSample, VideoInfo};
+use crate::{FailureCode, PathIdentity, StillSample, StillsLayout, VideoInfo, VideoStills};
 
 /// The environment variable the parent names the external decoder's ffmpeg
 /// in, when it starts a worker. Only Kettle's own platform code sets it, so
@@ -454,4 +454,242 @@ fn movie_brand(brand: &[u8]) -> bool {
             | b"F4V "
             | b"f4v "
     )
+}
+
+/// Space between a sheet's frames and around them, in pixels.
+pub const SHEET_GAP: u32 = 4;
+
+/// The instants `stills` asks for in a video `duration_ms` long, in the order
+/// they are laid out: the one at `at_s`, or `count` evenly through the window
+/// from `start_s` to `end_s` (the end without one), each the middle of its
+/// share. Past the end is the end.
+pub fn sample_times(duration_ms: u64, stills: &VideoStills) -> Vec<u64> {
+    let ms = |seconds: f64| {
+        let ms = (seconds * 1000.0).round();
+        if ms >= duration_ms as f64 {
+            duration_ms
+        } else {
+            ms.max(0.0) as u64
+        }
+    };
+    if let Some(at) = stills.at_s {
+        return vec![ms(at)];
+    }
+    let start = ms(stills.start_s);
+    let end = stills.end_s.map_or(duration_ms, ms).max(start);
+    let count = u64::from(stills.count.max(1));
+    let span = end - start;
+    (0..count)
+        .map(|index| start + (span * (2 * index + 1)) / (2 * count))
+        .collect()
+}
+
+/// The layout's grid, columns by rows.
+pub fn grid(stills: &VideoStills) -> (u32, u32) {
+    match stills.layout {
+        StillsLayout::Poster => (1, 1),
+        StillsLayout::Sheet { cols, .. } => {
+            let cols = u32::from(cols.max(1));
+            (cols, u32::from(stills.count).div_ceil(cols))
+        }
+    }
+}
+
+/// The size each frame of a picture `width` by `height` (as shown) is drawn
+/// at: as large as the grid and its gaps allow within `max_edge` on a side,
+/// never larger than the picture itself, its shape kept. `None` for an empty
+/// picture.
+pub fn tile_size(width: u32, height: u32, stills: &VideoStills) -> Option<(u32, u32)> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let (cols, rows) = grid(stills);
+    let gap = gap(stills);
+    let room = |count: u32| {
+        stills
+            .max_edge
+            .checked_sub(gap * (count + 1))
+            .map(|left| left / count)
+            .filter(|&room| room > 0)
+    };
+    let (room_w, room_h) = (room(cols)?, room(rows)?);
+    let scale = (f64::from(room_w) / f64::from(width))
+        .min(f64::from(room_h) / f64::from(height))
+        .min(1.0);
+    let tile = |side: u32| ((f64::from(side) * scale).floor() as u32).max(1);
+    Some((tile(width), tile(height)))
+}
+
+/// The space between a layout's frames: none for a poster.
+pub fn gap(stills: &VideoStills) -> u32 {
+    match stills.layout {
+        StillsLayout::Poster => 0,
+        StillsLayout::Sheet { .. } => SHEET_GAP,
+    }
+}
+
+/// Where frame `index` of the sheet `stills` lays out, with frames `tile`
+/// large, has its top-left corner, in the order frames are laid out.
+pub fn tile_origin(stills: &VideoStills, tile: (u32, u32), index: u32) -> (u32, u32) {
+    let (cols, _) = grid(stills);
+    let gap = gap(stills);
+    (
+        gap + (index % cols) * (tile.0 + gap),
+        gap + (index / cols) * (tile.1 + gap),
+    )
+}
+
+/// The whole sheet `stills` lays out with frames `tile` large: every frame,
+/// the gaps between them and the margin around them.
+pub fn sheet_size(stills: &VideoStills, tile: (u32, u32)) -> (u32, u32) {
+    let (cols, rows) = grid(stills);
+    let gap = gap(stills);
+    (
+        cols * tile.0 + gap * (cols + 1),
+        rows * tile.1 + gap * (rows + 1),
+    )
+}
+
+/// The largest `max_edge`, up to [`crate::MAX_VIDEO_JOB_EDGE`], at which
+/// [`tile_size`] gives each frame of `stills`'s layout, for a picture
+/// `width` by `height` (as shown), at most `longest` pixels on each side:
+/// frames as large as that allows, never larger than the picture. Tiles
+/// grow in steps (whole pixels of room, floored), so this searches rather
+/// than solves. `None` when no edge fits a frame.
+pub fn edge_for_tiles(stills: &VideoStills, width: u32, height: u32, longest: u32) -> Option<u32> {
+    let fits = |max_edge| {
+        tile_size(
+            width,
+            height,
+            &VideoStills {
+                max_edge,
+                ..*stills
+            },
+        )
+        .is_some_and(|(tile_w, tile_h)| tile_w <= longest && tile_h <= longest)
+    };
+    // An edge too small for the margins gives no tile at all. From the
+    // smallest that gives one, tiles never shrink as the edge grows: find
+    // where they stop fitting.
+    let (cols, rows) = grid(stills);
+    let gap = gap(stills);
+    let smallest = (gap * (cols + 1) + cols).max(gap * (rows + 1) + rows);
+    if smallest > crate::MAX_VIDEO_JOB_EDGE || !fits(smallest) {
+        return None;
+    }
+    let (mut fitting, mut over) = (smallest, crate::MAX_VIDEO_JOB_EDGE + 1);
+    while over - fitting > 1 {
+        let edge = fitting + (over - fitting) / 2;
+        if fits(edge) {
+            fitting = edge;
+        } else {
+            over = edge;
+        }
+    }
+    Some(fitting)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sheet(count: u8, cols: u8) -> VideoStills {
+        VideoStills {
+            count,
+            max_edge: 1568,
+            start_s: 0.0,
+            end_s: None,
+            at_s: None,
+            layout: StillsLayout::Sheet {
+                cols,
+                labels: false,
+            },
+        }
+    }
+
+    /// Frames sit after the margin, one tile and one gap apart, row by row,
+    /// and the sheet holds them all with its margin round them.
+    #[test]
+    fn frames_sit_where_the_sheet_puts_them() {
+        let stills = sheet(8, 4);
+        assert_eq!(tile_origin(&stills, (384, 216), 0), (4, 4));
+        assert_eq!(tile_origin(&stills, (384, 216), 3), (4 + 3 * 388, 4));
+        assert_eq!(tile_origin(&stills, (384, 216), 4), (4, 4 + 220));
+        assert_eq!(tile_origin(&stills, (384, 216), 7), (4 + 3 * 388, 4 + 220));
+        assert_eq!(sheet_size(&stills, (384, 216)), (1556, 444));
+        let poster = VideoStills {
+            count: 1,
+            layout: StillsLayout::Poster,
+            ..stills
+        };
+        assert_eq!(tile_origin(&poster, (640, 360), 0), (0, 0));
+        assert_eq!(sheet_size(&poster, (640, 360)), (640, 360));
+    }
+
+    /// The edge found for a longest side gives frames that fit it, as large
+    /// as it allows, never larger than the picture, for every shape.
+    #[test]
+    fn an_edge_for_tiles_fits_them_to_the_longest_side() {
+        let layout = sheet(8, 4);
+        let tiles = |width, height| {
+            let max_edge = edge_for_tiles(&layout, width, height, 384).unwrap();
+            assert!(max_edge <= crate::MAX_VIDEO_JOB_EDGE);
+            tile_size(width, height, &VideoStills { max_edge, ..layout }).unwrap()
+        };
+        assert_eq!(tiles(1920, 1080), (384, 216));
+        assert_eq!(tiles(1080, 1920), (216, 384));
+        assert_eq!(tiles(1000, 1000), (384, 384));
+        assert_eq!(tiles(320, 180), (320, 180), "never larger than the picture");
+        // The largest edge that fits: one more would not, or would change
+        // nothing because the picture is already whole.
+        for width in (1..4000).step_by(97) {
+            for height in (1..4000).step_by(89) {
+                let (tile_w, tile_h) = tiles(width, height);
+                assert!(tile_w <= 384 && tile_h <= 384, "{width}x{height}");
+                let max_edge = edge_for_tiles(&layout, width, height, 384).unwrap();
+                let next = tile_size(
+                    width,
+                    height,
+                    &VideoStills {
+                        max_edge: max_edge + 1,
+                        ..layout
+                    },
+                )
+                .unwrap();
+                assert!(
+                    next.0 > 384 || next.1 > 384 || next == (tile_w, tile_h),
+                    "{width}x{height}: {tile_w}x{tile_h} at {max_edge}, {next:?} past it"
+                );
+            }
+        }
+        // Where flooring makes a closed form overshoot.
+        assert!(tiles(268, 535).1 <= 384);
+        assert_eq!(edge_for_tiles(&layout, 0, 10, 384), None);
+        assert_eq!(edge_for_tiles(&layout, 10, 10, 0), None);
+        // Tiles fit only between an edge with room for the margins and one
+        // past the longest side: the search starts where tiles begin.
+        let tiny = edge_for_tiles(&layout, 1000, 1000, 1).unwrap();
+        assert_eq!(
+            tile_size(
+                1000,
+                1000,
+                &VideoStills {
+                    max_edge: tiny,
+                    ..layout
+                }
+            ),
+            Some((1, 1))
+        );
+        assert!(
+            tile_size(
+                1000,
+                1000,
+                &VideoStills {
+                    max_edge: tiny + 4,
+                    ..layout
+                }
+            )
+            .is_some_and(|(width, _)| width > 1)
+        );
+    }
 }
