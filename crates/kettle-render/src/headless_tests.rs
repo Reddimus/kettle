@@ -2036,6 +2036,8 @@ fn a_lane_draws_its_open_outside_button_only_when_offered() {
     };
     let snap = snapshot_of(80, 30, b"");
     let viewer = |open_outside| MediaLanePanel {
+        play: None,
+        frame: None,
         pane: 1,
         rect: (0.0, 0.0, 800.0, 600.0),
         collapsed: false,
@@ -2113,6 +2115,8 @@ fn a_lane_draws_a_gallerys_page_controls() {
     };
     let snap = snapshot_of(80, 30, b"");
     let viewer = |page| MediaLanePanel {
+        play: None,
+        frame: None,
         pane: 1,
         rect: (0.0, 0.0, 800.0, 600.0),
         collapsed: false,
@@ -2258,6 +2262,8 @@ fn a_lane_in_source_mode_shows_rows_instead_of_the_image() {
     };
     let red = [255, 0, 0, 255];
     let lane = |mode| MediaLanePanel {
+        play: None,
+        frame: None,
         pane: 1,
         rect: (0.0, 40.0, 480.0, 280.0),
         collapsed: false,
@@ -2345,6 +2351,8 @@ fn a_zoomed_lane_covers_its_content_and_stays_inside_it() {
     };
     let red = [255, 0, 0, 255];
     let lane = |view| MediaLanePanel {
+        play: None,
+        frame: None,
         pane: 1,
         rect: (0.0, 40.0, 480.0, 280.0),
         collapsed: false,
@@ -2423,6 +2431,8 @@ fn a_tile_that_covers_the_view_is_drawn_instead_of_the_image() {
     };
     let (red, blue) = ([255, 0, 0, 255], [0, 0, 255, 255]);
     let lane = |view, tile| MediaLanePanel {
+        play: None,
+        frame: None,
         pane: 1,
         rect: (0.0, 40.0, 480.0, 280.0),
         collapsed: false,
@@ -2505,6 +2515,8 @@ fn a_preview_lane_paints_its_panel_and_leaves_the_terminal() {
         ..pane(&snap, 480, 320)
     };
     let lane = MediaLanePanel {
+        play: None,
+        frame: None,
         pane: 1,
         rect: (0.0, 180.0, 480.0, 140.0),
         collapsed: false,
