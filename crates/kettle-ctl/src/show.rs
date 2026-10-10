@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use kettle_media::{
-    ExternalAttested, FailureCode, JobKind, MAX_MERMAID_BYTES, MAX_RASTER_BYTES, MAX_SVG_BYTES,
-    MediaKind, NativePath, Warning,
+    ExternalAttested, FailureCode, JobKind, MAX_FENCES, MAX_MERMAID_BYTES, MAX_RASTER_BYTES,
+    MAX_SVG_BYTES, MediaKind, NativePath, Warning,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -84,14 +84,25 @@ pub enum ShowSource {
     Image(Vec<u8>),
     /// Mermaid text, rendered as Mermaid.
     Mermaid(String),
-    /// An absolute path the caller attests by device and inode, classified by
-    /// the worker from the file it opens, or rendered as Mermaid when the
-    /// caller says it is (`"kind": "mermaid"`).
+    /// An absolute path the caller attests by device and inode, rendered as
+    /// `kind` says.
     File {
         path: NativePath,
         attestation: ExternalAttested,
-        mermaid: bool,
+        kind: FileKind,
     },
+}
+
+/// What a shown file is rendered as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileKind {
+    /// What the worker finds its bytes are.
+    Classified,
+    /// Mermaid, as the caller says it is (`"kind": "mermaid"`).
+    Mermaid,
+    /// Page `index`, from 0, of the Markdown diagram gallery it holds
+    /// (`"markdown_index"`), below [`MAX_FENCES`].
+    MarkdownPage(u8),
 }
 
 impl ShowSource {
@@ -99,8 +110,20 @@ impl ShowSource {
     pub fn job_kind(&self) -> JobKind {
         match self {
             Self::Svg(_) => JobKind::Svg,
-            Self::Mermaid(_) | Self::File { mermaid: true, .. } => JobKind::Mermaid,
-            Self::Image(_) | Self::File { mermaid: false, .. } => JobKind::Auto,
+            Self::Mermaid(_)
+            | Self::File {
+                kind: FileKind::Mermaid,
+                ..
+            } => JobKind::Mermaid,
+            Self::File {
+                kind: FileKind::MarkdownPage(index),
+                ..
+            } => JobKind::MarkdownDiagrams { index: *index },
+            Self::Image(_)
+            | Self::File {
+                kind: FileKind::Classified,
+                ..
+            } => JobKind::Auto,
         }
     }
 }
@@ -152,6 +175,19 @@ impl ShowRequest {
             Some(Value::String(kind)) if kind == "mermaid" && name == "path" => true,
             Some(_) => return Err(FailureCode::BadParams),
         };
+        // A page of a gallery is a file's too, and never one said to be
+        // Mermaid; past the most pages a gallery holds, it is in none.
+        let kind = match optional_u64(&mut fields, "markdown_index")? {
+            None if mermaid => FileKind::Mermaid,
+            None => FileKind::Classified,
+            Some(_) if name != "path" || mermaid => return Err(FailureCode::BadParams),
+            Some(index) => FileKind::MarkdownPage(
+                u8::try_from(index)
+                    .ok()
+                    .filter(|&index| usize::from(index) < MAX_FENCES)
+                    .ok_or(FailureCode::IndexOutOfRange)?,
+            ),
+        };
         let source = match (name, attestation) {
             ("svg", (None, None)) if text.len() > MAX_SVG_BYTES => {
                 return Err(FailureCode::TooLarge);
@@ -185,7 +221,7 @@ impl ShowRequest {
                 ShowSource::File {
                     path,
                     attestation: ExternalAttested { dev, ino },
-                    mermaid,
+                    kind,
                 }
             }
             _ => return Err(FailureCode::BadParams),
@@ -232,14 +268,20 @@ impl ShowRequest {
             ShowSource::File {
                 path,
                 attestation,
-                mermaid,
+                kind,
             } => {
                 let text = native_path_text(&path).ok_or(FailureCode::BadParams)?;
                 fields.insert("path".into(), Value::String(text));
                 fields.insert("dev".into(), attestation.dev.into());
                 fields.insert("ino".into(), attestation.ino.into());
-                if mermaid {
-                    fields.insert("kind".into(), "mermaid".into());
+                match kind {
+                    FileKind::Classified => {}
+                    FileKind::Mermaid => {
+                        fields.insert("kind".into(), "mermaid".into());
+                    }
+                    FileKind::MarkdownPage(index) => {
+                        fields.insert("markdown_index".into(), index.into());
+                    }
                 }
             }
         }
@@ -272,6 +314,14 @@ impl ShowRequest {
             _ => Ok(()),
         };
         // In the order `parse` checks, so both name the same failure.
+        if let ShowSource::File {
+            kind: FileKind::MarkdownPage(index),
+            ..
+        } = self.source
+            && usize::from(index) >= MAX_FENCES
+        {
+            return Err(FailureCode::IndexOutOfRange);
+        }
         if empty {
             return Err(FailureCode::BadParams);
         }
@@ -570,7 +620,7 @@ mod tests {
         let ShowSource::File {
             path: native,
             attestation,
-            mermaid: false,
+            kind: FileKind::Classified,
         } = &request.source
         else {
             panic!("a file source");
@@ -632,6 +682,61 @@ mod tests {
         }
     }
 
+    /// A file may name a page of the Markdown gallery it holds, from 0 to
+    /// the most pages a gallery has; past that it is in none. Only a file
+    /// names one, and never a file said to be Mermaid.
+    #[test]
+    fn a_file_may_name_a_gallery_page() {
+        let path = absolute("plan.md");
+        let page = |index: Value| {
+            ShowRequest::parse(json!({"path": path, "dev": 1, "ino": 2, "markdown_index": index}))
+        };
+        let request = page(json!(0)).unwrap();
+        assert_eq!(
+            request.source.job_kind(),
+            JobKind::MarkdownDiagrams { index: 0 }
+        );
+        let last = MAX_FENCES as u64 - 1;
+        assert_eq!(
+            page(json!(last)).unwrap().source.job_kind(),
+            JobKind::MarkdownDiagrams { index: last as u8 }
+        );
+        for past in [json!(last + 1), json!(256), json!(u64::MAX)] {
+            assert_eq!(
+                page(past.clone()),
+                Err(FailureCode::IndexOutOfRange),
+                "{past}"
+            );
+        }
+        assert_eq!(page(Value::Null).unwrap().source.job_kind(), JobKind::Auto);
+        for bad in [
+            page(json!(-1)),
+            page(json!(1.5)),
+            page(json!("1")),
+            ShowRequest::parse(json!({"svg": "<svg/>", "markdown_index": 0})),
+            ShowRequest::parse(json!({"mermaid": "graph LR", "markdown_index": 0})),
+            ShowRequest::parse(json!({"image_b64": "AAAA", "markdown_index": 0})),
+            ShowRequest::parse(
+                json!({"path": path, "dev": 1, "ino": 2, "kind": "mermaid", "markdown_index": 0}),
+            ),
+        ] {
+            assert_eq!(bad, Err(FailureCode::BadParams));
+        }
+        // A request built in code is held to the same bound.
+        let built = ShowRequest {
+            source: ShowSource::File {
+                path: NativePath::from_path(Path::new(&path)).unwrap(),
+                attestation: ExternalAttested { dev: 1, ino: 2 },
+                kind: FileKind::MarkdownPage(MAX_FENCES as u8),
+            },
+            title: Some(String::new()),
+            key: None,
+            pane: None,
+            inline: None,
+        };
+        assert_eq!(built.into_params(), Err(FailureCode::IndexOutOfRange));
+    }
+
     #[test]
     fn params_round_trip_through_the_one_parser() {
         let path = absolute("caf\u{e9}.png");
@@ -657,7 +762,7 @@ mod tests {
                         dev: u64::MAX,
                         ino: 1,
                     },
-                    mermaid: false,
+                    kind: FileKind::Classified,
                 },
                 title: None,
                 key: Some(path.clone()),
@@ -675,9 +780,20 @@ mod tests {
                 source: ShowSource::File {
                     path: NativePath::from_path(Path::new(&path)).unwrap(),
                     attestation: ExternalAttested { dev: 3, ino: 4 },
-                    mermaid: true,
+                    kind: FileKind::Mermaid,
                 },
                 title: None,
+                key: None,
+                pane: None,
+                inline: None,
+            },
+            ShowRequest {
+                source: ShowSource::File {
+                    path: NativePath::from_path(Path::new(&path)).unwrap(),
+                    attestation: ExternalAttested { dev: 5, ino: 6 },
+                    kind: FileKind::MarkdownPage(31),
+                },
+                title: Some("Plan".into()),
                 key: None,
                 pane: None,
                 inline: None,

@@ -4345,7 +4345,11 @@ refused at once, never waited on; a symbolic link is attested by its target
 and sent by its own name), and its confirmation. `kettle-ctl` pins `request_fits` against the line a client
 frames, to the byte with escapes, the inline `mermaid` source at 64 KiB and
 one byte over, `kind: "mermaid"` on a path only, and a path at 4 KiB in
-native units. For a live check on macOS, the
+native units. `markdown_index` names a page of a file's gallery from 0 to 31,
+past that (32, 256, the largest number) is `index_out_of_range`, a negative,
+fractional or string index or one on any source but a path, or beside
+`kind: "mermaid"`, is `bad_params`, a request built in code is held to the
+same bound, and a page round-trips through the one parser. For a live check on macOS, the
 worker must carry Kettle's Developer ID signature: inside a pane of
 `kettle --agent-server off --agent-display on`, `kettle show plot.png` and
 `kettle show diagram.svg` are confirmed as raster and svg, verified; a text
