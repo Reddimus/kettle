@@ -4240,10 +4240,14 @@ no control request may start a read. Then `send_mouse` a right click with
 `"mods":["shift"]` and see "Preview Copied File" in the menu.
 
 `kettle mcp --display`: unit tests pin that it offers exactly `kettle_show`
-(path required, no other property) and refuses every full-mode tool, that
-full mode does not offer it, that bad requests (no path, a relative path, a
-missing file, a directory, an over-long key, an empty title) are refused in
-the fixed wording before anything is sent, that a sent result is one plain
+(one of `mermaid` and `path`, no other property) and refuses every
+full-mode tool, that full mode offers the same `kettle_show`, that bad
+requests (no source, both, an empty or oversized Mermaid source, a relative
+path, a missing file, a directory, an over-long key, an empty title) are
+refused in the fixed wording before anything is sent, that the schema and
+the validator agree (whatever the validator sends on the schema accepts,
+and for ASCII text the two agree exactly, at each cap and one past it, in
+ASCII and four-byte characters), that a sent result is one plain
 line plus status-only structured content saying the model has not seen it,
 and that display discovery is private with no cache lifetime.
 `tests/mcp_stdio.rs` runs the real `kettle mcp --display` in both protocol

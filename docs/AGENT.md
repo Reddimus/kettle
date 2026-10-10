@@ -741,9 +741,18 @@ Or a project-scoped `.mcp.json`:
 
 `kettle mcp --display` offers one tool, `kettle_show`, and nothing that reads
 the screen, types, runs commands or drives Kettle. It needs agent previews,
-never full control. Its arguments are an absolute `path` (an image, SVG or
-Mermaid diagram file) and an optional `title` and `key`; inline bytes go through `kettle show
--` instead. It finds its Kettle the strict way `kettle show` does, the one the
+never full control. The full server (`kettle mcp`) offers the same
+`kettle_show` among its tools; it needs only what the display server needs.
+Its arguments are exactly one source, `mermaid` (Mermaid source, at most
+64 KiB of UTF-8) or an absolute `path` (an image, SVG or Mermaid file, at
+most 4 KiB), and an optional `title` (at most 4 KiB) and `key` (at most 256
+bytes), none of them empty; other media bytes go through `kettle show -`
+instead. The schema says what is checked: `oneOf` the two sources, each
+string's `minLength` of one, the path's absolute pattern, and each byte cap
+as its `maxLength`, a bound no string within the cap exceeds, since JSON
+Schema counts characters; text of wider characters can pass it and still be
+over the byte cap, which `kettle_show` refuses as `too_large` before it
+sends anything. It finds its Kettle the strict way `kettle show` does, the one the
 server runs inside, and returns one plain line and status-only structured
 content (`status`, `delivery: "shelf"`, `pane`, `window`, `item`, `verified`,
 `kind`, `width`, `height`, `warnings`, `model_has_seen: false`), never the

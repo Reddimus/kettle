@@ -108,6 +108,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   who signed that program's code once macOS validates it.
   Each pane keeps its last eight items; `list_panes` reports them. A push
   never opens anything on screen.
+- `kettle_show` takes inline Mermaid source (`mermaid`) as well as a file
+  `path`, and the full MCP server (`kettle mcp`) offers it too.
 - `kettle mcp --display` offers agents one tool, `kettle_show`, which sends
   an image, SVG or Mermaid diagram file to the media shelf of the pane the agent runs in. It
   needs only Agent previews and cannot read the screen, type or run
