@@ -461,10 +461,10 @@ fn placement(env: impl Fn(&str) -> Option<String>, kettle: impl FnOnce() -> bool
 const SHOW_INSIDE: &str = "Use kettle_show to send the user images and rendered diagrams in \
     this Kettle session. A supported interactive chat shows an inline card under the call; the \
     media shelf keeps the item, and clicking opens the viewer or preview lane. Call it after \
-    writing or editing a Mermaid file or making an image the user should see, using its \
+    writing or editing a Mermaid file or making an image/video the user should see, using its \
     absolute path. When your reply contains a useful Mermaid diagram, pass its source in \
-    mermaid and keep the text source in your reply. Skip trivial diagrams that need no \
-    inspection. Reuse key to update an item. A successful display does not mean you have seen \
+    mermaid and keep the text source in your reply. Skip trivial diagrams and passing-test \
+    videos that need no inspection. Reuse key to update an item. A successful display does not mean you have seen \
     the media. If it is unavailable, outside Kettle, busy or needs a restart, tell the user \
     once and do not retry. Never change Kettle configuration or install software yourself.";
 

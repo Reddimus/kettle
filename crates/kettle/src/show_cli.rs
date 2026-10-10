@@ -249,8 +249,9 @@ fn confirmation(result: &ShowResult) -> String {
         ", from an unverified sender"
     };
     format!(
-        "Sent to the Kettle media shelf of pane {} ({} {}x{}{sender}). You have not seen its contents.",
-        result.pane, result.kind, result.width, result.height
+        "Sent to the Kettle media shelf of pane {} ({}{sender}). You have not seen its contents.",
+        result.pane,
+        result.summary()
     )
 }
 
