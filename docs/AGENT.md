@@ -725,7 +725,12 @@ polls. Without this opt-in, the existing duration log and
 ## `kettle mcp` — MCP server
 
 Expose all of the above as Model Context Protocol tools, so Claude Code/Codex get
-kettle as native tools.
+kettle as native tools. For agent previews, the first-run route needs no
+registration: Kettle's Claude Code plugin and the `codex` function `kettle
+agent-setup --print` prints start `kettle mcp --display` for each session
+(see [Kettle's Claude Code plugin](#kettles-claude-code-plugin) and
+[Codex's launch function](#codexs-launch-function)).
+Register it by hand only for another client, or for full control.
 
 ```sh
 claude mcp add kettle -- kettle mcp
@@ -777,6 +782,8 @@ These are guidance only: `kettle_show` still finds its Kettle the strict way.
 On the 2026-07-28 revision, `server/discover` marks them `cacheScope:
 "private"` and `ttlMs: 0` in both modes, since they depend on where the
 server runs; the legacy `initialize` carries the same words.
+
+For a client the plugin and the function do not cover:
 
 ```sh
 claude mcp add kettle-display -- kettle mcp --display
