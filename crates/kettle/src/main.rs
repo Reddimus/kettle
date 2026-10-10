@@ -556,9 +556,11 @@ enum Cmd {
     /// agent tools. Register with Claude Code: `claude mcp add kettle -- kettle mcp`.
     Mcp(McpArgs),
     /// Send a local image, SVG or Mermaid diagram to the media shelf of the
-    /// pane this runs in, in the Kettle it runs inside. Pass - to read a small
-    /// one from stdin. The item waits on the shelf; nothing opens on screen. Agent
-    /// previews must be on; full control is never needed.
+    /// pane this runs in, in the Kettle it runs inside. Without a path, or
+    /// with -, read it from stdin (Mermaid up to 64 KiB with --mermaid, any
+    /// other up to what one request carries; pass a larger one as a file).
+    /// The item waits on the shelf; nothing opens on screen. Agent previews
+    /// must be on; full control is never needed.
     Show(ShowArgs),
     /// Set up Codex to start with Kettle's display server: print a `codex`
     /// shell function to review and add to your shell's startup file, report
@@ -571,9 +573,13 @@ enum Cmd {
 
 #[derive(clap::Args, Debug)]
 struct ShowArgs {
-    /// The image, SVG or Mermaid file to show, or - for bytes on stdin.
-    #[arg(value_name = "PATH", allow_hyphen_values = true)]
+    /// The image, SVG or Mermaid file to show, or - (the default) for stdin.
+    #[arg(value_name = "PATH", allow_hyphen_values = true, default_value = "-")]
     source: std::path::PathBuf,
+    /// Render it as Mermaid rather than by what its bytes turn out to be:
+    /// stdin is then Mermaid text, and a file is rendered as a diagram.
+    #[arg(long)]
+    mermaid: bool,
     /// A title for the shelf item (default: the file name).
     #[arg(long, value_name = "TITLE")]
     title: Option<String>,

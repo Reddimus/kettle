@@ -546,12 +546,12 @@ fn tool_kettle_show(
         Some(path) if std::path::Path::new(path).is_absolute() => std::path::Path::new(path),
         _ => return show_failed(FailureCode::BadParams.model_message()),
     };
-    let source = match crate::show_cli::file_source(path) {
+    let source = match crate::show_cli::file_source(path, false) {
         Ok(source) => source,
         Err(message) => return show_failed(&message),
     };
     let text = |name: &str| args.get(name).and_then(Value::as_str).map(str::to_owned);
-    let params = match (kettle_ctl::show::ShowRequest {
+    let params = match crate::show_cli::request_params(kettle_ctl::show::ShowRequest {
         source,
         title: text("title"),
         key: text("key"),
@@ -560,11 +560,9 @@ fn tool_kettle_show(
             .as_ref()
             .and(session.hook())
             .map(crate::mcp_display::CardHook::target),
-    })
-    .into_params()
-    {
+    }) {
         Ok(params) => params,
-        Err(failure) => return show_failed(failure.model_message()),
+        Err(message) => return show_failed(&message),
     };
     let mut client = match Client::discover_display(None) {
         Ok(client) => client,

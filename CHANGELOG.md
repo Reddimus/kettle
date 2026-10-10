@@ -87,9 +87,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   poster provider. Text or still-image containers named as videos no longer
   show a video card; movies renamed to another supported video suffix still
   work. Header inspection reads at most 64 KiB on the background worker.
-- `kettle show PATH` (or `-` for stdin) and the `show` control method send an
-  image, SVG or Mermaid diagram to the media shelf of the pane they run in, in the Kettle they
-  run inside. They need only Agent previews, never full control. Media lands
+- `kettle show PATH` (or stdin, with no path or `-`; `--mermaid` renders
+  either as a Mermaid diagram) and the `show` control method send an image,
+  SVG or Mermaid diagram to the media shelf of the pane they run in, in the
+  Kettle they run inside. They need only Agent previews, never full control.
+  Media too large for one request is refused, never cut short, with the
+  advice to pass a file path. Media lands
   in the caller's own pane by its process ancestry; a sender Kettle cannot
   place is labeled unverified with the program the system names for it (for
   `kettle show` and `kettle mcp`, the program that ran them) and, on macOS,

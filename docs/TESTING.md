@@ -4233,8 +4233,18 @@ separators, bidirectional formatting and placeholder sequences (the
 placeholder and the marks after it, which `strip_placeholders` in `kettle-vt`
 tests), bounded at 256 characters.
 `kettle-vt` hands a refused image's pixels back when only the account's room
-was missing. `kettle show`'s own tests pin its fixed failure wording, the
-absolute attested path and its confirmation. For a live check on macOS, the
+was missing. `kettle show`'s own tests pin its fixed failure wording, every
+refusal said by its code and reason and never in the reply's words (a
+hostile message, an unknown code or reason), stdin taken at its cap and
+refused one byte over (64 KiB with `--mermaid`, which must be UTF-8), never
+cut short, a path at 4 KiB looked for and one byte more refused before the
+file system is asked, the whole request measured as a client frames it (the
+largest image whose base64 fits the line, and the next refused; escape-heavy
+Mermaid always fits), the absolute attested path, `--mermaid` on a file, and
+its confirmation. `kettle-ctl` pins `request_fits` against the line a client
+frames, to the byte with escapes, the inline `mermaid` source at 64 KiB and
+one byte over, `kind: "mermaid"` on a path only, and a path at 4 KiB in
+native units. For a live check on macOS, the
 worker must carry Kettle's Developer ID signature: inside a pane of
 `kettle --agent-server off --agent-display on`, `kettle show plot.png` and
 `kettle show diagram.svg` are confirmed as raster and svg, verified; a text
