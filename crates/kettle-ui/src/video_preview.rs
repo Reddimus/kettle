@@ -1,3 +1,14 @@
+//! Pasted and dropped video receipts. A receipt check, Kettle itself run as
+//! a short-lived helper (`__media-preview-worker`), opens the named file
+//! through a trusted parent chain, identifies it, sees that its bytes start
+//! like a video and decodes nothing; on Linux it also opens the video's
+//! cached freedesktop.org thumbnails the same way. The poster then comes from
+//! the sandboxed media worker, held to the inode the check opened: a frame of
+//! the video, or on Linux, when no decoder can make one, a cached thumbnail
+//! the worker shows is that video's. On Windows, where no media worker runs,
+//! the check asks the Shell for the poster itself. A checked video with no
+//! poster still gets a receipt, without one.
+
 use std::ffi::OsString;
 use std::io::{Read as _, Seek as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -10,7 +21,7 @@ const INPUT_MAGIC: &[u8; 8] = b"KTLVPIN2";
 /// another build can tell a skewed request from garbage.
 const INPUT_MAGIC_FAMILY: &[u8; 7] = b"KTLVPIN";
 const MAX_BUILD_IDENTITY_BYTES: usize = 128;
-const OUTPUT_MAGIC: &[u8; 8] = b"KTLVPOU1";
+const OUTPUT_MAGIC: &[u8; 8] = b"KTLVPOU2";
 const MAX_PATH_BYTES: usize = 64 * 1024;
 const MAX_PREVIEW_WIDTH: u32 = 256;
 const MAX_PREVIEW_HEIGHT: u32 = 160;
@@ -52,19 +63,30 @@ enum RequestError {
 const MAX_WORKER_ATTEMPTS: u32 = 2;
 const PREVIEW_THREAD_COUNT: usize = 2;
 const PREVIEW_QUEUE_CAPACITY: usize = 8;
-/// One surviving thread may drain every queued job before reaching this one.
-/// Two seconds of bounded slack cover dispatch overhead. An unusually loaded
-/// host drops the optional receipt instead of retaining pending state forever.
-pub(crate) const PENDING_RECEIPT_TIMEOUT: Duration = Duration::from_secs(
-    ((PREVIEW_QUEUE_CAPACITY + 1) as u64 * WORKER_TIMEOUT.as_secs() * MAX_WORKER_ATTEMPTS as u64)
-        + 2,
-);
+/// How long a receipt has from its request for its checks and its poster:
+/// no check or render starts after it, and each stops at it. A job that
+/// waited it out in the queue gets no receipt. It holds both checks' two
+/// attempts and the media worker's cold start, twice, and render.
+const RECEIPT_DEADLINE: Duration = Duration::from_secs(20);
+/// Pending state outlives the deadline by two seconds of cleanup and
+/// dispatch slack, so an unusually loaded host drops the optional receipt
+/// instead of keeping pending state.
+pub(crate) const PENDING_RECEIPT_TIMEOUT: Duration =
+    Duration::from_secs(RECEIPT_DEADLINE.as_secs() + 2);
 const MAX_FILE_LIST_ENTRIES: usize = 256;
 const FINGERPRINT_SAMPLE_BYTES: usize = 64 * 1024;
-#[cfg(target_os = "linux")]
-const MAX_CACHED_THUMBNAIL_DIMENSION: u32 = 4_096;
-#[cfg(target_os = "linux")]
-const MAX_CACHED_THUMBNAIL_PIXELS: u64 = 16 * 1024 * 1024;
+/// Most cached thumbnails a check names: one for each of the standard's sizes.
+const MAX_CACHED_THUMBNAILS: usize = 4;
+/// The longest reply a check sends: its fixed fields, every cached thumbnail
+/// at the longest path, and the largest poster.
+const MAX_OUTPUT_BYTES: usize = OUTPUT_MAGIC.len()
+    + 8 * 4
+    + 4
+    + 32
+    + 1
+    + MAX_CACHED_THUMBNAILS * (8 + 8 + 4 + MAX_PATH_BYTES)
+    + 4 * 3
+    + MAX_PREVIEW_BYTES;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum VideoPasteSource {
@@ -342,6 +364,8 @@ struct PreviewJob {
     pane_id: u64,
     generation: u64,
     request: VideoPasteRequest,
+    /// The receipt's deadline, from its request.
+    deadline: std::time::Instant,
 }
 
 struct PreviewWorkerLifetime(std::sync::Arc<std::sync::atomic::AtomicUsize>);
@@ -358,12 +382,18 @@ pub(crate) struct VideoPreviewer {
 }
 
 impl VideoPreviewer {
-    pub(crate) fn new(proxy: winit::event_loop::EventLoopProxy<crate::app::UserEvent>) -> Self {
+    /// Start the receipt threads. `media` makes posters on macOS and Linux;
+    /// without it a checked video gets a receipt without one.
+    pub(crate) fn new(
+        proxy: winit::event_loop::EventLoopProxy<crate::app::UserEvent>,
+        media: Option<std::sync::Arc<kettle_media::client::WorkerClient>>,
+    ) -> Self {
         let (jobs, receiver) = crossbeam_channel::bounded::<PreviewJob>(PREVIEW_QUEUE_CAPACITY);
         let live_workers = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         for index in 0..PREVIEW_THREAD_COUNT {
             let receiver = receiver.clone();
             let proxy = proxy.clone();
+            let media = media.clone();
             let worker_lifetime = PreviewWorkerLifetime(live_workers.clone());
             // Increment before `spawn`: the new thread can exit immediately.
             // The captured guard balances this on normal exit, panic, or a
@@ -378,11 +408,40 @@ impl VideoPreviewer {
                         return;
                     }
                     while let Ok(job) = receiver.recv() {
-                        let (candidate, preview) = match run_preview_child(job.request.path()) {
-                            PreviewChildOutcome::Ready((size, preview)) => (
-                                Some(VideoPasteCandidate::from_verified(job.request, size)),
-                                preview,
-                            ),
+                        let outcome = run_preview_child(job.request.path(), job.deadline);
+                        let (candidate, preview) = match outcome {
+                            PreviewChildOutcome::Ready(checked) => {
+                                let size = checked.size;
+                                let poster = poster(
+                                    media.as_deref(),
+                                    job.request.path(),
+                                    checked,
+                                    job.deadline,
+                                );
+                                let candidate =
+                                    Some(VideoPasteCandidate::from_verified(job.request, size));
+                                match poster {
+                                    Ok(preview) => (candidate, preview),
+                                    Err(ChildLost) => {
+                                        // The file was checked: its receipt
+                                        // stands, without the poster the
+                                        // second check could not confirm.
+                                        let _ = proxy.send_event(
+                                            crate::app::UserEvent::VideoPreviewReady {
+                                                window_seq: job.window_seq,
+                                                pane_id: job.pane_id,
+                                                generation: job.generation,
+                                                candidate,
+                                                preview: None,
+                                            },
+                                        );
+                                        log::warn!(
+                                            "video preview worker could not reap its child; worker stopped"
+                                        );
+                                        break;
+                                    }
+                                }
+                            }
                             PreviewChildOutcome::Failed => (None, None),
                             PreviewChildOutcome::Skewed => {
                                 note_worker_skew();
@@ -437,6 +496,7 @@ impl VideoPreviewer {
                 pane_id,
                 generation,
                 request,
+                deadline: std::time::Instant::now() + RECEIPT_DEADLINE,
             })
             .is_ok()
     }
@@ -468,6 +528,7 @@ fn block_sigpipe_on_current_thread() -> bool {
     true
 }
 
+#[derive(Debug, Eq, PartialEq)]
 enum PreviewChildAttempt<T> {
     Ready(T),
     TimedOut,
@@ -485,11 +546,19 @@ enum PreviewChildOutcome<T> {
     WorkerLost,
 }
 
+/// Up to two attempts of a check, each given until when it may wait: its
+/// own timeout, never past `deadline`. Only a timeout is retried, and only
+/// while time is left; a job past its deadline starts no process.
 fn retry_preview_timeout<T>(
-    mut attempt: impl FnMut() -> PreviewChildAttempt<T>,
+    deadline: std::time::Instant,
+    mut attempt: impl FnMut(std::time::Instant) -> PreviewChildAttempt<T>,
 ) -> PreviewChildOutcome<T> {
     for _ in 0..MAX_WORKER_ATTEMPTS {
-        match attempt() {
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            break;
+        }
+        match attempt((now + WORKER_TIMEOUT).min(deadline)) {
             PreviewChildAttempt::Ready(output) => return PreviewChildOutcome::Ready(output),
             PreviewChildAttempt::TimedOut => {}
             PreviewChildAttempt::Failed => return PreviewChildOutcome::Failed,
@@ -522,6 +591,10 @@ fn note_worker_skew() {
 /// path Kettle started from, where an update may have put another build,
 /// which then answers with [`WORKER_SKEW_EXIT`].
 fn worker_executable() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(stand_in) = tests::STAND_IN.with(|stand_in| stand_in.borrow().clone()) {
+        return Some(stand_in);
+    }
     #[cfg(target_os = "linux")]
     {
         let image = Path::new("/proc/self/exe");
@@ -548,7 +621,7 @@ fn no_sigpipe(stdin: &std::process::ChildStdin) -> bool {
 fn read_bounded_preview(reader: &mut impl std::io::Read) -> std::io::Result<Vec<u8>> {
     let mut output = Vec::new();
     reader
-        .take((MAX_PREVIEW_BYTES + 64) as u64)
+        .take(MAX_OUTPUT_BYTES as u64 + 1)
         .read_to_end(&mut output)?;
     Ok(output)
 }
@@ -560,13 +633,16 @@ fn stop_and_reap_child(child: &mut std::process::Child) -> bool {
     }
 }
 
-fn run_preview_child(path: &Path) -> PreviewChildOutcome<(u64, Option<kettle_core::ImageData>)> {
-    retry_preview_timeout(|| run_preview_child_once(path))
+/// Check `path`, by `deadline`.
+fn run_preview_child(path: &Path, deadline: std::time::Instant) -> PreviewChildOutcome<Checked> {
+    retry_preview_timeout(deadline, |until| run_preview_child_once(path, until))
 }
 
-fn run_preview_child_once(
-    path: &Path,
-) -> PreviewChildAttempt<(u64, Option<kettle_core::ImageData>)> {
+/// One check of `path`, waited for until `until`: the request is written
+/// and the reply read on their own threads, so a helper that stalls, before
+/// or after reading, holds this one no longer than `until`, when it is
+/// stopped, which ends both.
+fn run_preview_child_once(path: &Path, until: std::time::Instant) -> PreviewChildAttempt<Checked> {
     let Some(input) = encode_request(path, build_identity()) else {
         return PreviewChildAttempt::Failed;
     };
@@ -587,7 +663,7 @@ fn run_preview_child_once(
     let Ok(mut child) = command.spawn() else {
         return PreviewChildAttempt::Failed;
     };
-    let Some(mut stdin) = child.stdin.take() else {
+    let (Some(mut stdin), Some(mut stdout)) = (child.stdin.take(), child.stdout.take()) else {
         return if stop_and_reap_child(&mut child) {
             PreviewChildAttempt::Failed
         } else {
@@ -602,21 +678,19 @@ fn run_preview_child_once(
             PreviewChildAttempt::WorkerLost
         };
     }
-    if stdin.write_all(&input).is_err() {
-        return if stop_and_reap_child(&mut child) {
-            PreviewChildAttempt::Failed
-        } else {
-            PreviewChildAttempt::WorkerLost
-        };
-    }
-    drop(stdin);
-
-    let Some(mut stdout) = child.stdout.take() else {
-        return if stop_and_reap_child(&mut child) {
-            PreviewChildAttempt::Failed
-        } else {
-            PreviewChildAttempt::WorkerLost
-        };
+    let writer = match std::thread::Builder::new()
+        .name("kettle-video-preview-writer".to_owned())
+        .spawn(move || stdin.write_all(&input))
+    {
+        Ok(writer) => writer,
+        Err(error) => {
+            log::warn!("video preview writer could not start: {error}");
+            return if stop_and_reap_child(&mut child) {
+                PreviewChildAttempt::Failed
+            } else {
+                PreviewChildAttempt::WorkerLost
+            };
+        }
     };
     let reader = match std::thread::Builder::new()
         .name("kettle-video-preview-reader".to_owned())
@@ -625,14 +699,14 @@ fn run_preview_child_once(
         Ok(reader) => reader,
         Err(error) => {
             log::warn!("video preview reader could not start: {error}");
-            return if stop_and_reap_child(&mut child) {
-                PreviewChildAttempt::Failed
-            } else {
-                PreviewChildAttempt::WorkerLost
-            };
+            if !stop_and_reap_child(&mut child) {
+                return PreviewChildAttempt::WorkerLost;
+            }
+            let _ = writer.join();
+            return PreviewChildAttempt::Failed;
         }
     };
-    let deadline = std::time::Instant::now() + WORKER_TIMEOUT;
+    let deadline = until;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
@@ -643,6 +717,7 @@ fn run_preview_child_once(
                 if !stop_and_reap_child(&mut child) {
                     return PreviewChildAttempt::WorkerLost;
                 }
+                let _ = writer.join();
                 return match reader.join() {
                     Ok(Ok(_)) => PreviewChildAttempt::TimedOut,
                     Ok(Err(_)) | Err(_) => PreviewChildAttempt::Failed,
@@ -652,45 +727,106 @@ fn run_preview_child_once(
                 if !stop_and_reap_child(&mut child) {
                     return PreviewChildAttempt::WorkerLost;
                 }
-                // Join only to bound the reader thread. Whatever it returns,
-                // the failed wait already makes this a non-retryable failure.
+                // Join only to bound the threads. Whatever they return, the
+                // failed wait already makes this a non-retryable failure.
+                let _ = writer.join();
                 let _ = reader.join();
                 return PreviewChildAttempt::Failed;
             }
         }
     };
-    let Ok(Ok(output)) = reader.join() else {
+    let wrote = writer.join().is_ok_and(|wrote| wrote.is_ok());
+    let output = reader.join().ok().and_then(Result::ok);
+    finish_attempt(
+        status.success(),
+        status.code(),
+        wrote,
+        output,
+        until,
+        std::time::Instant::now(),
+    )
+}
+
+/// What a check that ran to its helper's exit gave: its exit, whether its
+/// whole request was written, and its reply, seen at `now`. A reply seen
+/// after `until` is late and counts as a timeout, whatever it says; a
+/// request the helper did not read, or a reply that could not be read, is
+/// a failure.
+fn finish_attempt(
+    success: bool,
+    code: Option<i32>,
+    wrote: bool,
+    output: Option<Vec<u8>>,
+    until: std::time::Instant,
+    now: std::time::Instant,
+) -> PreviewChildAttempt<Checked> {
+    if now > until {
+        return PreviewChildAttempt::TimedOut;
+    }
+    if !wrote {
+        return PreviewChildAttempt::Failed;
+    }
+    let Some(output) = output else {
         return PreviewChildAttempt::Failed;
     };
-    if !status.success() {
-        return if worker_exit_is_retryable(status.code()) {
+    if !success {
+        return if worker_exit_is_retryable(code) {
             PreviewChildAttempt::TimedOut
-        } else if status.code() == Some(WORKER_SKEW_EXIT) {
+        } else if code == Some(WORKER_SKEW_EXIT) {
             PreviewChildAttempt::Skewed
         } else {
             PreviewChildAttempt::Failed
         };
     }
-    match decode_preview(&output) {
-        Some(output) => PreviewChildAttempt::Ready(output),
+    match decode_checked(&output) {
+        Some(checked) => PreviewChildAttempt::Ready(checked),
         None => PreviewChildAttempt::Failed,
     }
 }
 
-fn encode_request(path: &Path, build: &str) -> Option<Vec<u8>> {
+/// A path as the frames carry it: its bytes on Unix, its UTF-16 code units
+/// little-endian on Windows.
+fn path_bytes(path: &Path) -> Vec<u8> {
     #[cfg(unix)]
-    let bytes = {
+    {
         use std::os::unix::ffi::OsStrExt as _;
         path.as_os_str().as_bytes().to_vec()
-    };
+    }
     #[cfg(windows)]
-    let bytes = {
+    {
         use std::os::windows::ffi::OsStrExt as _;
         path.as_os_str()
             .encode_wide()
             .flat_map(u16::to_le_bytes)
             .collect::<Vec<_>>()
-    };
+    }
+}
+
+/// The path `bytes` carry, as [`path_bytes`] wrote it.
+fn path_from_bytes(bytes: &[u8]) -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt as _;
+        Some(PathBuf::from(OsString::from_vec(bytes.to_vec())))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStringExt as _;
+        if bytes.len() & 1 != 0 {
+            return None;
+        }
+        let wide = bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_le_bytes(*pair))
+            .collect::<Vec<_>>();
+        Some(PathBuf::from(OsString::from_wide(&wide)))
+    }
+}
+
+fn encode_request(path: &Path, build: &str) -> Option<Vec<u8>> {
+    let bytes = path_bytes(path);
     if bytes.is_empty() || bytes.len() > MAX_PATH_BYTES || build.len() > MAX_BUILD_IDENTITY_BYTES {
         return None;
     }
@@ -732,41 +868,72 @@ fn decode_request(input: &[u8], build: &str) -> Result<PathBuf, RequestError> {
     if len == 0 || len > MAX_PATH_BYTES || input.len() != path_start + len {
         return Err(RequestError::Malformed);
     }
-    let bytes = &input[path_start..];
-    #[cfg(unix)]
-    let path = {
-        use std::os::unix::ffi::OsStringExt as _;
-        PathBuf::from(OsString::from_vec(bytes.to_vec()))
-    };
-    #[cfg(windows)]
-    let path = {
-        use std::os::windows::ffi::OsStringExt as _;
-        if len & 1 != 0 {
-            return Err(RequestError::Malformed);
-        }
-        let wide = bytes
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|pair| u16::from_le_bytes(*pair))
-            .collect::<Vec<_>>();
-        PathBuf::from(OsString::from_wide(&wide))
-    };
-    Ok(path)
+    path_from_bytes(&input[path_start..]).ok_or(RequestError::Malformed)
 }
 
-fn encode_preview(size: u64, preview: Option<&RawPreview>) -> Option<Vec<u8>> {
-    let (width, height, rgba) = if let Some(preview) = preview {
-        if !valid_preview(preview.width, preview.height, preview.rgba.len()) {
+/// What the receipt check found.
+#[derive(Debug, PartialEq, Eq)]
+struct Checked {
+    /// The video's size in bytes.
+    size: u64,
+    /// The opened video's device, inode, size and modification time, which
+    /// the media worker is held to; zero on Windows, where none runs.
+    identity: kettle_media::PathIdentity,
+    /// The SHA-256 of the video's length and its first, middle and last
+    /// 64 KiB, which a second check must find again.
+    fingerprint: [u8; 32],
+    /// The video's cached thumbnails, each opened as the video was (Linux).
+    cached: Vec<CachedThumbnail>,
+    /// The poster the platform made (Windows).
+    preview: Option<RawPreview>,
+}
+
+/// A cached thumbnail the check opened: where, and the file it found there.
+#[derive(Debug, PartialEq, Eq)]
+struct CachedThumbnail {
+    path: PathBuf,
+    dev: u64,
+    ino: u64,
+}
+
+/// The check's reply: the magic, the size, the identity (device, inode,
+/// seconds, nanoseconds), the fingerprint, the cached thumbnails (a count,
+/// then each one's device, inode and path), then the poster's width, height
+/// and RGBA, all zero for none.
+fn encode_checked(checked: &Checked) -> Option<Vec<u8>> {
+    let (width, height, rgba) = match &checked.preview {
+        Some(preview) if valid_preview(preview.width, preview.height, preview.rgba.len()) => {
+            (preview.width, preview.height, preview.rgba.as_slice())
+        }
+        Some(_) => return None,
+        None => (0, 0, &[][..]),
+    };
+    if checked.cached.len() > MAX_CACHED_THUMBNAILS
+        || checked.identity.size != checked.size
+        || checked.identity.mtime_nanos >= 1_000_000_000
+    {
+        return None;
+    }
+    let identity = checked.identity;
+    let mut out = Vec::with_capacity(64 + rgba.len());
+    out.extend_from_slice(OUTPUT_MAGIC);
+    out.extend_from_slice(&checked.size.to_le_bytes());
+    out.extend_from_slice(&identity.dev.to_le_bytes());
+    out.extend_from_slice(&identity.ino.to_le_bytes());
+    out.extend_from_slice(&identity.mtime_seconds.to_le_bytes());
+    out.extend_from_slice(&identity.mtime_nanos.to_le_bytes());
+    out.extend_from_slice(&checked.fingerprint);
+    out.push(checked.cached.len() as u8);
+    for cached in &checked.cached {
+        let path = path_bytes(&cached.path);
+        if path.is_empty() || path.len() > MAX_PATH_BYTES {
             return None;
         }
-        (preview.width, preview.height, preview.rgba.as_slice())
-    } else {
-        (0, 0, &[][..])
-    };
-    let mut out = Vec::with_capacity(28 + rgba.len());
-    out.extend_from_slice(OUTPUT_MAGIC);
-    out.extend_from_slice(&size.to_le_bytes());
+        out.extend_from_slice(&cached.dev.to_le_bytes());
+        out.extend_from_slice(&cached.ino.to_le_bytes());
+        out.extend_from_slice(&(path.len() as u32).to_le_bytes());
+        out.extend_from_slice(&path);
+    }
     out.extend_from_slice(&width.to_le_bytes());
     out.extend_from_slice(&height.to_le_bytes());
     out.extend_from_slice(&(rgba.len() as u32).to_le_bytes());
@@ -774,31 +941,90 @@ fn encode_preview(size: u64, preview: Option<&RawPreview>) -> Option<Vec<u8>> {
     Some(out)
 }
 
-fn decode_preview(output: &[u8]) -> Option<(u64, Option<kettle_core::ImageData>)> {
-    if output.len() < 28 || &output[..8] != OUTPUT_MAGIC {
+/// A frame's fields, read in order.
+struct Fields<'a>(&'a [u8]);
+
+impl<'a> Fields<'a> {
+    fn take(&mut self, len: usize) -> Option<&'a [u8]> {
+        if self.0.len() < len {
+            return None;
+        }
+        let (head, tail) = self.0.split_at(len);
+        self.0 = tail;
+        Some(head)
+    }
+
+    fn array<const N: usize>(&mut self) -> Option<[u8; N]> {
+        self.take(N)?.try_into().ok()
+    }
+
+    fn u32(&mut self) -> Option<u32> {
+        self.array().map(u32::from_le_bytes)
+    }
+
+    fn u64(&mut self) -> Option<u64> {
+        self.array().map(u64::from_le_bytes)
+    }
+}
+
+/// The check's reply, exactly as [`encode_checked`] writes it, or `None`.
+fn decode_checked(output: &[u8]) -> Option<Checked> {
+    let mut fields = Fields(output);
+    if fields.take(OUTPUT_MAGIC.len())? != OUTPUT_MAGIC {
         return None;
     }
-    let size = u64::from_le_bytes(output[8..16].try_into().ok()?);
-    let width = u32::from_le_bytes(output[16..20].try_into().ok()?);
-    let height = u32::from_le_bytes(output[20..24].try_into().ok()?);
-    let len = u32::from_le_bytes(output[24..28].try_into().ok()?) as usize;
-    if output.len() != 28 + len {
-        return None;
-    }
-    if width == 0 && height == 0 && len == 0 {
-        return Some((size, None));
-    }
-    if !valid_preview(width, height, len) {
-        return None;
-    }
-    Some((
+    let size = fields.u64()?;
+    let identity = kettle_media::PathIdentity {
+        dev: fields.u64()?,
+        ino: fields.u64()?,
         size,
-        Some(kettle_core::ImageData::new(
+        mtime_seconds: i64::from_le_bytes(fields.array()?),
+        mtime_nanos: fields.u32()?,
+    };
+    if identity.mtime_nanos >= 1_000_000_000 {
+        return None;
+    }
+    let fingerprint = fields.array()?;
+    let count = usize::from(fields.take(1)?[0]);
+    if count > MAX_CACHED_THUMBNAILS {
+        return None;
+    }
+    let mut cached = Vec::with_capacity(count);
+    for _ in 0..count {
+        let dev = fields.u64()?;
+        let ino = fields.u64()?;
+        let len = fields.u32()? as usize;
+        if len == 0 || len > MAX_PATH_BYTES {
+            return None;
+        }
+        let path = path_from_bytes(fields.take(len)?)?;
+        cached.push(CachedThumbnail { path, dev, ino });
+    }
+    let width = fields.u32()?;
+    let height = fields.u32()?;
+    let len = fields.u32()? as usize;
+    let rgba = fields.take(len)?;
+    if !fields.0.is_empty() {
+        return None;
+    }
+    let preview = if (width, height, len) == (0, 0, 0) {
+        None
+    } else if valid_preview(width, height, len) {
+        Some(RawPreview {
             width,
             height,
-            output[28..].to_vec(),
-        )?),
-    ))
+            rgba: rgba.to_vec(),
+        })
+    } else {
+        return None;
+    };
+    Some(Checked {
+        size,
+        identity,
+        fingerprint,
+        cached,
+        preview,
+    })
 }
 
 fn valid_preview(width: u32, height: u32, len: usize) -> bool {
@@ -818,6 +1044,7 @@ fn valid_preview(width: u32, height: u32, len: usize) -> bool {
         && len <= MAX_PREVIEW_BYTES
 }
 
+#[derive(Debug, PartialEq, Eq)]
 struct RawPreview {
     width: u32,
     height: u32,
@@ -866,127 +1093,38 @@ pub fn run_worker() -> i32 {
     if sniff_held_video(&retained, identity.len).is_none() {
         return 3;
     }
+    let Some(stamp) = stamp(&retained, identity.len) else {
+        return 3;
+    };
     // Keep the user-visible absolute path for the platform APIs. In particular,
     // `SHCreateItemFromParsingName` consumes a Shell parsing name, not the
     // extended-length canonical path used for identity. The identity checks
     // before and after extraction still reject path swaps. Source: Microsoft
     // `SHCreateItemFromParsingName` API documentation.
+    #[cfg(windows)]
     let preview = platform_thumbnail(&path);
+    #[cfg(not(windows))]
+    let preview = None;
+    #[cfg(target_os = "linux")]
+    let cached = cached_thumbnails(&path);
+    #[cfg(not(target_os = "linux"))]
+    let cached = Vec::new();
     if !file_identity_matches(&path, &identity, &retained) {
         return 5;
     }
-    let Some(output) = encode_preview(identity.len, preview.as_ref()) else {
+    let Some(output) = encode_checked(&Checked {
+        size: identity.len,
+        identity: stamp,
+        fingerprint: identity.fingerprint,
+        cached,
+        preview,
+    }) else {
         return 6;
     };
     if std::io::stdout().write_all(&output).is_err() {
         return 7;
     }
     0
-}
-
-#[cfg(target_os = "macos")]
-fn platform_thumbnail(path: &Path) -> Option<RawPreview> {
-    use block2_06::RcBlock;
-    use objc2_06::AnyThread as _;
-    use objc2_core_foundation_03::CGSize;
-    use objc2_foundation_03::NSURL;
-    use objc2_quick_look_thumbnailing::{
-        QLThumbnailGenerationRequest, QLThumbnailGenerationRequestRepresentationTypes,
-        QLThumbnailGenerator, QLThumbnailRepresentation,
-    };
-    use std::os::unix::ffi::OsStrExt as _;
-
-    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
-    let pointer = std::ptr::NonNull::new(c_path.as_ptr().cast_mut())?;
-    let url = unsafe {
-        NSURL::fileURLWithFileSystemRepresentation_isDirectory_relativeToURL(pointer, false, None)
-    };
-    let request = unsafe {
-        QLThumbnailGenerationRequest::initWithFileAtURL_size_scale_representationTypes(
-            QLThumbnailGenerationRequest::alloc(),
-            &url,
-            CGSize::new(MAX_PREVIEW_WIDTH as f64, MAX_PREVIEW_HEIGHT as f64),
-            1.0,
-            QLThumbnailGenerationRequestRepresentationTypes::Thumbnail,
-        )
-    };
-    unsafe { request.setIconMode(false) };
-    let generator = unsafe { QLThumbnailGenerator::sharedGenerator() };
-    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-    // Apple's QLThumbnailGenerator
-    // `generateBestRepresentation(for:completion:)` contract imports the
-    // completion as `@escaping` and guarantees that it is called when the
-    // request finishes. Own the block on the heap across that asynchronous
-    // boundary; the worker still applies its bounded receive deadline.
-    let completion = RcBlock::new(
-        move |representation: *mut QLThumbnailRepresentation,
-              _error: *mut objc2_foundation_03::NSError| {
-            let preview = unsafe { representation.as_ref() }.and_then(|representation| {
-                let image = unsafe { representation.CGImage() };
-                cg_image_to_rgba(&image)
-            });
-            let _ = sender.send(preview);
-        },
-    );
-    unsafe {
-        generator.generateBestRepresentationForRequest_completionHandler(&request, &completion)
-    };
-    receiver.recv_timeout(Duration::from_millis(1_500)).ok()?
-}
-
-#[cfg(target_os = "macos")]
-fn cg_image_to_rgba(image: &objc2_core_graphics_03::CGImage) -> Option<RawPreview> {
-    use objc2_core_foundation_03::{CGPoint, CGRect, CGSize};
-    use objc2_core_graphics_03::{
-        CGBitmapContextCreate, CGBitmapInfo, CGColorSpace, CGContext, CGImageAlphaInfo,
-        CGImageByteOrderInfo,
-    };
-
-    let source_width = objc2_core_graphics_03::CGImage::width(Some(image));
-    let source_height = objc2_core_graphics_03::CGImage::height(Some(image));
-    if source_width == 0 || source_height == 0 {
-        return None;
-    }
-    let scale = (MAX_PREVIEW_WIDTH as f64 / source_width as f64)
-        .min(MAX_PREVIEW_HEIGHT as f64 / source_height as f64)
-        .min(1.0);
-    let width = (source_width as f64 * scale).round().max(1.0) as u32;
-    let height = (source_height as f64 * scale).round().max(1.0) as u32;
-    let row_bytes = width as usize * 4;
-    let mut rgba = vec![0u8; row_bytes * height as usize];
-    let color_space = CGColorSpace::new_device_rgb()?;
-    // The renderer consumes straight RGBA and premultiplies in its shader.
-    // Draw Quick Look's potentially translucent poster onto an opaque black
-    // destination so it is not premultiplied a second time downstream.
-    let bitmap_info =
-        CGBitmapInfo(CGImageAlphaInfo::NoneSkipLast.0 | CGImageByteOrderInfo::Order32Big.0);
-    let context = unsafe {
-        CGBitmapContextCreate(
-            rgba.as_mut_ptr().cast(),
-            width as usize,
-            height as usize,
-            8,
-            row_bytes,
-            Some(&color_space),
-            bitmap_info.0,
-        )?
-    };
-    CGContext::translate_ctm(Some(&context), 0.0, height as f64);
-    CGContext::scale_ctm(Some(&context), 1.0, -1.0);
-    CGContext::draw_image(
-        Some(&context),
-        CGRect::new(
-            CGPoint::new(0.0, 0.0),
-            CGSize::new(width as f64, height as f64),
-        ),
-        Some(image),
-    );
-    force_opaque_alpha(&mut rgba);
-    Some(RawPreview {
-        width,
-        height,
-        rgba,
-    })
 }
 
 #[cfg(windows)]
@@ -1117,6 +1255,255 @@ fn platform_thumbnail(path: &Path) -> Option<RawPreview> {
     })
 }
 
+/// The opened video's identity, as the media worker will read it from its
+/// own descriptor; on Windows, where no worker runs, only its size.
+fn stamp(file: &std::fs::File, size: u64) -> Option<kettle_media::PathIdentity> {
+    #[cfg(unix)]
+    {
+        let identity = kettle_media::PathIdentity::of(&file.metadata().ok()?)?;
+        (identity.size == size).then_some(identity)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = file;
+        Some(kettle_media::PathIdentity {
+            dev: 0,
+            ino: 0,
+            size,
+            mtime_seconds: 0,
+            mtime_nanos: 0,
+        })
+    }
+}
+
+/// What every receipt job is drawn against: a video's frame or a cached
+/// thumbnail ignores the theme, and the receipt paints its own canvas.
+#[cfg(unix)]
+const RECEIPT_THEME: kettle_media::Theme = kettle_media::Theme {
+    background: [0, 0, 0, 255],
+    foreground: [255; 4],
+    palette: [[0, 0, 0, 255]; 16],
+    accent: [255; 4],
+    is_dark: true,
+};
+
+/// A check's helper that could not be reaped: the queue thread that ran it
+/// stops rather than start another beside it.
+#[derive(Debug, PartialEq, Eq)]
+struct ChildLost;
+
+/// The receipt's poster: on Windows the one the check brought back, on macOS
+/// and Linux one the media worker makes, or none.
+fn poster(
+    media: Option<&kettle_media::client::WorkerClient>,
+    path: &Path,
+    checked: Checked,
+    deadline: std::time::Instant,
+) -> Result<Option<kettle_core::ImageData>, ChildLost> {
+    #[cfg(unix)]
+    {
+        let Some(media) = media else {
+            return Ok(None);
+        };
+        worker_poster(
+            path,
+            &checked,
+            deadline,
+            |job, control| media.render_media_with_control(job, control),
+            || run_preview_child(path, deadline),
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (media, path, deadline);
+        Ok(checked.preview.and_then(|preview| {
+            kettle_core::ImageData::new(preview.width, preview.height, preview.rgba)
+        }))
+    }
+}
+
+/// A poster from the media worker, rendered through `render` by `deadline`:
+/// the video's own, as an Auto job held to the inode the check opened, kept
+/// only when it is a video's and its file is unchanged since the check. On
+/// Linux, when no decoder could make one, the first cached thumbnail the
+/// worker shows is of this video, as the check saw it. Either way it is
+/// kept only when a second check, `recheck`, finds the same file with the
+/// same contents, still held as the first check held it: the worker read it
+/// on its own, and a video rewritten in between, its time restored, or made
+/// writable by another user, gets no poster.
+#[cfg(unix)]
+fn worker_poster(
+    path: &Path,
+    checked: &Checked,
+    deadline: std::time::Instant,
+    render: impl FnMut(
+        &kettle_media::Job,
+        &kettle_media::client::RenderControl,
+    ) -> Result<kettle_media::RenderOutput, kettle_media::client::RenderError>,
+    recheck: impl FnOnce() -> PreviewChildOutcome<Checked>,
+) -> Result<Option<kettle_core::ImageData>, ChildLost> {
+    let Some(image) = rendered_poster(path, checked, deadline, render) else {
+        return Ok(None);
+    };
+    match recheck() {
+        PreviewChildOutcome::Ready(again)
+            if again.size == checked.size
+                && again.identity == checked.identity
+                && again.fingerprint == checked.fingerprint =>
+        {
+            Ok(Some(image))
+        }
+        PreviewChildOutcome::WorkerLost => Err(ChildLost),
+        _ => {
+            log::debug!("video paste receipt: no poster: the video changed after its check");
+            Ok(None)
+        }
+    }
+}
+
+/// The poster [`worker_poster`] renders, before its second check.
+#[cfg(unix)]
+fn rendered_poster(
+    path: &Path,
+    checked: &Checked,
+    deadline: std::time::Instant,
+    mut render: impl FnMut(
+        &kettle_media::Job,
+        &kettle_media::client::RenderControl,
+    ) -> Result<kettle_media::RenderOutput, kettle_media::client::RenderError>,
+) -> Option<kettle_core::ImageData> {
+    use kettle_media::client::{RenderControl, RenderError};
+    use kettle_media::{JobKind, MediaKind};
+
+    let control = RenderControl::with_deadline(deadline);
+    let video = receipt_job(
+        JobKind::Auto,
+        attested(path, checked.identity.dev, checked.identity.ino)?,
+    );
+    let failure = match render(&video, &control) {
+        Ok(output) => {
+            let unchanged = output.rendered.digest.path_identity == Some(checked.identity);
+            if output.kind != MediaKind::Video || !unchanged {
+                log::debug!(
+                    "video paste receipt: no poster from a {:?} render, unchanged {unchanged}",
+                    output.kind
+                );
+                return None;
+            }
+            return receipt_image(output.rendered);
+        }
+        Err(RenderError::Failure(failure)) => failure,
+        Err(RenderError::Cancelled) => return None,
+    };
+    log::debug!("video paste receipt: no poster from the worker: {failure:?}");
+    #[cfg(target_os = "linux")]
+    if no_decoder_made_one(failure) {
+        return cached_poster(path, checked, &control, render);
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = failure;
+    None
+}
+
+/// Whether a video's poster failed for want of a decoder that could make
+/// one, which a cached thumbnail may stand in for: none, one without the
+/// codec or container, one the worker could not confine, or one that failed
+/// on the stream. A video that changed, a deadline that passed or a worker
+/// that is missing is not.
+#[cfg(target_os = "linux")]
+fn no_decoder_made_one(failure: kettle_media::FailureCode) -> bool {
+    use kettle_media::FailureCode;
+    matches!(
+        failure,
+        FailureCode::BackendUnavailable
+            | FailureCode::CodecUnavailable
+            | FailureCode::UnsupportedContainer
+            | FailureCode::SandboxUnavailable
+            | FailureCode::RenderParse
+            | FailureCode::RenderResource
+    )
+}
+
+/// The first of the check's cached thumbnails the worker renders as this
+/// video's: named by its URI and stamped with the modification time the
+/// check saw. Each is held to the inode the check opened.
+#[cfg(target_os = "linux")]
+fn cached_poster(
+    path: &Path,
+    checked: &Checked,
+    control: &kettle_media::client::RenderControl,
+    mut render: impl FnMut(
+        &kettle_media::Job,
+        &kettle_media::client::RenderControl,
+    ) -> Result<kettle_media::RenderOutput, kettle_media::client::RenderError>,
+) -> Option<kettle_core::ImageData> {
+    use kettle_media::client::RenderError;
+    use kettle_media::{FailureCode, JobKind, MediaKind, ThumbnailOf};
+
+    let of = ThumbnailOf {
+        uri_sha256: ThumbnailOf::uri_digest(&thumbnail_uri(path)?),
+        mtime_seconds: checked.identity.mtime_seconds,
+        mtime_nanos: checked.identity.mtime_nanos,
+    };
+    for cached in &checked.cached {
+        let job = receipt_job(
+            JobKind::CachedThumbnail(of),
+            attested(&cached.path, cached.dev, cached.ino)?,
+        );
+        match render(&job, control) {
+            Ok(output) if output.kind == MediaKind::Raster => {
+                return receipt_image(output.rendered);
+            }
+            Ok(_)
+            | Err(RenderError::Cancelled | RenderError::Failure(FailureCode::RenderTimeout)) => {
+                return None;
+            }
+            Err(RenderError::Failure(_)) => {}
+        }
+    }
+    None
+}
+
+/// A source the worker opens only when it is the file `dev` and `ino` name.
+#[cfg(unix)]
+fn attested(path: &Path, dev: u64, ino: u64) -> Option<kettle_media::Source> {
+    Some(kettle_media::Source::Path {
+        path: kettle_media::NativePath::from_path(path).ok()?,
+        authorization: kettle_media::Authorization::ExternalAttested(
+            kettle_media::ExternalAttested { dev, ino },
+        ),
+    })
+}
+
+/// A receipt's job: `kind` over `source`, fitted inside the receipt's
+/// largest poster.
+#[cfg(unix)]
+fn receipt_job(kind: kettle_media::JobKind, source: kettle_media::Source) -> kettle_media::Job {
+    kettle_media::Job {
+        kind,
+        source,
+        theme: RECEIPT_THEME,
+        canvas: kettle_media::Canvas::Theme,
+        target: kettle_media::Target {
+            width: MAX_PREVIEW_WIDTH,
+            height: MAX_PREVIEW_HEIGHT,
+            scale: 1.0,
+            crop: None,
+        },
+        fallback_fonts: Vec::new(),
+    }
+}
+
+/// A rendered poster as the receipt draws it: straight RGBA within the
+/// receipt's bounds.
+#[cfg(unix)]
+fn receipt_image(rendered: kettle_media::Rendered) -> Option<kettle_core::ImageData> {
+    if !valid_preview(rendered.width, rendered.height, rendered.rgba.len()) {
+        return None;
+    }
+    kettle_core::ImageData::new(rendered.width, rendered.height, rendered.rgba)
+}
+
 #[cfg(any(target_os = "linux", test))]
 fn thumbnail_digest_hex(digest: [u8; 16]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -1128,140 +1515,185 @@ fn thumbnail_digest_hex(digest: [u8; 16]) -> String {
     encoded
 }
 
+/// The video's file URI, as Freedesktop.org's `Thumbnail Managing Standard`
+/// ("Thumbnail URI") spells it for the cache's file names and `Thumb::URI`.
 #[cfg(target_os = "linux")]
-fn platform_thumbnail(path: &Path) -> Option<RawPreview> {
+fn thumbnail_uri(path: &Path) -> Option<String> {
+    url::Url::from_file_path(path).ok().map(String::from)
+}
+
+/// The video's cached thumbnails in the user's cache, largest size first.
+#[cfg(target_os = "linux")]
+fn cached_thumbnails(path: &Path) -> Vec<CachedThumbnail> {
+    let cache = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")));
+    cache.map_or_else(Vec::new, |cache| cached_thumbnails_in(&cache, path))
+}
+
+/// The video's thumbnails under `cache`, largest size first: each named by
+/// the MD5 of the video's URI, as the standard's "Thumbnail Creation" names
+/// them, and opened through kettle-state's held, trusted parent chain, which
+/// refuses a link, a file another user could change, or a cache directory
+/// another user could swap. Nothing is parsed here; the worker reads each.
+#[cfg(target_os = "linux")]
+fn cached_thumbnails_in(cache: &Path, path: &Path) -> Vec<CachedThumbnail> {
     use md5::{Digest as _, Md5};
     use std::os::unix::fs::MetadataExt as _;
 
-    // Freedesktop.org's `Thumbnail Managing Standard`, sections "Thumbnail
-    // URI" and "Thumbnail Creation", define the MD5 file name, cache classes,
-    // and `Thumb::URI` / `Thumb::MTime` validation used below.
-    let uri = url::Url::from_file_path(path).ok()?.to_string();
+    let Some(uri) = thumbnail_uri(path) else {
+        return Vec::new();
+    };
     let digest = thumbnail_digest_hex(Md5::digest(uri.as_bytes()).into());
-    let cache = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
-    let metadata = std::fs::metadata(path).ok()?;
-    let source_mtime = (metadata.mtime(), metadata.mtime_nsec());
-    for class in ["xx-large", "x-large", "large", "normal"] {
-        let candidate = cache
-            .join("thumbnails")
-            .join(class)
-            .join(format!("{digest}.png"));
-        if let Some(preview) = load_linux_cached_thumbnail(&candidate, &uri, source_mtime) {
-            return Some(preview);
-        }
-    }
-    None
+    ["xx-large", "x-large", "large", "normal"]
+        .into_iter()
+        .filter_map(|class| {
+            let candidate = cache
+                .join("thumbnails")
+                .join(class)
+                .join(format!("{digest}.png"));
+            let metadata = kettle_state::open_trusted_file_read(&candidate)
+                .ok()?
+                .metadata()
+                .ok()?;
+            Some(CachedThumbnail {
+                path: candidate,
+                dev: metadata.dev(),
+                ino: metadata.ino(),
+            })
+        })
+        .collect()
 }
 
-#[cfg(target_os = "linux")]
-fn load_linux_cached_thumbnail(path: &Path, uri: &str, mtime: (i64, i64)) -> Option<RawPreview> {
-    // Decode the exact leaf opened through kettle-state's held, trusted parent
-    // chain. Leaf-only O_NOFOLLOW still lets a writable cache ancestor swap a
-    // directory or redirect an intermediate symlink before open.
-    let mut file = kettle_state::open_trusted_file_read(path).ok()?;
-    if !thumbnail_metadata_matches(&mut file, uri, mtime) {
-        return None;
-    }
-    file.seek(std::io::SeekFrom::Start(0)).ok()?;
-    let image = image::load(std::io::BufReader::new(file), image::ImageFormat::Png)
-        .ok()?
-        .thumbnail(MAX_PREVIEW_WIDTH, MAX_PREVIEW_HEIGHT)
-        .to_rgba8();
-    Some(RawPreview {
-        width: image.width(),
-        height: image.height(),
-        rgba: image.into_raw(),
-    })
-}
-
-#[cfg(target_os = "linux")]
-fn thumbnail_metadata_matches(file: &mut std::fs::File, uri: &str, mtime: (i64, i64)) -> bool {
-    if file.seek(std::io::SeekFrom::Start(0)).is_err() {
-        return false;
-    }
-    let decoder = png::Decoder::new(std::io::BufReader::new(file));
-    let reader = match decoder.read_info() {
-        Ok(reader) => reader,
-        Err(_) => return false,
-    };
-    let info = reader.info();
-    if !cached_thumbnail_dimensions_allowed(info.width, info.height) {
-        return false;
-    }
-    let text = |key: &str| {
-        info.uncompressed_latin1_text
-            .iter()
-            .find(|chunk| chunk.keyword == key)
-            .map(|chunk| chunk.text.as_str())
-    };
-    text("Thumb::URI") == Some(uri)
-        && text("Thumb::MTime").is_some_and(|recorded| thumbnail_mtime_matches(recorded, mtime))
-}
-
-/// Whether a thumbnail's recorded `Thumb::MTime` is the source's modification
-/// time, `(seconds, nanoseconds)`. The standard writes whole seconds; tumbler
-/// adds a fraction (`1696300000.123456`). Either is the source's time when it
-/// agrees with the seconds and nanoseconds to the recorded precision,
-/// truncated or rounded, a rounding that carries into the next second
-/// included. Anything else (another time, signs, exponents, spaces, more than
-/// nine fraction digits, a fraction before 1970, where the sign makes it
-/// ambiguous) is stale.
-#[cfg(any(test, target_os = "linux"))]
-fn thumbnail_mtime_matches(recorded: &str, (seconds, nanos): (i64, i64)) -> bool {
-    let Some((whole, fraction)) = recorded.split_once('.') else {
-        return recorded == seconds.to_string();
-    };
-    if seconds < 0
-        || fraction.is_empty()
-        || fraction.len() > 9
-        || !fraction.bytes().all(|b| b.is_ascii_digit())
-    {
-        return false;
-    }
-    let (Ok(recorded_seconds), Ok(value)) = (whole.parse::<i64>(), fraction.parse::<i64>()) else {
-        return false;
-    };
-    // Exactly the digits an integer prints: no sign, no leading zero.
-    if whole != recorded_seconds.to_string() {
-        return false;
-    }
-    // The fraction's unit, in nanoseconds: 100_000_000 for one digit.
-    let digits = fraction.len() as u32;
-    let unit = 10i64.pow(9 - digits);
-    let truncated = (seconds, nanos / unit);
-    let rounded = match (nanos + unit / 2) / unit {
-        carry if carry == 10i64.pow(digits) => (seconds + 1, 0),
-        rounded => (seconds, rounded),
-    };
-    (recorded_seconds, value) == truncated || (recorded_seconds, value) == rounded
-}
-
-#[cfg(target_os = "linux")]
-fn cached_thumbnail_dimensions_allowed(width: u32, height: u32) -> bool {
-    width > 0
-        && height > 0
-        && width <= MAX_CACHED_THUMBNAIL_DIMENSION
-        && height <= MAX_CACHED_THUMBNAIL_DIMENSION
-        && u64::from(width) * u64::from(height) <= MAX_CACHED_THUMBNAIL_PIXELS
-}
-
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(windows)]
 fn force_opaque_alpha(rgba: &mut [u8]) {
     for pixel in rgba.as_chunks_mut::<4>().0 {
         pixel[3] = 255;
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-fn platform_thumbnail(_path: &Path) -> Option<RawPreview> {
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    thread_local! {
+        /// A program standing in for the check's helper, for the attempts
+        /// this thread makes.
+        pub(super) static STAND_IN: std::cell::RefCell<Option<PathBuf>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// A reply seen after the attempt's cutoff is late, whatever it says;
+    /// an unwritten request or an unread reply fails; the exit codes keep
+    /// their meanings.
+    #[test]
+    fn an_attempt_s_reply_counts_only_by_its_cutoff() {
+        let frame = || Some(encode_checked(&bare_check()).unwrap());
+        let until = std::time::Instant::now();
+        let after = until + Duration::from_millis(1);
+        assert_eq!(
+            finish_attempt(true, Some(0), true, frame(), until, after),
+            PreviewChildAttempt::TimedOut
+        );
+        assert_eq!(
+            finish_attempt(true, Some(0), true, frame(), until, until),
+            PreviewChildAttempt::Ready(bare_check())
+        );
+        assert_eq!(
+            finish_attempt(true, Some(0), false, frame(), until, until),
+            PreviewChildAttempt::Failed
+        );
+        assert_eq!(
+            finish_attempt(true, Some(0), true, None, until, until),
+            PreviewChildAttempt::Failed
+        );
+        assert_eq!(
+            finish_attempt(
+                false,
+                Some(WORKER_TIMEOUT_EXIT),
+                true,
+                frame(),
+                until,
+                until
+            ),
+            PreviewChildAttempt::TimedOut
+        );
+        assert_eq!(
+            finish_attempt(false, Some(WORKER_SKEW_EXIT), true, frame(), until, until),
+            PreviewChildAttempt::Skewed
+        );
+        assert_eq!(
+            finish_attempt(false, Some(3), true, frame(), until, until),
+            PreviewChildAttempt::Failed
+        );
+    }
+
+    /// A helper that stalls without reading a request larger than a pipe
+    /// holds stops the attempt at its cutoff, not when the helper ends.
+    #[cfg(unix)]
+    #[test]
+    fn a_stalled_helper_holds_an_attempt_no_longer_than_its_cutoff() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = crate::test_tempdir();
+        let helper = dir.path().join("stalls");
+        std::fs::write(&helper, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = PathBuf::from(format!("/{}", "a".repeat(MAX_PATH_BYTES - 1)));
+        let attempt = std::thread::spawn(move || {
+            assert!(block_sigpipe_on_current_thread());
+            STAND_IN.with(|stand_in| *stand_in.borrow_mut() = Some(helper));
+            let started = std::time::Instant::now();
+            let attempt = run_preview_child_once(&path, started + Duration::from_millis(300));
+            (attempt, started.elapsed())
+        });
+        let (attempt, elapsed) = attempt.join().unwrap();
+        assert!(
+            matches!(
+                attempt,
+                PreviewChildAttempt::TimedOut | PreviewChildAttempt::Failed
+            ),
+            "{attempt:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the attempt waited {elapsed:?} for a stalled helper"
+        );
+    }
+
+    /// A second check whose helper cannot be reaped stops the queue thread,
+    /// which still answers the checked receipt, without a poster.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreapable_second_check_stops_its_queue_thread() {
+        use kettle_media::MediaKind;
+        let path = std::env::current_dir().unwrap().join("clip.mp4");
+        let checked = bare_check();
+        let mut rendered = false;
+        let result = worker_poster(
+            &path,
+            &checked,
+            std::time::Instant::now() + RECEIPT_DEADLINE,
+            |_, _| {
+                rendered = true;
+                worker_reply(MediaKind::Video, Some(checked.identity))
+            },
+            || PreviewChildOutcome::WorkerLost,
+        );
+        assert!(rendered);
+        assert_eq!(result.err(), Some(ChildLost));
+        let source = kettle_test_support::production_source(include_str!("video_preview.rs"));
+        let lost = source
+            .split("Err(ChildLost) => {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n                                    }").next())
+            .expect("the second check's lost-child arm");
+        assert!(
+            lost.contains("candidate,")
+                && lost.contains("preview: None")
+                && lost.contains("break;"),
+            "{lost}"
+        );
+    }
 
     #[cfg(unix)]
     const VIDEO_FIXTURE: &[u8] = include_bytes!("../testdata/video-preview.mp4");
@@ -1371,22 +1803,40 @@ mod tests {
 
         assert!(!previewer.request(1, 2, 3, request));
         assert!(
-            PENDING_RECEIPT_TIMEOUT
-                >= WORKER_TIMEOUT * MAX_WORKER_ATTEMPTS * (PREVIEW_QUEUE_CAPACITY as u32 + 1)
-                    + Duration::from_secs(2),
-            "pending state must outlive a full queue drained by one surviving worker"
+            PENDING_RECEIPT_TIMEOUT >= RECEIPT_DEADLINE + Duration::from_secs(2),
+            "pending state must outlive the receipt's deadline and its cleanup"
         );
+    }
+
+    /// A job carries its deadline from its request, so time spent queued
+    /// counts against it.
+    #[test]
+    fn a_receipt_job_carries_its_deadline_from_the_request() {
+        let (jobs, receiver) = crossbeam_channel::bounded(PREVIEW_QUEUE_CAPACITY);
+        let live_workers = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(1));
+        let previewer = VideoPreviewer { jobs, live_workers };
+        let request = VideoPasteRequest::from_user_paths(
+            &[std::env::current_dir().unwrap().join("clip.mp4")],
+            VideoPasteSource::Drop,
+        )
+        .unwrap();
+        let before = std::time::Instant::now();
+        assert!(previewer.request(1, 2, 3, request));
+        let job = receiver.try_recv().unwrap();
+        assert!(job.deadline >= before + RECEIPT_DEADLINE);
+        assert!(job.deadline <= std::time::Instant::now() + RECEIPT_DEADLINE);
     }
 
     #[test]
     fn preview_child_retries_only_one_timeout() {
+        let later = std::time::Instant::now() + Duration::from_secs(60);
         let mut calls = 0;
         let mut outcomes = [
             PreviewChildAttempt::TimedOut,
             PreviewChildAttempt::Ready(7_u8),
         ]
         .into_iter();
-        let result = retry_preview_timeout(|| {
+        let result = retry_preview_timeout(later, |_| {
             calls += 1;
             outcomes.next().unwrap()
         });
@@ -1394,7 +1844,7 @@ mod tests {
         assert_eq!(calls, 2, "one cold timeout gets one fresh worker");
 
         calls = 0;
-        let result = retry_preview_timeout(|| {
+        let result = retry_preview_timeout(later, |_| {
             calls += 1;
             PreviewChildAttempt::<u8>::Failed
         });
@@ -1402,7 +1852,7 @@ mod tests {
         assert_eq!(calls, 1, "non-timeout failures must stay fail-closed");
 
         calls = 0;
-        let result = retry_preview_timeout(|| {
+        let result = retry_preview_timeout(later, |_| {
             calls += 1;
             PreviewChildAttempt::<u8>::TimedOut
         });
@@ -1410,12 +1860,47 @@ mod tests {
         assert_eq!(calls, 2, "repeated timeouts must remain bounded");
 
         calls = 0;
-        let result = retry_preview_timeout(|| {
+        let result = retry_preview_timeout(later, |_| {
             calls += 1;
             PreviewChildAttempt::<u8>::WorkerLost
         });
         assert_eq!(result, PreviewChildOutcome::WorkerLost);
         assert_eq!(calls, 1, "an unreaped child poisons its queue worker");
+    }
+
+    /// Each attempt waits its own timeout and never past the receipt's
+    /// deadline; a job past it starts none, and a timeout is retried only
+    /// while time is left.
+    #[test]
+    fn check_attempts_end_by_the_receipt_s_deadline() {
+        let now = std::time::Instant::now();
+        let mut calls = 0;
+        let result = retry_preview_timeout(now, |_| {
+            calls += 1;
+            PreviewChildAttempt::Ready(())
+        });
+        assert_eq!(result, PreviewChildOutcome::Failed);
+        assert_eq!(calls, 0, "a job past its deadline starts no check");
+
+        let soon = std::time::Instant::now() + Duration::from_millis(50);
+        let mut waits = Vec::new();
+        let result = retry_preview_timeout(soon, |until| {
+            waits.push(until);
+            std::thread::sleep(Duration::from_millis(60));
+            PreviewChildAttempt::<()>::TimedOut
+        });
+        assert_eq!(result, PreviewChildOutcome::Failed);
+        assert_eq!(waits, vec![soon], "no retry once the deadline passed");
+
+        let later = std::time::Instant::now() + Duration::from_secs(60);
+        let before = std::time::Instant::now();
+        let mut waits = Vec::new();
+        retry_preview_timeout(later, |until| {
+            waits.push(until);
+            PreviewChildAttempt::Ready(())
+        });
+        assert!(waits[0] >= before + WORKER_TIMEOUT);
+        assert!(waits[0] <= std::time::Instant::now() + WORKER_TIMEOUT);
     }
 
     #[test]
@@ -1443,7 +1928,7 @@ mod tests {
             }
         }
 
-        let frame = encode_preview(7, None).unwrap();
+        let frame = encode_checked(&checked(Vec::new(), None)).unwrap();
         let mut reader = CompleteThenError {
             bytes: std::io::Cursor::new(frame.clone()),
         };
@@ -1451,7 +1936,7 @@ mod tests {
             read_bounded_preview(&mut reader).is_err(),
             "partial success must not authenticate bytes from a failed pipe read"
         );
-        assert!(decode_preview(&frame).is_some(), "fixture must be valid");
+        assert!(decode_checked(&frame).is_some(), "fixture must be valid");
     }
 
     #[test]
@@ -1587,7 +2072,7 @@ mod tests {
             assert!(block_sigpipe_on_current_thread());
             let path = PathBuf::from(format!("/{}", "a".repeat(MAX_PATH_BYTES - 1)));
             matches!(
-                run_preview_child_once(&path),
+                run_preview_child_once(&path, std::time::Instant::now() + WORKER_TIMEOUT),
                 PreviewChildAttempt::Failed | PreviewChildAttempt::WorkerLost
             )
         })
@@ -1712,7 +2197,8 @@ mod tests {
         assert_eq!(decode_request(&old, "4.9.0"), Err(RequestError::Skewed));
 
         let mut calls = 0;
-        let result = retry_preview_timeout(|| {
+        let later = std::time::Instant::now() + Duration::from_secs(60);
+        let result = retry_preview_timeout(later, |_| {
             calls += 1;
             PreviewChildAttempt::<u8>::Skewed
         });
@@ -1726,7 +2212,7 @@ mod tests {
             .nth(1)
             .and_then(|rest| rest.split("\nfn encode_request(").next())
             .expect("run_preview_child_once");
-        assert!(child.contains("status.code() == Some(WORKER_SKEW_EXIT)"));
+        assert!(child.contains("code == Some(WORKER_SKEW_EXIT)"));
         assert!(child.contains("encode_request(path, build_identity())"));
         let worker = src
             .split("pub fn run_worker() -> i32 {")
@@ -1798,37 +2284,161 @@ mod tests {
         );
     }
 
+    /// A check's reply with these cached thumbnails and this poster.
+    fn checked(cached: Vec<CachedThumbnail>, preview: Option<RawPreview>) -> Checked {
+        Checked {
+            size: 42,
+            identity: kettle_media::PathIdentity {
+                dev: 7,
+                ino: 9,
+                size: 42,
+                mtime_seconds: -3,
+                mtime_nanos: 999_999_999,
+            },
+            fingerprint: [5; 32],
+            cached,
+            preview,
+        }
+    }
+
+    fn cached_at(name: &str, ino: u64) -> CachedThumbnail {
+        CachedThumbnail {
+            path: std::env::current_dir().unwrap().join(name),
+            dev: 7,
+            ino,
+        }
+    }
+
+    /// The check's reply comes back exactly as it was sent, and nothing
+    /// longer, larger or malformed decodes.
     #[test]
-    fn preview_protocol_requires_exact_bounded_rgba() {
+    fn the_check_s_reply_is_exact_and_bounded() {
         let preview = RawPreview {
             width: 2,
             height: 1,
             rgba: vec![1, 2, 3, 255, 4, 5, 6, 255],
         };
-        let encoded = encode_preview(42, Some(&preview)).unwrap();
-        let (size, decoded) = decode_preview(&encoded).expect("valid response");
-        let decoded = decoded.expect("poster");
-        assert_eq!(size, 42);
-        assert_eq!((decoded.width, decoded.height), (2, 1));
-
-        let metadata_only = encode_preview(7, None).unwrap();
-        let (size, preview) = decode_preview(&metadata_only).expect("metadata-only response");
-        assert_eq!(size, 7);
-        assert!(preview.is_none());
+        let full = checked(
+            (0..MAX_CACHED_THUMBNAILS as u64)
+                .map(|ino| cached_at("large.png", ino))
+                .collect(),
+            Some(preview),
+        );
+        let encoded = encode_checked(&full).unwrap();
+        assert_eq!(decode_checked(&encoded), Some(full));
+        let bare = checked(Vec::new(), None);
+        assert_eq!(decode_checked(&encode_checked(&bare).unwrap()), Some(bare));
 
         let mut trailing = encoded.clone();
         trailing.push(0);
-        assert!(decode_preview(&trailing).is_none());
+        assert_eq!(decode_checked(&trailing), None);
+        assert_eq!(decode_checked(&encoded[..encoded.len() - 1]), None);
+        let mut magic = encoded.clone();
+        magic[7] ^= 1;
+        assert_eq!(decode_checked(&magic), None);
 
-        let invalid = RawPreview {
-            width: MAX_PREVIEW_WIDTH + 1,
-            height: 1,
-            rgba: vec![0; (MAX_PREVIEW_WIDTH as usize + 1) * 4],
-        };
-        assert!(encode_preview(0, Some(&invalid)).is_none());
+        let too_many = checked(
+            (0..=MAX_CACHED_THUMBNAILS as u64)
+                .map(|ino| cached_at("large.png", ino))
+                .collect(),
+            None,
+        );
+        assert!(encode_checked(&too_many).is_none());
+        // One more well-formed thumbnail than a check names.
+        let four = checked(
+            (0..MAX_CACHED_THUMBNAILS as u64)
+                .map(|ino| cached_at("large.png", ino))
+                .collect(),
+            None,
+        );
+        let mut counted = encode_checked(&four).unwrap();
+        let one = encode_checked(&checked(vec![cached_at("large.png", 9)], None)).unwrap();
+        let entry = &one[OUTPUT_MAGIC.len() + 69..one.len() - 12];
+        let at = counted.len() - 12;
+        counted.splice(at..at, entry.iter().copied());
+        counted[OUTPUT_MAGIC.len() + 68] = MAX_CACHED_THUMBNAILS as u8 + 1;
+        assert_eq!(decode_checked(&counted), None);
+        counted[OUTPUT_MAGIC.len() + 68] = MAX_CACHED_THUMBNAILS as u8;
+        assert_eq!(decode_checked(&counted), None, "the count must cover them");
+        let mut late = encode_checked(&bare_check()).unwrap();
+        late[OUTPUT_MAGIC.len() + 32..OUTPUT_MAGIC.len() + 36]
+            .copy_from_slice(&1_000_000_000_u32.to_le_bytes());
+        assert_eq!(decode_checked(&late), None);
+        assert!(
+            encode_checked(&checked(
+                Vec::new(),
+                Some(RawPreview {
+                    width: MAX_PREVIEW_WIDTH + 1,
+                    height: 1,
+                    rgba: vec![0; (MAX_PREVIEW_WIDTH as usize + 1) * 4],
+                }),
+            ))
+            .is_none()
+        );
+        let long = PathBuf::from(format!("/{}", "a".repeat(MAX_PATH_BYTES)));
+        assert!(
+            encode_checked(&checked(
+                vec![CachedThumbnail {
+                    path: long,
+                    dev: 1,
+                    ino: 1
+                }],
+                None
+            ))
+            .is_none()
+        );
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn bare_check() -> Checked {
+        checked(Vec::new(), None)
+    }
+
+    /// A second check's reply that agrees with `first`.
+    #[cfg(target_os = "linux")]
+    fn checked_again(first: &Checked) -> Checked {
+        Checked {
+            size: first.size,
+            identity: first.identity,
+            fingerprint: first.fingerprint,
+            cached: Vec::new(),
+            preview: None,
+        }
+    }
+
+    /// The longest reply a check can send fits the bound the parent reads
+    /// to, which would otherwise cut it short and lose the receipt.
+    #[test]
+    fn the_longest_reply_fits_what_the_parent_reads() {
+        // Exactly the longest path a frame carries, in its own encoding: a
+        // byte a character on Unix, two on Windows.
+        let units = if cfg!(windows) {
+            MAX_PATH_BYTES / 2
+        } else {
+            MAX_PATH_BYTES
+        };
+        let longest = PathBuf::from(format!("/{}", "a".repeat(units - 1)));
+        assert_eq!(path_bytes(&longest).len(), MAX_PATH_BYTES);
+        let reply = checked(
+            (0..MAX_CACHED_THUMBNAILS as u64)
+                .map(|ino| CachedThumbnail {
+                    path: longest.clone(),
+                    dev: 1,
+                    ino,
+                })
+                .collect(),
+            Some(RawPreview {
+                width: MAX_PREVIEW_WIDTH,
+                height: MAX_PREVIEW_HEIGHT,
+                rgba: vec![255; MAX_PREVIEW_BYTES],
+            }),
+        );
+        let encoded = encode_checked(&reply).unwrap();
+        assert_eq!(encoded.len(), MAX_OUTPUT_BYTES);
+        let read = read_bounded_preview(&mut encoded.as_slice()).unwrap();
+        assert_eq!(decode_checked(&read), Some(reply));
+    }
+
+    #[cfg(target_os = "windows")]
     #[test]
     fn native_posters_are_opaque_for_the_straight_alpha_renderer() {
         let mut rgba = [20, 40, 60, 0, 10, 20, 30, 128];
@@ -1845,151 +2455,442 @@ mod tests {
         );
     }
 
+    /// A private cache directory holding the video's thumbnail at `classes`,
+    /// each a few bytes the check never parses.
+    #[cfg(target_os = "linux")]
+    fn thumbnail_cache(cache: &Path, video: &Path, classes: &[&str]) -> Vec<PathBuf> {
+        use md5::{Digest as _, Md5};
+        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+
+        let uri = url::Url::from_file_path(video).unwrap().to_string();
+        let digest = thumbnail_digest_hex(Md5::digest(uri.as_bytes()).into());
+        classes
+            .iter()
+            .map(|class| {
+                let directory = cache.join("thumbnails").join(class);
+                std::fs::DirBuilder::new()
+                    .recursive(true)
+                    .mode(0o700)
+                    .create(&directory)
+                    .unwrap();
+                let path = directory.join(format!("{digest}.png"));
+                std::fs::write(&path, class.as_bytes()).unwrap();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+                path
+            })
+            .collect()
+    }
+
+    /// The check names the video's cached thumbnails, largest size first,
+    /// each with the file it opened, and only those opened through a trusted
+    /// chain: never a link, a file another user could change, or one in a
+    /// directory another user could swap.
     #[cfg(target_os = "linux")]
     #[test]
-    fn linux_cache_requires_owned_private_matching_png() {
+    fn the_check_names_only_trusted_cached_thumbnails() {
         use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
 
         let dir = crate::test_tempdir();
-        let video = dir.path().join("clip.mp4");
+        let video = dir.path().join("clip one.mp4");
         write_test_video(&video, b"fixture");
-        let uri = url::Url::from_file_path(&video).unwrap().to_string();
-        let metadata = std::fs::metadata(&video).unwrap();
-        let mtime = metadata.mtime().to_string();
-        let source = (metadata.mtime(), metadata.mtime_nsec());
-        let thumbnail = dir.path().join("thumbnail.png");
-        {
-            let file = std::fs::File::create(&thumbnail).unwrap();
-            let mut encoder = png::Encoder::new(file, 2, 1);
-            encoder.set_color(png::ColorType::Rgba);
-            encoder.set_depth(png::BitDepth::Eight);
-            encoder
-                .add_text_chunk("Thumb::URI".to_string(), uri.clone())
-                .unwrap();
-            encoder
-                .add_text_chunk("Thumb::MTime".to_string(), mtime.clone())
-                .unwrap();
-            let mut writer = encoder.write_header().unwrap();
-            writer
-                .write_image_data(&[1, 2, 3, 255, 4, 5, 6, 255])
-                .unwrap();
-        }
-        std::fs::set_permissions(&thumbnail, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let cache = dir.path().join("cache");
+        let paths = thumbnail_cache(&cache, &video, &["normal", "xx-large", "large"]);
+        let named = cached_thumbnails_in(&cache, &video);
+        let expected: Vec<_> = [&paths[1], &paths[2], &paths[0]]
+            .into_iter()
+            .map(|path| {
+                let metadata = std::fs::metadata(path).unwrap();
+                CachedThumbnail {
+                    path: path.clone(),
+                    dev: metadata.dev(),
+                    ino: metadata.ino(),
+                }
+            })
+            .collect();
+        assert_eq!(named, expected);
+        assert!(cached_thumbnails_in(&cache, &dir.path().join("other.mp4")).is_empty());
 
-        let preview = load_linux_cached_thumbnail(&thumbnail, &uri, source)
-            .expect("matching private thumbnail");
-        assert_eq!((preview.width, preview.height), (256, 128));
+        // Readable by all is how caches are written; writable by others is not.
+        std::fs::set_permissions(&paths[1], std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(cached_thumbnails_in(&cache, &video).len(), 3);
+        std::fs::set_permissions(&paths[1], std::fs::Permissions::from_mode(0o666)).unwrap();
+        assert_eq!(cached_thumbnails_in(&cache, &video), expected[1..]);
 
-        std::fs::set_permissions(&thumbnail, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::remove_file(&paths[2]).unwrap();
+        symlink(&paths[0], &paths[2]).unwrap();
+        assert_eq!(cached_thumbnails_in(&cache, &video), expected[2..]);
+
+        let shared = dir.path().join("shared");
+        thumbnail_cache(&shared, &video, &["normal"]);
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
         assert!(
-            load_linux_cached_thumbnail(&thumbnail, &uri, source).is_some(),
-            "a conventional read-only thumbnail cache leaf is safe"
-        );
-        std::fs::set_permissions(&thumbnail, std::fs::Permissions::from_mode(0o664)).unwrap();
-        assert!(load_linux_cached_thumbnail(&thumbnail, &uri, source).is_none());
-        std::fs::set_permissions(&thumbnail, std::fs::Permissions::from_mode(0o600)).unwrap();
-        assert!(load_linux_cached_thumbnail(&thumbnail, &uri, (0, 0)).is_none());
-
-        let linked = dir.path().join("linked.png");
-        symlink(&thumbnail, &linked).unwrap();
-        assert!(load_linux_cached_thumbnail(&linked, &uri, source).is_none());
-
-        let writable_parent = dir.path().join("writable-cache");
-        std::fs::create_dir(&writable_parent).unwrap();
-        std::fs::set_permissions(&writable_parent, std::fs::Permissions::from_mode(0o777)).unwrap();
-        let untrusted = writable_parent.join("thumbnail.png");
-        std::fs::copy(&thumbnail, &untrusted).unwrap();
-        std::fs::set_permissions(&untrusted, std::fs::Permissions::from_mode(0o600)).unwrap();
-        assert!(
-            load_linux_cached_thumbnail(&untrusted, &uri, source).is_none(),
+            cached_thumbnails_in(&shared, &video).is_empty(),
             "a private leaf cannot make a writable cache ancestor trustworthy"
         );
-
-        // tumbler records the time with a fraction: the same source still
-        // matches, another time or another URI does not.
-        let fractional = |name: &str, uri: &str, recorded: &str| {
-            let path = dir.path().join(name);
-            let file = std::fs::File::create(&path).unwrap();
-            let mut encoder = png::Encoder::new(file, 2, 1);
-            encoder.set_color(png::ColorType::Rgba);
-            encoder.set_depth(png::BitDepth::Eight);
-            encoder
-                .add_text_chunk("Thumb::URI".to_string(), uri.to_string())
-                .unwrap();
-            encoder
-                .add_text_chunk("Thumb::MTime".to_string(), recorded.to_string())
-                .unwrap();
-            let mut writer = encoder.write_header().unwrap();
-            writer
-                .write_image_data(&[1, 2, 3, 255, 4, 5, 6, 255])
-                .unwrap();
-            drop(writer);
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-            path
-        };
-        let micros = format!("{mtime}.{:06}", metadata.mtime_nsec() / 1_000);
-        let tumbler = fractional("tumbler.png", &uri, &micros);
-        assert!(load_linux_cached_thumbnail(&tumbler, &uri, source).is_some());
-        let stale = fractional(
-            "stale.png",
-            &uri,
-            &format!("{}.000001", metadata.mtime() - 1),
-        );
-        assert!(load_linux_cached_thumbnail(&stale, &uri, source).is_none());
-        let other = fractional("other.png", "file:///tmp/other.mp4", &micros);
-        assert!(load_linux_cached_thumbnail(&other, &uri, source).is_none());
     }
 
-    /// A recorded `Thumb::MTime` is the source's time in whole seconds, or
-    /// with a fraction (tumbler) that agrees with the nanoseconds to its own
-    /// precision, truncated or rounded; nothing else matches.
+    /// The check looks in `XDG_CACHE_HOME` when it is set.
+    #[cfg(target_os = "linux")]
     #[test]
-    fn a_fractional_thumbnail_mtime_matches_the_same_source() {
-        let source = (1_696_300_000, 123_456_789);
-        for recorded in [
-            "1696300000",
-            "1696300000.1",
-            "1696300000.12",
-            "1696300000.123456",
-            "1696300000.123457",
-            "1696300000.123456789",
-        ] {
-            assert!(thumbnail_mtime_matches(recorded, source), "{recorded}");
+    fn the_check_looks_in_the_user_s_thumbnail_cache() {
+        const CHILD: &str = "KETTLE_VIDEO_PREVIEW_LINUX_CACHE_CHILD";
+        const VIDEO: &str = "KETTLE_VIDEO_PREVIEW_LINUX_CACHE_VIDEO";
+        if std::env::var_os(CHILD).is_none() {
+            let dir = crate::test_tempdir();
+            let video = dir.path().join("poster.mp4");
+            write_test_video(&video, VIDEO_FIXTURE);
+            thumbnail_cache(dir.path(), &video, &["large"]);
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "video_preview::tests::the_check_looks_in_the_user_s_thumbnail_cache",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env(VIDEO, &video)
+                .env("XDG_CACHE_HOME", dir.path())
+                .status()
+                .expect("re-exec the cache lookup test");
+            assert!(status.success(), "the cache lookup child failed: {status}");
+            return;
         }
-        for recorded in [
-            "1696299999",
-            "1696300001",
-            "1696300000.2",
-            "1696300000.123458",
-            "1696300000.1234567890",
-            "1696300000.",
-            ".123",
-            "+1696300000",
-            "1696300000.12e3",
-            " 1696300000",
-            "1696300000.12 ",
-            "01696300000",
-            "1696300000.-1",
-            "-1696300000.1",
-        ] {
-            assert!(!thumbnail_mtime_matches(recorded, source), "{recorded}");
+        let video = PathBuf::from(std::env::var_os(VIDEO).expect("video fixture path"));
+        let named = cached_thumbnails(&video);
+        assert_eq!(named.len(), 1, "{named:?}");
+        assert!(
+            named[0]
+                .path
+                .parent()
+                .unwrap()
+                .ends_with("thumbnails/large"),
+            "{named:?}"
+        );
+    }
+
+    /// A worker reply of `kind`, rendered from the file `identity` names.
+    #[cfg(unix)]
+    fn worker_reply(
+        kind: kettle_media::MediaKind,
+        identity: Option<kettle_media::PathIdentity>,
+    ) -> Result<kettle_media::RenderOutput, kettle_media::client::RenderError> {
+        let whole = kettle_media::Crop {
+            x: 0,
+            y: 0,
+            width: 2,
+            height: 1,
+        };
+        Ok(kettle_media::RenderOutput {
+            kind,
+            rendered: kettle_media::Rendered {
+                width: 2,
+                height: 1,
+                rgba: vec![10, 20, 30, 255, 40, 50, 60, 255],
+                digest: kettle_media::Digest {
+                    sha256: [0; 32],
+                    path_identity: identity,
+                },
+                layout: kettle_media::RenderLayout {
+                    source_width: 2.0,
+                    source_height: 1.0,
+                    image_in_target: whole,
+                    result_in_target: whole,
+                },
+                exact_source: None,
+                source_text: Vec::new(),
+                fence_sources: Vec::new(),
+                fence_count: 0,
+                fence_index: None,
+                uncovered_scripts: Vec::new(),
+                warnings: Vec::new(),
+                video: None,
+            },
+        })
+    }
+
+    #[cfg(unix)]
+    fn worker_failure(
+        code: kettle_media::FailureCode,
+    ) -> Result<kettle_media::RenderOutput, kettle_media::client::RenderError> {
+        Err(kettle_media::client::RenderError::Failure(code))
+    }
+
+    /// The poster `worker_poster` makes for `checked` of `path` when the
+    /// worker answers `replies` in turn and a second check finds the file
+    /// unchanged, and the jobs it sent.
+    #[cfg(unix)]
+    fn poster_from(
+        path: &Path,
+        checked: &Checked,
+        replies: Vec<Result<kettle_media::RenderOutput, kettle_media::client::RenderError>>,
+    ) -> (Option<kettle_core::ImageData>, Vec<kettle_media::Job>) {
+        poster_rechecked(
+            path,
+            checked,
+            replies,
+            PreviewChildOutcome::Ready(bare_check()),
+        )
+    }
+
+    /// [`poster_from`], the second check answering `again`. Every render is
+    /// held to the receipt's deadline.
+    #[cfg(unix)]
+    fn poster_rechecked(
+        path: &Path,
+        checked: &Checked,
+        replies: Vec<Result<kettle_media::RenderOutput, kettle_media::client::RenderError>>,
+        again: PreviewChildOutcome<Checked>,
+    ) -> (Option<kettle_core::ImageData>, Vec<kettle_media::Job>) {
+        let deadline = std::time::Instant::now() + RECEIPT_DEADLINE;
+        let mut replies = std::collections::VecDeque::from(replies);
+        let mut jobs = Vec::new();
+        let image = worker_poster(
+            path,
+            checked,
+            deadline,
+            |job, control| {
+                assert_eq!(control.deadline(), Some(deadline));
+                jobs.push(job.clone());
+                replies.pop_front().expect("a job past the replies")
+            },
+            || again,
+        )
+        .expect("no lost child");
+        assert!(replies.is_empty(), "replies left over: {replies:?}");
+        (image, jobs)
+    }
+
+    #[cfg(unix)]
+    fn held_to(path: &Path, dev: u64, ino: u64) -> kettle_media::Source {
+        kettle_media::Source::Path {
+            path: kettle_media::NativePath::from_path(path).unwrap(),
+            authorization: kettle_media::Authorization::ExternalAttested(
+                kettle_media::ExternalAttested { dev, ino },
+            ),
         }
-        // Rounding may carry into the next second.
-        assert!(thumbnail_mtime_matches(
-            "1696300001.000000",
-            (1_696_300_000, 999_999_600)
-        ));
-        assert!(thumbnail_mtime_matches(
-            "1696300000.999999",
-            (1_696_300_000, 999_999_600)
-        ));
-        assert!(!thumbnail_mtime_matches(
-            "1696300001.000000",
-            (1_696_300_000, 999_999_000)
-        ));
-        // Before 1970 the sign makes a fraction ambiguous: whole seconds only.
-        assert!(thumbnail_mtime_matches("-1", (-1, 250_000_000)));
-        assert!(!thumbnail_mtime_matches("-1.250000", (-1, 250_000_000)));
+    }
+
+    /// The poster is the worker's Auto render of the checked file, held to
+    /// the inode the check opened and fitted inside the receipt's bounds.
+    #[cfg(unix)]
+    #[test]
+    fn a_poster_comes_from_the_worker_held_to_the_checked_file() {
+        use kettle_media::MediaKind;
+        let path = std::env::current_dir().unwrap().join("clip.mp4");
+        let checked = bare_check();
+        let (image, jobs) = poster_from(
+            &path,
+            &checked,
+            vec![worker_reply(MediaKind::Video, Some(checked.identity))],
+        );
+        let image = image.expect("the worker's poster");
+        assert_eq!((image.width, image.height), (2, 1));
+        assert_eq!(&image.rgba[..], &[10, 20, 30, 255, 40, 50, 60, 255]);
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].kind, kettle_media::JobKind::Auto);
+        assert_eq!(jobs[0].source, held_to(&path, 7, 9));
+        assert_eq!(
+            jobs[0].target,
+            kettle_media::Target {
+                width: MAX_PREVIEW_WIDTH,
+                height: MAX_PREVIEW_HEIGHT,
+                scale: 1.0,
+                crop: None,
+            }
+        );
+        assert!(jobs[0].fallback_fonts.is_empty());
+    }
+
+    /// A poster is kept only when a second check finds the same file with
+    /// the same contents: one rewritten in place with its time restored, one
+    /// replaced, or one the check now refuses gets none.
+    #[cfg(unix)]
+    #[test]
+    fn a_poster_needs_a_second_check_to_agree() {
+        use kettle_media::MediaKind;
+        let path = std::env::current_dir().unwrap().join("clip.mp4");
+        let checked = bare_check();
+        let poster = || vec![worker_reply(MediaKind::Video, Some(checked.identity))];
+        let rewritten = Checked {
+            fingerprint: [6; 32],
+            ..bare_check()
+        };
+        let replaced = Checked {
+            identity: kettle_media::PathIdentity {
+                ino: 10,
+                ..checked.identity
+            },
+            ..bare_check()
+        };
+        for again in [
+            PreviewChildOutcome::Ready(rewritten),
+            PreviewChildOutcome::Ready(replaced),
+            PreviewChildOutcome::Failed,
+        ] {
+            let (image, jobs) = poster_rechecked(&path, &checked, poster(), again);
+            assert!(image.is_none());
+            assert_eq!(jobs.len(), 1);
+        }
+        let (image, _) = poster_rechecked(
+            &path,
+            &checked,
+            poster(),
+            PreviewChildOutcome::Ready(bare_check()),
+        );
+        assert!(image.is_some());
+    }
+
+    /// A poster past the receipt's bounds is none, whatever sent it.
+    #[cfg(unix)]
+    #[test]
+    fn a_poster_past_the_receipt_s_bounds_is_none() {
+        use kettle_media::MediaKind;
+        let path = std::env::current_dir().unwrap().join("clip.mp4");
+        let checked = bare_check();
+        let mut wide = worker_reply(MediaKind::Video, Some(checked.identity)).unwrap();
+        wide.rendered.width = MAX_PREVIEW_WIDTH + 1;
+        wide.rendered.rgba = vec![255; (MAX_PREVIEW_WIDTH as usize + 1) * 4];
+        let (image, jobs) = poster_from(&path, &checked, vec![Ok(wide)]);
+        assert!(image.is_none());
+        assert_eq!(jobs.len(), 1);
+    }
+
+    /// A render of another file (changed since the check) or of something
+    /// other than a video is no poster, and nothing else is tried.
+    #[cfg(unix)]
+    #[test]
+    fn a_render_of_another_file_or_kind_is_no_poster() {
+        use kettle_media::MediaKind;
+        let path = std::env::current_dir().unwrap().join("clip.mp4");
+        let checked = checked(vec![cached_at("large.png", 11)], None);
+        let changed = kettle_media::PathIdentity {
+            mtime_nanos: 0,
+            ..checked.identity
+        };
+        for reply in [
+            worker_reply(MediaKind::Video, Some(changed)),
+            worker_reply(MediaKind::Video, None),
+            worker_reply(MediaKind::Raster, Some(checked.identity)),
+        ] {
+            let (image, jobs) = poster_from(&path, &checked, vec![reply]);
+            assert!(image.is_none());
+            assert_eq!(jobs.len(), 1);
+        }
+    }
+
+    /// Where no decoder could make a poster, Linux tries the checked cached
+    /// thumbnails in turn, each held to the file the check opened and to the
+    /// video's URI and time as the check saw them, until one renders.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn without_a_decoder_a_cached_thumbnail_stands_in() {
+        use kettle_media::{FailureCode, JobKind, MediaKind, ThumbnailOf};
+        let path = std::env::current_dir().unwrap().join("clip one.mp4");
+        let cached = vec![
+            cached_at("xx-large.png", 11),
+            cached_at("large.png", 12),
+            cached_at("normal.png", 13),
+        ];
+        let checked = checked(cached, None);
+        let of = ThumbnailOf {
+            uri_sha256: ThumbnailOf::uri_digest(
+                &url::Url::from_file_path(&path).unwrap().to_string(),
+            ),
+            mtime_seconds: -3,
+            mtime_nanos: 999_999_999,
+        };
+        for failure in [
+            FailureCode::BackendUnavailable,
+            FailureCode::CodecUnavailable,
+            FailureCode::UnsupportedContainer,
+            FailureCode::SandboxUnavailable,
+            FailureCode::RenderParse,
+            FailureCode::RenderResource,
+        ] {
+            let (image, jobs) = poster_from(
+                &path,
+                &checked,
+                vec![
+                    worker_failure(failure),
+                    worker_failure(FailureCode::Changed),
+                    worker_reply(MediaKind::Raster, None),
+                ],
+            );
+            assert!(image.is_some(), "{failure:?}");
+            assert_eq!(jobs.len(), 3, "{failure:?}");
+            for (job, cached) in jobs[1..].iter().zip(&checked.cached) {
+                assert_eq!(job.kind, JobKind::CachedThumbnail(of));
+                assert_eq!(job.source, held_to(&cached.path, cached.dev, cached.ino));
+            }
+        }
+        // Nothing renders: no poster, every thumbnail tried once.
+        let (image, jobs) = poster_from(
+            &path,
+            &checked,
+            vec![
+                worker_failure(FailureCode::BackendUnavailable),
+                worker_failure(FailureCode::Changed),
+                worker_failure(FailureCode::UnsupportedMedia),
+                worker_failure(FailureCode::Changed),
+            ],
+        );
+        assert!(image.is_none());
+        assert_eq!(jobs.len(), 4);
+        // A video rewritten before the worker read it fails without saying
+        // so; the second check sees its new time and drops the stand-in.
+        let (image, jobs) = poster_rechecked(
+            &path,
+            &checked,
+            vec![
+                worker_failure(FailureCode::BackendUnavailable),
+                worker_reply(MediaKind::Raster, None),
+            ],
+            PreviewChildOutcome::Ready(Checked {
+                identity: kettle_media::PathIdentity {
+                    mtime_seconds: 5,
+                    ..checked.identity
+                },
+                ..checked_again(&checked)
+            }),
+        );
+        assert!(image.is_none());
+        assert_eq!(jobs.len(), 2);
+        // A deadline that passes stops the search.
+        let (image, jobs) = poster_from(
+            &path,
+            &checked,
+            vec![
+                worker_failure(FailureCode::BackendUnavailable),
+                worker_failure(FailureCode::RenderTimeout),
+            ],
+        );
+        assert!(image.is_none());
+        assert_eq!(jobs.len(), 2);
+    }
+
+    /// A video that changed, a deadline that passed, a worker that is missing
+    /// or a file that is gone gets no cached stand-in; nor does any failure
+    /// on macOS, which has no cache to fall back to.
+    #[cfg(unix)]
+    #[test]
+    fn other_failures_get_no_stand_in() {
+        use kettle_media::FailureCode;
+        let path = std::env::current_dir().unwrap().join("clip.mp4");
+        let checked = checked(vec![cached_at("large.png", 11)], None);
+        let mut failures = vec![
+            worker_failure(FailureCode::Changed),
+            worker_failure(FailureCode::RenderTimeout),
+            worker_failure(FailureCode::WorkerUnavailable),
+            worker_failure(FailureCode::FileNotFound),
+            Err(kettle_media::client::RenderError::Cancelled),
+        ];
+        if cfg!(target_os = "macos") {
+            failures.push(worker_failure(FailureCode::BackendUnavailable));
+        }
+        for failure in failures {
+            let (image, jobs) = poster_from(&path, &checked, vec![failure]);
+            assert!(image.is_none());
+            assert_eq!(jobs.len(), 1);
+        }
     }
 
     #[test]
@@ -2015,80 +2916,5 @@ mod tests {
             thumbnail_digest_hex(Md5::digest(b"a").into()),
             "0cc175b9c0f1b6a831c399e269772661"
         );
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn linux_platform_adapter_resolves_the_freedesktop_cache_entry() {
-        use md5::{Digest as _, Md5};
-        use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
-
-        const CHILD: &str = "KETTLE_VIDEO_PREVIEW_LINUX_ADAPTER_CHILD";
-        const VIDEO: &str = "KETTLE_VIDEO_PREVIEW_LINUX_ADAPTER_VIDEO";
-        if std::env::var_os(CHILD).is_none() {
-            let dir = crate::test_tempdir();
-            let video = dir.path().join("poster.mp4");
-            write_test_video(&video, VIDEO_FIXTURE);
-            let uri = url::Url::from_file_path(&video).unwrap().to_string();
-            let mtime = std::fs::metadata(&video).unwrap().mtime().to_string();
-            let digest = thumbnail_digest_hex(Md5::digest(uri.as_bytes()).into());
-            let cache = dir.path().join("thumbnails/normal");
-            std::fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(&cache)
-                .unwrap();
-            let thumbnail = cache.join(format!("{digest}.png"));
-            {
-                let file = std::fs::File::create(&thumbnail).unwrap();
-                let mut encoder = png::Encoder::new(file, 2, 1);
-                encoder.set_color(png::ColorType::Rgba);
-                encoder.set_depth(png::BitDepth::Eight);
-                encoder.add_text_chunk("Thumb::URI".into(), uri).unwrap();
-                encoder
-                    .add_text_chunk("Thumb::MTime".into(), mtime)
-                    .unwrap();
-                let mut writer = encoder.write_header().unwrap();
-                writer
-                    .write_image_data(&[1, 2, 3, 255, 4, 5, 6, 255])
-                    .unwrap();
-            }
-            std::fs::set_permissions(&thumbnail, std::fs::Permissions::from_mode(0o600)).unwrap();
-
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "video_preview::tests::linux_platform_adapter_resolves_the_freedesktop_cache_entry",
-                    "--nocapture",
-                ])
-                .env(CHILD, "1")
-                .env(VIDEO, &video)
-                .env("XDG_CACHE_HOME", dir.path())
-                .status()
-                .expect("re-exec Linux video adapter test");
-            assert!(
-                status.success(),
-                "Linux video adapter child failed: {status}"
-            );
-            return;
-        }
-
-        let video = PathBuf::from(std::env::var_os(VIDEO).expect("video fixture path"));
-        let preview = platform_thumbnail(&video).expect("Freedesktop video poster");
-        assert_eq!((preview.width, preview.height), (256, 128));
-        assert!(valid_preview(
-            preview.width,
-            preview.height,
-            preview.rgba.len()
-        ));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn linux_cache_rejects_unbounded_source_geometry() {
-        assert!(cached_thumbnail_dimensions_allowed(1_024, 1_024));
-        assert!(!cached_thumbnail_dimensions_allowed(0, 1));
-        assert!(!cached_thumbnail_dimensions_allowed(4_097, 1));
-        assert!(!cached_thumbnail_dimensions_allowed(4_096, 4_097));
     }
 }

@@ -167,6 +167,11 @@ impl RenderControl {
         }
     }
 
+    /// The absolute deadline, if there is one.
+    pub fn deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
     }
