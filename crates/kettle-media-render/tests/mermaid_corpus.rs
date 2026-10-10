@@ -7,8 +7,8 @@ mod fonts;
 use std::os::unix::ffi::OsStrExt as _;
 
 use kettle_media::{
-    Canvas, FallbackFont, Job, JobKind, MediaKind, NativePath, Source, Target, Theme, Warning,
-    content_digest,
+    Canvas, FailureCode, FallbackFont, Job, JobKind, MAX_FENCES, MediaKind, NativePath, Source,
+    Target, Theme, Warning, content_digest,
 };
 use kettle_media_render::render_with_kind;
 
@@ -126,6 +126,47 @@ fn every_pinned_diagram_family_renders_real_pixels_and_auto_preserves_source() {
             );
             assert_eq!(output.fence_count, 0, "{family}");
             assert!(output.fence_sources.is_empty(), "{family}");
+        }
+    }
+}
+
+/// The corpus as Markdown galleries, a family to a page: each page renders
+/// the pixels its Mermaid does, every page shares the document's digest,
+/// and a document of every family, more pages than a gallery holds, is
+/// refused whole rather than shown in part.
+#[test]
+fn every_pinned_family_is_a_gallery_page_that_renders_as_its_mermaid() {
+    let document = |families: &[(&str, &str)]| {
+        families
+            .iter()
+            .map(|(family, source)| format!("## {family}\n\n~~~~mermaid\n{source}\n~~~~\n\n"))
+            .collect::<String>()
+    };
+    let every = document(CORPUS);
+    assert_eq!(
+        render_with_kind(&job(&every, JobKind::Auto), |_| {}).map(|(kind, _)| kind),
+        Err(FailureCode::TooLarge)
+    );
+    for families in CORPUS.chunks(MAX_FENCES) {
+        let document = document(families);
+        let (kind, first) = render_with_kind(&job(&document, JobKind::Auto), |_| {}).unwrap();
+        assert_eq!(kind, MediaKind::Markdown);
+        first.validate_as(MediaKind::Markdown).unwrap();
+        assert_eq!(usize::from(first.fence_count), families.len());
+        for (index, &(family, source)) in families.iter().enumerate() {
+            let page = &first.fence_sources[index];
+            assert_eq!(page.trim_end(), source.trim_end(), "{family}");
+            let kind = JobKind::MarkdownDiagrams { index: index as u8 };
+            let (_, shown) = render_with_kind(&job(&document, kind), |_| {})
+                .unwrap_or_else(|error| panic!("{family}: {error:?}"));
+            let (_, alone) = render_with_kind(&job(page, JobKind::Mermaid), |_| {}).unwrap();
+            assert_eq!(shown.fence_index, Some(index as u8), "{family}");
+            assert_eq!(shown.digest, first.digest, "{family}");
+            assert_eq!(
+                (shown.width, shown.height, &shown.rgba),
+                (alone.width, alone.height, &alone.rgba),
+                "{family}"
+            );
         }
     }
 }

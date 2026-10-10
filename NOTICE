@@ -31,6 +31,11 @@ This product depends on and/or adapts ideas from the following projects:
   https://github.com/Latias94/merman
   Deterministic sketch primitives used by the pinned diagram renderer.
 
+* pulldown-cmark 0.13.4 - MIT
+  https://github.com/pulldown-cmark/pulldown-cmark
+  CommonMark parsing for the Mermaid fences of a Markdown diagram gallery,
+  with its HTML writer and command line disabled.
+
 * Contour — Apache-2.0
   Reference for the Sixel parser state machine.
 

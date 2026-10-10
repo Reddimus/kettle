@@ -3,13 +3,15 @@
 //! the largest input cap of the kinds it can be, and the actual kind's own cap
 //! applies before anything decodes it. Raster is recognized by its magic
 //! bytes; SVG is UTF-8 markup whose root element is `svg`; other UTF-8 text
-//! goes to the Mermaid renderer, which recognizes a diagram with its own
-//! preprocessing as it parses and refuses anything else. Anything else is
-//! `UnsupportedMedia`.
+//! holding a Mermaid fence, as CommonMark reads it, is a Markdown gallery,
+//! whatever it starts with (a README's HTML block or an autolink is no SVG);
+//! other markup is `UnsupportedMedia`, and any other UTF-8 text goes to the
+//! Mermaid renderer, which recognizes a diagram with its own preprocessing as
+//! it parses and refuses anything else. Anything else is `UnsupportedMedia`.
 
-use kettle_media::{FailureCode, Job, JobKind, MediaKind, Rendered};
+use kettle_media::{FailureCode, Job, JobKind, MAX_MARKDOWN_BYTES, MediaKind, Rendered};
 
-use crate::{mermaid, raster, source, svg};
+use crate::{markdown, mermaid, raster, source, svg};
 
 pub(crate) fn render(
     job: &Job,
@@ -30,15 +32,34 @@ fn render_loaded(
         return raster::render_loaded(job, snapshot).map(|rendered| (MediaKind::Raster, rendered));
     }
     let text = std::str::from_utf8(&snapshot.bytes).map_err(|_| FailureCode::UnsupportedMedia)?;
-    if svg::is_markup(text) {
+    if svg::is_svg(text) {
         return svg::render_auto(job, snapshot, || on_kind(MediaKind::Svg))
             .map(|rendered| (MediaKind::Svg, rendered));
     }
+    // Other markup is no SVG, and a gallery only if it holds a Mermaid
+    // fence; too large for that, it is unsupported, however hard it would
+    // be to parse.
+    let markup = svg::is_markup(text);
+    if markup && snapshot.within(MAX_MARKDOWN_BYTES).is_err() {
+        return Err(FailureCode::UnsupportedMedia);
+    }
+    // A diagram's own deadline starts here, before Markdown is parsed or
+    // fonts load, and holds through both.
+    let control = mermaid::control();
+    snapshot.within(MAX_MARKDOWN_BYTES)?;
+    let pages = markdown::pages(text, snapshot, &control)?;
+    if !pages.is_empty() {
+        on_kind(MediaKind::Markdown);
+        return markdown::render_page(job, snapshot, text, pages, 0, control)
+            .map(|rendered| (MediaKind::Markdown, rendered));
+    }
+    if markup {
+        return Err(FailureCode::UnsupportedMedia);
+    }
     // Mermaid is known to be Mermaid only once it parses as a diagram, so
-    // the kind is heard after rendering; the renderer keeps its own
-    // deadline, which starts here, before its fonts load.
+    // the kind is heard after rendering.
     snapshot.within(JobKind::Mermaid.input_cap())?;
-    let rendered = mermaid::render_loaded(job, snapshot, mermaid::control())?;
+    let rendered = mermaid::render_loaded(job, snapshot, control)?;
     on_kind(MediaKind::Mermaid);
     Ok((MediaKind::Mermaid, rendered))
 }
@@ -287,6 +308,109 @@ mod tests {
         let (kinds, result) = classify(&job(&path));
         assert_eq!(result, Err(FailureCode::FileTooLarge));
         assert!(kinds.is_empty());
+    }
+
+    /// Text holding a Mermaid fence is a Markdown gallery whatever the file
+    /// is called, heard as Markdown before its first page renders, with
+    /// every page and the document as read; text with fences in other
+    /// languages only is not a gallery, and goes to Mermaid as any text.
+    #[test]
+    fn markdown_with_a_mermaid_fence_is_a_gallery_whatever_the_file_is_called() {
+        let directory = tempfile::tempdir().unwrap();
+        let document = "# Plan\n\n```mermaid\nflowchart LR\n  A --> B\n```\n\n\
+            ```mermaid\npie\n  \"a\" : 1\n```\n";
+        for name in ["notes.md", "notes.mmd", "notes.bin", "notes.svg", "notes"] {
+            let path = directory.path().join(name);
+            std::fs::write(&path, document).unwrap();
+            let (kinds, result) = classify(&job(&path));
+            let (kind, rendered) = result.unwrap();
+            assert_eq!(
+                (kind, kinds),
+                (MediaKind::Markdown, vec![MediaKind::Markdown]),
+                "{name}"
+            );
+            rendered.validate_as(MediaKind::Markdown).unwrap();
+            assert_eq!((rendered.fence_count, rendered.fence_index), (2, Some(0)));
+            assert_eq!(rendered.exact_source.as_deref(), Some(document));
+            assert_eq!(rendered.source_text, ["flowchart LR", "  A --> B"]);
+            assert!(rendered.digest.path_identity.is_some());
+        }
+        let path = directory.path().join("code.md");
+        std::fs::write(&path, "# Code\n\n```rust\nfn main() {}\n```\n").unwrap();
+        let (kinds, result) = classify(&job(&path));
+        assert_eq!(
+            result.map(|(kind, _)| kind),
+            Err(FailureCode::UnsupportedMedia)
+        );
+        assert!(kinds.is_empty());
+    }
+
+    /// A gallery has the Markdown limit, not a diagram's: prose past a
+    /// diagram's limit around a small diagram is a gallery, text past it
+    /// with no fence is refused as too large for a diagram, and a document
+    /// past the Markdown limit is refused before it is parsed.
+    #[test]
+    fn a_gallery_keeps_the_markdown_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("long.md");
+        let fence = "```mermaid\nflowchart LR\n  A --> B\n```\n";
+        let prose = "words ".repeat(JobKind::Mermaid.input_cap() / 6 + 1);
+        std::fs::write(&path, format!("{prose}\n\n{fence}")).unwrap();
+        assert_eq!(classify(&job(&path)).1.unwrap().0, MediaKind::Markdown);
+        std::fs::write(&path, &prose).unwrap();
+        let (kinds, result) = classify(&job(&path));
+        assert_eq!(result.map(|(kind, _)| kind), Err(FailureCode::FileTooLarge));
+        assert!(kinds.is_empty());
+        let mut huge = String::from(fence);
+        huge.push_str(&"x".repeat(MAX_MARKDOWN_BYTES + 1 - huge.len()));
+        std::fs::write(&path, &huge).unwrap();
+        let (kinds, result) = classify(&job(&path));
+        assert_eq!(result.map(|(kind, _)| kind), Err(FailureCode::FileTooLarge));
+        assert!(kinds.is_empty());
+        huge.pop();
+        std::fs::write(&path, &huge).unwrap();
+        assert_eq!(classify(&job(&path)).1.unwrap().0, MediaKind::Markdown);
+    }
+
+    /// Markdown is a gallery whatever it starts with: an autolink, an HTML
+    /// block as a README's logo is, or a comment. Other markup without a
+    /// Mermaid fence stays unsupported.
+    #[test]
+    fn markdown_starting_with_markup_is_still_a_gallery() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("README.md");
+        let fence = "```mermaid\nflowchart LR\n  A --> B\n```\n";
+        for start in [
+            "<https://example.com>\n\n",
+            "<p align=\"center\"><img src=\"logo.png\"></p>\n\n# Title\n\n",
+            "<!-- generated -->\n<div>\n\n",
+        ] {
+            std::fs::write(&path, format!("{start}{fence}")).unwrap();
+            let (kinds, result) = classify(&job(&path));
+            assert_eq!(
+                result.map(|(kind, _)| kind),
+                Ok(MediaKind::Markdown),
+                "{start:?}"
+            );
+            assert_eq!(kinds, [MediaKind::Markdown]);
+        }
+        // Markup with no Mermaid fence is unsupported, past a diagram's
+        // limit too: it is no diagram, not one too large.
+        for page in [
+            "<html><body><p>no diagram</p></body></html>".to_owned(),
+            format!(
+                "<html><body>{}</body></html>",
+                "<p>words</p>".repeat(10_000)
+            ),
+        ] {
+            std::fs::write(&path, &page).unwrap();
+            assert_eq!(
+                classify(&job(&path)).1.map(|(kind, _)| kind),
+                Err(FailureCode::UnsupportedMedia),
+                "{} bytes",
+                page.len()
+            );
+        }
     }
 
     /// Bytes an Auto job carries inline are classified the same way.

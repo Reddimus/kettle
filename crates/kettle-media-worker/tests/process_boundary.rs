@@ -216,6 +216,44 @@ fn an_auto_job_replies_with_the_kind_it_turned_out_to_be() {
     );
 }
 
+/// A Markdown gallery crosses the worker's boundary whole: an Auto job's
+/// reply says Markdown and carries every page, the document as read and
+/// the page rendered; an explicit page comes back as asked, and a page past
+/// the last is refused by its code.
+#[test]
+fn a_markdown_gallery_crosses_the_boundary_whole() {
+    let document = "# Two\n\n```mermaid\nflowchart LR\n  A --> B\n```\n\n\
+        ```mermaid\nflowchart TD\n  C --> D\n```\n";
+    let Some(Frame::DetectedRendered { kind, rendered }) =
+        only_reply(&job_of(JobKind::Auto, document.as_bytes()))
+    else {
+        panic!("no typed reply to an Auto Markdown job");
+    };
+    assert_eq!(kind, MediaKind::Markdown);
+    rendered.validate_as(MediaKind::Markdown).unwrap();
+    assert_eq!(
+        rendered.fence_sources,
+        ["flowchart LR\n  A --> B\n", "flowchart TD\n  C --> D\n"]
+    );
+    assert_eq!((rendered.fence_count, rendered.fence_index), (2, Some(0)));
+    assert_eq!(rendered.exact_source.as_deref(), Some(document));
+    let Some(Frame::Rendered(second)) = only_reply(&job_of(
+        JobKind::MarkdownDiagrams { index: 1 },
+        document.as_bytes(),
+    )) else {
+        panic!("no reply to an explicit page");
+    };
+    assert_eq!(second.fence_index, Some(1));
+    assert_eq!(second.digest, rendered.digest);
+    assert_eq!(
+        only_reply(&job_of(
+            JobKind::MarkdownDiagrams { index: 2 },
+            document.as_bytes()
+        )),
+        failure(FailureCode::IndexOutOfRange)
+    );
+}
+
 #[test]
 fn an_explicit_kind_gets_the_plain_reply() {
     for frame in [job(&png([10, 20, 30, 255])), job_of(JobKind::Svg, SVG_1X1)] {

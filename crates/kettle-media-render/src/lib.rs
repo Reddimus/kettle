@@ -5,10 +5,10 @@
 //! nothing here trusts those to be the only bound, so every size is checked
 //! before the work it would cost.
 //!
-//! Raster, SVG and Mermaid jobs are rendered, and Auto jobs, which are
-//! classified by their bytes as one of those. Other kinds answer
-//! `UnsupportedMedia` until their renderers land, and on Windows, where no
-//! worker runs, every job answers `UnsupportedPlatform`.
+//! Raster, SVG, Mermaid and Markdown diagram gallery jobs are rendered, and
+//! Auto jobs, which are classified by their bytes as one of those. Video
+//! answers `UnsupportedMedia` until its renderer lands, and on Windows,
+//! where no worker runs, every job answers `UnsupportedPlatform`.
 
 use kettle_media::{FailureCode, Job, MediaKind, Rendered};
 
@@ -16,6 +16,8 @@ use kettle_media::{FailureCode, Job, MediaKind, Rendered};
 mod auto;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod container;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod markdown;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod mermaid;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -78,9 +80,11 @@ pub fn render_with_kind(
                 on_kind(MediaKind::Mermaid);
                 mermaid::render(job).map(|rendered| (MediaKind::Mermaid, rendered))
             }
-            JobKind::MarkdownDiagrams { .. } | JobKind::VideoProbe | JobKind::VideoStills(_) => {
-                Err(FailureCode::UnsupportedMedia)
+            JobKind::MarkdownDiagrams { index } => {
+                on_kind(MediaKind::Markdown);
+                markdown::render(job, index).map(|rendered| (MediaKind::Markdown, rendered))
             }
+            JobKind::VideoProbe | JobKind::VideoStills(_) => Err(FailureCode::UnsupportedMedia),
         }
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -120,6 +124,8 @@ mod tests {
             ("auto", include_str!("auto.rs")),
             ("source", include_str!("source.rs")),
             ("container", include_str!("container.rs")),
+            ("markdown", include_str!("markdown.rs")),
+            ("mermaid", include_str!("mermaid.rs")),
             ("svg", include_str!("svg/mod.rs")),
             ("svg/css", include_str!("svg/css.rs")),
             ("svg/fonts", include_str!("svg/fonts.rs")),

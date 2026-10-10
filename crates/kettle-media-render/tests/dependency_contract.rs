@@ -7,6 +7,9 @@ const FAMILY: &[(&str, &str)] = &[
     ("dugong", "0.8.0"),
     ("dugong-graphlib", "0.8.0"),
     ("manatee", "0.8.0"),
+    // Not merman's own, but merman-render's Markdown parser, which the
+    // gallery extraction shares rather than locking a second copy.
+    ("pulldown-cmark", "0.13.4"),
     ("roughr-merman", "0.12.3"),
 ];
 
