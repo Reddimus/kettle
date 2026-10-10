@@ -674,7 +674,16 @@ lane as its `›`, `‹` and `×` do ("Next preview", "Previous preview" and
 `preview_zoom_out` and `preview_fit` as its `≡`, `◐`, `⧉`, `↻`, `+`, `−` and
 `⤢` do ("Show preview source", "Next preview canvas", "Copy preview",
 "Reload preview", "Zoom preview in", "Zoom preview out" and "Fit preview to
-lane"). None has a default binding.
+lane"). `focus_preview` ("Focus preview") gives the focused pane's expanded
+lane the keyboard, and its footer says "Keyboard: preview": the arrows move
+the picture (or scroll a source), `+` and `-` zoom, `0` fits it (or shows a
+source from its start), `c` copies, and every other key and chord, Enter,
+digits and Kettle's own shortcuts included, does nothing, so nothing typed
+reaches the program in the pane (Option chords count on macOS). Esc, a
+click outside the lane, a file drop, another menu or dialog opening, or the
+lane closing, collapsing or changing item gives the keyboard back; the
+pointer and the wheel work as ever elsewhere, and an input method stays off
+meanwhile. None has a default binding.
 
 **Modals + UI**: `command_palette` (`palette`), `hint_mode` (`hints` /
 `quick_select`; labels the URLs, paths (a quoted or backticked path may hold

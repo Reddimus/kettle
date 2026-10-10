@@ -345,6 +345,10 @@ pub enum Action {
     PreviewZoomOut,
     /// Show the focused pane's rendered preview fitted to its lane again.
     PreviewFit,
+    /// Give the focused pane's preview lane the keyboard until Esc: arrows
+    /// move, `+`, `-` and `0` zoom and fit, `c` copies, and every other key
+    /// does nothing.
+    FocusPreview,
     /// Terminator parity (`key_send_newline`). Writes a literal `\n` to the focused
     /// pane's PTY. Mostly useful for inserting a newline into a
     /// shell line-editor that's otherwise consuming Enter
@@ -753,6 +757,7 @@ pub fn action_names() -> Vec<&'static str> {
         "preview_zoom_in",
         "preview_zoom_out",
         "preview_fit",
+        "focus_preview",
         "preferences",
         "edit_config",
         "settings",
@@ -1056,6 +1061,7 @@ impl Action {
             "preview_zoom_in" | "preview-zoom-in" => PreviewZoomIn,
             "preview_zoom_out" | "preview-zoom-out" => PreviewZoomOut,
             "preview_fit" | "preview-fit" => PreviewFit,
+            "focus_preview" | "focus-preview" => FocusPreview,
             "preferences"
             | "preferences_keybindings"
             | "preferences-keybindings"

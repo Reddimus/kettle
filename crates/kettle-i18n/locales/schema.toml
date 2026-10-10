@@ -1564,6 +1564,9 @@ context = "crates/kettle-config/src/palette.rs: command palette entry for previe
 [messages.palette_preview_zoom_out]
 context = "crates/kettle-config/src/palette.rs: command palette entry for preview_zoom_out, which shrinks the image in the focused pane's preview lane by one step about its center."
 
+[messages.palette_focus_preview]
+context = "crates/kettle-config/src/palette.rs: command palette entry for focus_preview, which gives the keyboard to the focused pane's preview lane until Esc: arrows move the image, + and - zoom, 0 fits it and c copies, and every other key does nothing, so nothing typed reaches the program in the terminal."
+
 [messages.palette_preview_fit]
 context = "crates/kettle-config/src/palette.rs: command palette entry for preview_fit, which shows the image in the focused pane's preview lane whole again, fitted to the lane, after zooming or panning."
 
@@ -1605,6 +1608,9 @@ args = [{ name = "index", type = "u64" }, { name = "count", type = "u64" }, { na
 
 [messages.media_lane_hint]
 context = "crates/kettle-ui/src/app.rs preview_lane_panel: footer of a pane's preview lane. While the lane shows, typing still reaches the program in the terminal beside it (often an AI agent), so the user knows the lane does not take their keys."
+
+[messages.media_lane_hint_focused]
+context = "crates/kettle-ui/src/app.rs preview_lane_panel: footer of a pane's preview lane while it holds the keyboard (focus_preview): keys move, zoom or copy the preview and reach nothing else, and Esc gives the keyboard back to the terminal beside the lane. Keep it short; it shares one line of the lane."
 
 [messages.media_lane_a11y_previous]
 context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of the preview lane's button that shows the previous item on the pane's media shelf."

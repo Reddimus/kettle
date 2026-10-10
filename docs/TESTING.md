@@ -4107,6 +4107,16 @@ every control and the content. For a live check, drag the edge
 (`preview_lanes`' `edge`) up and to both ends: `stty size` in the pane
 follows, down to 5 rows.
 
+Preview focus: `media::focus` tests pin the keys a focused lane takes and
+that it swallows the rest, every chord with Ctrl, Alt or Command
+included, and which act once a press; app guards pin it as the last modal
+before keybind resolution, `dispatch_ui_key`'s preview modal, `send_keys`
+and `send_text` refused before writing, the input method off, and every
+way out. For a live check, `focus_preview` with a lane open, then type
+Enter, digits, y, n and Cmd+T: nothing reaches the shell and no tab
+opens, `+` and `0` zoom and fit, `send_keys` answers busy, and after Esc
+typing reaches the shell again.
+
 Sharper pixels: `media::crop` tests pin the plan (the box at the size shown
 and the part in view with its guard, a raster never past its own pixels,
 none past 4096 on an edge, an SVG's crop within its ceiling, nothing asked

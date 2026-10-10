@@ -153,6 +153,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Cmd+wheel (Ctrl+wheel off macOS) at the pointer zoom the picture, the
   wheel or a drag pans it, and `⤢` fits it again. Also as
   `preview_zoom_in`, `preview_zoom_out` and `preview_fit`.
+- `focus_preview` ("Focus preview") gives a preview lane the keyboard until
+  Esc: arrows, `+`, `-`, `0` and `c` move, zoom, fit and copy, and nothing
+  else typed reaches the program in the pane.
 - Drag a preview lane's edge to resize it; the terminal keeps at least 20
   columns and 5 rows, and its program sees the new size as you drag.
 - A zoomed preview sharpens a moment after it stops moving: the part in view

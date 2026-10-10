@@ -376,7 +376,8 @@ its `mode` (`rendered` or `source`), `canvas` (`theme`, `white` or
 `checker`), `zoom` (relative to the item's fit), `content` and `image` (the
 content area's rectangle and where the item is drawn in it, past it when
 zoomed in), `sharp` (where sharper pixels for the part in view are drawn,
-or null), `edge` (the strip a drag resizes an expanded lane by, or null)
+or null), `edge` (the strip a drag resizes an expanded lane by, or null),
+`keyboard` (`preview` while the lane holds the keyboard, else `terminal`)
 and `controls`, each shown control's rectangle by name; never a
 title, source, path or pixel). An SVG's or a diagram's lane can show the
 source it was rendered from (`≡`), put the picture on another background
@@ -386,7 +387,11 @@ replaces the item in place, keeping its key and title, as one the user
 opened. A rendered item zooms (`−`, `+`, back to its fit with `⤢`, or a
 pinch or Cmd/Ctrl+wheel at the pointer) and pans (the wheel or a drag);
 `perform_action` takes `preview_zoom_in`, `preview_zoom_out` and
-`preview_fit` for the focused pane's lane. A zoomed item sharpens once its
+`preview_fit` for the focused pane's lane. While the user has given a lane
+the keyboard (`focus_preview`; `preview_lanes` reports `keyboard` as
+`preview`), `send_keys` and `send_text` to any pane in that window answer
+`busy` and write nothing, and `dispatch_ui_key` drives the lane's keys
+(modal `preview`). A zoomed item sharpens once its
 view settles, but a view a control client changed last reads no file for
 it. A control client may press these like any control, but no file is
 read again while Kettle handles a control request.
