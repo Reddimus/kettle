@@ -38,6 +38,8 @@ graph TD
     media["kettle-media<br/>bounded jobs and results · theme · caps<br/>source authorization · build handshake · binary frames<br/>worker availability client"]
     worker["kettle-media-worker (bin)<br/>early fd sweep · non-dumpable · rlimits<br/>watchdog · one job per process"] --> media
     worker --> mrender
+    worker --> mnative
+    mnative["kettle-media-native<br/>trusted user ffmpeg/ffprobe · contained runs<br/>exact frames by timestamp · deadlines"] --> media
     mrender["kettle-media-render<br/>held-handle source loads · raster decode under caps<br/>SVG sanitize · admission · resvg · straight RGBA<br/>no unsafe code"] --> media
 ```
 
@@ -83,7 +85,21 @@ poster or sheet with each frame's time. The source is held rather than read
 (`source::Held`): an open descriptor, the identity it had when opened and
 its first bytes, which classify it. An animated GIF, APNG or WebP is decoded
 here (`animation.rs`); a video container needs a decoder this crate does not
-have and returns `BackendUnavailable` until the worker supplies one.
+have and returns `BackendUnavailable` unless the worker supplies one.
+
+`kettle-media-native` is that decoder, and the only crate besides the
+worker's early setup with unsafe code (libc calls, each with a SAFETY
+comment). It runs the user's own ffmpeg and ffprobe, never bundled or
+linked, found only where the parent names them in the worker's environment
+(`KETTLE_MEDIA_DECODER`), which no request can set, and trusted only when
+no one but the user or root could have put them there. Each run is a child
+of the worker in its process group, contained so it starts no process of its
+own, with a fixed argument list, a fresh descriptor of the held file as its
+only input, stderr discarded, its output read up to an exact size and a
+deadline. ffprobe describes the streams and lists the packets around each
+instant, which gives the frame actually showing there; ffmpeg then decodes
+each frame by its own timestamp. The renderer lays the frames out and checks
+the held file is unchanged afterwards.
 Mermaid goes through merman 0.8.0, pinned exactly with its layout and
 painting family, under a resource-constrained policy and a two-second
 `OperationControl` deadline that starts before its fonts load. Kettle

@@ -61,6 +61,8 @@ serde_json.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# The macOS ACL check the worker's file shares with the external decoder's.
+kettle-media-native.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # kettle is a GUI-subsystem app (`#![cfg_attr(all(windows,
