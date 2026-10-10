@@ -90,6 +90,42 @@ pub enum VideoContainer {
     Asf,
 }
 
+impl VideoContainer {
+    /// Every container, in declaration order.
+    pub const ALL: [Self; 11] = [
+        Self::IsoBmff,
+        Self::QuickTime,
+        Self::Matroska,
+        Self::WebM,
+        Self::Avi,
+        Self::FlashVideo,
+        Self::MpegProgramStream,
+        Self::MpegVideo,
+        Self::MpegTransportStream,
+        Self::Ogg,
+        Self::Asf,
+    ];
+
+    /// The extension a copy in this container is named with, so the program
+    /// it is handed to reads it as what its bytes are. It comes from the
+    /// sniffed bytes, never from the name the video arrived under.
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::IsoBmff => "mp4",
+            Self::QuickTime => "mov",
+            Self::Matroska => "mkv",
+            Self::WebM => "webm",
+            Self::Avi => "avi",
+            Self::FlashVideo => "flv",
+            Self::MpegProgramStream => "mpg",
+            Self::MpegVideo => "m2v",
+            Self::MpegTransportStream => "ts",
+            Self::Ogg => "ogv",
+            Self::Asf => "asf",
+        }
+    }
+}
+
 /// Identify a container from the beginning of a file and its full length.
 ///
 /// This opens no files, allocates nothing and inspects at most

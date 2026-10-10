@@ -4583,6 +4583,41 @@ and its card line, and `kettle_show`'s structured content adds the `video`
 block beside the poster's size, still with `model_has_seen: false`. Quick
 select and the menus offer common video files (`.webm`, `.mp4`, `.mov`,
 `.mkv` and the like, never `.ts`) for a preview.
+`paste_image`'s video-copy tests copy a source by clone and by bytes (a
+read-only source too) into an owner-only file named with the extension
+asked for; stop a byte copy when asked, at its deadline, or at a source
+shorter than it said, leaving nothing; discard a short clone or a copy its
+check refuses; refuse an extension not the store's, an empty or oversized
+copy, a store full of new copies, and a copy that would leave the volume
+too full; and reap a dead video session. `media::external::video`'s tests
+copy the fixture MP4 named `.webm` as `.mp4`, private and quarantined;
+refuse a file grown, replaced, gone, a FIFO, rewritten with its identity
+restored, without an identity, or of another container, writing nothing;
+refuse a sparse file past 4 GiB; refuse a copy of another length, other
+first bytes or container, or whose source changed while copied; map each
+copy failure to its notice; copy nothing once closed; check each player's
+formats, its fixed command (mpv's `fd://3` after `--`) and the order of
+every check before the player starts; and open a video item, not an
+animation, in the player. The store's reservation tests keep two copies'
+names, places and bytes apart while they are made, refuse a reservation
+past the bounds, give room back, and discard a copy finished after the
+store closed with the directory cleanup left for it; a copy an end was
+asked for after its clone or last chunk is discarded; a byte copy asks
+before every chunk whether to end and whether the rest still fits; a kept
+copy that never reached the player is removed, and one that cannot be
+deleted stays charged; byte copies made at once count each other's
+unwritten bytes against the reserve; a launch asked last whether exit has
+begun refuses when it has;
+a pinned process reads the
+checked copy on descriptor 3 (read-only on Linux) after something else took
+its name; a viewer or player that exits with an error is reported; and an
+Auto video's poster is placed and cropped in its box as a raster is, laid
+out against the video's own size.
+`kettle-ctl`'s `only_quicktime_passes_for_quicktime`
+checks QuickTime Player's requirement. Each fails without its change. The
+ignored `quicktime_opens_a_marked_copy_live` opens the copy in QuickTime
+Player and closes the store; QuickTime Player keeps playing its open copy
+after Kettle deletes it.
 A video's Show result carries `video` (duration, its own size, codec name,
 rate when known, audio) beside its poster's size and round-trips; other
 results carry none. `media::shelf` keeps a video's metadata when its

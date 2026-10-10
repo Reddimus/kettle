@@ -5,7 +5,11 @@
 //! parses the bytes a program sent; marks the copy as downloaded (macOS
 //! quarantine); checks that the viewer is the one this platform permits and
 //! that the copy is still the one Kettle wrote; and only then hands it over.
-//! The work runs on a short thread, never the window thread.
+//! A video goes to the permitted video player instead, as a checked private
+//! copy of its file ([`video`]), never as its poster. The work runs on a
+//! short thread, never the window thread.
+
+mod video;
 
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -13,7 +17,10 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use kettle_core::ImageData;
 
+use crate::media::ShelfItem;
 use crate::paste_image::PastedImages;
+
+pub(crate) use video::{Player, VideoCopies, VideoSource, open as open_video};
 
 /// Opens being prepared at once; one more is refused rather than queued.
 const MAX_OPENS: usize = 2;
@@ -122,6 +129,37 @@ fn trusted_program(path: &Path) -> bool {
     owned_by_root(path, true) && path.parent().is_some_and(|dir| owned_by_root(dir, false))
 }
 
+/// What opens a shelf item outside Kettle on this platform.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Outside {
+    /// The image viewer, given a PNG of the pixels Kettle shows.
+    Image(Viewer),
+    /// The video player, given a private copy of the video's file.
+    Video(Player),
+}
+
+impl Outside {
+    /// What opens `item` outside Kettle, if this platform has it: the video
+    /// player for a video shown from its file, the image viewer for
+    /// anything else, an animation included.
+    pub(crate) fn of(item: &ShelfItem) -> Option<Self> {
+        if item.video.is_some_and(|video| video.container.is_some()) {
+            Player::find().map(Self::Video)
+        } else {
+            Viewer::find().map(Self::Image)
+        }
+    }
+
+    /// The menu row, and the lane button's accessible name, that opens an
+    /// item there.
+    pub(crate) fn label(self, tr: &kettle_i18n::Translator) -> &'static str {
+        match self {
+            Self::Image(viewer) => viewer.label(tr),
+            Self::Video(player) => player.label(tr),
+        }
+    }
+}
+
 /// Why an open did not happen, for the notice the user sees.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OpenFailure {
@@ -129,8 +167,60 @@ pub(crate) enum OpenFailure {
     Busy,
     /// The copy could not be made, or was changed before the viewer got it.
     Copy,
-    /// The viewer is gone, or is not the one permitted.
+    /// The viewer or player is gone, or is not the one permitted.
     Viewer,
+    /// The player does not play this video's container or codec.
+    Unplayable,
+    /// The video's file is not the one shown any more.
+    Changed,
+    /// The video is past what Kettle copies, or its copy would leave the
+    /// disk too full.
+    Room,
+    /// The viewer or player started but could not open the copy.
+    Refused,
+}
+
+impl OpenFailure {
+    /// The notice's title and body, for an image or a video.
+    pub(crate) fn notice(self, video: bool) -> (kettle_i18n::Text, kettle_i18n::Text) {
+        use kettle_i18n::Text;
+        if !video {
+            return (
+                Text::NotifyTitleOpenImage,
+                match self {
+                    Self::Busy => Text::NotifyBodyOpenImageBusy,
+                    Self::Viewer => Text::NotifyBodyOpenImageViewer,
+                    Self::Refused => Text::NotifyBodyOpenImageRefused,
+                    // An image is the pixels Kettle shows: nothing else
+                    // applies to it.
+                    Self::Copy | Self::Unplayable | Self::Changed | Self::Room => {
+                        Text::NotifyBodyOpenImageCopy
+                    }
+                },
+            );
+        }
+        (
+            Text::NotifyTitleOpenVideo,
+            match self {
+                Self::Busy => Text::NotifyBodyOpenVideoBusy,
+                Self::Copy => Text::NotifyBodyOpenVideoCopy,
+                Self::Viewer => Text::NotifyBodyOpenVideoPlayer,
+                Self::Unplayable => Text::NotifyBodyOpenVideoUnplayable,
+                Self::Changed => Text::NotifyBodyOpenVideoChanged,
+                Self::Room => Text::NotifyBodyOpenVideoRoom,
+                Self::Refused => Text::NotifyBodyOpenVideoRefused,
+            },
+        )
+    }
+}
+
+/// Wait for a viewer or player `child`, so it leaves no zombie, and tell
+/// `failed` when it could not open what it was given: it exited with an
+/// error, or could not be waited for.
+fn watch(mut child: std::process::Child, failed: impl FnOnce(OpenFailure)) {
+    if !child.wait().is_ok_and(|status| status.success()) {
+        failed(OpenFailure::Refused);
+    }
 }
 
 /// One of the [`MAX_OPENS`] slots, given back when dropped.
@@ -168,12 +258,12 @@ pub(crate) fn open(
     let _ = std::thread::Builder::new()
         .name("kettle-ui-open".into())
         .spawn(move || match hand_over(&copies, &image, viewer) {
-            Ok(mut child) => {
+            Ok(child) => {
                 // The slot bounds the work of opening, not how long the
                 // viewer stays up: Eye of GNOME runs until the user closes
-                // it, and this thread waits so it leaves no zombie behind.
+                // it.
                 drop(slot);
-                let _ = child.wait();
+                watch(child, failed);
             }
             Err(why) => {
                 drop(slot);
@@ -352,6 +442,67 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_secs(3));
         copies.lock().unwrap().cleanup();
         assert!(!dir.exists());
+    }
+
+    /// A viewer or player that exits with an error is heard as refusing the
+    /// copy; one that exits cleanly is not.
+    #[test]
+    fn a_child_that_fails_is_heard() {
+        let heard = |program: &str| {
+            let child = std::process::Command::new(program).spawn().unwrap();
+            let mut why = None;
+            watch(child, |failure| why = Some(failure));
+            why
+        };
+        assert_eq!(heard("/usr/bin/false"), Some(OpenFailure::Refused));
+        assert_eq!(heard("/usr/bin/true"), None);
+    }
+
+    /// Each way a video open fails has a notice of its own, and an image's
+    /// says only what can go wrong with an image.
+    #[test]
+    fn each_failure_says_why() {
+        use kettle_i18n::Text;
+        let all = [
+            OpenFailure::Busy,
+            OpenFailure::Copy,
+            OpenFailure::Viewer,
+            OpenFailure::Unplayable,
+            OpenFailure::Changed,
+            OpenFailure::Room,
+            OpenFailure::Refused,
+        ];
+        let video = all.map(|why| why.notice(true));
+        assert!(
+            video
+                .iter()
+                .all(|(title, _)| *title == Text::NotifyTitleOpenVideo)
+        );
+        for (index, (_, body)) in video.iter().enumerate() {
+            assert!(
+                video[index + 1..].iter().all(|(_, other)| other != body),
+                "{:?} shares its notice",
+                all[index]
+            );
+        }
+        let image = all.map(|why| why.notice(false));
+        assert!(
+            image
+                .iter()
+                .all(|(title, _)| *title == Text::NotifyTitleOpenImage)
+        );
+        assert_eq!(
+            image.map(|(_, body)| body),
+            [
+                Text::NotifyBodyOpenImageBusy,
+                Text::NotifyBodyOpenImageCopy,
+                Text::NotifyBodyOpenImageViewer,
+                Text::NotifyBodyOpenImageCopy,
+                Text::NotifyBodyOpenImageCopy,
+                Text::NotifyBodyOpenImageCopy,
+                Text::NotifyBodyOpenImageRefused,
+            ]
+        );
     }
 
     /// The viewer command is a fixed program with the absolute file last, and
