@@ -863,7 +863,10 @@ minute), then one text content, the index: the video's duration, size,
 codec, frame rate and audio, each frame's time in reading order, how far a
 time may be from the instant it stands for, and that the sheet is what was
 seen, not the whole video. The times are the frames actually shown, never
-the instants asked for. There is no `structuredContent`: Codex hands the
+the instants asked for, except for a stream whose packets carry no
+timestamps, sought by time: its frames stand for their instants within one
+frame's length, which the index gives as the tolerance. A single frame is a
+one-frame sheet, labeled like the rest. There is no `structuredContent`: Codex hands the
 model an image only from a result without it, and a literal `null` stops
 Claude Code reading the index (V-S(d) evidence; Appendix A asked for `null`).
 The whole response, base64 image and index together, fits the 768 KiB
@@ -881,9 +884,11 @@ model must not install software itself.
 
 `kettle video-frames PATH -o OUT.jpg` does the same from a shell, inside the
 caller's sandbox, with `--start`, `--end`, `--at`, `--count` and
-`--max-edge`. It writes the JPEG whole (a private file renamed into place,
-never over the video) and prints the index; it exits 0 once written, 1
-otherwise, the failure and any install hint on stderr.
+`--max-edge`. It writes the JPEG whole (a private file under an
+unpredictable name, renamed into place, never over the video), refuses a
+folder other users can change unless it is sticky, removes nothing it did
+not make, and prints the index; it exits 0 once written, 1 otherwise, the
+failure and any install hint on stderr.
 
 What decodes what: GIF, APNG and animated WebP are Kettle's own; on macOS,
 MP4 and QuickTime go to AVFoundation first; anything else, or what

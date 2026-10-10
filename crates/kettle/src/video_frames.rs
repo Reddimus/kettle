@@ -61,9 +61,13 @@ impl FramesRequest {
         if !(1..=MAX_EDGE).contains(&max_edge) {
             return Err(FailureCode::BadParams);
         }
+        if self.path.as_os_str().len() > kettle_media::MAX_PATH_BYTES {
+            return Err(FailureCode::BadParams);
+        }
+        // Every frame a model reads carries its time label, a single one
+        // too: a one-column sheet, never the unlabeled poster.
         let stills = if let Some(at) = self.at_s {
-            if self.start_s.is_some() || self.end_s.is_some() || self.count.is_some_and(|n| n != 1)
-            {
+            if self.start_s.is_some() || self.end_s.is_some() || self.count.is_some() {
                 return Err(FailureCode::BadParams);
             }
             VideoStills {
@@ -72,7 +76,10 @@ impl FramesRequest {
                 start_s: 0.0,
                 end_s: None,
                 at_s: Some(at),
-                layout: StillsLayout::Poster,
+                layout: StillsLayout::Sheet {
+                    cols: 1,
+                    labels: true,
+                },
             }
         } else {
             let count = self.count.unwrap_or(DEFAULT_COUNT);
@@ -89,13 +96,9 @@ impl FramesRequest {
                 start_s,
                 end_s: self.end_s,
                 at_s: None,
-                layout: if count == 1 {
-                    StillsLayout::Poster
-                } else {
-                    StillsLayout::Sheet {
-                        cols: columns(count),
-                        labels: true,
-                    }
+                layout: StillsLayout::Sheet {
+                    cols: columns(count),
+                    labels: true,
                 },
             }
         };
@@ -196,10 +199,14 @@ fn encode(
                 return Ok((jpeg, rgb.width(), rgb.height()));
             }
         }
-        let (width, height) = (sheet.width() * 3 / 4, sheet.height() * 3 / 4);
-        if width.max(height) < MIN_FIT_EDGE || width == 0 || height == 0 {
+        let longer = sheet.width().max(sheet.height());
+        if longer <= MIN_FIT_EDGE {
             return Err(FailureCode::TooLarge);
         }
+        // A quarter smaller, or exactly the minimum when that is closer.
+        let target = (longer * 3 / 4).max(MIN_FIT_EDGE);
+        let scale = |side: u32| (u64::from(side) * u64::from(target) / u64::from(longer)) as u32;
+        let (width, height) = (scale(sheet.width()).max(1), scale(sheet.height()).max(1));
         sheet =
             image::imageops::resize(&sheet, width, height, image::imageops::FilterType::Triangle);
     }
@@ -238,13 +245,14 @@ fn rate(fps_milli: u32) -> String {
     }
 }
 
-/// A span as people read it: `22 ms` under a second, else seconds to the
-/// tenth, `1.4 s`.
+/// A span as people read it, never less than it is: `22 ms` under a
+/// second, else seconds to the tenth rounded up, `1.5 s` for 1450 ms.
 fn span(ms: u64) -> String {
     if ms < 1000 {
         format!("{ms} ms")
     } else {
-        format!("{}.{} s", ms / 1000, ms / 100 % 10)
+        let tenths = ms.div_ceil(100);
+        format!("{}.{} s", tenths / 10, tenths % 10)
     }
 }
 
@@ -276,16 +284,26 @@ pub(crate) fn index(video: &VideoStillsResult, layout: StillsLayout) -> String {
             "no audio"
         }
     );
-    match layout {
-        StillsLayout::Poster => {
-            let sample = video.samples[0];
+    match (layout, video.samples.as_slice()) {
+        (_, [sample]) => {
             let _ = writeln!(
                 text,
-                "One frame, at {}.",
+                "One frame, labeled with its time: {}.",
                 still_label(sample.actual_ms, duration)
             );
         }
-        StillsLayout::Sheet { cols, .. } => {
+        (StillsLayout::Poster, _) => {
+            let _ = writeln!(text, "{} frames:", video.samples.len());
+            for (at, sample) in video.samples.iter().enumerate() {
+                let _ = writeln!(
+                    text,
+                    "{}. {}",
+                    at + 1,
+                    still_label(sample.actual_ms, duration)
+                );
+            }
+        }
+        (StillsLayout::Sheet { cols, .. }, _) => {
             let _ = writeln!(
                 text,
                 "A sheet of {} frames, {cols} across, read left to right and top to bottom, \
@@ -328,13 +346,98 @@ pub(crate) fn decoder_hint(failure: FailureCode) -> Option<&'static str> {
     })
 }
 
-/// Write `bytes` to `out` whole or not at all: a private file beside it,
-/// renamed over it. The video itself is never the output.
-fn write_out(out: &Path, input: &Path, bytes: &[u8]) -> Result<(), FailureCode> {
+/// Why the sheet was not written, in fixed words that name no path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OutputRefusal {
+    /// The output names the video itself.
+    IsInput,
+    /// Someone else could replace a file in the output's folder: it can be
+    /// written by others and has no sticky bit.
+    Shared,
+    /// The folder could not take the file.
+    Unwritable,
+}
+
+impl OutputRefusal {
+    pub(crate) fn text(self) -> &'static str {
+        match self {
+            Self::IsInput => "The output would replace the video itself; choose another path.",
+            Self::Shared => {
+                "Other users can change the output's folder; write the sheet somewhere only you can change."
+            }
+            Self::Unwritable => "The sheet could not be written there.",
+        }
+    }
+}
+
+/// Whether someone other than the owner could replace an entry in
+/// `directory`: it is group- or world-writable (or, on macOS, an ACL lets
+/// another write) and has no sticky bit.
+#[cfg(unix)]
+fn shared(directory: &Path) -> Result<bool, OutputRefusal> {
+    use std::os::unix::fs::MetadataExt as _;
+    let found = std::fs::metadata(directory).map_err(|_| OutputRefusal::Unwritable)?;
+    if found.mode() & 0o1000 != 0 {
+        return Ok(false);
+    }
+    #[cfg(target_os = "macos")]
+    if kettle_media_native::acl::grants_write(directory) {
+        return Ok(true);
+    }
+    Ok(found.mode() & 0o022 != 0)
+}
+
+/// Windows has no media worker, so no sheet is ever written there.
+#[cfg(not(unix))]
+fn shared(_: &Path) -> Result<bool, OutputRefusal> {
+    Ok(false)
+}
+
+/// A name no one can guess ahead of time: this process's randomly keyed
+/// hash of the clock.
+fn unpredictable() -> u64 {
+    use std::hash::{BuildHasher as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u32(std::process::id());
+    if let Ok(now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        hasher.write_u128(now.as_nanos());
+    }
+    hasher.finish()
+}
+
+/// A new private file in `directory` under a hidden, unpredictable name
+/// beside `name`, made by this call and by nothing else.
+fn create_private(
+    directory: &Path,
+    name: &std::ffi::OsStr,
+) -> Result<(PathBuf, std::fs::File), OutputRefusal> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    for _ in 0..16 {
+        let mut candidate = std::ffi::OsString::from(".");
+        candidate.push(name);
+        candidate.push(format!(".{:016x}.tmp", unpredictable()));
+        let path = directory.join(candidate);
+        match options.open(&path) {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return Err(OutputRefusal::Unwritable),
+        }
+    }
+    Err(OutputRefusal::Unwritable)
+}
+
+/// Write `bytes` to `out` whole or not at all: a private file of this
+/// call's own beside it, renamed over it, in a folder no one else can
+/// change, and never over the video. Only a file this call made is ever
+/// removed.
+fn write_out(out: &Path, input: &Path, bytes: &[u8]) -> Result<(), OutputRefusal> {
     if let (Ok(out), Ok(input)) = (std::fs::canonicalize(out), std::fs::canonicalize(input))
         && out == input
     {
-        return Err(FailureCode::BadParams);
+        return Err(OutputRefusal::IsInput);
     }
     let directory = out
         .parent()
@@ -345,48 +448,45 @@ fn write_out(out: &Path, input: &Path, bytes: &[u8]) -> Result<(), FailureCode> 
                 parent
             }
         })
-        .ok_or(FailureCode::BadParams)?;
-    let name = out.file_name().ok_or(FailureCode::BadParams)?;
-    let mut temporary = name.to_os_string();
-    temporary.push(format!(".kettle-{}.tmp", std::process::id()));
-    let temporary = directory.join(temporary);
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let written = options
-        .open(&temporary)
-        .and_then(|mut file| file.write_all(bytes).and_then(|()| file.sync_all()))
+        .ok_or(OutputRefusal::Unwritable)?;
+    let name = out.file_name().ok_or(OutputRefusal::Unwritable)?;
+    if shared(directory)? {
+        return Err(OutputRefusal::Shared);
+    }
+    let (temporary, mut file) = create_private(directory, name)?;
+    let written = file
+        .write_all(bytes)
+        .and_then(|()| file.sync_all())
         .and_then(|()| std::fs::rename(&temporary, out));
     if written.is_err() {
         let _ = std::fs::remove_file(&temporary);
-        return Err(FailureCode::FilePermission);
+        return Err(OutputRefusal::Unwritable);
     }
     Ok(())
 }
 
 /// Run `kettle video-frames …`; returns the exit code (0 written, 1 not).
 pub(crate) fn run(request: FramesRequest, out: &Path) -> i32 {
-    let result = crate::media_client()
+    let sheet = crate::media_client()
         .ok_or(FailureCode::WorkerUnavailable)
         .and_then(|client| render(&request, &client))
-        .and_then(|sheet| {
-            write_out(out, &request.path, &sheet.jpeg(&|_| true)?)?;
-            Ok(sheet)
-        });
-    match result {
-        Ok(sheet) => {
-            println!("{}", sheet.index());
-            0
-        }
+        .and_then(|sheet| sheet.jpeg(&|_| true).map(|jpeg| (sheet, jpeg)));
+    let (sheet, jpeg) = match sheet {
+        Ok(taken) => taken,
         Err(failure) => {
             eprintln!("kettle video-frames: {}", failure.model_message());
             if let Some(hint) = decoder_hint(failure) {
                 eprintln!("kettle video-frames: {hint}");
             }
-            1
+            return 1;
         }
+    };
+    if let Err(refusal) = write_out(out, &request.path, &jpeg) {
+        eprintln!("kettle video-frames: {}", refusal.text());
+        return 1;
     }
+    println!("{}", sheet.index());
+    0
 }
 
 #[cfg(test)]
@@ -424,7 +524,15 @@ mod tests {
         .unwrap();
         assert_eq!(
             (one.count, one.at_s, one.layout),
-            (1, Some(3.5), StillsLayout::Poster)
+            (
+                1,
+                Some(3.5),
+                StillsLayout::Sheet {
+                    cols: 1,
+                    labels: true
+                }
+            ),
+            "a single frame is labeled too"
         );
         let window = FramesRequest {
             start_s: Some(2.0),
@@ -486,6 +594,15 @@ mod tests {
                 ..request()
             },
             FramesRequest {
+                at_s: Some(1.0),
+                count: Some(1),
+                ..request()
+            },
+            FramesRequest {
+                path: PathBuf::from(format!("/{}", "a/".repeat(2100))),
+                ..request()
+            },
+            FramesRequest {
                 count: Some(0),
                 ..request()
             },
@@ -535,6 +652,12 @@ mod tests {
             encode(sheet(800, 450, true), &|_| false).unwrap_err(),
             FailureCode::TooLarge
         );
+        // The minimum itself is tried: 800, 600, 450, 337, then 320.
+        let (_, width, _) = encode(sheet(800, 450, true), &|jpeg| {
+            image::load_from_memory(jpeg).is_ok_and(|image| image.width() <= 320)
+        })
+        .unwrap();
+        assert_eq!(width, 320);
     }
 
     fn video(tolerance_ms: u32) -> VideoStillsResult {
@@ -592,11 +715,12 @@ mod tests {
         assert_eq!(
             index(&one, StillsLayout::Poster),
             "Video: 00:12.4, 1280x720, VP8, with audio.\n\
-             One frame, at 00:03.0.\n\
+             One frame, labeled with its time: 00:03.0.\n\
              This is what you have seen of the video, not all of it."
         );
         assert_eq!(span(22), "22 ms");
-        assert_eq!(span(1_450), "1.4 s");
+        assert_eq!(span(1_450), "1.5 s", "never less than it is");
+        assert_eq!(span(1_400), "1.4 s");
         assert_eq!(rate(25_000), "25 fps");
         assert_eq!(rate(23_976), "23.976 fps");
     }
@@ -615,7 +739,8 @@ mod tests {
     }
 
     /// The output is written whole beside where it goes, privately, and
-    /// never over the video itself.
+    /// never over the video itself; a folder others can change is refused
+    /// unless it is sticky; a failure removes nothing this call did not make.
     #[test]
     fn output_is_written_whole_and_never_over_the_input() {
         let directory = tempfile::tempdir().unwrap();
@@ -634,7 +759,7 @@ mod tests {
         }
         assert_eq!(
             write_out(&input, &input, b"jpeg").unwrap_err(),
-            FailureCode::BadParams
+            OutputRefusal::IsInput
         );
         assert_eq!(std::fs::read(&input).unwrap(), b"video");
         assert_eq!(
@@ -644,7 +769,7 @@ mod tests {
                 b"jpeg"
             )
             .unwrap_err(),
-            FailureCode::FilePermission
+            OutputRefusal::Unwritable
         );
         let leftovers: Vec<_> = std::fs::read_dir(directory.path())
             .unwrap()
@@ -652,5 +777,51 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp"))
             .collect();
         assert!(leftovers.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_folders_others_can_change_are_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let chmod = |path: &Path, mode: u32| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("clip.webm");
+        std::fs::write(&input, b"video").unwrap();
+        let folder = directory.path().join("out");
+        std::fs::create_dir(&folder).unwrap();
+        let out = folder.join("frames.jpg");
+        for (mode, refused) in [
+            (0o777, true),
+            (0o775, true),
+            (0o1777, false),
+            (0o755, false),
+        ] {
+            chmod(&folder, mode);
+            let written = write_out(&out, &input, b"jpeg");
+            if refused {
+                assert_eq!(written.unwrap_err(), OutputRefusal::Shared, "{mode:o}");
+            } else {
+                written.unwrap_or_else(|refusal| panic!("{mode:o}: {refusal:?}"));
+            }
+        }
+        // A folder that takes no file: nothing there is touched, including a
+        // file that looks like one of this command's own. Root writes
+        // anywhere, so this half cannot run as root.
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let lookalike = folder.join(".frames.jpg.0000000000000000.tmp");
+        std::fs::write(&lookalike, b"someone's").unwrap();
+        chmod(&folder, 0o555);
+        assert_eq!(
+            write_out(&out, &input, b"new").unwrap_err(),
+            OutputRefusal::Unwritable
+        );
+        chmod(&folder, 0o755);
+        assert_eq!(std::fs::read(&lookalike).unwrap(), b"someone's");
+        assert_eq!(std::fs::read(&out).unwrap(), b"jpeg");
     }
 }

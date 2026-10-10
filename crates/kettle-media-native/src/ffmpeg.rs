@@ -102,6 +102,13 @@ impl Ffmpeg {
     pub fn path(&self) -> &Path {
         self.ffmpeg.path()
     }
+
+    /// The path ffmpeg was found by, whose directory holds the ffprobe beside
+    /// it: what a parent names to the worker, so the worker finds the same
+    /// pair.
+    pub fn named(&self) -> &Path {
+        self.ffmpeg.named()
+    }
 }
 
 /// The demuxer a sniffed container is read with.

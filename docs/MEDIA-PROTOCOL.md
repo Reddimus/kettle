@@ -246,7 +246,8 @@ same check availability runs, inside the startup deadline, and refuses without
 starting anything once two workers have been stuck. Nothing in the GUI calls it yet.
 
 The platform starts the worker with `client::worker_command`: no arguments, an
-empty environment, `/` as the working directory, stdin and stdout piped,
+empty environment (Kettle's own platform then adds only
+`KETTLE_MEDIA_DECODER`, naming a trusted ffmpeg when it finds one), `/` as the working directory, stdin and stdout piped,
 stderr discarded, and on Unix a process group of its own. Two threads move the
 bytes, so no blocked read or write can hold a deadline: one writes Hello, then
 the job once Ready has matched, then closes stdin; the other reads the first
@@ -436,8 +437,9 @@ the sniffed MIME type, references outside the file forbidden and the VP9
 decoder registered; its properties load asynchronously within the deadline,
 and one batch request to an image generator, with the track's display
 transform applied, returns each frame with its actual time, each within
-a quarter of the gap to its neighbours, so inside its own share (a single
-instant exactly). At the deadline
+a quarter of the gap to its neighbours, so no two instants take the keyframe
+between them (a single instant exactly); a frame longer than the gap still
+starts where it starts, outside its instant's share. At the deadline
 the batch is cancelled. Each frame is drawn at exactly the tile size in sRGB
 and un-premultiplied. A container it does not read is
 `UnsupportedContainer`, and a codec it cannot decode `CodecUnavailable`;

@@ -925,9 +925,22 @@ fn video_frames_request(args: &Value) -> Result<crate::video_frames::FramesReque
         return Err(FailureCode::BadParams);
     }
     let seconds = |key: &str| args.get(key).and_then(Value::as_f64);
+    // A whole number in any JSON spelling, 9 or 9.0.
     let whole = |key: &str| -> Result<Option<u64>, FailureCode> {
         args.get(key)
-            .map(|value| value.as_u64().ok_or(FailureCode::BadParams))
+            .map(|value| {
+                value
+                    .as_u64()
+                    .or_else(|| {
+                        value
+                            .as_f64()
+                            .filter(|number| {
+                                number.fract() == 0.0 && (0.0..=u32::MAX.into()).contains(number)
+                            })
+                            .map(|number| number as u64)
+                    })
+                    .ok_or(FailureCode::BadParams)
+            })
             .transpose()
     };
     Ok(crate::video_frames::FramesRequest {
@@ -1034,8 +1047,9 @@ fn tool_argument_fields(name: &str) -> Option<&'static [(&'static str, ArgKind)]
             ("start_s", ArgKind::Number),
             ("end_s", ArgKind::Number),
             ("at_s", ArgKind::Number),
-            ("count", ArgKind::Unsigned),
-            ("max_edge", ArgKind::Unsigned),
+            // Integers by the schema, which a client may write as 9.0.
+            ("count", ArgKind::Number),
+            ("max_edge", ArgKind::Number),
             ("select", ArgKind::String),
         ],
         "kettle_run" => &[
@@ -1765,6 +1779,8 @@ mod tests {
             json!({"path": "/x.mp4", "count": 17}),
             json!({"path": "/x.mp4", "count": 2.5}),
             json!({"path": "/x.mp4", "at_s": 1.0, "end_s": 2.0}),
+            json!({"path": "/x.mp4", "at_s": 1.0, "count": 1}),
+            json!({"path": "/x.mp4", "count": -1}),
             json!({}),
         ] {
             let result = call(arguments.clone());
@@ -1776,6 +1792,15 @@ mod tests {
         let missing = call(json!({"path": "/nonexistent/kettle-test-clip.mp4"}));
         assert_eq!(
             missing["content"][0]["text"],
+            json!(FailureCode::FileNotFound.model_message())
+        );
+        // Integers as the schema allows them, 9.0 as well as 9, pass to the
+        // file check.
+        let spelled = call(
+            json!({"path": "/nonexistent/kettle-test-clip.mp4", "count": 9.0, "max_edge": 1568.0}),
+        );
+        assert_eq!(
+            spelled["content"][0]["text"],
             json!(FailureCode::FileNotFound.model_message())
         );
     }
