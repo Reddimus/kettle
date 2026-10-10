@@ -295,8 +295,13 @@ off applies at the next launch. `get_state` reports the policy in force as
 its caller runs
 in. It needs only Display, so `agent-display` is enough; it grants no reads
 or mutations, and a display-only client learns nothing about the screen from
-it. `kettle show PATH` and `kettle show -` (bytes on stdin) send it from a
-shell.
+it. `kettle show PATH` and `kettle show` (or `kettle show -`, bytes on
+stdin) send it from a shell; `--mermaid` renders either as a Mermaid diagram.
+Stdin is refused, never cut short, past what one request carries once
+encoded (about 768 KiB), or past 64 KiB of UTF-8 text with `--mermaid`; a
+path longer than 4 KiB is refused before anything looks for it, and the
+whole request, escapes and base64 included, is measured as a client frames
+it before it is sent.
 
 Params take exactly one source, plus optional `title` (at most 4 KiB) and
 `key` (1 to 256 bytes):
@@ -305,10 +310,13 @@ Params take exactly one source, plus optional `title` (at most 4 KiB) and
 |---|---|
 | `svg`: SVG text, at most 2 MiB | SVG |
 | `image_b64`: standard base64 bytes, at most 32 MiB decoded | whatever the media worker finds the bytes to be: raster, SVG, or text that parses as a Mermaid diagram |
-| `path` + `dev` + `ino`: an absolute path and the device and inode the caller saw | whatever the worker finds in the file it opens; another file at that path is refused |
+| `mermaid`: Mermaid text, at most 64 KiB | Mermaid |
+| `path` + `dev` + `ino`: an absolute path (at most 4 KiB) and the device and inode the caller saw | whatever the worker finds in the file it opens, or Mermaid with `kind: "mermaid"`; another file at that path is refused |
 
 The whole request still fits the 1 MiB request line, so larger media goes by
-path. The file's name, and the caller's word for its type, decide nothing.
+path. The file's name decides nothing; only the `mermaid` source, or
+`kind: "mermaid"` on a path, has the media rendered as Mermaid rather than
+as what its bytes turn out to be.
 A `pane` param is honored only for full control, for a caller Kettle cannot
 place. A malformed `show` is answered on its connection thread and never
 reaches the App.
@@ -346,7 +354,9 @@ identifier: `not_in_kettle_pane`, `busy`, `bad_params`, `too_large`,
 `file_refused` (`not_found`, `permission`, `not_regular`, `too_large`),
 `changed`, `unsupported_media`, `unsupported_platform`, `render_failed`
 (`timeout`, `resource`, `parse`), `over_budget`, `restart_required` and
-`worker_unavailable`. `kettle show` prints the same wording, and adds
+`worker_unavailable`. `kettle show` prints the same wording, by the code and
+reason alone: it never repeats the words a reply carries, and says so in
+its own words when a code or reason is one it does not know. It adds
 `not_in_kettle` when no Kettle it runs in has agent previews on.
 
 **The shelf.** Each pane keeps its last eight items, newest first; a full

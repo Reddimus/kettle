@@ -117,6 +117,46 @@ pub fn to_json_vec_bounded<T: Serialize + ?Sized>(
     Ok(writer.bytes)
 }
 
+/// Whether a `method` request carrying `params` fits one request line with
+/// whatever id and caller claim a client frames it: what a caller checks
+/// before it has a connection, so a source too large to send inline is
+/// refused with advice rather than a framing error. Nothing is buffered.
+pub fn request_fits(method: &str, params: &Value) -> bool {
+    /// [`Request`] as a client sends it with a claim, borrowing the params.
+    #[derive(Serialize)]
+    struct Framed<'a> {
+        v: u32,
+        id: u64,
+        method: &'a str,
+        params: &'a Value,
+        caller: PeerClaim,
+    }
+    struct Counter {
+        written: usize,
+    }
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.written = self.written.saturating_add(bytes.len());
+            if self.written > MAX_LINE_BYTES {
+                return Err(std::io::Error::other("request line limit reached"));
+            }
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let framed = Framed {
+        v: PROTOCOL_VERSION,
+        id: u64::MAX,
+        method,
+        params,
+        caller: PeerClaim::WIDEST,
+    };
+    serde_json::to_writer(&mut Counter { written: 0 }, &framed).is_ok()
+}
+
 /// Find the first newline which has not already been examined. When no
 /// delimiter is present, `scanned` advances to `bytes.len()`, so appending and
 /// retrying examines each byte once instead of rescanning the entire frame.
@@ -374,6 +414,16 @@ pub struct PeerClaim {
     /// `KETTLE_PID` from the client's environment: a hint, never proof.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid_hint: Option<std::num::NonZeroU32>,
+}
+
+impl PeerClaim {
+    /// The claim that takes the most room on the wire.
+    pub const WIDEST: Self = Self {
+        pid: std::num::NonZeroU32::MAX,
+        start_token: Some(StartToken(u64::MAX)),
+        pane_hint: Some(u64::MAX),
+        pid_hint: Some(std::num::NonZeroU32::MAX),
+    };
 }
 
 /// A process start instant on the wire. Always a decimal string: Windows
@@ -773,6 +823,35 @@ mod tests {
         let s = serde_json::to_string(&ev).unwrap();
         assert!(s.contains(r#""event":"output""#));
         assert!(s.contains(r#""pane":3"#));
+    }
+
+    /// A request fits by the line its widest id and claim take, escapes
+    /// counted, to the byte: what a client then frames is within the cap.
+    #[test]
+    fn a_request_fits_by_its_widest_framing_escapes_included() {
+        let request = |params: Value| Request {
+            v: PROTOCOL_VERSION,
+            id: u64::MAX,
+            method: "show".into(),
+            params,
+            caller: Some(PeerClaim::WIDEST),
+        };
+        let overhead = serde_json::to_vec(&request(Value::String(String::new())))
+            .unwrap()
+            .len();
+        // Each `"` takes two bytes on the wire.
+        let room = MAX_LINE_BYTES - overhead;
+        let mut text = "\"".repeat(room / 2);
+        if room % 2 == 1 {
+            text.push('a');
+        }
+        let at = Value::String(text.clone());
+        assert!(request_fits("show", &at), "exactly the line");
+        assert!(to_json_vec_bounded(&request(at), MAX_LINE_BYTES).is_ok());
+        text.push('a');
+        let over = Value::String(text);
+        assert!(!request_fits("show", &over), "one byte over");
+        assert!(to_json_vec_bounded(&request(over), MAX_LINE_BYTES).is_err());
     }
 
     #[test]

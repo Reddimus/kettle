@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use kettle_media::{
-    ExternalAttested, FailureCode, JobKind, MAX_RASTER_BYTES, MAX_SVG_BYTES, MediaKind, NativePath,
-    ValidationError, Warning,
+    ExternalAttested, FailureCode, JobKind, MAX_MERMAID_BYTES, MAX_RASTER_BYTES, MAX_SVG_BYTES,
+    MediaKind, NativePath, Warning,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -82,11 +82,15 @@ pub enum ShowSource {
     Svg(String),
     /// Image bytes, classified by the worker.
     Image(Vec<u8>),
+    /// Mermaid text, rendered as Mermaid.
+    Mermaid(String),
     /// An absolute path the caller attests by device and inode, classified by
-    /// the worker from the file it opens.
+    /// the worker from the file it opens, or rendered as Mermaid when the
+    /// caller says it is (`"kind": "mermaid"`).
     File {
         path: NativePath,
         attestation: ExternalAttested,
+        mermaid: bool,
     },
 }
 
@@ -95,7 +99,8 @@ impl ShowSource {
     pub fn job_kind(&self) -> JobKind {
         match self {
             Self::Svg(_) => JobKind::Svg,
-            Self::Image(_) | Self::File { .. } => JobKind::Auto,
+            Self::Mermaid(_) | Self::File { mermaid: true, .. } => JobKind::Mermaid,
+            Self::Image(_) | Self::File { mermaid: false, .. } => JobKind::Auto,
         }
     }
 }
@@ -124,7 +129,7 @@ impl ShowRequest {
             Value::Object(fields) => fields,
             _ => return Err(FailureCode::BadParams),
         };
-        let mut sources = ["svg", "image_b64", "path"]
+        let mut sources = ["svg", "image_b64", "mermaid", "path"]
             .into_iter()
             .filter(|name| fields.get(*name).is_some_and(|value| !value.is_null()));
         let name = sources.next().ok_or(FailureCode::BadParams)?;
@@ -141,11 +146,21 @@ impl ShowRequest {
             optional_u64(&mut fields, "dev")?,
             optional_u64(&mut fields, "ino")?,
         );
+        // Only a file says what it is; inline text has its field's name.
+        let mermaid = match fields.remove("kind") {
+            None | Some(Value::Null) => false,
+            Some(Value::String(kind)) if kind == "mermaid" && name == "path" => true,
+            Some(_) => return Err(FailureCode::BadParams),
+        };
         let source = match (name, attestation) {
             ("svg", (None, None)) if text.len() > MAX_SVG_BYTES => {
                 return Err(FailureCode::TooLarge);
             }
             ("svg", (None, None)) => ShowSource::Svg(text),
+            ("mermaid", (None, None)) if text.len() > MAX_MERMAID_BYTES => {
+                return Err(FailureCode::TooLarge);
+            }
+            ("mermaid", (None, None)) => ShowSource::Mermaid(text),
             ("image_b64", (None, None)) => {
                 // The size is checked before anything is decoded: first the
                 // longest encoding of the cap, then the exact decoded size.
@@ -163,15 +178,14 @@ impl ShowRequest {
                 ShowSource::Image(bytes)
             }
             ("path", (Some(dev), Some(ino))) => {
-                // `NativePath` refuses a relative path on every platform.
+                // `NativePath` refuses a relative path on every platform, and
+                // one too long: an option out of bounds, not media too large.
                 let path =
-                    NativePath::from_path(Path::new(&text)).map_err(|error| match error {
-                        ValidationError::TooLarge => FailureCode::TooLarge,
-                        _ => FailureCode::BadParams,
-                    })?;
+                    NativePath::from_path(Path::new(&text)).map_err(|_| FailureCode::BadParams)?;
                 ShowSource::File {
                     path,
                     attestation: ExternalAttested { dev, ino },
+                    mermaid,
                 }
             }
             _ => return Err(FailureCode::BadParams),
@@ -212,11 +226,21 @@ impl ShowRequest {
                 let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
                 fields.insert("image_b64".into(), Value::String(encoded));
             }
-            ShowSource::File { path, attestation } => {
+            ShowSource::Mermaid(text) => {
+                fields.insert("mermaid".into(), Value::String(text));
+            }
+            ShowSource::File {
+                path,
+                attestation,
+                mermaid,
+            } => {
                 let text = native_path_text(&path).ok_or(FailureCode::BadParams)?;
                 fields.insert("path".into(), Value::String(text));
                 fields.insert("dev".into(), attestation.dev.into());
                 fields.insert("ino".into(), attestation.ino.into());
+                if mermaid {
+                    fields.insert("kind".into(), "mermaid".into());
+                }
             }
         }
         if let Some(title) = self.title {
@@ -239,6 +263,7 @@ impl ShowRequest {
         let (empty, over) = match &self.source {
             ShowSource::Svg(text) => (text.is_empty(), text.len() > MAX_SVG_BYTES),
             ShowSource::Image(bytes) => (bytes.is_empty(), bytes.len() > MAX_RASTER_BYTES),
+            ShowSource::Mermaid(text) => (text.is_empty(), text.len() > MAX_MERMAID_BYTES),
             ShowSource::File { .. } => (false, false),
         };
         let text = |text: &Option<String>, cap: usize| match text {
@@ -406,7 +431,9 @@ mod tests {
             json!({"svg": 7}),
             json!({"svg": "<svg/>", "image_b64": "AA=="}),
             json!({"image_b64": "AA==", "path": absolute("a.png"), "dev": 1, "ino": 2}),
-            json!({"mermaid": "graph LR"}),
+            json!({"mermaid": "graph LR", "svg": "<svg/>"}),
+            json!({"mermaid": ""}),
+            json!({"mermaid": "graph LR", "dev": 1, "ino": 2}),
         ] {
             assert_eq!(
                 ShowRequest::parse(params.clone()),
@@ -543,6 +570,7 @@ mod tests {
         let ShowSource::File {
             path: native,
             attestation,
+            mermaid: false,
         } = &request.source
         else {
             panic!("a file source");
@@ -561,11 +589,47 @@ mod tests {
                 "{bad}"
             );
         }
-        let long = absolute(&"n".repeat(kettle_media::MAX_PATH_BYTES));
+        // At most 4 KiB as the platform spells it (UTF-16 on Windows): one
+        // unit more is an option out of bounds.
+        let unit = if cfg!(windows) { 2 } else { 1 };
+        let name = |units: usize| absolute(&"n".repeat(units - absolute("").len()));
+        let at = name(kettle_media::MAX_PATH_BYTES / unit);
+        assert!(ShowRequest::parse(json!({"path": at, "dev": 0, "ino": 5})).is_ok());
+        let over = name(kettle_media::MAX_PATH_BYTES / unit + 1);
         assert_eq!(
-            ShowRequest::parse(json!({"path": long, "dev": 0, "ino": 5})),
+            ShowRequest::parse(json!({"path": over, "dev": 0, "ino": 5})),
+            Err(FailureCode::BadParams)
+        );
+    }
+
+    /// Mermaid comes inline, as text of at most 64 KiB, or as a file the
+    /// caller says is Mermaid; nothing else takes a kind.
+    #[test]
+    fn mermaid_is_inline_text_or_a_file_said_to_be_mermaid() {
+        let at = "%".repeat(MAX_MERMAID_BYTES);
+        let request = ShowRequest::parse(json!({"mermaid": at})).unwrap();
+        assert_eq!(request.source.job_kind(), JobKind::Mermaid);
+        assert_eq!(request.source, ShowSource::Mermaid(at.clone()));
+        assert_eq!(
+            ShowRequest::parse(json!({"mermaid": format!("{at}%")})),
             Err(FailureCode::TooLarge)
         );
+        let path = absolute("flow.txt");
+        let file = ShowRequest::parse(json!({"path": path, "dev": 1, "ino": 2, "kind": "mermaid"}))
+            .unwrap();
+        assert_eq!(file.source.job_kind(), JobKind::Mermaid);
+        for bad in [
+            json!({"path": path, "dev": 1, "ino": 2, "kind": "svg"}),
+            json!({"path": path, "dev": 1, "ino": 2, "kind": 1}),
+            json!({"svg": "<svg/>", "kind": "mermaid"}),
+            json!({"mermaid": "graph LR", "kind": "mermaid"}),
+        ] {
+            assert_eq!(
+                ShowRequest::parse(bad.clone()),
+                Err(FailureCode::BadParams),
+                "{bad}"
+            );
+        }
     }
 
     #[test]
@@ -593,9 +657,28 @@ mod tests {
                         dev: u64::MAX,
                         ino: 1,
                     },
+                    mermaid: false,
                 },
                 title: None,
                 key: Some(path.clone()),
+                pane: None,
+                inline: None,
+            },
+            ShowRequest {
+                source: ShowSource::Mermaid("graph LR\n  A[\"caf\u{e9}\"] --> B".into()),
+                title: Some("Flow".into()),
+                key: None,
+                pane: None,
+                inline: Some(InlineTarget::CodexHook),
+            },
+            ShowRequest {
+                source: ShowSource::File {
+                    path: NativePath::from_path(Path::new(&path)).unwrap(),
+                    attestation: ExternalAttested { dev: 3, ino: 4 },
+                    mermaid: true,
+                },
+                title: None,
+                key: None,
                 pane: None,
                 inline: None,
             },

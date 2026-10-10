@@ -23283,7 +23283,12 @@ impl App {
             kettle_ctl::show::ShowSource::Image(bytes) => {
                 (kettle_media::Source::Bytes(bytes), None)
             }
-            kettle_ctl::show::ShowSource::File { path, attestation } => {
+            kettle_ctl::show::ShowSource::Mermaid(text) => {
+                (kettle_media::Source::Bytes(text.into_bytes()), None)
+            }
+            kettle_ctl::show::ShowSource::File {
+                path, attestation, ..
+            } => {
                 let name = path.file_name_lossy();
                 (
                     kettle_media::Source::Path {

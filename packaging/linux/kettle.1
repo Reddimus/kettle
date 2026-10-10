@@ -25,7 +25,8 @@ kettle \- fast GPU-accelerated terminal emulator for Linux and macOS
 .RI [ \-\-self\-test " | " \-\-display ]
 .br
 .B kettle show
-.IR PATH " | " \-
+.RI [ PATH " | " \- ]
+.RB [ \-\-mermaid ]
 .RI [ \-\-title
 .IR TITLE ]
 .RI [ \-\-key
@@ -535,12 +536,19 @@ which sends an image, SVG or Mermaid diagram file to the media shelf of the
 kettle pane the
 server runs in and needs agent previews, never full control.
 .TP
-.B kettle show \fIPATH\fR|\fB\-\fR [\fB\-\-title \fITITLE\fR] [\fB\-\-key \fIKEY\fR]
+.B kettle show \fR[\fIPATH\fR|\fB\-\fR] [\fB\-\-mermaid\fR] [\fB\-\-title \fITITLE\fR] [\fB\-\-key \fIKEY\fR]
 Send a local image, SVG or Mermaid diagram to the media shelf of the pane this
-runs in, in the kettle it runs inside; never another kettle. Pass
-.B \-
-for a small one on stdin; larger media goes by path. The media worker
-decides what the bytes are, not the file name. A later
+runs in, in the kettle it runs inside; never another kettle. Without a
+.IR PATH ,
+or with
+.BR \- ,
+it reads stdin: up to what one request carries once encoded (about
+768 KiB); larger media goes by path, and nothing is ever cut short. The media
+worker decides what the bytes are, not the file name, unless
+.B \-\-mermaid
+says to render them as a Mermaid diagram: stdin is then UTF-8 Mermaid text of
+at most 64 KiB, and a file is rendered as a diagram whatever it is called. A
+path longer than 4 KiB is refused before anything looks for it. A later
 .B show
 with the same
 .B \-\-key

@@ -730,6 +730,46 @@ pub enum FailureCode {
     WorkerUnavailable = 26,
 }
 impl FailureCode {
+    /// Every failure, in code order.
+    pub const ALL: [Self; 27] = [
+        Self::BadParams,
+        Self::TooLarge,
+        Self::FileNotFound,
+        Self::FilePermission,
+        Self::FileNotRegular,
+        Self::FileTooLarge,
+        Self::Changed,
+        Self::IndexOutOfRange,
+        Self::UnsupportedMedia,
+        Self::UnsupportedPlatform,
+        Self::RenderTimeout,
+        Self::RenderResource,
+        Self::RenderParse,
+        Self::RestartRequired,
+        Self::UnknownMethod,
+        Self::Busy,
+        Self::UnsupportedContainer,
+        Self::CodecUnavailable,
+        Self::BackendUnavailable,
+        Self::ExternalOpenUnavailable,
+        Self::DisplayDisabled,
+        Self::NotInKettle,
+        Self::NotInKettlePane,
+        Self::DisplayOnly,
+        Self::ReadOnly,
+        Self::OverBudget,
+        Self::WorkerUnavailable,
+    ];
+
+    /// The failure a control reply names by its `code` and `reason`, so a
+    /// client says it in its own fixed words; `None` for a pair Kettle never
+    /// sends.
+    pub fn from_wire(code: &str, reason: Option<&str>) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|failure| failure.code() == code && failure.reason() == reason)
+    }
+
     /// Appendix A primary error code. Fixed subreasons are exposed by `reason`.
     pub fn code(self) -> &'static str {
         match self {

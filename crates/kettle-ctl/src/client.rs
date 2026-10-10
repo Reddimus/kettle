@@ -29,8 +29,13 @@ pub enum CtlError {
     NotInKettle,
     /// An I/O / transport failure.
     Io(std::io::Error),
-    /// The server returned an error response.
-    Server { code: String, message: String },
+    /// The server returned an error response, with its fixed subreason when
+    /// it gave one.
+    Server {
+        code: String,
+        message: String,
+        reason: Option<String>,
+    },
     /// The server's reply was not parseable.
     Protocol(String),
     /// The request did not receive a complete response before its deadline.
@@ -54,7 +59,9 @@ impl std::fmt::Display for CtlError {
                 "this session is not running inside a kettle whose agent previews are on"
             ),
             CtlError::Io(e) => write!(f, "control I/O error: {e}"),
-            CtlError::Server { code, message } => write!(f, "server error [{code}]: {message}"),
+            CtlError::Server { code, message, .. } => {
+                write!(f, "server error [{code}]: {message}")
+            }
             CtlError::Protocol(m) => write!(f, "protocol error: {m}"),
             // Both of these end the caller's wait, not the server's work: a
             // request already on the wire may be carried out regardless. Say
@@ -506,6 +513,7 @@ impl Client {
                     return Err(CtlError::Server {
                         code: err.code,
                         message: err.message,
+                        reason: err.reason,
                     });
                 }
             }
