@@ -69,9 +69,15 @@ named regular files; only the requested collection face is inserted, with its
 index preserved and bounded metadata. The worker does no host font discovery
 and refuses embedded SVG/color/bitmap glyph formats. Actual shaped glyphs
 produce fallback and missing-script warnings; databases are isolated across
-jobs. Raster images, SVG and Mermaid diagrams are rendered, and so is an
-Auto job: one held snapshot of a file, classified by its bytes as raster,
-SVG or Mermaid and rendered as that, with a typed reply that says which.
+jobs. Raster images, SVG and Mermaid diagrams are rendered, Markdown
+diagram galleries too, and so is an Auto job: one held snapshot of a file,
+classified by its bytes as raster, SVG, Markdown or Mermaid and rendered as
+that, with a typed reply that says which. A gallery is the Mermaid fences
+of one CommonMark document (pulldown-cmark, the version merman-render
+already locks), at most 32 of at most 64 KiB each in at most 1 MiB; its
+reply carries every page, the document as read and its digest beside the
+one page rendered, so later pages render from those bytes and one gallery
+is one version of the file.
 Mermaid goes through merman 0.8.0, pinned exactly with its layout and
 painting family, under a resource-constrained policy and a two-second
 `OperationControl` deadline that starts before its fonts load. Kettle
@@ -93,7 +99,7 @@ moves to it; and relative font sizes, from attributes and style sheets alike,
 are resolved against the inherited size to absolute pixels within the number
 bound, or left out; and admission, the layer checks and
 resvg follow unchanged. The rendered item keeps the Mermaid source as its
-source text and digest. Every other kind is refused as unsupported until its
+source text and digest. Video is refused as unsupported until its
 renderer lands. The client's `render` runs one job in a
 fresh worker under startup and job deadlines, with the worker in its own
 process group, killed before it is reaped; `render_with_control` adds

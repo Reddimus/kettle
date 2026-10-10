@@ -77,7 +77,8 @@ image, or the crop asked for). The extents must be finite and positive, both rec
 nonempty and within u32, and the pixels no wider or taller than the region they cover: an
 SVG held to its pixel ceiling covers its region more sparsely. The optional exact source is
 a textual kind's input exactly as it was read, from the snapshot the digest covers (an SVG
-file, or a Mermaid diagram's source, never the generated SVG), at most 2 MiB; a raster
+file, a Mermaid diagram's source or a Markdown document, never the generated SVG), at most
+2 MiB; a raster
 returns none. A DetectedRendered reply is held to its kind on encode, on decode and when
 the parent takes it: an SVG, Mermaid or Markdown reply must carry its source, within that
 kind's input cap (2 MiB, 64 KiB, 1 MiB), and a raster or video reply must carry none.
@@ -389,9 +390,9 @@ of 0 backs it up. Every size is checked before the work it would cost, so the
 worker's limits and the client's deadlines and memory limit are a second
 bound, not the only one. An empty target box, one over 4096 pixels on an
 edge, a scale that is not a positive finite number, or a crop that is empty or
-leaves the box, is `BadParams`. Raster, SVG, Mermaid and Auto jobs are
-rendered; every other kind is `UnsupportedMedia` until its renderer lands. On Windows, where no
-worker runs, every job is `UnsupportedPlatform`.
+leaves the box, is `BadParams`. Raster, SVG, Mermaid, MarkdownDiagrams and
+Auto jobs are rendered; a video kind is `UnsupportedMedia` until its renderer
+lands. On Windows, where no worker runs, every job is `UnsupportedPlatform`.
 
 **Auto jobs.** The source is read once, under the larger of the raster and
 SVG caps, and that one snapshot is both classified and rendered, so a file
@@ -402,15 +403,34 @@ byte-order mark and the prolog (the XML declaration, processing
 instructions, comments and a document type declaration), is `svg` is SVG.
 That root is found by one scan, before the SVG cap applies or the parser
 runs, so other markup is `UnsupportedMedia` however large it is or however
-hard it would be to parse. Other UTF-8 text goes to the Mermaid renderer,
-which recognizes a diagram with its own preprocessing as it parses it and
-answers `UnsupportedMedia` for text that is not one, so the Mermaid kind is
-reported once the diagram has rendered. Markdown is `UnsupportedMedia` for
-now, as are bytes that are not UTF-8. The actual kind's own cap applies before
+hard it would be to parse, unless it is a Markdown gallery. Other UTF-8 text
+within the 1 MiB Markdown cap, markup included (a README's HTML block or an
+autolink is no SVG), is parsed as CommonMark, and text with a Mermaid fence is
+a Markdown gallery, reported as Markdown before its first page renders. Any
+other UTF-8 text that is not markup goes
+to the Mermaid renderer, which recognizes a diagram with its own
+preprocessing as it parses it and answers `UnsupportedMedia` for text that is
+not one, so the Mermaid kind is reported once the diagram has rendered.
+Bytes that are not UTF-8 are `UnsupportedMedia`. The actual kind's own cap applies before
 anything decodes the snapshot, so SVG content over 2 MiB is refused as an
 explicit SVG job's would be: `FileTooLarge` from a file and `TooLarge`
 inline. SVG behind a document type declaration is classified as SVG and then
 refused by the parser (`RenderParse`), as an explicit SVG job is.
+
+**Markdown galleries.** A page is each fenced code block whose info
+string's first word is `mermaid`, in any case, in document order, wherever
+CommonMark puts it (the top level, a list item, a block quote, its
+container's indentation removed); an unclosed fence runs to its container's
+end. Indented code, other languages and fences of white space only are not
+pages, however long. A document over 1 MiB, with more than 32 pages or with a
+page over 64 KiB is refused whole (`FileTooLarge` from a file, `TooLarge` inline),
+never shown in part; no page is `UnsupportedMedia`, and a
+`MarkdownDiagrams` index past the last page is `IndexOutOfRange`. The reply
+carries every page as `fence sources`, the count, the index rendered, the
+document as read as its exact source, and the digest of that one snapshot,
+whose display lines are the rendered page's. A page renders exactly as the
+same text sent as a Mermaid job would, within the same two-second diagram
+deadline, which starts before the document is parsed.
 
 **The source.** Inline bytes over the job kind's input cap (32 MiB for a
 raster or an Auto job, 2 MiB for an SVG) are `TooLarge`. A path is opened once, read-only, non-blocking and

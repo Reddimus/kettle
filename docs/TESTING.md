@@ -969,7 +969,11 @@ owned by root, so it is not dumpable (checked when not running as root). With
 `--features test-faults`, a job that panics leaves exactly
 `media worker panic` on stderr and no reply. An Auto job's reply names what
 it rendered, a PNG as raster and an SVG as SVG, prose is
-`UnsupportedMedia`, and an explicit kind's reply stays the plain frame. With
+`UnsupportedMedia`, and an explicit kind's reply stays the plain frame. A
+Markdown gallery crosses whole: an Auto job's reply says Markdown and carries
+both pages, the document as read and the first page rendered; an explicit
+page comes back with its index and the same digest, and one past the last is
+`IndexOutOfRange`. With
 `test-faults`, a job can pause either side of its classification: a 2.2 s
 pause after it ends a raster job, explicit or Auto, at the watchdog (exit 4)
 while an SVG job of either kind answers; and two 1.2 s pauses either side of
@@ -1001,8 +1005,7 @@ keeps it pure blue. An 8x8 box fits a 4x2 image at 8x4; a crop in box
 coordinates is transparent where the centered image does not reach; a box
 over the rendered edge or a crop outside it is `BadParams`. A file's digest
 covers its bytes and the open file's identity, the same bytes inline carry
-none, and kinds other than raster, SVG and Auto are `UnsupportedMedia` for
-now.
+none, and video kinds are `UnsupportedMedia` for now.
 
 Unit tests in `src/auto.rs` classify Auto jobs: a PNG is raster whatever the
 file is called (`.svg`, `.bin`, no suffix), and a declared SVG with a
@@ -1013,6 +1016,39 @@ identity included. Mermaid text is Mermaid whatever the file is called,
 reported once it has rendered, and text that only starts like a diagram is
 `RenderParse` with no kind reported. Prose, an HTML page, bytes that are not
 UTF-8 and an empty file are `UnsupportedMedia` with no kind reported.
+Markdown with a Mermaid fence is a gallery whatever the file is called
+(`.md`, `.mmd`, `.bin`, `.svg`, no suffix), heard as Markdown once, with both
+pages, the document and the first page's display lines, while Markdown whose
+only fence is Rust is `UnsupportedMedia`. Prose past a diagram's 64 KiB
+around a small fence is a gallery, the same prose with no fence is
+`FileTooLarge`, and a document a byte past 1 MiB is `FileTooLarge` while one
+at it renders. Markdown that starts with an autolink, a README's HTML block
+or a comment is still a gallery, while an HTML page with no Mermaid fence is
+`UnsupportedMedia`, small or past a diagram's 64 KiB.
+`src/markdown.rs` pins extraction: Mermaid fences are pages in document
+order, backtick or tilde, the language in any case and with attributes after
+it, inside a list item or a block quote with their indentation removed, while
+other languages, indented code, a fence in no language, a blank fence and
+`mermaid-ish` are not; a longer closing fence closes and a shorter one is
+text; an unclosed fence runs to the end. Thirty-two pages are a gallery and a
+thirty-third refuses the document (`FileTooLarge` from a file), blank fences
+not counting; a page at 64 KiB is kept and a byte more refuses the document
+wherever it is, while a blank fence of twice that is no page and no refusal,
+and text after 64 KiB of white space in one fence still refuses it, a row
+at a time in a block quote too; a document at 1 MiB parses and a byte more is refused before
+parsing. Text built to work a parser hard (nested quotes and lists, runs of
+backticks, brackets and emphasis, repeated openers) comes back within a
+second at the limit, a spent deadline stops extraction, a page renders beside
+every page with the document and its digest while another page renders other
+pixels, no page is `UnsupportedMedia`, a page past the last is
+`IndexOutOfRange`, a broken page is `RenderParse`, bytes that are not UTF-8
+are `UnsupportedMedia`, and the pages and pixels come from the snapshot read
+though the file is replaced after. Red checks: an off-by-one page limit, a
+thirty-third page kept, blank pages kept, a file refused as inline bytes, a
+case-sensitive language, the page's source or digest returned in place of the
+document's, no deadline between parser events, a blank fence refused, white
+space past the limit not counted, every markup taken for SVG, and markup
+with no fence sent to Mermaid each fail a test.
 `src/mermaid.rs` renders real diagrams that keep their Mermaid source as
 source text and digest, rerenders on a white canvas with new pixels but the
 same identity, keeps prose (`UnsupportedMedia`) apart from broken diagram
@@ -1021,7 +1057,10 @@ bytes that are not UTF-8, an oversized source and an empty one.
 `tests/mermaid_corpus.rs` renders each of the 37 pinned diagram families
 (fixtures from merman's upstream, provenance in their README) as a Mermaid
 and as an Auto job, with real pixels inside the target, and checks the
-fallback collection face per job. `svg::sanitize`'s
+fallback collection face per job. The same families as Markdown galleries, a
+family to a page: every page renders the pixels its Mermaid does with the
+document's digest, and one document of all 37, more pages than a gallery
+holds, is `TooLarge`. `svg::sanitize`'s
 `generated_diagrams_are_cleaned_where_outside_svg_is_refused` checks that a
 generated diagram keeps the first of repeated ids, leaves out an element
 past the number bound whole, resolves `em`, `ex` and percentage font sizes
