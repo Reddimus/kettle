@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 
 use crate::exec::{ExecOpts, OutputMode, run_exec_capture, run_exec_capture_cancellable};
 use kettle_ctl::Client;
+use kettle_media::FailureCode;
 
 const MAX_TOOL_TEXT_BYTES: usize = 512 * 1024;
 const MAX_COMMAND_ARGS: usize = 256;
@@ -111,9 +112,70 @@ fn show_tool_spec() -> Value {
     })
 }
 
+/// `kettle_video_frames`' specification: reading a video for oneself, apart
+/// from showing it, with the plan's parameters and their bounds.
+fn video_frames_tool_spec() -> Value {
+    json!({
+        "name": "kettle_video_frames",
+        "description": "Read a video's or animation's frames yourself. Returns one JPEG contact \
+            sheet of evenly spaced frames (nine by default), or one frame with at_s, each \
+            labeled with its time, and a text index of each frame's time with the video's \
+            duration, size, codec, frame rate and audio. The file is decoded on this machine; \
+            nothing is shown to the user. Narrow start_s and end_s around the moment that \
+            matters, or use at_s for one frame; max_edge 2560 reads small text.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": kettle_media::MAX_PATH_BYTES,
+                    "pattern": ABSOLUTE_PATH_PATTERN,
+                    "description": "absolute path of the video or animation, at most 4 KiB"
+                },
+                "start_s": {
+                    "type": "number",
+                    "minimum": 0,
+                    "description": "where the frames start, in seconds (default: the start)"
+                },
+                "end_s": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "description": "where the frames end, in seconds, after start_s (default: the end)"
+                },
+                "at_s": {
+                    "type": "number",
+                    "minimum": 0,
+                    "description": "one frame at this time, in seconds, instead of a sheet; not with start_s, end_s or count"
+                },
+                "count": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": kettle_media::MAX_VIDEO_STILLS,
+                    "description": "how many frames, 1 to 16 (default 9)"
+                },
+                "max_edge": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": crate::video_frames::MAX_EDGE,
+                    "description": "the sheet's longer edge in pixels (default 1568); 2560 to read small text"
+                },
+                "select": {
+                    "type": "string",
+                    "enum": ["even"],
+                    "description": "how frames are chosen: evenly across the window"
+                }
+            },
+            "required": ["path"],
+            "additionalProperties": false
+        }
+    })
+}
+
 fn full_tool_specs() -> Vec<Value> {
     vec![
         show_tool_spec(),
+        video_frames_tool_spec(),
         json!({
             "name": "kettle_run",
             "description": "Run a command headlessly under a real PTY (no window) and return its \
@@ -358,20 +420,25 @@ fn full_tool_specs() -> Vec<Value> {
 }
 
 /// Dispatch a `tools/call`. `params` is `{name, arguments}`. Returns an
-/// MCP tool result (`{content: [...], isError?}`).
+/// MCP tool result (`{content: [...], isError?}`), one whose image fits a
+/// legacy response with no id.
 pub fn call_tool(selection: ToolSelection, params: &Value) -> Value {
-    call_tool_inner(selection, params, None)
+    call_tool_inner(selection, params, None, &|result| {
+        crate::mcp::response_fits(&Value::Null, false, result)
+    })
 }
 
 /// Dispatch a tool while observing the owning JSON-RPC request's cancellation
 /// flag. Local runs terminate their child, while control-backed calls stop
 /// waiting and drop the connection so the server can release deferred work.
+/// `fits` says whether a result fits the response it will be sent in.
 pub fn call_tool_cancellable(
     selection: ToolSelection,
     params: &Value,
     cancelled: &std::sync::atomic::AtomicBool,
+    fits: &dyn Fn(&Value) -> bool,
 ) -> Value {
-    call_tool_inner(selection, params, Some(cancelled))
+    call_tool_inner(selection, params, Some(cancelled), fits)
 }
 
 pub(crate) fn validate_tool_call(selection: ToolSelection, params: &Value) -> Result<(), String> {
@@ -401,6 +468,7 @@ fn is_known_tool(selection: ToolSelection, name: &str) -> bool {
     matches!(
         name,
         "kettle_show"
+            | "kettle_video_frames"
             | "kettle_run"
             | "kettle_list_panes"
             | "kettle_read_screen"
@@ -422,6 +490,7 @@ fn call_tool_inner(
     selection: ToolSelection,
     params: &Value,
     cancelled: Option<&std::sync::atomic::AtomicBool>,
+    fits: &dyn Fn(&Value) -> bool,
 ) -> Value {
     let call = match parse_tool_call(selection, params) {
         Ok(call) => call,
@@ -434,11 +503,15 @@ fn call_tool_inner(
         if call.name == "kettle_show" {
             return show_failed(kettle_media::FailureCode::BadParams.into());
         }
+        if call.name == "kettle_video_frames" {
+            return frames_failed(kettle_media::FailureCode::BadParams);
+        }
         return error_result(&error);
     }
     match call.name.as_str() {
         "kettle_show" => tool_kettle_show(&args, params, cancelled, crate::mcp_display::session()),
         "kettle_card" => tool_kettle_card(&args, params, crate::mcp_display::session()),
+        "kettle_video_frames" => tool_kettle_video_frames(&args, fits),
         "kettle_run" => tool_kettle_run(&args, cancelled),
         "kettle_list_panes" => ctl_call(
             "list_panes",
@@ -835,6 +908,99 @@ fn ctl_discovery_error(error: &impl std::fmt::Display) -> Value {
 }
 
 /// An MCP error tool-result (isError = true).
+/// `kettle_video_frames`' arguments as a request, or `BadParams`: an
+/// absolute path, `select` only `"even"`, counts and edges that fit their
+/// types. The bounds themselves are the request's to check.
+fn video_frames_request(args: &Value) -> Result<crate::video_frames::FramesRequest, FailureCode> {
+    let path = args
+        .get("path")
+        .and_then(Value::as_str)
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or(FailureCode::BadParams)?;
+    if args
+        .get("select")
+        .is_some_and(|select| select.as_str() != Some("even"))
+    {
+        return Err(FailureCode::BadParams);
+    }
+    let seconds = |key: &str| args.get(key).and_then(Value::as_f64);
+    let whole = |key: &str| -> Result<Option<u64>, FailureCode> {
+        args.get(key)
+            .map(|value| value.as_u64().ok_or(FailureCode::BadParams))
+            .transpose()
+    };
+    Ok(crate::video_frames::FramesRequest {
+        path,
+        start_s: seconds("start_s"),
+        end_s: seconds("end_s"),
+        at_s: seconds("at_s"),
+        count: whole("count")?
+            .map(|count| u8::try_from(count).map_err(|_| FailureCode::BadParams))
+            .transpose()?,
+        max_edge: whole("max_edge")?
+            .map(|edge| u32::try_from(edge).map_err(|_| FailureCode::BadParams))
+            .transpose()?,
+    })
+}
+
+/// `kettle_video_frames`: take a video's stills in a worker this server
+/// starts, and return exactly one JPEG image and the text index, sized to
+/// fit the response they are sent in. There is no `structuredContent`:
+/// Codex hands the model an image only from a result without it.
+fn tool_kettle_video_frames(args: &Value, fits: &dyn Fn(&Value) -> bool) -> Value {
+    let request = match video_frames_request(args) {
+        Ok(request) => request,
+        Err(failure) => return frames_failed(failure),
+    };
+    let Some(client) = crate::media_client() else {
+        return frames_failed(FailureCode::WorkerUnavailable);
+    };
+    match crate::video_frames::render(&request, &client) {
+        Ok(sheet) => frames_fitting(&sheet, fits),
+        Err(failure) => frames_failed(failure),
+    }
+}
+
+/// The result for `sheet`, its JPEG the largest whose whole result `fits`.
+fn frames_fitting(sheet: &crate::video_frames::Sheet, fits: &dyn Fn(&Value) -> bool) -> Value {
+    let text = sheet.index();
+    match sheet.jpeg(&|jpeg| fits(&frames_result(jpeg, &text))) {
+        Ok(jpeg) => frames_result(&jpeg, &text),
+        Err(failure) => frames_failed(failure),
+    }
+}
+
+/// One JPEG image, then the text index.
+fn frames_result(jpeg: &[u8], text: &str) -> Value {
+    use base64::Engine as _;
+    json!({
+        "content": [
+            {
+                "type": "image",
+                "data": base64::engine::general_purpose::STANDARD.encode(jpeg),
+                "mimeType": "image/jpeg"
+            },
+            { "type": "text", "text": text }
+        ]
+    })
+}
+
+/// A frames failure in its fixed words, with the install hint when a decoder
+/// was missing; nothing in it comes from the media or its path.
+fn frames_failed(failure: FailureCode) -> Value {
+    let mut text = failure.model_message().to_owned();
+    if let Some(hint) = crate::video_frames::decoder_hint(failure) {
+        text.push(' ');
+        text.push_str(hint);
+    }
+    json!({
+        "content": [{ "type": "text", "text": text }],
+        "structuredContent": { "status": "failed", "code": failure.code() },
+        "isError": true,
+    })
+}
+
 fn error_result(message: &str) -> Value {
     let (message, truncated) = cap_tool_text(message.to_string());
     json!({
@@ -863,6 +1029,15 @@ fn tool_argument_fields(name: &str) -> Option<&'static [(&'static str, ArgKind)]
             ("key", ArgKind::String),
         ],
         "kettle_card" => &[("tool_use_id", ArgKind::String)],
+        "kettle_video_frames" => &[
+            ("path", ArgKind::String),
+            ("start_s", ArgKind::Number),
+            ("end_s", ArgKind::Number),
+            ("at_s", ArgKind::Number),
+            ("count", ArgKind::Unsigned),
+            ("max_edge", ArgKind::Unsigned),
+            ("select", ArgKind::String),
+        ],
         "kettle_run" => &[
             ("command", ArgKind::Strings),
             ("cols", ArgKind::Unsigned),
@@ -1537,6 +1712,164 @@ mod tests {
                 .unwrap()
                 .contains("agent-server"),
             "error should point at --agent-server"
+        );
+    }
+
+    /// Reading frames is the full server's alone, beside showing: never the
+    /// display plugin's, which refuses the call.
+    #[test]
+    fn video_frames_belong_to_the_full_server_only() {
+        assert!(names(ToolSelection::Full).contains(&"kettle_video_frames".to_owned()));
+        assert!(!names(ToolSelection::Display).contains(&"kettle_video_frames".to_owned()));
+        assert!(
+            validate_tool_call(
+                ToolSelection::Display,
+                &json!({"name": "kettle_video_frames", "arguments": {"path": "/x.mp4"}})
+            )
+            .is_err()
+        );
+        let spec = video_frames_tool_spec();
+        assert_eq!(spec["inputSchema"]["required"], json!(["path"]));
+        assert_eq!(spec["inputSchema"]["additionalProperties"], json!(false));
+        assert_eq!(
+            spec["inputSchema"]["properties"]["count"]["maximum"],
+            json!(16)
+        );
+        assert_eq!(
+            spec["inputSchema"]["properties"]["max_edge"]["maximum"],
+            json!(2560)
+        );
+        assert_eq!(
+            spec["inputSchema"]["properties"]["select"]["enum"],
+            json!(["even"])
+        );
+    }
+
+    /// Bad arguments come back as the fixed BadParams failure, with no image:
+    /// a relative path, a selection other than even, an unknown argument, a
+    /// count past 16, a fractional count, at_s beside a window; a missing file
+    /// is found missing before any worker starts.
+    #[test]
+    fn video_frames_refuse_bad_arguments_in_fixed_words() {
+        let call = |arguments: Value| {
+            call_tool(
+                ToolSelection::Full,
+                &json!({"name": "kettle_video_frames", "arguments": arguments}),
+            )
+        };
+        let bad = FailureCode::BadParams.model_message();
+        for arguments in [
+            json!({"path": "relative.mp4"}),
+            json!({"path": "/x.mp4", "select": "scenes"}),
+            json!({"path": "/x.mp4", "speed": 2}),
+            json!({"path": "/x.mp4", "count": 17}),
+            json!({"path": "/x.mp4", "count": 2.5}),
+            json!({"path": "/x.mp4", "at_s": 1.0, "end_s": 2.0}),
+            json!({}),
+        ] {
+            let result = call(arguments.clone());
+            assert_eq!(result["isError"], json!(true), "{arguments}");
+            assert_eq!(result["content"][0]["text"], json!(bad), "{arguments}");
+            assert_eq!(result["structuredContent"]["code"], json!("bad_params"));
+            assert_eq!(result["content"].as_array().unwrap().len(), 1);
+        }
+        let missing = call(json!({"path": "/nonexistent/kettle-test-clip.mp4"}));
+        assert_eq!(
+            missing["content"][0]["text"],
+            json!(FailureCode::FileNotFound.model_message())
+        );
+    }
+
+    fn sheet() -> crate::video_frames::Sheet {
+        let image = image::RgbaImage::from_fn(1200, 680, |x, y| {
+            let seed = x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503);
+            let byte = |shift: u32| (seed.rotate_left(shift) & 0xff) as u8;
+            image::Rgba([byte(0), byte(8), byte(16), 255])
+        });
+        crate::video_frames::Sheet {
+            image,
+            video: kettle_media::VideoStillsResult {
+                info: kettle_media::VideoInfo {
+                    duration_ms: 4_000,
+                    width: 640,
+                    height: 360,
+                    rotation: 0,
+                    codec: kettle_media::VideoCodec::Vp8,
+                    fps_milli: Some(25_000),
+                    has_audio: false,
+                    container: Some(kettle_media::video::VideoContainer::WebM),
+                },
+                samples: vec![
+                    kettle_media::StillSample {
+                        requested_ms: 1_000,
+                        actual_ms: 1_000,
+                    },
+                    kettle_media::StillSample {
+                        requested_ms: 3_000,
+                        actual_ms: 3_000,
+                    },
+                ],
+                tolerance_ms: 0,
+            },
+            layout: kettle_media::StillsLayout::Sheet {
+                cols: 2,
+                labels: true,
+            },
+        }
+    }
+
+    /// A result is one JPEG image, then the text index, with no
+    /// structuredContent, so Codex hands the model the image; it fits the
+    /// response it is sent in, in either era and whatever the id, by
+    /// shrinking the JPEG, never by cutting the index.
+    #[test]
+    fn video_frames_return_one_image_and_the_index_sized_to_their_response() {
+        let sheet = sheet();
+        let id = json!("x".repeat(40_000));
+        for modern in [false, true] {
+            let result = frames_fitting(&sheet, &|result| {
+                crate::mcp::response_fits(&id, modern, result)
+            });
+            assert!(crate::mcp::response_fits(&id, modern, &result));
+            let content = result["content"].as_array().unwrap();
+            assert_eq!(content.len(), 2);
+            assert_eq!(content[0]["type"], json!("image"));
+            assert_eq!(content[0]["mimeType"], json!("image/jpeg"));
+            use base64::Engine as _;
+            let jpeg = base64::engine::general_purpose::STANDARD
+                .decode(content[0]["data"].as_str().unwrap())
+                .unwrap();
+            assert_eq!(&jpeg[..2], &[0xff, 0xd8]);
+            assert_eq!(content[1], json!({"type": "text", "text": sheet.index()}));
+            assert!(result.get("structuredContent").is_none());
+            assert!(result.get("isError").is_none());
+        }
+        // A tight response: smaller, still whole; one that fits nothing is
+        // refused as too large, not cut.
+        let roomy = frames_fitting(&sheet, &|_| true);
+        let limit = serde_json::to_vec(&roomy).unwrap().len() / 4;
+        let tight = frames_fitting(&sheet, &|result| {
+            serde_json::to_vec(result).is_ok_and(|bytes| bytes.len() <= limit)
+        });
+        assert_eq!(tight["content"][1]["text"], json!(sheet.index()));
+        assert!(serde_json::to_vec(&tight).unwrap().len() <= limit);
+        let none = frames_fitting(&sheet, &|_| false);
+        assert_eq!(none["isError"], json!(true));
+        assert_eq!(none["structuredContent"]["code"], json!("too_large"));
+    }
+
+    /// A missing decoder's failure carries the install hint, which tells the
+    /// model not to install anything; other failures do not.
+    #[test]
+    fn a_missing_decoder_says_the_user_can_install_one() {
+        let missing = frames_failed(FailureCode::UnsupportedContainer);
+        let text = missing["content"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with(FailureCode::UnsupportedContainer.model_message()));
+        assert!(text.contains("ffmpeg") && text.contains("do not install software yourself"));
+        let parse = frames_failed(FailureCode::RenderParse);
+        assert_eq!(
+            parse["content"][0]["text"],
+            json!(FailureCode::RenderParse.model_message())
         );
     }
 }

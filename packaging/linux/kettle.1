@@ -32,6 +32,21 @@ kettle \- fast GPU-accelerated terminal emulator for Linux and macOS
 .RI [ \-\-key
 .IR KEY ]
 .br
+.B kettle video\-frames
+.I PATH
+.B \-o
+.I OUT.jpg
+.RI [ \-\-start
+.IR SECONDS ]
+.RI [ \-\-end
+.IR SECONDS ]
+.RI [ \-\-at
+.IR SECONDS ]
+.RI [ \-\-count
+.IR N ]
+.RI [ \-\-max\-edge
+.IR PIXELS ]
+.br
 .B kettle agent\-setup
 .RB ( \-\-print " [" \-\-shell
 .IR SHELL "] | " \-\-status " | " \-\-uninstall )
@@ -558,6 +573,40 @@ with the same
 agent previews
 .RB ( agent\-display ),
 never full control. Exits 0 once the item is on the shelf, 1 otherwise.
+.TP
+.B kettle video\-frames \fIPATH\fR \fB\-o\fR|\fB\-\-output \fIOUT.jpg\fR [\fB\-\-start \fISECONDS\fR] [\fB\-\-end \fISECONDS\fR] [\fB\-\-at \fISECONDS\fR] [\fB\-\-count \fIN\fR] [\fB\-\-max\-edge \fIPIXELS\fR]
+Read a video's or animation's frames as one JPEG contact sheet, for a model to
+inspect, and print which time each frame shows, with the video's duration,
+size, codec, frame rate and audio. This command opens
+.I PATH
+itself and decodes it in a media worker it starts; no kettle window is
+involved, and nothing is shown to anyone. Nine evenly spaced frames by
+default; narrow the window with
+.B \-\-start
+and
+.BR \-\-end ,
+take 1 to 16 with
+.BR \-\-count ,
+or one frame with
+.BR \-\-at .
+.B \-\-max\-edge
+sets the sheet's longer edge, up to 2560 pixels (default 1568), larger to read
+text in a frame. Each frame is labeled with the time it actually shows, which
+may be a little from the instant it stands for; the output says how far. GIF,
+APNG and animated WebP are decoded by kettle itself; on macOS MP4 and
+QuickTime by AVFoundation; anything else needs the user's own ffmpeg and
+ffprobe, looked for in
+.IR /opt/homebrew/bin ,
+.IR /usr/local/bin ,
+.IR /usr/bin ,
+.I /run/current\-system/sw/bin
+and the Nix profile, never in
+.BR PATH .
+The JPEG replaces
+.I OUT.jpg
+whole, private to you, and never the video itself. Exits 0 once it is
+written, 1 otherwise. Showing media to the user is
+.BR "kettle show" .
 .TP
 .B kettle agent\-setup \fR(\fB\-\-print\fR [\fB\-\-shell \fISHELL\fR] | \fB\-\-status\fR | \fB\-\-uninstall\fR)
 Set up Codex to start with kettle's display server.

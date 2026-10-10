@@ -104,6 +104,7 @@ mod ctl_cli;
 // `kettle show` — send media to the shelf of the pane it runs in.
 mod agent_setup;
 mod show_cli;
+mod video_frames;
 // Agent-first: `kettle mcp` — stdio MCP server exposing kettle as
 // native agent tools (run a command, drive a running kettle).
 mod mcp;
@@ -563,6 +564,13 @@ enum Cmd {
     /// The item waits on the shelf; nothing opens on screen. Agent previews
     /// must be on; full control is never needed.
     Show(ShowArgs),
+    /// Read a video's or animation's frames as one JPEG contact sheet, for a
+    /// model to inspect, and print which time each frame shows. The file is
+    /// opened by this command and decoded in a media worker it starts; no
+    /// Kettle window is involved. Nine evenly spaced frames by default;
+    /// narrow the window with --start and --end, or take one frame with
+    /// --at. Showing media to the user is `kettle show`.
+    VideoFrames(VideoFramesArgs),
     /// Set up Codex to start with Kettle's display server: print a `codex`
     /// shell function to review and add to your shell's startup file, report
     /// its status, or print how to remove it. Kettle edits no file.
@@ -589,6 +597,32 @@ struct ShowArgs {
     /// adding another (default: the file's path).
     #[arg(long, value_name = "KEY")]
     key: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+struct VideoFramesArgs {
+    /// The video or animation to read.
+    #[arg(value_name = "PATH")]
+    source: std::path::PathBuf,
+    /// Where to write the JPEG.
+    #[arg(short = 'o', long = "output", value_name = "OUT.jpg")]
+    output: std::path::PathBuf,
+    /// Where the frames start, in seconds (default: the start).
+    #[arg(long, value_name = "SECONDS")]
+    start: Option<f64>,
+    /// Where the frames end, in seconds (default: the end).
+    #[arg(long, value_name = "SECONDS")]
+    end: Option<f64>,
+    /// One frame at this time, in seconds, instead of a sheet.
+    #[arg(long, value_name = "SECONDS", conflicts_with_all = ["start", "end", "count"])]
+    at: Option<f64>,
+    /// How many frames, 1 to 16 (default 9).
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(1..=16))]
+    count: Option<u8>,
+    /// The sheet's longer edge in pixels, up to 2560 (default 1568); larger
+    /// to read text in a frame.
+    #[arg(long, value_name = "PIXELS", value_parser = clap::value_parser!(u32).range(1..=2560))]
+    max_edge: Option<u32>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -1195,6 +1229,17 @@ fn main() -> anyhow::Result<()> {
             }
             Cmd::Show(args) => {
                 std::process::exit(show_cli::run_show(args));
+            }
+            Cmd::VideoFrames(args) => {
+                let request = video_frames::FramesRequest {
+                    path: args.source,
+                    start_s: args.start,
+                    end_s: args.end,
+                    at_s: args.at,
+                    count: args.count,
+                    max_edge: args.max_edge,
+                };
+                std::process::exit(video_frames::run(request, &args.output));
             }
             Cmd::AgentSetup(args) => {
                 std::process::exit(agent_setup::run(args));

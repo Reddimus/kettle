@@ -842,6 +842,63 @@ because Codex lets a hook call only an enabled tool. A call carrying the
 model's `_meta.callId` is refused, as is one carrying Claude Code's id. The
 model's result says only that the media shows below the call.
 
+### Reading video: `kettle_video_frames` and `kettle video-frames`
+
+Showing media to the user and reading it yourself are separate. The full
+server (`kettle mcp`) offers `kettle_video_frames`, which returns a video's or
+animation's frames to the model; the display server, Kettle's Claude Code
+plugin and Codex's launch function never offer it, and nothing approves it,
+so the harness asks for it on its own, even where `kettle_run` is denied.
+It needs no Kettle window: the server opens the file itself and decodes it in
+a media worker it starts. Its arguments are an absolute `path` (at most
+4 KiB) and, optionally, `start_s` and `end_s` (a window, in seconds, ending
+after it starts), `count` (1 to 16 frames, nine by default), `at_s` (one
+frame, not with a window or a count), `max_edge` (the sheet's longer edge, up
+to 2560 pixels, 1568 by default; larger to read small text) and `select`,
+whose one value is `"even"`.
+
+The result is exactly one JPEG image content, a contact sheet with each frame
+labeled by its time (`mm:ss`, `h:mm:ss` from an hour, tenths under a
+minute), then one text content, the index: the video's duration, size,
+codec, frame rate and audio, each frame's time in reading order, how far a
+time may be from the instant it stands for, and that the sheet is what was
+seen, not the whole video. The times are the frames actually shown, never
+the instants asked for. There is no `structuredContent`: Codex hands the
+model an image only from a result without it, and a literal `null` stops
+Claude Code reading the index (V-S(d) evidence; Appendix A asked for `null`).
+The whole response, base64 image and index together, fits the 768 KiB
+response line in either MCP era: the JPEG is tried at falling qualities, then
+shrunk a quarter at a time, and a sheet that fits nowhere is `too_large`;
+the index is never cut. Claude Code keeps returned images in its own
+session files, as it does any tool's.
+
+Failures are `isError` results in the fixed words of [Showing
+media](#showing-media), with `status: "failed"` and the fixed `code`. When
+a decoder is what was missing (`unsupported_container`, `codec_unavailable`,
+`backend_unavailable`), the text adds that the user can install ffmpeg
+(`brew install ffmpeg` on macOS, the system's packages on Linux) and that the
+model must not install software itself.
+
+`kettle video-frames PATH -o OUT.jpg` does the same from a shell, inside the
+caller's sandbox, with `--start`, `--end`, `--at`, `--count` and
+`--max-edge`. It writes the JPEG whole (a private file renamed into place,
+never over the video) and prints the index; it exits 0 once written, 1
+otherwise, the failure and any install hint on stderr.
+
+What decodes what: GIF, APNG and animated WebP are Kettle's own; on macOS,
+MP4 and QuickTime go to AVFoundation first; anything else, or what
+AVFoundation cannot read, needs the user's ffmpeg and ffprobe, which Kettle
+finds only in `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`,
+`/run/current-system/sw/bin` and the Nix profile, never in `PATH`, and runs
+only when trusted (see [SECURITY.md](../SECURITY.md)).
+
+The full server's instructions say, in Appendix A's words, to use
+`kettle_video_frames` to inspect a video, since Read and view_image cannot;
+to narrow the window around the moment that matters or take one frame; that
+the sheet is what was seen, not the whole video; not to ask for the same
+window twice; never to run mpv or timg in a shell; and that showing and
+reading are separate operations with separate permissions.
+
 ### Kettle's Claude Code plugin
 
 `agent-display-claude-code` (Settings → Agents → Claude Code previews; off by

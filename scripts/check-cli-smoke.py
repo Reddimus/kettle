@@ -336,6 +336,22 @@ def main() -> int:
         require("mermaid" in run("--print-completions", "zsh", environment=environment),
                 "zsh completions are missing show --mermaid")
 
+        # `kettle video-frames`: its options, and refusals made before any
+        # worker starts.
+        frames_help = run("video-frames", "--help", environment=environment)
+        for flag in ("--output", "--start", "--end", "--at", "--count", "--max-edge"):
+            require(flag in frames_help, f"video-frames --help is missing {flag}")
+        missing_video = run(
+            "video-frames", str(scratch / "missing.webm"), "-o", str(scratch / "sheet.jpg"),
+            environment=environment, expect=1,
+        )
+        require("media file was not found" in missing_video,
+                f"video-frames of a missing file said: {missing_video!r}")
+        require(not (scratch / "sheet.jpg").exists(),
+                "video-frames wrote a sheet for a missing file")
+        require("video-frames" in run("--print-completions", "zsh", environment=environment),
+                "zsh completions are missing video-frames")
+
         # `kettle agent-setup`: the function, its removal and status, on the
         # systems that have it.
         if os.name != "nt":

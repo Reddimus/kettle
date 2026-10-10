@@ -118,6 +118,9 @@ previews (`agent-display`), then:
   Codex shows media when asked: say "show it in Kettle".
 - Any shell: `kettle show plot.png`, `kettle show notes.md`, or `kettle show
   --mermaid < flow.mmd`, sends media to the pane's shelf.
+- Reading a video yourself: the full MCP server's `kettle_video_frames`, or
+  `kettle video-frames clip.webm -o sheet.jpg`, returns a contact sheet of its
+  frames, each labeled with its time, and an index of what each shows.
 
 Without any agent, `/copy` a diagram and use `render_clipboard_as_diagram`,
 or select one and use `render_selection_as_diagram`. `kettle agent-setup

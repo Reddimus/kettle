@@ -104,7 +104,13 @@ only input, stderr discarded, its output read up to an exact size and a
 deadline. ffprobe describes the streams and lists the packets around each
 instant, which gives the frame actually showing there; ffmpeg then decodes
 each frame by its own timestamp. The renderer lays the frames out and checks
-the held file is unchanged afterwards.
+the held file is unchanged afterwards. The `kettle` crate's `video_frames`
+module takes those stills for a model to read: `kettle video-frames` and the
+full MCP server's `kettle_video_frames` open the file in their own process,
+start their own worker through the same client and launcher the GUI uses,
+and encode the sheet as one JPEG sized to its destination (any size for the
+command's file, the 768 KiB response line for MCP) with a text index of each
+frame's time.
 Mermaid goes through merman 0.8.0, pinned exactly with its layout and
 painting family, under a resource-constrained policy and a two-second
 `OperationControl` deadline that starts before its fonts load. Kettle

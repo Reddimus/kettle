@@ -214,22 +214,8 @@ pub struct Still {
     pub rgba: Vec<u8>,
 }
 
-/// A time as a label: `mm:ss`, `h:mm:ss` from an hour, with tenths for a
-/// video shorter than a minute, where whole seconds would repeat.
-pub fn label(ms: u64, duration_ms: u64) -> String {
-    let seconds = ms / 1000;
-    let (h, m, s) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
-    let base = if h > 0 {
-        format!("{h}:{m:02}:{s:02}")
-    } else {
-        format!("{m:02}:{s:02}")
-    };
-    if duration_ms < 60_000 {
-        format!("{base}.{}", ms / 100 % 10)
-    } else {
-        base
-    }
-}
+/// A time as a label, as every caller writes it.
+pub use kettle_media::still_label as label;
 
 /// The poster or sheet `stills` lays out from `frames`, in their order, with
 /// what the video is and how far a frame may be from its time: a Rendered
