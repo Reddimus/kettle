@@ -1,8 +1,8 @@
-//! `kettle show`: send a local image, SVG or Mermaid diagram to the media
-//! shelf of the pane
-//! this command runs in, in the Kettle it runs inside. It never reaches
-//! another Kettle, never opens anything on screen, and never needs full
-//! control: agent previews (`agent-display`) are enough.
+//! `kettle show`: send a local image, SVG, Mermaid diagram or Markdown
+//! diagram gallery to the media shelf of the pane this command runs in, in
+//! the Kettle it runs inside. It never reaches another Kettle, never opens
+//! anything on screen, and never needs full control: agent previews
+//! (`agent-display`) are enough.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
