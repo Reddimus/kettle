@@ -5,10 +5,14 @@ that each implementation slice must preserve. It is a design record, not a
 claim that all these features ship. The current implementation has bounded
 media frames, worker discovery/build identity, a separate resource-limited
 worker, raster/SVG rendering, paired packaging/update recovery, and internal
-availability. The inline-card rendering foundation has test-only registration,
-bounded scroll context, owned fallback ink and independent preview accounting.
-Production card callers, preview lanes, Mermaid, and audio/video playback remain
-later work.
+availability. Inline cards have bounded scroll context, owned fallback ink and
+independent preview accounting, registered by production callers for Claude
+Code and Codex; a Mermaid diagram's card carries its rendered poster, from
+source or a file, and keeps showing the item when the lane draws it again on
+another background. Preview lanes show, zoom, sharpen, resize and take the
+keyboard on request; Mermaid renders natively; and a diagram an agent printed
+can be previewed from the clipboard or a selection. Audio/video playback
+remains later work.
 The existing poster worker also uses the shared content-based video container
 classifier; this does not add a decoder or playback.
 

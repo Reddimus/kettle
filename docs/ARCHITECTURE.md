@@ -522,9 +522,13 @@ whose file name drops control,
 format, private-use and zero-width characters), and registers it in the
 pane's `kettle_render::InlineCards` (64 per pane) with a `CardPoster`: a weak
 reference to the shelf item's pixels, so a card never holds the preview
-account. The message rides back to the adapter in `ShowResult::inline`; the
-MCP server keeps it in its `DisplaySession` for the hook's one-time
-`kettle_card`, which is answered outside the tool queue. The renderer reports
+account. A lane's render on another canvas replaces the item's pixels in
+place, so `finish_lane_render` first moves the posters of the item's cards
+(`CardLedger::cards_of`, at its generation) to the new pixels
+(`InlineCards::set_poster`); a reload makes a new generation, which retires
+them as any replacement does. The message rides back to the adapter in
+`ShowResult::inline`; the MCP server keeps it in its `DisplaySession` for the
+hook's one-time `kettle_card`, which is answered outside the tool queue. The renderer reports
 each frame's accepted cards (`Renderer::painted_cards`), and their items count
 as visible when pixels are released. The tick retires cards whose harness
 exited, whose pane closed, or whose item left the shelf or was replaced.
