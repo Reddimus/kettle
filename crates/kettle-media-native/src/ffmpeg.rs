@@ -18,20 +18,28 @@
 //! before the frame instead, which decodes at once, and say so in their
 //! times. A stream without timestamps is sought by time, each frame then
 //! standing for its instant within one frame's length.
+//!
+//! A playback session takes the same description, then one ffmpeg run from
+//! its start to the end of the video at the rate and size it asked for,
+//! read a frame at a time as the session takes them; a session that stops
+//! taking them blocks it on its pipe. Its frames are timed from the start
+//! at that rate, since rawvideo carries no timestamps.
 
 use std::ffi::OsString;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use kettle_media::video::{
-    DECODER_ENV, DecodedFrame, DecodedStills, StillsPlan, VideoContainer, VideoDecoder, VideoInput,
+    DECODER_ENV, DecodedFrame, DecodedStills, FrameSource, PlayGate, PlayRequest, Playback,
+    StillsPlan, VideoContainer, VideoDecoder, VideoInput, VideoPlayer,
 };
 use kettle_media::{
-    FailureCode, MAX_VIDEO_FPS_MILLI, MAX_VIDEO_SIDE, StillSample, VideoCodec, VideoInfo,
+    FailureCode, MAX_VIDEO_FPS_MILLI, MAX_VIDEO_SIDE, Opened, StillSample, VideoCodec, VideoInfo,
+    play_size,
 };
 
 use crate::reopen::reopen;
-use crate::run::{Ran, RunError, run};
+use crate::run::{Exit, Piece, Ran, RunError, Streaming, run, stream};
 use crate::tools::{Refusal, Tool};
 
 /// The held file, as each decoder run reads it: its stdin, reopened by path
@@ -62,6 +70,14 @@ const MAX_CODECS_BYTES: usize = 1 << 20;
 /// Decoder threads per run. More multiplies memory under the worker's
 /// address-space limit.
 const THREADS: &str = "2";
+/// Processor time a session's ffmpeg may use: half a minute, and four
+/// seconds for each second of video it has left, room for its decoder and
+/// filter threads at full speed the whole way. A run that spins without
+/// writing goes when it is spent, whether or not anyone still reads it.
+const PLAY_CPU_SECONDS: u64 = 30;
+const PLAY_CPU_PER_SECOND: u64 = 4;
+/// How long the explanation of a session that gave no frame may take.
+const EXPLAIN_WITHIN: Duration = Duration::from_secs(2);
 
 /// ffmpeg and ffprobe, trusted, from one directory.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -211,6 +227,7 @@ struct Stream {
     average_rate: Option<(u64, u64)>,
     real_rate: Option<(u64, u64)>,
     time_base: Option<(u64, u64)>,
+    start_us: Option<i64>,
     duration_us: Option<i64>,
     /// Degrees counterclockwise, as the display matrix says.
     rotation: Option<i64>,
@@ -281,6 +298,7 @@ fn parse_probe(text: &str) -> Result<Probe, FailureCode> {
             "avg_frame_rate" => stream.average_rate = ratio(value),
             "r_frame_rate" => stream.real_rate = ratio(value),
             "time_base" => stream.time_base = ratio(value),
+            "start_time" => stream.start_us = micros(value),
             "duration" => stream.duration_us = micros(value),
             "disposition.attached_pic" => stream.cover = value == "1",
             _ if field.starts_with("side_data_list.side_data.") && field.ends_with(".rotation") => {
@@ -351,6 +369,19 @@ impl Probe {
     fn frame_ms(&self) -> u64 {
         self.fps_milli()
             .map_or(1000, |fps| 1_000_000u64.div_ceil(u64::from(fps)))
+    }
+
+    /// Where the video stream ends, in ms from the file's start, when it
+    /// says how long it is: the file's other streams can run on past it.
+    fn video_end_ms(&self) -> Option<u64> {
+        let duration = self.stream.duration_us.filter(|duration| *duration >= 0)?;
+        let start = self.stream.start_us.unwrap_or(self.start_us);
+        // A stream may start before the file's start: it then ends sooner.
+        let end = start
+            .saturating_sub(self.start_us)
+            .saturating_add(duration)
+            .max(0);
+        u64::try_from(end / 1000).ok()
     }
 }
 
@@ -514,6 +545,57 @@ fn frame_args(
     args
 }
 
+/// One session's decode: from `seek` seconds into the video until its end,
+/// `fps_milli` frames per thousand seconds, each `width` by `height` RGBA.
+fn play_args(
+    container: VideoContainer,
+    index: u32,
+    seek: &str,
+    width: u32,
+    height: u32,
+    fps_milli: u32,
+) -> Vec<OsString> {
+    [
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-protocol_whitelist",
+        "file",
+        "-threads",
+        THREADS,
+        "-filter_threads",
+        "1",
+        "-f",
+        demuxer(container),
+        "-ss",
+        seek,
+        "-i",
+        INPUT,
+        "-map",
+        &format!("0:{index}"),
+        "-an",
+        "-sn",
+        "-dn",
+        "-vf",
+        // The rate first, so only the frames kept are scaled. At its end the
+        // rate passes on the frame left rather than rounding it away: a
+        // start on a video's last frame, at a rate slower than its own,
+        // still shows that frame.
+        &format!(
+            "fps={fps_milli}/1000:eof_action=pass,scale={width}:{height}:flags=bilinear,setsar=1"
+        ),
+        "-pix_fmt",
+        "rgba",
+        "-f",
+        "rawvideo",
+        "pipe:1",
+    ]
+    .iter()
+    .map(OsString::from)
+    .collect()
+}
+
 /// The description ffprobe is asked for.
 fn probe_args(container: VideoContainer) -> Vec<String> {
     [
@@ -526,7 +608,7 @@ fn probe_args(container: VideoContainer) -> Vec<String> {
         demuxer(container),
         "-show_entries",
         "stream=index,codec_type,codec_name,width,height,sample_aspect_ratio,\
-         avg_frame_rate,r_frame_rate,time_base,duration:stream_disposition=attached_pic:\
+         avg_frame_rate,r_frame_rate,time_base,start_time,duration:stream_disposition=attached_pic:\
          stream_side_data=rotation:format=start_time,duration",
         "-of",
         "flat",
@@ -691,14 +773,24 @@ fn failure(error: RunError) -> FailureCode {
     }
 }
 
-impl VideoDecoder for Ffmpeg {
-    fn stills(
+/// What ffprobe says a video is: the stream decoded, its clock and, when the
+/// file gave no duration, its packets, which gave it; and the video as a
+/// result describes it.
+struct Described {
+    probe: Probe,
+    index: u32,
+    clock: Option<Clock>,
+    scanned: Option<Timeline>,
+    info: VideoInfo,
+}
+
+impl Ffmpeg {
+    fn describe(
         &self,
-        input: VideoInput<'_>,
-        plan: &mut dyn FnMut(&VideoInfo) -> Result<StillsPlan, FailureCode>,
+        input: &VideoInput<'_>,
         deadline: Instant,
-    ) -> Result<DecodedStills, FailureCode> {
-        let probe = self.probe(&input, deadline)?;
+    ) -> Result<Described, FailureCode> {
+        let probe = self.probe(input, deadline)?;
         let index = probe.stream.index.ok_or(FailureCode::UnsupportedMedia)?;
         let clock = probe
             .stream
@@ -711,7 +803,7 @@ impl VideoDecoder for Ffmpeg {
         // Without a duration the whole stream's packets are listed, which
         // also gives its length.
         let scanned = match (probe.duration_us, clock) {
-            (None, Some(_)) => self.packets(&input, index, &[], deadline)?,
+            (None, Some(_)) => self.packets(input, index, &[], deadline)?,
             _ => None,
         };
         let duration_us = match (probe.duration_us, &scanned, clock) {
@@ -736,6 +828,138 @@ impl VideoDecoder for Ffmpeg {
             container: Some(input.container),
         };
         info.validate().map_err(|_| FailureCode::RenderParse)?;
+        Ok(Described {
+            probe,
+            index,
+            clock,
+            scanned,
+            info,
+        })
+    }
+}
+
+impl VideoPlayer for Ffmpeg {
+    /// One ffmpeg run from the start asked for to the end, its frames
+    /// timed from that start at the rate it was asked for: rawvideo carries
+    /// no timestamps of its own. A start past the video's last frame shows
+    /// that frame, though the file's sound runs on.
+    fn play(
+        &self,
+        input: VideoInput<'_>,
+        request: PlayRequest,
+        deadline: Instant,
+    ) -> Result<Playback, FailureCode> {
+        let Described {
+            probe, index, info, ..
+        } = self.describe(&input, deadline)?;
+        let (width, height) = play_size(
+            info.width,
+            info.height,
+            request.max_width,
+            request.max_height,
+        )
+        .ok_or(FailureCode::RenderResource)?;
+        let fps_milli = info
+            .fps_milli
+            .map_or(request.max_fps_milli, |fps| fps.min(request.max_fps_milli));
+        let video_end_ms = probe
+            .video_end_ms()
+            .map_or(info.duration_ms, |end| end.min(info.duration_ms));
+        let start_ms = request
+            .start_ms
+            .min(video_end_ms.saturating_sub(probe.frame_ms()));
+        let opened = Opened {
+            info,
+            width,
+            height,
+            fps_milli,
+            start_ms,
+        };
+        opened.validate().map_err(|_| FailureCode::RenderParse)?;
+        let seek = seconds(i64::try_from(start_ms * 1000).unwrap_or(i64::MAX));
+        let args = play_args(input.container, index, &seek, width, height, fps_milli);
+        let left = (info.duration_ms - start_ms).div_ceil(1000);
+        let cpu = PLAY_CPU_SECONDS.saturating_add(left.saturating_mul(PLAY_CPU_PER_SECOND));
+        let file = reopen(input.file, input.identity)?;
+        let streaming = stream(&self.ffmpeg, &args, file, cpu).map_err(failure)?;
+        Ok(Playback {
+            opened,
+            frames: Box::new(Frames {
+                streaming,
+                start_ms,
+                duration_ms: info.duration_ms,
+                fps_milli,
+                taken: 0,
+                size: width as usize * height as usize * 4,
+                decoder: self.clone(),
+                codec: probe.stream.codec,
+            }),
+        })
+    }
+}
+
+/// A session's frames from one ffmpeg run.
+struct Frames {
+    streaming: Streaming,
+    start_ms: u64,
+    duration_ms: u64,
+    fps_milli: u32,
+    /// Frames taken so far.
+    taken: u64,
+    /// Each frame's bytes: a buffer of any other length is refused, so a
+    /// frame's edge is always the stream's.
+    size: usize,
+    /// Asked why, when the first frame does not come.
+    decoder: Ffmpeg,
+    codec: String,
+}
+
+impl FrameSource for Frames {
+    /// The next frame, timed `taken` frame lengths after the start. Its
+    /// output ending at a frame's edge, ffmpeg then exiting 0, ends the
+    /// video. Ending before the first frame is a failure, explained; ffmpeg
+    /// failing after a frame, or ending inside one, fails the stream, and
+    /// one killed by a signal (its processor-time limit) is out of
+    /// resources.
+    fn next_frame(
+        &mut self,
+        rgba: &mut [u8],
+        _gate: &PlayGate,
+    ) -> Result<Option<u64>, FailureCode> {
+        if rgba.len() != self.size {
+            return Err(FailureCode::BadParams);
+        }
+        match self.streaming.next_piece(rgba) {
+            Ok(Piece::Filled) => {
+                let after = self.taken * 1_000_000 / u64::from(self.fps_milli);
+                self.taken += 1;
+                Ok(Some((self.start_ms + after).min(self.duration_ms)))
+            }
+            Ok(Piece::Ended(Exit::Clean)) if self.taken > 0 => Ok(None),
+            Ok(Piece::Ended(Exit::Killed)) => Err(FailureCode::RenderResource),
+            Ok(Piece::Ended(_)) if self.taken == 0 => Err(self
+                .decoder
+                .explain(&self.codec, Instant::now() + EXPLAIN_WITHIN)),
+            Ok(Piece::Ended(_)) | Err(()) => Err(FailureCode::RenderParse),
+        }
+    }
+}
+
+impl VideoDecoder for Ffmpeg {
+    fn stills(
+        &self,
+        input: VideoInput<'_>,
+        plan: &mut dyn FnMut(&VideoInfo) -> Result<StillsPlan, FailureCode>,
+        deadline: Instant,
+    ) -> Result<DecodedStills, FailureCode> {
+        let Described {
+            probe,
+            index,
+            clock,
+            scanned,
+            info,
+        } = self.describe(&input, deadline)?;
+        let duration_ms = info.duration_ms;
         let wanted = plan(&info)?;
         if wanted.times_ms.is_empty() || wanted.width == 0 || wanted.height == 0 {
             return Err(FailureCode::BadParams);
@@ -902,6 +1126,52 @@ format.duration="10.000000"
         assert_eq!(probe.stream.time_base, Some((1, 15360)));
     }
 
+    /// The video's own end, when its stream gives a length: from where the
+    /// stream starts in the file, which may be after the file's start.
+    #[test]
+    fn the_video_ends_where_its_stream_does() {
+        let probe = |lines: &str| {
+            parse_probe(&format!(
+                "streams.stream.0.index=0\nstreams.stream.0.codec_type=\"video\"\n{lines}"
+            ))
+            .unwrap()
+        };
+        let shorter = probe(
+            "streams.stream.0.start_time=\"0.000000\"\nstreams.stream.0.duration=\"4.000000\"\n\
+             format.start_time=\"0.000000\"\nformat.duration=\"10.000000\"\n",
+        );
+        assert_eq!(
+            (shorter.duration_us, shorter.video_end_ms()),
+            (Some(10_000_000), Some(4000))
+        );
+        let later = probe(
+            "streams.stream.0.start_time=\"1.500000\"\nstreams.stream.0.duration=\"4.000000\"\n\
+             format.start_time=\"1.000000\"\nformat.duration=\"10.000000\"\n",
+        );
+        assert_eq!(later.video_end_ms(), Some(4500));
+        let earlier = probe(
+            "streams.stream.0.start_time=\"-1.000000\"\nstreams.stream.0.duration=\"2.000000\"\n\
+             format.start_time=\"0.000000\"\nformat.duration=\"3.000000\"\n",
+        );
+        assert_eq!(earlier.video_end_ms(), Some(1000));
+        let before = probe(
+            "streams.stream.0.start_time=\"-3.000000\"\nstreams.stream.0.duration=\"2.000000\"\n\
+             format.start_time=\"0.000000\"\nformat.duration=\"3.000000\"\n",
+        );
+        assert_eq!(before.video_end_ms(), Some(0));
+        let untold = probe("format.duration=\"10.000000\"\n");
+        assert_eq!(untold.video_end_ms(), None);
+        // ffprobe is asked for each stream's start and length.
+        let args = probe_args(VideoContainer::IsoBmff);
+        let streams = args
+            .iter()
+            .find_map(|arg| arg.strip_prefix("stream="))
+            .and_then(|entries| entries.split(':').next())
+            .unwrap();
+        let fields: Vec<&str> = streams.split(',').collect();
+        assert!(fields.contains(&"start_time") && fields.contains(&"duration"));
+    }
+
     /// Cover art is skipped for the real video; a stream's pixel aspect
     /// widens it; with no format duration the stream's is used, and with
     /// neither there is none; a description with no video, or too many
@@ -1047,6 +1317,25 @@ format.duration="10.000000"
             !packet_args(VideoContainer::Ogg, 0, &[])
                 .iter()
                 .any(|arg| arg == "-read_intervals")
+        );
+    }
+
+    /// A session's decode runs from its start to the end, video only, at
+    /// the rate asked, each frame scaled after the rate drops the others.
+    #[test]
+    fn play_arguments_are_fixed() {
+        let args: Vec<String> = play_args(VideoContainer::IsoBmff, 1, "2.500000", 640, 360, 29_970)
+            .into_iter()
+            .map(|arg| arg.into_string().unwrap())
+            .collect();
+        assert_eq!(
+            args.join(" "),
+            format!(
+                "-nostdin -hide_banner -loglevel error -protocol_whitelist file -threads 2 \
+                 -filter_threads 1 -f mov -ss 2.500000 -i {INPUT} -map 0:1 -an -sn -dn \
+                 -vf fps=29970/1000:eof_action=pass,scale=640:360:flags=bilinear,setsar=1 -pix_fmt rgba \
+                 -f rawvideo pipe:1"
+            )
         );
     }
 

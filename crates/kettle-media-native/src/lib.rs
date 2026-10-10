@@ -6,8 +6,9 @@
 //! places or where Kettle's configuration names, and only when no one but
 //! the user or root could have put them there. [`ffmpeg`] is the external
 //! decoder: ffmpeg and ffprobe, run as the worker's children with a fixed
-//! argument list, exactly sized output and a deadline, contained so they
-//! start no process of their own. `acl` (macOS) reads extended ACLs, which
+//! argument list, exactly sized output and a deadline (or, playing a video
+//! for a session, whole frames and a processor-time limit), contained so
+//! they start no process of their own. `acl` (macOS) reads extended ACLs, which
 //! can let another user write a file its mode says is private. [`sandbox`]
 //! is the worker's self-sandbox: Landlock and seccomp on Linux, a Seatbelt
 //! profile on macOS.
@@ -43,7 +44,9 @@ mod decoders {
 
     use kettle_media::FailureCode;
     use kettle_media::VideoInfo;
-    use kettle_media::video::{DecodedStills, StillsPlan, VideoDecoder, VideoInput};
+    use kettle_media::video::{
+        DecodedStills, PlayRequest, Playback, StillsPlan, VideoDecoder, VideoInput, VideoPlayer,
+    };
 
     use crate::ffmpeg::Ffmpeg;
 
@@ -143,6 +146,20 @@ mod decoders {
                 .stills(input, plan, deadline)
         }
     }
+
+    impl VideoPlayer for Decoders {
+        fn play(
+            &self,
+            input: VideoInput<'_>,
+            request: PlayRequest,
+            deadline: Instant,
+        ) -> Result<Playback, FailureCode> {
+            self.ffmpeg
+                .as_ref()
+                .ok_or(FailureCode::BackendUnavailable)?
+                .play(input, request, deadline)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -181,7 +198,7 @@ mod tests {
         let run = code_only(&production_source(include_str!("run.rs")));
         assert_eq!(run.matches("Command::new").count(), 1);
         let built = run.find("Command::new").unwrap();
-        let contained = run.find("crate::contain::contain(&mut command)").unwrap();
+        let contained = run.find("crate::contain::contain(&mut command,").unwrap();
         let spawned = run.find(".spawn()").unwrap();
         assert!(built < contained && contained < spawned);
         assert_eq!(run.matches(".spawn()").count(), 1);

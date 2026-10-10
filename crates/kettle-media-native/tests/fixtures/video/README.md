@@ -1,6 +1,6 @@
 # Video fixtures
 
-Four clips of the same picture: 64x36, 10 frames a second for 4 s (40
+Five clips of the same picture: 64x36, 10 frames a second for 4 s (40
 frames). Frame N shows its index in six blocks, three across and two down,
 read left to right and top to bottom as bits 0 to 5 of N: white (luma 235)
 for a one, black (16) for a zero. A block's centre survives scaling, and its
@@ -28,6 +28,11 @@ frame a decoder returned. They were made on 2026-10-10 with Homebrew's ffmpeg
 - `unsized.webm`: `index.webm`'s encoding written to a pipe (`-f webm
   pipe:1`), so it has no duration and no cues, as a browser's recorder
   leaves a file.
+- `long-audio.mp4`: `index.mp4`'s video with ten seconds of silent sound, so
+  the file runs six seconds past its video: `-i index.mp4 -f lavfi -t 10 -i
+  anullsrc=r=8000:cl=mono -map 0:v -map 1:a -c:v copy -c:a aac -b:a 8k
+  -movflags +faststart -map_metadata -1 -fflags +bitexact -flags:a
+  +bitexact`, made on 2026-10-10 with the same ffmpeg.
 
 | File | Bytes | SHA-256 |
 | --- | --- | --- |
@@ -36,3 +41,4 @@ frame a decoder returned. They were made on 2026-10-10 with Homebrew's ffmpeg
 | rotated.mp4 | 4117 | `fe665abfb89c63b567879cb42ba80028a9ab10df007e8c21285ac37f7052eca7` |
 | unsized.webm | 2795 | `4759f8fbd8447efcd1303c7ee101fff0737aa1a5bd4133eaf08d72f062ddd946` |
 | segments.mp4 | 4224 | `78ebea18da005ef402680afbf333bac3db4aa5e9e8f73f5c43e86d3f613705ac` |
+| long-audio.mp4 | 5462 | `6f5b60a7e3ba603cd9052093893df960f3c8c77bc93a1ea700fe6720096d0e09` |
