@@ -214,23 +214,7 @@ fn encode(
 
 /// A codec as people name it.
 fn codec_name(codec: VideoCodec) -> &'static str {
-    match codec {
-        VideoCodec::Unknown => "an unknown codec",
-        VideoCodec::H264 => "H.264",
-        VideoCodec::Hevc => "HEVC",
-        VideoCodec::Vp8 => "VP8",
-        VideoCodec::Vp9 => "VP9",
-        VideoCodec::Av1 => "AV1",
-        VideoCodec::Mpeg4 => "MPEG-4",
-        VideoCodec::Mpeg2 => "MPEG-2",
-        VideoCodec::ProRes => "ProRes",
-        VideoCodec::Mjpeg => "Motion JPEG",
-        VideoCodec::QuickTimeAnimation => "QuickTime Animation",
-        VideoCodec::Theora => "Theora",
-        VideoCodec::Gif => "GIF",
-        VideoCodec::Apng => "APNG",
-        VideoCodec::WebP => "WebP",
-    }
+    codec.name().unwrap_or("an unknown codec")
 }
 
 /// A frame rate as people write it: `25 fps`, `29.97 fps`.
