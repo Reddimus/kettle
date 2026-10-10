@@ -17,20 +17,30 @@
 //! (`PR_SET_NO_NEW_PRIVS` comes first), is inherited across `exec`, and a
 //! system call made under another architecture's numbering ends the process.
 //!
+//! A decoder that plays a video for a session also gets a processor-time
+//! limit of its own, soft and hard, so one that spins goes when it is
+//! spent, whether or not anyone is still reading it.
+//!
 //! The hook runs in the child between fork and exec and makes only
 //! async-signal-safe calls on values built before the fork. If it cannot
-//! install the limit or the filter, the spawn fails: a decoder never runs
+//! install the limits or the filter, the spawn fails: a decoder never runs
 //! uncontained.
 
 use std::process::Command;
 
 /// Make `command`'s process unable to start another, or (on Linux) to leave
-/// its process group.
-pub(crate) fn contain(command: &mut Command) {
+/// its process group; with `cpu_seconds`, also unable to use more processor
+/// time than that (never more than it would have inherited).
+pub(crate) fn contain(command: &mut Command, cpu_seconds: Option<u64>) {
     use std::os::unix::process::CommandExt as _;
     #[cfg(target_os = "linux")]
     let filter = linux::filter();
+    let cpu =
+        cpu_seconds.map(|seconds| libc::rlim_t::try_from(seconds).unwrap_or(libc::rlim_t::MAX));
     let hook = move || -> std::io::Result<()> {
+        if let Some(cpu) = cpu {
+            limit_cpu(cpu)?;
+        }
         #[cfg(target_os = "linux")]
         linux::install(&filter)?;
         #[cfg(target_os = "macos")]
@@ -39,9 +49,32 @@ pub(crate) fn contain(command: &mut Command) {
     };
     // SAFETY: the hook runs in the forked child before exec. It allocates
     // nothing and takes no lock: it reads a filter built before the fork and
-    // makes only prctl, geteuid and setrlimit calls, which are
+    // makes only prctl, geteuid, getrlimit and setrlimit calls, which are
     // async-signal-safe.
     unsafe { command.pre_exec(hook) };
+}
+
+/// Lower the processor-time limit to `seconds`, soft and hard, or to the
+/// hard limit inherited when that is lower: it is never raised.
+fn limit_cpu(seconds: libc::rlim_t) -> std::io::Result<()> {
+    let mut inherited = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `inherited` is a valid rlimit that outlives the call.
+    if unsafe { libc::getrlimit(libc::RLIMIT_CPU, &mut inherited) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let value = seconds.min(inherited.rlim_max);
+    let limit = libc::rlimit {
+        rlim_cur: value,
+        rlim_max: value,
+    };
+    // SAFETY: `limit` is a valid rlimit that outlives the call.
+    if unsafe { libc::setrlimit(libc::RLIMIT_CPU, &limit) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -245,6 +278,17 @@ mod tests {
             Some("session") => (unsafe { libc::setsid() }) != -1,
             // SAFETY: setpgid takes no pointers.
             Some("group") => (unsafe { libc::setpgid(0, 0) }) == 0,
+            // Whether the processor-time limit is seven seconds, soft and
+            // hard.
+            Some("cpu-seven") => {
+                let mut limit = libc::rlimit {
+                    rlim_cur: 0,
+                    rlim_max: 0,
+                };
+                // SAFETY: `limit` is a valid rlimit that outlives the call.
+                (unsafe { libc::getrlimit(libc::RLIMIT_CPU, &mut limit) }) == 0
+                    && (limit.rlim_cur, limit.rlim_max) == (7, 7)
+            }
             #[cfg(target_os = "linux")]
             Some(raw) => linux_raw(raw),
             _ => false,
@@ -294,6 +338,12 @@ mod tests {
 
     /// Whether the child could make `check`, contained or not.
     fn child_made(check: &str, contained: bool) -> bool {
+        child_made_within(check, contained.then_some(None))
+    }
+
+    /// Whether the child could make `check`: contained, with a processor
+    /// limit or not, when `contained` is given.
+    fn child_made_within(check: &str, contained: Option<Option<u64>>) -> bool {
         let mut command = Command::new(std::env::current_exe().unwrap());
         command
             .args([
@@ -306,8 +356,8 @@ mod tests {
             .env(CHILD, check)
             .stdin(Stdio::null())
             .stderr(Stdio::null());
-        if contained {
-            contain(&mut command);
+        if let Some(cpu_seconds) = contained {
+            contain(&mut command, cpu_seconds);
         }
         let output = command.output().unwrap();
         let text = String::from_utf8_lossy(&output.stdout);
@@ -338,6 +388,15 @@ mod tests {
             assert_eq!(child_made(check, true), contained, "{check}, contained");
             assert!(child_made(check, false), "{check}, uncontained");
         }
+    }
+
+    /// A playing decoder's processor limit is set, soft and hard, before it
+    /// runs; one contained without a limit keeps what it inherits.
+    #[test]
+    fn a_processor_limit_is_set_before_the_decoder_runs() {
+        assert!(child_made_within("cpu-seven", Some(Some(7))));
+        assert!(!child_made_within("cpu-seven", Some(None)));
+        assert!(!child_made_within("cpu-seven", None));
     }
 
     /// On Linux the filter answers by number and flag: `clone3` with

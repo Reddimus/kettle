@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use kettle_media::video::{
-    DecodedStills, StillsPlan, VideoContainer, VideoDecoder, VideoInput, sniff_video_container,
+    DecodedStills, PlayGate, PlayRequest, Playback, StillsPlan, VideoContainer, VideoDecoder,
+    VideoInput, VideoPlayer, sniff_video_container,
 };
 use kettle_media::{FailureCode, PathIdentity, VideoCodec, VideoInfo};
 use kettle_media_native::ffmpeg::Ffmpeg;
@@ -62,11 +63,15 @@ struct Fake {
 /// How the stand-in ffmpeg answers.
 #[derive(Clone, Copy)]
 struct Answer {
+    /// Frames a session's run writes, before any shortfall.
+    frames: u32,
     /// Pixels short of the size asked for (negative: over).
     short: i64,
     /// A byte written past the frame.
     trailing: bool,
     status: u8,
+    /// Killed by a signal once its frames are written.
+    killed: bool,
     /// Whether its codec list says it decodes H.264.
     decodes: bool,
     /// Never answers.
@@ -78,9 +83,11 @@ struct Answer {
 }
 
 const GOOD: Answer = Answer {
+    frames: 1,
     short: 0,
     trailing: false,
     status: 0,
+    killed: false,
     decodes: true,
     hangs: false,
     codecs_fail: false,
@@ -107,15 +114,18 @@ impl Fake {
             format!("{}\nexec /bin/sleep 30", log("ffmpeg"))
         } else {
             format!(
-                "{log}\ncase \"$*\" in *-codecs*) {codecs} ;; esac\n\
-                 w=0; h=0\n\
-                 for arg in \"$@\"; do case \"$arg\" in scale=*) v=${{arg#scale=}}; w=${{v%%:*}}; v=${{v#*:}}; h=${{v%%:*}} ;; esac; done\n\
-                 n=$((w * h - {short})); i=0\n\
+                "{log}\nulimit -t >> \"${{0%/*}}/ffmpeg.cpu\"\n\
+                 case \"$*\" in *-codecs*) {codecs} ;; esac\n\
+                 w=0; h=0; f=1\n\
+                 for arg in \"$@\"; do case \"$arg\" in fps=*) f={frames}; arg=${{arg#*,}} ;; esac; case \"$arg\" in scale=*) v=${{arg#scale=}}; w=${{v%%:*}}; v=${{v#*:}}; h=${{v%%:*}} ;; esac; done\n\
+                 n=$((f * w * h - {short})); i=0\n\
                  while [ \"$i\" -lt \"$n\" ]; do printf '\\377\\000\\000\\377'; i=$((i + 1)); done\n\
-                 {trailing}exit {status}",
+                 {trailing}{killed}exit {status}",
                 log = log("ffmpeg"),
+                frames = answer.frames,
                 short = answer.short,
                 trailing = if answer.trailing { "printf x\n" } else { "" },
+                killed = if answer.killed { "kill -KILL $$\n" } else { "" },
                 status = answer.status,
             )
         };
@@ -628,4 +638,262 @@ fn each_program_brings_its_own_library_tree() {
         [root.join("a/bin/ffmpeg"), root.join("b/bin/ffprobe")]
     );
     assert_eq!(trees, [root.join("a/lib"), root.join("b/lib")]);
+}
+
+/// Open `clip` for a session within `room`, from `start_ms`, at most
+/// `max_fps_milli`.
+fn play(
+    decoder: &dyn VideoPlayer,
+    clip: &Clip,
+    room: (u32, u32),
+    start_ms: u64,
+    max_fps_milli: u32,
+) -> Result<Playback, FailureCode> {
+    decoder.play(
+        clip.input(),
+        PlayRequest {
+            max_width: room.0,
+            max_height: room.1,
+            start_ms,
+            max_fps_milli,
+        },
+        later(),
+    )
+}
+
+/// Every frame of an opened session to its end: each one's time and pixels.
+fn frames_of(playback: &mut Playback) -> Result<Vec<(u64, Vec<u8>)>, FailureCode> {
+    let size = playback.opened.width as usize * playback.opened.height as usize * 4;
+    let gate = PlayGate::default();
+    gate.play();
+    let mut frames = Vec::new();
+    loop {
+        let mut rgba = vec![0; size];
+        match playback.frames.next_frame(&mut rgba, &gate)? {
+            Some(pts) => frames.push((pts, rgba)),
+            None => return Ok(frames),
+        }
+        assert!(frames.len() <= 1000, "a session that never ends");
+    }
+}
+
+/// A session's run is described first, then decodes from its start at the
+/// rate asked, fitted to the room and never enlarged; its frames are timed
+/// from that start, its output ending at a frame's edge ends the video, and
+/// it runs within a processor-time limit for the video it has left.
+#[test]
+fn a_session_decodes_from_its_start_at_its_rate() {
+    let fake = Fake::new(DESCRIPTION, PACKETS, Answer { frames: 4, ..GOOD });
+    let clip = Clip::mp4();
+    let mut playback = play(&fake.decoder(), &clip, (20, 20), 300, 5_000).unwrap();
+    let opened = playback.opened;
+    assert_eq!(
+        (
+            opened.width,
+            opened.height,
+            opened.fps_milli,
+            opened.start_ms
+        ),
+        (20, 15, 5_000, 300)
+    );
+    assert_eq!(opened.info.duration_ms, 1000);
+    let frames = frames_of(&mut playback).unwrap();
+    assert_eq!(
+        frames.iter().map(|(pts, _)| *pts).collect::<Vec<_>>(),
+        // 300 ms on, a fifth of a second apart, held to the video's length.
+        [300, 500, 700, 900]
+    );
+    assert!(frames.iter().all(|(_, rgba)| rgba.len() == 20 * 15 * 4));
+    // Read once that run has ended, before another starts.
+    let call = fake.calls("ffmpeg").pop().unwrap();
+    assert_eq!(arg_after(&call, "-ss"), Some("0.300000"));
+    assert_eq!(
+        arg_after(&call, "-vf"),
+        Some("fps=5000/1000:eof_action=pass,scale=20:15:flags=bilinear,setsar=1")
+    );
+    // Half a minute and four seconds for the one second left.
+    let cpu = std::fs::read_to_string(fake.directory.path().join("ffmpeg.cpu")).unwrap();
+    assert_eq!(cpu.trim(), "34");
+    // A buffer of another size is refused, never read as a frame's worth.
+    let mut playback = play(&fake.decoder(), &clip, (20, 20), 300, 5_000).unwrap();
+    let gate = PlayGate::default();
+    for wrong in [0, 20 * 15 * 2, 20 * 15 * 4 + 1] {
+        assert_eq!(
+            playback.frames.next_frame(&mut vec![0; wrong], &gate),
+            Err(FailureCode::BadParams)
+        );
+    }
+
+    // A video's own rate is kept when it is slower, its own size when it
+    // is smaller, and a start past the last frame shows the last frame.
+    let mut playback = play(&fake.decoder(), &clip, (1920, 1080), 5_000, 30_000).unwrap();
+    let opened = playback.opened;
+    assert_eq!(
+        (
+            opened.width,
+            opened.height,
+            opened.fps_milli,
+            opened.start_ms
+        ),
+        (40, 30, 10_000, 900)
+    );
+    // Frames past the end, which a real ffmpeg does not write, are held to
+    // the video's length.
+    assert_eq!(
+        frames_of(&mut playback)
+            .unwrap()
+            .iter()
+            .map(|(pts, _)| *pts)
+            .collect::<Vec<_>>(),
+        [900, 1000, 1000, 1000]
+    );
+
+    // Sound that runs two seconds past the video: a start past the video's
+    // last frame still shows that frame.
+    let longer: Vec<&str> = DESCRIPTION
+        .iter()
+        .map(|line| {
+            if line.starts_with("format.duration=") {
+                "format.duration=\"3.000000\""
+            } else {
+                line
+            }
+        })
+        .collect();
+    let fake = Fake::new(&longer, PACKETS, GOOD);
+    let mut playback = play(&fake.decoder(), &clip, (40, 30), 2_500, 10_000).unwrap();
+    assert_eq!(
+        (playback.opened.info.duration_ms, playback.opened.start_ms),
+        (3000, 900)
+    );
+    assert_eq!(frames_of(&mut playback).unwrap().len(), 1);
+    let call = fake.calls("ffmpeg").pop().unwrap();
+    assert_eq!(arg_after(&call, "-ss"), Some("0.900000"));
+}
+
+/// A session's run that ends inside a frame is a misframed stream; one that
+/// gives no frame at all is explained, by its codec missing from this
+/// ffmpeg or by the stream; one that fails after whole frames fails the
+/// stream, and one killed by a signal then is out of resources.
+#[test]
+fn a_session_without_whole_frames_fails() {
+    let clip = Clip::mp4();
+    for (answer, failure) in [
+        (
+            Answer {
+                frames: 2,
+                status: 1,
+                ..GOOD
+            },
+            FailureCode::RenderParse,
+        ),
+        (
+            Answer {
+                frames: 2,
+                killed: true,
+                ..GOOD
+            },
+            FailureCode::RenderResource,
+        ),
+    ] {
+        let fake = Fake::new(DESCRIPTION, PACKETS, answer);
+        let mut playback = play(&fake.decoder(), &clip, (40, 30), 0, 10_000).unwrap();
+        assert_eq!(frames_of(&mut playback), Err(failure));
+    }
+    let short = Fake::new(
+        DESCRIPTION,
+        PACKETS,
+        Answer {
+            frames: 2,
+            short: 1,
+            ..GOOD
+        },
+    );
+    let mut playback = play(&short.decoder(), &clip, (40, 30), 0, 10_000).unwrap();
+    assert_eq!(frames_of(&mut playback), Err(FailureCode::RenderParse));
+    for (decodes, failure) in [
+        (false, FailureCode::CodecUnavailable),
+        (true, FailureCode::RenderParse),
+    ] {
+        let none = Fake::new(
+            DESCRIPTION,
+            PACKETS,
+            Answer {
+                frames: 0,
+                status: 1,
+                decodes,
+                ..GOOD
+            },
+        );
+        let mut playback = play(&none.decoder(), &clip, (40, 30), 0, 10_000).unwrap();
+        assert_eq!(frames_of(&mut playback), Err(failure), "decodes: {decodes}");
+    }
+}
+
+/// A real ffmpeg started past the video's end, in a file whose sound runs
+/// six seconds longer, shows the video's last frame, at the video's rate or
+/// one far slower.
+#[test]
+fn real_ffmpeg_shows_the_last_frame_of_a_video_its_sound_outlasts() {
+    let Some(decoder) = installed() else {
+        return;
+    };
+    for max_fps_milli in [10_000, 1_000] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("long-audio.mp4");
+        std::fs::copy(fixture("long-audio.mp4"), &path).unwrap();
+        let clip = Clip::open(directory, path);
+        let mut playback = play(&decoder, &clip, (64, 36), 9_900, max_fps_milli).unwrap();
+        assert_eq!(playback.opened.info.duration_ms, 10_000);
+        assert_eq!(playback.opened.start_ms, 3900);
+        let frames = frames_of(&mut playback)
+            .unwrap_or_else(|failure| panic!("at {max_fps_milli}: {failure:?}"));
+        let shown: Vec<(u64, u32)> = frames
+            .iter()
+            .map(|(pts, rgba)| (*pts, frame_index(rgba, 64, 36, false)))
+            .collect();
+        assert_eq!(shown, [(3900, 39)], "at {max_fps_milli}");
+    }
+}
+
+/// A real ffmpeg plays every frame in order from where it starts, each
+/// timed as the frame it is, at the rate asked: in MP4, WebM, a rotated MP4
+/// (shown upright) and a WebM with no duration.
+#[test]
+fn real_ffmpeg_plays_each_frame_in_order() {
+    let Some(decoder) = installed() else {
+        return;
+    };
+    for (name, room, start_ms, max_fps_milli, size, first, step) in [
+        ("index.mp4", (64, 64), 0, 30_000, (64, 36), 0, 1),
+        ("index.mp4", (32, 32), 2000, 30_000, (32, 18), 20, 1),
+        ("index.mp4", (64, 36), 0, 5_000, (64, 36), 0, 2),
+        ("index.webm", (64, 36), 1000, 10_000, (64, 36), 10, 1),
+        ("rotated.mp4", (64, 64), 0, 10_000, (36, 64), 0, 1),
+        ("unsized.webm", (64, 36), 0, 10_000, (64, 36), 0, 1),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(name);
+        std::fs::copy(fixture(name), &path).unwrap();
+        let clip = Clip::open(directory, path);
+        let mut playback = play(&decoder, &clip, room, start_ms, max_fps_milli)
+            .unwrap_or_else(|failure| panic!("{name}: {failure:?}"));
+        let opened = playback.opened;
+        assert_eq!((opened.width, opened.height), size, "{name}");
+        assert_eq!(opened.info.duration_ms, 4000, "{name}");
+        let frames =
+            frames_of(&mut playback).unwrap_or_else(|failure| panic!("{name}: {failure:?}"));
+        let indices: Vec<u32> = frames
+            .iter()
+            .map(|(_, rgba)| frame_index(rgba, size.0, size.1, name == "rotated.mp4"))
+            .collect();
+        let expected: Vec<u32> = (first..40).step_by(step).collect();
+        assert_eq!(indices, expected, "{name} from {start_ms}");
+        let times: Vec<u64> = frames.iter().map(|(pts, _)| *pts).collect();
+        let expected: Vec<u64> = expected
+            .iter()
+            .map(|&index| u64::from(index) * 100)
+            .collect();
+        assert_eq!(times, expected, "{name} from {start_ms}");
+    }
 }

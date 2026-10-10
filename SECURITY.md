@@ -340,10 +340,16 @@ Reports that fit any of these are welcome:
   `setpgid`, so it cannot leave its group either. On macOS, MP4 and QuickTime
   are read first by AVFoundation inside the worker, opened by descriptor
   with references outside the file forbidden; decoding runs in Apple's
-  decoder service, demuxing in the worker under its limits. Running a binary from
+  decoder service, demuxing in the worker under its limits. A video the user
+  plays streams from one ffmpeg run per session, held to all of the above
+  but the deadline: video only, read a whole frame at a time (output ending
+  inside a frame fails the session), and within a processor-time limit set
+  before it runs, half a minute and four seconds for each second of video
+  left, so a run that spins without writing goes when it is spent, whether
+  or not anyone still reads it. Running a binary from
   anywhere else, an argument a request or the media chose, a decoder that
-  starts a process, reads another file, or outlives its job, or a frame
-  accepted at the wrong size, is in scope.
+  starts a process, reads another file, or outlives its job or session, or a
+  frame accepted at the wrong size, is in scope.
 - **Video paste receipts** — a pasted or dropped video's receipt starts
   with a check, Kettle itself run as a short-lived helper with a two-second
   deadline: it opens the file only through a parent chain no other

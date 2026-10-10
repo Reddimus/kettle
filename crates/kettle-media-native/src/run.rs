@@ -3,11 +3,17 @@
 //! discarded, stdout read up to a cap and one byte past it, all within a
 //! deadline. A tool still running at the deadline, or writing past its cap,
 //! is killed and reaped; so is one whose caller stops waiting for it.
+//!
+//! A tool that plays a video is started the same way and read as it writes,
+//! a frame at a time, within a processor-time limit instead of a deadline:
+//! it lasts as long as its session, and is killed and reaped when the
+//! session lets it go. Its output ending says how it then exited.
 
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::Read as _;
-use std::process::{Child, Command, Stdio};
+use std::os::unix::process::ExitStatusExt as _;
+use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -33,6 +39,9 @@ pub(crate) struct Ran {
     /// It exited with status 0.
     pub(crate) success: bool,
 }
+
+/// How long a streamed tool may take to exit once its output has ended.
+const EXIT_WITHIN: Duration = Duration::from_secs(1);
 
 /// A started tool, killed and reaped unless it was waited for.
 struct Running(Option<Child>);
@@ -63,6 +72,36 @@ impl Running {
             }
         }
     }
+
+    /// How it exits within `within`, reaped if it does; one that does not
+    /// is killed and reaped when dropped.
+    fn exit_within(&mut self, within: Duration) -> Exit {
+        let deadline = Instant::now() + within;
+        let mut pause = Duration::from_micros(250);
+        loop {
+            let Some(child) = self.0.as_mut() else {
+                return Exit::Failed;
+            };
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    self.0 = None;
+                    return if status.success() {
+                        Exit::Clean
+                    } else if status.signal().is_some() {
+                        Exit::Killed
+                    } else {
+                        Exit::Failed
+                    };
+                }
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(pause);
+                    pause = (pause * 2).min(Duration::from_millis(5));
+                }
+                Ok(None) => return Exit::Stuck,
+                Err(_) => return Exit::Failed,
+            }
+        }
+    }
 }
 
 impl Drop for Running {
@@ -72,12 +111,103 @@ impl Drop for Running {
             // signals): the job has failed anyway, and the decoder, which
             // cannot leave the worker's process group, goes when Kettle kills
             // that group after the worker exits. Waiting for it here would
-            // only hold the worker up.
+            // only hold the worker up; one that has already exited is still
+            // reaped.
             if child.kill().is_ok() {
                 let _ = child.wait();
+            } else {
+                let _ = child.try_wait();
             }
         }
     }
+}
+
+/// Start `tool` contained with `args`, `input` as its stdin (none reads as
+/// empty) and its output piped, within `cpu_seconds` of processor time when
+/// given.
+fn start<A: AsRef<OsStr>>(
+    tool: &Tool,
+    args: &[A],
+    input: Option<File>,
+    cpu_seconds: Option<u64>,
+) -> Result<(Running, ChildStdout), RunError> {
+    tool.check().map_err(|_| RunError::Unavailable)?;
+    let mut command = Command::new(tool.path());
+    command
+        .args(args)
+        .env_clear()
+        .current_dir("/")
+        .stdin(input.map_or_else(Stdio::null, Stdio::from))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    crate::contain::contain(&mut command, cpu_seconds);
+    let mut running = Running(Some(command.spawn().map_err(|_| RunError::Unavailable)?));
+    let stdout = running.child().stdout.take().ok_or(RunError::Unavailable)?;
+    Ok((running, stdout))
+}
+
+/// A tool read as it writes, in pieces of a fixed size: killed and reaped
+/// once dropped, its output closed first.
+pub(crate) struct Streaming {
+    stdout: ChildStdout,
+    /// Waited for once the output ends; otherwise killed and reaped after
+    /// the output is closed.
+    running: Running,
+}
+
+/// What a streamed tool gave for a piece.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Piece {
+    /// The piece, whole.
+    Filled,
+    /// Its output ended at a piece's edge, and it then exited so.
+    Ended(Exit),
+}
+
+/// How a streamed tool exited once its output ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Exit {
+    /// With status 0.
+    Clean,
+    /// With another status.
+    Failed,
+    /// By a signal: its processor-time limit, or a crash.
+    Killed,
+    /// Not within a second: it is killed when the stream is dropped.
+    Stuck,
+}
+
+impl Streaming {
+    /// Fill `piece` from the output: `Filled` once it is full, `Ended` with
+    /// how the tool exited when the output ended before its first byte, and
+    /// an error when it ended inside it or could not be read.
+    pub(crate) fn next_piece(&mut self, piece: &mut [u8]) -> Result<Piece, ()> {
+        let mut filled = 0;
+        while filled < piece.len() {
+            match self.stdout.read(&mut piece[filled..]) {
+                Ok(0) if filled == 0 => {
+                    return Ok(Piece::Ended(self.running.exit_within(EXIT_WITHIN)));
+                }
+                Ok(0) => return Err(()),
+                Ok(read) => filled += read,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => return Err(()),
+            }
+        }
+        Ok(Piece::Filled)
+    }
+}
+
+/// Start `tool` with `args` and `input` as its stdin, to be read as it
+/// writes, within `cpu_seconds` of processor time.
+pub(crate) fn stream<A: AsRef<OsStr>>(
+    tool: &Tool,
+    args: &[A],
+    input: File,
+    cpu_seconds: u64,
+) -> Result<Streaming, RunError> {
+    let (running, stdout) = start(tool, args, Some(input), Some(cpu_seconds))?;
+    Ok(Streaming { stdout, running })
 }
 
 /// Run `tool` with `args`, `input` as its stdin (none reads as empty), and
@@ -89,18 +219,7 @@ pub(crate) fn run<A: AsRef<OsStr>>(
     cap: usize,
     deadline: Instant,
 ) -> Result<Ran, RunError> {
-    tool.check().map_err(|_| RunError::Unavailable)?;
-    let mut command = Command::new(tool.path());
-    command
-        .args(args)
-        .env_clear()
-        .current_dir("/")
-        .stdin(input.map_or_else(Stdio::null, Stdio::from))
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    crate::contain::contain(&mut command);
-    let mut running = Running(Some(command.spawn().map_err(|_| RunError::Unavailable)?));
-    let stdout = running.child().stdout.take().ok_or(RunError::Unavailable)?;
+    let (running, stdout) = start(tool, args, input, None)?;
     let (sender, received) = mpsc::channel();
     // The tool can start no process to hold the pipe open, so the reader
     // ends once the tool does, killed or not.
