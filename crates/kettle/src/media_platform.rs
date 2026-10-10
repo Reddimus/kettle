@@ -108,8 +108,10 @@ fn guard_pipe_writes() -> std::io::Result<()> {
 #[cfg(unix)]
 fn decoder() -> Option<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
+    // By the name it was found under: its directory holds the ffprobe the
+    // search trusted beside it, which the worker looks for again.
     kettle_media_native::ffmpeg::Ffmpeg::search(home.as_deref())
-        .map(|found| found.path().to_path_buf())
+        .map(|found| found.named().to_path_buf())
 }
 
 /// Start the worker with `kettle_media`'s command, leading a process group of
@@ -1170,6 +1172,22 @@ mod tests {
             // `env` itself as the worker: nothing is inherited, and the only
             // variable is the decoder, when a trusted one is installed.
             let mut worker = spawn(Path::new("/usr/bin/env")).unwrap();
+            // The decoder is named as found, so the worker finds the same
+            // ffmpeg and ffprobe pair the search trusted.
+            if let Some(decoder) = decoder() {
+                kettle_media_native::ffmpeg::Ffmpeg::trust(&decoder).unwrap();
+                let directory = decoder.parent().unwrap();
+                let nix = std::env::var_os("HOME")
+                    .map(|home| PathBuf::from(home).join(".nix-profile/bin"));
+                assert!(
+                    kettle_media_native::tools::SEARCH_DIRS
+                        .iter()
+                        .any(|place| directory == Path::new(place))
+                        || nix.as_deref() == Some(directory),
+                    "named where it was found, not where its links lead: {}",
+                    decoder.display()
+                );
+            }
             let expected = decoder().map_or_else(String::new, |decoder| {
                 format!(
                     "{}={}\n",

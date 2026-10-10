@@ -604,7 +604,8 @@ and the Nix profile, never in
 .BR PATH .
 The JPEG replaces
 .I OUT.jpg
-whole, private to you, and never the video itself. Exits 0 once it is
+whole, private to you, and never the video itself; a folder other users can
+change is refused unless it is sticky. Exits 0 once it is
 written, 1 otherwise. Showing media to the user is
 .BR "kettle show" .
 .TP
