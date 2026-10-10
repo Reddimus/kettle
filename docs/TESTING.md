@@ -4107,6 +4107,13 @@ every control and the content. For a live check, drag the edge
 (`preview_lanes`' `edge`) up and to both ends: `stty size` in the pane
 follows, down to 5 rows.
 
+Mermaid cards: app tests pin that a Mermaid item gets a card, captioned as
+one, from inline source or a file, and that a lane's render on another
+canvas moves the item's card posters to the new pixels before the old go;
+`kettle-render` pins that a card shows pixels rendered again, held as weakly
+as the first, and `media::cards` that an item's cards are those at its
+generation in its pane.
+
 Copied diagrams: `kettle-core`'s `diagram_copy` tests pin fences (any
 indentation, verbatim, in order, at most 16, closed by their own mark indented
 at most three columns past the opening, a tab counting to the next multiple of

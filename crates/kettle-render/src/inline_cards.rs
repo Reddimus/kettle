@@ -178,6 +178,24 @@ impl InlineCards {
         Ok(())
     }
 
+    /// Show `image` on the card under `nonce`, as its item's pixels rendered
+    /// again: held weakly, the poster stays only while the caller, like a
+    /// shelf, holds `image`. Whether the card is registered.
+    pub fn set_poster(
+        &mut self,
+        nonce: InlineNonce,
+        image: Option<&kettle_core::ImageData>,
+    ) -> bool {
+        match self.entries.get_mut(&nonce) {
+            Some(card) => {
+                card.poster = image.map(CardPoster::new);
+                card.pending = false;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Forget the card under `nonce`; its text stays in the transcript and
     /// paints as an unknown card from the next frame.
     pub fn remove(&mut self, nonce: InlineNonce) -> bool {
@@ -222,21 +240,6 @@ impl InlineCards {
             None if entry.pending => CardVisual::Pending,
             None => CardVisual::Failed,
         })
-    }
-
-    /// The poster stays only while the caller, like a shelf, holds `image`.
-    #[cfg(test)]
-    pub(crate) fn set_poster(
-        &mut self,
-        nonce: InlineNonce,
-        image: Option<&kettle_core::ImageData>,
-    ) {
-        let entry = self
-            .entries
-            .get_mut(&nonce)
-            .expect("test registration exists");
-        entry.poster = image.map(CardPoster::new);
-        entry.pending = false;
     }
 
     /// Recomputed every painted frame; the renderer reuses frame and scratch
@@ -673,6 +676,33 @@ pub(crate) mod tests {
         let other = InlineNonce::new([6, 5, 4, 3, 2, 1]).unwrap();
         cards.insert(other, spec(3, 12, None)).unwrap();
         assert!(matches!(cards.visual(other), Some(CardVisual::Pending)));
+    }
+
+    /// A card shows its item's pixels rendered again once told, holding
+    /// them as weakly as the first; a card no one registered takes none.
+    #[test]
+    fn a_card_shows_its_items_pixels_rendered_again() {
+        let nonce = InlineNonce::new([1, 2, 3, 4, 5, 6]).unwrap();
+        let first = kettle_core::ImageData::new(2, 1, vec![255; 8]).unwrap();
+        let mut cards = InlineCards::default();
+        cards
+            .insert(nonce, spec(3, 12, Some(CardPoster::new(&first))))
+            .unwrap();
+        // Rendered again on another canvas, the item lets the first go.
+        let again = kettle_core::ImageData::new(2, 1, vec![9; 8]).unwrap();
+        drop(first);
+        assert!(matches!(cards.visual(nonce), Some(CardVisual::Failed)));
+        assert!(cards.set_poster(nonce, Some(&again)));
+        assert!(
+            matches!(cards.visual(nonce), Some(CardVisual::Ready(image)) if image.rgba.as_slice() == [9; 8])
+        );
+        let pixels = std::sync::Arc::downgrade(&again.rgba);
+        drop(again);
+        assert!(pixels.upgrade().is_none(), "held weakly");
+        let stranger = InlineNonce::new([6, 5, 4, 3, 2, 1]).unwrap();
+        let other = kettle_core::ImageData::new(1, 1, vec![0; 4]).unwrap();
+        assert!(!cards.set_poster(stranger, Some(&other)));
+        assert!(!cards.contains(stranger));
     }
 
     #[test]

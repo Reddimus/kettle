@@ -412,6 +412,9 @@ first, as opening it would be; when a preview cannot be had, a notification
 says why. Only the user's own key press or click starts such a read: a
 control client may run `preview_link` or drive the menus, but a pick, a
 menu row or a confirmation it sends previews nothing.
+A Mermaid diagram an agent shows gets a card like an image, with its
+rendered poster, whether it came as source or as a file; when the lane
+draws it again on another background, the card shows that too.
 Clicking an inline card opens its pane's lane on that card's item. A card
 takes a primary press, and its release, before anything else in the window
 except open dialogs and the lanes, so the program behind it sees neither.

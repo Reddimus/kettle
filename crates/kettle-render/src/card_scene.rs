@@ -829,8 +829,12 @@ mod tests {
             .unwrap();
             match state {
                 CardBadgeState::Pending => {}
-                CardBadgeState::Failed => cards.set_poster(nonce, None),
-                CardBadgeState::Ready => cards.set_poster(nonce, Some(&poster)),
+                CardBadgeState::Failed => {
+                    cards.set_poster(nonce, None);
+                }
+                CardBadgeState::Ready => {
+                    cards.set_poster(nonce, Some(&poster));
+                }
             }
             let mut frame = CardFrame::default();
             cards.recognize_into(&snap, &mut frame);

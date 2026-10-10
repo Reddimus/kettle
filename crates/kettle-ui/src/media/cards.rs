@@ -115,6 +115,16 @@ impl CardLedger {
             .map(|card| card.item.0)
     }
 
+    /// The live cards in `pane` that show `item`, at the generation each was
+    /// registered for.
+    pub(crate) fn cards_of(&self, pane: u64, item: (u64, u64)) -> Vec<InlineNonce> {
+        self.cards
+            .iter()
+            .filter(|(_, card)| card.pane == pane && card.item == item)
+            .map(|(nonce, _)| *nonce)
+            .collect()
+    }
+
     /// Retire every card `retire` names, returning each one's pane and nonce
     /// so its pane forgets it too.
     pub(crate) fn retire(
@@ -229,6 +239,37 @@ mod tests {
             "every attempt collides with a live card"
         );
         assert_eq!(ledger.mint(|_| false), None, "no randomness, no nonce");
+    }
+
+    /// An item's cards are those in its pane registered for it at its
+    /// generation: not another pane's, item's or generation's.
+    #[test]
+    fn an_items_cards_are_its_own_at_its_generation() {
+        let mut ledger = CardLedger::default();
+        let now = Instant::now();
+        ledger.record(nonce(1), card(1, 7), now);
+        ledger.record(nonce(2), card(1, 8), now);
+        ledger.record(nonce(3), card(2, 7), now);
+        ledger.record(
+            nonce(4),
+            CardRecord {
+                item: (1, 1),
+                ..card(1, 7)
+            },
+            now,
+        );
+        ledger.record(
+            nonce(5),
+            CardRecord {
+                item: (2, 0),
+                ..card(1, 7)
+            },
+            now,
+        );
+        let mut cards = ledger.cards_of(1, (1, 0));
+        cards.sort_by_key(|nonce| format!("{nonce:?}"));
+        assert_eq!(cards, vec![nonce(1), nonce(2)]);
+        assert!(ledger.cards_of(3, (1, 0)).is_empty());
     }
 
     #[test]

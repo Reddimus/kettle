@@ -153,6 +153,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Cmd+wheel (Ctrl+wheel off macOS) at the pointer zoom the picture, the
   wheel or a drag pans it, and `⤢` fits it again. Also as
   `preview_zoom_in`, `preview_zoom_out` and `preview_fit`.
+- An agent's Mermaid diagram keeps its inline card's picture when its
+  preview lane draws it on another background.
 - Preview a diagram an agent printed: `/copy` it in Claude Code or Codex and
   use `render_clipboard_as_diagram`, or select the reply and use
   `render_selection_as_diagram` (also on right-click), and the lane renders

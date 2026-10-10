@@ -23974,14 +23974,26 @@ impl App {
             Ok(image) => image,
             Err(_) => return tell(self, ws, LaneNotice::RenderFailed),
         };
+        // The item's cards show its new pixels: their posters hold the old
+        // ones only weakly, and those go now.
+        let cards = self
+            .media
+            .cards
+            .cards_of(render.pane, (render.item, render.generation));
         let Some(window) = self.window_by_seq(ws, render.window) else {
             return;
         };
-        let Some(item) = window.mux.panes.get_mut(&render.pane).and_then(|pane| {
-            pane.media_shelf
-                .get_mut(render.item)
-                .filter(|item| item.generation == render.generation)
-        }) else {
+        let Some(pane) = window.mux.panes.get_mut(&render.pane) else {
+            return;
+        };
+        for nonce in cards {
+            pane.inline_cards.set_poster(nonce, Some(&image));
+        }
+        let Some(item) = pane
+            .media_shelf
+            .get_mut(render.item)
+            .filter(|item| item.generation == render.generation)
+        else {
             return;
         };
         item.pixels = crate::media::ItemPixels::Ready(image);
@@ -43734,6 +43746,40 @@ mod tests {
         ));
     }
 
+    /// A Mermaid diagram an agent shows gets a card with its rendered poster,
+    /// from inline source (no file name) or from a file, captioned as one.
+    #[test]
+    fn a_mermaid_item_gets_a_card_from_source_or_file() {
+        let owner = kettle_ctl::process::ProcessIdentity::new_for_tests(41, 410);
+        let image = kettle_core::ImageData::new(64, 48, vec![9; 64 * 48 * 4]).unwrap();
+        let now = std::time::Instant::now();
+        let mut ledger = crate::media::CardLedger::default();
+        let mut pane_cards = kettle_render::InlineCards::default();
+        for (name, caption) in [
+            (None, "mermaid 64x48"),
+            (Some("flow.mmd"), "flow.mmd - mermaid 64x48"),
+        ] {
+            let delivery = super::register_card(
+                &mut ledger,
+                (3, &mut pane_cards, (80, 40)),
+                (8.0, 16.0),
+                (9, 0),
+                kettle_media::MediaKind::Mermaid,
+                &image,
+                crate::media::InlineDraft {
+                    owner,
+                    harness: kettle_render::CardHarness::ClaudeHook,
+                    name: name.map(Into::into),
+                },
+                now,
+            )
+            .expect("a card");
+            assert_eq!(delivery.message.split('\n').next_back(), Some(caption));
+        }
+        assert_eq!(pane_cards.len(), 2);
+        assert_eq!(ledger.cards_of(3, (9, 0)).len(), 2);
+    }
+
     /// A verified harness's card is registered in its pane with the message
     /// its harness prints; anything that cannot hold leaves the shelf alone.
     #[test]
@@ -57328,6 +57374,27 @@ mod lane_control_tests {
             1,
             "a path pull is still the one witness site"
         );
+    }
+
+    /// A lane's render on another canvas shows on the item's inline cards
+    /// too: their posters move to the new pixels before the old go.
+    #[test]
+    fn a_rerendered_items_cards_show_its_new_pixels() {
+        let src = super::production_source();
+        let flat = src.split_whitespace().collect::<Vec<_>>().join(" ");
+        let finish = flat
+            .split("fn finish_lane_render(")
+            .nth(1)
+            .and_then(|rest| rest.split(" fn ").next())
+            .expect("finish_lane_render");
+        let moved = finish
+            .find("for nonce in cards { pane.inline_cards.set_poster(nonce, Some(&image)); }")
+            .expect("posters move");
+        let replaced = finish
+            .find("item.pixels = crate::media::ItemPixels::Ready(image);")
+            .expect("pixels replaced");
+        assert!(moved < replaced);
+        assert!(finish.contains(".cards_of(render.pane, (render.item, render.generation));"));
     }
 
     /// Copying copies what the lane shows: the source in source mode, else
