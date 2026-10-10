@@ -4569,6 +4569,14 @@ inside a pane of `kettle --agent-server off --agent-display on` and call
 separators, bidirectional formatting and placeholder sequences (the
 placeholder and the marks after it, which `strip_placeholders` in `kettle-vt`
 tests), bounded at 256 characters.
+`card_scene`'s `a_video_card_shows_play_and_its_length` paints a video
+card's play glyph (a triangle a pixel row at a time, on a plate, inside the
+poster) and its length (`0:12`) on the poster's foot, and neither on another
+card; `duration_label` writes `m:ss` and `h:mm:ss`. In `kettle-ui`, a
+video's caption gives its own size and length, its detail line its own size
+(not its poster's), codec, length and sound (no codec name when Kettle does
+not know it), and its failure notices say to install ffmpeg for a missing
+container, codec or decoder only; each fails without its change.
 A video's Show result carries `video` (duration, its own size, codec name,
 rate when known, audio) beside its poster's size and round-trips; other
 results carry none. `media::shelf` keeps a video's metadata when its

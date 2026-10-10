@@ -100,6 +100,9 @@ pub struct CardSpec {
     pub harness: CardHarness,
     pub caption: String,
     pub poster: Option<CardPoster>,
+    /// A video's length: the card shows a play glyph and the duration on
+    /// its poster. `None` for anything else.
+    pub duration_ms: Option<u64>,
 }
 
 /// Why a card was not registered.
@@ -120,6 +123,7 @@ struct RegisteredCard {
     caption: String,
     poster: Option<CardPoster>,
     pending: bool,
+    duration_ms: Option<u64>,
 }
 
 /// Owned by Pane: the cards the UI registered for it, as the renderer paints
@@ -173,9 +177,15 @@ impl InlineCards {
                 caption: spec.caption,
                 poster: spec.poster,
                 pending,
+                duration_ms: spec.duration_ms,
             },
         );
         Ok(())
+    }
+
+    /// The video length of the card under `nonce`, if it shows a video.
+    pub(crate) fn duration(&self, nonce: InlineNonce) -> Option<u64> {
+        self.entries.get(&nonce)?.duration_ms
     }
 
     /// Show `image` on the card under `nonce`, as its item's pixels rendered
@@ -227,6 +237,7 @@ impl InlineCards {
                 caption: "diagram.png - raster 640x480".into(),
                 poster: None,
                 pending: true,
+                duration_ms: None,
             },
         );
     }
@@ -615,6 +626,7 @@ pub(crate) mod tests {
             harness: CardHarness::ClaudeHook,
             caption: "plot.png - raster 64x48".into(),
             poster,
+            duration_ms: None,
         }
     }
 
