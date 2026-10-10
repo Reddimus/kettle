@@ -154,6 +154,14 @@ mod decoders {
             request: PlayRequest,
             deadline: Instant,
         ) -> Result<Playback, FailureCode> {
+            #[cfg(all(target_os = "macos", feature = "avfoundation"))]
+            if let Some(native) = &self.native {
+                match native.play(input, request, deadline) {
+                    Ok(playback) => return Ok(playback),
+                    Err(failure) if next_may_succeed(failure) && self.ffmpeg.is_some() => {}
+                    Err(failure) => return Err(failure),
+                }
+            }
             self.ffmpeg
                 .as_ref()
                 .ok_or(FailureCode::BackendUnavailable)?

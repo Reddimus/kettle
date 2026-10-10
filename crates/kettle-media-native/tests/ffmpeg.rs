@@ -18,7 +18,7 @@ use kettle_media::{FailureCode, PathIdentity, VideoCodec, VideoInfo};
 use kettle_media_native::ffmpeg::Ffmpeg;
 
 mod support;
-use support::frame_index;
+use support::{frame_index, frame_index_mirrored};
 
 fn later() -> Instant {
     Instant::now() + Duration::from_secs(20)
@@ -870,6 +870,7 @@ fn real_ffmpeg_plays_each_frame_in_order() {
         ("index.mp4", (64, 36), 0, 5_000, (64, 36), 0, 2),
         ("index.webm", (64, 36), 1000, 10_000, (64, 36), 10, 1),
         ("rotated.mp4", (64, 64), 0, 10_000, (36, 64), 0, 1),
+        ("mirrored.mp4", (64, 64), 0, 10_000, (64, 36), 0, 1),
         ("unsized.webm", (64, 36), 0, 10_000, (64, 36), 0, 1),
     ] {
         let directory = tempfile::tempdir().unwrap();
@@ -885,7 +886,10 @@ fn real_ffmpeg_plays_each_frame_in_order() {
             frames_of(&mut playback).unwrap_or_else(|failure| panic!("{name}: {failure:?}"));
         let indices: Vec<u32> = frames
             .iter()
-            .map(|(_, rgba)| frame_index(rgba, size.0, size.1, name == "rotated.mp4"))
+            .map(|(_, rgba)| match name {
+                "mirrored.mp4" => frame_index_mirrored(rgba, size.0, size.1),
+                _ => frame_index(rgba, size.0, size.1, name == "rotated.mp4"),
+            })
             .collect();
         let expected: Vec<u32> = (first..40).step_by(step).collect();
         assert_eq!(indices, expected, "{name} from {start_ms}");
