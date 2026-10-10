@@ -4249,6 +4249,8 @@ the validator agree (whatever the validator sends on the schema accepts,
 and for ASCII text the two agree exactly, at each cap and one past it, in
 ASCII and four-byte characters), that a sent result is one plain
 line plus status-only structured content saying the model has not seen it,
+that a refusal carries its fixed code and reason and nothing else, and that
+the client's own refusals have codes of their own,
 and that discovery is private with no cache lifetime in both modes. `mcp`
 pins where the server runs (a Kettle found the strict way, `TERM_PROGRAM`
 saying Kettle, tmux, and tmux's own `TERM_PROGRAM` saying nothing of
