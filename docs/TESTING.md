@@ -4618,6 +4618,24 @@ checks QuickTime Player's requirement. Each fails without its change. The
 ignored `quicktime_opens_a_marked_copy_live` opens the copy in QuickTime
 Player and closes the store; QuickTime Player keeps playing its open copy
 after Kettle deletes it.
+
+V1b live acceptance (macOS 27, debug build with a signed worker, Claude Code
+2.1.296 in a Kettle pane with Claude Code previews): `kettle_show` of an
+H.264 MP4 and of a VP8 WebM each printed a card with the middle frame, the
+play glyph and `0:09`, named by assistive technology as `Video · 640×360 ·
+H.264 · 0:09 · no audio` (VP8 for the WebM, its poster through ffmpeg); a
+native right-press on the MP4's card offered Open and Open in QuickTime
+Player, which opened an owner-only, quarantined copy byte-identical to the
+file in a 0700 `kettle-video-` session; the WebM's row opened nothing and
+copied nothing; the lane's `↗`, clicked natively and through `send_mouse`,
+opened another copy; and closing the window deleted the copies while
+QuickTime Player kept the ones it had open. Not run: Linux with mpv, left
+for R1's pass on the Ubuntu guest (argv, trust and refusal are unit-tested,
+and Docker runs the copy tests through the byte copy, as its file system
+cannot clone), mixed DPI, and the notice banners, which macOS draws outside
+what the tools can capture (their mapping is unit-tested). This branch predates #512,
+so the WebM's notice raised macOS's "Choose Application" dialog, as main
+did before that fix.
 A video's Show result carries `video` (duration, its own size, codec name,
 rate when known, audio) beside its poster's size and round-trips; other
 results carry none. `media::shelf` keeps a video's metadata when its
