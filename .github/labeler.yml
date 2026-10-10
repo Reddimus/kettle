@@ -46,6 +46,7 @@ media:
           - "crates/kettle-media/**"
           - "crates/kettle-media-worker/**"
           - "crates/kettle-media-render/**"
+          - "crates/kettle-media-native/**"
           - "crates/kettle/src/media_platform.rs"
           - "crates/kettle/build_support/**"
 

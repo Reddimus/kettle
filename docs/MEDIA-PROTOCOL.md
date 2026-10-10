@@ -406,7 +406,8 @@ worker's limits and the client's deadlines and memory limit are a second
 bound, not the only one. An empty target box, one over 4096 pixels on an
 edge, a scale that is not a positive finite number, or a crop that is empty or
 leaves the box, is `BadParams`. Raster, SVG, Mermaid, MarkdownDiagrams and
-Auto jobs are rendered, and so are VideoStills jobs on animated images.
+Auto jobs are rendered, and so are VideoStills jobs on animated images and,
+through the worker's external decoder, on video.
 VideoProbe is `UnsupportedMedia` until its renderer lands. On Windows, where
 no worker runs, every job is `UnsupportedPlatform`.
 
@@ -420,9 +421,31 @@ tile as it is kept. A GIF delay under 20 ms shows for 100 ms, as browsers
 show it, and a delay of 0 in an APNG or WebP shows for 100 ms too. A single
 frame lasts 0 ms, and a PNG that does not animate is `UnsupportedMedia`.
 More than 10,000 frames, or more than two billion decoded pixels over both
-passes, is `RenderResource`, and the job has 2.5 s. A sniffed video
-container is `BackendUnavailable` until the worker's decoder arrives; other
-bytes are `UnsupportedMedia`.
+passes, is `RenderResource`, and the job has 2.5 s. Other bytes are
+`UnsupportedMedia`.
+
+A sniffed video container is decoded by the external decoder the parent
+names when it starts the worker, in the worker's environment as
+`KETTLE_MEDIA_DECODER` (an ffmpeg binary, with ffprobe beside it); no job
+or request names one. Without it, or when the binaries are not trusted,
+the job is `BackendUnavailable`. Inline video bytes are `UnsupportedMedia`:
+a decoder reads a file, and the worker writes none. ffprobe describes the
+streams (the first video stream that is not cover art; the size as shown,
+its pixel aspect and display rotation applied; the codec, frame rate and
+whether there is audio) and lists the packets around each instant, or the
+whole stream's when it has no duration, which then gives its length. Each
+still is the frame showing at its instant, the last frame starting at or
+before it, decoded by that frame's own timestamp, so its actual time is
+that frame's start. When the remaining instants would miss the deadline at
+the pace so far, each takes its frame's keyframe instead, with the
+keyframe's time. A stream whose packets carry no timestamps is sought by
+time: each frame's actual time is its instant, and the tolerance is one
+frame's length. A frame that is not exactly the tile size in RGBA, a byte
+short or over, is `RenderParse`, or `CodecUnavailable` when ffmpeg's codec
+list says it cannot decode the codec. A decoder past the deadline is
+`RenderTimeout`; a file changed while it was decoded is `Changed`. A video's
+digest covers its first 64 KiB and the held file's identity, since hashing
+the whole file would cost more than the job has.
 
 Each still is the frame showing at the middle of its equal share of the
 window (`start_s` to `end_s`, the duration by default), or at `at_s`, clamped

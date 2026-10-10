@@ -1065,6 +1065,21 @@ pub struct PathIdentity {
     pub mtime_seconds: i64,
     pub mtime_nanos: u32,
 }
+#[cfg(unix)]
+impl PathIdentity {
+    /// The identity in an open file's metadata; `None` for a modification
+    /// time no file system gives.
+    pub fn of(metadata: &std::fs::Metadata) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt as _;
+        Some(Self {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+            size: metadata.len(),
+            mtime_seconds: metadata.mtime(),
+            mtime_nanos: u32::try_from(metadata.mtime_nsec()).ok()?,
+        })
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Digest {
     pub sha256: [u8; 32],

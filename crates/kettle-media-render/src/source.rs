@@ -274,13 +274,7 @@ fn read_capped(file: &File, cap: u64) -> Result<Vec<u8>, FailureCode> {
 }
 
 fn identity(metadata: &Metadata) -> Result<PathIdentity, FailureCode> {
-    Ok(PathIdentity {
-        dev: metadata.dev(),
-        ino: metadata.ino(),
-        size: metadata.len(),
-        mtime_seconds: metadata.mtime(),
-        mtime_nanos: u32::try_from(metadata.mtime_nsec()).map_err(|_| FailureCode::Changed)?,
-    })
+    PathIdentity::of(metadata).ok_or(FailureCode::Changed)
 }
 
 fn open_failure(error: std::io::Error) -> FailureCode {

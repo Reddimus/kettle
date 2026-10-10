@@ -1,4 +1,64 @@
-//! Content-based container identification shared by video callers.
+//! Content-based container identification shared by video callers, and the
+//! seam a video decoder outside the renderer plugs into.
+
+use std::fs::File;
+use std::time::Instant;
+
+use crate::{FailureCode, PathIdentity, StillSample, VideoInfo};
+
+/// The environment variable the parent names the external decoder's ffmpeg
+/// in, when it starts a worker. Only Kettle's own platform code sets it, so
+/// no request can choose a binary.
+pub const DECODER_ENV: &str = "KETTLE_MEDIA_DECODER";
+
+/// A video decoder the worker supplies to the renderer, which itself starts
+/// no process and links no codec.
+pub trait VideoDecoder {
+    /// Decode the stills `plan` asks for once it knows what the video is.
+    /// `plan` turns the video's description into the instants to show and
+    /// the size of each frame; frames come back in that order, at that size,
+    /// each with the time of the frame actually shown.
+    fn stills(
+        &self,
+        input: VideoInput<'_>,
+        plan: &mut dyn FnMut(&VideoInfo) -> Result<StillsPlan, FailureCode>,
+        deadline: Instant,
+    ) -> Result<DecodedStills, FailureCode>;
+}
+
+/// The video to decode: the open file the renderer holds, what it was when
+/// opened, and the container its first bytes say it is.
+#[derive(Clone, Copy, Debug)]
+pub struct VideoInput<'a> {
+    pub file: &'a File,
+    pub identity: PathIdentity,
+    pub container: VideoContainer,
+}
+
+/// What a stills job wants from the decoder: instants in ms from the
+/// video's start, in layout order, and the size every frame is drawn at.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StillsPlan {
+    pub times_ms: Vec<u64>,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// A decoder's answer: the video, one frame per instant asked for, and how
+/// far a frame's time may be from the instant it stands for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DecodedStills {
+    pub info: VideoInfo,
+    pub frames: Vec<DecodedFrame>,
+    pub tolerance_ms: u32,
+}
+
+/// One frame as straight RGBA at the plan's size, with its times.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DecodedFrame {
+    pub sample: StillSample,
+    pub rgba: Vec<u8>,
+}
 
 /// Maximum prefix inspected without reading the rest of a video file.
 pub const MAX_VIDEO_PREFIX_BYTES: usize = 64 * 1024;

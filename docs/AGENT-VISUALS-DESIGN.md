@@ -23,7 +23,8 @@ classifier; this does not add a decoder or playback.
 | --- | --- |
 | `kettle-media` | Bounded jobs/results and wire frames; source authorization; build handshake; shared video container identification; injected platform client for worker availability, deadlines and footprint monitoring |
 | `kettle-media-worker` | Separate O3 executable; early descriptor sweep and resource setup; one job/reply per process; watchdog and input-free failure reporting |
-| `kettle-media-render` | Held-descriptor source/font reads; content-based raster selection; SVG sanitizing and admission; rendering into straight RGBA |
+| `kettle-media-render` | Held-descriptor source/font reads; content-based raster selection; SVG sanitizing and admission; rendering into straight RGBA; animation stills and poster/sheet layout |
+| `kettle-media-native` | The worker's native video code: trusting the user's ffmpeg and ffprobe, running them contained with fixed arguments, deadlines and exactly sized output |
 | `kettle` | Installed-worker resolution and native verification; CLI/MCP and launch integration as they land |
 | `kettle-ui` | User actions, request admission, lifetime/cancellation, fallback-font resolution and bounded requeue, preview/card/shelf/viewer state as they land |
 | `kettle-vt` | Shared marker codec, Kitty mark decoding and independent preview accounts |

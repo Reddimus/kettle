@@ -2134,6 +2134,7 @@ dependencies = [
  "kettle-ctl",
  "kettle-i18n",
  "kettle-media",
+ "kettle-media-native",
  "kettle-render",
  "kettle-state",
  "kettle-test-support",
@@ -2222,6 +2223,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "kettle-media-native"
+version = "4.9.0"
+dependencies = [
+ "kettle-media",
+ "kettle-test-support",
+ "libc",
+ "tempfile",
+]
+
+[[package]]
 name = "kettle-media-render"
 version = "4.9.0"
 dependencies = [
@@ -2257,6 +2268,7 @@ version = "4.9.0"
 dependencies = [
  "image",
  "kettle-media",
+ "kettle-media-native",
  "kettle-media-render",
  "kettle-test-support",
  "libc",

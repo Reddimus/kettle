@@ -66,7 +66,18 @@ pub fn render(job: &Job) -> Result<Rendered, FailureCode> {
 /// can narrow its deadline to that kind's.
 pub fn render_with_kind(
     job: &Job,
+    on_kind: impl FnMut(MediaKind),
+) -> Result<(MediaKind, Rendered), FailureCode> {
+    render_with_decoder(job, on_kind, None)
+}
+
+/// Render one job as [`render_with_kind`] does, with `decoder` for a video
+/// container's stills; without one they are `BackendUnavailable`. The
+/// renderer starts no process: the worker supplies the decoder.
+pub fn render_with_decoder(
+    job: &Job,
     mut on_kind: impl FnMut(MediaKind),
+    decoder: Option<&dyn kettle_media::video::VideoDecoder>,
 ) -> Result<(MediaKind, Rendered), FailureCode> {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
@@ -90,14 +101,14 @@ pub fn render_with_kind(
                 on_kind(MediaKind::Markdown);
                 markdown::render(job, index).map(|rendered| (MediaKind::Markdown, rendered))
             }
-            JobKind::VideoStills(stills) => stills::render(job, &stills, &mut on_kind)
+            JobKind::VideoStills(stills) => stills::render(job, &stills, &mut on_kind, decoder)
                 .map(|rendered| (MediaKind::Video, rendered)),
             JobKind::VideoProbe => Err(FailureCode::UnsupportedMedia),
         }
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        let _ = (job, &mut on_kind);
+        let _ = (job, &mut on_kind, decoder);
         Err(FailureCode::UnsupportedPlatform)
     }
 }

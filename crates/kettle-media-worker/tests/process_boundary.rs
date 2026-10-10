@@ -297,6 +297,213 @@ fn an_animations_stills_cross_the_boundary() {
     );
 }
 
+/// A worker started with an external decoder named, as Kettle starts one.
+fn worker_with_decoder(ffmpeg: &std::path::Path) -> Child {
+    Command::new(WORKER)
+        .env_clear()
+        .env(kettle_media::video::DECODER_ENV, ffmpeg)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+/// The one reply to `frame` from `child`, which then exits quietly.
+fn reply_from(mut child: Child, frame: &Frame) -> Option<Frame> {
+    handshake(&mut child);
+    send(&mut child, frame);
+    let reply = receive(&mut child);
+    drop(child.stdin.take());
+    assert_eq!(receive(&mut child), None);
+    assert_eq!(exit_code(&mut child, Duration::from_secs(10)), 0);
+    assert_eq!(finish(&mut child), "");
+    reply
+}
+
+/// A stills job on a file, as a GUI action names one.
+fn stills_of(path: &std::path::Path, stills: kettle_media::VideoStills) -> Frame {
+    use std::os::unix::ffi::OsStrExt as _;
+    let Frame::Job(mut job) = job_of(JobKind::VideoStills(stills), b"") else {
+        unreachable!()
+    };
+    job.source = Source::user_pull(
+        NativePath::new(path.as_os_str().as_bytes().to_vec()).unwrap(),
+        kettle_media::GuiActionWitness::from_explicit_gui_action(),
+    );
+    Frame::Job(job)
+}
+
+fn sheet(count: u8) -> kettle_media::VideoStills {
+    kettle_media::VideoStills {
+        count,
+        max_edge: 64,
+        start_s: 0.0,
+        end_s: None,
+        at_s: None,
+        layout: kettle_media::StillsLayout::Sheet {
+            cols: 2,
+            labels: true,
+        },
+    }
+}
+
+/// Stand-in ffmpeg and ffprobe for a one-second, 40x30, 10 fps H.264 video,
+/// built from shell built-ins only (a contained decoder cannot start a
+/// process, and the worker's file-size limit forbids writing a log).
+fn stand_in_decoder(directory: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+    let description = [
+        "streams.stream.0.index=0",
+        "streams.stream.0.codec_name=\"h264\"",
+        "streams.stream.0.codec_type=\"video\"",
+        "streams.stream.0.width=40",
+        "streams.stream.0.height=30",
+        "streams.stream.0.avg_frame_rate=\"10/1\"",
+        "streams.stream.0.time_base=\"1/1000\"",
+        "format.start_time=\"0.000000\"",
+        "format.duration=\"1.000000\"",
+    ];
+    let packets = [
+        "0,K__", "100,___", "200,___", "300,___", "400,___", "500,K__", "600,___", "700,___",
+        "800,___", "900,___",
+    ];
+    let quoted = |lines: &[&str]| {
+        lines
+            .iter()
+            .map(|line| format!("'{line}'"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let ffprobe = format!(
+        "case \"$*\" in\n*packet=*) printf '%s\\n' {} ;;\n*) printf '%s\\n' {} ;;\nesac",
+        quoted(&packets),
+        quoted(&description)
+    );
+    let ffmpeg = "w=0; h=0\n\
+        for arg in \"$@\"; do case \"$arg\" in scale=*) v=${arg#scale=}; w=${v%%:*}; v=${v#*:}; h=${v%%:*} ;; esac; done\n\
+        n=$((w * h)); i=0\n\
+        while [ \"$i\" -lt \"$n\" ]; do printf '\\000\\200\\377\\377'; i=$((i + 1)); done";
+    for (name, body) in [("ffprobe", ffprobe.as_str()), ("ffmpeg", ffmpeg)] {
+        let path = directory.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    directory.join("ffmpeg")
+}
+
+/// A file whose first bytes say MP4.
+fn mp4_file(directory: &std::path::Path) -> std::path::PathBuf {
+    let mut bytes = vec![0, 0, 0, 24];
+    bytes.extend_from_slice(b"ftypisom\0\0\x02\0isomiso2");
+    bytes.extend_from_slice(&[0; 64]);
+    let path = directory.join("clip.mp4");
+    std::fs::write(&path, bytes).unwrap();
+    path
+}
+
+/// A video's stills come from the decoder the parent named, under the
+/// worker's own limits: the sheet, with what the video is and the time of
+/// each frame shown. Without a decoder, or with one others could have
+/// replaced, they are `BackendUnavailable`; inline video bytes are
+/// unsupported, a decoder reading only files.
+#[test]
+fn a_videos_stills_come_from_the_decoder_the_parent_named() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let decoders = kettle_test_support::private_tempdir("kettle-worker-decoder-");
+    let ffmpeg = stand_in_decoder(decoders.path());
+    let clips = kettle_test_support::private_tempdir("kettle-worker-clip-");
+    let clip = mp4_file(clips.path());
+
+    let Some(Frame::Rendered(rendered)) =
+        reply_from(worker_with_decoder(&ffmpeg), &stills_of(&clip, sheet(4)))
+    else {
+        panic!("no stills from the decoder");
+    };
+    rendered.validate_as(MediaKind::Video).unwrap();
+    let video = rendered.video.unwrap();
+    assert_eq!(
+        (
+            video.info.duration_ms,
+            video.info.width,
+            video.info.height,
+            video.info.codec
+        ),
+        (1000, 40, 30, kettle_media::VideoCodec::H264)
+    );
+    assert_eq!(
+        video
+            .samples
+            .iter()
+            .map(|sample| (sample.requested_ms, sample.actual_ms))
+            .collect::<Vec<_>>(),
+        [(125, 100), (375, 300), (625, 600), (875, 800)]
+    );
+    assert_eq!(video.tolerance_ms, 75);
+    assert_eq!(
+        rendered.digest.path_identity.map(|identity| identity.size),
+        Some(88),
+        "the held file's identity stands for the video"
+    );
+
+    assert_eq!(
+        reply_from(worker(), &stills_of(&clip, sheet(4))),
+        failure(FailureCode::BackendUnavailable)
+    );
+    let Frame::Job(mut inline) = stills_of(&clip, sheet(4)) else {
+        unreachable!()
+    };
+    inline.source = Source::Bytes(std::fs::read(&clip).unwrap());
+    assert_eq!(
+        reply_from(worker_with_decoder(&ffmpeg), &Frame::Job(inline)),
+        failure(FailureCode::UnsupportedMedia)
+    );
+    std::fs::set_permissions(&ffmpeg, std::fs::Permissions::from_mode(0o777)).unwrap();
+    assert_eq!(
+        reply_from(worker_with_decoder(&ffmpeg), &stills_of(&clip, sheet(4))),
+        failure(FailureCode::BackendUnavailable)
+    );
+}
+
+/// A real ffmpeg, when one is installed, decodes through the worker under
+/// its limits and returns the frames showing at each instant.
+#[test]
+fn a_real_decoder_crosses_the_boundary() {
+    let home = std::env::var_os("HOME");
+    let Some(found) =
+        kettle_media_native::ffmpeg::Ffmpeg::search(home.as_deref().map(std::path::Path::new))
+    else {
+        eprintln!("skipped: no trusted ffmpeg is installed");
+        return;
+    };
+    let clips = kettle_test_support::private_tempdir("kettle-worker-clip-");
+    let clip = clips.path().join("index.webm");
+    std::fs::copy(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../kettle-media-native/tests/fixtures/video/index.webm"
+        ),
+        &clip,
+    )
+    .unwrap();
+    let Some(Frame::Rendered(rendered)) = reply_from(
+        worker_with_decoder(found.path()),
+        &stills_of(&clip, sheet(3)),
+    ) else {
+        panic!("no stills from ffmpeg");
+    };
+    let video = rendered.video.unwrap();
+    assert_eq!(video.info.codec, kettle_media::VideoCodec::Vp8);
+    assert_eq!(
+        video
+            .samples
+            .iter()
+            .map(|sample| sample.actual_ms)
+            .collect::<Vec<_>>(),
+        [600, 2000, 3300]
+    );
+}
+
 #[test]
 fn an_explicit_kind_gets_the_plain_reply() {
     for frame in [job(&png([10, 20, 30, 255])), job_of(JobKind::Svg, SVG_1X1)] {

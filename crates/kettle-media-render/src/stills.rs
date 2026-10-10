@@ -6,7 +6,10 @@
 
 use std::time::{Duration, Instant};
 
-use kettle_media::video::{MAX_VIDEO_PREFIX_BYTES, VideoContainer, sniff_video_container};
+use kettle_media::video::{
+    MAX_VIDEO_PREFIX_BYTES, StillsPlan, VideoContainer, VideoDecoder, VideoInput,
+    sniff_video_container,
+};
 use kettle_media::{
     Crop, Digest, FailureCode, Job, MAX_RASTER_BYTES, MAX_STILL_TOLERANCE_MS, MediaKind,
     RenderLayout, Rendered, StillSample, StillsLayout, VideoInfo, VideoStills, VideoStillsResult,
@@ -41,11 +44,13 @@ pub fn classify(held: &Held<'_>) -> StillsSource {
 }
 
 /// Render a stills job here: an animation is decoded and laid out; a video
-/// needs a decoder this renderer does not have, which the worker supplies.
+/// needs a decoder this renderer does not have, which the worker supplies,
+/// given the held file to read and the frames to take.
 pub(crate) fn render(
     job: &Job,
     stills: &VideoStills,
     on_kind: &mut impl FnMut(MediaKind),
+    decoder: Option<&dyn VideoDecoder>,
 ) -> Result<Rendered, FailureCode> {
     let deadline = Instant::now() + DEADLINE;
     let held = source::hold(&job.source, MAX_VIDEO_PREFIX_BYTES)?;
@@ -59,7 +64,69 @@ pub(crate) fn render(
                 .map_err(|_| FailureCode::BadParams)?;
             compose(stills, info, frames, tolerance, digest)
         }
-        StillsSource::Video(_) => Err(FailureCode::BackendUnavailable),
+        StillsSource::Video(container) => {
+            let decoder = decoder.ok_or(FailureCode::BackendUnavailable)?;
+            // A decoder reads a file; inline bytes would have to be written
+            // somewhere first, and the worker writes nothing.
+            let Held::File {
+                file,
+                identity,
+                prefix,
+            } = &held
+            else {
+                return Err(FailureCode::UnsupportedMedia);
+            };
+            on_kind(MediaKind::Video);
+            let input = VideoInput {
+                file,
+                identity: *identity,
+                container,
+            };
+            let mut planned = None;
+            let decoded = decoder.stills(
+                input,
+                &mut |info| {
+                    let times_ms = sample_times(info.duration_ms, stills);
+                    let (width, height) = tile_size(info.width, info.height, stills)
+                        .ok_or(FailureCode::RenderResource)?;
+                    let plan = StillsPlan {
+                        times_ms,
+                        width,
+                        height,
+                    };
+                    planned = Some(plan.clone());
+                    Ok(plan)
+                },
+                deadline,
+            )?;
+            held.unchanged()?;
+            let plan = planned.ok_or(FailureCode::RenderParse)?;
+            if decoded.frames.len() != plan.times_ms.len()
+                || decoded
+                    .frames
+                    .iter()
+                    .zip(&plan.times_ms)
+                    .any(|(frame, &asked)| frame.sample.requested_ms != asked)
+            {
+                return Err(FailureCode::RenderParse);
+            }
+            let frames = decoded
+                .frames
+                .into_iter()
+                .map(|frame| Still {
+                    sample: frame.sample,
+                    width: plan.width,
+                    height: plan.height,
+                    rgba: frame.rgba,
+                })
+                .collect();
+            // A video is too large to hash whole: its first bytes and the
+            // held file's identity stand for it, and the file is checked
+            // unchanged after decoding.
+            let digest = kettle_media::content_digest(prefix, Some(*identity))
+                .map_err(|_| FailureCode::BadParams)?;
+            compose(stills, decoded.info, frames, decoded.tolerance_ms, digest)
+        }
         StillsSource::Unsupported => Err(FailureCode::UnsupportedMedia),
     }
 }
@@ -531,6 +598,160 @@ mod tests {
         assert_eq!(
             crate::render(&job(b"plain text".to_vec())).unwrap_err(),
             FailureCode::UnsupportedMedia
+        );
+    }
+
+    /// What a stand-in decoder does once it has the plan.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Misstep {
+        None,
+        OneFrameShort,
+        OtherTime,
+        RewritesTheFile,
+    }
+
+    /// A decoder in process: it describes a 40x30, one-second video, takes
+    /// the plan, and answers solid frames at each instant, unless told to
+    /// misstep.
+    struct StandIn {
+        misstep: Misstep,
+        path: std::path::PathBuf,
+    }
+
+    impl VideoDecoder for StandIn {
+        fn stills(
+            &self,
+            input: VideoInput<'_>,
+            plan: &mut dyn FnMut(&VideoInfo) -> Result<StillsPlan, FailureCode>,
+            _deadline: Instant,
+        ) -> Result<kettle_media::video::DecodedStills, FailureCode> {
+            assert_eq!(input.container, VideoContainer::IsoBmff);
+            let info = VideoInfo {
+                container: Some(VideoContainer::IsoBmff),
+                ..info(40, 30)
+            };
+            let plan = plan(&info)?;
+            let mut frames: Vec<_> = plan
+                .times_ms
+                .iter()
+                .map(|&at| kettle_media::video::DecodedFrame {
+                    sample: StillSample {
+                        requested_ms: at + u64::from(self.misstep == Misstep::OtherTime),
+                        actual_ms: at,
+                    },
+                    rgba: [9, 99, 199, 255].repeat((plan.width * plan.height) as usize),
+                })
+                .collect();
+            if self.misstep == Misstep::OneFrameShort {
+                frames.pop();
+            }
+            if self.misstep == Misstep::RewritesTheFile {
+                std::thread::sleep(Duration::from_millis(5));
+                std::fs::write(&self.path, b"rewritten while decoding").unwrap();
+            }
+            Ok(kettle_media::video::DecodedStills {
+                info,
+                frames,
+                tolerance_ms: 0,
+            })
+        }
+    }
+
+    /// A video's stills come from the decoder the worker passes in, laid out
+    /// with the decoder's times and the held file's identity as the digest;
+    /// a decoder answering the wrong frames, or a file changed while it was
+    /// decoded, is refused, and inline video bytes are unsupported.
+    #[test]
+    fn a_video_is_decoded_by_the_decoder_given() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("clip.mp4");
+        let mut mp4 = vec![0, 0, 0, 24];
+        mp4.extend_from_slice(b"ftypisom\0\0\x02\0isomiso2");
+        let job = |source: kettle_media::Source| Job {
+            kind: kettle_media::JobKind::VideoStills(sheet(4, 2, false)),
+            source,
+            theme: kettle_media::Theme {
+                background: [0; 4],
+                foreground: [255; 4],
+                palette: [[0; 4]; 16],
+                accent: [0; 4],
+                is_dark: true,
+            },
+            canvas: kettle_media::Canvas::Theme,
+            target: kettle_media::Target {
+                width: 1,
+                height: 1,
+                scale: 1.0,
+                crop: None,
+            },
+            fallback_fonts: Vec::new(),
+        };
+        let file_job = || {
+            job(kettle_media::Source::user_pull(
+                kettle_media::NativePath::new(path.as_os_str().as_bytes().to_vec()).unwrap(),
+                kettle_media::GuiActionWitness::from_explicit_gui_action(),
+            ))
+        };
+        let render = |misstep: Misstep| {
+            std::fs::write(&path, &mp4).unwrap();
+            let decoder = StandIn {
+                misstep,
+                path: path.clone(),
+            };
+            crate::render_with_decoder(&file_job(), |_| {}, Some(&decoder))
+        };
+
+        let (kind, rendered) = render(Misstep::None).unwrap();
+        assert_eq!(kind, MediaKind::Video);
+        let video = rendered.video.as_ref().unwrap();
+        assert_eq!(
+            video
+                .samples
+                .iter()
+                .map(|sample| sample.actual_ms)
+                .collect::<Vec<_>>(),
+            [125, 375, 625, 875]
+        );
+        assert_eq!(
+            rendered.digest,
+            kettle_media::content_digest(
+                &mp4,
+                kettle_media::PathIdentity::of(&std::fs::metadata(&path).unwrap())
+            )
+            .unwrap()
+        );
+        let at = |x: u32, y: u32| {
+            let i = ((y * rendered.width + x) * 4) as usize;
+            rendered.rgba[i..i + 4].to_vec()
+        };
+        assert_eq!(at(GAP + 1, GAP + 1), [9, 99, 199, 255]);
+
+        for misstep in [Misstep::OneFrameShort, Misstep::OtherTime] {
+            assert_eq!(render(misstep).unwrap_err(), FailureCode::RenderParse);
+        }
+        assert_eq!(
+            render(Misstep::RewritesTheFile).unwrap_err(),
+            FailureCode::Changed
+        );
+        let decoder = StandIn {
+            misstep: Misstep::None,
+            path: path.clone(),
+        };
+        assert_eq!(
+            crate::render_with_decoder(
+                &job(kettle_media::Source::Bytes(mp4.clone())),
+                |_| {},
+                Some(&decoder)
+            )
+            .unwrap_err(),
+            FailureCode::UnsupportedMedia
+        );
+        std::fs::write(&path, &mp4).unwrap();
+        assert_eq!(
+            crate::render(&file_job()).unwrap_err(),
+            FailureCode::BackendUnavailable,
+            "no decoder given"
         );
     }
 }

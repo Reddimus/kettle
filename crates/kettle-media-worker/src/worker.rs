@@ -147,11 +147,23 @@ fn answer(
 ) -> Result<(MediaKind, Rendered), FailureCode> {
     #[cfg(feature = "test-faults")]
     faults::inject(job);
-    kettle_media_render::render_with_kind(job, |kind| {
-        classified(kind);
-        #[cfg(feature = "test-faults")]
-        faults::after_classification(job);
-    })
+    // A video's stills need the external decoder the parent named, trusted
+    // again here; without one they are `BackendUnavailable`.
+    let decoder = matches!(job.kind, kettle_media::JobKind::VideoStills(_))
+        .then(kettle_media_native::ffmpeg::Ffmpeg::configured)
+        .flatten()
+        .and_then(Result::ok);
+    kettle_media_render::render_with_decoder(
+        job,
+        |kind| {
+            classified(kind);
+            #[cfg(feature = "test-faults")]
+            faults::after_classification(job);
+        },
+        decoder
+            .as_ref()
+            .map(|decoder| decoder as &dyn kettle_media::video::VideoDecoder),
+    )
 }
 
 /// Answer a frame other than the one expected, or one that could not be read.

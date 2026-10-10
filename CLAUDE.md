@@ -3,7 +3,7 @@
 Follow [`AGENTS.md`](AGENTS.md) for repository-wide engineering, validation,
 documentation, and version-control rules.
 
-Kettle is a Rust workspace of fifteen crates. Start with `Cargo.toml`, the owning
+Kettle is a Rust workspace of sixteen crates. Start with `Cargo.toml`, the owning
 crate, and its nearby tests. Use the existing `just` recipes for validation.
 
 Keep the crate boundaries intact:
@@ -19,6 +19,7 @@ Keep the crate boundaries intact:
 | `kettle-media` | bounded media jobs and results, caps and worker frames |
 | `kettle-media-worker` | the media worker executable: early setup, limits, watchdog |
 | `kettle-media-render` | what the worker renders: source loading, raster and SVG |
+| `kettle-media-native` | the worker's native video code: trusted external decoders, run contained |
 | `kettle-ctl` | control IPC |
 | `kettle-remote` | the remote command spool |
 | `kettle-state` | durable writes and advisory locking |
