@@ -313,14 +313,17 @@ Params take exactly one source, plus optional `title` (at most 4 KiB) and
 | Source | Rendered as |
 |---|---|
 | `svg`: SVG text, at most 2 MiB | SVG |
-| `image_b64`: standard base64 bytes, at most 32 MiB decoded | whatever the media worker finds the bytes to be: raster, SVG, or text that parses as a Mermaid diagram |
+| `image_b64`: standard base64 bytes, at most 32 MiB decoded | whatever the media worker finds the bytes to be: raster, SVG, a Markdown gallery, or text that parses as a Mermaid diagram |
 | `mermaid`: Mermaid text, at most 64 KiB | Mermaid |
-| `path` + `dev` + `ino`: an absolute path (at most 4 KiB) and the device and inode the caller saw | whatever the worker finds in the file it opens, or Mermaid with `kind: "mermaid"`; another file at that path is refused |
+| `path` + `dev` + `ino`: an absolute path (at most 4 KiB) and the device and inode the caller saw | whatever the worker finds in the file it opens, Mermaid with `kind: "mermaid"`, or with `markdown_index` that page of its Markdown gallery; another file at that path is refused |
 
 The whole request still fits the 1 MiB request line, so larger media goes by
 path. The file's name decides nothing; only the `mermaid` source, or
 `kind: "mermaid"` on a path, has the media rendered as Mermaid rather than
-as what its bytes turn out to be.
+as what its bytes turn out to be. `markdown_index`, from 0 to 31, opens a
+file's Markdown gallery at that page rather than its first; a number past 31
+is `index_out_of_range`, as is one past the file's last page, and only a
+path, never one said to be Mermaid, takes it.
 A `pane` param is honored only for full control, for a caller Kettle cannot
 place. A malformed `show` is answered on its connection thread and never
 reaches the App.
