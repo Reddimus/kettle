@@ -1456,3 +1456,97 @@ fn a_video_frame_is_exactly_its_size() {
     assert!(decode(&sized(1920), Direction::WorkerToParent).is_ok());
     assert!(decode(&sized(1921), Direction::WorkerToParent).is_err());
 }
+
+/// A frame written from its buffer is the frame encoded, and refused as it
+/// is: the same bytes, the same bounds.
+#[test]
+fn a_video_frame_written_from_its_buffer_is_the_frame_encoded() {
+    let frame = VideoFrame {
+        seq: 41,
+        pts_ms: 1_366,
+        width: 3,
+        height: 2,
+        rgba: (0..24).collect(),
+    };
+    let mut written = Vec::new();
+    write_video_frame(&mut written, frame.borrowed()).unwrap();
+    assert_eq!(
+        written,
+        encode(&Frame::VideoFrame(frame.clone()), Direction::WorkerToParent).unwrap()
+    );
+    assert_eq!(
+        decode(&written, Direction::WorkerToParent).unwrap(),
+        Frame::VideoFrame(frame.clone())
+    );
+    let short = VideoFrameRef {
+        rgba: &frame.rgba[..23],
+        ..frame.borrowed()
+    };
+    let wide = VideoFrameRef {
+        width: 1921,
+        height: 1,
+        rgba: &[0; 1921 * 4],
+        ..frame.borrowed()
+    };
+    for bad in [short, wide] {
+        let mut written = Vec::new();
+        assert!(write_video_frame(&mut written, bad).is_err());
+        assert!(written.is_empty());
+    }
+}
+
+/// A session's picture is the video as shown, fitted to the room it has with
+/// its shape kept, never enlarged, and never past 1920 on a side or 1080p's
+/// pixels.
+#[test]
+fn a_session_fits_its_picture_to_the_room() {
+    for (shown, room, fitted) in [
+        // Smaller than the room: as it is.
+        ((640, 360), (1280, 720), Some((640, 360))),
+        // Wider than the room: its width, the height kept in shape.
+        ((3840, 2160), (1280, 1280), Some((1280, 720))),
+        // Taller: its height.
+        ((1080, 1920), (1280, 960), Some((540, 960))),
+        // A large room is held to the session's edge and pixels.
+        ((3840, 2160), (4000, 4000), Some((1920, 1080))),
+        ((4000, 4000), (1920, 1920), Some((1440, 1440))),
+        // Held to the pixels after the room: rounded once, from the video.
+        ((1139, 2001), (1920, 1920), Some((1086, 1908))),
+        ((7680, 100), (1920, 1080), Some((1920, 25))),
+        // A sliver keeps at least a pixel.
+        ((10_000, 1), (100, 100), Some((100, 1))),
+        ((0, 360), (100, 100), None),
+        ((640, 360), (0, 100), None),
+    ] {
+        assert_eq!(
+            play_size(shown.0, shown.1, room.0, room.1),
+            fitted,
+            "{shown:?} in {room:?}"
+        );
+    }
+    // Every fit is within its room and the session's bounds.
+    for shown in [
+        (1, 1),
+        (1919, 1081),
+        (2001, 999),
+        (1139, 2001),
+        (2001, 1139),
+        (16_384, 16_384),
+        (3, 16_384),
+        (4097, 2161),
+    ] {
+        for room in [(1, 1), (1920, 1080), (1920, 1920), (333, 777)] {
+            let (width, height) = play_size(shown.0, shown.1, room.0, room.1).unwrap();
+            assert!(width <= room.0.min(shown.0).max(1) && height <= room.1.min(shown.1).max(1));
+            assert!(width <= MAX_PLAY_EDGE && height <= MAX_PLAY_EDGE);
+            assert!(u64::from(width) * u64::from(height) <= u64::from(MAX_PLAY_PIXELS));
+            // Its shape kept to within a pixel on either side.
+            let (shown_width, shown_height) = (u64::from(shown.0), u64::from(shown.1));
+            let drift = (u64::from(width) * shown_height).abs_diff(u64::from(height) * shown_width);
+            assert!(
+                drift <= shown_width.max(shown_height),
+                "{shown:?} in {room:?} drew {width}x{height}"
+            );
+        }
+    }
+}

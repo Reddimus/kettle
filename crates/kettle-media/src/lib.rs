@@ -602,6 +602,33 @@ pub struct VideoFrame {
 }
 impl VideoFrame {
     pub fn validate(&self) -> Result<(), ValidationError> {
+        self.borrowed().validate()
+    }
+
+    /// This frame with its pixels borrowed.
+    pub fn borrowed(&self) -> VideoFrameRef<'_> {
+        VideoFrameRef {
+            seq: self.seq,
+            pts_ms: self.pts_ms,
+            width: self.width,
+            height: self.height,
+            rgba: &self.rgba,
+        }
+    }
+}
+
+/// A session frame whose pixels stay in the buffer they were decoded into,
+/// as [`wire::write_video_frame`] writes one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VideoFrameRef<'a> {
+    pub seq: u64,
+    pub pts_ms: u64,
+    pub width: u32,
+    pub height: u32,
+    pub rgba: &'a [u8],
+}
+impl VideoFrameRef<'_> {
+    pub fn validate(&self) -> Result<(), ValidationError> {
         play_frame_size(self.width, self.height)?;
         if self.pts_ms > MAX_VIDEO_DURATION_MS
             || self.rgba.len() != self.width as usize * self.height as usize * 4
@@ -610,6 +637,60 @@ impl VideoFrame {
         }
         Ok(())
     }
+}
+
+/// The size a session draws a video at: as shown, fitted within `max_width`
+/// by `max_height` with its shape kept, never enlarged, and within a
+/// session's bounds (1920 on a side, 1080p's pixels). `None` for a video
+/// with no size.
+pub fn play_size(
+    shown_width: u32,
+    shown_height: u32,
+    max_width: u32,
+    max_height: u32,
+) -> Option<(u32, u32)> {
+    if shown_width == 0 || shown_height == 0 || max_width == 0 || max_height == 0 {
+        return None;
+    }
+    let (width, height) = (u64::from(shown_width), u64::from(shown_height));
+    let room_width = u64::from(max_width.min(MAX_PLAY_EDGE));
+    let room_height = u64::from(max_height.min(MAX_PLAY_EDGE));
+    // The larger of the two scales that fit, as a ratio, never past 1.
+    let (numerator, denominator) = if room_width * height <= room_height * width {
+        (room_width, width)
+    } else {
+        (room_height, height)
+    };
+    let (numerator, denominator) = if numerator >= denominator {
+        (1, 1)
+    } else {
+        (numerator, denominator)
+    };
+    let mut fitted = (
+        (width * numerator / denominator).max(1),
+        (height * numerator / denominator).max(1),
+    );
+    let pixels = u64::from(MAX_PLAY_PIXELS);
+    if fitted.0 * fitted.1 > pixels {
+        // Scaled from the video's own size, so its shape is rounded once.
+        // The pixels bind only below the room's scale, so this stays
+        // within the room.
+        let scale = (pixels as f64 / (width * height) as f64).sqrt();
+        fitted = (
+            ((width as f64 * scale) as u64).max(1),
+            ((height as f64 * scale) as u64).max(1),
+        );
+        while fitted.0 * fitted.1 > pixels {
+            if fitted.0 * height >= fitted.1 * width {
+                fitted.0 -= 1;
+            } else {
+                fitted.1 -= 1;
+            }
+        }
+    }
+    let fitted = (u32::try_from(fitted.0).ok()?, u32::try_from(fitted.1).ok()?);
+    play_frame_size(fitted.0, fitted.1).ok()?;
+    Some(fitted)
 }
 
 /// Where a session is.
