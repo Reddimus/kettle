@@ -242,6 +242,57 @@ Reports that fit any of these are welcome:
   a tree that cannot be measured fails the job. A worker process or a child
   of one that outlives its job, or a reply accepted from a worker that then
   crashed, is in scope.
+- **Media worker sandbox** — before it reads a byte of a job's media or
+  fonts, the worker opens the files the job names (its source, checked as
+  rendering checks it, and its fallback fonts) and confines itself, and
+  everything it starts, to them: no other file read, no write but
+  `/dev/null`, no network, no program but a trusted video decoder's own, no
+  leaving its process group, and no change to any file's mode, owner,
+  attributes or times. Rendering reads only the files the worker admitted
+  before confining itself: through their own handles, a file that failed
+  to open keeps that failure, and a path the job never named is refused. On Linux this is Landlock,
+  from ABI 1, handling every right the kernel knows, with held files
+  granted by inode (a name moved onto another file grants nothing), the
+  decoder's programs and their script and ELF interpreters executable, and
+  the system library trees and the decoder's package prefix readable
+  (Homebrew's, only when it is in a `Cellar` directly inside one of
+  Homebrew's own prefixes; the Nix store; `/usr/local` or `/opt/local`;
+  elsewhere only a real `lib` directory beside its `bin`, never a `lib`
+  that is a link, and never the directory above, which could be a home). A seccomp filter on every thread refuses what Landlock does not
+  cover: creating, binding or connecting any socket, and any socket pair
+  but a connected Unix one (which the standard library's spawn uses and
+  which reaches nothing else); System V IPC; truncation; metadata changes; `O_TRUNC` opens; namespaces and
+  mounts; tracing; BPF; perf; io_uring; keys; `setsid` and `setpgid`; any
+  ioctl but those asking about a descriptor or setting its own flags;
+  any signal leaving the worker: from ABI 6 Landlock keeps signals inside
+  the sandbox; on older kernels the filter allows only `kill` of the
+  worker's own process group and thread- or queue-directed signals to the
+  worker itself, so a decoder can signal only the whole group, never
+  itself or one of its threads alone, and the worker does not kill a
+  decoder past its deadline, which then goes with the worker's process
+  group once the job has failed; and any process for a
+  job that runs no decoder. The watchdog thread, started
+  earlier, confines itself to nothing and reports whether it could; a job
+  counts as confined only if it did, so a signal handler can never run on
+  an unconfined thread. On macOS it is a deny-by-default Seatbelt profile
+  (`sandbox_init_with_parameters`, every path a parameter) that allows,
+  beyond the job's grants, only what AVFoundation was measured to need: the
+  system's code and libraries under `/System/Library`, `/usr/lib` and
+  `/Library/Apple` (never all of `/System`, whose `Volumes/Data` holds the
+  users' homes), file metadata (names and sizes, never contents), sysctl
+  reads, Apple's video decoder service and its IOSurface client, `/dev/fd`
+  (descriptors already held), and what dyld needs to start a granted
+  program; it refuses `setsid`, `setpgid` and System V IPC, and signals to
+  anything outside its sandbox. A
+  video is never decoded unconfined: where the sandbox cannot be applied (a
+  Linux kernel without Landlock, or with it turned off; a macOS without the
+  call) a video job fails with `backend_unavailable`, reason `sandbox`,
+  while raster, SVG and Mermaid, which only Kettle's own code parses, still
+  render in the bounded worker. A decoder that is a script launching other
+  programs is not supported. A job reading or writing past its grants,
+  reaching the network, running another program, leaving its group, or
+  decoding a video unconfined, is in scope. The policy is `kettle-media-native`'s
+  `sandbox`; the barrier is the worker's `answer`.
 - **Media rendering** — the worker renders with `kettle-media-render`, safe
   code that writes nothing. A source path is opened once, read-only and
   non-blocking, and decided from that open file: it must be a regular file
@@ -274,8 +325,8 @@ Reports that fit any of these are welcome:
   deadline. On Linux a seccomp filter stops it from starting a process or
   leaving its process group or session; on macOS its process limit stops
   it from starting a process (a decoder is never run as root, whom the
-  limit does not bind), but it could still leave its group itself, which
-  only the planned worker sandbox can prevent. On macOS, MP4 and QuickTime
+  limit does not bind), and the worker's sandbox refuses it `setsid` and
+  `setpgid`, so it cannot leave its group either. On macOS, MP4 and QuickTime
   are read first by AVFoundation inside the worker, opened by descriptor
   with references outside the file forbidden; decoding runs in Apple's
   decoder service, demuxing in the worker under its limits. Running a binary from
@@ -335,9 +386,10 @@ Reports that fit any of these are welcome:
   refused. An SVG that makes the worker read or fetch anything outside its
   explicit job inputs,
   load a font it was not given, expand or allocate past those limits before
-  being refused, or crash the worker, is in scope. This is resource isolation,
-  not an operating-system sandbox: code execution inside the worker after
-  a renderer exploit is not yet confined.
+  being refused, or crash the worker, is in scope. Beyond these bounds,
+  where the worker's sandbox applies, it confines code running in it after
+  a renderer exploit to the job's own files; where it cannot apply, raster,
+  SVG and Mermaid still render under these bounds alone.
 - **Lua plugin sandbox escape** — `lua-sandbox = safe` (the default)
   nils `os.execute`, `os.exit`, `io.open`, `io.popen`,
   `package.loadlib`, `loadfile`, `dofile`, etc. A bypass that lets a

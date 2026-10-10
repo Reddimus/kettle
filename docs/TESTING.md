@@ -4619,6 +4619,43 @@ ignored `quicktime_opens_a_marked_copy_live` opens the copy in QuickTime
 Player and closes the store; QuickTime Player keeps playing its open copy
 after Kettle deletes it.
 
+`kettle-media-native`'s `tests/sandbox.rs` measures the worker's sandbox
+from inside a fresh copy of the test binary, each scenario against an
+unconfined control that shows every refused operation works without it: a
+confined job reads the file it holds (through its descriptor, a
+`/proc/self/fd` or `/dev/fd` reopen, and its path) but not the file beside
+it, `/etc/hosts` or anything to write; changes no mode; reaches no network;
+stays in its session; starts no program; and threads it starts are
+confined too. On macOS the same sibling cannot be reached through
+`/System/Volumes/Data` either. With programs, only those run, they read only what the job
+may, and a process the job starts inherits every refusal. A thread started
+earlier, as the watchdog is, confines itself to nothing (on Linux an
+earlier thread that did not would keep its access). Each runs on macOS and,
+in Docker, on Linux with Landlock ABI 4; a system without a sandbox says
+SKIP. The macOS profile takes every path as a parameter, and the Linux
+filter's jumps all land inside it; a script shorter than an ELF header is
+still a script, and a decoder's library tree is its package prefix, or the
+`lib` beside its `bin`, never a home, never a `lib` that is a link (to the
+home or to a sibling), and not through a `Cellar` of one's own. A confined
+job whose decoder runs past its deadline is answered at the deadline even
+where the sandbox refuses the kill. `kettle-media-render` reads only what the worker
+admitted: the admitted file after another takes its name, a failed file's
+failure even once its name leads to an admitted one, and no path the job
+never named. On macOS, the cancellation-free message-queue call is refused
+too. A sandbox that fails to apply fails these tests; only a system without
+one skips them. The Linux filter's answers are checked by running it
+through an evaluator that accepts only the opcodes it uses: sockets, pairs
+but connected Unix ones, System V IPC, ioctls past the descriptor queries,
+signals leaving the worker (and, where Landlock scopes signals, none of
+that), processes and namespaces, truncating opens, and another
+architecture's numbering.
+`kettle-media-worker`'s fault tests show a job cannot read the file beside
+its source, that without a sandbox a video is refused
+(`SandboxUnavailable`) while an image renders, and that a watchdog left
+unconfined refuses videos too; its guard pins the watchdog's
+self-confinement and the barrier before rendering. Each fails without its
+change.
+
 V1b live acceptance (macOS 27, debug build with a signed worker, Claude Code
 2.1.296 in a Kettle pane with Claude Code previews): `kettle_show` of an
 H.264 MP4 and of a VP8 WebM each printed a card with the middle frame, the

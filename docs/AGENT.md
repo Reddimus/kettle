@@ -904,7 +904,10 @@ media](#showing-media), with `status: "failed"` and the fixed `code`. When
 a decoder is what was missing (`unsupported_container`, `codec_unavailable`,
 `backend_unavailable`), the text adds that the user can install ffmpeg
 (`brew install ffmpeg` on macOS, the system's packages on Linux) and that the
-model must not install software itself.
+model must not install software itself. `backend_unavailable` with reason
+`sandbox` means Kettle could not confine its media worker on this system,
+and decodes no video there; nothing to install helps, and the text says
+not to retry or ask the user to turn off security.
 
 `kettle video-frames PATH -o OUT.jpg` does the same from a shell, inside the
 caller's sandbox, with `--start`, `--end`, `--at`, `--count` and
