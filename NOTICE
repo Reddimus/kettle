@@ -36,6 +36,18 @@ This product depends on and/or adapts ideas from the following projects:
   CommonMark parsing for the Mermaid fences of a Markdown diagram gallery,
   with its HTML writer and command line disabled.
 
+* objc2, block2 and the objc2 framework crates (objc2-av-foundation,
+  objc2-core-media, objc2-core-graphics, objc2-core-foundation,
+  objc2-foundation) — MIT, and Zlib OR Apache-2.0 OR MIT
+  https://github.com/madsmtm/objc2
+  On macOS the media worker calls AVFoundation through these bindings.
+  The decoders themselves are Apple's, part of the operating system.
+
+* FFmpeg — not distributed
+  When the user has installed ffmpeg and ffprobe, the media worker runs
+  them as separate programs to decode video. Kettle neither bundles nor
+  links them; their licenses are those of the user's own build.
+
 * Contour — Apache-2.0
   Reference for the Sixel parser state machine.
 
