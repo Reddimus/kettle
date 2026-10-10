@@ -905,7 +905,7 @@ macos-cursor-blink-layer macos-option-as-alt menu-item minimum-contrast modify-o
 mouse-hide-while-typing mouse-scroll-multiplier new-tab-after-current-tab osc52 padding-x padding-y
 palette paste-files paste-image paste-image-preview paste-images paste-video-preview
 preview-lane-side putty-paste-style putty-paste-style-source-clipboard record record-dir record-max-bytes
-record-max-directory-bytes record-max-files record-raw-input resize-overlay restore-session
+record-max-directory-bytes record-max-files record-raw-input reduce-motion resize-overlay restore-session
 scroll-multiplier scroll-on-input scroll-on-keystroke scroll-on-output scroll-tabbar scrollback
 scrollback-byte-limit scrollback-bytes scrollback-infinite scrollback-limit scrollback-lines
 scrollback-memory scrollbar scrollbar-width search-background search-case-sensitive
@@ -919,7 +919,7 @@ title-font title-format title-hide-sizetext title-inactive-bg-color title-inacti
 title-receive-bg-color title-receive-fg-color title-transmit-bg-color title-transmit-fg-color
 title-use-system-font trigger unfocused-split-opacity update-check update-check-interval-hours
 update-policy urgent-bell use-custom-command use-custom-url-handler use-system-font use-theme-colors
-vim-menu-nav visible-bell window-blur window-height window-padding-x window-padding-y
+video-preview-hover vim-menu-nav visible-bell window-blur window-height window-padding-x window-padding-y
 window-position-x window-position-y window-state window-title-format window-width word-delimiters""".split())
 CONFIG_DYNAMIC_KEYS = frozenset(("env", "command", "shell", "custom-command", "trigger",
                                  "menu-item", "keybind", "keybind-yield", "enabled-plugins",
