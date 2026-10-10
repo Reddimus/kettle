@@ -829,8 +829,16 @@ indices and every metadata bound; input caps, fonts and video options; the
 content digest changes with the content and each identity field (its framing
 is pinned against a value computed independently); build ID bounds and wire
 direction; the largest reply and its allocation budget; streaming at exact
-boundaries and through interrupted reads; version 1 and version 3 frames of
-every kind are `RestartRequired`; an Auto job has tag 6; a typed reply is its
+boundaries and through interrupted reads; version 1, 2, 3 and 5 frames of
+every kind are `RestartRequired`; a stills job's poster or sheet layout and its
+4096 edge round-trip, while a poster of several frames, a sheet of no columns
+or more columns than frames and an edge past 4096 are refused; a video reply's
+result round-trips plain and typed, is required on a video reply and refused
+on any other, and a rotation off the right angles, an empty or oversized
+frame list, a time past the end, a zero or excessive frame rate, a tolerance
+past its bound, an empty or oversized side, a duration past its bound and an
+unknown codec or container are refused on encode and, written past the
+encoder, on decode; an Auto job has tag 6; a typed reply is its
 media-kind byte followed by exactly the plain reply's payload, round-trips
 for every kind and streams after Ready, and an unknown kind or a typed reply
 in another direction is refused. `tests/worker.rs` drives a
@@ -4126,7 +4134,7 @@ same columns, `ui_geometry` reports the lane under `preview_lanes`, a click on
 `▾` leaves a one-row strip and on `×` gives the terminal back its size
 exactly.
 
-Lane content: `kettle-media` tests pin protocol 3's layout and exact
+Lane content: `kettle-media` tests pin the protocol's layout and exact
 source; `kettle-ui` tests pin that a spec rebuilds the job it came from, that
 an item's text is its exact source until released and evicting its pixels
 releases it, that native path keys never merge by their printed form, that

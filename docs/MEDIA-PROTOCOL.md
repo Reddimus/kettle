@@ -28,9 +28,9 @@ turns it into an `ExternalRequest` with an `ExternalAttested` path or inline
 bytes, and Mermaid text or `kind: "mermaid"` selects the Mermaid job kind
 rather than Auto.
 
-## Wire version 3
+## Wire version 4
 
-The header is 11 bytes: `KMED`, u16 LE protocol version 3, a frame kind, then u32 LE payload
+The header is 11 bytes: `KMED`, u16 LE protocol version 4, a frame kind, then u32 LE payload
 length. No padding or compression is permitted. Binary data and UTF-8 strings have u32 LE
 byte lengths. Lists have u32 LE counts. Integers and f64 bit patterns use LE. Boolean and
 optional-value discriminants are exactly 0 or 1. Floats must satisfy the field validators.
@@ -43,7 +43,7 @@ platform refuses the other encoding.
 | 2 Ready | Worker to parent | Same BuildId representation |
 | 3 ExternalRequest | External to parent | Kind, restricted source, theme, canvas, target, fonts |
 | 4 Job | Parent to worker | Kind, worker source, theme, canvas, target, fonts |
-| 5 Rendered | Worker to parent | Width, height, RGBA blob, 32 digest bytes, optional path identity, display lines, fence count, optional index, fence sources, script names, warning codes, layout, optional exact source |
+| 5 Rendered | Worker to parent | Width, height, RGBA blob, 32 digest bytes, optional path identity, display lines, fence count, optional index, fence sources, script names, warning codes, layout, optional exact source, optional video result |
 | 6 Failure | Worker to parent | One fixed error-code byte |
 | 7 DetectedRendered | Worker to parent | One media-kind byte, then exactly the Rendered payload |
 
@@ -51,9 +51,24 @@ Job-kind tags 0 through 6 are Mermaid, Svg, Raster, MarkdownDiagrams, VideoProbe
 VideoStills and Auto. An Auto job asks the worker to classify the source by its bytes.
 Media-kind tags 0 through 4 are Raster, Svg, Mermaid, Markdown and Video: what a
 DetectedRendered reply actually rendered. Markdown adds one index byte. Stills adds count u8, edge u32, start f64, optional
-end f64 and optional single-frame time f64. Single-frame time requires count 1, start 0 and
-no end time. Interval times must be finite, nonnegative and ordered. The still-count cap is
-16 and the requested edge cap is 2560, as in the video-frame contract.
+end f64, optional single-frame time f64 and a layout: tag 0 for a poster, which requires
+count 1, or tag 1 for a sheet followed by its column count u8, from 1 to the frame count, and
+a labels boolean. Single-frame time requires count 1, start 0 and no end time. Interval
+times must be finite, nonnegative and ordered. The still-count cap is 16. A worker job's
+edge cap is 4096, room for a lane's poster or sheet; the video-frame contract holds a
+model's own requests to 2560 before they become jobs.
+
+A video reply, and only a video reply, ends with a video result (its flag 1; every other
+reply writes 0): duration ms u64, width and height u32 as shown, rotation u16 (0, 90, 180
+or 270 degrees clockwise), a codec byte (0 unknown, then H.264, HEVC, VP8, VP9, AV1, MPEG-4,
+MPEG-2, ProRes, MJPEG, QuickTime Animation, Theora, GIF, APNG and WebP), an optional frame
+rate in frames per thousand seconds (its flag, then u32, which must be 0 without the flag),
+an audio boolean, a container byte (0 for an animated image, then the sniffed families in
+`video::VideoContainer` order from 1), a count of 1 to 16 samples, each a requested and an
+actual time in ms u64 within the duration, and a tolerance ms u32. Sides are at most 16384,
+the duration about a year, the frame rate 1000 fps and the tolerance a minute. The samples
+are in the order the frames are laid out, and an actual time is the frame shown, which a
+decoder may take from up to the tolerance away from the time asked.
 
 Source tag 0 carries a bounded byte blob. Mermaid, SVG and Markdown bytes require UTF-8.
 Tag 1 carries a native path followed by authorization tag 0 and dev/ino u64 values, or

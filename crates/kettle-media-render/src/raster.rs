@@ -55,6 +55,7 @@ pub(crate) fn render_loaded(
         fence_index: None,
         uncovered_scripts: Vec::new(),
         warnings: Vec::new(),
+        video: None,
     };
     rendered
         .validate()
