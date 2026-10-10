@@ -21,7 +21,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   this Kettle's display server for that launch only, so `kettle_show` sends
   media to the pane's shelf. Every other Codex command runs unchanged, and
   Kettle edits neither the shell's startup files nor Codex's configuration.
-  `--status` reports what a launch would get, and `--uninstall` prints how
+  `--status` reports whether the shell reaches its Kettle with agent previews
+  on, what a launch would get, and Claude Code's plugin and policy state for
+  the pane, and `--uninstall` prints how
   to remove the function. It is for bash, zsh and fish, on macOS and Linux.
 - Codex shows a card under the call for media it sends with `kettle_show`,
   like Claude Code. On macOS with Codex CLI 0.162, the launch function adds a

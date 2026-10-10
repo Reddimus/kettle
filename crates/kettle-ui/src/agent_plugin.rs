@@ -603,6 +603,41 @@ fn check_offered(
     })
 }
 
+/// What `kettle agent-setup --status` reports about Claude Code, for a shell
+/// whose environment `var` reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClaudeStatus {
+    /// The shell's pane started with Kettle's plugin offered to Claude Code.
+    pub in_pane: bool,
+    /// Claude Code's managed policy on this machine forbids plugins from the
+    /// environment, or Kettle cannot read all of it. A policy managed
+    /// remotely is not visible to Kettle.
+    pub forbidden: bool,
+    /// This Kettle can make its plugin: it does not run from a translocated
+    /// copy or a path the plugin cannot name.
+    pub offerable: bool,
+}
+
+/// [`ClaudeStatus`] for the shell whose environment `var` reads: its
+/// `CLAUDE_CODE_PLUGIN_DIRS`, and the policy for the Claude Code its
+/// `CLAUDE_CONFIG_DIR` and `HOME` name.
+pub fn claude_status(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> ClaudeStatus {
+    let in_pane = var(PLUGIN_DIRS_VARIABLE).is_some_and(|value| {
+        value
+            .to_string_lossy()
+            .split(':')
+            .any(|entry| is_kettle_plugin(entry.trim()))
+    });
+    let config = claude_config_dir(var("CLAUDE_CONFIG_DIR").as_deref(), var("HOME").as_deref());
+    let offerable = std::env::current_exe()
+        .is_ok_and(|kettle| PluginFiles::new(&kettle, env!("CARGO_PKG_VERSION")).is_ok());
+    ClaudeStatus {
+        in_pane,
+        forbidden: sideload_disabled(&PolicySources::for_machine(config)),
+        offerable,
+    }
+}
+
 /// The entry `directory` makes in `CLAUDE_CODE_PLUGIN_DIRS`; `None` when the
 /// variable cannot hold it.
 pub(crate) fn plugin_dir_entry(directory: &Path) -> Option<&str> {
@@ -669,6 +704,25 @@ mod tests {
             "5.0.0",
         )
         .unwrap()
+    }
+
+    /// A shell's pane has Kettle's plugin when its `CLAUDE_CODE_PLUGIN_DIRS`
+    /// names one, among others or not, and not for another plugin's.
+    #[test]
+    fn a_pane_has_the_plugin_when_its_variable_names_kettles() {
+        let status = |dirs: Option<&str>| {
+            claude_status(|name| match name {
+                PLUGIN_DIRS_VARIABLE => dirs.map(Into::into),
+                "HOME" => Some("/nowhere".into()),
+                _ => None,
+            })
+            .in_pane
+        };
+        let ours = "/data/kettle/agent-plugins/kettle-00000000000000aa";
+        assert!(status(Some(ours)));
+        assert!(status(Some(&format!("/opt/other: {ours} "))));
+        assert!(!status(Some("/opt/other/agent-plugins/kettle-zz")));
+        assert!(!status(None));
     }
 
     #[test]

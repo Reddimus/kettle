@@ -385,20 +385,26 @@ fn print_function(kettle: &Path, shell: SetupShell) -> Result<String, SetupError
     Ok(kettle_ui::codex_shell::codex_function(kettle, shell)?)
 }
 
-/// How to take the function out again.
-fn uninstall_text(shell: SetupShell) -> &'static str {
-    match shell {
+/// What the harnesses still write, which status and removal say rather than
+/// promising nothing is written.
+const HARNESS_WRITES: &str = "Codex and Claude Code still write their usual history and \
+     session files, and Claude Code keeps data for a plugin it loads. Kettle writes none \
+     of their settings or startup files.";
+
+/// How to take the function out again, and what the harnesses still write.
+fn uninstall_text(shell: SetupShell) -> String {
+    let remove = match shell {
         SetupShell::Bash | SetupShell::Zsh => {
-            "Remove the codex function from your shell's startup file, then run: unset -f codex\n\
-             If Kettle defines it for you, turn off Settings, Agents, Codex previews \
-             (agent-display-codex); new panes then start without it."
+            "Remove the codex function from your shell's startup file, then run: unset -f codex"
         }
         SetupShell::Fish => {
-            "Remove the codex function from your fish configuration, then run: functions --erase codex\n\
-             If Kettle defines it for you, turn off Settings, Agents, Codex previews \
-             (agent-display-codex); new panes then start without it."
+            "Remove the codex function from your fish configuration, then run: functions --erase codex"
         }
-    }
+    };
+    format!(
+        "{remove}\nIf Kettle defines it for you, turn off Settings, Agents, Codex previews \
+         (agent-display-codex); new panes then start without it.\n{HARNESS_WRITES}"
+    )
 }
 
 /// Whether the saved configuration has Kettle define `codex` in new panes'
@@ -656,7 +662,94 @@ fn launch(argv: Vec<OsString>) -> i32 {
     }
 }
 
+/// Whether the Kettle `client` reached shows media, asked without showing
+/// anything: an empty `show` is refused as malformed where agent previews
+/// are on, and as disabled where they are off.
+fn previews_on(client: &mut kettle_ctl::Client) -> Result<bool, kettle_ctl::CtlError> {
+    use kettle_ctl::CtlError;
+    let probe = client.call_with_timeout("show", serde_json::json!({}), Duration::from_secs(3));
+    match probe {
+        Err(CtlError::Server { code, .. }) if code == "bad_params" => Ok(true),
+        Err(CtlError::Server { code, .. }) if code == "display_disabled" => Ok(false),
+        Err(error) => Err(error),
+        Ok(_) => Err(CtlError::Protocol("an empty show was accepted".into())),
+    }
+}
+
+/// The status line for the Kettle this shell runs in, found the strict way
+/// `kettle show` finds it: whether its agent previews are on, or why it was
+/// not reached.
+fn kettle_status(found: Result<bool, &kettle_ctl::CtlError>) -> &'static str {
+    use kettle_ctl::CtlError;
+    match found {
+        Ok(true) => "this shell reaches the Kettle it runs in, whose agent previews are on",
+        Ok(false) => {
+            "this shell reaches the Kettle it runs in, but its agent previews are off; turn \
+             them on in Settings, Agents, Agent previews"
+        }
+        Err(CtlError::NotInKettle) => {
+            "this shell is not in a Kettle whose agent previews are on, so nothing it starts \
+             can show media there"
+        }
+        Err(CtlError::NoServer | CtlError::Io(_)) => {
+            "no Kettle with agent previews on answered; turn them on in Settings, Agents, \
+             Agent previews"
+        }
+        Err(_) => "the Kettle this shell runs in answered in a form this command does not know",
+    }
+}
+
+/// The status line for Claude Code: whether this pane started with Kettle's
+/// plugin and, when it did not, what is known of why. `saved` is the saved
+/// setting and `previews` whether the Kettle this shell reaches has its
+/// agent previews on, when one answered: a Kettle started with them off
+/// offers new panes nothing, whatever is saved. A policy managed remotely
+/// is not visible to Kettle.
+fn claude_status_text(
+    status: kettle_ui::ClaudeStatus,
+    saved: bool,
+    previews: Option<bool>,
+) -> &'static str {
+    if !status.in_pane && !status.offerable {
+        return "this pane started without Kettle's plugin, and this Kettle cannot offer it: \
+                it runs from a translocated copy or a path the plugin cannot name; run \
+                Kettle from /Applications";
+    }
+    match (status.in_pane, status.forbidden, saved) {
+        (true, _, _) => "this pane started with Kettle's plugin offered to Claude Code",
+        (false, true, _) => {
+            "this pane started without Kettle's plugin: Claude Code's managed policy on this \
+             machine forbids plugins from the environment, or Kettle could not read all of it"
+        }
+        (false, false, true) if previews == Some(false) => {
+            "this pane started without Kettle's plugin; this Kettle's agent previews are off, \
+             so new panes do not get it until they are on (Settings, Agents, Agent previews)"
+        }
+        (false, false, true) => {
+            "this pane started without Kettle's plugin; new panes get it (Claude Code \
+             previews is on in your saved settings), unless a policy your organization \
+             manages remotely, which Kettle cannot see, forbids it"
+        }
+        (false, false, false) => {
+            "this pane started without Kettle's plugin; turn on Settings, Agents, Claude Code \
+             previews (agent-display-claude-code) for new panes"
+        }
+    }
+}
+
+/// Whether the saved configuration offers Kettle's plugin to Claude Code in
+/// new panes. It is read, never repaired.
+fn claude_integration() -> bool {
+    kettle_config::Config::default_path()
+        .filter(|path| path.exists())
+        .map(|path| kettle_config::Config::load_from(&path))
+        .is_some_and(|config| config.agent_display && config.agent_display_claude_code)
+}
+
 fn print_status() {
+    let found =
+        kettle_ctl::Client::discover_display(None).and_then(|mut client| previews_on(&mut client));
+    println!("Kettle: {}", kettle_status(found.as_ref().copied()));
     let version = installed_version().map(|version| version.trim().to_owned());
     let codex = match &version {
         None => "not found".to_owned(),
@@ -695,10 +788,16 @@ fn print_status() {
     {
         println!("zsh: {zsh}");
     }
+    let claude = kettle_ui::claude_status(|name| std::env::var_os(name));
+    println!(
+        "Claude Code: {}",
+        claude_status_text(claude, claude_integration(), found.as_ref().ok().copied())
+    );
     println!(
         "Interactive sessions get Kettle's display server for that launch only. Codex's \
          configuration and your shell's startup files are left as they are."
     );
+    println!("{HARNESS_WRITES}");
 }
 
 #[cfg(test)]
@@ -1144,6 +1243,100 @@ mod tests {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
+    }
+
+    /// Whether previews are on is asked with an empty `show`, answered as
+    /// malformed where they are on and as disabled where they are off; any
+    /// other answer is not one the status knows.
+    #[cfg(unix)]
+    #[test]
+    fn previews_are_asked_about_with_an_empty_show() {
+        use std::io::{BufRead as _, Write as _};
+        let directory = kettle_test_support::private_tempdir("kettle-setup-probe-");
+        for (answer, want) in [
+            (
+                r#""ok":false,"error":{"code":"bad_params","message":"m"}"#,
+                Some(true),
+            ),
+            (
+                r#""ok":false,"error":{"code":"display_disabled","message":"m"}"#,
+                Some(false),
+            ),
+            (r#""ok":true,"result":{}"#, None),
+        ] {
+            let socket = directory
+                .path()
+                .join(format!("probe-{}.sock", answer.len()));
+            let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+            let server = std::thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["method"], "show");
+                assert_eq!(request["params"], serde_json::json!({}), "it shows nothing");
+                let id = request["id"].as_u64().unwrap();
+                writeln!(&stream, r#"{{"v":1,"id":{id},{answer}}}"#).unwrap();
+            });
+            let mut client =
+                kettle_ctl::Client::connect_endpoint(socket.to_str().unwrap()).unwrap();
+            assert_eq!(previews_on(&mut client).ok(), want, "{answer}");
+            server.join().unwrap();
+        }
+    }
+
+    /// The Kettle line says whether the strict lookup reached a Kettle with
+    /// agent previews on, and why not in words of its own.
+    #[test]
+    fn the_kettle_line_says_whether_previews_are_reachable() {
+        use kettle_ctl::CtlError;
+        assert!(kettle_status(Ok(true)).contains("agent previews are on"));
+        assert!(kettle_status(Ok(false)).contains("agent previews are off"));
+        assert!(kettle_status(Err(&CtlError::NotInKettle)).contains("not in a Kettle"));
+        assert!(kettle_status(Err(&CtlError::NoServer)).contains("turn them on"));
+        let hostile = CtlError::Protocol("\u{1b}]52;c;aGk=\u{7}".into());
+        assert!(!kettle_status(Err(&hostile)).contains('\u{1b}'));
+    }
+
+    /// The Claude Code line names the plugin in this pane, a local policy
+    /// that forbids it, the saved setting, a Kettle running with its
+    /// previews off, and that a remotely managed policy is not visible to
+    /// Kettle.
+    #[test]
+    fn the_claude_line_names_the_plugin_policy_and_setting() {
+        let status = |in_pane, forbidden| kettle_ui::ClaudeStatus {
+            in_pane,
+            forbidden,
+            offerable: true,
+        };
+        for previews in [None, Some(true), Some(false)] {
+            let text = |status, saved| claude_status_text(status, saved, previews);
+            assert!(text(status(true, true), false).contains("started with"));
+            let stuck = kettle_ui::ClaudeStatus {
+                offerable: false,
+                ..status(false, false)
+            };
+            assert!(text(stuck, true).contains("cannot offer it"));
+            assert!(text(status(false, true), true).contains("managed policy"));
+            assert!(text(status(false, false), false).contains("turn on"));
+            // Saved on: new panes get it, unless the Kettle this shell
+            // reaches started with its previews off.
+            let saved = text(status(false, false), true);
+            assert_eq!(saved.contains("new panes get it"), previews != Some(false));
+            assert_eq!(saved.contains("previews are off"), previews == Some(false));
+        }
+    }
+
+    /// Status and removal say what the harnesses still write, never that
+    /// nothing is written.
+    #[test]
+    fn status_and_removal_name_what_the_harnesses_write() {
+        for shell in [SetupShell::Bash, SetupShell::Zsh, SetupShell::Fish] {
+            assert!(uninstall_text(shell).contains("history and session files"));
+        }
+        assert!(HARNESS_WRITES.contains("history and session files"));
+        assert!(HARNESS_WRITES.contains("plugin"));
     }
 
     /// The automatic line says it reports the saved settings, which a

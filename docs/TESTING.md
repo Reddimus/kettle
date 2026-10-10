@@ -3922,8 +3922,14 @@ generator, runs under every zsh and fish the shell-integration check covers
 (macOS zsh, and fish 3.7, 4.2 and 4.8 in CI): `check_codex_zsh` and
 `check_codex_fish` check the restored variable, the user's startup order, the
 forwarded arguments and that a user's own or autoloadable `codex` wins.
-`agent-setup`'s tests check that `--status` reports the saved settings and
-names a system `zshenv` that keeps Kettle out of zsh; `owned_dir` checks a nested layout installs
+`agent-setup`'s tests check that `--status` reports the saved settings, the
+Kettle it reached or why not (in its own words, never a reply's), whether
+its previews are on, asked of a test socket with an empty `show` (malformed
+where on, disabled where off, anything else unknown), Claude Code's plugin
+in the pane, a local policy forbidding it, a Kettle that cannot offer it,
+and that a remote one is not visible, and that status and removal name what the harnesses still
+write, and names a system `zshenv` that keeps Kettle out of zsh;
+`agent_plugin` pins a pane counted as having the plugin by its variable; `owned_dir` checks a nested layout installs
 read-only at every level and that an extra entry deep inside fails the
 check; the App tests pin that the startup files are offered before the first
 pane and on reload, gated on both settings, and the Codex row's note. Checked
