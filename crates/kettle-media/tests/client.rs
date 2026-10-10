@@ -127,6 +127,40 @@ fn a_real_worker_renders_a_job() {
     assert_eq!(client.render(&common::job()), Ok(expected));
 }
 
+/// A caller that knows how large its answer can be may refuse a longer
+/// reply before it is held: one byte over is a resource failure, exactly
+/// enough renders.
+#[test]
+fn a_reply_past_the_caller_s_limit_is_refused() {
+    use kettle_media::client::{RenderControl, RenderError};
+    use kettle_media::wire::{Direction, Frame, encode};
+    let mut expected = common::rendered_as(MediaKind::Raster);
+    expected.digest = content_digest(&[7], None).unwrap();
+    let frame = encode(
+        &Frame::Rendered(expected.clone()),
+        Direction::WorkerToParent,
+    )
+    .unwrap()
+    .len();
+    let client = WorkerClient::with_test_budgets(
+        common::build(),
+        Box::new(Stub::new("")),
+        STARTUP,
+        STARTUP,
+        u64::MAX,
+    );
+    let control =
+        |limit| RenderControl::with_deadline(Instant::now() + 2 * STARTUP).limit_reply(limit);
+    assert_eq!(
+        client.render_with_control(&common::job(), &control(frame - 1)),
+        Err(RenderError::Failure(FailureCode::RenderResource))
+    );
+    assert_eq!(
+        client.render_with_control(&common::job(), &control(frame)),
+        Ok(expected)
+    );
+}
+
 #[test]
 fn a_worker_that_never_answers_is_tried_twice() {
     let started = Instant::now();

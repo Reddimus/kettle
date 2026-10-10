@@ -132,7 +132,8 @@ pub(crate) fn attempt(
     let mut worker = Running::new(process, shared, budgets).interruptible(control);
     let (events, received) = mpsc::channel();
     let (go, job_ready) = mpsc::channel();
-    if spawn_reader(stdout, events).is_err()
+    let reply_limit = control.and_then(RenderControl::reply_limit);
+    if spawn_reader(stdout, events, reply_limit).is_err()
         || spawn_writer(Arc::clone(shared), stdin, hello_bytes, job_ready).is_err()
     {
         worker.kill();
@@ -228,6 +229,11 @@ pub(crate) fn attempt(
             Stopped::Killed | Stopped::Stuck => Err(FailureCode::WorkerUnavailable),
         },
         Err(Wait::OverFootprint) => {
+            worker.kill();
+            Err(FailureCode::RenderResource)
+        }
+        // A reply longer than the caller's limit, refused before it was held.
+        Ok(Event::Reply(Err(WireError::Validation(crate::ValidationError::TooLarge)), _)) => {
             worker.kill();
             Err(FailureCode::RenderResource)
         }
@@ -620,9 +626,14 @@ fn poll(process: &mut dyn WorkerProcess, budget: Duration) -> Option<WorkerExit>
     }
 }
 
-/// Reads the first frame, capped at Ready's size, then the reply, checking
-/// for end of file after a refusal or the reply.
-fn spawn_reader(mut stdout: Box<dyn Read + Send>, events: Sender<Event>) -> std::io::Result<()> {
+/// Reads the first frame, capped at Ready's size, then the reply, capped at
+/// `reply_limit` when the caller set one, checking for end of file after a
+/// refusal or the reply.
+fn spawn_reader(
+    mut stdout: Box<dyn Read + Send>,
+    events: Sender<Event>,
+    reply_limit: Option<usize>,
+) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("kettle-media-read".into())
         .spawn(move || {
@@ -647,7 +658,12 @@ fn spawn_reader(mut stdout: Box<dyn Read + Send>, events: Sender<Event>) -> std:
                     return;
                 }
             }
-            let reply = wire::read_frame(&mut stdout, Direction::WorkerToParent);
+            let most = Direction::WorkerToParent.max_frame_bytes();
+            let reply = wire::read_frame_within(
+                &mut stdout,
+                Direction::WorkerToParent,
+                reply_limit.map_or(most, |limit| limit.min(most)),
+            );
             let clean = matches!(reply, Ok(Some(_))) && at_end(&mut *stdout);
             let _ = events.send(Event::Reply(reply, clean));
         })

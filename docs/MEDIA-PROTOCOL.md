@@ -295,7 +295,9 @@ file. The caller's thread watches the clock:
 `render_media_with_control(job, control)` returns the actual kind beside the
 pixels, and `render_with_control` the pixels alone. Their `RenderControl`
 carries a cancellation flag and an optional absolute deadline, shared with
-whoever owns the job. The deadline covers everything: waiting for the job
+whoever owns the job, and optionally a reply limit (`limit_reply`): a caller
+that knows how large a right answer can be has a reply frame longer than that
+refused from its header, before its payload is held, as `RenderResource`. The deadline covers everything: waiting for the job
 before it, checking and starting the worker, both startup attempts, and the
 reply; it only ever shortens the budgets above. A cancelled or expired job
 never starts a worker or a cold-start retry, not even one whose file check
