@@ -11,6 +11,18 @@ use crate::{FailureCode, PathIdentity, StillSample, VideoInfo};
 /// no request can choose a binary.
 pub const DECODER_ENV: &str = "KETTLE_MEDIA_DECODER";
 
+/// The video decoders a worker on this platform has, in the order it tries
+/// them: Apple's own (AVFoundation) on macOS, then the user's ffmpeg, which
+/// the parent finds in fixed places when it starts a worker. None on Windows,
+/// where no worker runs. Kettle ships and loads no GStreamer.
+pub const DECODERS: &[&str] = if cfg!(target_os = "macos") {
+    &["avfoundation", "ffmpeg"]
+} else if cfg!(target_os = "linux") {
+    &["ffmpeg"]
+} else {
+    &[]
+};
+
 /// A video decoder the worker supplies to the renderer, which itself starts
 /// no process and links no codec.
 pub trait VideoDecoder {
