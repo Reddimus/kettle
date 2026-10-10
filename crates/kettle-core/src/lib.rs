@@ -30,6 +30,10 @@
 //! - [`scrollbar`] — `scroll-on-output` per-pane history-diff detection
 //!   and `target_offset` thumb math.
 
+mod diagram_copy;
+pub use diagram_copy::{
+    DiagramCopyError, MAX_COPIED_DIAGRAMS, MAX_DIAGRAM_COPY_BYTES, diagram_sources,
+};
 pub mod event;
 pub mod grid_text;
 mod inline_text;
@@ -75,8 +79,8 @@ pub use search::{
 pub use term::{
     CommandFinished, KeyboardClaims, ProtocolNotification, PtyEofProgress, PtyGeometry,
     PtyInputTail, PtyOutputSender, PtyReadProgress, PtyReadStatus, PtyStdin, PtyWriter, ScreenText,
-    SessionLogFailure, SharedTerm, ShellActivity, Terminal, TerminalCapabilities,
-    WorkingDirectoryPolicy,
+    SelectionTextTooLarge, SessionLogFailure, SharedTerm, ShellActivity, Terminal,
+    TerminalCapabilities, WorkingDirectoryPolicy, selected_diagram_sources, selection_text_bounded,
 };
 // OSC 9;4 taskbar-progress state, surfaced by `Terminal::progress`
 // (re-exported so the UI can name it without depending on kettle-vt directly).

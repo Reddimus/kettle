@@ -798,6 +798,64 @@ the tile in place of the item's pixels only while it covers all of the view
 (`MediaLaneGeometry::tile`), one image a lane either way; the shelf item's
 own pixels never change, so copying copies them.
 
+A diagram the user copied or selected comes through
+`kettle_core::diagram_sources(text, width)`, linear in the text: every
+Mermaid fence verbatim, a fence of another language being that language's
+text (a fence inside it is none, and no diagram is looked for there),
+closed as CommonMark closes one (its own mark, at
+least as many, indented at most three columns past the opening, a tab
+reaching the next multiple of four), up to an
+unclosed one, which runs to the end, its body and all, so nothing after it
+is a fence, or else the one diagram in the text. It starts
+at the first header (any type the renderer detects, as a whole word) that
+begins its paragraph or follows Claude's `mermaid` label or one of Codex's
+exact notices, which also say whose reply it is, else at the first header
+at all; the comments, directives and front matter directly above it come
+with it, and a label or notice below it is its own text. A directive runs
+from `%%{` to the first row whose first `}%%` ends it or is followed only by
+a comment, blank rows and all, as Mermaid reads it; unclosed, its rows are
+prose. Front matter opens a block (first
+in the text, after a blank row, or under the label or a notice) and closes
+at the next `---` as far indented; one whose rows are not all YAML, as
+wrapped ones would not be, is refused rather than dropped, and a `---`
+indented further is the YAML's text. A row of either that a wrap could have
+made is refused too, since joining it could change a string, as is a header
+a wrap could have made of the row above it; a header word inside front
+matter or a directive is their text and starts nothing. All of this is
+found in one pass, each block's end by a cursor that only moves forward, so
+no row is looked at more than a bounded number of times. A reply's diagram runs over
+blank rows while the next row is indented as far as its body, so prose back
+at the message's indentation ends it; after an unindented body that prose
+cannot be told from more diagram (`Unbounded`). A diagram with a row at the
+left edge, where no reply on screen puts one, holds no wraps and is taken
+as written, width or not; one that starts the text runs to its end, as
+`/copy` leaves it. A harness's
+bullet (Claude's `⏺`, Codex's `•`), prose and common indentation come off.
+With a width, the pane's for a selection (`selected_diagram_sources`, which
+also puts back the leading columns of a selection that starts inside a row,
+and takes the lines a rectangle spans whole, as its sides would cut the
+rows' indentation and ends),
+hard wraps are joined back by inverting the harness's greedy word wrap: a
+row indented less than the body that no wrapper of that harness, or of
+either when it is unknown, could have kept on the row above is a
+continuation, joined with the space it took: one, however many the wrapper
+dropped, which Mermaid draws the same as a run. A row ending in a hyphen or
+slash before one that starts with a word (Codex may have broken a word or
+wrapped at a space after it), a full row a too-long word could have been cut
+at, a row that would have fit (wrapped at another width), and unindented
+text are refused, never guessed; without a width, so is any row that some width the
+rows fit in could have wrapped, by its shape or anywhere in an unindented
+body, and in an unindented body with a width too, since the pane may have
+been narrower when the agent wrapped it. Agents
+indent a diagram's body consistently, so a body row back at the header's
+indentation after a row long enough to wrap it is taken for a wrap. The
+rules came from the S6 spike and its corpus is the test, with the
+renderer's own corpus as a drift guard. The App's `preview_copied_diagram`
+refuses a control client before reading the clipboard or the selection, and
+`open_context_menu` probes neither for its rows while one drives it; the first source goes
+as Mermaid bytes through `admit_user_pull`, the same admission a path pull
+uses.
+
 The user can pull a file into a lane too: `preview_link` runs quick select
 with `hint_previews` keeping only the image, SVG and Mermaid files a pane
 names (a whole path, off Windows, or a local `file://` link), and the

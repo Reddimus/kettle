@@ -4107,6 +4107,44 @@ every control and the content. For a live check, drag the edge
 (`preview_lanes`' `edge`) up and to both ends: `stty size` in the pane
 follows, down to 5 rows.
 
+Copied diagrams: `kettle-core`'s `diagram_copy` tests pin fences (any
+indentation, verbatim, in order, at most 16, closed by their own mark indented
+at most three columns past the opening, a tab counting to the next multiple of
+four, an unclosed one running to the end, a fence of another language
+consuming its body, so a Mermaid fence inside it is its text and no diagram is
+looked for there), the bullet, notice and prose around a diagram, where it
+starts (a header beginning its paragraph or after a label or notice, not a
+header word in prose; a notice or label inside it stays), the front matter,
+directives and comments above it (front matter with blank rows, a `---` inside
+a YAML block scalar, a directive over several rows and over blank rows;
+wrapped front matter, a directive or front matter row a wrap could have made,
+and a header a wrap could have made of the comment above it, refused; a header
+word inside front matter ignored; a rule under prose or with nothing to close
+it, and an unclosed directive, prose), every type the renderer detects as a
+whole word, where it ends (over blank rows inside its body, at prose, to the
+end of a source at the left edge, and `Unbounded` after an unindented body in
+a reply), the common indentation, and the hard-wrap rules: a wrap joins back
+only when the width is known and no wrapper of the harness, or of either when
+it is unknown, could have kept the row above, with wide characters; it refuses
+a hyphen or slash Codex may have broken at, after a letter of any script, a
+full row a long word could have been cut at, a row wrapped at another width,
+and unindented text, and without a width a row some width could have wrapped,
+in an unindented body too, as an unindented body is with a width; a diagram at
+the left edge is taken as written. `tests/diagram_copy.rs` runs the S6 corpus
+of Claude Code and Codex captures (its fixtures' README): 93 cases give their
+source exactly and 15 are refused, as the validated prototype did; and every
+diagram in the renderer's Mermaid corpus copies back whole; hostile text at
+the 1 MiB cap, shaped to make the search revisit rows, takes about as long as
+any other. Term tests pin the bounded selection, a selection that starts
+inside a row, and a rectangle over a diagram taking its lines whole. App
+guards pin the control-client refusal before any read, menus a control client
+opens reading neither, Mermaid bytes as the user's pull, and the menu rows.
+For a live check, `/copy` a diagram (or put a capture on the clipboard), press
+the bound chord: the lane shows "Copied diagram"; select a wrapped reply and
+press the selection chord: its source view shows the wrap joined back; the
+menu rows show on right-click and Shift+right-click, and a control client's
+`perform_action` reads nothing.
+
 Preview focus: `media::focus` tests pin the keys a focused lane takes and
 that it swallows the rest, every chord with Ctrl, Alt or Command
 included, and which act once a press; app guards pin it as the last modal

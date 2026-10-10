@@ -1,0 +1,15 @@
+⏺ Here's the normalization pipeline flow:
+
+  mermaid
+  flowchart LR
+      subgraph S[Normalizer]
+          A[Clipboard] --> B[Strip]
+      end
+      B --> C[Render]
+
+  Here's the decision workflow:
+
+  mermaid
+  flowchart TD
+      X[Start] --> Y{OK?}
+      Y -->|yes| Z[Done]
