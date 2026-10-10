@@ -31,6 +31,15 @@
 //! read its copy once it opens, so that store drops its oldest copies to take
 //! a new one instead of refusing it; it is marked downloaded on macOS before
 //! any viewer sees it, deleted on exit, and swept with the pasted sessions.
+//!
+//! **Copies for a video player.** A third store ([`VIDEOS`]) holds private
+//! copies of the files videos were shown from, for the permitted video
+//! player. Each is a clone of the held source where the file system makes
+//! one, and a bounded chunked copy where it cannot (another volume, or a
+//! file system without clones) that leaves [`MIN_FREE_AFTER_COPY`] free; it
+//! is made owner-only, named with the extension of the container its bytes
+//! are, checked by the caller through a fresh handle before it is kept, and
+//! then held, marked, deleted and swept as the image copies are.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, OpenOptions};
@@ -45,6 +54,9 @@ pub(crate) struct StoreKind {
     /// key, so it must stay stable across versions or old directories become
     /// unreclaimable.
     prefix: &'static str,
+    /// The extensions its files are named with, lowercase. The first names
+    /// the empty file that founds a session.
+    extensions: &'static [&'static str],
     /// Per-session ceilings. The byte ceiling also bounds the source buffer:
     /// the caller already materialized it, but refusing a larger value keeps
     /// a malformed provider from driving an unbounded encode.
@@ -60,6 +72,9 @@ pub(crate) struct StoreKind {
     /// How long an image stays before it may be dropped for a newer one, so
     /// whoever was handed it has time to read it.
     min_age: Duration,
+    /// The free space a byte copy into this store must leave on its volume.
+    /// A clone takes none, so it is not asked.
+    keep_free: u64,
 }
 
 /// Screenshots pasted as paths. A program may still read any of them, so a
@@ -68,11 +83,13 @@ pub(crate) struct StoreKind {
 /// loop, not normal use.
 pub(crate) const PASTED: StoreKind = StoreKind {
     prefix: "kettle-paste-",
+    extensions: &["png"],
     max_files: 64,
     max_bytes: 256 * 1024 * 1024,
     max_sequence: 64,
     evicts: false,
     min_age: Duration::ZERO,
+    keep_free: 0,
 };
 
 /// Copies handed to the image viewer. The viewer reads its copy when it
@@ -80,15 +97,52 @@ pub(crate) const PASTED: StoreKind = StoreKind {
 /// been there a minute; a store full of newer copies refuses another.
 pub(crate) const OPENED: StoreKind = StoreKind {
     prefix: "kettle-open-",
+    extensions: &["png"],
     max_files: 32,
     max_bytes: 128 * 1024 * 1024,
     max_sequence: 999_999,
     evicts: true,
     min_age: Duration::from_secs(60),
+    keep_free: 0,
+};
+
+/// Private copies of videos handed to the video player, each named with
+/// the extension of the container its bytes are. A player reads its copy
+/// for as long as it plays it, and a copy dropped while open stays readable
+/// to it, so the oldest go first when the store is full, once they have
+/// been there five minutes. A clone shares its source's blocks, but each
+/// copy counts as its full length, what a byte copy takes.
+pub(crate) const VIDEOS: StoreKind = StoreKind {
+    prefix: "kettle-video-",
+    extensions: &[
+        "mp4", "mov", "mkv", "webm", "avi", "flv", "mpg", "m2v", "ts", "ogv", "asf",
+    ],
+    max_files: 8,
+    max_bytes: 8 * 1024 * 1024 * 1024,
+    max_sequence: 999_999,
+    evicts: true,
+    min_age: Duration::from_secs(5 * 60),
+    keep_free: MIN_FREE_AFTER_COPY,
+};
+
+/// The video store with no free space to keep, for tests that copy without
+/// depending on how full the machine running them is.
+#[cfg(all(test, unix))]
+pub(crate) const VIDEOS_ANY_DISK: StoreKind = StoreKind {
+    keep_free: 0,
+    ..VIDEOS
 };
 
 /// Every store, for the crash sweep.
-const KINDS: [StoreKind; 2] = [PASTED, OPENED];
+const KINDS: [StoreKind; 3] = [PASTED, OPENED, VIDEOS];
+
+/// The free space a byte copy of a video must leave on its volume.
+const MIN_FREE_AFTER_COPY: u64 = 2 * 1024 * 1024 * 1024;
+
+/// How much of a video a byte copy reads and writes at a time, between
+/// asking whether to stop.
+#[cfg_attr(not(unix), allow(dead_code))]
+const COPY_CHUNK: usize = 1024 * 1024;
 
 /// Reject absurd dimensions before allocating. 16384² RGBA is ~1 GiB, already
 /// far past any real screenshot; beyond this a malformed clipboard descriptor is
@@ -122,6 +176,25 @@ struct LiveImage {
     preview: Option<PastedImagePreview>,
 }
 
+/// The next file a store is ready to take: its name, path and number, and
+/// the bytes left in the budget.
+struct NextFile {
+    name: OsString,
+    path: PathBuf,
+    sequence: usize,
+    remaining: u64,
+}
+
+/// How a copy is made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Copying {
+    /// A clone where the file system makes one, else bytes.
+    CloneFirst,
+    /// Bytes, a chunk at a time.
+    #[cfg_attr(not(all(test, unix)), allow(dead_code))]
+    Bytes,
+}
+
 /// An image the store dropped but could not delete. It still counts against
 /// the store's bounds, its bytes included, and cleanup tries it again.
 struct StuckImage {
@@ -146,6 +219,78 @@ struct SessionDirectory {
     inode: u64,
 }
 
+impl SessionDirectory {
+    /// Another handle on the same held directory.
+    fn try_clone(&self) -> io::Result<Self> {
+        Ok(Self {
+            path: self.path.clone(),
+            file: self.file.try_clone()?,
+            #[cfg(unix)]
+            device: self.device,
+            #[cfg(unix)]
+            inode: self.inode,
+        })
+    }
+}
+
+/// Room and a name a store set aside for one copy, which is made without
+/// holding the store ([`Reservation::copy`]) and then kept
+/// ([`PastedImages::keep_copy`]) or given back ([`PastedImages::release`]).
+/// Until then its place and its bytes count against the store's bounds.
+pub(crate) struct Reservation {
+    /// Its own handle on the session directory the copy goes in.
+    directory: SessionDirectory,
+    next: NextFile,
+    size: u64,
+    /// The free space a byte copy must leave.
+    keep_free: u64,
+    /// The store's count of bytes its byte copies have yet to write.
+    pending: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl Reservation {
+    /// Copy the first `size` bytes of `source`, an open regular file, into
+    /// the reserved private file and return it. Where the file system can
+    /// clone the source (APFS, Btrfs, XFS) the copy shares its blocks;
+    /// elsewhere it is copied a chunk at a time, only while
+    /// [`MIN_FREE_AFTER_COPY`] stays free. `stop` is asked before and after a
+    /// clone and between chunks, and so is `deadline`; a copy either ends
+    /// asks for is discarded. A read the file system never answers is not
+    /// interrupted, but it holds no store.
+    pub(crate) fn copy(
+        &self,
+        source: &File,
+        stop: &dyn Fn() -> bool,
+        deadline: Instant,
+    ) -> io::Result<File> {
+        self.copy_as(source, Copying::CloneFirst, stop, deadline)
+    }
+
+    fn copy_as(
+        &self,
+        source: &File,
+        how: Copying,
+        stop: &dyn Fn() -> bool,
+        deadline: Instant,
+    ) -> io::Result<File> {
+        copy_into_session(
+            &self.directory,
+            self.next.name.as_os_str(),
+            source,
+            (self.size, how, self.keep_free),
+            (stop, deadline),
+            &self.pending,
+        )
+    }
+
+    /// Discard `file`, the copy made for this reservation, which its maker
+    /// found not to be what it should be. The reservation still has to be
+    /// given back.
+    pub(crate) fn discard(&self, file: File) {
+        discard_private_file_in_session(&self.directory, file, self.next.name.as_os_str());
+    }
+}
+
 /// Owner of this process's pasted-image scratch directory.
 ///
 /// The directory is created lazily only after bitmap validation and budget
@@ -158,6 +303,11 @@ pub(crate) struct PastedImages {
     directory: Option<SessionDirectory>,
     files: Vec<LiveImage>,
     stuck: Vec<StuckImage>,
+    /// Copies being made: each one's name and the bytes set aside for it.
+    reserved: Vec<(OsString, u64)>,
+    /// The bytes this store's byte copies have yet to write, together, so
+    /// copies made at once keep the free-space reserve between them.
+    pending: std::sync::Arc<std::sync::atomic::AtomicU64>,
     bytes: u64,
     /// Closed for good: it takes no more images.
     closed: bool,
@@ -175,6 +325,8 @@ impl PastedImages {
             directory: None,
             files: Vec::new(),
             stuck: Vec::new(),
+            reserved: Vec::new(),
+            pending: Default::default(),
             bytes: 0,
             closed: false,
         }
@@ -229,60 +381,21 @@ impl PastedImages {
                 ),
             ));
         }
-        if self.closed {
-            return Err(io::Error::other("the image store is closed"));
-        }
-        if self.kind.evicts {
-            // Make room oldest first, for as much as the PNG can take: its
-            // filtered rows, deflated no larger than stored, plus framing.
-            let bound = u64::try_from(expected + height)
-                .unwrap_or(u64::MAX)
-                .saturating_mul(9)
-                / 8
-                + 4096;
-            while self.held() >= self.kind.max_files
-                || self.kind.max_bytes.saturating_sub(self.bytes) < bound
-            {
-                if !self.drop_oldest() {
-                    break;
-                }
-            }
-        }
-        let remaining = self.kind.max_bytes.saturating_sub(self.bytes);
-        if self.held() >= self.kind.max_files || remaining == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::QuotaExceeded,
-                format!(
-                    "pasted-image budget reached ({} files, {} bytes)",
-                    self.files.len(),
-                    self.bytes
-                ),
-            ));
-        }
-        if self.directory.is_none() {
-            self.directory = Some(establish_session_directory(&self.dir)?);
-        }
+        // Make room oldest first, for as much as the PNG can take: its
+        // filtered rows, deflated no larger than stored, plus framing.
+        let bound = u64::try_from(expected + height)
+            .unwrap_or(u64::MAX)
+            .saturating_mul(9)
+            / 8
+            + 4096;
+        let next = self.begin(bound, "png")?;
         let directory = self
             .directory
             .as_ref()
-            .expect("the session directory was established above");
-        verify_session_directory_path(directory)?;
-
-        let sequence = self
-            .seq
-            .checked_add(1)
-            .filter(|sequence| *sequence <= self.kind.max_sequence)
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::QuotaExceeded,
-                    "pasted-image sequence overflowed",
-                )
-            })?;
-        let leaf = format!("{sequence:04}.png");
-        let path = self.dir.join(&leaf);
-        let name = OsStr::new(&leaf);
+            .expect("begin established the session directory");
+        let name = next.name.as_os_str();
         let file = create_private_file_in_session(directory, name)?;
-        let mut writer = BudgetWriter::new(io::BufWriter::new(file), remaining);
+        let mut writer = BudgetWriter::new(io::BufWriter::new(file), next.remaining);
         // `image` is already a kettle-ui dependency (the window icon decodes
         // through it), and the `png` feature it is built with covers encoding.
         use image::ImageEncoder as _;
@@ -308,6 +421,256 @@ impl PastedImages {
             discard_private_file_in_session(directory, file, name);
             return Err(error);
         }
+        // Build UI chrome only after the private PNG has been published. A
+        // session already at its file or byte limit should fail before doing
+        // even the bounded thumbnail resize on every rejected paste.
+        self.finish(
+            next,
+            file,
+            written,
+            |_| Ok(()),
+            || {
+                if with_preview {
+                    make_preview(width, height, rgba)
+                } else {
+                    None
+                }
+            },
+        )
+    }
+
+    /// Set aside room and a name for a `size` byte copy named with
+    /// `extension`, one of this store's, to be made without holding the
+    /// store.
+    pub(crate) fn reserve_copy(&mut self, size: u64, extension: &str) -> io::Result<Reservation> {
+        if !self.kind.extensions.contains(&extension) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("this store names no file .{extension}"),
+            ));
+        }
+        if size == 0 || size > self.kind.max_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::QuotaExceeded,
+                format!("a {size} byte copy is past what this store holds"),
+            ));
+        }
+        let next = self.begin(size, extension)?;
+        if size > next.remaining {
+            return Err(budget_error(self.files.len(), self.bytes));
+        }
+        let directory = self
+            .directory
+            .as_ref()
+            .expect("begin established the session directory")
+            .try_clone()?;
+        // The name is taken now, so a copy reserved meanwhile gets the next.
+        self.seq = next.sequence;
+        self.reserved.push((next.name.clone(), size));
+        Ok(Reservation {
+            directory,
+            next,
+            size,
+            keep_free: self.kind.keep_free,
+            pending: std::sync::Arc::clone(&self.pending),
+        })
+    }
+
+    /// Keep `file`, the copy made for `reservation`, once it is as long as
+    /// reserved, a fresh handle through the held directory is the same file,
+    /// `check` accepts it, and the store is open with the session it
+    /// reserved in. Anything else discards it.
+    pub(crate) fn keep_copy(
+        &mut self,
+        reservation: Reservation,
+        file: File,
+        check: impl FnOnce(&File) -> io::Result<()>,
+    ) -> io::Result<PathBuf> {
+        let Reservation {
+            directory,
+            next,
+            size,
+            ..
+        } = reservation;
+        self.unreserve(&next.name);
+        let same = self.directory.as_ref().is_some_and(|held| {
+            same_open_file_identity(&held.file, &directory.file).unwrap_or(false)
+        });
+        if self.closed || !same {
+            discard_private_file_in_session(&directory, file, next.name.as_os_str());
+            // The store closed while the copy was made, and its cleanup left
+            // the directory for it: the last one out takes it away.
+            if self.directory.is_none() {
+                let _ = remove_session_directory(directory);
+            }
+            return Err(io::Error::other("the store closed while the copy was made"));
+        }
+        self.finish(next, file, size, check, || None)
+    }
+
+    /// Give back the room `reservation` set aside, its copy not made.
+    pub(crate) fn release(&mut self, reservation: Reservation) {
+        self.unreserve(&reservation.next.name);
+        if self.directory.is_none() {
+            let _ = remove_session_directory(reservation.directory);
+        }
+    }
+
+    fn unreserve(&mut self, name: &OsStr) {
+        if let Some(index) = self.reserved.iter().position(|(held, _)| held == name) {
+            self.reserved.swap_remove(index);
+        }
+    }
+
+    /// Delete the copy at `path`, through the held directory, and stop
+    /// counting it: one that was kept but never handed over.
+    pub(crate) fn remove(&mut self, path: &Path) -> io::Result<()> {
+        let index = self
+            .files
+            .iter()
+            .position(|image| image.path == path)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+        let directory = self.directory.as_ref().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "the store holds no directory")
+        })?;
+        let image = self.files.remove(index);
+        match remove_open_private_file_in_session(directory, image.file, &image.name) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                // Still on disk: still counted, its bytes included, for
+                // cleanup to try again.
+                self.stuck.push(StuckImage { name: image.name });
+                return Err(error);
+            }
+        }
+        self.bytes = self.bytes.saturating_sub(image.bytes);
+        Ok(())
+    }
+
+    /// Another handle on the kept copy at `path`, pinned to the file Kettle
+    /// checked whatever later happens to its name.
+    pub(crate) fn kept_file(&self, path: &Path) -> io::Result<File> {
+        self.files
+            .iter()
+            .find(|image| image.path == path)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?
+            .file
+            .try_clone()
+    }
+
+    /// Reserve, copy and keep in one go, for tests.
+    #[cfg(all(test, unix))]
+    fn save_copy(
+        &mut self,
+        source: &File,
+        size: u64,
+        extension: &str,
+        stop: &dyn Fn() -> bool,
+        deadline: Instant,
+        check: impl FnOnce(&File) -> io::Result<()>,
+    ) -> io::Result<PathBuf> {
+        self.save_copy_as(
+            source,
+            (size, extension),
+            Copying::CloneFirst,
+            (stop, deadline),
+            check,
+        )
+    }
+
+    #[cfg(all(test, unix))]
+    fn save_copy_as(
+        &mut self,
+        source: &File,
+        (size, extension): (u64, &str),
+        how: Copying,
+        (stop, deadline): (&dyn Fn() -> bool, Instant),
+        check: impl FnOnce(&File) -> io::Result<()>,
+    ) -> io::Result<PathBuf> {
+        let reservation = self.reserve_copy(size, extension)?;
+        match reservation.copy_as(source, how, stop, deadline) {
+            Ok(file) => self.keep_copy(reservation, file, check),
+            Err(error) => {
+                self.release(reservation);
+                Err(error)
+            }
+        }
+    }
+
+    /// Get ready for one more file named with `extension`: make room for
+    /// `bound` bytes when the store drops its oldest, refuse when it is full
+    /// or closed, hold its session directory, and name the file.
+    fn begin(&mut self, bound: u64, extension: &str) -> io::Result<NextFile> {
+        if self.closed {
+            return Err(io::Error::other("the image store is closed"));
+        }
+        if self.kind.evicts {
+            while self.held() >= self.kind.max_files
+                || self.kind.max_bytes.saturating_sub(self.counted_bytes()) < bound
+            {
+                if !self.drop_oldest() {
+                    break;
+                }
+            }
+        }
+        let remaining = self.kind.max_bytes.saturating_sub(self.counted_bytes());
+        if self.held() >= self.kind.max_files || remaining == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::QuotaExceeded,
+                format!(
+                    "pasted-image budget reached ({} files, {} bytes)",
+                    self.files.len(),
+                    self.bytes
+                ),
+            ));
+        }
+        if self.directory.is_none() {
+            self.directory = Some(establish_session_directory(&self.dir, self.kind)?);
+        }
+        let directory = self
+            .directory
+            .as_ref()
+            .expect("the session directory was established above");
+        verify_session_directory_path(directory)?;
+
+        let sequence = self
+            .seq
+            .checked_add(1)
+            .filter(|sequence| *sequence <= self.kind.max_sequence)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::QuotaExceeded,
+                    "pasted-image sequence overflowed",
+                )
+            })?;
+        let leaf = format!("{sequence:04}.{extension}");
+        Ok(NextFile {
+            path: self.dir.join(&leaf),
+            name: OsString::from(leaf),
+            sequence,
+            remaining,
+        })
+    }
+
+    /// Keep `file`, the new file `next` names, once it is `written` bytes
+    /// long within the budget, a fresh handle through the held directory is
+    /// the same file, `check` accepts it, and the session is still the one
+    /// held. Anything else discards it. `preview` is built only once it is
+    /// kept.
+    fn finish(
+        &mut self,
+        next: NextFile,
+        file: File,
+        written: u64,
+        check: impl FnOnce(&File) -> io::Result<()>,
+        preview: impl FnOnce() -> Option<PastedImagePreview>,
+    ) -> io::Result<PathBuf> {
+        let directory = self
+            .directory
+            .as_ref()
+            .expect("begin established the session directory");
+        let name = next.name.as_os_str();
         let actual = match file.metadata() {
             Ok(metadata) => metadata.len(),
             Err(error) => {
@@ -315,15 +678,15 @@ impl PastedImages {
                 return Err(error);
             }
         };
-        if actual != written || actual > remaining {
+        if actual != written || actual > next.remaining {
             discard_private_file_in_session(directory, file, name);
-            return Err(if actual > remaining {
+            return Err(if actual > next.remaining {
                 budget_error(self.files.len(), self.bytes)
             } else {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!(
-                        "encoded PNG length changed while writing (counted {written}, found {actual})"
+                        "the file's length changed while writing (counted {written}, found {actual})"
                     ),
                 )
             });
@@ -354,22 +717,25 @@ impl PastedImages {
                 "pasted-image path no longer identifies the created PNG",
             ));
         }
-        if let Some(directory) = self.directory.as_ref() {
-            match session_directory_matches_path(directory) {
-                Ok(true) => {}
-                Ok(false) => {
-                    drop(retained);
-                    discard_private_file_in_session(directory, file, name);
-                    return Err(io::Error::new(
-                        io::ErrorKind::PermissionDenied,
-                        "pasted-image session changed while publishing the PNG path",
-                    ));
-                }
-                Err(error) => {
-                    drop(retained);
-                    discard_private_file_in_session(directory, file, name);
-                    return Err(error);
-                }
+        if let Err(error) = check(&retained) {
+            drop(retained);
+            discard_private_file_in_session(directory, file, name);
+            return Err(error);
+        }
+        match session_directory_matches_path(directory) {
+            Ok(true) => {}
+            Ok(false) => {
+                drop(retained);
+                discard_private_file_in_session(directory, file, name);
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "pasted-image session changed while publishing the PNG path",
+                ));
+            }
+            Err(error) => {
+                drop(retained);
+                discard_private_file_in_session(directory, file, name);
+                return Err(error);
             }
         }
         drop(file);
@@ -381,30 +747,31 @@ impl PastedImages {
             ));
         };
         self.bytes = total;
-        self.seq = sequence;
-        // Build UI chrome only after the private PNG has been published. A
-        // session already at its file or byte limit should fail before doing
-        // even the bounded thumbnail resize on every rejected paste.
-        let preview = if with_preview {
-            make_preview(width, height, rgba)
-        } else {
-            None
-        };
+        // A copy reserved after this one may already have taken a later name.
+        self.seq = self.seq.max(next.sequence);
         self.files.push(LiveImage {
-            path: path.clone(),
-            name: name.to_os_string(),
+            path: next.path.clone(),
+            name: next.name,
             file: retained,
             bytes: actual,
             created: Instant::now(),
-            preview,
+            preview: preview(),
         });
-        Ok(path)
+        Ok(next.path)
     }
 
-    /// The images on disk this store counts: those it holds and those it
-    /// could not delete.
+    /// The images this store counts: those it holds, those it could not
+    /// delete, and copies being made.
     fn held(&self) -> usize {
-        self.files.len() + self.stuck.len()
+        self.files.len() + self.stuck.len() + self.reserved.len()
+    }
+
+    /// The bytes this store counts: what it holds and what copies being made
+    /// set aside.
+    fn counted_bytes(&self) -> u64 {
+        self.reserved
+            .iter()
+            .fold(self.bytes, |total, (_, size)| total.saturating_add(*size))
     }
 
     /// Delete the oldest image, through the held directory, and stop counting
@@ -589,6 +956,8 @@ impl PastedImages {
             directory: None,
             files: Vec::new(),
             stuck: Vec::new(),
+            reserved: Vec::new(),
+            pending: Default::default(),
             bytes: 0,
             closed: false,
         }
@@ -739,16 +1108,19 @@ fn parse_session_name(name: &str, prefix: &str) -> Option<SessionName> {
     Some(SessionName { pid, nonce })
 }
 
-fn parse_image_name(name: &str, max_sequence: usize) -> Option<usize> {
-    let sequence = name.strip_suffix(".png")?;
-    if sequence.len() < 4 || !sequence.bytes().all(|byte| byte.is_ascii_digit()) {
+fn parse_image_name(name: &str, kind: StoreKind) -> Option<usize> {
+    let (sequence, extension) = name.split_once('.')?;
+    if !kind.extensions.contains(&extension)
+        || sequence.len() < 4
+        || !sequence.bytes().all(|byte| byte.is_ascii_digit())
+    {
         return None;
     }
     let value = sequence
         .parse::<usize>()
         .ok()
-        .filter(|value| (1..=max_sequence).contains(value))?;
-    (format!("{value:04}.png") == name).then_some(value)
+        .filter(|value| (1..=kind.max_sequence).contains(value))?;
+    (format!("{value:04}.{extension}") == name).then_some(value)
 }
 
 fn reap_stale_session(path: &Path, now: SystemTime, kind: StoreKind) -> io::Result<()> {
@@ -781,7 +1153,7 @@ fn reap_stale_session(path: &Path, now: SystemTime, kind: StoreKind) -> io::Resu
                 "pasted-image session contains a non-UTF-8 name",
             ));
         };
-        if parse_image_name(name, kind.max_sequence).is_none() {
+        if parse_image_name(name, kind).is_none() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("pasted-image session contains an unknown entry: {name}"),
@@ -828,9 +1200,10 @@ fn create_private_file(path: &Path) -> io::Result<std::fs::File> {
 /// and identify; only after that exact directory is held do real PNG creations
 /// use its capability. If a same-user process races the create/open boundary,
 /// identity comparison fails before any screenshot bytes are encoded.
-fn establish_session_directory(path: &Path) -> io::Result<SessionDirectory> {
-    let bootstrap_name = OsStr::new("0001.png");
-    let bootstrap_path = path.join("0001.png");
+fn establish_session_directory(path: &Path, kind: StoreKind) -> io::Result<SessionDirectory> {
+    let bootstrap = format!("0001.{}", kind.extensions[0]);
+    let bootstrap_name = OsStr::new(&bootstrap);
+    let bootstrap_path = path.join(&bootstrap);
     let creator = create_private_file(&bootstrap_path)?;
     let directory = match open_session_directory(path) {
         Ok(directory) => directory,
@@ -1204,6 +1577,265 @@ fn discard_private_file(file: File, path: &Path) {
             path.display()
         );
     }
+}
+
+/// Copy `size` bytes of `source` into a new private file `name` in the held
+/// session `directory`, as `how` says, and return the file. A clone the file
+/// system cannot make falls back to bytes.
+#[cfg(unix)]
+fn copy_into_session(
+    directory: &SessionDirectory,
+    name: &OsStr,
+    source: &File,
+    (size, how, keep_free): (u64, Copying, u64),
+    (stop, deadline): (&dyn Fn() -> bool, Instant),
+    pending: &std::sync::atomic::AtomicU64,
+) -> io::Result<File> {
+    let asked_to_end = || -> io::Result<()> {
+        if stop() {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "the copy was stopped",
+            ));
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the copy ran past its deadline",
+            ));
+        }
+        Ok(())
+    };
+    // A finished copy that an end was asked for meanwhile goes too.
+    let keep_unless_ended = |file: File| match asked_to_end() {
+        Ok(()) => Ok(file),
+        Err(error) => {
+            discard_private_file_in_session(directory, file, name);
+            Err(error)
+        }
+    };
+    asked_to_end()?;
+    #[cfg(target_os = "macos")]
+    if how == Copying::CloneFirst {
+        match clone_into_session(directory, name, source) {
+            Err(error) if clone_unsupported(&error) => {}
+            Ok(file) => return keep_unless_ended(file),
+            Err(error) => return Err(error),
+        }
+    }
+    let file = create_private_file_in_session(directory, name)?;
+    #[cfg(target_os = "linux")]
+    if how == Copying::CloneFirst {
+        use std::os::fd::AsRawFd as _;
+        // SAFETY: both descriptors are open, and FICLONE only reads the
+        // source's and writes the new file's blocks.
+        if unsafe { libc::ioctl(file.as_raw_fd(), libc::FICLONE, source.as_raw_fd()) } == 0 {
+            return keep_unless_ended(file);
+        }
+        let error = io::Error::last_os_error();
+        if !clone_unsupported(&error) {
+            discard_private_file_in_session(directory, file, name);
+            return Err(error);
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let _ = how;
+    // What every byte copy of the store has left to write must fit before
+    // each chunk, keeping the reserve: two copies never count it twice.
+    let share = Pending::new(pending, size);
+    let room = |left: u64| {
+        share.left(left);
+        require_free(
+            directory,
+            pending.load(std::sync::atomic::Ordering::Acquire),
+            keep_free,
+        )
+    };
+    match copy_chunks(source, &file, size, &asked_to_end, &room) {
+        Ok(()) => keep_unless_ended(file),
+        Err(error) => {
+            discard_private_file_in_session(directory, file, name);
+            Err(error)
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn copy_into_session(
+    _directory: &SessionDirectory,
+    _name: &OsStr,
+    _source: &File,
+    _size: (u64, Copying, u64),
+    _stop: (&dyn Fn() -> bool, Instant),
+    _pending: &std::sync::atomic::AtomicU64,
+) -> io::Result<File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "videos are copied only on Unix",
+    ))
+}
+
+/// Clone `source` as `name` in the held session `directory`, owner-only,
+/// and open it. The clone takes the source's mode, so it is made
+/// owner-only before it is opened, inside a directory only the owner may
+/// enter.
+#[cfg(target_os = "macos")]
+fn clone_into_session(
+    directory: &SessionDirectory,
+    name: &OsStr,
+    source: &File,
+) -> io::Result<File> {
+    use std::os::fd::AsRawFd as _;
+    /// `sys/clonefile.h`: do not follow a link at the destination, and take
+    /// no ownership from the source.
+    const CLONE_NOFOLLOW: u32 = 0x0001;
+    const CLONE_NOOWNERCOPY: u32 = 0x0002;
+
+    let c_name = session_c_name(name)?;
+    // SAFETY: both descriptors are open and the name is NUL-terminated; the
+    // call creates the clone and fails if the name exists.
+    if unsafe {
+        libc::fclonefileat(
+            source.as_raw_fd(),
+            directory.file.as_raw_fd(),
+            c_name.as_ptr(),
+            CLONE_NOFOLLOW | CLONE_NOOWNERCOPY,
+        )
+    } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: as above; AT_SYMLINK_NOFOLLOW changes the entry itself.
+    let made_private = unsafe {
+        libc::fchmodat(
+            directory.file.as_raw_fd(),
+            c_name.as_ptr(),
+            0o600,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } == 0;
+    let opened = if made_private {
+        open_existing_private_file_in_session(directory, name)
+    } else {
+        Err(io::Error::last_os_error())
+    };
+    if opened.is_err() {
+        // SAFETY: as above. The name was free until the clone took it, in a
+        // directory only this user may change.
+        unsafe { libc::unlinkat(directory.file.as_raw_fd(), c_name.as_ptr(), 0) };
+    }
+    opened
+}
+
+/// Whether a clone failed only because this file system, or this pair of
+/// volumes, cannot make one, so bytes will do.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn clone_unsupported(error: &io::Error) -> bool {
+    // ENOTSUP and EOPNOTSUPP are one number on Linux and two on macOS.
+    error.raw_os_error().is_some_and(|code| {
+        [
+            libc::EXDEV,
+            libc::ENOTSUP,
+            libc::EOPNOTSUPP,
+            libc::EINVAL,
+            libc::ENOTTY,
+            libc::ENOSYS,
+        ]
+        .contains(&code)
+    })
+}
+
+/// One byte copy's share of its store's pending bytes: what it has left to
+/// write, updated as it writes and given back when it ends.
+#[cfg(unix)]
+struct Pending<'a> {
+    total: &'a std::sync::atomic::AtomicU64,
+    left: std::cell::Cell<u64>,
+}
+
+#[cfg(unix)]
+impl<'a> Pending<'a> {
+    fn new(total: &'a std::sync::atomic::AtomicU64, size: u64) -> Self {
+        total.fetch_add(size, std::sync::atomic::Ordering::AcqRel);
+        Self {
+            total,
+            left: std::cell::Cell::new(size),
+        }
+    }
+
+    /// This copy now has `left` bytes to write, never more than before.
+    fn left(&self, left: u64) {
+        let written = self.left.get().saturating_sub(left);
+        self.left.set(self.left.get() - written);
+        self.total
+            .fetch_sub(written, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Pending<'_> {
+    fn drop(&mut self) {
+        self.total
+            .fetch_sub(self.left.get(), std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+/// Refuse a `size` byte copy into the held session `directory` that would
+/// leave less than `keep` bytes free on its volume.
+#[cfg(unix)]
+fn require_free(directory: &SessionDirectory, size: u64, keep: u64) -> io::Result<()> {
+    use std::os::fd::AsRawFd as _;
+    // SAFETY: the descriptor is open and the buffer is the call's own type.
+    let mut stats = unsafe { std::mem::zeroed::<libc::statvfs>() };
+    if unsafe { libc::fstatvfs(directory.file.as_raw_fd(), &mut stats) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    #[allow(clippy::unnecessary_cast)]
+    let free = (stats.f_bavail as u64).saturating_mul(stats.f_frsize as u64);
+    if free < size.saturating_add(keep) {
+        return Err(io::Error::new(
+            io::ErrorKind::StorageFull,
+            format!("a {size} byte copy would leave less than {keep} bytes free"),
+        ));
+    }
+    Ok(())
+}
+
+/// Copy the first `size` bytes of `source` to `dest`, a chunk at a time.
+/// Before each chunk `ended` says whether to stop and `room` whether what is
+/// left still fits. A source that ends early is refused.
+#[cfg(unix)]
+fn copy_chunks(
+    source: &File,
+    dest: &File,
+    size: u64,
+    ended: &dyn Fn() -> io::Result<()>,
+    room: &dyn Fn(u64) -> io::Result<()>,
+) -> io::Result<()> {
+    use std::os::unix::fs::FileExt as _;
+    let mut buffer = vec![0_u8; COPY_CHUNK];
+    let mut offset = 0_u64;
+    while offset < size {
+        ended()?;
+        room(size - offset)?;
+        let want = usize::try_from(size - offset)
+            .unwrap_or(usize::MAX)
+            .min(buffer.len());
+        let read = match source.read_at(&mut buffer[..want], offset) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "the source ended before its size",
+                ));
+            }
+            Ok(read) => read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        dest.write_all_at(&buffer[..read], offset)?;
+        offset += read as u64;
+    }
+    Ok(())
 }
 
 fn budget_error(files: usize, bytes: u64) -> io::Error {
@@ -1878,7 +2510,7 @@ mod tests {
                 "{near_miss}"
             );
         }
-        let pasted = |name| parse_image_name(name, PASTED.max_sequence);
+        let pasted = |name| parse_image_name(name, PASTED);
         assert_eq!(pasted("0001.png"), Some(1));
         assert_eq!(pasted("0064.png"), Some(64));
         for near_miss in [
@@ -1902,11 +2534,34 @@ mod tests {
             Some(SessionName { pid: 42, nonce: 0 })
         );
         assert_eq!(parse_session_name("kettle-open-42-0", PASTED.prefix), None);
-        let opened = |name| parse_image_name(name, OPENED.max_sequence);
+        let opened = |name| parse_image_name(name, OPENED);
         assert_eq!(opened("0065.png"), Some(65));
         assert_eq!(opened("999999.png"), Some(999_999));
-        for near_miss in ["0000.png", "00065.png", "1000000.png"] {
+        for near_miss in ["0000.png", "00065.png", "1000000.png", "0001.mp4"] {
             assert_eq!(opened(near_miss), None, "{near_miss}");
+        }
+        // A video-copy session names each copy with one of its containers'
+        // extensions, and nothing else.
+        assert_eq!(
+            parse_session_name("kettle-video-42-0", VIDEOS.prefix),
+            Some(SessionName { pid: 42, nonce: 0 })
+        );
+        assert_eq!(parse_session_name("kettle-video-42-0", OPENED.prefix), None);
+        let videos = |name| parse_image_name(name, VIDEOS);
+        assert_eq!(videos("0001.mp4"), Some(1));
+        assert_eq!(videos("0007.webm"), Some(7));
+        assert_eq!(videos("0012.ts"), Some(12));
+        for near_miss in [
+            "0001.png",
+            "0001.MP4",
+            "0001.mp4.extra",
+            "0001.",
+            "0001",
+            ".mp4",
+            "0000.mp4",
+            "1000000.mov",
+        ] {
+            assert_eq!(videos(near_miss), None, "{near_miss}");
         }
     }
 
@@ -1983,7 +2638,7 @@ mod tests {
 
         let path = scratch("held-create");
         let displaced = path.with_extension("displaced");
-        let directory = establish_session_directory(&path).expect("establish session");
+        let directory = establish_session_directory(&path, PASTED).expect("establish session");
         std::fs::rename(&path, &displaced).expect("displace held session");
         std::fs::DirBuilder::new()
             .mode(0o700)
@@ -2104,8 +2759,8 @@ mod tests {
         assert!(images.bytes <= small.max_bytes);
         images.cleanup();
 
-        // The crash sweep covers both stores.
-        assert_eq!(KINDS, [PASTED, OPENED]);
+        // The crash sweep covers every store.
+        assert_eq!(KINDS, [PASTED, OPENED, VIDEOS]);
         let root = scratch("opened-sweep");
         let pid = std::process::id();
         let nonce = SystemTime::now()
@@ -2206,6 +2861,478 @@ mod tests {
             assert!(String::from_utf8_lossy(&out.stdout).contains(";Kettle;"));
         }
         images.cleanup();
+    }
+
+    /// A source file of `len` patterned bytes, with `mode`, in its own
+    /// private directory.
+    #[cfg(unix)]
+    fn video_source(len: usize, mode: u32) -> (kettle_test_support::PrivateTempDir, File) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = kettle_test_support::private_tempdir("kettle-video-source-");
+        let path = dir.path().join("clip.bin");
+        let bytes: Vec<u8> = (0..len).map(|index| (index % 251) as u8).collect();
+        std::fs::write(&path, &bytes).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        let file = File::open(&path).unwrap();
+        (dir, file)
+    }
+
+    #[cfg(unix)]
+    fn never() -> bool {
+        false
+    }
+
+    #[cfg(unix)]
+    fn soon() -> Instant {
+        Instant::now() + Duration::from_secs(30)
+    }
+
+    /// A video copy is the source's bytes in a new owner-only file named
+    /// with the extension asked for, which the store holds, marks and
+    /// deletes like any other. A read-only source copies too, as its clone
+    /// takes its mode before being made private.
+    #[cfg(unix)]
+    #[test]
+    fn a_video_copy_is_a_private_copy_of_its_source() {
+        use std::os::unix::fs::PermissionsExt as _;
+        for (how, mode) in [
+            (Copying::CloneFirst, 0o644),
+            (Copying::CloneFirst, 0o444),
+            (Copying::Bytes, 0o444),
+        ] {
+            let dir = scratch("video-copy");
+            let mut copies = PastedImages::of_kind_in(VIDEOS_ANY_DISK, dir.clone());
+            // Past one chunk, and not a whole number of them.
+            let len = COPY_CHUNK * 2 + 4321;
+            let (_source_dir, source) = video_source(len, mode);
+            let path = copies
+                .save_copy_as(&source, (len as u64, "webm"), how, (&never, soon()), |_| {
+                    Ok(())
+                })
+                .unwrap_or_else(|error| panic!("{how:?} {mode:o}: {error}"));
+            assert_eq!(path.extension(), Some(OsStr::new("webm")));
+            let meta = std::fs::symlink_metadata(&path).unwrap();
+            assert!(meta.is_file());
+            assert_eq!(
+                meta.permissions().mode() & 0o7777,
+                0o600,
+                "{how:?} {mode:o}"
+            );
+            let expected: Vec<u8> = (0..len).map(|index| (index % 251) as u8).collect();
+            assert!(
+                std::fs::read(&path).unwrap() == expected,
+                "{how:?} {mode:o}"
+            );
+            assert!(copies.path_still_matches(&path));
+            copies.mark_downloaded(&path).expect("mark");
+            assert_eq!(copies.bytes, len as u64);
+            copies.cleanup();
+            assert!(!dir.exists(), "{how:?} {mode:o}");
+        }
+    }
+
+    /// A byte copy stops between chunks when asked, or once its deadline
+    /// passes, and a source shorter than it said is refused; none of them
+    /// leaves a file behind or counts against the store.
+    #[cfg(unix)]
+    #[test]
+    fn an_unfinished_copy_leaves_nothing() {
+        let len = COPY_CHUNK + 1;
+        let (_source_dir, source) = video_source(len, 0o600);
+        let stopped = || true;
+        let cases: [(&dyn Fn() -> bool, Instant, u64, io::ErrorKind); 3] = [
+            (&stopped, soon(), len as u64, io::ErrorKind::Interrupted),
+            (&never, Instant::now(), len as u64, io::ErrorKind::TimedOut),
+            (&never, soon(), len as u64 + 1, io::ErrorKind::UnexpectedEof),
+        ];
+        for (stop, deadline, size, kind) in cases {
+            let dir = scratch("video-unfinished");
+            let mut copies = PastedImages::of_kind_in(VIDEOS_ANY_DISK, dir.clone());
+            let error = copies
+                .save_copy_as(
+                    &source,
+                    (size, "mp4"),
+                    Copying::Bytes,
+                    (stop, deadline),
+                    |_| Ok(()),
+                )
+                .expect_err("unfinished");
+            assert_eq!(error.kind(), kind);
+            assert_eq!(
+                (copies.files.len(), copies.stuck.len(), copies.bytes),
+                (0, 0, 0)
+            );
+            let directory = copies.directory.as_ref().expect("session held");
+            assert!(
+                session_directory_entry_names(directory, 8)
+                    .unwrap()
+                    .is_empty(),
+                "{kind:?}"
+            );
+            copies.cleanup();
+            assert!(!dir.exists());
+        }
+    }
+
+    /// A clone of a source that is not the size it was said to be, or a
+    /// copy its check refuses, is discarded.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_that_is_not_what_was_asked_is_discarded() {
+        let len = 4096;
+        let (_source_dir, source) = video_source(len, 0o600);
+        for (size, refuse) in [(len as u64 - 1, false), (len as u64, true)] {
+            let dir = scratch("video-discard");
+            let mut copies = PastedImages::of_kind_in(VIDEOS_ANY_DISK, dir.clone());
+            let checked = std::cell::Cell::new(false);
+            let error = copies
+                .save_copy(&source, size, "mov", &never, soon(), |copy| {
+                    checked.set(true);
+                    // As the caller's check does: the copy is the source's
+                    // length, and what it holds is the video.
+                    if refuse || copy.metadata()?.len() != len as u64 {
+                        Err(io::Error::new(io::ErrorKind::InvalidData, "not the video"))
+                    } else {
+                        Ok(())
+                    }
+                })
+                .expect_err("discarded");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            // A clone is the whole source, so a short one fails its length
+            // before its check is asked. APFS clones; a byte copy, where a
+            // file system cannot, copies only what it was asked.
+            #[cfg(target_os = "macos")]
+            assert_eq!(checked.get(), refuse);
+            #[cfg(not(target_os = "macos"))]
+            let _ = checked;
+            assert_eq!((copies.files.len(), copies.bytes), (0, 0));
+            let directory = copies.directory.as_ref().expect("session held");
+            assert!(
+                session_directory_entry_names(directory, 8)
+                    .unwrap()
+                    .is_empty()
+            );
+            copies.cleanup();
+            assert!(!dir.exists());
+        }
+    }
+
+    /// A copy is named only with one of its store's extensions, is never
+    /// empty or past the store's bytes, and the store's extensions are
+    /// exactly its containers'.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_is_named_and_sized_within_its_store() {
+        let (_source_dir, source) = video_source(16, 0o600);
+        let dir = scratch("video-names");
+        let mut copies = PastedImages::of_kind_in(VIDEOS_ANY_DISK, dir.clone());
+        for (size, extension, kind) in [
+            (16, "png", io::ErrorKind::InvalidInput),
+            (16, "exe", io::ErrorKind::InvalidInput),
+            (16, "MP4", io::ErrorKind::InvalidInput),
+            (16, "../mp4", io::ErrorKind::InvalidInput),
+            (0, "mp4", io::ErrorKind::QuotaExceeded),
+            (VIDEOS.max_bytes + 1, "mp4", io::ErrorKind::QuotaExceeded),
+        ] {
+            let error = copies
+                .save_copy(&source, size, extension, &never, soon(), |_| Ok(()))
+                .expect_err(extension);
+            assert_eq!(error.kind(), kind, "{size} {extension}");
+        }
+        assert!(!dir.exists(), "a refused copy writes nothing");
+        let containers: Vec<_> = kettle_media::video::VideoContainer::ALL
+            .iter()
+            .map(|container| container.extension())
+            .collect();
+        assert_eq!(VIDEOS.extensions, containers.as_slice());
+    }
+
+    /// A store full of copies too new to drop refuses another, and a byte
+    /// copy that would leave the volume too full is refused before it
+    /// starts.
+    #[cfg(unix)]
+    #[test]
+    fn a_full_store_or_volume_refuses_a_copy() {
+        let (_source_dir, source) = video_source(16, 0o600);
+        let dir = scratch("video-full");
+        let mut copies = PastedImages::of_kind_in(VIDEOS_ANY_DISK, dir.clone());
+        for _ in 0..VIDEOS.max_files {
+            copies
+                .save_copy(&source, 16, "mp4", &never, soon(), |_| Ok(()))
+                .expect("room");
+        }
+        let error = copies
+            .save_copy(&source, 16, "mp4", &never, soon(), |_| Ok(()))
+            .expect_err("full of new copies");
+        assert_eq!(error.kind(), io::ErrorKind::QuotaExceeded);
+        let directory = copies.directory.as_ref().expect("session held");
+        assert!(require_free(directory, 0, 0).is_ok());
+        assert_eq!(
+            require_free(directory, u64::MAX / 2, 0).map_err(|error| error.kind()),
+            Err(io::ErrorKind::StorageFull)
+        );
+        assert_eq!(
+            require_free(directory, 0, u64::MAX).map_err(|error| error.kind()),
+            Err(io::ErrorKind::StorageFull)
+        );
+        copies.cleanup();
+        assert!(!dir.exists());
+        // A byte copy keeps the free space its store asks for: the video
+        // store's 2 GiB, here more than any disk has.
+        assert_eq!(VIDEOS.keep_free, 2 * 1024 * 1024 * 1024);
+        let dir = scratch("video-keep-free");
+        let greedy = StoreKind {
+            keep_free: u64::MAX / 4,
+            ..VIDEOS
+        };
+        let mut copies = PastedImages::of_kind_in(greedy, dir.clone());
+        let error = copies
+            .save_copy_as(
+                &source,
+                (16, "mp4"),
+                Copying::Bytes,
+                (&never, soon()),
+                |_| Ok(()),
+            )
+            .expect_err("no disk keeps that much free");
+        assert_eq!(error.kind(), io::ErrorKind::StorageFull);
+        copies.cleanup();
+        assert!(!dir.exists());
+    }
+
+    /// A copy kept but never handed over goes when asked, and stops
+    /// counting; one the store does not hold is not found.
+    #[cfg(unix)]
+    #[test]
+    fn a_kept_copy_can_be_removed() {
+        let (_source_dir, source) = video_source(64, 0o600);
+        let dir = scratch("video-remove");
+        let mut copies = PastedImages::of_kind_in(VIDEOS_ANY_DISK, dir.clone());
+        let path = copies
+            .save_copy(&source, 64, "mp4", &never, soon(), |_| Ok(()))
+            .unwrap();
+        assert_eq!((copies.held(), copies.bytes), (1, 64));
+        copies.remove(&path).unwrap();
+        assert!(!path.exists());
+        assert_eq!((copies.held(), copies.bytes), (0, 0));
+        assert_eq!(
+            copies.remove(&path).map_err(|error| error.kind()),
+            Err(io::ErrorKind::NotFound)
+        );
+        copies.cleanup();
+        assert!(!dir.exists());
+    }
+
+    /// A kept copy that cannot be deleted stays counted, its bytes
+    /// included, for cleanup to try again.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_that_will_not_go_stays_charged() {
+        let (_source_dir, source) = video_source(64, 0o600);
+        let dir = scratch("video-stuck");
+        let mut copies = PastedImages::of_kind_in(VIDEOS_ANY_DISK, dir.clone());
+        let path = copies
+            .save_copy(&source, 64, "mp4", &never, soon(), |_| Ok(()))
+            .unwrap();
+        // Another file takes its name, so the held one can no longer be
+        // deleted by it.
+        let other = dir.join("other");
+        std::fs::write(&other, b"x").unwrap();
+        std::fs::rename(&other, &path).unwrap();
+        assert!(copies.remove(&path).is_err());
+        assert_eq!((copies.held(), copies.counted_bytes()), (1, 64));
+        std::fs::remove_file(&path).unwrap();
+        copies.cleanup();
+        assert!(!dir.exists());
+    }
+
+    /// Byte copies made at once keep the reserve between them: what another
+    /// copy has yet to write counts against this one's room, and a copy's
+    /// share is given back however it ends.
+    #[cfg(unix)]
+    #[test]
+    fn copies_made_at_once_share_the_reserve() {
+        let (_source_dir, source) = video_source(64, 0o600);
+        let dir = scratch("video-pending");
+        let mut copies = PastedImages::of_kind_in(VIDEOS_ANY_DISK, dir.clone());
+        let counter = std::sync::Arc::clone(&copies.pending);
+        let other = Pending::new(&counter, u64::MAX / 4);
+        let error = copies
+            .save_copy_as(
+                &source,
+                (64, "mp4"),
+                Copying::Bytes,
+                (&never, soon()),
+                |_| Ok(()),
+            )
+            .expect_err("the other copy's bytes do not fit beside it");
+        assert_eq!(error.kind(), io::ErrorKind::StorageFull);
+        drop(other);
+        assert_eq!(copies.pending.load(std::sync::atomic::Ordering::Acquire), 0);
+        copies
+            .save_copy_as(
+                &source,
+                (64, "mp4"),
+                Copying::Bytes,
+                (&never, soon()),
+                |_| Ok(()),
+            )
+            .expect("room once it is done");
+        assert_eq!(copies.pending.load(std::sync::atomic::Ordering::Acquire), 0);
+        copies.cleanup();
+        assert!(!dir.exists());
+    }
+
+    /// A reserved copy holds its name, its place and its bytes until it is
+    /// kept or given back, so copies made at once never pass the bounds or
+    /// share a name; one finished after the store closed is discarded with
+    /// the directory cleanup left for it.
+    #[cfg(unix)]
+    #[test]
+    fn a_reserved_copy_holds_its_place() {
+        let (_source_dir, source) = video_source(64, 0o600);
+        let dir = scratch("video-reserve");
+        let mut copies = PastedImages::of_kind_in(VIDEOS_ANY_DISK, dir.clone());
+        let first = copies.reserve_copy(64, "mp4").unwrap();
+        let second = copies.reserve_copy(64, "webm").unwrap();
+        assert_ne!(first.next.name, second.next.name);
+        let kept = first.next.sequence.max(second.next.sequence);
+        assert_eq!((copies.held(), copies.counted_bytes()), (2, 128));
+        let mut rest: Vec<_> = (2..VIDEOS.max_files)
+            .map(|_| copies.reserve_copy(64, "mp4").unwrap())
+            .collect();
+        assert_eq!(
+            copies
+                .reserve_copy(64, "mp4")
+                .map(|_| ())
+                .map_err(|error| error.kind()),
+            Err(io::ErrorKind::QuotaExceeded),
+            "every place is reserved"
+        );
+        copies.release(rest.pop().unwrap());
+        let again = copies.reserve_copy(64, "mp4").unwrap();
+        for reservation in rest.drain(..).chain([again]) {
+            copies.release(reservation);
+        }
+        // The second finishes first; the first then keeps its own name.
+        let made = second.copy(&source, &never, soon()).unwrap();
+        let second_path = copies.keep_copy(second, made, |_| Ok(())).unwrap();
+        let made = first.copy(&source, &never, soon()).unwrap();
+        let first_path = copies.keep_copy(first, made, |_| Ok(())).unwrap();
+        assert_ne!(first_path, second_path);
+        assert_eq!((copies.held(), copies.bytes), (2, 128));
+        // Numbering goes on past both, whichever was kept last.
+        let late = copies.reserve_copy(64, "webm").unwrap();
+        assert!(late.next.sequence > kept, "{}", late.next.sequence);
+        let made = late.copy(&source, &never, soon()).unwrap();
+        copies.close();
+        assert!(
+            dir.exists(),
+            "cleanup leaves the directory to the copy being made"
+        );
+        assert!(copies.keep_copy(late, made, |_| Ok(())).is_err());
+        assert!(!dir.exists(), "the last one out takes the directory away");
+    }
+
+    /// A copy that an end is asked for while it is made is discarded, even
+    /// once the clone or the last chunk is done.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_ended_meanwhile_is_discarded() {
+        let len = COPY_CHUNK;
+        let (_source_dir, source) = video_source(len, 0o600);
+        for (how, asks_before_ending) in [(Copying::CloneFirst, 1), (Copying::Bytes, 2)] {
+            let dir = scratch("video-ended");
+            let mut copies = PastedImages::of_kind_in(VIDEOS_ANY_DISK, dir.clone());
+            let asked = std::cell::Cell::new(0);
+            let stop = || {
+                asked.set(asked.get() + 1);
+                asked.get() > asks_before_ending
+            };
+            let reservation = copies.reserve_copy(len as u64, "mp4").unwrap();
+            let error = reservation
+                .copy_as(&source, how, &stop, soon())
+                .expect_err("ended");
+            assert_eq!(error.kind(), io::ErrorKind::Interrupted, "{how:?}");
+            copies.release(reservation);
+            let directory = copies.directory.as_ref().unwrap();
+            assert!(
+                session_directory_entry_names(directory, 8)
+                    .unwrap()
+                    .is_empty(),
+                "{how:?}"
+            );
+            copies.cleanup();
+            assert!(!dir.exists());
+        }
+    }
+
+    /// A byte copy asks, before every chunk, whether to end and whether what
+    /// is left still fits, and stops when either says so.
+    #[cfg(unix)]
+    #[test]
+    fn the_reserve_is_asked_before_every_chunk() {
+        let len = COPY_CHUNK * 2 + 10;
+        let (_source_dir, source) = video_source(len, 0o600);
+        let dest = tempfile::tempfile().unwrap();
+        let asked = std::cell::RefCell::new(Vec::new());
+        let room = |left: u64| {
+            asked.borrow_mut().push(left);
+            Ok(())
+        };
+        copy_chunks(&source, &dest, len as u64, &|| Ok(()), &room).unwrap();
+        let chunk = COPY_CHUNK as u64;
+        assert_eq!(
+            *asked.borrow(),
+            [len as u64, len as u64 - chunk, len as u64 - 2 * chunk]
+        );
+        // An end asked for before the second chunk stops it there.
+        asked.borrow_mut().clear();
+        let ends = std::cell::Cell::new(0);
+        let ended = || {
+            ends.set(ends.get() + 1);
+            if ends.get() > 1 {
+                Err(io::Error::from(io::ErrorKind::Interrupted))
+            } else {
+                Ok(())
+            }
+        };
+        assert_eq!(
+            copy_chunks(&source, &dest, len as u64, &ended, &room).map_err(|error| error.kind()),
+            Err(io::ErrorKind::Interrupted)
+        );
+        assert_eq!(*asked.borrow(), [len as u64], "one chunk, then the end");
+        let full = |left: u64| {
+            if left < len as u64 {
+                Err(io::Error::from(io::ErrorKind::StorageFull))
+            } else {
+                Ok(())
+            }
+        };
+        assert_eq!(
+            copy_chunks(&source, &dest, len as u64, &|| Ok(()), &full)
+                .map_err(|error| error.kind()),
+            Err(io::ErrorKind::StorageFull)
+        );
+    }
+
+    /// A video-copy session a dead process left is reclaimed, its copies
+    /// named with their containers' extensions.
+    #[test]
+    fn a_dead_video_session_is_reaped() {
+        let root = scratch("video-stale-root");
+        let directory = root.join(format!("{}{}-7", VIDEOS.prefix, std::process::id()));
+        for name in ["0001.mp4", "0002.webm", "0003.ts"] {
+            let mut file = create_private_file(&directory.join(name)).expect("create");
+            file.write_all(b"private video bytes").expect("write");
+        }
+        let future = SystemTime::now() + STALE_AFTER + Duration::from_secs(1);
+        sweep_stale_in(&root, future, VIDEOS, |_| true);
+        assert!(
+            !directory.exists(),
+            "a verified dead video session is reclaimed"
+        );
+        let _ = std::fs::remove_dir(&root);
     }
 
     #[test]

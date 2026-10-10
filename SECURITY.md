@@ -85,6 +85,50 @@ Reports that fit any of these are welcome:
   those bounds or is replaced before launch, or an open that no press on a
   card asked for, is in scope. The store is `kettle-ui`'s
   `paste_image::OPENED`; the hand-off is `media::external`.
+- **Opening a video outside Kettle** — a video's Open in QuickTime Player
+  (macOS) or Open in mpv (Linux) handing anything but a checked private
+  copy of the file shown to anything but the one permitted player:
+  QuickTime Player, checked against Apple's signature requirement for
+  `com.apple.QuickTimePlayerX`, or `/usr/bin/mpv` owned by root and
+  writable only by root, run with fixed arguments, no shell and no search
+  path, never the default association, and only for a container and codec
+  that player reads; never the video's poster, and never the file a program
+  named. Kettle opens that file itself, read-only and without blocking, and
+  copies it only while it is still the file shown: the same device, inode,
+  size and modification time, and the same first 64 KiB, making the same
+  container. The copy is a clone where the file system makes one and
+  otherwise a chunked byte copy that, before every chunk, still fits with
+  2 GiB of the volume left free; either kind is given up at exit or after
+  two minutes, checked before and after a clone and between chunks. Copies
+  made at once count each other's unwritten bytes against the reserve. A
+  copy is made and checked without holding the store, so neither exit nor
+  another open waits on the source's file system (the store's own
+  operations are on Kettle's temporary directory); a read the file system
+  never answers is not interrupted, holds one of the two open slots, and
+  leaves its partial copy to the crash sweep.
+  The copy is made owner-only before it is opened, named by the container
+  its bytes are, checked again (its length, its first bytes, and the source
+  unchanged while it was copied), marked downloaded on macOS, and checked
+  to still be Kettle's just before the player starts. mpv then gets the
+  copy's own file, read-only, as descriptor 3 (`fd://3`, after `--`), so it
+  plays exactly what was checked. QuickTime Player takes a path, so a
+  process running as the user could swap the copy in its owner-only
+  directory between that last check and QuickTime Player opening it, as it
+  could Preview's PNG; such a process could also start either app itself.
+  A copy that does not reach the player is deleted at once (a kept copy
+  that cannot be deleted stays counted until cleanup); a launch asks
+  whether exit has begun just before it starts, though one already past
+  that check can still race exit, whose cleanup then takes its copy; and a
+  launch that fails is reported: on macOS when `open` cannot hand QuickTime
+  Player the file, on Linux when mpv exits with an error. Videos past 4 GiB are not copied.
+  The store keeps 8 copies and 8 GiB, each counted at its full length,
+  copies being made included, drops its oldest once five minutes old (a
+  player that has its copy open keeps reading it), and is closed, deleted
+  and swept as the image copies are. Nothing in the GUI decodes the video.
+  A copy that reaches another user, a player started on a file Kettle did
+  not check, any player but the permitted one, or a copy past those
+  bounds, is in scope. The store is `paste_image::VIDEOS`; the hand-off is
+  `media::external::video`.
 - **Codex's startup** — with `agent-display-codex` on, the zsh a new pane
   starts reads a Kettle-owned, read-only `.zshenv` that Kettle checks before
   each pane and points zsh at by borrowing `ZDOTDIR`, and the fish one runs

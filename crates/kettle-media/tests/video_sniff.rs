@@ -277,3 +277,30 @@ fn ebml_size_fields_can_use_wide_encodings() {
     let bytes = b"\x1a\x45\xdf\xa3\x01\0\0\0\0\0\0\x0e\x42\x82\x01\0\0\0\0\0\0\x04webm";
     assert_eq!(sniff(bytes), Some(VideoContainer::WebM));
 }
+
+/// Each container names its copies with an extension of its own: short
+/// lowercase letters and digits, so a name made from one is a plain file
+/// name that no two containers share.
+#[test]
+fn each_container_has_its_own_copy_extension() {
+    let extensions: Vec<_> = VideoContainer::ALL
+        .iter()
+        .map(|container| container.extension())
+        .collect();
+    for extension in &extensions {
+        assert!(
+            (2..=4).contains(&extension.len())
+                && extension
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit()),
+            "{extension}"
+        );
+    }
+    let mut unique = extensions.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(unique.len(), extensions.len(), "{extensions:?}");
+    assert_eq!(VideoContainer::IsoBmff.extension(), "mp4");
+    assert_eq!(VideoContainer::QuickTime.extension(), "mov");
+    assert_eq!(VideoContainer::WebM.extension(), "webm");
+}
