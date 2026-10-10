@@ -1308,7 +1308,7 @@ const MAX_LANE_IMAGES: usize = 64;
 
 pub use media_lane::{
     MediaCanvas, MediaLaneGeometry, MediaLaneHit, MediaLaneMode, MediaLanePanel, MediaLaneSender,
-    MediaLaneSource, media_lane_geometry,
+    MediaLaneSource, MediaLaneTile, media_lane_geometry,
 };
 pub use media_viewport::{MAX_MEDIA_ZOOM, MEDIA_ZOOM_STEP, MIN_MEDIA_ZOOM, MediaViewport};
 
@@ -8877,10 +8877,16 @@ impl Renderer {
                         }
                     }
                 }
+                // The sharper pixels when they cover what is in view, else
+                // the lane's own: one image a lane either way.
+                let (rect, pixels) = match (geometry.tile, lane.tile.as_ref()) {
+                    (Some(rect), Some(tile)) => (rect, &tile.image),
+                    _ => (image_rect, image),
+                };
                 let content = geometry.content;
                 lane_items.push(imgpipe::ImageItem::placement(
-                    [image_rect.0, image_rect.1, image_rect.2, image_rect.3],
-                    image.clone(),
+                    [rect.0, rect.1, rect.2, rect.3],
+                    pixels.clone(),
                     None,
                     None,
                     [content.0, content.1, content.2, content.3],

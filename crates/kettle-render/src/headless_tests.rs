@@ -2060,6 +2060,7 @@ fn a_lane_draws_its_open_outside_button_only_when_offered() {
 
         notice: None,
         view: crate::MediaViewport::FIT,
+        tile: None,
     };
     let geometry = media_lane_geometry(
         &viewer(true),
@@ -2182,6 +2183,7 @@ fn a_lane_in_source_mode_shows_rows_instead_of_the_image() {
 
         notice: None,
         view: crate::MediaViewport::FIT,
+        tile: None,
     };
     let reds = |image: &image::RgbaImage| {
         image
@@ -2260,6 +2262,7 @@ fn a_zoomed_lane_covers_its_content_and_stays_inside_it() {
         reload: false,
         notice: None,
         view,
+        tile: None,
     };
     let geometry = |view| {
         media_lane_geometry(
@@ -2295,6 +2298,87 @@ fn a_zoomed_lane_covers_its_content_and_stays_inside_it() {
     assert_eq!(outside, 0, "nothing past the content");
     let area = (cw * ch) as usize;
     assert!(inside * 100 >= area * 99, "{inside} of {area}: covered");
+}
+
+/// Sharper pixels covering a zoomed lane's view are drawn instead of its
+/// own, never as well; ones that do not cover it are not drawn.
+#[test]
+fn a_tile_that_covers_the_view_is_drawn_instead_of_the_image() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(480, 320) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let snap = snapshot_of(40, 2, b"");
+    let view = || PaneView {
+        terminal: (0.0, 0.0, 480.0, 40.0),
+        ..pane(&snap, 480, 320)
+    };
+    let (red, blue) = ([255, 0, 0, 255], [0, 0, 255, 255]);
+    let lane = |view, tile| MediaLanePanel {
+        pane: 1,
+        rect: (0.0, 40.0, 480.0, 280.0),
+        collapsed: false,
+        title: "plot.png".into(),
+        detail: "Image · 16×16".into(),
+        sender: MediaLaneSender {
+            text: "From this pane".into(),
+            program: None,
+            signer: None,
+        },
+        hint: "Keys still go to the terminal".into(),
+        position: (1, 1),
+        image: Some(kettle_core::ImageData::new(16, 16, red.repeat(16 * 16)).unwrap()),
+        status: String::new(),
+        canvas: MediaCanvas::Theme,
+        open_outside: false,
+        mode: MediaLaneMode::Rendered,
+        source: None,
+        copy: true,
+        reload: false,
+        notice: None,
+        view,
+        tile,
+    };
+    let fitted = media_lane_geometry(
+        &lane(crate::MediaViewport::FIT, None),
+        (renderer.cell_w, renderer.cell_h),
+        (
+            renderer.overlay_text_cell_width(),
+            renderer.metrics.line_height,
+        ),
+    )
+    .unwrap();
+    let zoom = crate::MediaViewport::FIT.zoomed(32.0, fitted.fit.unwrap(), fitted.content);
+    let tile = |coverage| {
+        Some(crate::MediaLaneTile {
+            image: kettle_core::ImageData::new(8, 8, blue.repeat(64)).unwrap(),
+            coverage,
+        })
+    };
+    let mut shot = |tile| {
+        let overlay = Overlay {
+            media_lanes: vec![lane(zoom, tile)],
+            ..focused(false)
+        };
+        capture(&mut renderer, &cfg, &[view()], &overlay)
+    };
+    let count = |image: &image::RgbaImage, want: [u8; 3]| {
+        image
+            .pixels()
+            .filter(|pixel| (0..3).all(|channel| pixel[channel].abs_diff(want[channel]) < 40))
+            .count()
+    };
+    let covering = shot(tile((0.0, 0.0, 1.0, 1.0)));
+    assert_eq!(count(&covering, [255, 0, 0]), 0, "the image is not drawn");
+    assert!(count(&covering, [0, 0, 255]) > 1000, "the tile is");
+    let short = shot(tile((0.49, 0.49, 0.51, 0.51)));
+    assert_eq!(
+        count(&short, [0, 0, 255]),
+        0,
+        "a tile short of the view is not"
+    );
+    assert!(count(&short, [255, 0, 0]) > 1000);
 }
 
 /// A preview lane paints its opaque panel over its share of the pane, with
@@ -2336,6 +2420,7 @@ fn a_preview_lane_paints_its_panel_and_leaves_the_terminal() {
 
         notice: None,
         view: crate::MediaViewport::FIT,
+        tile: None,
     };
     let without = capture(&mut renderer, &cfg, &[view()], &focused(false));
     let overlay = Overlay {

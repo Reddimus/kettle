@@ -375,7 +375,8 @@ rectangle and `expanded`, `strip` or `badge`, and for a lane with an item
 its `mode` (`rendered` or `source`), `canvas` (`theme`, `white` or
 `checker`), `zoom` (relative to the item's fit), `content` and `image` (the
 content area's rectangle and where the item is drawn in it, past it when
-zoomed in) and `controls`, each shown control's rectangle by name; never a
+zoomed in), `sharp` (where sharper pixels for the part in view are drawn,
+or null) and `controls`, each shown control's rectangle by name; never a
 title, source, path or pixel). An SVG's or a diagram's lane can show the
 source it was rendered from (`≡`), put the picture on another background
 (`◐`; a diagram is rendered again for it, from the same source), copy the
@@ -384,7 +385,9 @@ replaces the item in place, keeping its key and title, as one the user
 opened. A rendered item zooms (`−`, `+`, back to its fit with `⤢`, or a
 pinch or Cmd/Ctrl+wheel at the pointer) and pans (the wheel or a drag);
 `perform_action` takes `preview_zoom_in`, `preview_zoom_out` and
-`preview_fit` for the focused pane's lane. A control client may press these like any control, but no file is
+`preview_fit` for the focused pane's lane. A zoomed item sharpens once its
+view settles, but a view a control client changed last reads no file for
+it. A control client may press these like any control, but no file is
 read again while Kettle handles a control request.
 The user can also preview an image, SVG or Mermaid file a pane names
 without any agent: `preview_link` (the palette's "Preview a file in

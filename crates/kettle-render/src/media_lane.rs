@@ -46,6 +46,23 @@ pub struct MediaLaneSource {
     pub total_rows: usize,
 }
 
+/// Sharper pixels for part of a zoomed item, and the part they cover as
+/// fractions of the image's width and height: left, top, right, bottom.
+#[derive(Clone)]
+pub struct MediaLaneTile {
+    pub image: kettle_core::ImageData,
+    pub coverage: (f64, f64, f64, f64),
+}
+
+impl std::fmt::Debug for MediaLaneTile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MediaLaneTile")
+            .field("size", &(self.image.width, self.image.height))
+            .field("coverage", &self.coverage)
+            .finish()
+    }
+}
+
 /// One pane's lane, projected for painting.
 #[derive(Clone, Debug)]
 pub struct MediaLanePanel {
@@ -86,6 +103,9 @@ pub struct MediaLanePanel {
     pub notice: Option<String>,
     /// How the rendered item is zoomed and panned.
     pub view: crate::MediaViewport,
+    /// Sharper pixels for the part of the zoomed item in view, when the
+    /// lane holds some.
+    pub tile: Option<MediaLaneTile>,
 }
 
 /// Who sent an item, in the UI language, with where the sending program's
@@ -206,6 +226,9 @@ pub struct MediaLaneGeometry {
     /// Where the image is drawn: `fit` zoomed and panned, reaching past
     /// `content` when zoomed in.
     pub image: Option<Rect4>,
+    /// Where the sharper pixels are drawn instead, when they cover all of
+    /// the image in view: one image a lane, either way.
+    pub tile: Option<Rect4>,
     /// How many source rows fit the content area, in source mode.
     pub source_rows: usize,
 }
@@ -250,6 +273,20 @@ impl MediaLaneGeometry {
         let right = (image.0 + image.2).min(content.0 + content.2);
         let bottom = (image.1 + image.3).min(content.1 + content.3);
         (right > left && bottom > top).then_some((left, top, right - left, bottom - top))
+    }
+
+    /// The part of the image in view, as fractions of its width and height:
+    /// left, top, right and bottom.
+    pub fn visible(&self) -> Option<(f64, f64, f64, f64)> {
+        let (image, shown) = (self.image?, self.shown()?);
+        let along =
+            |at: f32, from: f32, length: f32| (f64::from(at) - f64::from(from)) / f64::from(length);
+        Some((
+            along(shown.0, image.0, image.2),
+            along(shown.1, image.1, image.3),
+            along(shown.0 + shown.2, image.0, image.2),
+            along(shown.1 + shown.3, image.1, image.3),
+        ))
     }
 
     /// What a press at `(x, y)` does; `None` outside the lane.
@@ -409,6 +446,7 @@ pub fn media_lane_geometry(
             content: empty,
             fit: None,
             image: None,
+            tile: None,
             source_rows: 0,
         });
     }
@@ -434,7 +472,7 @@ pub fn media_lane_geometry(
         MediaLaneMode::Source => (None, (image_area.3 / lh).floor() as usize),
     };
     let image = fit.and_then(|fit| lane.view.place(fit, content));
-    Some(MediaLaneGeometry {
+    let mut geometry = MediaLaneGeometry {
         rect,
         title,
         counter,
@@ -458,8 +496,48 @@ pub fn media_lane_geometry(
         content,
         fit,
         image,
+        tile: None,
         source_rows,
-    })
+    };
+    geometry.tile = lane
+        .tile
+        .as_ref()
+        .zip(geometry.image)
+        .zip(geometry.visible())
+        .and_then(|((tile, image), visible)| tile_rect(tile.coverage, visible, image));
+    Some(geometry)
+}
+
+/// Where pixels covering `coverage` of an image drawn at `image` go, when
+/// they cover all of it in view, `visible`.
+fn tile_rect(
+    coverage: (f64, f64, f64, f64),
+    visible: (f64, f64, f64, f64),
+    image: Rect4,
+) -> Option<Rect4> {
+    const SLACK: f64 = 1e-6;
+    let finite = [coverage.0, coverage.1, coverage.2, coverage.3]
+        .iter()
+        .all(|value| value.is_finite());
+    let covers = visible.0 >= coverage.0 - SLACK
+        && visible.1 >= coverage.1 - SLACK
+        && visible.2 <= coverage.2 + SLACK
+        && visible.3 <= coverage.3 + SLACK;
+    if !(finite && covers && coverage.2 > coverage.0 && coverage.3 > coverage.1) {
+        return None;
+    }
+    let (x, y, w, h) = (
+        f64::from(image.0),
+        f64::from(image.1),
+        f64::from(image.2),
+        f64::from(image.3),
+    );
+    Some((
+        (x + coverage.0 * w) as f32,
+        (y + coverage.1 * h) as f32,
+        ((coverage.2 - coverage.0) * w) as f32,
+        ((coverage.3 - coverage.1) * h) as f32,
+    ))
 }
 
 /// The whole pixels inside `area`, so an image lands on pixel boundaries
@@ -832,6 +910,7 @@ mod tests {
 
             notice: None,
             view: crate::MediaViewport::FIT,
+            tile: None,
         }
     }
 
@@ -1239,6 +1318,52 @@ mod tests {
             );
             assert_eq!((geometry.image, geometry.shown()), (None, None));
         }
+    }
+
+    /// Sharper pixels are drawn in the part of the zoomed image they cover,
+    /// and only while that holds all of it in view; the part in view is the
+    /// shown image as fractions of the whole.
+    #[test]
+    fn a_tile_is_drawn_only_while_it_covers_the_view() {
+        let mut lane = viewer((1, 1), Some((64, 48)));
+        let fitted = media_lane_geometry(&lane, CELL, CELL).unwrap();
+        lane.view = crate::MediaViewport::FIT.zoomed(32.0, fitted.fit.unwrap(), fitted.content);
+        let zoomed = media_lane_geometry(&lane, CELL, CELL).unwrap();
+        let (image, shown) = (zoomed.image.unwrap(), zoomed.shown().unwrap());
+        let visible = zoomed.visible().unwrap();
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        assert!(near(
+            visible.0,
+            f64::from(shown.0 - image.0) / f64::from(image.2)
+        ));
+        assert!(visible.0 > 0.0 && visible.2 < 1.0, "{visible:?}");
+        assert_eq!(zoomed.tile, None, "no tile, none drawn");
+        let tile = |coverage| MediaLaneTile {
+            image: kettle_core::ImageData::new(1, 1, vec![0; 4]).unwrap(),
+            coverage,
+        };
+        lane.tile = Some(tile((0.25, 0.0, 0.75, 1.0)));
+        let covered = media_lane_geometry(&lane, CELL, CELL).unwrap();
+        let rect = covered.tile.expect("it covers the view");
+        assert_eq!(rect.0, image.0 + 0.25 * image.2);
+        assert_eq!(rect.2, 0.5 * image.2);
+        assert_eq!((rect.1, rect.3), (image.1, image.3));
+        lane.tile = Some(tile((0.45, 0.0, 0.75, 1.0)));
+        assert_eq!(
+            media_lane_geometry(&lane, CELL, CELL).unwrap().tile,
+            None,
+            "the view reaches past it"
+        );
+        lane.tile = Some(tile((f64::NAN, 0.0, 1.0, 1.0)));
+        assert_eq!(media_lane_geometry(&lane, CELL, CELL).unwrap().tile, None);
+        lane.tile = Some(tile((0.0, 0.0, 1.0, 1.0)));
+        lane.mode = MediaLaneMode::Source;
+        lane.source = Some(MediaLaneSource::default());
+        assert_eq!(
+            media_lane_geometry(&lane, CELL, CELL).unwrap().tile,
+            None,
+            "a source shows no image"
+        );
     }
 
     /// However narrow the lane, every control and the counter lie inside it:

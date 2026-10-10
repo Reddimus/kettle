@@ -162,6 +162,9 @@ pub(crate) struct ItemSource {
     /// A file's text as the worker read it; bytes a request carried are
     /// their own text.
     file_text: Option<Arc<ChargedBytes>>,
+    /// Whether the file changed since it was read: nothing more is read for
+    /// the item unasked, until a reload replaces it.
+    pub changed: bool,
 }
 
 /// What holds an item's text, if any: the bytes a request carried, or else
@@ -208,6 +211,7 @@ impl ItemSource {
             digest,
             rows,
             file_text,
+            changed: false,
         }
     }
 

@@ -8988,6 +8988,8 @@ pub struct App {
     /// Whether a control client's request is being handled: what it
     /// drives is never the user's own gesture.
     ctl_driving: bool,
+    /// The last ticket a lane took for sharper pixels.
+    crop_tickets: u64,
     /// The thread that copies a lane's image or source, from the first copy.
     preview_copy: Option<crate::media::CopyService>,
     /// Bounded native-poster jobs. Paths cross only the private child-worker
@@ -10001,6 +10003,7 @@ impl App {
             )),
             previews_ready: Vec::new(),
             ctl_driving: false,
+            crop_tickets: 0,
             preview_copy: None,
             video_previewer,
             next_video_preview_generation: 1,
@@ -10905,7 +10908,11 @@ impl App {
                 notice: None,
                 ..*panel
             },
-            _ => crate::window_state::PreviewPanel::new(item),
+            // Another item: the sharper pixels were the last one's.
+            _ => {
+                ws.lane_crops.remove(&pane);
+                crate::window_state::PreviewPanel::new(item)
+            }
         };
         let had_panel = ws.preview_panels.insert(pane, panel).is_some();
         let side = match self.cfg.preview_lane_side {
@@ -10945,6 +10952,7 @@ impl App {
         if resized {
             self.resize_all(ws);
         }
+        self.lanes_moved(ws);
         ws.accessibility_pending = true;
         if let Some(window) = &ws.window {
             window.request_redraw();
@@ -10953,10 +10961,11 @@ impl App {
 
     /// Close `pane`'s preview lane; its terminal gets the room back.
     fn close_preview(&mut self, ws: &mut WindowState, pane: u64) {
-        // Motion banked toward a scroll of the lane goes with it. A press
-        // on it still owns the pointer until its release, which is the
-        // lane's.
+        // Motion banked toward a scroll of the lane goes with it, as do its
+        // sharper pixels. A press on it still owns the pointer until its
+        // release, which is the lane's.
         ws.lane_wheel.reset();
+        ws.lane_crops.remove(&pane);
         let had_panel = ws.preview_panels.remove(&pane).is_some();
         let resized = ws.mux.close_lane(pane);
         if had_panel || resized {
@@ -11024,6 +11033,13 @@ impl App {
         };
         let mut spec = item.source.spec.clone();
         let reads_a_file = matches!(spec.input, crate::media::SourceInput::Path { .. });
+        // A file found changed is read again only by a reload.
+        if reads_a_file && item.source.changed {
+            if let Some(panel) = ws.preview_panels.get_mut(&pane) {
+                panel.notice = Some(crate::window_state::LaneNotice::Changed);
+            }
+            return;
+        }
         if self.ctl_driving && reads_a_file
             || matches!(spec.input, crate::media::SourceInput::Released)
         {
@@ -11038,6 +11054,7 @@ impl App {
             pane,
             item: item.id,
             generation: item.generation,
+            tile: None,
         };
         let deadline = std::time::Instant::now() + kettle_ctl::show::SHOW_SERVER_DEADLINE;
         let push = crate::media::Push::new(
@@ -11158,11 +11175,146 @@ impl App {
         let view = change(panel.view, fit, geometry.content);
         if view != panel.view {
             panel.view = view;
+            self.want_lane_crop(ws, pane);
             if let Some(window) = &ws.window {
                 window.request_redraw();
             }
         }
         true
+    }
+
+    /// What shows of a zoomed item may have moved, or another item may show:
+    /// each zoomed lane asks again for sharper pixels once it settles.
+    fn lanes_moved(&mut self, ws: &mut WindowState) {
+        let zoomed: Vec<u64> = ws
+            .preview_panels
+            .iter()
+            .filter(|(_, panel)| !panel.view.is_fit())
+            .map(|(pane, _)| *pane)
+            .collect();
+        let control = self.ctl_driving;
+        let now = std::time::Instant::now();
+        for pane in zoomed {
+            ws.lane_crops.entry(pane).or_default().again(now, control);
+        }
+    }
+
+    /// `pane`'s lane view changed: ask for sharper pixels once it settles,
+    /// for the view of whoever changed it.
+    fn want_lane_crop(&mut self, ws: &mut WindowState, pane: u64) {
+        let control = self.ctl_driving;
+        ws.lane_crops
+            .entry(pane)
+            .or_default()
+            .view_changed(std::time::Instant::now(), control);
+    }
+
+    /// Ask for the sharper pixels whose time has come at `now`; how long
+    /// until the next is due.
+    fn ask_due_lane_crops(
+        &mut self,
+        ws: &mut WindowState,
+        now: std::time::Instant,
+    ) -> Option<std::time::Duration> {
+        let due: Vec<(u64, bool)> = ws
+            .lane_crops
+            .iter_mut()
+            .filter_map(|(pane, crop)| crop.take_due(now).map(|control| (*pane, control)))
+            .collect();
+        for (pane, control) in due {
+            self.ask_lane_crop(ws, pane, control);
+        }
+        ws.lane_crops
+            .values()
+            .filter_map(crate::media::LaneCrop::due)
+            .min()
+            .map(|at| {
+                at.saturating_duration_since(now)
+                    .max(std::time::Duration::from_millis(1))
+            })
+    }
+
+    /// Ask the worker for the part of `pane`'s zoomed item in view at the
+    /// size it shows, unless the lane's own pixels, or the sharper ones it
+    /// holds, show it well enough; with nothing sharper needed, let those go.
+    /// A file is read only for the user's own view: never when a control
+    /// client changed it last (`control`), nor once the file changed since
+    /// the item was rendered, until a reload.
+    fn ask_lane_crop(&mut self, ws: &mut WindowState, pane: u64, control: bool) {
+        // Whatever this asks, or finds no need to, a render asked for
+        // before is no longer wanted.
+        if let Some(crop) = ws.lane_crops.get_mut(&pane) {
+            crop.asked = None;
+        }
+        let Some(geometry) = self.preview_lane_geometry_of(ws, pane) else {
+            return;
+        };
+        let Some(item) = preview_item(ws, pane) else {
+            return;
+        };
+        let (Some(placed), Some(visible), Some(layout), Some(held)) = (
+            geometry.image,
+            geometry.visible(),
+            item.layout,
+            item.image().map(|image| (image.width, image.height)),
+        ) else {
+            return;
+        };
+        let plan = crate::media::plan_crop(
+            item.kind,
+            &layout,
+            held,
+            (f64::from(placed.2), f64::from(placed.3)),
+            visible,
+            item.source.spec.target.scale,
+        );
+        let (id, generation, changed) = (item.id, item.generation, item.source.changed);
+        let mut spec = item.source.spec.clone();
+        let crop = ws.lane_crops.entry(pane).or_default();
+        let Some(target) = plan else {
+            crop.tile = None;
+            return;
+        };
+        let reads_file = matches!(spec.input, crate::media::SourceInput::Path { .. });
+        if (reads_file && (changed || control))
+            || matches!(spec.input, crate::media::SourceInput::Released)
+            || crop.tile.as_ref().is_some_and(|tile| {
+                tile.serves(id, generation, spec.canvas) && tile.suffices(visible, &target)
+            })
+        {
+            return;
+        }
+        self.crop_tickets += 1;
+        let ticket = self.crop_tickets;
+        crop.asked = Some(ticket);
+        spec.target = target;
+        let render = crate::media::LaneRender {
+            window: ws.seq,
+            pane,
+            item: id,
+            generation,
+            tile: Some(ticket),
+        };
+        let deadline = std::time::Instant::now() + kettle_ctl::show::SHOW_SERVER_DEADLINE;
+        let push = crate::media::Push::new(
+            crate::media::Requester::Lane(render),
+            crate::media::Route {
+                pane,
+                window: ws.seq,
+                verified: true,
+            },
+            crate::media::Draft {
+                key: None,
+                title: String::new(),
+                provenance: crate::media::Provenance::User,
+                inline: None,
+            },
+            spec,
+            kettle_media::client::RenderControl::with_deadline(deadline),
+        );
+        self.media
+            .admit(crate::media::Sender::LaneTile(pane), deadline, push);
+        self.media_tick(ws);
     }
 
     /// Zoom `pane`'s rendered item by `factor` about the content's center.
@@ -11598,6 +11750,7 @@ impl App {
             })
             .collect();
         ws.preview_panels.retain(|pane, _| live.contains(pane));
+        ws.lane_crops.retain(|pane, _| live.contains(pane));
         let resized = ws.mux.retain_lanes(|pane| live.contains(&pane));
         if resized || ws.preview_panels.len() != before {
             self.lanes_changed(ws, resized);
@@ -11659,6 +11812,17 @@ impl App {
                 .map(|notice| lane_notice_text(notice, tr).to_string()),
             reload: preview_reloads(item),
             view: panel.view,
+            // Sharper pixels for this item as it is now, if the lane holds
+            // them.
+            tile: ws
+                .lane_crops
+                .get(&pane)
+                .and_then(|crop| crop.tile.as_ref())
+                .filter(|tile| tile.serves(item.id, item.generation, item.source.spec.canvas))
+                .map(|tile| kettle_render::MediaLaneTile {
+                    image: tile.image.clone(),
+                    coverage: tile.coverage,
+                }),
         };
         // The source rows in view, for the room the lane has: only those are
         // read out of the text.
@@ -14162,6 +14326,9 @@ impl App {
         }
         ws.pty_resize_retry
             .record_result(std::time::Instant::now(), native_resize_failed);
+        // The window, its font or its splits changed what a zoomed lane
+        // shows.
+        self.lanes_moved(ws);
     }
 
     /// Shared zoom transition for `Action::ToggleZoom` and
@@ -22957,6 +23124,18 @@ impl App {
         // A lane's render that could not run, and each copy that ended, are
         // said in the lane that asked.
         for render in self.media.take_lane_failures() {
+            // Sharper pixels that could not be asked for leave the lane
+            // showing its own, without a word.
+            if let Some(ticket) = render.tile {
+                if let Some(crop) = self
+                    .window_by_seq(ws, render.window)
+                    .and_then(|window| window.lane_crops.get_mut(&render.pane))
+                    .filter(|crop| crop.asked == Some(ticket))
+                {
+                    crop.asked = None;
+                }
+                continue;
+            }
             self.tell_lane(
                 ws,
                 render.window,
@@ -23300,6 +23479,10 @@ impl App {
         use crate::window_state::LaneNotice;
         use kettle_media::FailureCode;
         use kettle_media::client::RenderError;
+        if let Some(ticket) = render.tile {
+            return self.finish_lane_crop(ws, render, ticket, spec, result);
+        }
+        let control = self.ctl_driving;
         let tell = |app: &mut Self, ws: &mut WindowState, notice| {
             app.tell_lane(ws, render.window, render.pane, render.item, notice);
         };
@@ -23307,6 +23490,7 @@ impl App {
             Ok(output) => output,
             Err(RenderError::Cancelled) => return,
             Err(RenderError::Failure(FailureCode::Changed)) => {
+                self.mark_preview_changed(ws, &render);
                 return tell(self, ws, LaneNotice::Changed);
             }
             Err(RenderError::Failure(_)) => return tell(self, ws, LaneNotice::RenderFailed),
@@ -23321,10 +23505,13 @@ impl App {
         match verdict {
             // Replaced or gone: nothing to say.
             LaneRenderVerdict::Gone => return,
-            LaneRenderVerdict::Changed => return tell(self, ws, LaneNotice::Changed),
+            LaneRenderVerdict::Changed => {
+                self.mark_preview_changed(ws, &render);
+                return tell(self, ws, LaneNotice::Changed);
+            }
             LaneRenderVerdict::Same => {}
         }
-        let (width, height) = (rendered.width, rendered.height);
+        let (width, height, layout) = (rendered.width, rendered.height, rendered.layout);
         let image = match self.admit_preview_pixels(ws, width, height, rendered.rgba) {
             Ok(image) => image,
             Err(_) => return tell(self, ws, LaneNotice::RenderFailed),
@@ -23341,6 +23528,7 @@ impl App {
         };
         item.pixels = crate::media::ItemPixels::Ready(image);
         item.size = (width, height);
+        item.layout = Some(layout);
         item.source.spec.canvas = spec.canvas;
         if let Some(panel) = window
             .preview_panels
@@ -23348,10 +23536,121 @@ impl App {
             .filter(|panel| panel.item == render.item)
         {
             panel.notice = None;
+            // Sharper pixels for the old canvas no longer serve: a zoomed
+            // lane asks again.
+            if !panel.view.is_fit() {
+                window
+                    .lane_crops
+                    .entry(render.pane)
+                    .or_default()
+                    .again(std::time::Instant::now(), control);
+            }
         }
         window.accessibility_pending = true;
         if let Some(handle) = &window.window {
             handle.request_redraw();
+        }
+    }
+
+    /// Take a zoomed lane's sharper pixels: only those its lane asked for
+    /// last, for the item it still shows unreplaced, read from the same
+    /// source. A file changed since is said in the lane, and nothing more is
+    /// read for that item until a reload makes another generation; any
+    /// other failure leaves the lane showing its own pixels.
+    fn finish_lane_crop(
+        &mut self,
+        ws: &mut WindowState,
+        render: crate::media::LaneRender,
+        ticket: u64,
+        spec: crate::media::JobSpec,
+        result: Result<kettle_media::RenderOutput, kettle_media::client::RenderError>,
+    ) {
+        use kettle_media::FailureCode;
+        use kettle_media::client::RenderError;
+        let verdict = match &result {
+            Ok(output) => self
+                .window_by_seq(ws, render.window)
+                .and_then(|window| window.mux.panes.get(&render.pane))
+                .map_or(LaneRenderVerdict::Gone, |pane| {
+                    lane_render_verdict(pane.media_shelf.items(), &render, &output.rendered.digest)
+                }),
+            Err(RenderError::Failure(FailureCode::Changed)) => LaneRenderVerdict::Changed,
+            Err(_) => LaneRenderVerdict::Gone,
+        };
+        // A changed file is the item's to remember, whether or not its lane
+        // still wants these pixels.
+        if verdict == LaneRenderVerdict::Changed {
+            self.mark_preview_changed(ws, &render);
+        }
+        let Some(window) = self.window_by_seq(ws, render.window) else {
+            return;
+        };
+        let Some(crop) = window
+            .lane_crops
+            .get_mut(&render.pane)
+            .filter(|crop| crop.asked == Some(ticket))
+        else {
+            return;
+        };
+        crop.asked = None;
+        match verdict {
+            LaneRenderVerdict::Gone => return,
+            LaneRenderVerdict::Changed => {
+                crop.tile = None;
+                return self.tell_lane(
+                    ws,
+                    render.window,
+                    render.pane,
+                    render.item,
+                    crate::window_state::LaneNotice::Changed,
+                );
+            }
+            LaneRenderVerdict::Same => {}
+        }
+        let Ok(output) = result else {
+            return;
+        };
+        let rendered = output.rendered;
+        let Some(coverage) = crate::media::crop_coverage(&rendered.layout) else {
+            return;
+        };
+        let image_width = rendered.layout.image_in_target.width;
+        // Sharper pixels are a nicety: with no room they are not kept, and
+        // nothing on a shelf gives way for them.
+        let Ok(image) = kettle_core::ImageData::try_with_budget(
+            rendered.width,
+            rendered.height,
+            rendered.rgba,
+            &kettle_core::GraphicsBudget::previews(),
+        ) else {
+            return;
+        };
+        crop.tile = Some(crate::media::LaneTile {
+            item: render.item,
+            generation: render.generation,
+            canvas: spec.canvas,
+            image,
+            coverage,
+            image_width,
+        });
+        if let Some(handle) = &window.window {
+            handle.request_redraw();
+        }
+    }
+
+    /// Note that the file `render`'s item came from changed since it was
+    /// read: nothing more is read for that item unasked, whatever becomes
+    /// of its lane, until a reload replaces it.
+    fn mark_preview_changed(&mut self, ws: &mut WindowState, render: &crate::media::LaneRender) {
+        // What the lane asked for it and is still waiting reads nothing.
+        self.media.withdraw_lane_renders(render.pane, render.item);
+        if let Some(item) = self
+            .window_by_seq(ws, render.window)
+            .and_then(|window| window.mux.panes.get_mut(&render.pane))
+            .and_then(|pane| pane.media_shelf.get_mut(render.item))
+            .filter(|item| item.generation == render.generation)
+        {
+            item.source.changed = true;
         }
     }
 
@@ -23379,6 +23678,7 @@ impl App {
         };
         let kettle_media::RenderOutput { kind, rendered } = output;
         let (width, height) = (rendered.width, rendered.height);
+        let layout = rendered.layout;
         let warnings = rendered.warnings;
         let image = match self.admit_preview_pixels(ws, width, height, rendered.rgba) {
             Ok(image) => image,
@@ -23398,7 +23698,7 @@ impl App {
         );
         let source =
             crate::media::ItemSource::new(spec, rendered.digest, textual, rendered.exact_source);
-        let item = crate::media::ShelfItem::new(
+        let mut item = crate::media::ShelfItem::new(
             item_id,
             key,
             title,
@@ -23408,6 +23708,7 @@ impl App {
             image,
             source,
         );
+        item.layout = Some(layout);
         let Some(window) = window_with_pane(ws, &mut self.windows, route.pane) else {
             let _ = origin.refuse(FailureCode::NotInKettlePane);
             return;
@@ -24158,6 +24459,7 @@ impl App {
                         // rectangles, never pixels.
                         lane["content"] = rect_json(geometry.content);
                         lane["image"] = geometry.image.map(rect_json).into();
+                        lane["sharp"] = geometry.tile.map(rect_json).into();
                         let controls: serde_json::Map<String, serde_json::Value> =
                             lane_controls(&geometry)
                                 .into_iter()
@@ -36844,6 +37146,8 @@ impl App {
         if self.cards_tip.until().is_some_and(|until| until <= now) {
             self.end_cards_tip(ws);
         }
+        // Zoomed lanes whose view settled ask for sharper pixels.
+        let lane_crop_wait = self.ask_due_lane_crops(ws, now);
         let cards_tip_wait = self.cards_tip.until().map(|until| {
             until
                 .saturating_duration_since(now)
@@ -37098,6 +37402,9 @@ impl App {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         if let Some(next) = cards_tip_wait {
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
+        if let Some(next) = lane_crop_wait {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         if let Some(next) = pending_video_receipt_wait {
@@ -43064,6 +43371,7 @@ mod tests {
 
             notice: None,
             view: kettle_render::MediaViewport::FIT,
+            tile: None,
         };
         let (label, description) = super::media_lane_accessibility(&lane, &tr);
         assert!(
@@ -56104,6 +56412,7 @@ mod lane_control_tests {
             pane: 2,
             item: 4,
             generation: 0,
+            tile: None,
         };
         let same = shelf[0].source.digest.clone();
         let other = kettle_media::content_digest(b"flowchart TD", None).unwrap();
@@ -56293,6 +56602,48 @@ mod lane_control_tests {
             "ws.pane_drag = None; ws.lane_drag = None; ws.reuse_pane_snapshots_once = false;",
             "if ws.context_menu.is_some() || self.pointer_modal_open(ws) { ws.lane_drag = None; return false; }",
             "if hit == Some(kettle_render::MediaLaneHit::Inside) && let Some(geometry) = geometry && geometry.fit.is_some() && rect_contains(geometry.content, x, y)",
+        ] {
+            assert!(flat.contains(needle), "{needle}");
+        }
+    }
+
+    /// A zoomed lane asks for sharper pixels when its view settles: any view
+    /// change or lane change wants them, the event loop asks once due and
+    /// waits for the next, as a sender of their own; a lane's ask reads no
+    /// file for a control client's view, a changed file or released bytes;
+    /// they come back to the lane only for its last ticket, never fail
+    /// aloud, and go with their item, lane or pane.
+    #[test]
+    fn lane_crops_are_wired() {
+        let src = super::production_source();
+        let flat = src.split_whitespace().collect::<Vec<_>>().join(" ");
+        for needle in [
+            "panel.view = view; self.want_lane_crop(ws, pane);",
+            ".filter(|(_, panel)| !panel.view.is_fit()) .map(|(pane, _)| *pane) .collect(); let control = self.ctl_driving; let now = std::time::Instant::now(); for pane in zoomed { ws.lane_crops.entry(pane).or_default().again(now, control); }",
+            // A finished render on another canvas asks again for a zoomed
+            // lane, as the old canvas's pixels no longer serve.
+            "if !panel.view.is_fit() { window .lane_crops .entry(render.pane) .or_default() .again(std::time::Instant::now(), control); }",
+            // A file found changed stays so with its item, not its lane.
+            "// still wants these pixels. if verdict == LaneRenderVerdict::Changed { self.mark_preview_changed(ws, &render); } let Some(window) = self.window_by_seq(ws, render.window) else {",
+            "// The window, its font or its splits changed what a zoomed lane // shows. self.lanes_moved(ws);",
+            // A change found withdraws what still waits to read the file, and
+            // a canvas change reads it no more either.
+            "// What the lane asked for it and is still waiting reads nothing. self.media.withdraw_lane_renders(render.pane, render.item);",
+            "// A file found changed is read again only by a reload. if reads_a_file && item.source.changed {",
+            "Err(RenderError::Failure(FailureCode::Changed)) => { self.mark_preview_changed(ws, &render); return tell(self, ws, LaneNotice::Changed); }",
+            "LaneRenderVerdict::Changed => { self.mark_preview_changed(ws, &render); return tell(self, ws, LaneNotice::Changed); }",
+            "// before is no longer wanted. if let Some(crop) = ws.lane_crops.get_mut(&pane) { crop.asked = None; } let Some(geometry) = self.preview_lane_geometry_of(ws, pane) else {",
+            "let lane_crop_wait = self.ask_due_lane_crops(ws, now);",
+            "if let Some(next) = lane_crop_wait { wait = Some(wait.map_or(next, |current| current.min(next))); }",
+            "if (reads_file && (changed || control)) || matches!(spec.input, crate::media::SourceInput::Released)",
+            ".admit(crate::media::Sender::LaneTile(pane), deadline, push);",
+            "if let Some(ticket) = render.tile { return self.finish_lane_crop(ws, render, ticket, spec, result); } let control = self.ctl_driving; let tell =",
+            ".filter(|crop| crop.asked == Some(ticket)) else { return; }; crop.asked = None;",
+            "if let Some(ticket) = render.tile { if let Some(crop) = self",
+            "ws.lane_wheel.reset(); ws.lane_crops.remove(&pane);",
+            "_ => { ws.lane_crops.remove(&pane); crate::window_state::PreviewPanel::new(item) }",
+            "ws.lane_crops.retain(|pane, _| live.contains(pane));",
+            "tile.serves(item.id, item.generation, item.source.spec.canvas)",
         ] {
             assert!(flat.contains(needle), "{needle}");
         }

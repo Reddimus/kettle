@@ -737,6 +737,32 @@ the release, another press, a menu or dialog opening, or focus loss. A
 control client's whole wheel steps zoom and pan as the wheel's lines do
 (`lane_wheel_steps`).
 
+Zoomed past its own pixels, a lane asks the worker for the part in view at
+the size shown (`media::crop`). Any change to the view, or to the lanes,
+marks the lane's `LaneCrop` due once the view is quiet for 75 ms, or at
+most 150 ms after the change began; `about_to_wait` asks then and wakes for
+the next. `plan_crop` makes the target a box of the image's own shape, its
+longer side the size shown and the other rounded up so the worker's fit
+fills it, a raster's never past its own pixels and none past 4096 on an
+edge, with the crop the part in view plus a two-pixel guard, shrinking the
+box until an SVG's crop meets its ceiling; it asks only for a quarter more
+detail than the lane holds. The render is a `Requester::Lane` with a
+ticket, queued as `Sender::LaneTile` so it never displaces a render on
+another canvas. It reads no file when a control client changed the view
+last (a later change to the lane, such as a copy, leaves the view whose it
+was) or its action led to the ask, once the file changed
+(`ItemSource::changed`, which stays with the item whatever becomes of its
+lane, until a reload replaces it; the lane's renders still waiting for it
+are withdrawn, and a canvas change reads it no more either), or for
+released bytes. An ask that needs
+nothing, or finds the pixels it holds enough, drops the ticket it asked
+before; a finished render on another canvas asks again. `finish_lane_crop` keeps only the last ticket's pixels, for the same
+item and source, charged without evicting anything, as a `LaneTile` with
+the part of the image they cover from the reply's layout. The renderer draws
+the tile in place of the item's pixels only while it covers all of the view
+(`MediaLaneGeometry::tile`), one image a lane either way; the shelf item's
+own pixels never change, so copying copies them.
+
 The user can pull a file into a lane too: `preview_link` runs quick select
 with `hint_previews` keeping only the image, SVG and Mermaid files a pane
 names (a whole path, off Windows, or a local `file://` link), and the
