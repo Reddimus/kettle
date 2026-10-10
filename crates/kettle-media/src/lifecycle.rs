@@ -375,16 +375,24 @@ fn spawn_within(
 }
 
 /// A worker's own failure code, kept only when a worker can mean it: one
-/// that names GUI or agent state is not the worker's to report.
-fn refusal(code: FailureCode) -> FailureCode {
+/// that names GUI or agent state is not the worker's to report. A video's
+/// container, codec, decoder and sandbox are the worker's: the lane tells
+/// the user which one is missing.
+pub(crate) fn refusal(code: FailureCode) -> FailureCode {
     use FailureCode::*;
     match code {
         BadParams | TooLarge | FileNotFound | FilePermission | FileNotRegular | FileTooLarge
         | Changed | IndexOutOfRange | UnsupportedMedia | UnsupportedPlatform | RenderTimeout
-        | RenderResource | RenderParse | RestartRequired | UnknownMethod | WorkerUnavailable => {
-            code
-        }
-        _ => WorkerUnavailable,
+        | RenderResource | RenderParse | RestartRequired | UnknownMethod | WorkerUnavailable
+        | UnsupportedContainer | CodecUnavailable | BackendUnavailable | SandboxUnavailable => code,
+        Busy
+        | ExternalOpenUnavailable
+        | DisplayDisabled
+        | NotInKettle
+        | NotInKettlePane
+        | DisplayOnly
+        | ReadOnly
+        | OverBudget => WorkerUnavailable,
     }
 }
 
@@ -1269,6 +1277,38 @@ mod tests {
             ),
             (
                 FailureCode::DisplayDisabled,
+                FailureCode::WorkerUnavailable,
+                FailureCode::WorkerUnavailable,
+            ),
+            // A video's container, codec, decoder and sandbox are the
+            // worker's to report, in a reply.
+            (
+                FailureCode::UnsupportedContainer,
+                FailureCode::UnsupportedContainer,
+                FailureCode::WorkerUnavailable,
+            ),
+            (
+                FailureCode::CodecUnavailable,
+                FailureCode::CodecUnavailable,
+                FailureCode::WorkerUnavailable,
+            ),
+            (
+                FailureCode::BackendUnavailable,
+                FailureCode::BackendUnavailable,
+                FailureCode::WorkerUnavailable,
+            ),
+            (
+                FailureCode::SandboxUnavailable,
+                FailureCode::SandboxUnavailable,
+                FailureCode::WorkerUnavailable,
+            ),
+            (
+                FailureCode::Busy,
+                FailureCode::WorkerUnavailable,
+                FailureCode::WorkerUnavailable,
+            ),
+            (
+                FailureCode::OverBudget,
                 FailureCode::WorkerUnavailable,
                 FailureCode::WorkerUnavailable,
             ),
