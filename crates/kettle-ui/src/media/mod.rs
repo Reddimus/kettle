@@ -134,6 +134,9 @@ pub(crate) struct Draft {
     pub provenance: Provenance,
     /// The inline card to register once the item is on the shelf.
     pub inline: Option<InlineDraft>,
+    /// Diagrams copied or selected together, whose first the push renders:
+    /// its item keeps them all as its gallery.
+    pub gallery: Option<std::sync::Arc<Gallery>>,
 }
 
 /// An inline card a verified harness may have: who owns it and, when the
@@ -505,6 +508,7 @@ mod tests {
                 title: "t".into(),
                 provenance: Provenance::Verified,
                 inline: None,
+                gallery: None,
             },
             ItemSource::sample(b"<svg/>").spec,
             RenderControl::default(),

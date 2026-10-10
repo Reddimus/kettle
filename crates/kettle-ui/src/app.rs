@@ -11210,6 +11210,7 @@ impl App {
                 title: String::new(),
                 provenance: crate::media::Provenance::User,
                 inline: None,
+                gallery: None,
             },
             spec,
             kettle_media::client::RenderControl::with_deadline(deadline),
@@ -11555,6 +11556,7 @@ impl App {
                 title: String::new(),
                 provenance: crate::media::Provenance::User,
                 inline: None,
+                gallery: None,
             },
             spec,
             kettle_media::client::RenderControl::with_deadline(deadline),
@@ -23600,6 +23602,7 @@ impl App {
                 title,
                 provenance,
                 inline,
+                gallery: None,
             },
             spec,
             kettle_media::client::RenderControl::with_deadline(deadline),
@@ -23895,33 +23898,52 @@ impl App {
                 let body = match error {
                     E::Wrapped => T::NotifyBodyPreviewDiagramWrapped,
                     E::Unbounded => T::NotifyBodyPreviewDiagramUnbounded,
+                    E::TooMany => {
+                        return fire_notify(
+                            tr.text(T::NotifyTitlePreviewNothing),
+                            &tr.notify_body_preview_diagram_too_many(
+                                kettle_core::MAX_COPIED_DIAGRAMS as u64,
+                            ),
+                        );
+                    }
                     _ => T::NotifyBodyPreviewNoDiagram,
                 };
                 return fire_notify(tr.text(T::NotifyTitlePreviewNothing), tr.text(body));
             }
         };
         let count = sources.len();
-        let Some(source) = sources.into_iter().next() else {
-            return;
+        let title = match (selection, count > 1) {
+            (true, false) => tr.text(T::MediaShelfSelectedDiagram).to_owned(),
+            (true, true) => tr.media_shelf_selected_diagrams(count as u64),
+            (false, false) => tr.text(T::MediaShelfCopiedDiagram).to_owned(),
+            (false, true) => tr.media_shelf_copied_diagrams(count as u64),
         };
-        let title = if selection {
-            tr.text(T::MediaShelfSelectedDiagram).to_owned()
-        } else if count > 1 {
-            tr.media_shelf_copied_diagrams(count as u64)
-        } else {
-            tr.text(T::MediaShelfCopiedDiagram).to_owned()
+        let Some(first) = sources.first().cloned() else {
+            return;
         };
         if let Some(failure) = media_unavailable(self.startup.media.as_deref()) {
             return notify_preview_failure(tr, Some(failure));
         }
-        self.admit_user_pull(
+        // Several are one gallery, each charged on its own, whose first is
+        // rendered; the item keeps them all.
+        let gallery = match count {
+            1 => None,
+            _ => match crate::media::Gallery::new(sources) {
+                Some(gallery) => Some(Arc::new(gallery)),
+                None => {
+                    return notify_preview_failure(tr, Some(kettle_media::FailureCode::OverBudget));
+                }
+            },
+        };
+        self.admit_user_pull_of(
             ws,
             pane,
             kettle_media::JobKind::Mermaid,
-            kettle_media::Source::Bytes(source.into_bytes()),
+            kettle_media::Source::Bytes(first.into_bytes()),
             None,
             title,
             kettle_media::Canvas::Theme,
+            gallery,
         );
     }
 
@@ -24121,6 +24143,23 @@ impl App {
         title: String,
         canvas: kettle_media::Canvas,
     ) {
+        self.admit_user_pull_of(ws, pane, kind, source, key, title, canvas, None);
+    }
+
+    /// [`Self::admit_user_pull`], for the first of `gallery`'s diagrams when
+    /// there is one: its item keeps them all.
+    #[allow(clippy::too_many_arguments)]
+    fn admit_user_pull_of(
+        &mut self,
+        ws: &mut WindowState,
+        pane: u64,
+        kind: kettle_media::JobKind,
+        source: kettle_media::Source,
+        key: Option<crate::media::ShelfKey>,
+        title: String,
+        canvas: kettle_media::Canvas,
+        gallery: Option<Arc<crate::media::Gallery>>,
+    ) {
         let tr = self.ui_text;
         let Some((theme, target)) = self.media_surface(ws, pane) else {
             return;
@@ -24148,6 +24187,7 @@ impl App {
                 title,
                 provenance: crate::media::Provenance::User,
                 inline: None,
+                gallery,
             },
             spec,
             kettle_media::client::RenderControl::with_deadline(deadline),
@@ -24499,14 +24539,21 @@ impl App {
             title,
             provenance,
             inline,
+            gallery,
         } = draft;
         let textual = matches!(
             kind,
             kettle_media::MediaKind::Svg | kettle_media::MediaKind::Mermaid
         );
         // A Markdown gallery's item is the page rendered, as the Mermaid it
-        // is, with every page kept to show the others from.
-        let (item_kind, source) = if kind == kettle_media::MediaKind::Markdown {
+        // is, with every page kept to show the others from; so is the first
+        // of diagrams copied together.
+        let (item_kind, source) = if let Some(gallery) = gallery {
+            let Some(page) = crate::media::ItemSource::page(&spec, gallery, 0) else {
+                return notify_preview_failure(tr, origin.refuse(FailureCode::OverBudget));
+            };
+            (kettle_media::MediaKind::Mermaid, page)
+        } else if kind == kettle_media::MediaKind::Markdown {
             let page = rendered
                 .fence_index
                 .zip(crate::media::Gallery::new(rendered.fence_sources))
@@ -57562,7 +57609,7 @@ mod lane_control_tests {
         };
         let finish = body("finish_show");
         for needle in [
-            "let (item_kind, source) = if kind == kettle_media::MediaKind::Markdown {",
+            "let (item_kind, source) = if let Some(gallery) = gallery { let Some(page) = crate::media::ItemSource::page(&spec, gallery, 0) else { return notify_preview_failure(tr, origin.refuse(FailureCode::OverBudget)); }; (kettle_media::MediaKind::Mermaid, page) } else if kind == kettle_media::MediaKind::Markdown {",
             ".zip(crate::media::Gallery::new(rendered.fence_sources))",
             "crate::media::ItemSource::page(&spec, Arc::new(gallery), index)",
             "return notify_preview_failure(tr, origin.refuse(FailureCode::OverBudget));",
@@ -58045,8 +58092,20 @@ mod lane_control_tests {
             .expect("the selection read");
         assert!(refused < read && refused < selected);
         assert!(preview.contains("kettle_media::JobKind::Mermaid,"));
-        assert!(preview.contains("kettle_media::Source::Bytes(source.into_bytes()),"));
+        assert!(preview.contains("kettle_media::Source::Bytes(first.into_bytes()),"));
         let flat = src.split_whitespace().collect::<Vec<_>>().join(" ");
+        let preview_flat = preview.split_whitespace().collect::<Vec<_>>().join(" ");
+        // Several are one gallery, refused as over budget without room;
+        // more than a gallery holds are refused by name.
+        for needle in [
+            "E::TooMany => { return fire_notify( tr.text(T::NotifyTitlePreviewNothing), &tr.notify_body_preview_diagram_too_many( kettle_core::MAX_COPIED_DIAGRAMS as u64, ), ); }",
+            "let gallery = match count { 1 => None, _ => match crate::media::Gallery::new(sources) {",
+            "return notify_preview_failure(tr, Some(kettle_media::FailureCode::OverBudget));",
+            "kettle_media::Canvas::Theme, gallery, );",
+        ] {
+            assert!(preview_flat.contains(needle), "{needle}");
+        }
+        assert!(body("admit_user_pull_of").contains("inline: None,\n                gallery,"));
         for needle in [
             "Action::RenderClipboardAsDiagram => self.preview_copied_diagram(ws, false),",
             "Action::RenderSelectionAsDiagram => self.preview_copied_diagram(ws, true),",

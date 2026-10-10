@@ -893,9 +893,12 @@ indentation after a row long enough to wrap it is taken for a wrap. The
 rules came from the S6 spike and its corpus is the test, with the
 renderer's own corpus as a drift guard. The App's `preview_copied_diagram`
 refuses a control client before reading the clipboard or the selection, and
-`open_context_menu` probes neither for its rows while one drives it; the first source goes
-as Mermaid bytes through `admit_user_pull`, the same admission a path pull
-uses.
+`open_context_menu` probes neither for its rows while one drives it. One
+source goes as Mermaid bytes through `admit_user_pull`, the same admission a
+path pull uses; several become one `Gallery`, whose first goes the same way
+with the gallery in its `Draft`, so its item keeps every page as a Markdown
+gallery's does. More than 32 fences are refused (`TooMany`), never cut
+short.
 
 The user can pull a file into a lane too: `preview_link` runs quick select
 with `hint_previews` keeping only the image, SVG, Mermaid and Markdown files
