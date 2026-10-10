@@ -2269,16 +2269,24 @@ fn window_with_pane<'a>(
         .find(|window| window.mux.panes.contains_key(&pane))
 }
 
+/// `get_state`'s `media`: whether the worker is there, and which video
+/// decoders a worker here has, which is release policy, not a search: the
+/// user's ffmpeg is looked for when a worker starts, and no GStreamer is used.
 fn ctl_media_state(media: Option<&kettle_media::client::WorkerClient>) -> serde_json::Value {
     use kettle_media::client::MediaAvailability;
-    match media.map(kettle_media::client::WorkerClient::availability) {
+    let mut state = match media.map(kettle_media::client::WorkerClient::availability) {
         None => serde_json::json!({ "availability": "unavailable", "reason": "not_configured" }),
         Some(MediaAvailability::Checking) => serde_json::json!({ "availability": "checking" }),
         Some(MediaAvailability::Available) => serde_json::json!({ "availability": "available" }),
         Some(MediaAvailability::Unavailable(cause)) => {
             serde_json::json!({ "availability": "unavailable", "reason": cause.code() })
         }
-    }
+    };
+    state["video"] = serde_json::json!({
+        "decoders": kettle_media::video::DECODERS,
+        "gstreamer": "not_used",
+    });
+    state
 }
 
 fn ctl_page_values_with_page(
@@ -52952,9 +52960,25 @@ mod tests {
             }
         }
 
+        let video = serde_json::json!({
+            "decoders": if cfg!(target_os = "macos") {
+                serde_json::json!(["avfoundation", "ffmpeg"])
+            } else if cfg!(target_os = "linux") {
+                serde_json::json!(["ffmpeg"])
+            } else {
+                serde_json::json!([])
+            },
+            "gstreamer": "not_used",
+        });
+        let with_video = |mut state: serde_json::Value| {
+            state["video"] = video.clone();
+            state
+        };
         assert_eq!(
             super::ctl_media_state(None),
-            serde_json::json!({ "availability": "unavailable", "reason": "not_configured" })
+            with_video(
+                serde_json::json!({ "availability": "unavailable", "reason": "not_configured" })
+            )
         );
         let (release, held) = std::sync::mpsc::channel();
         let client = WorkerClient::new(
@@ -52967,7 +52991,7 @@ mod tests {
         // The check is still held: the answer comes back at once.
         assert_eq!(
             super::ctl_media_state(Some(&client)),
-            serde_json::json!({ "availability": "checking" })
+            with_video(serde_json::json!({ "availability": "checking" }))
         );
         drop(release);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -52976,7 +53000,9 @@ mod tests {
             if state["availability"] != "checking" {
                 assert_eq!(
                     state,
-                    serde_json::json!({ "availability": "unavailable", "reason": "worker_missing" })
+                    with_video(
+                        serde_json::json!({ "availability": "unavailable", "reason": "worker_missing" })
+                    )
                 );
                 break;
             }
@@ -53007,7 +53033,10 @@ mod tests {
         loop {
             let state = super::ctl_media_state(Some(&available));
             if state["availability"] != "checking" {
-                assert_eq!(state, serde_json::json!({ "availability": "available" }));
+                assert_eq!(
+                    state,
+                    with_video(serde_json::json!({ "availability": "available" }))
+                );
                 break;
             }
             assert!(
