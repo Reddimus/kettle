@@ -28,6 +28,7 @@ pub(crate) fn test_tempdir() -> kettle_test_support::PrivateTempDir {
 mod activation_server;
 mod agent_plugin;
 mod app;
+pub mod codex_shell;
 mod held_buttons;
 // Startup phase stamps, printed with RUST_LOG=kettle::startup=info. Public so
 // the binary can mark the first statement of `main`.
@@ -63,6 +64,7 @@ mod mux;
 mod native_drag;
 mod native_material;
 mod notifications;
+mod owned_dir;
 mod paste_image;
 mod runtime_diagnostics;
 mod search_input;

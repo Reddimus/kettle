@@ -30,6 +30,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   you once to trust the hook in its own hook review; until then, and with
   other Codex versions, media goes to the pane's shelf. A card's provenance
   tab names the harness that printed it.
+- Codex previews (`agent-display-codex`, Settings → Agents → Codex previews;
+  off by default, needs agent previews): the zsh or fish a new pane starts
+  defines `codex` itself, as the function `kettle agent-setup --print`
+  prints, so there is nothing to paste. zsh reads a Kettle-owned, read-only
+  `.zshenv` through a borrowed `ZDOTDIR` it puts back exactly; fish runs
+  Kettle's code after your configuration (`fish -C`). Your startup files run
+  as before, and a `codex` you define or can autoload still wins. `kettle
+  agent-setup --status` says whether your saved settings turn it on.
 - Claude Code previews (`agent-display-claude-code`, Settings → Agents →
   Claude Code previews; off by default, needs agent previews): Claude Code
   started in a new pane gets Kettle's own plugin, the display server and the
@@ -273,6 +281,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- `login-shell = true` with no `command` no longer stops Kettle at launch on
+  macOS and Linux. It added `-l` to your default shell, which takes no
+  arguments there, and the pane's spawn panicked. Your default shell already
+  starts as a login shell; `login-shell` now adds `-l` only to a shell a
+  `command` names.
 - `kettle mcp` lists its tools to clients on MCP 2026-07-28, which include
   current Claude Code. Its tool list left out the `ttlMs` and `cacheScope`
   fields that revision requires on every list result, so those clients

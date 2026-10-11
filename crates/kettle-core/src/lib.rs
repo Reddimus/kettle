@@ -46,6 +46,7 @@ pub mod search;
 // test exercise it without the feature flag.
 #[cfg(any(feature = "asciicast", test))]
 pub mod record;
+pub mod shell_startup;
 #[cfg(unix)]
 mod startup_geometry;
 pub mod term;

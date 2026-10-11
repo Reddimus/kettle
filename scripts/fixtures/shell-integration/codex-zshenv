@@ -1,0 +1,28 @@
+# Kettle's .zshenv, which zsh reads in place of yours. It puts ZDOTDIR
+# back, runs what Kettle adds, then runs your .zshenv; your other
+# startup files follow as usual.
+if [[ -n "${KETTLE_ZDOTDIR_SET-}" ]]; then
+  ZDOTDIR="${KETTLE_ZDOTDIR-}"
+else
+  'builtin' 'unset' 'ZDOTDIR'
+fi
+'builtin' 'unset' 'KETTLE_ZDOTDIR' 'KETTLE_ZDOTDIR_SET'
+# Kettle's Codex integration (agent-display-codex): before your first
+# prompt, after all your startup files, define codex unless you have one.
+if [[ -o interactive ]]; then
+  _kettle_codex() {
+    'builtin' 'emulate' -L zsh
+    precmd_functions=(${precmd_functions:#_kettle_codex})
+    'builtin' 'unfunction' '_kettle_codex'
+    if (( ! ${+functions[codex]} )); then
+codex() {
+  command '/kettle-stand-in/bin/kettle' agent-setup --launch-codex -- "$@"
+}
+    fi
+  }
+  'builtin' 'typeset' -ga precmd_functions
+  precmd_functions+=(_kettle_codex)
+fi
+if [[ -r "${ZDOTDIR-$HOME}/.zshenv" || -r "${ZDOTDIR-$HOME}/.zshenv.zwc" ]]; then
+  'builtin' 'source' -- "${ZDOTDIR-$HOME}/.zshenv"
+fi

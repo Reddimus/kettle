@@ -242,6 +242,11 @@ the `Restore` and `Disable` variants, so it does not build against an upstream
   at spawn time with the home directory, so a directory deleted after Kettle's
   automation checked it would relocate the command. With the opt-in the spawn
   fails instead. Interactive panes leave it off and keep the HOME recovery.
+  On Unix, `CommandBuilder::shell_arg` gives the default program arguments.
+  It still starts as a login shell, with `-` and its name as `argv[0]`, and
+  the arguments follow. Upstream panics on any argument for the default
+  program, so Kettle could not hand the user's fish its `-C` startup without
+  naming the shell itself and losing that login `argv[0]`.
   On Unix, dropping the master writer now closes only its duplicate descriptor
   and never writes a newline or VEOF byte into the terminal; deliberate EOF
   remains Kettle's live-termios `PtyStdin::try_signal_eof` path.

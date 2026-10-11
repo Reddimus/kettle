@@ -34,6 +34,7 @@ use crate::images::{
     prune, relative_origin,
 };
 use crate::persistence::{AsyncFileWriter, AsyncWriterStatus};
+use crate::shell_startup::ShellStartup;
 
 const PTY_READ_BUFFER_BYTES: usize = 64 * 1024;
 const PTY_PUMP_QUEUE_DEPTH: usize = 4;
@@ -5109,18 +5110,23 @@ fn is_wsl_launcher(prog: &str) -> bool {
     last.eq_ignore_ascii_case("wsl") || last.eq_ignore_ascii_case("wsl.exe")
 }
 
-/// Whether the platform's default shell (`default_prog`) accepts the POSIX `-l`
-/// login switch. `false` on Windows, where `default_prog`
-/// resolves to pwsh/powershell/cmd — none of which treat `-l` as a login flag —
-/// so `login-shell = true` must not inject it there. `true` everywhere else,
-/// where the default shell is a POSIX shell that honors `-l`.
-const fn default_shell_accepts_login_flag() -> bool {
-    cfg!(not(windows))
+/// The command a pane runs: `argv`, or the user's shell when it is empty,
+/// with Kettle's PowerShell integration where it applies. `login_shell` adds
+/// `-l` to an explicit POSIX shell. The user's shell needs no `-l`: on Unix
+/// it already starts as a login shell, with `-` and its name as `argv[0]`,
+/// and takes no arguments of its own; on Windows it is pwsh, powershell or
+/// cmd, none of which take `-l` as a login switch.
+fn pane_command(argv: &[String], login_shell: bool, shell_integration: bool) -> CommandBuilder {
+    match argv.split_first() {
+        Some((prog, rest)) => {
+            explicit_prog_with_integration(prog, rest, login_shell, shell_integration)
+        }
+        None => default_prog_with_integration(shell_integration),
+    }
 }
 
 /// Whether an EXPLICIT `command = <prog>` accepts the POSIX `-l` login switch.
 ///
-/// The explicit-argv counterpart of `default_shell_accepts_login_flag`.
 /// Returns `false` for `wsl.exe`, where `-l` means "list distros", and for the
 /// Windows-native shells (`pwsh`/`powershell`/`cmd`), which don't treat `-l`
 /// as a login flag. Matches on the case-insensitive basename sans `.exe`.
@@ -6576,6 +6582,7 @@ impl Terminal {
             extra_env,
             login_shell,
             shell_integration,
+            &ShellStartup::default(),
             TerminalCapabilities::default(),
             event_tx,
             waker,
@@ -6602,6 +6609,7 @@ impl Terminal {
         extra_env: &[(String, String)],
         login_shell: bool,
         shell_integration: bool,
+        shell_startup: &ShellStartup,
         capabilities: TerminalCapabilities,
         event_tx: crossbeam_channel::Sender<TermEvent>,
         waker: Waker,
@@ -6621,6 +6629,7 @@ impl Terminal {
             extra_env,
             login_shell,
             shell_integration,
+            shell_startup,
             capabilities,
             WorkingDirectoryPolicy::FallbackToHome,
             event_tx,
@@ -6649,6 +6658,7 @@ impl Terminal {
         extra_env: &[(String, String)],
         login_shell: bool,
         shell_integration: bool,
+        shell_startup: &ShellStartup,
         capabilities: TerminalCapabilities,
         cwd_policy: WorkingDirectoryPolicy,
         event_tx: crossbeam_channel::Sender<TermEvent>,
@@ -6669,24 +6679,7 @@ impl Terminal {
         let startup_geometry =
             crate::startup_geometry::Trace::start(pair.master.as_raw_fd(), recording_start_ns);
 
-        let mut cmd = match argv.split_first() {
-            Some((prog, rest)) => {
-                explicit_prog_with_integration(prog, rest, login_shell, shell_integration)
-            }
-            None => {
-                let mut c = default_prog_with_integration(shell_integration);
-                // `-l` is the POSIX login-shell switch. On Windows
-                // `default_prog()` resolves to pwsh/powershell/cmd, none of which
-                // accept it (powershell.exe errors on an unknown arg, pwsh's
-                // `-Login` is reserved/no-op on Windows, cmd ignores it), so
-                // `login-shell = true` with no explicit `command` would open a
-                // broken/empty pane.
-                if login_shell && default_shell_accepts_login_flag() {
-                    c.arg("-l");
-                }
-                c
-            }
-        };
+        let mut cmd = pane_command(argv, login_shell, shell_integration);
         #[cfg(windows)]
         overlay_windows_parent_env(&mut cmd, std::env::vars_os());
         cmd.set_process_tree_containment(capabilities.contain_process_tree);
@@ -6735,6 +6728,13 @@ impl Terminal {
             "WSLENV",
             child_wslenv(&std::env::var("WSLENV").unwrap_or_default(), extra_env),
         );
+        // After the environment, which decides the shell the PTY runs and
+        // holds the `ZDOTDIR` zsh would have read.
+        let explicit = match argv {
+            [program] => Some(program.as_str()),
+            _ => None,
+        };
+        crate::shell_startup::apply(&mut cmd, explicit, shell_startup);
         apply_working_directory(&mut cmd, cwd, cwd_policy);
         #[cfg(unix)]
         let reader_poll_fd = pair
@@ -14656,6 +14656,7 @@ mod teardown_tests {
                 &[],
                 false,
                 false,
+                &crate::shell_startup::ShellStartup::default(),
                 TerminalCapabilities {
                     color_scheme_dark: seed,
                     ..TerminalCapabilities::default()
@@ -16335,7 +16336,7 @@ mod teardown_tests {
 
 #[cfg(test)]
 mod login_flag_tests {
-    use super::{default_shell_accepts_login_flag, prog_accepts_login_flag};
+    use super::{pane_command, prog_accepts_login_flag};
 
     /// An explicit `command = …` only gets `-l` for a POSIX
     /// shell — never wsl.exe (where `-l` lists distros) or a Windows-native
@@ -16359,22 +16360,20 @@ mod login_flag_tests {
         assert!(!prog_accepts_login_flag("wsl"));
     }
 
-    /// Drift guard. The spawn path gates the default-shell
-    /// `-l` injection on this fn, so pinning its value pins the behavior: `-l`
-    /// is POSIX-only and must never reach the Windows default shell.
+    /// `login-shell = true` with no `command` leaves the user's shell as it
+    /// starts, already a login shell on Unix, and gives an explicit POSIX
+    /// shell `-l`. Adding `-l` to the user's shell panicked: the builder for
+    /// it takes no arguments.
     #[test]
-    fn default_shell_login_flag_is_posix_only() {
-        assert_eq!(default_shell_accepts_login_flag(), !cfg!(windows));
-        #[cfg(windows)]
-        assert!(
-            !default_shell_accepts_login_flag(),
-            "Windows default shell (pwsh/powershell/cmd) must not get -l"
-        );
-        #[cfg(not(windows))]
-        assert!(
-            default_shell_accepts_login_flag(),
-            "POSIX default shell honors -l when login-shell=true"
-        );
+    fn login_shell_gives_only_an_explicit_shell_its_flag() {
+        let users = pane_command(&[], true, false);
+        assert!(!users.get_argv().iter().any(|arg| arg == "-l"));
+        #[cfg(unix)]
+        assert!(users.is_default_prog() && users.get_shell_args().is_empty());
+        let explicit = pane_command(&["zsh".to_owned()], true, false);
+        assert_eq!(explicit.get_argv(), &["zsh", "-l"]);
+        let plain = pane_command(&["zsh".to_owned()], false, false);
+        assert_eq!(plain.get_argv(), &["zsh"]);
     }
 }
 

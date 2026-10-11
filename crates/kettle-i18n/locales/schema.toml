@@ -1066,6 +1066,9 @@ context = "crates/kettle-ui/src/settings.rs categories(): Settings row. Lets AI 
 [messages.settings_field_agent_previews_claude_code]
 context = "crates/kettle-ui/src/settings.rs categories(): Settings row under Agents. Offers Claude Code, in new panes, Kettle's plugin so its images and diagrams show as cards."
 
+[messages.settings_field_agent_previews_codex]
+context = "crates/kettle-ui/src/settings.rs: Settings → Agents toggle (agent-display-codex) that makes the zsh or fish a new pane starts define a codex function starting Codex with Kettle's display server. Codex is a product name."
+
 [messages.settings_field_background_animation]
 context = "crates/kettle-ui/src/settings.rs categories(): Settings row label. When the animated background moves."
 
@@ -1288,6 +1291,21 @@ context = "crates/kettle-ui/src/app.rs claude_code_note: footer note on the Clau
 
 [messages.settings_note_claude_code_unsupported]
 context = "crates/kettle-ui/src/app.rs claude_code_note: footer note on the Claude Code previews row when this platform cannot check the plugin directory yet (Windows)."
+
+[messages.settings_note_codex_needs_previews]
+context = "crates/kettle-ui/src/app.rs codex_note: Settings footer under the Codex previews row while agent previews are off."
+
+[messages.settings_note_codex_new_panes]
+context = "crates/kettle-ui/src/app.rs codex_note: Settings footer under the Codex previews row: it applies to zsh and fish started in a new pane, a user-defined codex still takes priority, and other shells use the printed function. zsh, fish, codex and kettle agent-setup --print are literal names."
+
+[messages.settings_note_codex_translocated]
+context = "crates/kettle-ui/src/app.rs codex_note: Settings footer under the Codex previews row when macOS runs Kettle from a temporary translocated copy."
+
+[messages.settings_note_codex_unavailable]
+context = "crates/kettle-ui/src/app.rs codex_note: Settings footer under the Codex previews row when Kettle could not write or check its startup files."
+
+[messages.settings_note_codex_unsupported]
+context = "crates/kettle-ui/src/app.rs codex_note: Settings footer under the Codex previews row on a system where the integration cannot run."
 
 [messages.settings_note_language]
 context = "crates/kettle-ui/src/app.rs settings_footer_note: footer note while the Language row is focused. A new window keeps the current language; only a restart changes it."
