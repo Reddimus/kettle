@@ -31,6 +31,8 @@ pub(crate) enum PreviewKey {
     Copy,
     /// Play or pause a video, or stop its silent preview, as Space.
     Play,
+    /// Mute a playing video's sound, or let it be heard, as M.
+    Mute,
     /// Nothing: the key is the lane's all the same.
     Swallow,
 }
@@ -38,7 +40,10 @@ pub(crate) enum PreviewKey {
 impl PreviewKey {
     /// Whether the key acts once a press: holding it does not repeat.
     pub(crate) fn once(self) -> bool {
-        matches!(self, Self::Exit | Self::Copy | Self::Fit | Self::Play)
+        matches!(
+            self,
+            Self::Exit | Self::Copy | Self::Fit | Self::Play | Self::Mute
+        )
     }
 }
 
@@ -67,6 +72,7 @@ pub(crate) fn preview_key(key: &Key, mods: ModifiersState) -> PreviewKey {
             ("-", false) => PreviewKey::ZoomOut,
             ("0", false) => PreviewKey::Fit,
             ("c", false) => PreviewKey::Copy,
+            ("m", false) => PreviewKey::Mute,
             _ => PreviewKey::Swallow,
         },
         _ => PreviewKey::Swallow,
@@ -127,6 +133,9 @@ mod tests {
         assert_eq!(preview_key(&character("0"), none), PreviewKey::Fit);
         assert_eq!(preview_key(&character("c"), none), PreviewKey::Copy);
         assert_eq!(preview_key(&character("C"), shift), PreviewKey::Swallow);
+        assert_eq!(preview_key(&character("m"), none), PreviewKey::Mute);
+        assert_eq!(preview_key(&character("M"), shift), PreviewKey::Swallow);
+        assert!(PreviewKey::Mute.once());
         assert_eq!(
             preview_key(&Key::Named(NamedKey::Space), none),
             PreviewKey::Play
