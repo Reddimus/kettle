@@ -3715,6 +3715,18 @@ nowhere, and a dead server's alias is withdrawn while its entry is left to its
 own registry. A real connection is accepted only when the kernel names the
 entry's pid and the live start matches its token.
 
+`kettle` on a pane's `PATH`: `mux` tests pin that the running Kettle's
+folder is appended last to a `PATH` none of whose absolute entries holds an
+`kettle` this user may run, and that the `PATH` is left alone when one does
+(a `kettle` that cannot run, or that only other users may run, is none, as
+is one in a relative entry, which is not looked in), when it is empty, and
+for a folder that is translocated, relative or holds a `:`; that a pane's `PATH` starts from the configured `env`, and stays as
+configured with `add-kettle-to-path = off`. `kettle-config` pins the default,
+the values, and a malformed value reported; Settings pins the Agents row.
+For a live check, start Kettle from a Finder launch on macOS: `command -v
+kettle` in a new pane names `kettle.app/Contents/MacOS/kettle` unless one is
+installed elsewhere on the `PATH`.
+
 Showing media. `kettle-ctl`'s `show` tests: exactly one nonempty source;
 bounded, typed options (a key or title one byte over its cap is
 `too_large`); inline SVG moves rather than copies and is refused over 2 MiB;
@@ -3910,8 +3922,19 @@ generator, runs under every zsh and fish the shell-integration check covers
 (macOS zsh, and fish 3.7, 4.2 and 4.8 in CI): `check_codex_zsh` and
 `check_codex_fish` check the restored variable, the user's startup order, the
 forwarded arguments and that a user's own or autoloadable `codex` wins.
-`agent-setup`'s tests check that `--status` reports the saved settings and
-names a system `zshenv` that keeps Kettle out of zsh; `owned_dir` checks a nested layout installs
+`agent-setup`'s tests check that `--status` reports the saved settings, the
+Kettle it reached or why not (in its own words, never a reply's), whether
+its previews are on, asked of a test socket with an empty `show` (malformed
+where on, disabled where off, anything else unknown), Claude Code's plugin
+in the pane, a local policy forbidding it, a Kettle that cannot offer it,
+and that a remote one is not visible, and that status and removal name what the harnesses still
+write, and names a system `zshenv` that keeps Kettle out of zsh;
+`agent_plugin` pins a pane counted as having the plugin by its variable;
+`codex_shell` pins a shell known by its program's name; the palette and
+keybind tests pin `copy_agent_setup` without a default binding, and an App
+guard pins it copying the function for the configured shell or `SHELL` from
+this Kettle's path, with a notification for a translocated copy and for a
+clipboard it could not reach; `owned_dir` checks a nested layout installs
 read-only at every level and that an extra entry deep inside fails the
 check; the App tests pin that the startup files are offered before the first
 pane and on reload, gated on both settings, and the Codex row's note. Checked
@@ -4217,24 +4240,73 @@ no control request may start a read. Then `send_mouse` a right click with
 `"mods":["shift"]` and see "Preview Copied File" in the menu.
 
 `kettle mcp --display`: unit tests pin that it offers exactly `kettle_show`
-(path required, no other property) and refuses every full-mode tool, that
-full mode does not offer it, that bad requests (no path, a relative path, a
-missing file, a directory, an over-long key, an empty title) are refused in
-the fixed wording before anything is sent, that a sent result is one plain
+(one of `mermaid` and `path`, no other property) and refuses every
+full-mode tool, that full mode offers the same `kettle_show`, that bad
+requests (no source, both, an empty or oversized Mermaid source, a relative
+path, a missing file, a directory, an over-long key, an empty title) are
+refused in the fixed wording before anything is sent, that the schema and
+the validator agree (whatever the validator sends on the schema accepts,
+and for ASCII text the two agree exactly, at each cap and one past it, in
+ASCII and four-byte characters), that a sent result is one plain
 line plus status-only structured content saying the model has not seen it,
-and that display discovery is private with no cache lifetime.
-`tests/mcp_stdio.rs` runs the real `kettle mcp --display` in both protocol
+that a refusal carries its fixed code and reason and nothing else, and that
+the client's own refusals have codes of their own,
+and that discovery is private with no cache lifetime in both modes. `mcp`
+pins where the server runs (a Kettle found the strict way, `TERM_PROGRAM`
+saying Kettle, tmux, and tmux's own `TERM_PROGRAM` saying nothing of
+Kettle), the instructions for each (the triggers, keeping the source,
+showing is not seeing, no retry and no changes inside; the tmux addition;
+not calling it outside; the full server saying the same after its tools),
+and both protocol eras carrying the same words.
+`tests/mcp_stdio.rs` runs `kettle_show` to completion through the real
+`kettle mcp`, in display and full mode, in both protocol eras, from Mermaid
+source and from a file, against a Kettle with previews on that the test
+itself registers and serves (the server descends from it, so the strict
+lookup picks it): the source arrives as sent, or the file's path with its
+device and inode, and the model gets one plain line saying it has not seen
+the media. It also runs the real `kettle mcp --display` in both protocol
 eras: initialize's instructions name `kettle_show`, `tools/list` is exactly
 `[kettle_show]`, a `kettle_run` call is refused as an invalid tool, and
-`server/discover` is private. For a live check, run `kettle mcp --display`
+`server/discover` is private. The model-behavior acceptance (S-G, with S3)
+ran each harness in a Kettle pane on 15 prompts that should show something
+(five that write or edit a Mermaid file, five that make an image, five whose
+reply holds a useful diagram) and 20 ordinary ones, each once in a fresh
+directory: Claude Code 2.1.296 called `kettle_show` on 15 of 15 and 0 of
+20, by path for files and images and inline for reply diagrams; Codex 0.162,
+through the launch function's server table, on 0 of 15 and 0 of 20, on 14
+of 15 with "Show it in Kettle." added and 15 of 15 when the tool was named.
+No reply in either claimed to have seen the media. The drivers, prompts and
+scores are kept outside the repository with the run's other evidence. For
+a live check, run `kettle mcp --display`
 inside a pane of `kettle --agent-server off --agent-display on` and call
 `kettle_show` on an SVG: it lands verified in that pane. Titles lose control characters,
 separators, bidirectional formatting and placeholder sequences (the
 placeholder and the marks after it, which `strip_placeholders` in `kettle-vt`
 tests), bounded at 256 characters.
 `kettle-vt` hands a refused image's pixels back when only the account's room
-was missing. `kettle show`'s own tests pin its fixed failure wording, the
-absolute attested path and its confirmation. For a live check on macOS, the
+was missing. `just cli-smoke` runs the built `kettle show` for its options,
+a missing file, an overlong path and non-UTF-8 Mermaid on stdin, all refused
+before any Kettle is looked for, so the smoke never shows anything where it
+runs, and `kettle agent-setup` for its function, its removal text and the
+lines of its status (on Windows, that it is not available). `main`'s tests
+pin that a pending update (on Windows, where one waits for Kettle's windows
+to close) ends every `show`, `mcp` and `agent-setup` invocation without
+running it.
+`kettle show`'s own tests pin its fixed failure wording, every
+refusal said by its code and reason and never in the reply's words (a
+hostile message, an unknown code or reason), stdin taken at its cap and
+refused one byte over (64 KiB with `--mermaid`, which must be UTF-8), never
+cut short, a path at 4 KiB looked for and one byte more refused before the
+file system is asked, the whole request measured as a client frames it (the
+largest image whose base64 fits the line, and the next refused; escape-heavy
+Mermaid always fits), the absolute attested path, `--mermaid` on a file, the
+attestation taken by opening the file (one it may look up but not read is
+refused with `permission`, unless the suite runs as root; a named pipe is
+refused at once, never waited on; a symbolic link is attested by its target
+and sent by its own name), and its confirmation. `kettle-ctl` pins `request_fits` against the line a client
+frames, to the byte with escapes, the inline `mermaid` source at 64 KiB and
+one byte over, `kind: "mermaid"` on a path only, and a path at 4 KiB in
+native units. For a live check on macOS, the
 worker must carry Kettle's Developer ID signature: inside a pane of
 `kettle --agent-server off --agent-display on`, `kettle show plot.png` and
 `kettle show diagram.svg` are confirmed as raster and svg, verified; a text

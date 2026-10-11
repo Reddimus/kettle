@@ -416,47 +416,89 @@ fn respond(responses: &Responder, message: Value) {
 /// from, and the capabilities it can use — in one round trip, so a client does
 /// not have to probe with `tools/list` to find out what is here.
 fn discover_result(selection: ToolSelection) -> Value {
-    match selection {
-        ToolSelection::Full => json!({
-            "supportedVersions": MCP_SUPPORTED_VERSIONS,
-            "capabilities": {"tools": {}},
-            // Declared because this result is cacheable and the shape says so.
-            "ttlMs": STATIC_RESULT_TTL_MS,
-            "cacheScope": "public",
-            "instructions": instructions(selection),
-        }),
-        // Display instructions depend on where this server runs, so the
-        // result is this session's alone and is never reused.
-        ToolSelection::Display => json!({
-            "supportedVersions": MCP_SUPPORTED_VERSIONS,
-            "capabilities": {"tools": {}},
-            "ttlMs": 0,
-            "cacheScope": "private",
-            "instructions": instructions(selection),
-        }),
+    // The instructions depend on where this server runs, so the result is
+    // this session's alone and is never reused.
+    json!({
+        "supportedVersions": MCP_SUPPORTED_VERSIONS,
+        "capabilities": {"tools": {}},
+        "ttlMs": 0,
+        "cacheScope": "private",
+        "instructions": instructions(selection),
+    })
+}
+
+/// Where this server runs, for what its instructions say. `kettle_show`
+/// itself still finds its Kettle the strict way, whatever this says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Placement {
+    /// In a Kettle pane: display discovery finds a Kettle that serves
+    /// agent previews or control, one this process descends from or a live
+    /// one `KETTLE_PID` names; or `TERM_PROGRAM` says Kettle.
+    Inside,
+    /// In tmux inside a Kettle pane, which only a live `KETTLE_PID` naming
+    /// such a Kettle shows: tmux sets its own `TERM_PROGRAM`, and its server
+    /// is no descendant. A Kettle serving neither is not found, and its
+    /// panes are told what any place outside Kettle is.
+    InsideTmux,
+    /// Anywhere else.
+    Outside,
+}
+
+/// Where a server whose environment `env` reads runs; `kettle` says
+/// whether display discovery found a Kettle it runs in.
+fn placement(env: impl Fn(&str) -> Option<String>, kettle: impl FnOnce() -> bool) -> Placement {
+    let tmux = env("TMUX").is_some_and(|value| !value.is_empty());
+    let inside = kettle() || env("TERM_PROGRAM").as_deref() == Some("kettle");
+    match (inside, tmux) {
+        (true, false) => Placement::Inside,
+        (true, true) => Placement::InsideTmux,
+        (false, _) => Placement::Outside,
     }
 }
 
-/// What the server tells the model to do with its tools. Display mode says
-/// whether this session runs inside a Kettle that can show media, by the
-/// same strict choice `kettle_show` makes.
-fn instructions(selection: ToolSelection) -> &'static str {
+/// What a model inside Kettle is told about `kettle_show`, in the words of
+/// the plan's Appendix A for what ships today.
+const SHOW_INSIDE: &str = "Use kettle_show to send the user images and rendered diagrams in \
+    this Kettle session. A supported interactive chat shows an inline card under the call; the \
+    media shelf keeps the item, and clicking opens the viewer or preview lane. Call it after \
+    writing or editing a Mermaid file or making an image the user should see, using its \
+    absolute path. When your reply contains a useful Mermaid diagram, pass its source in \
+    mermaid and keep the text source in your reply. Skip trivial diagrams that need no \
+    inspection. Reuse key to update an item. A successful display does not mean you have seen \
+    the media. If it is unavailable, outside Kettle, busy or needs a restart, tell the user \
+    once and do not retry. Never change Kettle configuration or install software yourself.";
+
+/// What one in tmux inside Kettle is told besides.
+const SHOW_TMUX: &str = " This session runs in tmux, where Kettle cannot verify the pane: \
+    media goes to the pane tmux was started from, marked as from an unverified sender, or is \
+    refused; if it is refused, tell the user once.";
+
+/// What a model outside Kettle is told.
+const SHOW_OUTSIDE: &str =
+    "kettle_show works only for a local interactive session inside Kettle. Do not call it here.";
+
+/// What the server tells the model to do with its tools: for `kettle_show`,
+/// by where it runs.
+fn instructions(selection: ToolSelection) -> String {
+    let here = placement(
+        |name| std::env::var(name).ok(),
+        || kettle_ctl::client::display_target().is_some(),
+    );
+    instructions_for(selection, here)
+}
+
+fn instructions_for(selection: ToolSelection, here: Placement) -> String {
+    let show = match here {
+        Placement::Inside => SHOW_INSIDE.to_owned(),
+        Placement::InsideTmux => format!("{SHOW_INSIDE}{SHOW_TMUX}"),
+        Placement::Outside => SHOW_OUTSIDE.to_owned(),
+    };
     match selection {
-        ToolSelection::Full => {
-            "Use kettle_run for bounded one-shot PTY commands. Other tools inspect or drive a running Kettle control server."
-        }
-        ToolSelection::Display if kettle_ctl::client::display_target().is_some() => {
-            "Use kettle_show to send the user an image, SVG or Mermaid diagram file in this Kettle \
-             session; it goes \
-             to the media shelf of the pane you run in, where the user can open it. Call it after \
-             making an image the user should see, with its absolute path. Reuse key to replace an \
-             item. A successful show does not mean you have seen the media. If it is unavailable, \
-             busy or Kettle needs a restart, tell the user once and do not retry. Never change \
-             Kettle configuration or install software yourself."
-        }
-        ToolSelection::Display => {
-            "kettle_show works only for a local interactive session inside Kettle. Do not call it here."
-        }
+        ToolSelection::Full => format!(
+            "Use kettle_run for bounded one-shot PTY commands. Other tools inspect or drive a \
+             running Kettle control server. {show}"
+        ),
+        ToolSelection::Display => show,
     }
 }
 
@@ -1141,23 +1183,29 @@ fn read_capped_line(reader: &mut impl BufRead) -> Result<Option<Vec<u8>>, ReadLi
 mod tests {
     use super::*;
 
-    /// Display discovery is this session's alone, never reused, and offers
-    /// only kettle_show; full discovery keeps its public cache.
+    /// Discovery is this session's alone, never reused, in both modes, as
+    /// what it says depends on where the server runs; display mode speaks
+    /// only of kettle_show, full mode of its tools and kettle_show.
     #[test]
-    fn display_discovery_is_private_and_offers_only_show() {
-        let display = discover_result(ToolSelection::Display);
-        assert_eq!(
-            (display["cacheScope"].as_str(), display["ttlMs"].as_u64()),
-            (Some("private"), Some(0))
-        );
-        assert!(
-            display["instructions"]
-                .as_str()
-                .unwrap()
-                .contains("kettle_show")
-        );
+    fn discovery_is_private_in_both_modes() {
+        for selection in [ToolSelection::Display, ToolSelection::Full] {
+            let discovered = discover_result(selection);
+            assert_eq!(
+                (
+                    discovered["cacheScope"].as_str(),
+                    discovered["ttlMs"].as_u64()
+                ),
+                (Some("private"), Some(0)),
+                "{selection:?}"
+            );
+            assert!(
+                discovered["instructions"]
+                    .as_str()
+                    .unwrap()
+                    .contains("kettle_show")
+            );
+        }
         let full = discover_result(ToolSelection::Full);
-        assert_eq!(full["cacheScope"], "public");
         assert!(
             full["instructions"]
                 .as_str()
@@ -1172,6 +1220,78 @@ mod tests {
         .unwrap();
         let instructions = init["result"]["instructions"].as_str().unwrap();
         assert!(instructions.contains("kettle_show") && !instructions.contains("kettle_run"));
+        assert_eq!(
+            instructions,
+            discover_result(ToolSelection::Display)["instructions"],
+            "both eras say the same"
+        );
+    }
+
+    /// Where the server runs is told by a Kettle found the strict way, a
+    /// `TERM_PROGRAM` saying Kettle, and tmux; tmux's own `TERM_PROGRAM`
+    /// says nothing of Kettle.
+    #[test]
+    fn the_placement_comes_from_kettle_term_program_and_tmux() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| (*value).to_owned())
+            }
+        };
+        assert_eq!(placement(env(&[]), || true), Placement::Inside);
+        assert_eq!(
+            placement(env(&[("TERM_PROGRAM", "kettle")]), || false),
+            Placement::Inside
+        );
+        assert_eq!(
+            placement(env(&[("TMUX", "/tmp/tmux-501/default,1,0")]), || true),
+            Placement::InsideTmux
+        );
+        assert_eq!(
+            placement(
+                env(&[("TERM_PROGRAM", "tmux"), ("TMUX", "/tmp/t,1,0")]),
+                || false
+            ),
+            Placement::Outside
+        );
+        assert_eq!(placement(env(&[("TMUX", "")]), || true), Placement::Inside);
+        assert_eq!(
+            placement(env(&[("TERM_PROGRAM", "iTerm.app")]), || false),
+            Placement::Outside
+        );
+    }
+
+    /// Inside, the model is told when and how to show media, that showing
+    /// is not seeing, and not to retry or change anything; in tmux, what
+    /// happens to the pane; outside, not to call it. Full mode says the
+    /// same after its own tools.
+    #[test]
+    fn the_instructions_follow_the_placement() {
+        let inside = instructions_for(ToolSelection::Display, Placement::Inside);
+        for words in [
+            "after writing or editing a Mermaid file",
+            "pass its source in mermaid and keep the text source in your reply",
+            "Skip trivial diagrams",
+            "Reuse key",
+            "does not mean you have seen the media",
+            "tell the user once and do not retry",
+            "Never change Kettle configuration or install software yourself",
+        ] {
+            assert!(inside.contains(words), "{words}");
+        }
+        let tmux = instructions_for(ToolSelection::Display, Placement::InsideTmux);
+        assert!(tmux.starts_with(&inside) && tmux.contains("unverified"));
+        assert_eq!(
+            instructions_for(ToolSelection::Display, Placement::Outside),
+            SHOW_OUTSIDE
+        );
+        for here in [Placement::Inside, Placement::InsideTmux, Placement::Outside] {
+            let full = instructions_for(ToolSelection::Full, here);
+            assert!(full.starts_with("Use kettle_run"));
+            assert!(full.ends_with(&instructions_for(ToolSelection::Display, here)));
+        }
     }
 
     /// A writer that never finishes a write, standing in for a peer that has

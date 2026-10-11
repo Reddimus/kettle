@@ -139,6 +139,7 @@ full restart. The GPU picker persists the selection per application.
 |---|---|---|
 | Agent previews | `agent-display` | On / Off — lets AI agents show media in Kettle without reading the screen or typing. Turning it on applies at once, also for agents already connected; turning it off applies when Kettle restarts |
 | Codex previews | `agent-display-codex` | On / Off — zsh and fish started in a new pane define `codex`, which starts Codex with Kettle's display server. Needs agent previews; a `codex` you define still wins, and panes already open keep what they started with |
+| Add kettle to PATH | `add-kettle-to-path` | Automatic / Off — a new pane on macOS or Linux whose `PATH` has no `kettle` gets this Kettle's folder appended, after your commands. Panes already open keep theirs |
 | Claude Code previews | `agent-display-claude-code` | On / Off — Claude Code started in a new pane gets Kettle's plugin, so the images and diagrams it sends show as cards under the call. Needs agent previews; panes already open keep what they started with |
 
 The footer explains the row's effect right now: what turning it on or off does;

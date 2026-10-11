@@ -219,6 +219,34 @@ Under WSL, pass a path visible inside the distro, such as
 flag is claimed here; consult the installed client's current help for its
 supported attachment flows.
 
+## Agent display, not model attachment
+
+Two directions are easy to confuse. Attaching an image to a prompt, above,
+gives it to the model; Kettle only carries the keys or the path. Agent
+previews go the other way: an agent sends media to the user through
+`kettle_show` (`kettle mcp --display`, or the full `kettle mcp`) or `kettle
+show`, and Kettle renders it for the user alone. The model never receives the
+pixels, and every result says so: showing is not seeing.
+
+Delivery depends on the harness and how it was started:
+
+| Harness | How it gets `kettle_show` | What the user sees |
+|---|---|---|
+| Claude Code in a Kettle pane | Kettle's plugin, offered to new panes with Claude Code previews on | a card under the call, and the pane's media shelf |
+| Codex in a Kettle pane | the `codex` function `kettle agent-setup --print` prints, or Codex previews | a card under the call with Codex CLI 0.162 on macOS once its hook is trusted; the shelf otherwise |
+| Any MCP client registered by hand | `kettle mcp --display` | the shelf |
+| A shell, or an agent's shell tool | `kettle show` | the shelf; Codex's command sandbox blocks Kettle's socket, so it uses MCP |
+
+Outside Kettle, the instructions say not to call `kettle_show`, and a call is
+refused with `not_in_kettle`. In tmux inside a Kettle pane, Kettle can place
+the session only by the `KETTLE_PID` the tmux server inherited: media lands in
+the pane tmux was started from, marked as from an unverified sender, or is
+refused. Over SSH, in a container or on another machine, the session is not in
+a Kettle the server can reach, and nothing is shown. Without any agent, the
+user can still preview a diagram they copied (`render_clipboard_as_diagram`)
+or selected (`render_selection_as_diagram`), or a file a pane names
+(`preview_link`). See [Automation and MCP](AGENT.md#showing-media).
+
 ## File paste (paths)
 
 Kettle's path-paste channel also works for a video, PDF, or arbitrary binary:

@@ -20,6 +20,14 @@ protocol version, requiring the local protocol too. It returns RestartRequired o
 helper retries. State sequencing and verification of which spawned worker supplied a reply
 belong to P2.
 
+Callers outside the GUI never speak this protocol. `kettle show` and
+`kettle_show` send the control method `show` (inline `mermaid` text, or a
+`path` with its `dev`/`ino`, plus `kind: "mermaid"` to render a file as a
+diagram), which [Automation and MCP](AGENT.md#showing-media) describes; the GUI
+turns it into an `ExternalRequest` with an `ExternalAttested` path or inline
+bytes, and Mermaid text or `kind: "mermaid"` selects the Mermaid job kind
+rather than Auto.
+
 ## Wire version 3
 
 The header is 11 bytes: `KMED`, u16 LE protocol version 3, a frame kind, then u32 LE payload

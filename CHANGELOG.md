@@ -21,8 +21,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   this Kettle's display server for that launch only, so `kettle_show` sends
   media to the pane's shelf. Every other Codex command runs unchanged, and
   Kettle edits neither the shell's startup files nor Codex's configuration.
-  `--status` reports what a launch would get, and `--uninstall` prints how
+  `--status` reports whether the shell reaches its Kettle with agent previews
+  on, what a launch would get, and Claude Code's plugin and policy state for
+  the pane, and `--uninstall` prints how
   to remove the function. It is for bash, zsh and fish, on macOS and Linux.
+- The Codex launch function approves `kettle_show` by its own name for the
+  launch, never the whole server, so media shows under any approval policy:
+  with `approval_policy = "never"`, Codex refused every call that would ask.
 - Codex shows a card under the call for media it sends with `kettle_show`,
   like Claude Code. On macOS with Codex CLI 0.162, the launch function adds a
   `PostToolUse` hook that collects the card Kettle registers for the call, and
@@ -30,6 +35,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   you once to trust the hook in its own hook review; until then, and with
   other Codex versions, media goes to the pane's shelf. A card's provenance
   tab names the harness that printed it.
+- "Copy agent setup commands" in the palette (`copy_agent_setup`) puts the
+  `codex` function for your shell on the clipboard, ready to paste into its
+  startup file. In English and Spanish.
+- A new pane on macOS or Linux whose `PATH` has no `kettle` gets the running
+  Kettle's folder appended, after your own commands, so agents and setup
+  commands there find it (`add-kettle-to-path`, Settings → Agents; `off`
+  leaves the `PATH` as configured).
 - Codex previews (`agent-display-codex`, Settings → Agents → Codex previews;
   off by default, needs agent previews): the zsh or fish a new pane starts
   defines `codex` itself, as the function `kettle agent-setup --print`
@@ -87,15 +99,23 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   poster provider. Text or still-image containers named as videos no longer
   show a video card; movies renamed to another supported video suffix still
   work. Header inspection reads at most 64 KiB on the background worker.
-- `kettle show PATH` (or `-` for stdin) and the `show` control method send an
-  image, SVG or Mermaid diagram to the media shelf of the pane they run in, in the Kettle they
-  run inside. They need only Agent previews, never full control. Media lands
+- `kettle show PATH` (or stdin, with no path or `-`; `--mermaid` renders
+  either as a Mermaid diagram) and the `show` control method send an image,
+  SVG or Mermaid diagram to the media shelf of the pane they run in, in the
+  Kettle they run inside. They need only Agent previews, never full control.
+  Media too large for one request is refused, never cut short, with the
+  advice to pass a file path. Media lands
   in the caller's own pane by its process ancestry; a sender Kettle cannot
   place is labeled unverified with the program the system names for it (for
   `kettle show` and `kettle mcp`, the program that ran them) and, on macOS,
   who signed that program's code once macOS validates it.
   Each pane keeps its last eight items; `list_panes` reports them. A push
   never opens anything on screen.
+- `kettle_show` takes inline Mermaid source (`mermaid`) as well as a file
+  `path`, and the full MCP server (`kettle mcp`) offers it too. Its
+  instructions follow where the server runs: inside a Kettle pane they say
+  when to show media and that showing is not seeing, in tmux what happens to
+  the pane, and elsewhere not to call it.
 - `kettle mcp --display` offers agents one tool, `kettle_show`, which sends
   an image, SVG or Mermaid diagram file to the media shelf of the pane the agent runs in. It
   needs only Agent previews and cannot read the screen, type or run

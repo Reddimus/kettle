@@ -424,3 +424,154 @@ fn mcp_stdio_names_a_malformed_modern_envelope_instead_of_blaming_the_handshake(
         );
     }
 }
+
+/// A Kettle with agent previews on, in this test process: a control server
+/// registered where a `kettle mcp` started from here looks, which answers
+/// every `show` as shown and sends each request's params back to the test.
+#[cfg(unix)]
+struct FakeKettle {
+    runtime: tempfile::TempDir,
+    shows: std::sync::mpsc::Receiver<Value>,
+}
+
+#[cfg(unix)]
+impl FakeKettle {
+    fn start() -> Self {
+        use std::io::BufRead as _;
+        let runtime = tempfile::Builder::new()
+            .prefix("kmcp")
+            .tempdir_in("/tmp")
+            .expect("runtime dir");
+        let registry = runtime.path().join("kettle").join("ctl");
+        let pid = std::process::id();
+        let endpoint = kettle_ctl::discovery::default_endpoint(&registry, pid);
+        {
+            use std::os::unix::fs::DirBuilderExt as _;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&registry)
+                .expect("registry");
+        }
+        let listener = kettle_ctl::transport::CtlListener::bind(&endpoint).expect("bind");
+        let entry =
+            kettle_ctl::discovery::RegistryEntry::registering("gui", pid, endpoint, "5.0.0", 1);
+        kettle_ctl::discovery::register(&registry, &entry).expect("register");
+        let (sent, shows) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            while let Ok(stream) = listener.accept() {
+                let sent = sent.clone();
+                std::thread::spawn(move || {
+                    let mut writer = stream.try_clone().expect("clone");
+                    for line in std::io::BufReader::new(stream).lines() {
+                        let Ok(line) = line else { return };
+                        let request: Value = serde_json::from_str(&line).expect("request");
+                        let reply = if request["method"] == "show" {
+                            let _ = sent.send(request["params"].clone());
+                            json!({"v": 1, "id": request["id"], "ok": true, "result": {
+                                "pane": 1, "verified": true, "window": 1, "item": 2,
+                                "kind": "mermaid", "width": 64, "height": 48, "warnings": []}})
+                        } else {
+                            json!({"v": 1, "id": request["id"], "ok": false,
+                                "error": {"code": "unknown_method", "message": "m"}})
+                        };
+                        if writeln!(writer, "{reply}").is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        Self { runtime, shows }
+    }
+
+    /// Run `kettle mcp` with `args` here, where it finds this Kettle.
+    fn mcp(&self, args: &[&str], messages: &[Value]) -> Vec<Value> {
+        let mut child = kettle()
+            .args(args)
+            .env("XDG_RUNTIME_DIR", self.runtime.path())
+            .env_remove("KETTLE_PID")
+            .env_remove("KETTLE_PANE_ID")
+            .env_remove("TMUX")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn kettle mcp");
+        {
+            let mut stdin = child.stdin.take().expect("stdin");
+            for message in messages {
+                writeln!(stdin, "{message}").expect("write");
+            }
+        }
+        let mut out = String::new();
+        child
+            .stdout
+            .take()
+            .expect("stdout")
+            .read_to_string(&mut out)
+            .expect("read");
+        child.wait().expect("wait");
+        parse_responses(&out)
+    }
+}
+
+/// `kettle_show` completes through the real `kettle mcp`, in both modes and
+/// both protocol eras, from Mermaid source and from a file: the Kettle it
+/// runs in gets the source as sent, or the file's path and identity, and
+/// the model gets one plain line saying it has not seen the media.
+#[cfg(unix)]
+#[test]
+fn kettle_show_completes_in_both_modes_and_eras() {
+    let kettle = FakeKettle::start();
+    let directory = tempfile::tempdir().expect("dir");
+    let file = directory.path().join("flow.mmd");
+    std::fs::write(&file, "graph LR\n  A --> B\n").expect("file");
+    let file = file.to_str().expect("utf-8").to_owned();
+    let meta = json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": {"name": "kettle-test", "version": "1"},
+        "io.modelcontextprotocol/clientCapabilities": {}
+    });
+    for args in [&["mcp", "--display"][..], &["mcp"][..]] {
+        for (source, check) in [
+            (json!({"mermaid": "graph LR\n  A --> B"}), "mermaid"),
+            (json!({"path": file}), "path"),
+        ] {
+            let legacy = [
+                json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                    "protocolVersion": "2025-11-25", "capabilities": {},
+                    "clientInfo": {"name": "test", "version": "1"}}}),
+                json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+                json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                    "params": {"name": "kettle_show", "arguments": source}}),
+            ];
+            let modern = [json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"_meta": meta, "name": "kettle_show", "arguments": source}})];
+            for (era, messages) in [("legacy", &legacy[..]), ("modern", &modern[..])] {
+                let responses = kettle.mcp(args, messages);
+                let call = responses
+                    .iter()
+                    .find(|response| response["id"] == 2)
+                    .unwrap_or_else(|| panic!("{args:?} {era}: {responses:?}"));
+                let result = &call["result"];
+                assert_ne!(result["isError"], true, "{args:?} {era} {check}: {result}");
+                let text = result["content"][0]["text"].as_str().unwrap();
+                assert!(text.contains("You have not seen its contents"), "{text}");
+                assert_eq!(result["structuredContent"]["status"], "sent");
+                assert_eq!(result["structuredContent"]["model_has_seen"], false);
+                let params = kettle
+                    .shows
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .expect("the show arrived");
+                match check {
+                    "mermaid" => assert_eq!(params["mermaid"], "graph LR\n  A --> B"),
+                    _ => {
+                        assert_eq!(params["path"], file);
+                        assert!(params["dev"].is_u64() && params["ino"].is_u64());
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1044,6 +1044,18 @@ impl AskBeforeClosing {
     }
 }
 
+/// Whether a new pane's `PATH` gets the running Kettle's directory when no
+/// `kettle` is on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AddKettleToPath {
+    /// Append the directory, after everything on the `PATH`, when nothing on
+    /// it is an executable `kettle`.
+    #[default]
+    Auto,
+    /// Leave the `PATH` as configured.
+    Off,
+}
+
 /// The side of its pane a preview lane opens on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PreviewLaneSide {
@@ -1396,6 +1408,12 @@ pub struct Config {
     /// `agent-display`; panes that are already open keep what they started
     /// with, and a `codex` the user defines still wins.
     pub agent_display_codex: bool,
+    /// `add-kettle-to-path`: with `auto` (default), a new pane on macOS or
+    /// Linux whose `PATH`, after the configured `env`, has no executable
+    /// `kettle` gets the running Kettle's directory appended, never put in
+    /// front of the user's commands, and never a translocated copy's. `off`
+    /// leaves the `PATH` as configured.
+    pub add_kettle_to_path: AddKettleToPath,
     /// `preview-lane-side`: where a pane's preview lane opens, `bottom`
     /// (default), which keeps the terminal's columns, or `right`, which keeps
     /// its rows. Applies to lanes opened after it changes.
@@ -2759,6 +2777,7 @@ impl Default for Config {
             agent_display: false,
             agent_display_claude_code: false,
             agent_display_codex: false,
+            add_kettle_to_path: AddKettleToPath::Auto,
             preview_lane_side: PreviewLaneSide::Bottom,
             ask_before_closing: AskBeforeClosing::MultipleTerminals,
             close_button_on_tab: true,
@@ -3898,6 +3917,10 @@ impl Config {
                 "preview-lane-side" | "preview_lane_side" => matches!(
                     v.trim().to_ascii_lowercase().as_str(),
                     "bottom" | "right"
+                ),
+                "add-kettle-to-path" | "add_kettle_to_path" => matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "auto" | "on" | "true" | "yes" | "off" | "false" | "no"
                 ),
                 "update-policy" | "update_policy" => matches!(
                     v.trim().to_ascii_lowercase().as_str(),
@@ -5300,6 +5323,15 @@ impl Config {
                 "agent-display-codex" | "agent_display_codex" => {
                     if let Some(b) = parse_bool(&e.value) {
                         cfg.agent_display_codex = b;
+                    }
+                }
+                "add-kettle-to-path" | "add_kettle_to_path" => {
+                    match e.value.trim().to_ascii_lowercase().as_str() {
+                        "auto" | "on" | "true" | "yes" => {
+                            cfg.add_kettle_to_path = AddKettleToPath::Auto;
+                        }
+                        "off" | "false" | "no" => cfg.add_kettle_to_path = AddKettleToPath::Off,
+                        _ => {}
                     }
                 }
                 // Opt IN to restoring the last session on launch
@@ -8085,6 +8117,25 @@ cell-height = 1.2\n";
         assert!(Config::parse_text("agent-display-claude-code = true").agent_display_claude_code);
         assert!(Config::parse_text("agent_display_claude_code = on").agent_display_claude_code);
         assert!(!Config::parse_text("agent-display-claude-code = maybe").agent_display_claude_code);
+    }
+
+    /// Kettle is added to a new pane's `PATH` unless that is turned off; a
+    /// value it does not know is reported and leaves the default.
+    #[test]
+    fn kettle_is_added_to_the_path_unless_turned_off() {
+        assert_eq!(Config::default().add_kettle_to_path, AddKettleToPath::Auto);
+        for (text, want) in [
+            ("add-kettle-to-path = off", AddKettleToPath::Off),
+            ("add_kettle_to_path = No", AddKettleToPath::Off),
+            ("add-kettle-to-path = auto", AddKettleToPath::Auto),
+            ("add-kettle-to-path = maybe", AddKettleToPath::Auto),
+        ] {
+            assert_eq!(Config::parse_text(text).add_kettle_to_path, want, "{text}");
+        }
+        assert!(!Config::detect_malformed_values("add-kettle-to-path = maybe").is_empty());
+        assert!(Config::detect_malformed_values("add-kettle-to-path = off").is_empty());
+        let (_, unknown) = Config::parse_collect("add-kettle-to-path = off");
+        assert!(unknown.is_empty(), "{unknown:?}");
     }
 
     #[test]

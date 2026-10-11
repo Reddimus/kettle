@@ -97,6 +97,33 @@ fn set_claude_plugin_dirs(
     }
 }
 
+/// `path` with `directory`, the running Kettle's, after everything on it,
+/// when none of its absolute entries holds a `kettle` this user may run
+/// (as the pane's shell runs as this user); `None` to
+/// leave it as it is. It never puts Kettle in front of the user's commands,
+/// and never adds a directory that does not last (a translocated copy's),
+/// is not absolute and UTF-8, or would split the variable, nor fills an
+/// empty `PATH`.
+#[cfg(unix)]
+fn path_with_kettle(path: &str, directory: &std::path::Path) -> Option<String> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let runnable = |kettle: &std::path::Path| {
+        std::fs::metadata(kettle).is_ok_and(|metadata| metadata.is_file())
+            && std::ffi::CString::new(kettle.as_os_str().as_bytes())
+                .is_ok_and(|name| unsafe { libc::access(name.as_ptr(), libc::X_OK) } == 0)
+    };
+    let directory = crate::codex_shell::kettle_path(directory).ok()?;
+    if directory.contains(':') || path.is_empty() {
+        return None;
+    }
+    let found = path
+        .split(':')
+        .map(std::path::Path::new)
+        .filter(|entry| entry.is_absolute())
+        .any(|entry| runnable(&entry.join("kettle")));
+    (!found).then(|| format!("{path}:{directory}"))
+}
+
 /// The environment a new pane starts with: the user's `env` entries, then
 /// Kettle's own values, appended last so they win. `KETTLE_PANE_ID` and
 /// `KETTLE_PID` name this pane and this Kettle for control clients started
@@ -112,6 +139,20 @@ fn pane_environment(config: &Config, pane_id: u64, kettle_pid: u32) -> Vec<(Stri
     });
     environment.push((KETTLE_PANE_ID.to_string(), pane_id.to_string()));
     environment.push((KETTLE_PID.to_string(), kettle_pid.to_string()));
+    // `kettle` for the agents and setup commands run in the pane, from the
+    // running Kettle when the `PATH` this pane gets has none.
+    #[cfg(unix)]
+    if config.add_kettle_to_path == kettle_config::AddKettleToPath::Auto {
+        let path = pane_variable(&environment, "PATH")
+            .map(str::to_owned)
+            .or_else(|| std::env::var("PATH").ok());
+        if let (Some(path), Ok(kettle)) = (path, std::env::current_exe())
+            && let Some(directory) = kettle.parent()
+            && let Some(path) = path_with_kettle(&path, directory)
+        {
+            environment.push(("PATH".to_string(), path));
+        }
+    }
     // Kettle's Claude Code plugin, checked again now, for a Claude Code
     // configured where this pane's environment says. The plugin, like the
     // variable's `:`-separated entries, is Unix-only.
@@ -8690,6 +8731,99 @@ mod node_tests {
         let a = NEXT_PANE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let b = NEXT_PANE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         assert!(b > a, "monotonic process-wide allocation");
+    }
+
+    /// A pane's `PATH` gets the running Kettle's directory last when none of
+    /// its absolute entries holds an executable `kettle`, and is left alone
+    /// when one does, when it is empty, and for a directory that is
+    /// translocated, relative, or would split the variable.
+    #[cfg(unix)]
+    #[test]
+    fn kettle_is_appended_to_a_path_that_has_none() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = kettle_test_support::private_tempdir("kettle-path-");
+        let user = directory.path().join("user");
+        let app = directory.path().join("app");
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::create_dir_all(&app).unwrap();
+        let app_text = app.to_str().unwrap();
+        let user_text = user.to_str().unwrap();
+        let path = format!("/usr/bin:{user_text}");
+        assert_eq!(
+            super::path_with_kettle(&path, &app),
+            Some(format!("{path}:{app_text}")),
+            "appended last"
+        );
+        let kettle = user.join("kettle");
+        std::fs::write(&kettle, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&kettle, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(
+            super::path_with_kettle(&path, &app).is_some(),
+            "a kettle that cannot run is none"
+        );
+        // Run by others but not by its owner, this user: none for the pane.
+        std::fs::set_permissions(&kettle, std::fs::Permissions::from_mode(0o011)).unwrap();
+        if unsafe { libc::geteuid() } != 0 {
+            assert!(
+                super::path_with_kettle(&path, &app).is_some(),
+                "a kettle only others may run is none"
+            );
+        }
+        std::fs::set_permissions(&kettle, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            super::path_with_kettle(&path, &app),
+            None,
+            "the user's wins"
+        );
+        // The same folder named relative to the working directory: it would
+        // depend on where the pane's shell runs, so it is not looked in.
+        let depth = std::env::current_dir().unwrap().components().count() - 1;
+        let relative = format!(
+            "{}{}",
+            "../".repeat(depth),
+            user.strip_prefix("/").unwrap().display()
+        );
+        assert!(std::path::Path::new(&relative).join("kettle").is_file());
+        assert!(
+            super::path_with_kettle(&format!("/usr/bin:{relative}"), &app).is_some(),
+            "a relative entry is not looked in"
+        );
+        assert_eq!(super::path_with_kettle("", &app), None);
+        for directory in [
+            "/private/var/folders/x/AppTranslocation/1/d/kettle.app/Contents/MacOS",
+            "relative/MacOS",
+            "/odd:dir",
+        ] {
+            assert_eq!(
+                super::path_with_kettle("/usr/bin", std::path::Path::new(directory)),
+                None,
+                "{directory}"
+            );
+        }
+    }
+
+    /// The pane's `PATH` comes from the configured `env` first, and is left
+    /// as configured with `add-kettle-to-path = off`.
+    #[cfg(unix)]
+    #[test]
+    fn a_panes_path_follows_its_configured_env_and_the_setting() {
+        let mut config = Config::default();
+        config
+            .env
+            .push(("PATH".to_string(), "/nowhere/bin".to_string()));
+        let environment = super::pane_environment(&config, 1, 2);
+        let path = super::pane_variable(&environment, "PATH").unwrap();
+        let kettle = std::env::current_exe().unwrap();
+        assert_eq!(
+            path,
+            format!("/nowhere/bin:{}", kettle.parent().unwrap().display())
+        );
+        config.add_kettle_to_path = kettle_config::AddKettleToPath::Off;
+        let environment = super::pane_environment(&config, 1, 2);
+        assert_eq!(
+            super::pane_variable(&environment, "PATH"),
+            Some("/nowhere/bin")
+        );
     }
 
     #[test]

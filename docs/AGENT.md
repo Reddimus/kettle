@@ -295,8 +295,17 @@ off applies at the next launch. `get_state` reports the policy in force as
 its caller runs
 in. It needs only Display, so `agent-display` is enough; it grants no reads
 or mutations, and a display-only client learns nothing about the screen from
-it. `kettle show PATH` and `kettle show -` (bytes on stdin) send it from a
-shell.
+it. `kettle show PATH` and `kettle show` (or `kettle show -`, bytes on
+stdin) send it from a shell; `--mermaid` renders either as a Mermaid diagram.
+Stdin is refused, never cut short, past what one request carries once
+encoded (about 768 KiB), or past 64 KiB of UTF-8 text with `--mermaid`; a
+path longer than 4 KiB is refused before anything looks for it, and the
+whole request, escapes and base64 included, is measured as a client frames
+it before it is sent. It attests a file by opening it as the media worker
+will (read-only, without waiting on a named pipe, never as a controlling
+terminal) and sends the device and inode of what it opened, so Kettle shows
+nothing the command could not read itself: a file it may look up but not
+read is refused with `permission`.
 
 Params take exactly one source, plus optional `title` (at most 4 KiB) and
 `key` (1 to 256 bytes):
@@ -305,10 +314,13 @@ Params take exactly one source, plus optional `title` (at most 4 KiB) and
 |---|---|
 | `svg`: SVG text, at most 2 MiB | SVG |
 | `image_b64`: standard base64 bytes, at most 32 MiB decoded | whatever the media worker finds the bytes to be: raster, SVG, or text that parses as a Mermaid diagram |
-| `path` + `dev` + `ino`: an absolute path and the device and inode the caller saw | whatever the worker finds in the file it opens; another file at that path is refused |
+| `mermaid`: Mermaid text, at most 64 KiB | Mermaid |
+| `path` + `dev` + `ino`: an absolute path (at most 4 KiB) and the device and inode the caller saw | whatever the worker finds in the file it opens, or Mermaid with `kind: "mermaid"`; another file at that path is refused |
 
 The whole request still fits the 1 MiB request line, so larger media goes by
-path. The file's name, and the caller's word for its type, decide nothing.
+path. The file's name decides nothing; only the `mermaid` source, or
+`kind: "mermaid"` on a path, has the media rendered as Mermaid rather than
+as what its bytes turn out to be.
 A `pane` param is honored only for full control, for a caller Kettle cannot
 place. A malformed `show` is answered on its connection thread and never
 reaches the App.
@@ -346,7 +358,9 @@ identifier: `not_in_kettle_pane`, `busy`, `bad_params`, `too_large`,
 `file_refused` (`not_found`, `permission`, `not_regular`, `too_large`),
 `changed`, `unsupported_media`, `unsupported_platform`, `render_failed`
 (`timeout`, `resource`, `parse`), `over_budget`, `restart_required` and
-`worker_unavailable`. `kettle show` prints the same wording, and adds
+`worker_unavailable`. `kettle show` prints the same wording, by the code and
+reason alone: it never repeats the words a reply carries, and says so in
+its own words when a code or reason is one it does not know. It adds
 `not_in_kettle` when no Kettle it runs in has agent previews on.
 
 **The shelf.** Each pane keeps its last eight items, newest first; a full
@@ -711,7 +725,12 @@ polls. Without this opt-in, the existing duration log and
 ## `kettle mcp` — MCP server
 
 Expose all of the above as Model Context Protocol tools, so Claude Code/Codex get
-kettle as native tools.
+kettle as native tools. For agent previews, the first-run route needs no
+registration: Kettle's Claude Code plugin and the `codex` function `kettle
+agent-setup --print` prints start `kettle mcp --display` for each session
+(see [Kettle's Claude Code plugin](#kettles-claude-code-plugin) and
+[Codex's launch function](#codexs-launch-function)).
+Register it by hand only for another client, or for full control.
 
 ```sh
 claude mcp add kettle -- kettle mcp
@@ -727,18 +746,54 @@ Or a project-scoped `.mcp.json`:
 
 `kettle mcp --display` offers one tool, `kettle_show`, and nothing that reads
 the screen, types, runs commands or drives Kettle. It needs agent previews,
-never full control. Its arguments are an absolute `path` (an image, SVG or
-Mermaid diagram file) and an optional `title` and `key`; inline bytes go through `kettle show
--` instead. It finds its Kettle the strict way `kettle show` does, the one the
+never full control. The full server (`kettle mcp`) offers the same
+`kettle_show` among its tools; it needs only what the display server needs.
+Its arguments are exactly one source, `mermaid` (Mermaid source, at most
+64 KiB of UTF-8) or an absolute `path` (an image, SVG or Mermaid file, at
+most 4 KiB), and an optional `title` (at most 4 KiB) and `key` (at most 256
+bytes), none of them empty; other media bytes go through `kettle show -`
+instead. The schema says what is checked: `oneOf` the two sources, each
+string's `minLength` of one, the path's absolute pattern, and each byte cap
+as its `maxLength`, a bound no string within the cap exceeds, since JSON
+Schema counts characters; text of wider characters can pass it and still be
+over the byte cap, which `kettle_show` refuses as `too_large` before it
+sends anything. It finds its Kettle the strict way `kettle show` does, the one the
 server runs inside, and returns one plain line and status-only structured
 content (`status`, `delivery: "shelf"`, `pane`, `window`, `item`, `verified`,
 `kind`, `width`, `height`, `warnings`, `model_has_seen: false`), never the
 media. Failures are `isError` results in the fixed wording of [Showing
-media](#showing-media). The instructions say to use `kettle_show` when the
-server runs inside a Kettle that can show media, and not to call it
-otherwise; on the 2026-07-28 revision, `server/discover` marks them
-`cacheScope: "private"` and `ttlMs: 0`, since they depend on where the server
-runs.
+media](#showing-media), with structured content of `status: "failed"`, the
+fixed `code` and `reason` (Kettle's own, or the client's: `stdin_unreadable`,
+`unknown_refusal`, `unknown_reply`) and `model_has_seen: false`, and nothing
+else: no path, source or card. The instructions, in both modes, follow where the
+server runs. Inside a Kettle pane (a Kettle that serves agent previews or
+control and that it descends from or a live `KETTLE_PID` names, or
+`TERM_PROGRAM=kettle`) they say when to show media: after writing or editing
+a Mermaid file or making an image the user should see, by its absolute path;
+a useful diagram in the reply by its source in `mermaid`, keeping the source
+in the reply; not trivial diagrams. They also say to reuse `key`, that
+showing is not seeing, to tell the user once and not retry, and never to
+change configuration or install software. In tmux inside a Kettle pane,
+known only by a live `KETTLE_PID` naming such a Kettle, they add that media
+goes to the pane tmux was started from, marked unverified, or is refused.
+Elsewhere, a Kettle that serves neither included, they say not to call it.
+The full server says the same after its own tools.
+These are guidance only: `kettle_show` still finds its Kettle the strict way.
+How much of them a harness shows its model differs. Claude Code shows the
+instructions and loads the deferred tool through its tool search when a
+turn calls for it, so it shows files, images and reply diagrams unasked
+(15 of 15 such prompts in the 2026-10-10 acceptance run, and none of 20
+ordinary ones). Codex CLI 0.162 always defers MCP tools and shows its model
+neither a server's instructions nor a tool's description, so it shows media
+when asked: "show it in Kettle" (14 of 15) or naming `kettle_show` (15 of
+15), never unasked (0 of 15). Neither model claimed to have seen what it
+showed. Kettle sets no `anthropic/alwaysLoad`: Claude Code finds the tool
+without it.
+On the 2026-07-28 revision, `server/discover` marks them `cacheScope:
+"private"` and `ttlMs: 0` in both modes, since they depend on where the
+server runs; the legacy `initialize` carries the same words.
+
+For a client the plugin and the function do not cover:
 
 ```sh
 claude mcp add kettle-display -- kettle mcp --display
@@ -842,6 +897,18 @@ directory, and Claude Code's `/plugin` and `/mcp` list `kettle`. To remove
 it, turn the setting off. The directory stays in Kettle's data directory;
 delete it with `chmod -R u+w` and then `rm -r`.
 
+### `kettle` on a pane's `PATH`
+
+`kettle show`, `kettle mcp` and `kettle agent-setup` run in a pane by name.
+With `add-kettle-to-path = auto` (the default) on macOS and Linux, a new pane
+whose `PATH`, after the configured `env`, has no executable `kettle` in any
+absolute entry gets the running Kettle's folder appended, after every entry,
+so a `kettle` you installed yourself always wins. A translocated copy's
+folder is never added, since it does not last: run Kettle from
+`/Applications` first. An empty `PATH`, which means the working directory,
+is left as it is, and `off` leaves the `PATH` as configured. A shell startup
+file that sets `PATH` outright still replaces it.
+
 ### Codex's launch function
 
 Codex gets Kettle's display server one launch at a time, through a shell
@@ -856,8 +923,10 @@ codex() {
 }
 ```
 
-Review it, then add it to your shell's startup file. Kettle edits no file and
-none of Codex's configuration, and runs nothing to set it up. The function
+Review it, then add it to your shell's startup file. The palette's "Copy
+agent setup commands" (`copy_agent_setup`) puts the same function, for the
+shell new panes start, on the clipboard. Kettle edits no file and none of
+Codex's configuration, and runs nothing to set it up. The function
 hands its arguments to Kettle as they are; nothing in them is evaluated. In a
 Kettle pane, with Codex CLI 0.159 or a later 0.x, an interactive session (a
 fresh one, `codex resume` or `codex fork`) then starts with these, for that
@@ -866,8 +935,11 @@ launch only:
   not get this launch's server;
 - `-c mcp_servers.kettle=…`: this Kettle's `mcp --display`, forwarding
   `KETTLE_PANE_ID` and `KETTLE_PID` (Codex passes a server only the
-  variables it is told to) and enabling `kettle_show` alone. It approves
-  nothing, so Codex asks before a call as its own policy says.
+  variables it is told to) and enabling `kettle_show` alone, approved by its
+  own name (`tools.kettle_show.approval_mode = "approve"`), never the server
+  as a whole: it only puts media on the pane's shelf and returns no
+  contents, and a Codex whose approval policy is `never` refuses every call
+  that would ask, so without it nothing would show.
 
 Kettle's options go right after `resume` or `fork`, or first, never after a
 prompt or `--`, and `--no-daemon` is not added twice. Everything else runs
@@ -902,9 +974,18 @@ would replace Kettle's.
 
 A session started this way does not show in `codex agents`. The function names the Kettle that
 printed it, and a Kettle running from a translocated copy refuses to print
-one. `kettle agent-setup --status` reports what a launch from this shell would
-get and whether Kettle defines the function for you, and `--uninstall` prints
-how to remove it.
+one. `kettle agent-setup --status` reports whether this shell reaches the
+Kettle it runs in (found the strict way `kettle show` finds it) and whether
+its agent previews are on, asked with an empty `show` that shows nothing;
+what a Codex launch from it would get; whether Kettle defines the function
+for you; and whether this pane started with Kettle's plugin for Claude Code,
+or why not: Claude Code's managed policy on this machine forbids it (a
+policy your organization manages remotely is not visible to Kettle), or
+this Kettle cannot offer it, running from a translocated copy.
+`--uninstall` prints how to remove the function. Both say that Codex and
+Claude Code still write their usual history and session files, and that
+Claude Code keeps data for a plugin it loads: Kettle writes none of their
+settings or startup files, which is not the same as nothing written.
 
 ### Kettle defines it for you
 
