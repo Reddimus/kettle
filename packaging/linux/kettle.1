@@ -532,13 +532,15 @@ and exits, for CI.
 .B \-\-display
 offers only
 .BR kettle_show ,
-which sends an image, SVG or Mermaid diagram file to the media shelf of the
+which sends an image, SVG, Mermaid or Markdown file to the media shelf of the
 kettle pane the
 server runs in and needs agent previews, never full control.
 .TP
 .B kettle show \fR[\fIPATH\fR|\fB\-\fR] [\fB\-\-mermaid\fR] [\fB\-\-title \fITITLE\fR] [\fB\-\-key \fIKEY\fR]
-Send a local image, SVG or Mermaid diagram to the media shelf of the pane this
-runs in, in the kettle it runs inside; never another kettle. Without a
+Send a local image, SVG, Mermaid diagram or Markdown diagram gallery (the
+Mermaid diagrams of a Markdown file, paged in the preview lane) to the media
+shelf of the pane this runs in, in the kettle it runs inside; never another
+kettle. Without a
 .IR PATH ,
 or with
 .BR \- ,

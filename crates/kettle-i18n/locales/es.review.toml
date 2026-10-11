@@ -16,11 +16,14 @@ media_shelf_untitled = "draft"
 media_shelf_copied_diagram = "draft"
 media_shelf_copied_diagrams = "draft"
 media_shelf_selected_diagram = "draft"
+media_shelf_selected_diagrams = "draft"
 palette_open_media_shelf = "draft"
 palette_preview_link = "draft"
 palette_preview_clipboard_path = "draft"
 palette_preview_next = "draft"
 palette_preview_previous = "draft"
+palette_preview_next_diagram = "draft"
+palette_preview_previous_diagram = "draft"
 palette_close_preview = "draft"
 palette_preview_source = "draft"
 palette_preview_canvas = "draft"
@@ -59,6 +62,9 @@ media_lane_a11y_reload = "draft"
 media_lane_a11y_zoom_out = "draft"
 media_lane_a11y_zoom_in = "draft"
 media_lane_a11y_fit = "draft"
+media_lane_a11y_previous_diagram = "draft"
+media_lane_a11y_next_diagram = "draft"
+media_lane_a11y_diagram = "draft"
 media_lane_notice_image_copied = "draft"
 media_lane_notice_source_copied = "draft"
 media_lane_notice_copy_failed = "draft"
@@ -142,6 +148,7 @@ notify_body_preview_nothing_copied = "draft"
 notify_body_preview_no_diagram = "draft"
 notify_body_preview_diagram_wrapped = "draft"
 notify_body_preview_diagram_unbounded = "draft"
+notify_body_preview_diagram_too_many = "draft"
 notify_title_preview_no_room = "draft"
 menu_open_in_image_viewer = "draft"
 menu_open_in_preview = "draft"
@@ -599,10 +606,13 @@ keys = [
     "media_lane_a11y_close",
     "media_lane_a11y_collapse",
     "media_lane_a11y_copy",
+    "media_lane_a11y_diagram",
     "media_lane_a11y_expand",
     "media_lane_a11y_fit",
     "media_lane_a11y_next",
+    "media_lane_a11y_next_diagram",
     "media_lane_a11y_previous",
+    "media_lane_a11y_previous_diagram",
     "media_lane_a11y_reload",
     "media_lane_a11y_rendered",
     "media_lane_a11y_source",

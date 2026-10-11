@@ -70,8 +70,8 @@ const ABSOLUTE_PATH_PATTERN: &str = if cfg!(windows) {
 fn show_tool_spec() -> Value {
     json!({
         "name": "kettle_show",
-        "description": "Send an image, SVG or Mermaid file path to the user's Kettle display, \
-            or render inline Mermaid source. Interactive supported harnesses get a card under \
+        "description": "Send an image, SVG, Mermaid file or Markdown Mermaid gallery path to the \
+            user's Kettle display, or render inline Mermaid source. Interactive supported harnesses get a card under \
             the call and a shelf entry; other modes use the shelf. Clicking opens it in the \
             viewer or preview lane. Tested diagram families: flowchart, sequence, state, class, \
             ER, gantt, pie, mindmap, gitGraph, timeline, journey and quadrant. Returns delivery \
@@ -90,7 +90,7 @@ fn show_tool_spec() -> Value {
                     "minLength": 1,
                     "maxLength": kettle_media::MAX_PATH_BYTES,
                     "pattern": ABSOLUTE_PATH_PATTERN,
-                    "description": "absolute path of an image, SVG or Mermaid file, at most 4 KiB"
+                    "description": "absolute path of an image, SVG, Mermaid or Markdown file, at most 4 KiB"
                 },
                 "title": {
                     "type": "string",

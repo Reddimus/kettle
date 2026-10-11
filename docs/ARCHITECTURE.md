@@ -69,9 +69,15 @@ named regular files; only the requested collection face is inserted, with its
 index preserved and bounded metadata. The worker does no host font discovery
 and refuses embedded SVG/color/bitmap glyph formats. Actual shaped glyphs
 produce fallback and missing-script warnings; databases are isolated across
-jobs. Raster images, SVG and Mermaid diagrams are rendered, and so is an
-Auto job: one held snapshot of a file, classified by its bytes as raster,
-SVG or Mermaid and rendered as that, with a typed reply that says which.
+jobs. Raster images, SVG and Mermaid diagrams are rendered, Markdown
+diagram galleries too, and so is an Auto job: one held snapshot of a file,
+classified by its bytes as raster, SVG, Markdown or Mermaid and rendered as
+that, with a typed reply that says which. A gallery is the Mermaid fences
+of one CommonMark document (pulldown-cmark, the version merman-render
+already locks), at most 32 of at most 64 KiB each in at most 1 MiB; its
+reply carries every page, the document as read and its digest beside the
+one page rendered, so later pages render from those bytes and one gallery
+is one version of the file.
 Mermaid goes through merman 0.8.0, pinned exactly with its layout and
 painting family, under a resource-constrained policy and a two-second
 `OperationControl` deadline that starts before its fonts load. Kettle
@@ -93,7 +99,7 @@ moves to it; and relative font sizes, from attributes and style sheets alike,
 are resolved against the inherited size to absolute pixels within the number
 bound, or left out; and admission, the layer checks and
 resvg follow unchanged. The rendered item keeps the Mermaid source as its
-source text and digest. Every other kind is refused as unsupported until its
+source text and digest. Video is refused as unsupported until its
 renderer lands. The client's `render` runs one job in a
 fresh worker under startup and job deadlines, with the worker in its own
 process group, killed before it is reaped; `render_with_control` adds
@@ -693,6 +699,37 @@ item's pixels releases its charged bytes too. The render lane builds each
 thread. A shelf key is a `ShelfKey`: the key a `show` named, or a file's
 native path, so two paths that print alike never replace each other.
 
+A Markdown gallery's reply becomes a Mermaid item (`ItemSource::page`): a
+`media::Gallery` keeps every page, each a `ChargedBytes` of its own behind
+an `Arc`, and the item's source is the page shown, its spec a Mermaid job
+over those bytes on the reply's theme, canvas and target, its digest that
+page's, so canvas renders, sharper crops, the source view and a source copy
+all work on the page as on any diagram the item carried. No room for the
+pages refuses the reply as over budget. A gallery read from a file keeps
+its path and the page shown (`reload_file`), which a reload reads again as
+`MarkdownDiagrams { index }`; evicting the item's pixels gives back the
+pages but keeps that path. `‹` and `›` on the detail line, Page Up and Page
+Down in a focused lane, and the palette's diagram actions call
+`page_preview`, which asks for a page (`gallery_step`, counting from the
+page asked for and not yet shown, `PreviewPanel::page` with the item's
+generation, `page_waited_on`) as a lane render carrying it with a ticket
+of its own (`LaneRender::page`, a `PageAsk`) from the bytes kept, never the
+file, on the canvas the user chose; the counter shows that page while it
+renders. A canvas change while a page is waited on asks for that page again
+on the new canvas under a new ticket, taking the waiting request's place,
+since a newer lane render displaces a waiting one unsaid; the request it
+supersedes, if already running, can then neither clear the wait nor stand
+for it. `finish_lane_render` takes a page render only for the request its
+lane waits on, or for the page it shows drawn again (`lane_takes_page`),
+for that item and generation, and only if its digest is that page's (`lane_render_verdict`);
+then the page becomes the item's source (`ItemSource::select`), with the
+render's warnings, its cards show the new pixels, and, for another page,
+the lane fits it and shows its source from the top, with no sharper pixels
+of the last page. A page that fails, is withdrawn, or comes
+back for a lane that moved on lets the wait go and leaves the page shown as
+it was. Only a render that read a file can find it changed: a render of
+bytes kept with another digest is of a page gone by, and is dropped.
+
 A lane's header can switch to the item's source (`MediaLaneMode::Source`),
 whose visible rows `media::display_rows` takes out of the text for the
 room the lane has, with tabs expanded and characters that act shown as
@@ -856,13 +893,16 @@ indentation after a row long enough to wrap it is taken for a wrap. The
 rules came from the S6 spike and its corpus is the test, with the
 renderer's own corpus as a drift guard. The App's `preview_copied_diagram`
 refuses a control client before reading the clipboard or the selection, and
-`open_context_menu` probes neither for its rows while one drives it; the first source goes
-as Mermaid bytes through `admit_user_pull`, the same admission a path pull
-uses.
+`open_context_menu` probes neither for its rows while one drives it. One
+source goes as Mermaid bytes through `admit_user_pull`, the same admission a
+path pull uses; several become one `Gallery`, whose first goes the same way
+with the gallery in its `Draft`, so its item keeps every page as a Markdown
+gallery's does. More than 32 fences are refused (`TooMany`), never cut
+short.
 
 The user can pull a file into a lane too: `preview_link` runs quick select
-with `hint_previews` keeping only the image, SVG and Mermaid files a pane
-names (a whole path, off Windows, or a local `file://` link), and the
+with `hint_previews` keeping only the image, SVG, Mermaid and Markdown files
+a pane names (a whole path, off Windows, or a local `file://` link), and the
 right-click menu adds a "Preview in Kettle" row (`UrlHow::Preview`) on a
 link to one. Both reach `preview_pane_link`, which passes the pane's
 `link_gate` as opening the link would: a remote pane, or one that has gone,

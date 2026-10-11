@@ -291,9 +291,9 @@ off applies at the next launch. `get_state` reports the policy in force as
 
 ### Showing media
 
-`show` sends an image, SVG or Mermaid diagram to the media shelf of the pane
-its caller runs
-in. It needs only Display, so `agent-display` is enough; it grants no reads
+`show` sends an image, SVG, Mermaid diagram or Markdown diagram gallery (a
+Markdown file's Mermaid diagrams, paged in the lane) to the media shelf of the
+pane its caller runs in. It needs only Display, so `agent-display` is enough; it grants no reads
 or mutations, and a display-only client learns nothing about the screen from
 it. `kettle show PATH` and `kettle show` (or `kettle show -`, bytes on
 stdin) send it from a shell; `--mermaid` renders either as a Mermaid diagram.
@@ -313,14 +313,17 @@ Params take exactly one source, plus optional `title` (at most 4 KiB) and
 | Source | Rendered as |
 |---|---|
 | `svg`: SVG text, at most 2 MiB | SVG |
-| `image_b64`: standard base64 bytes, at most 32 MiB decoded | whatever the media worker finds the bytes to be: raster, SVG, or text that parses as a Mermaid diagram |
+| `image_b64`: standard base64 bytes, at most 32 MiB decoded | whatever the media worker finds the bytes to be: raster, SVG, a Markdown gallery, or text that parses as a Mermaid diagram |
 | `mermaid`: Mermaid text, at most 64 KiB | Mermaid |
-| `path` + `dev` + `ino`: an absolute path (at most 4 KiB) and the device and inode the caller saw | whatever the worker finds in the file it opens, or Mermaid with `kind: "mermaid"`; another file at that path is refused |
+| `path` + `dev` + `ino`: an absolute path (at most 4 KiB) and the device and inode the caller saw | whatever the worker finds in the file it opens, Mermaid with `kind: "mermaid"`, or with `markdown_index` that page of its Markdown gallery; another file at that path is refused |
 
 The whole request still fits the 1 MiB request line, so larger media goes by
 path. The file's name decides nothing; only the `mermaid` source, or
 `kind: "mermaid"` on a path, has the media rendered as Mermaid rather than
-as what its bytes turn out to be.
+as what its bytes turn out to be. `markdown_index`, from 0 to 31, opens a
+file's Markdown gallery at that page rather than its first; a number past 31
+is `index_out_of_range`, as is one past the file's last page, and only a
+path, never one said to be Mermaid, takes it.
 A `pane` param is honored only for full control, for a caller Kettle cannot
 place. A malformed `show` is answered on its connection thread and never
 reaches the App.
@@ -415,9 +418,10 @@ on the selected reply, with what the agent's UI added and wrapped taken back
 off. A control client cannot trigger either: they read the clipboard or a
 selection only on the user's own key press or click, and a menu a control
 client opens does not look at them to offer its rows.
-The user can also preview an image, SVG or Mermaid file a pane names
-without any agent: `preview_link` (the palette's "Preview a file in
-Kettle") labels such files in the focused pane as quick select does, and the
+The user can also preview an image, SVG, Mermaid or Markdown file a pane
+names without any agent (a Markdown file's Mermaid diagrams are a gallery,
+paged in the lane with `‹` and `›`): `preview_link` (the palette's "Preview
+a file in Kettle") labels such files in the focused pane as quick select does, and the
 right-click menu offers "Preview in Kettle" on a link to one. The file
 opens in that pane's lane once it renders, its sender reading "You opened
 this from the pane", and the shelf report marks it `from_user`. A link from
@@ -620,7 +624,7 @@ so press Enter with `send_keys`, not a trailing `\n`.
 | `resize_window` | full | request a live window client-area resize (`window`, `width`, `height`) and let the normal renderer/PTY resize path process it |
 | `perform_action` | full | dispatch a named Kettle app action (`action`, for example `start_search`, `command_palette`, `open_ssh`, `hint_mode`, `edit_tab_title`). The control-only `focus_window` action shows and focuses its target without toggling visibility. Use this for app chrome that is not pane input; `send_keys` intentionally writes terminal keystrokes to the focused pane |
 | `run_command` | full | run `command` in a pane, reply with `{exit_code, duration_ms, output, output_truncated}`; capture is capped at the newest 10,000 retained lines and then 512 KiB, and `output_truncated` is true if either cap drops output |
-| `show` | display | put an image, SVG or Mermaid diagram on the shelf of the caller's pane, reply with `{pane, verified, window, item, kind, width, height, warnings}` once it is there (see [Showing media](#showing-media)) |
+| `show` | display | put an image, SVG, Mermaid diagram or Markdown diagram gallery on the shelf of the caller's pane, reply with `{pane, verified, window, item, kind, width, height, warnings}` once it is there (see [Showing media](#showing-media)) |
 
 **Multi-window**: a kettle process can host several OS windows.
 `list_tabs` / `list_panes` enumerate them all, ordered by window seq;
@@ -749,8 +753,8 @@ the screen, types, runs commands or drives Kettle. It needs agent previews,
 never full control. The full server (`kettle mcp`) offers the same
 `kettle_show` among its tools; it needs only what the display server needs.
 Its arguments are exactly one source, `mermaid` (Mermaid source, at most
-64 KiB of UTF-8) or an absolute `path` (an image, SVG or Mermaid file, at
-most 4 KiB), and an optional `title` (at most 4 KiB) and `key` (at most 256
+64 KiB of UTF-8) or an absolute `path` (an image, SVG, Mermaid or Markdown
+file, at most 4 KiB), and an optional `title` (at most 4 KiB) and `key` (at most 256
 bytes), none of them empty; other media bytes go through `kettle show -`
 instead. The schema says what is checked: `oneOf` the two sources, each
 string's `minLength` of one, the path's absolute pattern, and each byte cap

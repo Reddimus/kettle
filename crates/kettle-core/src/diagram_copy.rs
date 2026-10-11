@@ -17,8 +17,9 @@ use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
 
 /// Most text a copy or a selection may hold.
 pub const MAX_DIAGRAM_COPY_BYTES: usize = 1024 * 1024;
-/// Most fenced diagrams taken from one copy.
-pub const MAX_COPIED_DIAGRAMS: usize = 16;
+/// Most fenced diagrams one copy may hold: as many as a gallery shows
+/// (`kettle_media::MAX_FENCES`). More are refused, never cut short.
+pub const MAX_COPIED_DIAGRAMS: usize = 32;
 
 /// Why copied text gave no diagram.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,6 +37,8 @@ pub enum DiagramCopyError {
     /// Text follows an unindented diagram, after a blank row, in a reply:
     /// that may be prose or more of the diagram.
     Unbounded,
+    /// More Mermaid fences than [`MAX_COPIED_DIAGRAMS`].
+    TooMany,
 }
 
 /// The notices Codex prints before a diagram it shows as text, as captured.
@@ -145,6 +148,9 @@ pub fn diagram_sources(text: &str, width: Option<usize>) -> Result<Vec<String>, 
         return Err(DiagramCopyError::Empty);
     }
     let (fenced, covered) = fenced_sources(text);
+    if fenced.len() > MAX_COPIED_DIAGRAMS {
+        return Err(DiagramCopyError::TooMany);
+    }
     if !fenced.is_empty() {
         return Ok(fenced);
     }
@@ -165,7 +171,7 @@ pub fn diagram_sources(text: &str, width: Option<usize>) -> Result<Vec<String>, 
 }
 
 /// Every ```` ```mermaid ```` or `~~~mermaid` fence's body, verbatim, in
-/// order, the first [`MAX_COPIED_DIAGRAMS`], and the lines every fence
+/// order, up to one past [`MAX_COPIED_DIAGRAMS`], and the lines every fence
 /// covers, of any language. A fence's body is its own text, so a fence
 /// inside one is not a fence. Unclosed, a fence runs to the end of the
 /// text, as in CommonMark. Each line is looked at once.
@@ -173,7 +179,7 @@ fn fenced_sources(text: &str) -> (Vec<String>, Vec<std::ops::Range<usize>>) {
     let lines: Vec<&str> = text.split('\n').collect();
     let (mut sources, mut covered) = (Vec::new(), Vec::new());
     let mut at = 0;
-    while at < lines.len() && sources.len() < MAX_COPIED_DIAGRAMS {
+    while at < lines.len() && sources.len() <= MAX_COPIED_DIAGRAMS {
         let Some((indentation, fence, mermaid)) = fence_open(lines[at]) else {
             at += 1;
             continue;
@@ -789,11 +795,21 @@ mod tests {
             ["graph LR\n  A --> B"],
             "unclosed, it runs to the end, verbatim"
         );
-        let many = "```mermaid\ngraph LR\n```\n".repeat(MAX_COPIED_DIAGRAMS + 4);
+        // As many as a gallery shows, and one more is refused, never cut
+        // short; blank fences do not count.
+        let many = |count| "```mermaid\ngraph LR\n```\n".repeat(count);
+        let full = many(MAX_COPIED_DIAGRAMS) + "```mermaid\n\n```\n";
         assert_eq!(
-            diagram_sources(&many, None).unwrap().len(),
+            diagram_sources(&full, None).unwrap().len(),
             MAX_COPIED_DIAGRAMS
         );
+        for count in [MAX_COPIED_DIAGRAMS + 1, MAX_COPIED_DIAGRAMS + 40] {
+            assert_eq!(
+                diagram_sources(&many(count), None),
+                Err(DiagramCopyError::TooMany),
+                "{count}"
+            );
+        }
     }
 
     /// Claude's label and bullet, Codex's notices wrapped over rows and its

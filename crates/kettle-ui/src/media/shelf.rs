@@ -177,7 +177,6 @@ impl Shelf {
         &self.items
     }
 
-    #[cfg(test)]
     pub(crate) fn get(&self, id: u64) -> Option<&ShelfItem> {
         self.items.iter().find(|item| item.id == id)
     }

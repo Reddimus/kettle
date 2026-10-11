@@ -969,7 +969,11 @@ owned by root, so it is not dumpable (checked when not running as root). With
 `--features test-faults`, a job that panics leaves exactly
 `media worker panic` on stderr and no reply. An Auto job's reply names what
 it rendered, a PNG as raster and an SVG as SVG, prose is
-`UnsupportedMedia`, and an explicit kind's reply stays the plain frame. With
+`UnsupportedMedia`, and an explicit kind's reply stays the plain frame. A
+Markdown gallery crosses whole: an Auto job's reply says Markdown and carries
+both pages, the document as read and the first page rendered; an explicit
+page comes back with its index and the same digest, and one past the last is
+`IndexOutOfRange`. With
 `test-faults`, a job can pause either side of its classification: a 2.2 s
 pause after it ends a raster job, explicit or Auto, at the watchdog (exit 4)
 while an SVG job of either kind answers; and two 1.2 s pauses either side of
@@ -1001,8 +1005,7 @@ keeps it pure blue. An 8x8 box fits a 4x2 image at 8x4; a crop in box
 coordinates is transparent where the centered image does not reach; a box
 over the rendered edge or a crop outside it is `BadParams`. A file's digest
 covers its bytes and the open file's identity, the same bytes inline carry
-none, and kinds other than raster, SVG and Auto are `UnsupportedMedia` for
-now.
+none, and video kinds are `UnsupportedMedia` for now.
 
 Unit tests in `src/auto.rs` classify Auto jobs: a PNG is raster whatever the
 file is called (`.svg`, `.bin`, no suffix), and a declared SVG with a
@@ -1013,6 +1016,39 @@ identity included. Mermaid text is Mermaid whatever the file is called,
 reported once it has rendered, and text that only starts like a diagram is
 `RenderParse` with no kind reported. Prose, an HTML page, bytes that are not
 UTF-8 and an empty file are `UnsupportedMedia` with no kind reported.
+Markdown with a Mermaid fence is a gallery whatever the file is called
+(`.md`, `.mmd`, `.bin`, `.svg`, no suffix), heard as Markdown once, with both
+pages, the document and the first page's display lines, while Markdown whose
+only fence is Rust is `UnsupportedMedia`. Prose past a diagram's 64 KiB
+around a small fence is a gallery, the same prose with no fence is
+`FileTooLarge`, and a document a byte past 1 MiB is `FileTooLarge` while one
+at it renders. Markdown that starts with an autolink, a README's HTML block
+or a comment is still a gallery, while an HTML page with no Mermaid fence is
+`UnsupportedMedia`, small or past a diagram's 64 KiB.
+`src/markdown.rs` pins extraction: Mermaid fences are pages in document
+order, backtick or tilde, the language in any case and with attributes after
+it, inside a list item or a block quote with their indentation removed, while
+other languages, indented code, a fence in no language, a blank fence and
+`mermaid-ish` are not; a longer closing fence closes and a shorter one is
+text; an unclosed fence runs to the end. Thirty-two pages are a gallery and a
+thirty-third refuses the document (`FileTooLarge` from a file), blank fences
+not counting; a page at 64 KiB is kept and a byte more refuses the document
+wherever it is, while a blank fence of twice that is no page and no refusal,
+and text after 64 KiB of white space in one fence still refuses it, a row
+at a time in a block quote too; a document at 1 MiB parses and a byte more is refused before
+parsing. Text built to work a parser hard (nested quotes and lists, runs of
+backticks, brackets and emphasis, repeated openers) comes back within a
+second at the limit, a spent deadline stops extraction, a page renders beside
+every page with the document and its digest while another page renders other
+pixels, no page is `UnsupportedMedia`, a page past the last is
+`IndexOutOfRange`, a broken page is `RenderParse`, bytes that are not UTF-8
+are `UnsupportedMedia`, and the pages and pixels come from the snapshot read
+though the file is replaced after. Red checks: an off-by-one page limit, a
+thirty-third page kept, blank pages kept, a file refused as inline bytes, a
+case-sensitive language, the page's source or digest returned in place of the
+document's, no deadline between parser events, a blank fence refused, white
+space past the limit not counted, every markup taken for SVG, and markup
+with no fence sent to Mermaid each fail a test.
 `src/mermaid.rs` renders real diagrams that keep their Mermaid source as
 source text and digest, rerenders on a white canvas with new pixels but the
 same identity, keeps prose (`UnsupportedMedia`) apart from broken diagram
@@ -1021,7 +1057,10 @@ bytes that are not UTF-8, an oversized source and an empty one.
 `tests/mermaid_corpus.rs` renders each of the 37 pinned diagram families
 (fixtures from merman's upstream, provenance in their README) as a Mermaid
 and as an Auto job, with real pixels inside the target, and checks the
-fallback collection face per job. `svg::sanitize`'s
+fallback collection face per job. The same families as Markdown galleries, a
+family to a page: every page renders the pixels its Mermaid does with the
+document's digest, and one document of all 37, more pages than a gallery
+holds, is `TooLarge`. `svg::sanitize`'s
 `generated_diagrams_are_cleaned_where_outside_svg_is_refused` checks that a
 generated diagram keeps the first of repeated ids, leaves out an element
 past the number bound whole, resolves `em`, `ex` and percentage font sizes
@@ -4094,7 +4133,9 @@ releases it, that native path keys never merge by their printed form, that
 a lane shows only the source rows in view with nothing that acts, scrolls
 within its rows, shows a raster's or an SVG's canvas as chosen but a
 diagram's as rendered until a render for the choice comes back, takes a
-lane's render only for the same item and source, queues it as its own
+lane's render only for the same item and source (a render of bytes kept with
+another digest is gone by, never a changed file; only a file read again
+changes), queues it as its own
 sender that fails to its lane, copies on a thread that runs one copy and
 holds one more, and never reads a file for a control client's canvas
 change; and that reload pulls the item's own file under its key, title and
@@ -4103,6 +4144,39 @@ item shows again. `kettle-render` tests pin where the new controls sit, how they
 way in a narrow header, and, on the GPU, that source mode draws rows and not
 the image. For a live check, preview an SVG and click `≡`, `◐` and `⧉`
 (their rectangles are in `ui_geometry`'s `preview_lanes`).
+
+Galleries: `media::source` tests pin that a gallery holds one to 32 pages,
+that a page is its item's source (a Mermaid job over the bytes kept, which a
+source copy shares, on the job's canvas and target), that another page
+replaces it whole and one past the last changes nothing, and that a gallery
+read from a file reloads that file at the page shown, still once its pages
+are given back, while copied pages have none. App tests pin that a page's
+render counts only for that page's bytes and a canvas render of the page
+shown before paging is gone, for a gallery from a file and from bytes alike;
+that a step counts from the page asked for, else the one shown, and stops at
+either end; that a lane takes a page render for the request it waits on,
+at the generation asked, or for the page it shows, never another item,
+generation or page, nor an older request for the page it waits on; that reload reads a gallery's file at the page shown as
+`MarkdownDiagrams`; that the page controls have their own ctl names and
+node ids; and that the wiring holds: a Markdown reply becomes a Mermaid item
+with its pages, refused as over budget without room; a page is asked for
+from the bytes kept on the chosen canvas and taken only while its lane waits
+on it, then fitted from the top with the render's warnings; a canvas change
+while one is waited on asks for that page again; the counter shows the page
+asked for; a failure, a withdrawal or a lane that moved on lets the wait
+go. Page Up and Page Down page a focused lane and the palette's diagram
+actions work as the lane's `‹` and `›`. `kettle-render` pins the page
+controls at the end of the detail line, which keeps four columns beside
+them, their presses, and none for one page, a collapsed lane or too little
+room, and on the GPU that they are drawn as button cells with their glyphs
+and the counter between, the page before quieter on the first page. Red checks: a bytes render read as changed, any digest taken for a
+page, a step that wraps or ignores the page asked for, a page whose digest
+is not taken, pages kept when released, a reload page that does not follow
+the page shown, a missing page press, the detail's columns ignored, no
+button cells, no quieter edge, the page shown not taken again, the
+generation ignored, a canvas change that drops the page waited on, warnings
+kept from the last page, a counter that ignores the page asked for, a
+ticket ignored and a canvas change reusing the old ticket each fail a test.
 
 Zoom and pan: `kettle-render`'s `media_viewport` tests pin that zooming at a
 point keeps the image point under it, that an axis longer than the content
@@ -4138,7 +4212,8 @@ as the first, and `media::cards` that an item's cards are those at its
 generation in its pane.
 
 Copied diagrams: `kettle-core`'s `diagram_copy` tests pin fences (any
-indentation, verbatim, in order, at most 16, closed by their own mark indented
+indentation, verbatim, in order, up to 32 with blank ones not counting and a
+33rd refused as `TooMany`, never cut short, closed by their own mark indented
 at most three columns past the opening, a tab counting to the next multiple of
 four, an unclosed one running to the end, a fence of another language
 consuming its body, so a Mermaid fence inside it is its text and no diagram is
@@ -4168,7 +4243,11 @@ the 1 MiB cap, shaped to make the search revisit rows, takes about as long as
 any other. Term tests pin the bounded selection, a selection that starts
 inside a row, and a rectangle over a diagram taking its lines whole. App
 guards pin the control-client refusal before any read, menus a control client
-opens reading neither, Mermaid bytes as the user's pull, and the menu rows.
+opens reading neither, Mermaid bytes as the user's pull, several diagrams as
+one gallery carried with the first (refused as over budget without room),
+more than 32 refused by name, and the menu rows. Red checks: no `TooMany`
+and a scan that stops at the limit, so a 33rd is never seen, each fail a
+test.
 For a live check, `/copy` a diagram (or put a capture on the clipboard), press
 the bound chord: the lane shows "Copied diagram"; select a wrapped reply and
 press the selection chord: its source view shows the wrap joined back; the
@@ -4306,7 +4385,11 @@ refused at once, never waited on; a symbolic link is attested by its target
 and sent by its own name), and its confirmation. `kettle-ctl` pins `request_fits` against the line a client
 frames, to the byte with escapes, the inline `mermaid` source at 64 KiB and
 one byte over, `kind: "mermaid"` on a path only, and a path at 4 KiB in
-native units. For a live check on macOS, the
+native units. `markdown_index` names a page of a file's gallery from 0 to 31,
+past that (32, 256, the largest number) is `index_out_of_range`, a negative,
+fractional or string index or one on any source but a path, or beside
+`kind: "mermaid"`, is `bad_params`, a request built in code is held to the
+same bound, and a page round-trips through the one parser. For a live check on macOS, the
 worker must carry Kettle's Developer ID signature: inside a pane of
 `kettle --agent-server off --agent-display on`, `kettle show plot.png` and
 `kettle show diagram.svg` are confirmed as raster and svg, verified; a text

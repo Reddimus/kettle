@@ -8841,6 +8841,8 @@ impl Renderer {
                 geometry.zoom_out,
                 geometry.zoom_in,
                 geometry.zoom_fit,
+                geometry.page_previous,
+                geometry.page_next,
                 Some(geometry.toggle),
                 Some(geometry.close),
             ]
@@ -8913,6 +8915,7 @@ impl Renderer {
                     &geometry,
                     lane.collapsed || !geometry.full,
                     lane.mode,
+                    lane.page,
                     (
                         gc(palette.label),
                         gc(palette.description),

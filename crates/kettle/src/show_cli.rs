@@ -1,13 +1,13 @@
-//! `kettle show`: send a local image, SVG or Mermaid diagram to the media
-//! shelf of the pane
-//! this command runs in, in the Kettle it runs inside. It never reaches
-//! another Kettle, never opens anything on screen, and never needs full
-//! control: agent previews (`agent-display`) are enough.
+//! `kettle show`: send a local image, SVG, Mermaid diagram or Markdown
+//! diagram gallery to the media shelf of the pane this command runs in, in
+//! the Kettle it runs inside. It never reaches another Kettle, never opens
+//! anything on screen, and never needs full control: agent previews
+//! (`agent-display`) are enough.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use kettle_ctl::show::{SHOW_CALL_TIMEOUT, ShowRequest, ShowResult, ShowSource};
+use kettle_ctl::show::{FileKind, SHOW_CALL_TIMEOUT, ShowRequest, ShowResult, ShowSource};
 use kettle_ctl::{Client, CtlError};
 use kettle_media::{ExternalAttested, FailureCode, MAX_MERMAID_BYTES, NativePath};
 
@@ -166,7 +166,11 @@ pub(crate) fn file_source(path: &Path, mermaid: bool) -> Result<ShowSource, Refu
     Ok(ShowSource::File {
         path: native,
         attestation,
-        mermaid,
+        kind: if mermaid {
+            FileKind::Mermaid
+        } else {
+            FileKind::Classified
+        },
     })
 }
 
@@ -440,12 +444,16 @@ mod tests {
         let directory = kettle_test_support::private_tempdir("kettle-show-cli-");
         let file = directory.path().join("plot.png");
         std::fs::write(&file, b"png").unwrap();
-        let ShowSource::File { path, mermaid, .. } = file_source(&file, false).unwrap() else {
+        let ShowSource::File { path, kind, .. } = file_source(&file, false).unwrap() else {
             panic!("a file source");
         };
         assert_eq!(path, NativePath::from_path(&file).unwrap());
-        assert!(!mermaid);
-        let ShowSource::File { mermaid: true, .. } = file_source(&file, true).unwrap() else {
+        assert_eq!(kind, FileKind::Classified);
+        let ShowSource::File {
+            kind: FileKind::Mermaid,
+            ..
+        } = file_source(&file, true).unwrap()
+        else {
             panic!("a Mermaid file source");
         };
         assert_eq!(

@@ -77,6 +77,12 @@ pub(crate) fn is_markup(text: &str) -> bool {
     root_element_name(text).is_some()
 }
 
+/// Whether `text` is SVG markup: its first element, past the byte-order mark
+/// and prolog, is `svg`.
+pub(crate) fn is_svg(text: &str) -> bool {
+    root_element_name(text) == Some("svg")
+}
+
 /// The local name of the first element in `text`, past a byte-order mark and
 /// the prolog (the XML declaration, processing instructions, comments and a
 /// document type declaration), found by one bounded scan without parsing.
