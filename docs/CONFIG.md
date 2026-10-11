@@ -718,7 +718,8 @@ in preview"), and `preview_source`,
 lane"), and `preview_play` as a video's `▶` and `■` do ("Play or stop the
 silent preview"): a silent preview of eight frames from across the video,
 shown in turn, which never starts while Kettle handles a control request or
-a Lua script's action. `focus_preview` ("Focus preview") gives the focused pane's expanded
+a Lua script's action. `video_play` ("Play or pause the video") works as
+the lane's play button does. `focus_preview` ("Focus preview") gives the focused pane's expanded
 lane the keyboard, and its footer says "Keyboard: preview": the arrows move
 the picture (or scroll a source), Page Up and Page Down show a gallery's
 previous and next diagram, `+` and `-` zoom, `0` fits it (or shows a source
