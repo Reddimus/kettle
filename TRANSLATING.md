@@ -17,8 +17,11 @@ Never edit the generated Rust in `target/`; it is rebuilt from the TOML.
 ## What is translated
 
 All Kettle-owned GUI text: Settings, the command palette and pickers, menus,
-the Dock menu, prompts and confirmations, the search bar, paste receipts,
-banners, desktop notifications and accessibility names.
+the macOS menu bar's application menu and the Dock menu, prompts and
+confirmations, the search bar, paste receipts, banners, desktop
+notifications and accessibility names. The Linux desktop entry
+(`packaging/linux/kettle.desktop`) carries Spanish `GenericName`, `Comment`
+and `Keywords` beside the English ones.
 
 Not translated, in any language:
 
@@ -26,7 +29,9 @@ Not translated, in any language:
 - user and host names, paths, theme and font names, and other config values;
 - config keys and values, keybind action names, flags and subcommands;
 - logs, `kettle ctl` JSON, `ui_geometry` and other control-protocol output;
-- the CLI's help and error text, the man page and these docs (English in 5.0).
+- the CLI's help and error text, listings, shell completions and the default
+  config, the man page and these docs (English in 5.0; the CLI's output is
+  byte-identical whatever the locale or `language`).
 
 ## Messages
 
