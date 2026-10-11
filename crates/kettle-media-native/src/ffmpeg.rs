@@ -895,6 +895,8 @@ impl VideoPlayer for Ffmpeg {
                 decoder: self.clone(),
                 codec: probe.stream.codec,
             }),
+            // ffmpeg's playback is silent: Opened says so.
+            audio: None,
         })
     }
 }

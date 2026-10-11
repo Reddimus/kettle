@@ -85,6 +85,10 @@ impl PlayRequest {
 pub struct Playback {
     pub opened: Opened,
     pub frames: Box<dyn FrameSource>,
+    /// The video's sound, decoded from the start asked for, when the session
+    /// asked for sound and this player can decode it; Opened then says
+    /// Ready.
+    pub audio: Option<Box<dyn crate::audio::AudioSource>>,
 }
 
 impl std::fmt::Debug for Playback {

@@ -36,6 +36,13 @@ frame a decoder returned. They were made on 2026-10-10 with Homebrew's ffmpeg
   anullsrc=r=8000:cl=mono -map 0:v -map 1:a -c:v copy -c:a aac -b:a 8k
   -movflags +faststart -map_metadata -1 -fflags +bitexact -flags:a
   +bitexact`, made on 2026-10-10 with the same ffmpeg.
+- `ticks.mp4`: `index.mp4`'s video with four seconds of sound, a 20 ms 1 kHz
+  tick at half scale starting each whole second, counted in samples so it
+  never drifts: `-i index.mp4 -f lavfi -i
+  "aevalsrc='if(lt(mod(n\,48000)\,960)\,0.5*sin(2*PI*1000*n/48000)\,0)':s=48000:d=4"
+  -map 0:v -map 1:a -c:v copy -c:a aac -b:a 64k -ac 1 -movflags +faststart
+  -map_metadata -1 -fflags +bitexact -flags:a +bitexact`, made on 2026-10-10
+  with the same ffmpeg.
 
 | File | Bytes | SHA-256 |
 | --- | --- | --- |
@@ -46,3 +53,4 @@ frame a decoder returned. They were made on 2026-10-10 with Homebrew's ffmpeg
 | segments.mp4 | 4224 | `78ebea18da005ef402680afbf333bac3db4aa5e9e8f73f5c43e86d3f613705ac` |
 | mirrored.mp4 | 4117 | `3e7ee2243962b9cc7fc3ffa6c6459499660be6cee2b9a8fb783290e671234ffc` |
 | long-audio.mp4 | 5462 | `6f5b60a7e3ba603cd9052093893df960f3c8c77bc93a1ea700fe6720096d0e09` |
+| ticks.mp4 | 9583 | `b53795cb3fcc1266f4a5bed15867e633aad1b5707ff69701b746af857e7d6f36` |
