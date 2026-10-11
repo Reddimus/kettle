@@ -1,0 +1,10 @@
+# libFuzzer dictionary for the frame decoder: the magic, the version, and
+# lengths and kinds as the header writes them.
+magic="KMED"
+version="\x06\x00"
+kind_hello="\x01"
+kind_job="\x04"
+kind_video_frame="\x0b"
+kind_play_state="\x0c"
+length_zero="\x00\x00\x00\x00"
+length_max="\xff\xff\xff\xff"

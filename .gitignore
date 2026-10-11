@@ -14,3 +14,9 @@ __pycache__/
 # kettle source. Added after `scripts/release.sh` flagged the
 # untracked directory.
 .claude/
+
+# cargo fuzz's build output, corpora and findings.
+/fuzz/target/
+/fuzz/corpus/
+/fuzz/artifacts/
+/fuzz/coverage/
