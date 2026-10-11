@@ -468,6 +468,12 @@ impl Writer {
                     }
                 }
             }
+            JobKind::CachedThumbnail(of) => {
+                self.u8(7)?;
+                self.raw(&of.uri_sha256)?;
+                self.raw(&of.mtime_seconds.to_le_bytes())?;
+                self.u32(of.mtime_nanos)
+            }
         }
     }
     fn job_tail<S>(&mut self, j: &Job<S>) -> Result<(), WireError> {
@@ -824,6 +830,11 @@ impl<'a> Reader<'a> {
                 },
             }),
             6 => JobKind::Auto,
+            7 => JobKind::CachedThumbnail(ThumbnailOf {
+                uri_sha256: self.array()?,
+                mtime_seconds: i64::from_le_bytes(self.array()?),
+                mtime_nanos: self.u32()?,
+            }),
             _ => return Err(WireError::UnknownEnum),
         };
         k.validate()?;

@@ -119,3 +119,7 @@ kettle-media = { workspace = true, features = ["test-worker"] }
 tempfile = "3"
 # Reads back the TOML `agent-setup` writes for Codex.
 toml.workspace = true
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# Names a video's cached thumbnail as the receipt check looks for it.
+md-5 = "0.11"

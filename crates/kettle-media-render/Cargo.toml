@@ -22,6 +22,9 @@ kettle-media.workspace = true
 image = { workspace = true, features = ["png", "jpeg", "webp", "bmp", "gif"] }
 # O_NONBLOCK and O_NOCTTY for the source open; no unsafe call is made.
 libc = "0.2"
+# A cached thumbnail's text chunks, read before its pixels are decoded: the
+# PNG decoder the raster codecs already use.
+png = "0.18.1"
 # SVG, pinned exactly: admission mirrors this renderer's allocation geometry,
 # so a version change needs that audit. Defaults off: no system font
 # discovery, memory-mapped fonts, compressed SVG or embedded raster images;

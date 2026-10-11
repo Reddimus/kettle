@@ -294,12 +294,15 @@ the path lets the agent read the video's frames with `kettle_video_frames` (full
 MCP) or `kettle video-frames` (any shell).
 
 An explicit copied or dropped video also gets a short-lived receipt when
-`paste-video-preview` is on. After bounded background validation it uses a
-native thumbnail when one is available and a generic poster otherwise. The
-receipt never means the client attached or opened the video. macOS uses Quick
-Look, Windows uses the Shell thumbnail provider, and Linux accepts only a
-matching owner-controlled cache entry that other principals cannot modify. The
-video card has no open action because native launch APIs cannot bind a path to
+`paste-video-preview` is on. After bounded background validation it shows a
+poster when one can be made and a generic poster otherwise. The receipt never
+means the client attached or opened the video. On macOS and Linux the poster
+comes from Kettle's sandboxed media worker, through AVFoundation on macOS and
+your ffmpeg; on Linux a video no decoder can read falls back to a matching
+owner-controlled thumbnail-cache entry that other principals cannot modify,
+which the worker reads as an image (outside the sandbox where none can be
+applied, as images are). Windows uses the Shell thumbnail provider. The video
+card has no open action because native launch APIs cannot bind a path to
 Kettle's validated handle; clicking the card or `×` dismisses it. Kettle does
 not scan hovered or pasted path text.
 

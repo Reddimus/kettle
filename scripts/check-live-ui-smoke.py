@@ -7597,45 +7597,6 @@ def write_image_receipt_fixture(path: Path, width: int = 640, height: int = 360)
     path.write_bytes(data)
 
 
-def write_linux_video_thumbnail_cache(video: Path, cache: Path) -> None:
-    """Seed the standard thumbnail cache without adding a test dependency."""
-
-    def chunk(kind: bytes, payload: bytes) -> bytes:
-        body = kind + payload
-        return struct.pack(">I", len(payload)) + body + struct.pack(">I", zlib.crc32(body))
-
-    uri = video.resolve().as_uri()
-    mtime = str(video.stat().st_mtime_ns // 1_000_000_000)
-    digest = hashlib.md5(uri.encode("utf-8"), usedforsecurity=False).hexdigest()
-    directory = cache / "thumbnails" / "xx-large"
-    directory.mkdir(parents=True, mode=0o700)
-    os.chmod(cache, 0o700)
-    os.chmod(cache / "thumbnails", 0o700)
-    os.chmod(directory, 0o700)
-
-    width, height = 256, 144
-    rows = bytearray()
-    colors = ((137, 180, 250, 255), (166, 227, 161, 255), (245, 194, 231, 255))
-    for y in range(height):
-        rows.append(0)
-        for x in range(width):
-            r, g, b, a = colors[min(2, x * 3 // width)]
-            if (x // 16 + y // 16) % 2:
-                r, g, b = max(0, r - 28), max(0, g - 28), max(0, b - 28)
-            rows.extend((r, g, b, a))
-    png = (
-        b"\x89PNG\r\n\x1a\n"
-        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
-        + chunk(b"tEXt", b"Thumb::URI\x00" + uri.encode("latin-1"))
-        + chunk(b"tEXt", b"Thumb::MTime\x00" + mtime.encode("ascii"))
-        + chunk(b"IDAT", zlib.compress(bytes(rows), level=6))
-        + chunk(b"IEND", b"")
-    )
-    target = directory / f"{digest}.png"
-    target.write_bytes(png)
-    os.chmod(target, 0o600)
-
-
 def set_bitmap_clipboard(path: Path) -> Optional[subprocess.Popen]:
     """Replace the desktop clipboard with one PNG bitmap for an explicit smoke."""
     system = platform.system()
@@ -7884,6 +7845,24 @@ def set_file_list_clipboard(paths: Sequence[Path]) -> Optional[subprocess.Popen]
             f"{cp.stderr}\n{cp.stdout}"
         )
     return None
+
+
+def wait_for_media_worker(live: LiveKettle, smoke: str, timeout_s: float = 10.0) -> None:
+    """Wait until Kettle finds its media worker, which makes video posters."""
+    deadline = time.monotonic() + timeout_s
+    media: object = None
+    while time.monotonic() < deadline:
+        media = live.json_ctl("get_state").get("media")
+        if isinstance(media, dict) and media.get("availability") == "available":
+            return
+        if isinstance(media, dict) and media.get("availability") == "unavailable":
+            break
+        time.sleep(0.1)
+    raise SystemExit(
+        f"{smoke} smoke: the media worker is not available beside the Kettle "
+        f"under test ({media!r}); build it with `cargo build -p kettle-media-worker` "
+        "into the same directory, signed on macOS"
+    )
 
 
 def wait_for_media_receipt(
@@ -16037,7 +16016,12 @@ def run_image_paste_receipt(kettle: str, root: Path) -> Path:
 
 
 def run_video_paste_receipt(kettle: str, root: Path) -> Path:
-    """Paste an explicit video file list and capture the native poster card."""
+    """Paste an explicit video file list and capture the poster card.
+
+    On macOS and Linux the poster comes from the media worker installed beside
+    the Kettle under test, through its decoders (Apple's, or the user's
+    ffmpeg); on Windows from the Shell.
+    """
     out = root / f"video-paste-receipt-{time.strftime('%Y%m%d-%H%M%S')}"
     out.mkdir(parents=True, exist_ok=True)
     out.chmod(0o700)
@@ -16120,8 +16104,9 @@ def run_video_paste_receipt(kettle: str, root: Path) -> Path:
         fixture.chmod(0o600)
     launch_env: Dict[str, Optional[str]] = {}
     if platform.system() == "Linux":
+        # An empty thumbnail cache: the poster must come from the decoder.
         cache = out / "xdg-cache"
-        write_linux_video_thumbnail_cache(fixtures[0], cache)
+        cache.mkdir(mode=0o700)
         launch_env["XDG_CACHE_HOME"] = str(cache)
     clipboard_owner = set_file_list_clipboard(fixtures)
 
@@ -16145,6 +16130,8 @@ def run_video_paste_receipt(kettle: str, root: Path) -> Path:
             "PS " if platform.system() == "Windows" else "bash-", timeout_ms=12000
         )
         live.json_ctl("resize_window", {"width": 900, "height": 600})
+        if platform.system() != "Windows":
+            wait_for_media_worker(live, "video-paste-receipt")
         if live.json_ctl("ui_geometry").get("window_focused") is not True:
             focus_live_kettle_window(live, desktop_point=(120.0, 120.0))
             focus_deadline = time.monotonic() + 5.0
@@ -16299,7 +16286,9 @@ def run_video_paste_receipt(kettle: str, root: Path) -> Path:
             {
                 "platform": platform.platform(),
                 "clipboard_file_count": len(fixtures),
-                "native_poster": True,
+                "poster_from": (
+                    "shell" if platform.system() == "Windows" else "media-worker"
+                ),
                 "states": states,
             },
             indent=2,

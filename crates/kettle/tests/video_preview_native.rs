@@ -1,6 +1,6 @@
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "windows")]
 use std::io::Write as _;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "windows")]
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -11,10 +11,10 @@ fn build_identity() -> String {
     env!("KETTLE_SOURCE_ID").to_string()
 }
 const WORKER_SKEW_EXIT: i32 = 9;
-const OUTPUT_MAGIC: &[u8; 8] = b"KTLVPOU1";
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+const OUTPUT_MAGIC: &[u8; 8] = b"KTLVPOU2";
+#[cfg(target_os = "windows")]
 const MAX_PREVIEW_WIDTH: u32 = 256;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "windows")]
 const MAX_PREVIEW_HEIGHT: u32 = 160;
 const WORKER_TIMEOUT_EXIT: i32 = 4;
 const VIDEO_FIXTURE: &[u8] = include_bytes!("../../kettle-ui/testdata/video-preview.mp4");
@@ -127,15 +127,171 @@ fn shipped_worker_accepts_movie_bytes_with_another_video_suffix() {
         output
     };
     assert!(output.status.success(), "{output:?}");
-    assert!(output.stdout.len() >= 28, "{output:?}");
-    assert_eq!(&output.stdout[..8], OUTPUT_MAGIC);
+    let reply = Reply::parse(&output.stdout);
+    assert_eq!(reply.size, VIDEO_FIXTURE.len() as u64);
+    // The same file checked again has the same fingerprint, which a
+    // poster's second check compares.
+    let again = Reply::parse(&run_worker_with(&input).stdout);
+    assert_eq!(again.fingerprint, reply.fingerprint);
+    assert_ne!(reply.fingerprint, [0; 32]);
+}
+
+/// A check's reply: the video's size, identity and sampled fingerprint, the
+/// cached thumbnails it opened, and the poster it made, if any.
+struct Reply {
+    size: u64,
+    #[cfg_attr(not(unix), allow(dead_code))]
+    identity: (u64, u64, i64, u32),
+    fingerprint: [u8; 32],
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    cached: Vec<(u64, u64, Vec<u8>)>,
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+}
+
+impl Reply {
+    fn parse(bytes: &[u8]) -> Self {
+        let mut at = 0;
+        let mut take = |len: usize| {
+            let field = &bytes[at..at + len];
+            at += len;
+            field
+        };
+        assert_eq!(take(8), OUTPUT_MAGIC);
+        let u64_at = |field: &[u8]| u64::from_le_bytes(field.try_into().unwrap());
+        let u32_at = |field: &[u8]| u32::from_le_bytes(field.try_into().unwrap());
+        let size = u64_at(take(8));
+        let identity = (
+            u64_at(take(8)),
+            u64_at(take(8)),
+            i64::from_le_bytes(take(8).try_into().unwrap()),
+            u32_at(take(4)),
+        );
+        let fingerprint = take(32).try_into().unwrap();
+        let count = take(1)[0];
+        let cached = (0..count)
+            .map(|_| {
+                let dev = u64_at(take(8));
+                let ino = u64_at(take(8));
+                let len = u32_at(take(4)) as usize;
+                (dev, ino, take(len).to_vec())
+            })
+            .collect();
+        let width = u32_at(take(4));
+        let height = u32_at(take(4));
+        let len = u32_at(take(4)) as usize;
+        let rgba = take(len).to_vec();
+        assert_eq!(at, bytes.len(), "trailing bytes in the reply");
+        Self {
+            size,
+            identity,
+            fingerprint,
+            cached,
+            width,
+            height,
+            rgba,
+        }
+    }
+}
+
+/// On macOS and Linux the check decodes nothing: it answers with the file's
+/// own identity, which the media worker is then held to, and no pixels.
+#[cfg(unix)]
+#[test]
+fn shipped_check_answers_with_the_file_s_identity_and_no_pixels() {
+    use std::os::unix::fs::MetadataExt as _;
+    let dir = kettle_test_support::private_tempdir("kettle-video-check-");
+    let path = dir.path().join("clip.mp4");
+    write_private_fixture(&path, VIDEO_FIXTURE);
+    let input = worker_input(&path, &build_identity());
+    let output = run_worker_with(&input);
+    let output = if output.status.code() == Some(WORKER_TIMEOUT_EXIT) {
+        run_worker_with(&input)
+    } else {
+        output
+    };
+    assert!(output.status.success(), "{output:?}");
+    let reply = Reply::parse(&output.stdout);
+    let metadata = std::fs::metadata(&path).unwrap();
+    assert_eq!(reply.size, metadata.len());
     assert_eq!(
-        u64::from_le_bytes(output.stdout[8..16].try_into().unwrap()),
-        VIDEO_FIXTURE.len() as u64
+        reply.identity,
+        (
+            metadata.dev(),
+            metadata.ino(),
+            metadata.mtime(),
+            u32::try_from(metadata.mtime_nsec()).unwrap()
+        )
+    );
+    assert_eq!((reply.width, reply.height), (0, 0));
+    assert!(reply.rgba.is_empty());
+}
+
+/// On Linux the check also opens the video's cached thumbnails in the
+/// user's cache, and names each with the file it opened.
+#[cfg(target_os = "linux")]
+#[test]
+fn shipped_check_names_the_video_s_cached_thumbnails() {
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _};
+    let dir = kettle_test_support::private_tempdir("kettle-video-check-");
+    let path = dir.path().join("clip.mp4");
+    write_private_fixture(&path, VIDEO_FIXTURE);
+    // The MD5 of the video's file URI, which has no characters to escape.
+    let uri = format!("file://{}", path.display());
+    let digest = md5_hex(uri.as_bytes());
+    let cache = dir.path().join("cache");
+    let directory = cache.join("thumbnails/large");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&directory)
+        .unwrap();
+    let thumbnail = directory.join(format!("{digest}.png"));
+    write_private_fixture(&thumbnail, b"never parsed by the check");
+    let _worker = one_worker_at_a_time();
+    let output = Command::new(env!("CARGO_BIN_EXE_kettle"))
+        .arg("__media-preview-worker")
+        .env("XDG_CACHE_HOME", &cache)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write as _;
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(&worker_input(&path, &build_identity()))?;
+            child.wait_with_output()
+        })
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let reply = Reply::parse(&output.stdout);
+    let metadata = std::fs::metadata(&thumbnail).unwrap();
+    assert_eq!(
+        reply.cached,
+        vec![(
+            metadata.dev(),
+            metadata.ino(),
+            thumbnail.as_os_str().as_bytes().to_vec()
+        )]
     );
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+/// The lowercase hex MD5 of `bytes` (RFC 1321), enough for a cache file name.
+#[cfg(target_os = "linux")]
+fn md5_hex(bytes: &[u8]) -> String {
+    use md5::{Digest as _, Md5};
+    Md5::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
 fn run_native_worker(video: &Path) -> std::process::Output {
     let _worker = one_worker_at_a_time();
     let mut child = Command::new(env!("CARGO_BIN_EXE_kettle"))
@@ -154,52 +310,9 @@ fn run_native_worker(video: &Path) -> std::process::Output {
     child.wait_with_output().unwrap()
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-fn worker_timed_out(output: &std::process::Output) -> bool {
-    output.status.code() == Some(WORKER_TIMEOUT_EXIT)
-}
-
-#[cfg(target_os = "macos")]
-fn worker_returned_empty_poster(output: &std::process::Output) -> bool {
-    output.status.success()
-        && output.stdout.len() == 28
-        && output.stdout.get(..8) == Some(OUTPUT_MAGIC.as_slice())
-        && u64::from_le_bytes(output.stdout[8..16].try_into().unwrap())
-            == VIDEO_FIXTURE.len() as u64
-        && u32::from_le_bytes(output.stdout[16..20].try_into().unwrap()) == 0
-        && u32::from_le_bytes(output.stdout[20..24].try_into().unwrap()) == 0
-        && u32::from_le_bytes(output.stdout[24..28].try_into().unwrap()) == 0
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn macos_warm_retry_accepts_only_an_exact_empty_poster() {
-    use std::os::unix::process::ExitStatusExt as _;
-
-    let mut stdout = Vec::with_capacity(28);
-    stdout.extend_from_slice(OUTPUT_MAGIC);
-    stdout.extend_from_slice(&(VIDEO_FIXTURE.len() as u64).to_le_bytes());
-    stdout.extend_from_slice(&0_u32.to_le_bytes());
-    stdout.extend_from_slice(&0_u32.to_le_bytes());
-    stdout.extend_from_slice(&0_u32.to_le_bytes());
-    let mut output = std::process::Output {
-        status: std::process::ExitStatus::from_raw(0),
-        stdout,
-        stderr: Vec::new(),
-    };
-
-    assert!(worker_returned_empty_poster(&output));
-    output.stdout.push(0);
-    assert!(!worker_returned_empty_poster(&output));
-    output.stdout.pop();
-    output.stdout[0] ^= 1;
-    assert!(!worker_returned_empty_poster(&output));
-    output.stdout[0] ^= 1;
-    output.stdout[8] ^= 1;
-    assert!(!worker_returned_empty_poster(&output));
-}
-
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+/// On Windows, where no media worker runs, the check asks the Shell for the
+/// poster itself.
+#[cfg(target_os = "windows")]
 #[test]
 fn shipped_worker_extracts_a_bounded_native_video_poster() {
     let dir = kettle_test_support::private_tempdir("kettle-video-native-");
@@ -207,14 +320,8 @@ fn shipped_worker_extracts_a_bounded_native_video_poster() {
     write_private_fixture(&video, VIDEO_FIXTURE);
 
     let output = run_native_worker(&video);
-    let retry = worker_timed_out(&output);
-    #[cfg(target_os = "macos")]
-    let retry = retry || worker_returned_empty_poster(&output);
-    let output = if retry {
-        // Windows mirrors production by retrying only a deadline. Quick Look
-        // can instead cold-return a valid empty poster before that deadline;
-        // this provider-capability test gets one warm attempt in that case.
-        // Production correctly keeps the empty result as a generic receipt.
+    let output = if output.status.code() == Some(WORKER_TIMEOUT_EXIT) {
+        // Windows mirrors production by retrying only a deadline.
         run_native_worker(&video)
     } else {
         output
@@ -225,36 +332,29 @@ fn shipped_worker_extracts_a_bounded_native_video_poster() {
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.stdout.len() >= 28);
-    assert_eq!(&output.stdout[..8], OUTPUT_MAGIC);
-    let size = u64::from_le_bytes(output.stdout[8..16].try_into().unwrap());
-    let width = u32::from_le_bytes(output.stdout[16..20].try_into().unwrap());
-    let height = u32::from_le_bytes(output.stdout[20..24].try_into().unwrap());
-    let len = u32::from_le_bytes(output.stdout[24..28].try_into().unwrap()) as usize;
-    assert_eq!(size, VIDEO_FIXTURE.len() as u64);
-    if len == 0 {
-        assert_eq!((width, height), (0, 0));
-        #[cfg(target_os = "macos")]
-        panic!("Quick Look returned no poster for the checked-in H.264 fixture");
-        #[cfg(target_os = "windows")]
-        {
-            assert!(
-                std::env::var_os("KETTLE_REQUIRE_NATIVE_VIDEO_POSTER").as_deref()
-                    != Some(std::ffi::OsStr::new("1")),
-                "Windows returned no poster although native poster support was required"
-            );
-            eprintln!(
-                "skipping native video poster: set KETTLE_REQUIRE_NATIVE_VIDEO_POSTER=1 on a capable Windows host"
-            );
-            return;
-        }
+    let reply = Reply::parse(&output.stdout);
+    assert_eq!(reply.size, VIDEO_FIXTURE.len() as u64);
+    if reply.rgba.is_empty() {
+        assert_eq!((reply.width, reply.height), (0, 0));
+        assert!(
+            std::env::var_os("KETTLE_REQUIRE_NATIVE_VIDEO_POSTER").as_deref()
+                != Some(std::ffi::OsStr::new("1")),
+            "Windows returned no poster although native poster support was required"
+        );
+        eprintln!(
+            "skipping native video poster: set KETTLE_REQUIRE_NATIVE_VIDEO_POSTER=1 on a capable Windows host"
+        );
+        return;
     }
-    assert!(width > 0 && width <= MAX_PREVIEW_WIDTH);
-    assert!(height > 0 && height <= MAX_PREVIEW_HEIGHT);
-    assert_eq!(len, width as usize * height as usize * 4);
-    assert_eq!(output.stdout.len(), 28 + len);
+    assert!(reply.width > 0 && reply.width <= MAX_PREVIEW_WIDTH);
+    assert!(reply.height > 0 && reply.height <= MAX_PREVIEW_HEIGHT);
+    assert_eq!(
+        reply.rgba.len(),
+        reply.width as usize * reply.height as usize * 4
+    );
     assert!(
-        output.stdout[28..]
+        reply
+            .rgba
             .as_chunks::<4>()
             .0
             .iter()
