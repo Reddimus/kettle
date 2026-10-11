@@ -87,6 +87,24 @@ plural = "count"
 context = "crates/kettle-ui/src/app.rs: confirmation before moving a key combination to another action. chord is a key combination such as Ctrl+Shift+T; taken and action are config action names such as split_right, all verbatim."
 args = [{ name = "chord", type = "str" }, { name = "taken", type = "str" }, { name = "action", type = "str" }]
 
+[messages.macos_menu_about]
+context = "crates/kettle-ui/src/macos_menu.rs app_menu_model: row in Kettle's application menu in the macOS menu bar, which replaces the standard one in the UI's language. Use the wording macOS itself uses in that language; Kettle is the product's name, verbatim. Opens the standard About panel."
+
+[messages.macos_menu_services]
+context = "crates/kettle-ui/src/macos_menu.rs app_menu_model: row in Kettle's application menu in the macOS menu bar, which replaces the standard one in the UI's language. Use the wording macOS itself uses in that language; Kettle is the product's name, verbatim. The Services submenu macOS fills."
+
+[messages.macos_menu_hide]
+context = "crates/kettle-ui/src/macos_menu.rs app_menu_model: row in Kettle's application menu in the macOS menu bar, which replaces the standard one in the UI's language. Use the wording macOS itself uses in that language; Kettle is the product's name, verbatim. Hides Kettle's windows."
+
+[messages.macos_menu_hide_others]
+context = "crates/kettle-ui/src/macos_menu.rs app_menu_model: row in Kettle's application menu in the macOS menu bar, which replaces the standard one in the UI's language. Use the wording macOS itself uses in that language; Kettle is the product's name, verbatim. Hides every other application's windows."
+
+[messages.macos_menu_show_all]
+context = "crates/kettle-ui/src/macos_menu.rs app_menu_model: row in Kettle's application menu in the macOS menu bar, which replaces the standard one in the UI's language. Use the wording macOS itself uses in that language; Kettle is the product's name, verbatim. Shows every hidden application again."
+
+[messages.macos_menu_quit]
+context = "crates/kettle-ui/src/macos_menu.rs app_menu_model: row in Kettle's application menu in the macOS menu bar, which replaces the standard one in the UI's language. Use the wording macOS itself uses in that language; Kettle is the product's name, verbatim. Quits Kettle."
+
 [messages.dock_new_tab]
 context = "crates/kettle-ui/src/macos_dock.rs dock_menu_model: row in the macOS Dock icon's menu. macOS title case in English; acts immediately, so no ellipsis."
 
