@@ -256,6 +256,7 @@ fn confine(
         files: files.iter().collect(),
         programs,
         trees,
+        audio_output: false,
     })
 }
 

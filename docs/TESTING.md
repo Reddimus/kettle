@@ -4882,7 +4882,17 @@ admitted: the admitted file after another takes its name, a failed file's
 failure even once its name leads to an admitted one, and no path the job
 never named. On macOS, the cancellation-free message-queue call is refused
 too. A sandbox that fails to apply fails these tests; only a system without
-one skips them. The Linux filter's answers are checked by running it
+one skips them. Unconfined a muted output AudioQueue plays and its clock
+runs; confined it cannot start, and a job granted sound plays it while
+refused everything else as before. Without either of the sound grant's two
+services an output does not start, so each is needed; the profile carries
+neither unless sound is granted. `tests/audio_out.rs` plays muted silence
+through the output: its clock starts with it, runs while it plays, holds
+while paused and runs on after, each buffer comes back free once played,
+and a buffer is filled only within its size by whole frames. A machine
+with no audio output skips the sound tests, saying so, unless
+`KETTLE_REQUIRE_AUDIO` is set, which makes that a failure. The Linux
+filter's answers are checked by running it
 through an evaluator that accepts only the opcodes it uses: sockets, pairs
 but connected Unix ones, System V IPC, ioctls past the descriptor queries,
 signals leaving the worker (and, where Landlock scopes signals, none of
