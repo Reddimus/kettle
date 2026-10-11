@@ -298,7 +298,13 @@ Reports that fit any of these are welcome:
   reads, Apple's video decoder service and its IOSurface client, `/dev/fd`
   (descriptors already held), and what dyld needs to start a granted
   program; it refuses `setsid`, `setpgid` and System V IPC, and signals to
-  anything outside its sandbox. A
+  anything outside its sandbox. A job granted sound (`audio_output`, off
+  unless asked for) may also reach two services more, measured as both
+  needed and enough for an output AudioQueue: the audio server
+  (`com.apple.audio.audiohald`) and its component registry
+  (`com.apple.audio.AudioComponentRegistrar`); no input, no device file and
+  nothing else of audio's. A job playing sound past that, or recording, is
+  in scope. A
   video is never decoded unconfined: where the sandbox cannot be applied (a
   Linux kernel without Landlock, or with it turned off; a macOS without the
   call) a video job fails with `backend_unavailable`, reason `sandbox`,

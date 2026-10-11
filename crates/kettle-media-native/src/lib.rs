@@ -21,6 +21,8 @@
 #[cfg(target_os = "macos")]
 pub mod acl;
 #[cfg(all(target_os = "macos", feature = "avfoundation"))]
+pub mod audio_out;
+#[cfg(all(target_os = "macos", feature = "avfoundation"))]
 pub mod avfoundation;
 #[cfg(unix)]
 mod contain;
@@ -101,6 +103,20 @@ mod decoders {
                     trees.dedup();
                     (programs, trees)
                 })
+        }
+
+        /// Apple's decoder alone, the one that plays a session's sound,
+        /// when this build has it: a session confined for sound runs no
+        /// external decoder. `None` without it.
+        pub fn sounding(&self) -> Option<Self> {
+            #[cfg(all(target_os = "macos", feature = "avfoundation"))]
+            if let Some(native) = self.native {
+                return Some(Self {
+                    native: Some(native),
+                    ffmpeg: None,
+                });
+            }
+            None
         }
 
         /// Whether there is any decoder to try.
