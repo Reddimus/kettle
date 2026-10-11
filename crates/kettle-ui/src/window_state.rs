@@ -762,6 +762,9 @@ pub(crate) struct LaneDrag {
     pub(crate) last: (f64, f64),
     /// Past the threshold: the pointer's motion pans the item.
     pub(crate) panning: bool,
+    /// A press on a playing video's bar: the pointer's motion moves where
+    /// the bar says the video is, and the release opens it there.
+    pub(crate) scrub: bool,
 }
 
 /// What a lane says it did, in place of its hint.
@@ -786,6 +789,14 @@ pub(crate) enum LaneNotice {
     PreviewNeedsDecoder,
     /// The system has no sandbox to decode the video in.
     PreviewNeedsSandbox,
+    /// The video could not be opened or stopped while it played.
+    VideoFailed,
+    /// The video did not open in time.
+    VideoTimedOut,
+    /// No decoder Kettle may use plays this video.
+    VideoNeedsDecoder,
+    /// No sandbox to decode the video in.
+    VideoNeedsSandbox,
 }
 
 /// The real pointer resting on a lane's picture: where, since when, and
@@ -912,6 +923,8 @@ pub(crate) struct WindowState {
     /// Each lane's silent video preview, by pane: being made, playing, or
     /// its frames held while the poster shows.
     pub(crate) lane_previews: std::collections::HashMap<u64, crate::media::LanePreview>,
+    /// Each lane's video playing, paused or stopped where it stood, by pane.
+    pub(crate) lane_playbacks: std::collections::HashMap<u64, crate::media::LanePlayback>,
     /// The lane whose picture the real pointer rests on: what starts a
     /// hover preview.
     pub(crate) lane_hover: Option<LaneHover>,
@@ -1479,6 +1492,7 @@ impl WindowState {
             preview_focus: None,
             lane_crops: std::collections::HashMap::new(),
             lane_previews: std::collections::HashMap::new(),
+            lane_playbacks: std::collections::HashMap::new(),
             lane_hover: None,
             selecting: false,
             selecting_pane: None,
