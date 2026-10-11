@@ -984,7 +984,10 @@ both pages, the document as read and the first page rendered; an explicit
 page comes back with its index and the same digest, and one past the last is
 `IndexOutOfRange`. An animation's stills cross too: a labeled sheet of the
 WebP fixture comes back as a Video reply with its duration, codec and each
-frame's time, and inline MP4 bytes are `UnsupportedMedia`. So do a
+frame's time, and inline MP4 bytes are `UnsupportedMedia`. An Auto job on
+an MP4 named `.png` comes back, through the stand-in decoder, as a detected
+Video reply, its poster the 40x30 picture fitted into a 20x20 box and its
+middle frame's time; without decoders for Auto jobs it fails. So do a
 video's: with stand-in ffmpeg and ffprobe named in `KETTLE_MEDIA_DECODER`,
 shell built-ins only, a held MP4 comes back as a Video reply with the
 stand-in's description and the time of each frame shown, and its digest
@@ -1158,6 +1161,13 @@ a video's file not checked after decoding, a decoder's frames taken
 without checking their count and times, and an animation frame shrunk in
 straight alpha.
 
+Unit tests in `src/auto.rs` also show a video to an Auto job: an MP4 named
+`.mp4`, `.png` or nothing is a video, reported once, its poster the middle
+frame fitted into a 400x400 box (1280x720 becomes 400x225) or kept at the
+picture's size in a larger box, with the video result; without a decoder it
+is `BackendUnavailable` with no kind heard, and a 48 MiB video, past every
+snapshot cap, is held and decoded, not read. Dropping the video branch fails
+them.
 Unit tests in `src/auto.rs` classify Auto jobs: a PNG is raster whatever the
 file is called (`.svg`, `.bin`, no suffix), and a declared SVG with a
 byte-order mark, an XML declaration and a comment is SVG named `.png`; each
@@ -4559,6 +4569,79 @@ inside a pane of `kettle --agent-server off --agent-display on` and call
 separators, bidirectional formatting and placeholder sequences (the
 placeholder and the marks after it, which `strip_placeholders` in `kettle-vt`
 tests), bounded at 256 characters.
+`card_scene`'s `a_video_card_shows_play_and_its_length` paints a video
+card's play glyph (a triangle a pixel row at a time, on a plate, inside the
+poster) and its length (`0:12`) on the poster's foot, and neither on another
+card; `duration_label` writes `m:ss` and `h:mm:ss`. In `kettle-ui`, a
+video's caption gives its own size and length, its detail line its own size
+(not its poster's), codec, length and sound (no codec name when Kettle does
+not know it), and its failure notices say to install ffmpeg for a missing
+container, codec or decoder only; each fails without its change.
+A shown video's lines say what it is (`video 1280x720 VP8 0:12, no audio`,
+no codec name a sender made up) in `kettle show`, `kettle_show`'s shelf line
+and its card line, and `kettle_show`'s structured content adds the `video`
+block beside the poster's size, still with `model_has_seen: false`. Quick
+select and the menus offer common video files (`.webm`, `.mp4`, `.mov`,
+`.mkv` and the like, never `.ts`) for a preview.
+`paste_image`'s video-copy tests copy a source by clone and by bytes (a
+read-only source too) into an owner-only file named with the extension
+asked for; stop a byte copy when asked, at its deadline, or at a source
+shorter than it said, leaving nothing; discard a short clone or a copy its
+check refuses; refuse an extension not the store's, an empty or oversized
+copy, a store full of new copies, and a copy that would leave the volume
+too full; and reap a dead video session. `media::external::video`'s tests
+copy the fixture MP4 named `.webm` as `.mp4`, private and quarantined;
+refuse a file grown, replaced, gone, a FIFO, rewritten with its identity
+restored, without an identity, or of another container, writing nothing;
+refuse a sparse file past 4 GiB; refuse a copy of another length, other
+first bytes or container, or whose source changed while copied; map each
+copy failure to its notice; copy nothing once closed; check each player's
+formats, its fixed command (mpv's `fd://3` after `--`) and the order of
+every check before the player starts; and open a video item, not an
+animation, in the player. The store's reservation tests keep two copies'
+names, places and bytes apart while they are made, refuse a reservation
+past the bounds, give room back, and discard a copy finished after the
+store closed with the directory cleanup left for it; a copy an end was
+asked for after its clone or last chunk is discarded; a byte copy asks
+before every chunk whether to end and whether the rest still fits; a kept
+copy that never reached the player is removed, and one that cannot be
+deleted stays charged; byte copies made at once count each other's
+unwritten bytes against the reserve; a launch asked last whether exit has
+begun refuses when it has;
+a pinned process reads the
+checked copy on descriptor 3 (read-only on Linux) after something else took
+its name; a viewer or player that exits with an error is reported; and an
+Auto video's poster is placed and cropped in its box as a raster is, laid
+out against the video's own size.
+`kettle-ctl`'s `only_quicktime_passes_for_quicktime`
+checks QuickTime Player's requirement. Each fails without its change. The
+ignored `quicktime_opens_a_marked_copy_live` opens the copy in QuickTime
+Player and closes the store; QuickTime Player keeps playing its open copy
+after Kettle deletes it.
+
+V1b live acceptance (macOS 27, debug build with a signed worker, Claude Code
+2.1.296 in a Kettle pane with Claude Code previews): `kettle_show` of an
+H.264 MP4 and of a VP8 WebM each printed a card with the middle frame, the
+play glyph and `0:09`, named by assistive technology as `Video · 640×360 ·
+H.264 · 0:09 · no audio` (VP8 for the WebM, its poster through ffmpeg); a
+native right-press on the MP4's card offered Open and Open in QuickTime
+Player, which opened an owner-only, quarantined copy byte-identical to the
+file in a 0700 `kettle-video-` session; the WebM's row opened nothing and
+copied nothing; the lane's `↗`, clicked natively and through `send_mouse`,
+opened another copy; and closing the window deleted the copies while
+QuickTime Player kept the ones it had open. Not run: Linux with mpv, left
+for R1's pass on the Ubuntu guest (argv, trust and refusal are unit-tested,
+and Docker runs the copy tests through the byte copy, as its file system
+cannot clone), mixed DPI, and the notice banners, which macOS draws outside
+what the tools can capture (their mapping is unit-tested). This branch predates #512,
+so the WebM's notice raised macOS's "Choose Application" dialog, as main
+did before that fix.
+A video's Show result carries `video` (duration, its own size, codec name,
+rate when known, audio) beside its poster's size and round-trips; other
+results carry none. `media::shelf` keeps a video's metadata when its
+poster's pixels are evicted, and `app`'s `videos_keep_what_they_are` holds
+`finish_show` and `finish_lane_render` to storing it and the Show result to
+sending it.
 `kettle-vt` hands a refused image's pixels back when only the account's room
 was missing. `just cli-smoke` runs the built `kettle show` for its options,
 a missing file, an overlong path and non-UTF-8 Mermaid on stdin, all refused

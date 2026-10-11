@@ -66,16 +66,25 @@ pub(crate) fn card_message(nonce: InlineNonce, size: (u8, u8), caption: &str) ->
 }
 
 /// What a card says under it: the file's name, when it came from a file, and
-/// what Kettle made of it, on one line no wider than `columns`. Nothing else
-/// the sender sent, such as a title, reaches a caption.
+/// what Kettle made of it (a video's own size and length), on one line no
+/// wider than `columns`. Nothing else the sender sent, such as a title,
+/// reaches a caption.
 pub(crate) fn card_caption(
     name: Option<&str>,
     kind: MediaKind,
     size: (u32, u32),
+    duration_ms: Option<u64>,
     columns: usize,
 ) -> String {
     let (width, height) = size;
-    let detail = format!("{} {width}x{height}", kind.as_str());
+    let detail = match duration_ms {
+        Some(ms) => format!(
+            "{} {width}x{height} {}",
+            kind.as_str(),
+            kettle_render::duration_label(ms)
+        ),
+        None => format!("{} {width}x{height}", kind.as_str()),
+    };
     let caption = match name.map(caption_name).filter(|name| !name.is_empty()) {
         Some(name) => {
             let detail = format!(" - {detail}");
@@ -299,21 +308,32 @@ mod tests {
     #[test]
     fn a_caption_names_the_file_and_fits_one_line() {
         assert_eq!(
-            card_caption(Some("plot.png"), MediaKind::Raster, (640, 480), 80),
+            card_caption(Some("plot.png"), MediaKind::Raster, (640, 480), None, 80),
             "plot.png - raster 640x480"
         );
         assert_eq!(
-            card_caption(None, MediaKind::Svg, (64, 48), 80),
+            card_caption(None, MediaKind::Svg, (64, 48), None, 80),
             "svg 64x48",
             "no file, no name"
         );
-        let long = card_caption(Some(&"x".repeat(200)), MediaKind::Svg, (1, 2), 30);
+        let long = card_caption(Some(&"x".repeat(200)), MediaKind::Svg, (1, 2), None, 30);
         assert!(
             unicode_width::UnicodeWidthStr::width(long.as_str()) <= 30,
             "{long}"
         );
         assert!(long.ends_with("… - svg 1x2"), "{long}");
-        let tight = card_caption(Some("plot.png"), MediaKind::Raster, (640, 480), 8);
+        let tight = card_caption(Some("plot.png"), MediaKind::Raster, (640, 480), None, 8);
+        assert_eq!(
+            card_caption(
+                Some("clip.webm"),
+                MediaKind::Video,
+                (1280, 720),
+                Some(12_400),
+                80
+            ),
+            "clip.webm - video 1280x720 0:12",
+            "a video's own size and length"
+        );
         assert!(
             unicode_width::UnicodeWidthStr::width(tight.as_str()) <= 8,
             "{tight}"

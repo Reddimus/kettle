@@ -308,6 +308,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   ffprobe, which Kettle finds only in fixed places, trusts only when no one
   else could have changed them, and runs contained, with a deadline. Kettle
   never installs them. The display server never offers the tool.
+- Agents and `kettle show` can show a video: it lands as its poster, the
+  middle frame, with a play glyph and its length on its card, and the lane,
+  `kettle show` and `kettle_show`'s result say its size, codec, length and
+  sound. Nothing plays inside Kettle yet, and the model has still not seen
+  it. Quick select and the menus offer common video files for a preview.
+  Without a decoder for it, the notice says to install ffmpeg.
+- A video card's menu, and the lane's open button, open the video in
+  QuickTime Player on macOS or mpv on Linux (`/usr/bin/mpv` only), never your
+  default application, and only in a format that player plays. The player
+  gets a private copy of the file Kettle showed, checked to still be that
+  file: a clone where the disk allows, otherwise a copy that leaves 2 GiB
+  free, owner-only, quarantined on macOS, up to 4 GiB, and deleted when
+  Kettle exits. It opens paused.
 
 ### Changed
 

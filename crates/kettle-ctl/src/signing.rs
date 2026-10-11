@@ -49,17 +49,22 @@ impl Requirement {
     /// hands an image to open outside it on macOS.
     pub const PREVIEW: Self = Self(r#"anchor apple and identifier "com.apple.Preview""#);
 
+    /// QuickTime Player, Apple's video player, as Apple signs it: the one app
+    /// Kettle hands a video to open outside it on macOS.
+    pub const QUICKTIME: Self = Self(r#"anchor apple and identifier "com.apple.QuickTimePlayerX""#);
+
     pub const fn text(self) -> &'static str {
         self.0
     }
 
     /// Every requirement Kettle checks, for the test that parses them all.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::APPLE_ISSUED,
         Self::APPLE_OWN,
         Self::CLAUDE_CODE,
         Self::CODEX,
         Self::PREVIEW,
+        Self::QUICKTIME,
     ];
 }
 
@@ -740,6 +745,23 @@ mod tests {
                 Requirement::PREVIEW
             )
             .is_err()
+        );
+    }
+
+    /// QuickTime Player meets its requirement, and Preview does not pass
+    /// for it, nor it for Preview.
+    #[test]
+    fn only_quicktime_passes_for_quicktime() {
+        let quicktime = std::path::Path::new("/System/Applications/QuickTime Player.app");
+        let preview = std::path::Path::new("/System/Applications/Preview.app");
+        assert_eq!(verify_static(quicktime, Requirement::QUICKTIME), Ok(()));
+        assert_eq!(
+            verify_static(preview, Requirement::QUICKTIME),
+            Err(SignatureError::NotValid)
+        );
+        assert_eq!(
+            verify_static(quicktime, Requirement::PREVIEW),
+            Err(SignatureError::NotValid)
         );
     }
 

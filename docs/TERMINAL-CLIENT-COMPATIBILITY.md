@@ -247,6 +247,19 @@ user can still preview a diagram they copied (`render_clipboard_as_diagram`)
 or selected (`render_selection_as_diagram`), or a file a pane names
 (`preview_link`). See [Automation and MCP](AGENT.md#showing-media).
 
+A shown video is its poster, the middle frame, with a play glyph and its
+length on the card and its size, codec, length and sound in the lane;
+nothing in Kettle plays it yet, and the model still has not seen it. Which
+videos get a poster depends on the platform's decoders: on macOS, MP4 and
+QuickTime through Apple's own (AVFoundation); everywhere else, and every
+other container on macOS, the user's own ffmpeg, which Kettle never installs.
+Without it, the user hears what to install and the agent's result says the
+video could not be shown. The card's menu and the lane's `↗` open a private
+copy of the file in QuickTime Player on macOS (MP4 and QuickTime with the
+codecs every Mac plays) or mpv on Linux (`/usr/bin/mpv`). This is separate
+from a pasted video's receipt below, which stays informational with no open
+action.
+
 ## File paste (paths)
 
 Kettle's path-paste channel also works for a video, PDF, or arbitrary binary:

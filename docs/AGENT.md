@@ -291,9 +291,10 @@ off applies at the next launch. `get_state` reports the policy in force as
 
 ### Showing media
 
-`show` sends an image, SVG, Mermaid diagram or Markdown diagram gallery (a
-Markdown file's Mermaid diagrams, paged in the lane) to the media shelf of the
-pane its caller runs in. It needs only Display, so `agent-display` is enough; it grants no reads
+`show` sends an image, SVG, Mermaid diagram, Markdown diagram gallery (a
+Markdown file's Mermaid diagrams, paged in the lane) or video (its poster,
+the middle frame, with what the video is; nothing plays) to the media shelf
+of the pane its caller runs in. It needs only Display, so `agent-display` is enough; it grants no reads
 or mutations, and a display-only client learns nothing about the screen from
 it. `kettle show PATH` and `kettle show` (or `kettle show -`, bytes on
 stdin) send it from a shell; `--mermaid` renders either as a Mermaid diagram.
@@ -355,7 +356,12 @@ so does closing their pane. A file's key defaults to its path, so showing a
 file again replaces its item in place, keeping the item id.
 
 The result is `{pane, verified, window, item, kind, width, height, warnings}`,
-`kind` being what the media turned out to be. Failures carry the fixed code,
+`kind` being what the media turned out to be. A video (`kind: "video"`) is
+shown as its poster, the middle frame fitted to the lane, whose size
+`width` and `height` give; its result adds `video` with what the video is:
+`duration_ms`, its own `width` and `height` as shown, Kettle's name for the
+`codec` (`h264`, `vp8` and so on, or `unknown`), `fps_milli` when the stream
+says, and `has_audio`. Failures carry the fixed code,
 an optional fixed `reason` and wording that names no path, source or
 identifier: `not_in_kettle_pane`, `busy`, `bad_params`, `too_large`,
 `file_refused` (`not_found`, `permission`, `not_regular`, `too_large`),
@@ -382,7 +388,10 @@ SVG and a checkerboard for raster, with its title, kind, size and sender,
 and `‹ ›` to browse, `▾` to collapse the lane to a one-row strip and `×` to
 close it. Where this platform permits an image viewer and the item still
 holds its pixels, the header also has `↗`, which opens it there (Preview on
-macOS, Eye of GNOME on Linux), the same hand-off as a card menu's row. The
+macOS, Eye of GNOME on Linux), the same hand-off as a card menu's row. A
+video's `↗` opens a private copy of its file in the permitted video player
+instead (QuickTime Player on macOS, mpv on Linux), its poster's pixels held
+or not. The
 terminal keeps at least 20 columns and 5 rows: with less room the lane is
 the strip, along the pane's bottom whichever side it opened on; opening one
 in a pane too small even for that shows a notice and leaves the item unseen,
@@ -433,6 +442,14 @@ menu row or a confirmation it sends previews nothing.
 A Mermaid diagram an agent shows gets a card like an image, with its
 rendered poster, whether it came as source or as a file; when the lane
 draws it again on another background, the card shows that too.
+A video gets a card with its poster, a play glyph over the middle and its
+length on the poster's foot, and a caption with its own size and length
+(`clip.webm - video 1280x720 0:12`); the lane's detail line gives its own
+size, codec, length and whether it has sound, and a screen reader hears the
+same. Nothing plays: a card or the lane never starts a video or a sound.
+When no decoder reads a video, its notice says the user can install ffmpeg
+(`brew install ffmpeg` on macOS, the system's packages on Linux); Kettle
+never installs it.
 Clicking an inline card opens its pane's lane on that card's item. A card
 takes a primary press, and its release, before anything else in the window
 except open dialogs and the lanes, so the program behind it sees neither.
@@ -455,8 +472,15 @@ viewer, Open in Preview (macOS) or Open in Image Viewer (Linux, Eye of
 GNOME at `/usr/bin/eog`). That row hands the viewer a fresh PNG of the pixels
 Kettle shows, from a private store that keeps the newest 32 copies and
 128 MiB and is deleted on exit; a row acts only while the card still shows
-the item, at the generation, the menu named. Nothing a program prints opens
-another app.
+the item, at the generation, the menu named. A video's row is Open in
+QuickTime Player (macOS) or Open in mpv (Linux, at `/usr/bin/mpv`) instead:
+it hands the player a private copy of the video's file, never its poster,
+only while the file is still the one shown and only in a format that player
+reads (QuickTime Player: H.264, HEVC, MPEG-4, ProRes and Motion JPEG in MP4
+or QuickTime; mpv: every container Kettle recognizes), from a store that
+keeps 8 copies and 8 GiB, copies videos up to 4 GiB, and is deleted on
+exit. The player opens paused. A notice says why an open did not happen.
+Nothing a program prints opens another app.
 `kettle ctl send_mouse` clicks a card the same way. Quick select (`hint_mode`) labels each card on screen in the
 focused pane, and picking its label opens it; text in a card's rows is its
 marks, so it gets no label of its own. Screen readers see each card as a

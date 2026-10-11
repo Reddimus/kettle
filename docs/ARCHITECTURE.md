@@ -104,7 +104,10 @@ only input, stderr discarded, its output read up to an exact size and a
 deadline. ffprobe describes the streams and lists the packets around each
 instant, which gives the frame actually showing there; ffmpeg then decodes
 each frame by its own timestamp. The renderer lays the frames out and checks
-the held file is unchanged afterwards. The `kettle` crate's `video_frames`
+the held file is unchanged afterwards. An Auto job, what Show sends for a
+file, classifies a held file's first bytes, so a video shown to the user
+becomes its poster (the middle frame fitted to the lane's box) with the same
+decoders and its metadata, never read whole. The `kettle` crate's `video_frames`
 module takes those stills for a model to read: `kettle video-frames` and the
 full MCP server's `kettle_video_frames` open the file in their own process,
 start their own worker through the same client and launcher the GUI uses,
@@ -132,8 +135,14 @@ moves to it; and relative font sizes, from attributes and style sheets alike,
 are resolved against the inherited size to absolute pixels within the number
 bound, or left out; and admission, the layer checks and
 resvg follow unchanged. The rendered item keeps the Mermaid source as its
-source text and digest. Video is refused as unsupported until its
-renderer lands. The client's `render` runs one job in a
+source text and digest. A video's item keeps its file as its source and,
+as its digest, the first 64 KiB and the file's identity, with the
+`VideoInfo` the worker read (its own size, length, codec, rate, sound and
+container) beside the poster; no codec runs in the GUI, which only draws the
+poster, its play glyph and length, and compares bytes when it copies the
+file for the permitted player. Nothing plays in Kettle yet: the separate
+`VideoProbe` job, whose answer says whether Kettle can play a video, waits
+for the playback worker. The client's `render` runs one job in a
 fresh worker under startup and job deadlines, with the worker in its own
 process group, killed before it is reaped; `render_with_control` adds
 cancellation and one absolute deadline its caller owns. Nothing in the GUI
@@ -375,6 +384,46 @@ off the window thread; `hand_over` checks the viewer, writes the copy, marks
 it downloaded through the held handle (`mark_downloaded`), checks it is still
 the file Kettle wrote (`path_still_matches`) and starts the viewer, all under
 that lock, and at most two opens are prepared at once.
+
+A third `PastedImages`, of kind `paste_image::VIDEOS` (prefix
+`kettle-video-`, 8 files and 8 GiB, oldest dropped once five minutes old),
+holds the copies of video files a card menu or the lane's `↗` hands to the
+video player, each named `NNNN.<ext>` with the extension of the container
+its bytes are (`VideoContainer::extension`); a store accepts only its own
+kind's extensions, in names and in the crash sweep. `begin` makes room and
+names the next file and `finish` keeps it (length, a fresh handle that is
+the same file, the caller's check, the session still held), shared by
+`save_rgba` and the video copies. A video copy is made without holding the
+store: `reserve_copy` sets aside its name, place and bytes (counted against
+the bounds until it is kept or given back, its name taken at once so two
+copies made together never share one) with its own handle on the session
+directory; `Reservation::copy` then clones the held source where the file
+system makes one (`fclonefileat` on macOS, made owner-only with `fchmodat`
+before it is opened; `FICLONE` into a new owner-only file on Linux) or
+copies it a 1 MiB chunk at a time with `pread` and `pwrite`, asking before
+every chunk whether to end and whether what the store's byte copies have
+left to write (`Pending`, shared by copies made at once) still fits with
+2 GiB free, and asking again before and after a clone. The caller checks
+the copy against the source, also without the store, and discards one that
+is not what was shown; `keep_copy` keeps it
+through `finish`, or discards it, with the directory cleanup left for it,
+once the store has closed. `release` gives back a reservation whose copy
+failed, and `remove` deletes a kept copy that never reached the player.
+`media::external::video` owns the rest: `Player` (QuickTime Player,
+verified by Apple's signature requirement, or `/usr/bin/mpv`, trusted as
+Eye of GNOME is), what each `plays`, and `start`, which gives mpv the
+copy's own file read-only as descriptor 3 (`pin`) so it plays what was
+checked; `VideoSource`, built from the shelf item's path, digest, title and
+the worker's `VideoInfo`; and `Held`, which reopens the file as the worker
+did and checks its identity, its first 64 KiB against the poster's digest,
+and its sniffed container before anything is copied, then checks the copy
+the same way and the source unchanged. The App holds the store in
+`VideoCopies`; its `close` sets the flag a copy asks about and then takes
+the store, which nothing holds while a copy is made or checked, so exit
+waits only on Kettle's own temporary directory; `start` asks the flag last,
+just before the spawn. `watch` waits for what was started (`open` on macOS,
+mpv or Eye of GNOME on Linux) and reports one that exits with an error. Nothing in the GUI parses video: what a video is
+comes from the worker, and its bytes are only compared.
 
 Crash cleanup recognizes only
 `kettle-paste-<canonical-pid>-<canonical-u128-nonce>` and

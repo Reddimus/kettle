@@ -2168,6 +2168,34 @@ fn card_release_opens(
     !covered && over.is_some_and(|card| (card.pane, card.nonce) == pressed)
 }
 
+/// What an item is, in a lane's detail line or a card's screen-reader label:
+/// its kind and size, and for a video its own size (not its poster's),
+/// codec, length and whether it has sound.
+fn media_item_detail(
+    tr: kettle_i18n::Translator,
+    kind: &str,
+    item: &crate::media::ShelfItem,
+) -> String {
+    let Some(video) = &item.video else {
+        let (width, height) = item.size;
+        return format!("{kind} · {width}×{height}");
+    };
+    let mut detail = format!("{kind} · {}×{}", video.width, video.height);
+    if let Some(codec) = video.codec.name() {
+        detail.push_str(" · ");
+        detail.push_str(codec);
+    }
+    detail.push_str(" · ");
+    detail.push_str(&kettle_render::duration_label(video.duration_ms));
+    detail.push_str(" · ");
+    detail.push_str(tr.text(if video.has_audio {
+        kettle_i18n::Text::MediaVideoWithAudio
+    } else {
+        kettle_i18n::Text::MediaVideoNoAudio
+    }));
+    detail
+}
+
 /// Register an inline card for a published item and build the message its
 /// harness prints. `None` when the harness is over its limits, the pane
 /// cannot hold a card, no nonce could be had, or the message would not
@@ -2178,7 +2206,7 @@ fn register_card(
     (pane_id, pane_cards, grid): (u64, &mut kettle_render::InlineCards, (usize, usize)),
     cell: (f32, f32),
     item: (u64, u64),
-    kind: kettle_media::MediaKind,
+    (kind, video): (kettle_media::MediaKind, Option<&kettle_media::VideoInfo>),
     image: &kettle_core::ImageData,
     inline: crate::media::InlineDraft,
     now: std::time::Instant,
@@ -2190,7 +2218,10 @@ fn register_card(
     let caption = crate::media::card_caption(
         inline.name.as_deref(),
         kind,
-        (image.width, image.height),
+        video.map_or((image.width, image.height), |video| {
+            (video.width, video.height)
+        }),
+        video.map(|video| video.duration_ms),
         room,
     );
     let delivery = kettle_ctl::show::InlineDelivery {
@@ -2208,6 +2239,7 @@ fn register_card(
                 harness: inline.harness,
                 caption,
                 poster: Some(kettle_render::CardPoster::new(image)),
+                duration_ms: video.map(|video| video.duration_ms),
             },
         )
         .ok()?;
@@ -5967,9 +5999,10 @@ fn hint_action(kind: kettle_core::hints::Kind, alternate: bool, unsafe_path: boo
 }
 
 /// Whether a file named `name` is one a lane can preview, by its extension:
-/// the raster formats the media worker decodes, SVG, Mermaid, and Markdown,
-/// whose Mermaid diagrams are a gallery. The worker still decides by the
-/// bytes; this only picks what to offer.
+/// the raster formats the media worker decodes, SVG, Mermaid, Markdown,
+/// whose Mermaid diagrams are a gallery, and the common video containers,
+/// shown as a poster (`.ts` is left out: it names TypeScript far more often).
+/// The worker still decides by the bytes; this only picks what to offer.
 fn previewable_name(name: &str) -> bool {
     let extension = name
         .rsplit_once('.')
@@ -5988,6 +6021,19 @@ fn previewable_name(name: &str) -> bool {
                 | "mermaid"
                 | "md"
                 | "markdown"
+                | "mp4"
+                | "m4v"
+                | "mov"
+                | "webm"
+                | "mkv"
+                | "avi"
+                | "mpg"
+                | "mpeg"
+                | "m2ts"
+                | "mts"
+                | "ogv"
+                | "wmv"
+                | "flv"
         )
     )
 }
@@ -6162,27 +6208,35 @@ const MAX_PREVIEWS_READY: usize = 8;
 /// Tell the user why a preview they asked for did not open; nothing for a
 /// request that answers a control client (`None`).
 fn notify_preview_failure(tr: kettle_i18n::Translator, failure: Option<kettle_media::FailureCode>) {
-    use kettle_i18n::Text as T;
-    use kettle_media::FailureCode as F;
     let Some(failure) = failure else {
         return;
     };
-    let body = match failure {
+    fire_notify(
+        tr.text(kettle_i18n::Text::NotifyTitlePreviewFailed),
+        tr.text(preview_failure_body(failure)),
+    );
+}
+
+/// What a failed preview's notice says, by its failure.
+fn preview_failure_body(failure: kettle_media::FailureCode) -> kettle_i18n::Text {
+    use kettle_i18n::Text as T;
+    use kettle_media::FailureCode as F;
+    match failure {
         F::FileNotFound => T::NotifyBodyPreviewMissing,
         F::FilePermission | F::FileNotRegular | F::Changed => T::NotifyBodyPreviewUnreadable,
         F::TooLarge | F::FileTooLarge => T::NotifyBodyPreviewTooLarge,
-        F::UnsupportedMedia
-        | F::UnsupportedContainer
-        | F::CodecUnavailable
-        | F::RenderParse
-        | F::IndexOutOfRange => T::NotifyBodyPreviewUnsupported,
-        F::WorkerUnavailable
-        | F::RestartRequired
-        | F::UnsupportedPlatform
-        | F::BackendUnavailable => T::NotifyBodyPreviewUnavailable,
+        // Only a video's decoders answer these: which one a user can install.
+        F::UnsupportedContainer | F::CodecUnavailable | F::BackendUnavailable => {
+            T::NotifyBodyPreviewNeedsDecoder
+        }
+        F::UnsupportedMedia | F::RenderParse | F::IndexOutOfRange => {
+            T::NotifyBodyPreviewUnsupported
+        }
+        F::WorkerUnavailable | F::RestartRequired | F::UnsupportedPlatform => {
+            T::NotifyBodyPreviewUnavailable
+        }
         _ => T::NotifyBodyPreviewFailed,
-    };
-    fire_notify(tr.text(T::NotifyTitlePreviewFailed), tr.text(body));
+    }
 }
 
 /// Where a link handed to `App::open_url` came from.
@@ -6996,8 +7050,9 @@ struct MediaTarget {
 enum MediaMenuAction {
     /// Open the item in Kettle's viewer.
     View,
-    /// Open a copy of it in the permitted image viewer.
-    OpenOutside(crate::media::Viewer),
+    /// Open a copy of it in the permitted image viewer, or of a video in
+    /// the permitted video player.
+    OpenOutside(crate::media::Outside),
 }
 
 /// What the title-edit overlay edits (Terminator parity).
@@ -9078,6 +9133,10 @@ pub struct App {
     /// The PNG copies handed to the image viewer, made off the window thread.
     /// Owner-only, bounded, oldest dropped first, and removed on exit.
     viewer_copies: std::sync::Arc<std::sync::Mutex<crate::paste_image::PastedImages>>,
+    /// The private copies of videos handed to the video player, made off
+    /// the window thread. Owner-only, bounded, oldest dropped first, and
+    /// removed on exit.
+    video_copies: std::sync::Arc<crate::media::VideoCopies>,
     /// Previews the user asked for that are on their pane's shelf, waiting
     /// for that pane's window to open them: window, pane and item.
     previews_ready: Vec<(u64, u64, u64)>,
@@ -10100,6 +10159,7 @@ impl App {
             viewer_copies: std::sync::Arc::new(std::sync::Mutex::new(
                 crate::paste_image::PastedImages::new(crate::paste_image::OPENED),
             )),
+            video_copies: std::sync::Arc::new(crate::media::VideoCopies::new()),
             previews_ready: Vec::new(),
             ctl_driving: false,
             crop_tickets: 0,
@@ -10154,6 +10214,9 @@ impl App {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .close();
+        // And the copies handed to the video player; a copy on its way
+        // stops first.
+        app.video_copies.close();
         if let Err(error) = &result {
             app.runtime_tracker.record_exit(&error.to_string());
         }
@@ -12012,9 +12075,10 @@ impl App {
     }
 
     /// Open the menu of the card `nonce` in `pane` at (`px`, `py`): open its
-    /// item in Kettle, and open a copy of it in the permitted image viewer
-    /// where this platform has one. False when the card's item has left the
-    /// shelf, so the press goes where it would have.
+    /// item in Kettle, and open a copy of it in the permitted image viewer,
+    /// or of a video in the permitted video player, where this platform has
+    /// one. False when the card's item has left the shelf, so the press goes
+    /// where it would have.
     fn open_card_menu(
         &mut self,
         ws: &mut WindowState,
@@ -12024,13 +12088,13 @@ impl App {
         let Some(item) = self.media.cards.item(pane, nonce) else {
             return false;
         };
-        let Some(generation) = ws.mux.panes.get(&pane).and_then(|state| {
+        let Some((generation, outside)) = ws.mux.panes.get(&pane).and_then(|state| {
             state
                 .media_shelf
                 .items()
                 .iter()
                 .find(|it| it.id == item)
-                .map(|it| it.generation)
+                .map(|it| (it.generation, crate::media::Outside::of(it)))
         }) else {
             return false;
         };
@@ -12046,11 +12110,11 @@ impl App {
             target,
             action: MediaMenuAction::View,
         }];
-        if let Some(viewer) = crate::media::Viewer::find() {
+        if let Some(outside) = outside {
             items.push(ContextMenuItem::Media {
-                label: viewer.label(&tr),
+                label: outside.label(&tr),
                 target,
-                action: MediaMenuAction::OpenOutside(viewer),
+                action: MediaMenuAction::OpenOutside(outside),
             });
         }
         self.show_context_menu(ws, items, px, py);
@@ -12058,8 +12122,7 @@ impl App {
     }
 
     /// Act on a card menu row, if the card still shows the item the menu
-    /// named: open it as a click would, or a PNG copy of it in the permitted
-    /// image viewer.
+    /// named: open it as a click would, or a copy of it outside Kettle.
     fn act_on_media(&mut self, ws: &mut WindowState, target: MediaTarget, action: MediaMenuAction) {
         if self.media.cards.item(target.pane, target.nonce) != Some(target.item) {
             return;
@@ -12077,7 +12140,7 @@ impl App {
             MediaMenuAction::View => {
                 self.open_card(ws, target.pane, target.nonce);
             }
-            MediaMenuAction::OpenOutside(viewer) => self.open_item_outside(item, viewer),
+            MediaMenuAction::OpenOutside(outside) => self.open_item_outside(item, outside),
         }
     }
 
@@ -12098,15 +12161,17 @@ impl App {
             .find(|it| it.id == panel.item)
     }
 
-    /// The permitted image viewer `pane`'s lane offers its item to: none when
-    /// this platform has none or the item's pixels were let go.
-    fn preview_opens_outside(&self, ws: &WindowState, pane: u64) -> Option<crate::media::Viewer> {
-        self.preview_item(ws, pane)?.image()?;
-        crate::media::Viewer::find()
+    /// What `pane`'s lane offers to open its item in outside Kettle: none
+    /// when this platform has nothing permitted for it, or an image's pixels
+    /// were let go. A video opens from its file, not its poster.
+    fn preview_opens_outside(&self, ws: &WindowState, pane: u64) -> Option<crate::media::Outside> {
+        let item = self.preview_item(ws, pane)?;
+        let outside = crate::media::Outside::of(item)?;
+        (matches!(outside, crate::media::Outside::Video(_)) || item.image().is_some())
+            .then_some(outside)
     }
 
-    /// Open `pane`'s lane item in the permitted image viewer, when it offers
-    /// to.
+    /// Open `pane`'s lane item outside Kettle, when it offers to.
     fn open_preview_outside(&self, ws: &WindowState, pane: u64) {
         let Some(outside) = self.preview_opens_outside(ws, pane) else {
             return;
@@ -12116,31 +12181,37 @@ impl App {
         }
     }
 
-    /// Open a PNG copy of `item` in `viewer`; a notice says why if it does
-    /// not open.
-    fn open_item_outside(&self, item: &crate::media::ShelfItem, viewer: crate::media::Viewer) {
+    /// Open a copy of `item` `outside`: a PNG of an image's pixels in the
+    /// image viewer, or a private copy of a video's file in the video
+    /// player. A notice says why if it does not open.
+    fn open_item_outside(&self, item: &crate::media::ShelfItem, outside: crate::media::Outside) {
         let tr = self.ui_text;
+        let video = matches!(outside, crate::media::Outside::Video(_));
         let failed = move |why: crate::media::OpenFailure| {
-            fire_notify(
-                tr.text(kettle_i18n::Text::NotifyTitleOpenImage),
-                tr.text(match why {
-                    crate::media::OpenFailure::Busy => kettle_i18n::Text::NotifyBodyOpenImageBusy,
-                    crate::media::OpenFailure::Copy => kettle_i18n::Text::NotifyBodyOpenImageCopy,
-                    crate::media::OpenFailure::Viewer => {
-                        kettle_i18n::Text::NotifyBodyOpenImageViewer
-                    }
-                }),
-            );
+            let (title, body) = why.notice(video);
+            fire_notify(tr.text(title), tr.text(body));
         };
-        match item.image() {
-            Some(image) => crate::media::open_externally(
-                std::sync::Arc::clone(&self.viewer_copies),
-                image.clone(),
-                viewer,
-                failed,
-            ),
-            // Its pixels were let go to stay within the budget.
-            None => failed(crate::media::OpenFailure::Copy),
+        match outside {
+            crate::media::Outside::Image(viewer) => match item.image() {
+                Some(image) => crate::media::open_externally(
+                    std::sync::Arc::clone(&self.viewer_copies),
+                    image.clone(),
+                    viewer,
+                    failed,
+                ),
+                // Its pixels were let go to stay within the budget.
+                None => failed(crate::media::OpenFailure::Copy),
+            },
+            crate::media::Outside::Video(player) => match crate::media::VideoSource::of(item) {
+                Some(source) => crate::media::open_video(
+                    std::sync::Arc::clone(&self.video_copies),
+                    source,
+                    player,
+                    failed,
+                ),
+                // Shown from no file Kettle can name: nothing to copy.
+                None => failed(crate::media::OpenFailure::Changed),
+            },
         }
     }
 
@@ -12189,8 +12260,11 @@ impl App {
     /// hears it: kind, size and sender.
     fn card_accessibility_detail(&self, item: &crate::media::ShelfItem) -> String {
         let (kind, sender) = self.media_item_kind_and_sender(item);
-        let (width, height) = item.size;
-        format!("{kind} · {width}×{height} · {}", sender.text)
+        format!(
+            "{} · {}",
+            media_item_detail(self.ui_text, kind, item),
+            sender.text
+        )
     }
 
     /// Show the shelf item `step` places along from the one `pane`'s lane
@@ -12271,7 +12345,6 @@ impl App {
         let item = &items[index];
         let tr = &self.ui_text;
         let (kind, sender) = self.media_item_kind_and_sender(item);
-        let (width, height) = item.size;
         let text = item.source.text();
         let mode = lane_mode(item, panel);
         let mut lane = kettle_render::MediaLanePanel {
@@ -12279,7 +12352,7 @@ impl App {
             rect,
             collapsed,
             title: item.title.clone(),
-            detail: format!("{kind} · {width}×{height}"),
+            detail: media_item_detail(*tr, kind, item),
             sender,
             // Where keys go: the terminal, or this lane while it holds the
             // keyboard.
@@ -12366,7 +12439,8 @@ impl App {
             kettle_media::MediaKind::Raster => kettle_i18n::Text::MediaViewerKindImage,
             kettle_media::MediaKind::Svg => kettle_i18n::Text::MediaViewerKindSvg,
             kettle_media::MediaKind::Mermaid => kettle_i18n::Text::MediaViewerKindMermaid,
-            _ => kettle_i18n::Text::MediaViewerKindMedia,
+            kettle_media::MediaKind::Video => kettle_i18n::Text::MediaViewerKindVideo,
+            kettle_media::MediaKind::Markdown => kettle_i18n::Text::MediaViewerKindMedia,
         });
         let sender = match &item.provenance {
             crate::media::Provenance::Verified => kettle_render::MediaLaneSender {
@@ -24328,6 +24402,7 @@ impl App {
         }
         let (width, height, layout) = (rendered.width, rendered.height, rendered.layout);
         let warnings = rendered.warnings;
+        let video = rendered.video.as_ref().map(|video| video.info);
         let image = match self.admit_preview_pixels(ws, width, height, rendered.rgba) {
             Ok(image) => image,
             Err(_) => return tell(self, ws, LaneNotice::RenderFailed),
@@ -24368,6 +24443,9 @@ impl App {
         item.size = (width, height);
         item.layout = Some(layout);
         item.warnings = warnings;
+        if video.is_some() {
+            item.video = video;
+        }
         item.source.spec.canvas = spec.canvas;
         if let Some(panel) = window
             .preview_panels
@@ -24528,6 +24606,7 @@ impl App {
         let (width, height) = (rendered.width, rendered.height);
         let layout = rendered.layout;
         let warnings = rendered.warnings;
+        let video = rendered.video.as_ref().map(|video| video.info);
         let image = match self.admit_preview_pixels(ws, width, height, rendered.rgba) {
             Ok(image) => image,
             Err(failure) => return notify_preview_failure(tr, origin.refuse(failure)),
@@ -24584,6 +24663,7 @@ impl App {
             source,
         );
         item.layout = Some(layout);
+        item.video = video;
         let Some(window) = window_with_pane(ws, &mut self.windows, route.pane) else {
             let _ = origin.refuse(FailureCode::NotInKettlePane);
             return;
@@ -24641,7 +24721,7 @@ impl App {
                     (route.pane, &mut pane.inline_cards, grid),
                     cell,
                     (published.id, generation),
-                    kind,
+                    (kind, video.as_ref()),
                     &image,
                     inline,
                     std::time::Instant::now(),
@@ -24674,6 +24754,7 @@ impl App {
             &warnings,
         );
         result.inline = delivery;
+        result.video = video.map(kettle_ctl::show::ShowVideo::from);
         let id = origin.request_id;
         origin.answer(kettle_ctl::protocol::Response::ok(
             id,
@@ -33016,7 +33097,7 @@ impl App {
                         }
                         kettle_render::MediaLaneHit::OpenOutside => {
                             match self.preview_opens_outside(ws, lane.pane) {
-                                Some(viewer) => viewer.label(&self.ui_text),
+                                Some(outside) => outside.label(&self.ui_text),
                                 None => continue,
                             }
                         }
@@ -39089,9 +39170,10 @@ mod tests {
             run.find("app.start_first_pane_before_launch()").unwrap(),
             run.find("event_loop.run_app(&mut app)").unwrap(),
             run.find("app.pasted_images.cleanup();").unwrap(),
-            // Copies handed to the image viewer go on exit too.
+            // Copies handed to the image viewer and the video player go on
+            // exit too.
             run.find("app.viewer_copies").unwrap(),
-            run.find(".close();\n        if let Err(error) = &result {")
+            run.find("app.video_copies.close();\n        if let Err(error) = &result {")
                 .unwrap(),
             run.find("app.runtime_tracker.stop();").unwrap(),
         ];
@@ -44185,7 +44267,7 @@ mod tests {
                 (3, &mut pane_cards, (80, 40)),
                 (8.0, 16.0),
                 (9, 0),
-                kettle_media::MediaKind::Mermaid,
+                (kettle_media::MediaKind::Mermaid, None),
                 &image,
                 crate::media::InlineDraft {
                     owner,
@@ -44221,7 +44303,7 @@ mod tests {
             (3, &mut pane_cards, (80, 40)),
             (8.0, 16.0),
             (9, 0),
-            kettle_media::MediaKind::Raster,
+            (kettle_media::MediaKind::Raster, None),
             &image,
             draft(),
             now,
@@ -44243,7 +44325,7 @@ mod tests {
                 (3, &mut pane_cards, (80, 4)),
                 (8.0, 16.0),
                 (9, 0),
-                kettle_media::MediaKind::Raster,
+                (kettle_media::MediaKind::Raster, None),
                 &image,
                 draft(),
                 now,
@@ -44256,7 +44338,7 @@ mod tests {
                 (3, &mut pane_cards, (80, 40)),
                 (8.0, 16.0),
                 (9, 0),
-                kettle_media::MediaKind::Raster,
+                (kettle_media::MediaKind::Raster, None),
                 &image,
                 draft(),
                 now,
@@ -44269,7 +44351,7 @@ mod tests {
                 (3, &mut pane_cards, (80, 40)),
                 (8.0, 16.0),
                 (9, 0),
-                kettle_media::MediaKind::Raster,
+                (kettle_media::MediaKind::Raster, None),
                 &image,
                 draft(),
                 now,
@@ -52207,7 +52289,9 @@ mod tests {
             ContextMenuItem::Media {
                 label: "Open in Preview",
                 target,
-                action: MediaMenuAction::OpenOutside(crate::media::Viewer::Preview),
+                action: MediaMenuAction::OpenOutside(crate::media::Outside::Image(
+                    crate::media::Viewer::Preview,
+                )),
             },
         ];
         for (index, row) in rows.iter().enumerate() {
@@ -52224,7 +52308,9 @@ mod tests {
                 action,
                 [
                     MediaMenuAction::View,
-                    MediaMenuAction::OpenOutside(crate::media::Viewer::Preview)
+                    MediaMenuAction::OpenOutside(crate::media::Outside::Image(
+                        crate::media::Viewer::Preview,
+                    ))
                 ][index]
             );
         }
@@ -55756,6 +55842,10 @@ mod hint_action_tests {
             "h.mermaid",
             "README.md",
             "plan.Markdown",
+            "run.webm",
+            "clip.MP4",
+            "take.mov",
+            "screen.mkv",
         ] {
             assert!(previewable_name(name), "{name}");
         }
@@ -55767,6 +55857,7 @@ mod hint_action_tests {
             "plot.",
             "",
             "notes.mdx",
+            "index.ts",
         ] {
             assert!(!previewable_name(name), "{name}");
         }
@@ -57600,6 +57691,114 @@ mod lane_control_tests {
                 LaneRenderVerdict::Gone,
                 "a canvas render of the page shown before"
             );
+        }
+    }
+
+    /// A video's detail line gives its own size, not its poster's, its
+    /// codec, length and sound; anything else keeps kind and size.
+    #[test]
+    fn a_videos_detail_says_what_it_is() {
+        let tr = kettle_i18n::Translator::default();
+        let mut item = crate::media::ShelfItem::new(
+            1,
+            None,
+            "clip.webm".into(),
+            crate::media::Provenance::Verified,
+            kettle_media::MediaKind::Video,
+            Vec::new(),
+            kettle_core::ImageData::new(400, 225, vec![0; 400 * 225 * 4]).unwrap(),
+            crate::media::ItemSource::sample(b"<svg/>"),
+        );
+        assert_eq!(
+            super::media_item_detail(tr, "Video", &item),
+            "Video · 400×225"
+        );
+        let mut info = kettle_media::VideoInfo {
+            duration_ms: 12_400,
+            width: 1280,
+            height: 720,
+            rotation: 0,
+            codec: kettle_media::VideoCodec::Vp8,
+            fps_milli: Some(25_000),
+            has_audio: false,
+            container: Some(kettle_media::video::VideoContainer::WebM),
+        };
+        item.video = Some(info);
+        assert_eq!(
+            super::media_item_detail(tr, "Video", &item),
+            "Video · 1280×720 · VP8 · 0:12 · no audio"
+        );
+        info.codec = kettle_media::VideoCodec::Unknown;
+        info.has_audio = true;
+        item.video = Some(info);
+        assert_eq!(
+            super::media_item_detail(tr, "Video", &item),
+            "Video · 1280×720 · 0:12 · with audio"
+        );
+    }
+
+    /// A video no decoder here reads says which one the user can install;
+    /// other failures keep their notices.
+    #[test]
+    fn a_missing_decoder_says_what_to_install() {
+        use kettle_i18n::Text as T;
+        use kettle_media::FailureCode as F;
+        for failure in [
+            F::UnsupportedContainer,
+            F::CodecUnavailable,
+            F::BackendUnavailable,
+        ] {
+            assert_eq!(
+                super::preview_failure_body(failure),
+                T::NotifyBodyPreviewNeedsDecoder
+            );
+        }
+        assert_eq!(
+            super::preview_failure_body(F::RenderParse),
+            T::NotifyBodyPreviewUnsupported
+        );
+        assert_eq!(
+            super::preview_failure_body(F::WorkerUnavailable),
+            T::NotifyBodyPreviewUnavailable
+        );
+        let tr = kettle_i18n::Translator::default();
+        assert!(
+            tr.text(T::NotifyBodyPreviewNeedsDecoder)
+                .contains("brew install ffmpeg")
+        );
+    }
+
+    /// A video's metadata, from its poster's render, goes onto its shelf
+    /// item and into the Show result, and a re-render keeps it.
+    #[test]
+    fn videos_keep_what_they_are() {
+        let src = super::production_source();
+        let flat = src.split_whitespace().collect::<Vec<_>>().join(" ");
+        let body = |name: &str| {
+            flat.split(&format!("fn {name}("))
+                .nth(1)
+                .and_then(|rest| rest.split(" fn ").next())
+                .unwrap_or_else(|| panic!("{name}"))
+                .to_owned()
+        };
+        let finish = body("finish_show");
+        for needle in [
+            "let video = rendered.video.as_ref().map(|video| video.info);",
+            "item.layout = Some(layout); item.video = video;",
+            "result.video = video.map(kettle_ctl::show::ShowVideo::from);",
+            "(published.id, generation), (kind, video.as_ref()), &image,",
+        ] {
+            assert!(finish.contains(needle), "finish_show: {needle}");
+        }
+        let card = body("register_card");
+        assert!(card.contains("duration_ms: video.map(|video| video.duration_ms),"));
+        assert!(card.contains("video.map_or((image.width, image.height), |video| { (video.width, video.height) }), video.map(|video| video.duration_ms),"));
+        let lane = body("finish_lane_render");
+        for needle in [
+            "let video = rendered.video.as_ref().map(|video| video.info);",
+            "if video.is_some() { item.video = video; }",
+        ] {
+            assert!(lane.contains(needle), "finish_lane_render: {needle}");
         }
     }
 
