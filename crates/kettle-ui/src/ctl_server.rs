@@ -105,7 +105,7 @@ pub enum CtlServerMsg {
     /// completes).
     Request {
         conn_id: u64,
-        request: AdmittedRequest,
+        request: Box<AdmittedRequest>,
         reply: ReplyTx,
     },
     /// The connection closed.
@@ -417,31 +417,31 @@ impl AdmittedRequest {
 /// Admit `req` under `policy`, or answer it. The policy gate comes first, so a
 /// refused request learns nothing about its parameters; then the parameter
 /// shape every method shares.
-fn admit(policy: CtlPolicy, req: Request) -> Result<AdmittedRequest, Response> {
+fn admit(policy: CtlPolicy, req: Request) -> Result<AdmittedRequest, Box<Response>> {
     use kettle_ctl::protocol::error_codes as ec;
     let Some(method) = Method::from_name(&req.method) else {
-        return Err(Response::err(
+        return Err(Box::new(Response::err(
             req.id,
             ec::UNKNOWN_METHOD,
             format!("unknown method '{}'", req.method),
-        ));
+        )));
     };
     if let Err(error) = policy.check(method.capability()) {
-        return Err(Response::err(req.id, &error.code, error.message));
+        return Err(Box::new(Response::err(req.id, &error.code, error.message)));
     }
     if !req.params.is_null() && !req.params.is_object() {
         // `show` answers every bad request in its own fixed wording.
         if method == Method::Show {
-            return Err(kettle_ctl::show::show_failure(
+            return Err(Box::new(kettle_ctl::show::show_failure(
                 req.id,
                 kettle_media::FailureCode::BadParams,
-            ));
+            )));
         }
-        return Err(Response::err(
+        return Err(Box::new(Response::err(
             req.id,
             ec::BAD_PARAMS,
             "params must be an object",
-        ));
+        )));
     }
     Ok(AdmittedRequest {
         req,
@@ -460,13 +460,14 @@ fn prepare(
     mut request: AdmittedRequest,
     claim: Result<PeerClaim, UnverifiedReason>,
     capture: &PeerCapture,
-) -> Result<AdmittedRequest, Response> {
+) -> Result<AdmittedRequest, Box<Response>> {
     match request.method {
         Method::GetState => request.caller = CallerEvidence::check(claim, capture),
         Method::Show => {
             let params = std::mem::take(&mut request.req.params);
-            let show = kettle_ctl::show::ShowRequest::parse(params)
-                .map_err(|failure| kettle_ctl::show::show_failure(request.req.id, failure))?;
+            let show = kettle_ctl::show::ShowRequest::parse(params).map_err(|failure| {
+                Box::new(kettle_ctl::show::show_failure(request.req.id, failure))
+            })?;
             request.caller = CallerEvidence::check(claim, capture);
             let chain = request.caller.chain().and_then(Result::ok);
             let sender = capture
@@ -956,7 +957,7 @@ fn connection_loop(
             let (rtx, rrx) = crossbeam_channel::bounded::<Response>(1);
             let _ = tx.send(CtlServerMsg::Request {
                 conn_id,
-                request,
+                request: Box::new(request),
                 reply: rtx,
             });
             wake();
@@ -1215,7 +1216,7 @@ fn wait_for_poll(
         let (rtx, rrx) = crossbeam_channel::bounded::<Response>(1);
         let _ = tx.send(CtlServerMsg::Request {
             conn_id,
-            request: wait.read_screen_probe(pinned_pane.as_ref()),
+            request: Box::new(wait.read_screen_probe(pinned_pane.as_ref())),
             reply: rtx,
         });
         wake();

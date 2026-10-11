@@ -10696,6 +10696,7 @@ impl App {
         let kind = tr.text(match item.kind {
             kettle_media::MediaKind::Raster => kettle_i18n::Text::MediaViewerKindImage,
             kettle_media::MediaKind::Svg => kettle_i18n::Text::MediaViewerKindSvg,
+            kettle_media::MediaKind::Mermaid => kettle_i18n::Text::MediaViewerKindMermaid,
             _ => kettle_i18n::Text::MediaViewerKindMedia,
         });
         let sender = match &item.provenance {
@@ -21364,7 +21365,7 @@ impl App {
                     if !request.internal_probe() && !ctl_method_is_pure_read(request.method()) {
                         needs_redraw = true;
                     }
-                    self.handle_ctl_request(ws, event_loop, conn_id, request, reply);
+                    self.handle_ctl_request(ws, event_loop, conn_id, *request, reply);
                 }
                 CtlServerMsg::Disconnect { conn_id } => {
                     let panes = self

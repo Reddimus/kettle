@@ -57,13 +57,13 @@ pub fn tool_specs(selection: ToolSelection) -> Vec<Value> {
 fn show_tool_spec() -> Value {
     json!({
         "name": "kettle_show",
-        "description": "Send an image or SVG file to the media shelf of the Kettle pane this \
-            session runs in, where the user can open it. Returns delivery status and metadata, \
+        "description": "Send an image, SVG or Mermaid diagram file to the media shelf of the \
+            Kettle pane this session runs in, where the user can open it. Returns delivery status and metadata, \
             not the image contents.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "absolute path of the image or SVG file"},
+                "path": {"type": "string", "description": "absolute path of the image, SVG or Mermaid file"},
                 "title": {"type": "string", "maxLength": kettle_ctl::show::MAX_SHOW_TITLE_BYTES, "description": "title for the shelf item (default: the file name)"},
                 "key": {"type": "string", "minLength": 1, "maxLength": kettle_ctl::show::MAX_SHOW_KEY_BYTES, "description": "replace the shelf item with this key instead of adding another (default: the file's path)"}
             },
@@ -952,7 +952,8 @@ mod tests {
         assert_eq!(schema["required"], json!(["path"]));
         assert_eq!(schema["additionalProperties"], json!(false));
         let properties: Vec<_> = schema["properties"].as_object().unwrap().keys().collect();
-        assert_eq!(properties, ["key", "path", "title"]);
+        // In the order the schema lists them, as JSON objects keep it.
+        assert_eq!(properties, ["path", "title", "key"]);
         for name in names(ToolSelection::Full) {
             assert!(
                 validate_tool_call(

@@ -6214,13 +6214,19 @@ wait
         assert!(s.contains("\"cols\":80"));
     }
 
-    /// The event types replaced `serde_json::Value` maps, whose keys serialize
-    /// in alphabetical order. Consumers may compare lines byte for byte, so
-    /// every event must keep the bytes those maps produced.
+    /// The event types replaced `serde_json::Value` maps, whose keys then
+    /// serialized in alphabetical order. Consumers may compare lines byte for
+    /// byte, so every event must keep the bytes those maps produced, whatever
+    /// order Kettle's JSON maps keep now.
     #[test]
     fn json_events_keep_the_bytes_of_the_value_maps_they_replaced() {
         fn line(value: serde_json::Value) -> String {
-            format!("{value}\n")
+            let sorted: std::collections::BTreeMap<_, _> = value
+                .as_object()
+                .expect("an event is an object")
+                .iter()
+                .collect();
+            format!("{}\n", serde_json::to_string(&sorted).unwrap())
         }
 
         let mut outputter = Outputter::new(OutputMode::Json);

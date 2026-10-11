@@ -71,6 +71,29 @@ def tracked_entries(root: Path) -> list[tuple[str, str, str]]:
     return entries
 
 
+def exact_paths(root: Path, paths: list[str]) -> set[str]:
+    """The paths `.gitattributes` marks `-text`: kept byte for byte on
+    purpose (an upstream license, a terminal capture), so the LF, final
+    newline and trailing-whitespace rules are not theirs."""
+    if not paths:
+        return set()
+    result = subprocess.run(
+        ["git", "check-attr", "-z", "--stdin", "text"],
+        cwd=root,
+        check=True,
+        input=b"".join(path.encode("utf-8") + b"\0" for path in paths),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    fields = result.stdout.split(b"\0")
+    exact: set[str] = set()
+    for at in range(0, len(fields) - 2, 3):
+        path, _, value = fields[at : at + 3]
+        if value == b"unset":
+            exact.add(path.decode("utf-8"))
+    return exact
+
+
 def git_blob_id(data: bytes, object_format: str) -> str:
     try:
         digest = hashlib.new(object_format, usedforsecurity=False)
@@ -157,7 +180,7 @@ def audit_binary(path: str, data: bytes) -> list[str]:
     return []
 
 
-def audit_text(path: str, data: bytes) -> tuple[str | None, list[str]]:
+def audit_text(path: str, data: bytes, exact: bool = False) -> tuple[str | None, list[str]]:
     errors: list[str] = []
     try:
         text = data.decode("utf-8")
@@ -165,6 +188,10 @@ def audit_text(path: str, data: bytes) -> tuple[str | None, list[str]]:
         return None, [f"{path}: invalid UTF-8 at byte {error.start}"]
     if text.startswith("\ufeff"):
         errors.append(f"{path}: unexpected UTF-8 BOM")
+    # Kept byte for byte (`-text`): its line endings and white space are
+    # what it was given.
+    if exact:
+        return text, errors
     if "\r" in text:
         errors.append(f"{path}: CR/CRLF found; tracked text must use LF")
     if text and not text.endswith("\n"):
@@ -208,6 +235,7 @@ def local_markdown_links(root: Path, path: str, text: str) -> Iterable[tuple[str
 
 def audit(root: Path) -> dict[str, Any]:
     entries = tracked_entries(root)
+    exact = exact_paths(root, [relative for _, _, relative in entries])
     object_format = str(git(root, "rev-parse", "--show-object-format")).strip()
     head = str(git(root, "rev-parse", "HEAD")).strip()
     errors: list[str] = []
@@ -260,7 +288,7 @@ def audit(root: Path) -> dict[str, Any]:
         elif is_binary:
             errors.extend(audit_binary(relative, data))
         else:
-            text, text_errors = audit_text(relative, data)
+            text, text_errors = audit_text(relative, data, relative in exact)
             errors.extend(text_errors)
             if text is not None:
                 errors.extend(audit_structure(relative, text))
