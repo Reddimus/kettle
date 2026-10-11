@@ -6249,6 +6249,7 @@ fn lane_action_hit(action: &Action) -> Option<kettle_render::MediaLaneHit> {
         Action::PreviewCopy => Some(Hit::Copy),
         Action::PreviewReload => Some(Hit::Reload),
         Action::VideoPlay => Some(Hit::Play),
+        Action::VideoMute => Some(Hit::Sound),
         Action::PreviewZoomIn => Some(Hit::ZoomIn),
         Action::PreviewZoomOut => Some(Hit::ZoomOut),
         Action::PreviewFit => Some(Hit::Fit),
@@ -22587,6 +22588,7 @@ impl App {
             | Action::PreviewCopy
             | Action::PreviewReload
             | Action::VideoPlay
+            | Action::VideoMute
             | Action::PreviewZoomIn
             | Action::PreviewZoomOut
             | Action::PreviewFit => {
