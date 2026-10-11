@@ -27,3 +27,5 @@ required-features = ["test-worker"]
 [features]
 # Test fixture only. No production worker or spawn client lives in P1.
 test-worker = []
+# The entry points the fuzz targets (fuzz/) call. Never in a shipped build.
+fuzzing = []
