@@ -958,13 +958,13 @@ fn a_replys_source_goes_with_its_kind() {
     assert!(decode(&bytes, Direction::WorkerToParent).is_err());
 }
 
-/// Neither end reads the other version's frames: a version 5 worker or
+/// Neither end reads the other version's frames: a version 6 worker or
 /// parent is restarted, never half understood, and so is a newer one.
 #[test]
 fn version_skew_either_way_is_restart_required() {
-    assert_eq!(PROTOCOL_VERSION, 6);
+    assert_eq!(PROTOCOL_VERSION, 7);
     for (_, direction, golden) in vectors() {
-        for version in [1u16, 2, 3, 4, 5, 7] {
+        for version in [1u16, 2, 3, 4, 5, 6, 8] {
             let mut skewed = bytes(golden);
             skewed[4..6].copy_from_slice(&version.to_le_bytes());
             assert_eq!(
@@ -1198,6 +1198,7 @@ fn a_playback_session_s_frames_roundtrip_in_their_direction() {
         max_height: 720,
         start_ms: 4_500,
         max_fps_milli: 30_000,
+        audio: AudioRequest::Muted,
     });
     let opened = Frame::Opened(Opened {
         info: video_info(),
@@ -1205,6 +1206,7 @@ fn a_playback_session_s_frames_roundtrip_in_their_direction() {
         height: 360,
         fps_milli: 30_000,
         start_ms: 4_500,
+        audio: AudioStatus::Ready,
     });
     let frame = Frame::VideoFrame(VideoFrame {
         seq: 7,
@@ -1231,6 +1233,14 @@ fn a_playback_session_s_frames_roundtrip_in_their_direction() {
             Frame::PlayCommand(PlayCommand::Close),
             Direction::ParentToWorker,
         ),
+        (
+            Frame::PlayCommand(PlayCommand::Mute),
+            Direction::ParentToWorker,
+        ),
+        (
+            Frame::PlayCommand(PlayCommand::Unmute),
+            Direction::ParentToWorker,
+        ),
         (opened.clone(), Direction::WorkerToParent),
         (frame.clone(), Direction::WorkerToParent),
         (
@@ -1243,6 +1253,10 @@ fn a_playback_session_s_frames_roundtrip_in_their_direction() {
         ),
         (
             Frame::PlayState(PlayState::Ended),
+            Direction::WorkerToParent,
+        ),
+        (
+            Frame::AudioState(AudioStatus::Unavailable),
             Direction::WorkerToParent,
         ),
     ] {
@@ -1271,6 +1285,7 @@ fn a_playback_session_opens_only_within_its_bounds() {
         max_height: 1080,
         start_ms: 0,
         max_fps_milli: MAX_PLAY_FPS_MILLI,
+        audio: AudioRequest::On,
     };
     assert!(good.validate().is_ok());
     // The room is a bound only: more pixels than a frame may have is fine.
@@ -1350,8 +1365,32 @@ fn a_playback_session_opens_only_within_its_bounds() {
         height: 360,
         fps_milli: 30_000,
         start_ms: 9_000,
+        audio: AudioStatus::DecoderSilent,
     };
     assert!(opened.validate().is_ok());
+    // Sound plays only from a video that has some.
+    let silent = VideoInfo {
+        has_audio: false,
+        ..video_info()
+    };
+    assert!(
+        Opened {
+            info: silent,
+            audio: AudioStatus::Ready,
+            ..opened
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(
+        Opened {
+            info: silent,
+            audio: AudioStatus::NoTrack,
+            ..opened
+        }
+        .validate()
+        .is_ok()
+    );
     assert!(
         Opened {
             start_ms: 9_001,
@@ -1378,12 +1417,19 @@ fn a_playback_session_opens_only_within_its_bounds() {
         (
             Frame::PlayCommand(PlayCommand::Close),
             Direction::ParentToWorker,
-            4,
+            6,
         ),
         (
             Frame::PlayState(PlayState::Ended),
             Direction::WorkerToParent,
             3,
+        ),
+        (Frame::PlayOpen(good.clone()), Direction::ParentToWorker, 3),
+        (Frame::Opened(opened), Direction::WorkerToParent, 6),
+        (
+            Frame::AudioState(AudioStatus::Off),
+            Direction::WorkerToParent,
+            6,
         ),
     ] {
         let mut bytes = encode(&frame, direction).unwrap();
@@ -1638,6 +1684,7 @@ fn a_session_reads_its_frames_into_one_buffer() {
             height: 1,
             fps_milli: 30_000,
             start_ms: 0,
+            audio: AudioStatus::Off,
         }),
         Direction::WorkerToParent,
     )

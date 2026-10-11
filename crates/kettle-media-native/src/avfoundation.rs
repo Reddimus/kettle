@@ -35,8 +35,8 @@ use kettle_media::video::{
     StillsPlan, VideoContainer, VideoDecoder, VideoInput, VideoPlayer,
 };
 use kettle_media::{
-    FailureCode, MAX_VIDEO_FPS_MILLI, MAX_VIDEO_SIDE, Opened, StillSample, VideoCodec, VideoInfo,
-    play_size,
+    AudioStatus, FailureCode, MAX_VIDEO_FPS_MILLI, MAX_VIDEO_SIDE, Opened, StillSample, VideoCodec,
+    VideoInfo, play_size,
 };
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
@@ -666,6 +666,7 @@ impl VideoPlayer for AvFoundation {
             height,
             fps_milli,
             start_ms,
+            audio: AudioStatus::silent(request.audio, info.has_audio),
         };
         opened.validate().map_err(|_| FailureCode::RenderParse)?;
         let coded = if info.rotation % 180 == 90 {

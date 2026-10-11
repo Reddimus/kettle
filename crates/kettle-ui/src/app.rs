@@ -11486,6 +11486,7 @@ impl App {
                 max_height: edge(room.1),
                 start_ms: start_ms.min(info.duration_ms),
                 max_fps_milli: kettle_media::MAX_PLAY_FPS_MILLI,
+                audio: kettle_media::AudioRequest::On,
             },
         ))
     }

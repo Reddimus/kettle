@@ -435,6 +435,7 @@ mod tests {
                     has_audio: false,
                     container: None,
                 },
+                audio: kettle_media::AudioStatus::NoTrack,
                 width: 2,
                 height: 1,
                 fps_milli: 10_000,

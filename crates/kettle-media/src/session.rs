@@ -573,8 +573,8 @@ mod tests {
     };
     use crate::wire::{read_frame, write_frame};
     use crate::{
-        BuildId, Failure, GuiActionWitness, NativePath, Ready, Source, VideoCodec, VideoFrame,
-        VideoInfo,
+        AudioRequest, AudioStatus, BuildId, Failure, GuiActionWitness, NativePath, Ready, Source,
+        VideoCodec, VideoFrame, VideoInfo,
     };
 
     fn build_id() -> BuildId {
@@ -724,6 +724,7 @@ mod tests {
             has_audio: false,
             container: None,
         },
+        audio: AudioStatus::NoTrack,
         width: 4,
         height: 2,
         fps_milli: 10_000,
@@ -818,7 +819,7 @@ mod tests {
                 PlayCommand::Pause => {
                     out(&mut stdout, &Frame::PlayState(PlayState::Paused));
                 }
-                PlayCommand::Heartbeat => {}
+                PlayCommand::Heartbeat | PlayCommand::Mute | PlayCommand::Unmute => {}
                 PlayCommand::Close => return WorkerExit::Code(0),
             }
         }
@@ -855,6 +856,7 @@ mod tests {
             max_height: 360,
             start_ms: 0,
             max_fps_milli: 30_000,
+            audio: AudioRequest::On,
         }
     }
 

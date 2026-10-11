@@ -14,7 +14,7 @@ use kettle_media::video::{
     DecodedStills, PlayGate, PlayRequest, Playback, StillsPlan, VideoContainer, VideoDecoder,
     VideoInput, VideoPlayer, sniff_video_container,
 };
-use kettle_media::{FailureCode, PathIdentity, VideoCodec, VideoInfo};
+use kettle_media::{AudioRequest, FailureCode, PathIdentity, VideoCodec, VideoInfo};
 use kettle_media_native::ffmpeg::Ffmpeg;
 
 mod support;
@@ -656,6 +656,7 @@ fn play(
             max_height: room.1,
             start_ms,
             max_fps_milli,
+            audio: AudioRequest::On,
         },
         later(),
     )
