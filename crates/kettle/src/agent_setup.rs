@@ -988,12 +988,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_version_probe_is_bounded() {
-        use std::os::unix::fs::PermissionsExt as _;
         let directory = tempfile::tempdir().unwrap();
         let script = |name: &str, body: &str| {
+            let source = directory.path().join(format!("{name}.sh"));
+            std::fs::write(&source, format!("#!/bin/sh\n{body}\n")).unwrap();
+            // Copied so that no child another test forks meanwhile holds it
+            // open for writing, which fails running it (ETXTBSY) on Linux.
             let path = directory.path().join(name);
-            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            kettle_test_support::copy_executable_fixture(&source, &path).unwrap();
             path
         };
         // Hands its output to a child that outlives it.
@@ -1050,18 +1052,19 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_printed_function_passes_arguments_untouched() {
-        use std::os::unix::fs::PermissionsExt as _;
         let directory = tempfile::tempdir().unwrap();
         // A stand-in Kettle at an awkward path that prints each argument on
         // a line of its own.
         let stand_in = directory.path().join("it's a $HOME `x` dir").join("kettle");
         std::fs::create_dir_all(stand_in.parent().unwrap()).unwrap();
+        let source = directory.path().join("stand-in.sh");
         std::fs::write(
-            &stand_in,
+            &source,
             "#!/bin/sh\nfor a in \"$@\"; do printf '[%s]\\n' \"$a\"; done\n",
         )
         .unwrap();
-        std::fs::set_permissions(&stand_in, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // Copied, as `script` copies, so no forked child holds it for writing.
+        kettle_test_support::copy_executable_fixture(&source, &stand_in).unwrap();
         let arguments = [
             "two words",
             "$HOME",
