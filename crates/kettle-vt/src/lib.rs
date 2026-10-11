@@ -45,7 +45,7 @@ pub mod sixel;
 pub use completion::{CompletionCandidate, CompletionKind, CompletionList, CompletionUpdate};
 pub use extract::{Chunk, DeferredGraphics, Extractor, PrivateOutputFilter, Progress, PromptKind};
 pub use graphics_limits::{GraphicsBudget, GraphicsLimits, GraphicsReservation};
-pub use image::{ImageData, PixelBuffer, Placed, PlacementParams};
+pub use image::{ImageData, ImageRefusal, PixelBuffer, Placed, PlacementParams};
 
 #[cfg(test)]
 mod tests {

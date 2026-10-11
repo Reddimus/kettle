@@ -828,8 +828,12 @@ and unknown nested enums are refused before any payload allocation; fence
 indices and every metadata bound; input caps, fonts and video options; the
 content digest changes with the content and each identity field (its framing
 is pinned against a value computed independently); build ID bounds and wire
-direction; the largest reply and its allocation budget; and streaming at exact
-boundaries and through interrupted reads. `tests/worker.rs` drives a
+direction; the largest reply and its allocation budget; streaming at exact
+boundaries and through interrupted reads; version 1 and version 3 frames of
+every kind are `RestartRequired`; an Auto job has tag 6; a typed reply is its
+media-kind byte followed by exactly the plain reply's payload, round-trips
+for every kind and streams after Ready, and an unknown kind or a typed reply
+in another direction is refused. `tests/worker.rs` drives a
 feature-gated stub worker (`media-test-worker`, a fixture, never shipped)
 through exact replies and reaping, handshake mismatch, an oversize frame,
 trailing payload bytes, a fence index out of range and truncation. The
@@ -901,7 +905,20 @@ the limit for a whole deadline does not; a worker over the limit while it
 exits after a complete reply is `RenderResource`, not a success, while one
 that exits 0 just as a measurement runs keeps its reply, as does any stop
 that ends after its own exit was seen; a footprint that cannot be measured
-fails closed; and exit codes map as documented. `tests/client.rs` (with `--features test-worker`) runs the
+fails closed; and exit codes map as documented. Typed replies: an Auto job
+returns the kind its worker reports, raster or SVG, after a clean exit; a
+plain reply cannot satisfy an Auto job, and a typed reply cannot change an
+explicitly requested kind (both `WorkerUnavailable`). `RenderControl`: a job
+cancelled or expired before it starts never starts a worker; cancelling
+before Ready or after the job is written kills and reaps the worker and
+retries nothing; the deadline covers waiting for another job's slot, both
+cold starts and the final clean exit; a worker that replied but lingers is
+killed at the deadline rather than after a five-second cleanup budget; a job
+interrupted while the worker file is still being checked starts no worker
+once the check ends, nor does one cancelled just as the check ends, before
+its caller looks again; a cancelled late start is reaped before another is
+admitted; and a cancelled worker that will not die is still counted as
+abandoned. `tests/client.rs` (with `--features test-worker`) runs the
 stub worker as a real process, copied under a name that picks its behavior: a
 job rendered; a worker that never answers tried twice within bounds; a 4 MiB
 job to a worker that never reads it, ended by the deadline; a reply followed
@@ -950,7 +967,14 @@ Ready arrives. On Linux, `/proc/<pid>/limits` shows the CPU, file-size, core,
 address-space and descriptor limits, and the worker's `/proc` entries are
 owned by root, so it is not dumpable (checked when not running as root). With
 `--features test-faults`, a job that panics leaves exactly
-`media worker panic` on stderr and no reply. The workspace commands do not
+`media worker panic` on stderr and no reply. An Auto job's reply names what
+it rendered, a PNG as raster and an SVG as SVG, prose is
+`UnsupportedMedia`, and an explicit kind's reply stays the plain frame. With
+`test-faults`, a job can pause either side of its classification: a 2.2 s
+pause after it ends a raster job, explicit or Auto, at the watchdog (exit 4)
+while an SVG job of either kind answers; and two 1.2 s pauses either side of
+an Auto raster job's classification end it too, while one alone does not, so
+learning the kind does not restart the clock. The workspace commands do not
 enable that feature, so `just media-protocol-test` and ci.yml run it.
 
 Red checks: no sweep, a sweep after the hook or not first in its function,
@@ -977,7 +1001,27 @@ keeps it pure blue. An 8x8 box fits a 4x2 image at 8x4; a crop in box
 coordinates is transparent where the centered image does not reach; a box
 over the rendered edge or a crop outside it is `BadParams`. A file's digest
 covers its bytes and the open file's identity, the same bytes inline carry
-none, and kinds other than raster and SVG are `UnsupportedMedia` for now.
+none, and kinds other than raster, SVG and Auto are `UnsupportedMedia` for
+now.
+
+Unit tests in `src/auto.rs` classify Auto jobs: a PNG is raster whatever the
+file is called (`.svg`, `.bin`, no suffix), and a declared SVG with a
+byte-order mark, an XML declaration and a comment is SVG named `.png`; each
+reports its kind once. Replacing the file after it is loaded changes
+nothing: the loaded snapshot is classified and rendered, its digest and
+identity included. Prose, Mermaid source, an HTML page, bytes that are not
+UTF-8 and an empty file are `UnsupportedMedia` with no kind reported. SVG
+content one byte over the SVG cap is refused before it is parsed, as an
+explicit SVG job's is (`FileTooLarge` from a file, `TooLarge` inline), and a
+byte less renders; a file over the Auto cap is never read whole. The root
+decides first: an HTML page over the SVG cap, one with 257 attributes (past
+the parser's limit) and one whose comment mentions `<svg/>` are all
+`UnsupportedMedia`, and an SVG behind a document type declaration is SVG,
+refused as `RenderParse` as an explicit SVG job is. `src/svg/mod.rs` pins the
+root scan: byte-order mark and XML whitespace, namespace prefixes, comments,
+declarations with quoted `>` and internal subsets (whose comments,
+instructions and literals cannot fake the root, in either direction), and a
+prolog that never ends.
 
 `tests/hostile.rs` renders under a global allocator that records the largest
 single allocation each thread makes. A WebP whose 1x1 canvas holds a bitstream
@@ -3630,8 +3674,8 @@ tests connect over the actual transport: the test process to itself, and a
 shell-started grandchild that the server verifies through the shell up to
 itself. `process` tests read this process and a child, a killed child before it
 is reaped, and Linux `stat` lines with hostile command names. `ctl_server`
-tests pin the claim latch and that `get_state` alone carries the check over a
-real connection; App tests pin the nearest-pane match and that hints never
+tests pin the claim latch and that `get_state` and `show` alone carry the
+check over a real connection; App tests pin the nearest-pane match and that hints never
 verify; `mux` tests pin that the pane id exists before the child and that
 config cannot override `KETTLE_PANE_ID`/`KETTLE_PID`. For a live check, run
 `kettle ctl get_state --pid $KETTLE_PID` inside a pane and confirm `caller`
@@ -3646,6 +3690,119 @@ only the OS location to the real entry once, an alias to a missing entry leads
 nowhere, and a dead server's alias is withdrawn while its entry is left to its
 own registry. A real connection is accepted only when the kernel names the
 entry's pid and the live start matches its token.
+
+Showing media. `kettle-ctl`'s `show` tests: exactly one nonempty source;
+bounded, typed options (a key or title one byte over its cap is
+`too_large`); inline SVG moves rather than copies and is refused over 2 MiB;
+image bytes are standard base64, sized from their length and padding before
+anything is decoded, and classified by the worker; a path must be absolute
+and attested by device and inode; params round-trip through the one parser
+for every source, and a request built in code that the parser would refuse
+is refused before it is sent; failures carry fixed codes, reasons and wording that
+never mentions full control; results name kinds and warnings by their wire
+words. `process` reads this test binary's executable and refuses the same pid
+under another start; `identity` refuses as the peer a process that started
+after the accept under a reused pid. Display discovery over scripted registries tries only
+the Kettle named or enclosing, then a `KETTLE_PID` entry that records its
+start, and otherwise ends in `NotInKettle` having connected nowhere, while
+control discovery still falls back. The `method` table classifies `show` as
+the one Display method. `ctl_server` answers a malformed `show`, non-object
+params included, on its connection thread in `show`'s own wording and hands the App a valid one parsed, its params moved, its
+sender named by the kernel with its executable, and its caller checked. The
+program that asked is the one that ran Kettle's own command line, when the
+sender's checked ancestry starts at it; any other sender asked for itself.
+`kettle-ctl`'s `signing` tests (macOS): Apple's own `sleep` meets the
+Apple-issued requirement as `com.apple.sleep`, signed by `macOS Software
+Signing` with no team; a requirement it does not meet, a test binary's ad-hoc
+signature and another process on its pid are refused; a null reference is
+never released; an exec changes a process's audit token though its pid and
+start stay; and every requirement Kettle checks parses. A signed program's
+path is the one its signature was checked against. Apple is named only for
+Apple's own code, never for a third party's signature without a team. The
+kernel's validity flag and the code-directory match need a program whose
+signature broke after it started, which CI cannot make;
+on a Developer ID build, Claude Code (236 MB) validates as `Anthropic PBC
+(Q6L2SF6YDW)` in about 2 ms after the first check in a process, which takes
+0.2 to 0.5 s. A signer reads as its certificate's name, or Apple for Apple's
+own code. The viewer's sender line finds its program's path and signer in
+any language's word order, whatever they hold, and a line too narrow even for
+the path's last segment shortens around the signer, which stays whole. In
+`kettle-ui`'s `media` module, `route` tests: the nearest live pane ancestor
+in any window wins; a reused pid is not an ancestor; a verified caller keeps
+its pane whatever it asks for; only full control names a pane for an
+unplaced caller; a hint routes, unverified, only when it names this Kettle
+and a live pane; nothing else routes. `queue` tests: one render at a time in
+arrival order; one waiting push per sender, the newest keeping its place;
+senders are panes or processes (pid and start), never connections; a full
+queue is busy; a push past its deadline never starts. `shelf` tests: newest
+first, a key replacing in place with its id; a full shelf drops the least
+recently viewed item, never the visible one; evicted pixels keep the item;
+the `list_panes` report holds no pixels. A push cancelled after its render
+finished stays cancelled and publishes nothing, and a lane thread that ends,
+by a return or a panic, closes its result channel before it wakes the App.
+The shelf counts unseen items, and a replaced item is unseen again unless it
+is the one on screen.
+
+The media viewer (`kettle-render`'s `media_viewer` tests) sits inside its
+pane with its controls on one header row and the sender on a line of its own
+under kind and size; a sender line too long for the viewer shortens the
+program's path from its middle, keeping its last segment and who signed it, needs no browsing buttons for one
+item, fits its image centered and never enlarged, keeps the image's shape
+within half a pixel at one scale and lands on whole pixels inside its area (a
+sweep of wide and tall sizes under whole and fractional overlay metrics; an
+image too thin to fit keeps one pixel),
+maps presses to previous, next, close,
+inside and outside, has no geometry in a pane too small or with a degenerate
+cell, and bounds and clips its checkerboard. Drift tests keep the viewer's
+shaped text in the retained chrome damage key, so browsing repaints its
+labels, and reshape it on a font reload; a font-system test shows an
+invalidated line takes the new family though its text is unchanged.
+`kettle-ui` tests pin that the viewer takes only Esc and the arrows, that the
+titlebar badge counts unseen items only, and that both the native and the
+ctl press paths reach the viewer before the tab bar, the update banner, the
+receipt or the terminal, and only the primary button acts. A Back or
+Forward press stops at the viewer, a modal or a context menu, and a release
+reaches the terminal only after a press it wrote (one the search bar kept back
+does not count), once. Wheel motion over
+the viewer is dropped before the accumulator banks it. A confirmation, a
+context menu, or any other modal closes it, as does a resize that leaves its
+pane too small to draw it, and the receipt is hidden under it. The shelf's
+shortcut closes any open viewer whatever key it is bound to, ahead of Esc and
+the arrows, a bare modifier leaves the viewer open, and the shortcut runs
+once per press. Its accessibility
+node says the item's place on the shelf and a release, and enters the
+accessibility key so browsing republishes it. For a live check (macOS, worker signed),
+show a PNG and an SVG, run `kettle ctl perform_action --json
+'{"action":"open_media_shelf"}'` and take screenshots: the viewer shows the
+newest item with its title, kind, size and `1/2`; clicking `›` shows the
+other with its own text; `×` and a click in the margin outside close it; the
+window title counts unopened items. Real Esc and arrow presses need window
+focus, which the release's native checks cover.
+
+`kettle mcp --display`: unit tests pin that it offers exactly `kettle_show`
+(path required, no other property) and refuses every full-mode tool, that
+full mode does not offer it, that bad requests (no path, a relative path, a
+missing file, a directory, an over-long key, an empty title) are refused in
+the fixed wording before anything is sent, that a sent result is one plain
+line plus status-only structured content saying the model has not seen it,
+and that display discovery is private with no cache lifetime.
+`tests/mcp_stdio.rs` runs the real `kettle mcp --display` in both protocol
+eras: initialize's instructions name `kettle_show`, `tools/list` is exactly
+`[kettle_show]`, a `kettle_run` call is refused as an invalid tool, and
+`server/discover` is private. For a live check, run `kettle mcp --display`
+inside a pane of `kettle --agent-server off --agent-display on` and call
+`kettle_show` on an SVG: it lands verified in that pane. Titles lose control characters,
+separators and bidirectional formatting, bounded at 256 characters.
+`kettle-vt` hands a refused image's pixels back when only the account's room
+was missing. `kettle show`'s own tests pin its fixed failure wording, the
+absolute attested path and its confirmation. For a live check on macOS, the
+worker must carry Kettle's Developer ID signature: inside a pane of
+`kettle --agent-server off --agent-display on`, `kettle show plot.png` and
+`kettle show diagram.svg` are confirmed as raster and svg, verified; a text
+file is `unsupported_media`; with `KETTLE_PID` and `KETTLE_PANE_ID` stripped
+the pane is still found by ancestry; outside Kettle the command says it is
+not in Kettle, and naming this Kettle and pane through the environment from
+outside lands unverified.
 #### `kettle mcp`
 
 `kettle mcp --self-test` (in-process handshake +

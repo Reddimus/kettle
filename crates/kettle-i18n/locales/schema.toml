@@ -1409,3 +1409,49 @@ context = "crates/kettle-render/src/card_scene.rs: status inside an owned inline
 
 [messages.inline_card_unavailable]
 context = "crates/kettle-render/src/card_scene.rs: status inside an owned inline media card whose poster is unavailable."
+
+[messages.media_shelf_untitled]
+context = "crates/kettle-ui/src/app.rs ctl_show: title of a media shelf item an agent sent as inline image or SVG bytes without a title. The item is a picture; keep it short."
+
+[messages.palette_open_media_shelf]
+context = "crates/kettle-config/src/palette.rs: command palette entry that opens the focused pane's media shelf (images an agent sent) in the viewer."
+
+[messages.media_viewer_kind_image]
+context = "crates/kettle-ui/src/app.rs media_viewer_projection: kind of a raster item in the media viewer's detail line."
+
+[messages.media_viewer_kind_svg]
+context = "crates/kettle-ui/src/app.rs media_viewer_projection: kind of an SVG item in the media viewer's detail line, which lists kind, size and sender. SVG is a format name."
+
+[messages.media_viewer_kind_media]
+context = "crates/kettle-ui/src/app.rs media_viewer_projection: kind of any other media item in the media viewer's detail line."
+
+[messages.media_viewer_from_pane]
+context = "crates/kettle-ui/src/app.rs media_viewer_projection: the media viewer's sender line, under the kind and size, when Kettle verified the item came from a program running in this pane. It starts its own line."
+
+[messages.media_viewer_unverified]
+context = "crates/kettle-ui/src/app.rs media_viewer_projection: the media viewer's sender line when Kettle could not verify the sender is in this pane and macOS could not validate who signed it. program is the executable path the system reports, shortened from its middle when the line is too long; pid is its process id. It starts its own line."
+args = [{ name = "program", type = "str" }, { name = "pid", type = "u64" }]
+
+[messages.media_viewer_unverified_signed]
+context = "crates/kettle-ui/src/app.rs media_viewer_projection: the media viewer's sender line when Kettle could not verify the sender is in this pane but macOS validated who signed it. program is the executable path the system reports, shortened from its middle when the line is too long; pid is its process id; signer is the certificate's name, such as a company and its team id, or Apple. It starts its own line."
+args = [{ name = "program", type = "str" }, { name = "pid", type = "u64" }, { name = "signer", type = "str" }]
+
+[messages.media_viewer_unknown_program]
+context = "crates/kettle-ui/src/app.rs media_viewer_projection: stands in for program in media_viewer_unverified when the system did not report the sender's executable."
+
+[messages.media_viewer_hint]
+context = "crates/kettle-render/src/media_viewer.rs: footer of the media viewer when the shelf has several items. Esc is the key name; the arrows browse."
+
+[messages.media_viewer_hint_single]
+context = "crates/kettle-render/src/media_viewer.rs: footer of the media viewer when the shelf has one item. Esc is the key name."
+
+[messages.media_viewer_released]
+context = "crates/kettle-ui/src/app.rs media_viewer_projection: shown in the media viewer in place of an image whose pixels Kettle released to stay within its memory budget."
+
+[messages.media_viewer_a11y]
+context = "crates/kettle-ui/src/app.rs media_viewer_accessibility: screen-reader name of the open media viewer: the item's place on the shelf (index of count, counting from 1), its title and its detail line."
+args = [{ name = "index", type = "u64" }, { name = "count", type = "u64" }, { name = "title", type = "str" }, { name = "detail", type = "str" }]
+
+[messages.window_title_new_media]
+context = "crates/kettle-ui/src/app.rs desired_window_title: prefix of the OS window title while the focused pane's media shelf holds items the user has not opened. ASCII only: Linux window-manager title fonts may lack symbols. count is how many."
+args = [{ name = "count", type = "u64" }]

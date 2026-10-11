@@ -11,6 +11,8 @@ pub mod video;
 pub mod wire;
 pub use digest::content_digest;
 
+use std::time::Duration;
+
 /// Native path bytes, including the Windows UTF-16LE encoding when applicable.
 pub const MAX_PATH_BYTES: usize = 4 * 1024;
 /// Mermaid input is refused above this limit, never truncated.
@@ -73,7 +75,7 @@ pub const MAX_VERSION_BYTES: usize = 64;
 /// Hex digest of the source a binary was built from, up to 256 bits.
 pub const MAX_SOURCE_HASH_BYTES: usize = 64;
 /// No version negotiation. A header skew requires restart.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ValidationError {
@@ -124,12 +126,66 @@ pub fn rgba_len(w: u32, h: u32, edge: u32, bytes: usize) -> Result<usize, Valida
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativePath(Vec<u8>);
 impl NativePath {
+    /// `path` in the platform's native encoding (its bytes on Unix, UTF-16LE
+    /// on Windows), checked as [`NativePath::new`] checks it.
+    pub fn from_path(path: &std::path::Path) -> Result<Self, ValidationError> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt as _;
+            Self::new(path.as_os_str().as_bytes().to_vec())
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt as _;
+            Self::new(
+                path.as_os_str()
+                    .encode_wide()
+                    .flat_map(u16::to_le_bytes)
+                    .collect(),
+            )
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = path;
+            Err(ValidationError::InvalidPath)
+        }
+    }
+
     pub fn new(bytes: Vec<u8>) -> Result<Self, ValidationError> {
         validate_path(&bytes)?;
         Ok(Self(bytes))
     }
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
+    }
+    /// A display-only basename. Lossy conversion never changes the native
+    /// path used by the worker and performs no filesystem access.
+    pub fn file_name_lossy(&self) -> Option<String> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt as _;
+            std::path::Path::new(std::ffi::OsStr::from_bytes(self.as_bytes()))
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStringExt as _;
+            let units: Vec<u16> = self
+                .as_bytes()
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|unit| u16::from_le_bytes(*unit))
+                .collect();
+            std::path::PathBuf::from(std::ffi::OsString::from_wide(&units))
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            None
+        }
     }
 }
 pub(crate) fn validate_path(bytes: &[u8]) -> Result<(), ValidationError> {
@@ -184,6 +240,67 @@ mod native_path_tests {
     fn wide(s: &str) -> Vec<u8> {
         s.encode_utf16().flat_map(u16::to_le_bytes).collect()
     }
+    #[test]
+    fn display_basename_preserves_unicode_and_never_exposes_parent_directories() {
+        let base = if cfg!(windows) { "C:\\media" } else { "/media" };
+        let path =
+            NativePath::from_path(&std::path::Path::new(base).join("caf\u{e9}.svg")).unwrap();
+        assert_eq!(path.file_name_lossy().as_deref(), Some("caf\u{e9}.svg"));
+        let root = if cfg!(windows) { "C:\\" } else { "/" };
+        assert_eq!(
+            NativePath::from_path(std::path::Path::new(root))
+                .unwrap()
+                .file_name_lossy(),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn display_basename_does_not_modify_non_utf8_native_bytes() {
+        let bytes = b"/media/diagram-\xff.svg".to_vec();
+        let path = NativePath::new(bytes.clone()).unwrap();
+        assert_eq!(
+            path.file_name_lossy().as_deref(),
+            Some("diagram-\u{fffd}.svg")
+        );
+        assert_eq!(path.as_bytes(), bytes);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn display_basename_does_not_modify_unpaired_native_surrogates() {
+        let mut bytes = wide("C:\\media\\diagram-");
+        bytes.extend(0xd800u16.to_le_bytes());
+        bytes.extend(wide(".svg"));
+        let path = NativePath::new(bytes.clone()).unwrap();
+        assert_eq!(
+            path.file_name_lossy().as_deref(),
+            Some("diagram-\u{fffd}.svg")
+        );
+        assert_eq!(path.as_bytes(), bytes);
+    }
+
+    #[test]
+    fn from_path_is_the_native_encoding() {
+        let path = if cfg!(windows) {
+            "C:\\media\\caf\u{e9}.svg"
+        } else {
+            "/media/caf\u{e9}.svg"
+        };
+        let native = if cfg!(windows) {
+            wide(path)
+        } else {
+            path.as_bytes().to_vec()
+        };
+        assert_eq!(
+            NativePath::from_path(std::path::Path::new(path))
+                .unwrap()
+                .as_bytes(),
+            native
+        );
+    }
+
     #[test]
     fn windows_absolute_syntax_without_lossy_conversion() {
         for s in [
@@ -318,10 +435,14 @@ impl VideoStills {
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum JobKind {
+    /// The worker classifies a file snapshot by its bytes.
+    Auto,
     Mermaid,
     Svg,
     Raster,
-    MarkdownDiagrams { index: u8 },
+    MarkdownDiagrams {
+        index: u8,
+    },
     VideoProbe,
     VideoStills(VideoStills),
 }
@@ -331,8 +452,18 @@ impl JobKind {
             Self::Mermaid => MAX_MERMAID_BYTES,
             Self::Svg => MAX_SVG_BYTES,
             Self::MarkdownDiagrams { .. } => MAX_MARKDOWN_BYTES,
+            // The largest kind Auto can turn out to be; the worker applies
+            // the actual kind's own cap once it knows it.
+            Self::Auto => MAX_RASTER_BYTES.max(MAX_SVG_BYTES),
             _ => MAX_RASTER_BYTES,
         }
+    }
+    /// How long a worker may take from this job's arrival to its reply. An
+    /// Auto job starts with the longest of the kinds it can turn out to be,
+    /// then narrows to [`MediaKind::render_deadline`] of the actual kind,
+    /// still counted from its arrival.
+    pub fn render_deadline(self) -> Duration {
+        MediaKind::for_job(self).map_or(AUTO_RENDER_DEADLINE, MediaKind::render_deadline)
     }
     pub fn validate(self) -> Result<(), ValidationError> {
         match self {
@@ -344,6 +475,53 @@ impl JobKind {
         }
     }
 }
+/// An Auto job's deadline before it is classified: the longest of the kinds
+/// the worker classifies into (raster and SVG).
+const AUTO_RENDER_DEADLINE: Duration = Duration::from_secs(3);
+
+/// What a job turned out to be. For an Auto job the worker decides it from
+/// the bytes, never the file's name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaKind {
+    Raster,
+    Svg,
+    Mermaid,
+    Markdown,
+    Video,
+}
+impl MediaKind {
+    pub(crate) fn for_job(kind: JobKind) -> Option<Self> {
+        match kind {
+            JobKind::Auto => None,
+            JobKind::Raster => Some(Self::Raster),
+            JobKind::Svg => Some(Self::Svg),
+            JobKind::Mermaid => Some(Self::Mermaid),
+            JobKind::MarkdownDiagrams { .. } => Some(Self::Markdown),
+            JobKind::VideoProbe | JobKind::VideoStills(_) => Some(Self::Video),
+        }
+    }
+
+    /// The kind's wire word in control replies.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Raster => "raster",
+            Self::Svg => "svg",
+            Self::Mermaid => "mermaid",
+            Self::Markdown => "markdown",
+            Self::Video => "video",
+        }
+    }
+
+    /// How long a worker may take from a job's arrival to its reply once the
+    /// job is known to be this kind.
+    pub fn render_deadline(self) -> Duration {
+        match self {
+            Self::Raster => Duration::from_secs(2),
+            Self::Svg | Self::Mermaid | Self::Markdown | Self::Video => Duration::from_secs(3),
+        }
+    }
+}
+
 pub type Color = [u8; 4];
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Theme {
@@ -649,6 +827,17 @@ pub enum Warning {
     FontFallback = 2,
     SilentVideo = 3,
 }
+impl Warning {
+    /// The warning's wire word in control replies.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SourceDisplayClipped => "source_display_clipped",
+            Self::MissingGlyphs => "missing_glyphs",
+            Self::FontFallback => "font_fallback",
+            Self::SilentVideo => "silent_video",
+        }
+    }
+}
 /// Open-file identity included in content digests. Timestamps are seconds + nanoseconds
 /// relative to the Unix epoch; callers provide metadata from the held source descriptor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -680,6 +869,13 @@ pub struct Rendered {
     pub uncovered_scripts: Vec<String>,
     pub warnings: Vec<Warning>,
 }
+/// A rendered job and what it turned out to be.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RenderOutput {
+    pub kind: MediaKind,
+    pub rendered: Rendered,
+}
+
 impl Rendered {
     pub fn validate(&self) -> Result<(), ValidationError> {
         if rgba_len(

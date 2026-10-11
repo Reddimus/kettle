@@ -174,11 +174,12 @@ pub enum Method {
     PerformAction,
     RunCommand,
     WaitFor,
+    Show,
 }
 
 impl Method {
     /// Complete method table, used by tests and diagnostics.
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 18] = [
         Self::GetState,
         Self::ListTabs,
         Self::ListPanes,
@@ -196,6 +197,7 @@ impl Method {
         Self::PerformAction,
         Self::RunCommand,
         Self::WaitFor,
+        Self::Show,
     ];
 
     /// Parse the stable protocol-v1 method spelling.
@@ -218,6 +220,7 @@ impl Method {
             "perform_action" => Self::PerformAction,
             "run_command" => Self::RunCommand,
             "wait_for" => Self::WaitFor,
+            "show" => Self::Show,
             _ => return None,
         })
     }
@@ -242,6 +245,7 @@ impl Method {
             Self::PerformAction => "perform_action",
             Self::RunCommand => "run_command",
             Self::WaitFor => "wait_for",
+            Self::Show => "show",
         }
     }
 
@@ -266,6 +270,7 @@ impl Method {
             | Self::UiGeometry
             | Self::Subscribe
             | Self::WaitFor => Capability::Read,
+            Self::Show => Capability::Display,
         }
     }
 
@@ -429,6 +434,10 @@ pub struct RpcError {
     pub code: String,
     /// Human-readable detail.
     pub message: String,
+    /// A fixed refinement of `code`, for codes that have one (a `show`
+    /// refused with `file_refused` says `not_found`, `permission`, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// A server→client event (only after `subscribe`). Distinguished from a
@@ -469,6 +478,7 @@ impl Response {
             error: Some(RpcError {
                 code: code.to_string(),
                 message: message.into(),
+                reason: None,
             }),
         }
     }
@@ -665,7 +675,7 @@ mod tests {
     /// to any of them is a deliberate edit here too.
     #[test]
     fn method_table_is_unique_and_classified() {
-        use Capability::{Mutate, Read};
+        use Capability::{Display, Mutate, Read};
         use Execution::{Connection, Ui};
         let table = [
             ("get_state", Read, Ui),
@@ -686,6 +696,8 @@ mod tests {
             ("perform_action", Mutate, Ui),
             ("run_command", Mutate, Ui),
             ("wait_for", Read, Connection),
+            // Grants no reads or mutations; answered after the render.
+            ("show", Display, Ui),
         ];
         assert_eq!(table.len(), Method::ALL.len());
         let mut names = std::collections::HashSet::new();
@@ -698,16 +710,14 @@ mod tests {
         }
     }
 
-    /// The Display capability arrives before any method uses it; `show`
-    /// lands with display admission.
+    /// `show` is the one method Display grants.
     #[test]
-    fn no_method_needs_display_yet() {
-        assert!(
-            Method::ALL
-                .iter()
-                .all(|method| method.capability() != Capability::Display)
-        );
-        assert_eq!(Method::from_name("show"), None);
+    fn show_is_the_only_display_method() {
+        let display: Vec<_> = Method::ALL
+            .iter()
+            .filter(|method| method.capability() == Capability::Display)
+            .collect();
+        assert_eq!(display, [&Method::Show]);
     }
 
     #[test]

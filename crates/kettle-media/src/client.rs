@@ -8,11 +8,12 @@
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError, TryLockError};
+use std::time::Instant;
 
 use crate::lifecycle::{self, Budgets};
-use crate::{BuildId, FailureCode, Job, Rendered};
+use crate::{BuildId, FailureCode, Job, RenderOutput, Rendered};
 
 /// After this many workers that would not die, media stays off for the life
 /// of this process: whatever stops them dying would stop the next one too.
@@ -149,6 +150,47 @@ pub trait WorkerPlatform: Send + Sync {
     fn guard_pipe_writes(&self) -> std::io::Result<()>;
 }
 
+/// Cancellation and an optional absolute deadline, shared with the job owner.
+/// Cancellation retains the running job's slot until cleanup ends.
+#[derive(Clone, Debug, Default)]
+pub struct RenderControl {
+    cancelled: Arc<AtomicBool>,
+    deadline: Option<Instant>,
+}
+
+impl RenderControl {
+    /// Includes queueing, file checks, both startup attempts and rendering.
+    pub fn with_deadline(deadline: Instant) -> Self {
+        Self {
+            deadline: Some(deadline),
+            ..Self::default()
+        }
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn interrupted(&self, now: Instant) -> bool {
+        self.is_cancelled() || self.deadline.is_some_and(|deadline| now >= deadline)
+    }
+
+    pub(crate) fn limit(&self, until: Instant) -> Instant {
+        self.deadline.map_or(until, |deadline| until.min(deadline))
+    }
+}
+
+/// Explicit cancellation is distinct from a rendering failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RenderError {
+    Cancelled,
+    Failure(FailureCode),
+}
+
 /// Answers whether media previews are available, without blocking the caller
 /// on the filesystem or a signature check, and renders one job at a time.
 pub struct WorkerClient {
@@ -276,16 +318,67 @@ impl WorkerClient {
     /// cleanup; jobs run one at a time. A worker that never becomes ready is
     /// retried once; after Ready nothing is retried.
     pub fn render(&self, job: &Job) -> Result<Rendered, FailureCode> {
-        let _one_at_a_time = self
-            .rendering
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        self.render_inner(job, None).map(|output| output.rendered)
+    }
+
+    /// Render off the UI thread with cancellation and one absolute deadline.
+    /// Interrupted requests never retry a cold startup. Cleanup retains the
+    /// existing bounded reaping and abandoned-worker policy.
+    pub fn render_with_control(
+        &self,
+        job: &Job,
+        control: &RenderControl,
+    ) -> Result<Rendered, RenderError> {
+        self.render_media_with_control(job, control)
+            .map(|output| output.rendered)
+    }
+
+    /// Render pixels and the actual content kind under one absolute deadline.
+    pub fn render_media_with_control(
+        &self,
+        job: &Job,
+        control: &RenderControl,
+    ) -> Result<RenderOutput, RenderError> {
+        let result = self.render_inner(job, Some(control));
+        if control.is_cancelled() {
+            Err(RenderError::Cancelled)
+        } else if control.interrupted(Instant::now()) {
+            Err(RenderError::Failure(FailureCode::RenderTimeout))
+        } else {
+            result.map_err(RenderError::Failure)
+        }
+    }
+
+    fn render_inner(
+        &self,
+        job: &Job,
+        control: Option<&RenderControl>,
+    ) -> Result<RenderOutput, FailureCode> {
+        let _one_at_a_time = if let Some(control) = control {
+            loop {
+                if control.interrupted(Instant::now()) {
+                    return Err(FailureCode::RenderTimeout);
+                }
+                match self.rendering.try_lock() {
+                    Ok(guard) => break guard,
+                    Err(TryLockError::Poisoned(error)) => break error.into_inner(),
+                    Err(TryLockError::WouldBlock) => std::thread::sleep(lifecycle::TICK),
+                }
+            }
+        } else {
+            self.rendering
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+        };
         self.shared.reap_abandoned();
         for attempt in 0..2 {
+            if control.is_some_and(|control| control.interrupted(Instant::now())) {
+                return Err(FailureCode::RenderTimeout);
+            }
             if self.shared.stuck.load(Ordering::Acquire) >= MAX_STUCK_WORKERS {
                 return Err(FailureCode::WorkerUnavailable);
             }
-            match lifecycle::attempt(&self.shared, &self.build_id, job, self.budgets) {
+            match lifecycle::attempt(&self.shared, &self.build_id, job, self.budgets, control) {
                 Err(lifecycle::NeverReady) if attempt == 0 => {}
                 Err(lifecycle::NeverReady) => return Err(FailureCode::RenderTimeout),
                 Ok(result) => return result,

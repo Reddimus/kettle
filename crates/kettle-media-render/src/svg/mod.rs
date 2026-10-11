@@ -20,8 +20,8 @@ mod sanitize;
 mod structure;
 
 use kettle_media::{
-    Crop, FailureCode, Job, MAX_SOURCE_LINE_BYTES, MAX_SOURCE_LINES, MAX_SVG_RENDERED_EDGE,
-    MAX_SVG_RENDERED_PIXELS, Rendered, Target, Warning, content_digest,
+    Crop, FailureCode, Job, JobKind, MAX_SOURCE_LINE_BYTES, MAX_SOURCE_LINES,
+    MAX_SVG_RENDERED_EDGE, MAX_SVG_RENDERED_PIXELS, Rendered, Target, Warning, content_digest,
 };
 use resvg::tiny_skia::{Pixmap, Transform};
 
@@ -35,9 +35,105 @@ pub(crate) fn prepare() {
 pub(crate) fn render(job: &Job) -> Result<Rendered, FailureCode> {
     let snapshot = source::load(&job.source, job.kind.input_cap())?;
     let text = std::str::from_utf8(&snapshot.bytes).map_err(|_| FailureCode::RenderParse)?;
+    render_parsed(job, &snapshot, text, &sanitize::parse(text)?)
+}
+
+/// Render an Auto job's snapshot if it is SVG: UTF-8 markup whose root
+/// element is `svg`, within the SVG input cap. Anything else is
+/// `UnsupportedMedia`, whatever its size and however hard it would be to
+/// parse: the root is found before the cap applies or the parser runs.
+/// `on_svg` runs once the snapshot is known to be SVG, before it is parsed.
+pub(crate) fn render_auto(
+    job: &Job,
+    snapshot: &source::Snapshot<'_>,
+    on_svg: impl FnOnce(),
+) -> Result<Rendered, FailureCode> {
+    let text = std::str::from_utf8(&snapshot.bytes).map_err(|_| FailureCode::UnsupportedMedia)?;
+    if root_element_name(text) != Some("svg") {
+        return Err(FailureCode::UnsupportedMedia);
+    }
+    snapshot.within(JobKind::Svg.input_cap())?;
+    on_svg();
+    let document = sanitize::parse(text)?;
+    // The parser's root is the element found above; anything else is a
+    // document it read differently, which is not one to render.
+    if document.root_element().tag_name().name() != "svg" {
+        return Err(FailureCode::RenderParse);
+    }
+    render_parsed(job, snapshot, text, &document)
+}
+
+/// The local name of the first element in `text`, past a byte-order mark and
+/// the prolog (the XML declaration, processing instructions, comments and a
+/// document type declaration), found by one bounded scan without parsing.
+/// `None` when `text` is not markup or its prolog never ends.
+fn root_element_name(text: &str) -> Option<&str> {
+    const XML_SPACE: [char; 4] = [' ', '\t', '\r', '\n'];
+    let mut rest = text.strip_prefix('\u{feff}').unwrap_or(text);
+    loop {
+        rest = rest.trim_start_matches(XML_SPACE);
+        if let Some(after) = rest.strip_prefix("<?") {
+            rest = &after[after.find("?>")? + 2..];
+        } else if let Some(after) = rest.strip_prefix("<!--") {
+            rest = &after[after.find("-->")? + 3..];
+        } else if let Some(after) = rest.strip_prefix("<!") {
+            rest = after_declaration(after)?;
+        } else {
+            let after = rest.strip_prefix('<')?;
+            let end = after
+                .find(|c: char| XML_SPACE.contains(&c) || c == '/' || c == '>')
+                .unwrap_or(after.len());
+            let name = &after[..end];
+            return Some(name.rsplit_once(':').map_or(name, |(_, local)| local));
+        }
+    }
+}
+
+/// What follows a `<!...>` declaration: its end is the first `>` outside
+/// quoted literals and an internal subset in brackets, where comments and
+/// processing instructions are skipped whole, whatever they contain.
+fn after_declaration(text: &str) -> Option<&str> {
+    let mut depth = 0_usize;
+    let mut rest = text;
+    loop {
+        let at = rest.find(['"', '\'', '[', ']', '>', '<'])?;
+        let c = rest[at..].chars().next()?;
+        let after = &rest[at + c.len_utf8()..];
+        rest = match c {
+            '"' | '\'' => &after[after.find(c)? + 1..],
+            '<' => {
+                if let Some(comment) = after.strip_prefix("!--") {
+                    &comment[comment.find("-->")? + 3..]
+                } else if let Some(instruction) = after.strip_prefix('?') {
+                    &instruction[instruction.find("?>")? + 2..]
+                } else {
+                    after
+                }
+            }
+            '[' => {
+                depth += 1;
+                after
+            }
+            ']' => {
+                depth = depth.saturating_sub(1);
+                after
+            }
+            '>' if depth == 0 => return Some(after),
+            _ => after,
+        };
+    }
+}
+
+/// Render `document`, parsed from `text`, the UTF-8 of `snapshot`.
+fn render_parsed(
+    job: &Job,
+    snapshot: &source::Snapshot<'_>,
+    text: &str,
+    document: &roxmltree::Document<'_>,
+) -> Result<Rendered, FailureCode> {
     // Sanitized (CSS resolved into attributes), then admitted on exactly
     // the text usvg will parse.
-    let sanitized = sanitize::write(&sanitize::parse(text)?)?;
+    let sanitized = sanitize::write(document)?;
     structure::admit(&sanitize::parse(&sanitized)?)?;
     let fonts = fonts::for_job(&job.fallback_fonts)?;
     let tree = crate::guarded(FailureCode::RenderParse, || {
@@ -325,6 +421,39 @@ mod tests {
             unpremultiply(vec![64, 32, 0, 128, 9, 9, 9, 0, 255, 255, 255, 255]),
             [128, 64, 0, 128, 0, 0, 0, 0, 255, 255, 255, 255]
         );
+    }
+
+    #[test]
+    fn the_root_is_found_past_the_prolog_without_parsing() {
+        for (text, root) in [
+            ("<svg/>", Some("svg")),
+            ("\u{feff} \r\n\t<svg width='1'>", Some("svg")),
+            ("<svg>", Some("svg")),
+            ("<svgx/>", Some("svgx")),
+            ("<s:svg xmlns:s='http://www.w3.org/2000/svg'/>", Some("svg")),
+            ("<?xml version='1.0'?><!-- <svg> --><html/>", Some("html")),
+            ("<?xml version='1.0'?>\n<!-- a > b -->\n<svg/>", Some("svg")),
+            (
+                "<!DOCTYPE svg PUBLIC '-//W3C//DTD SVG 1.1//EN' 'x>y'><svg/>",
+                Some("svg"),
+            ),
+            ("<!DOCTYPE html [<!ENTITY a '>'>]><html/>", Some("html")),
+            // Inside the subset, comments and instructions are opaque.
+            ("<!DOCTYPE html [<!-- ]><svg/> -->]><html/>", Some("html")),
+            ("<!DOCTYPE html [<?pi ]><svg/> ?>]><html/>", Some("html")),
+            ("<!DOCTYPE svg [<!-- ' -->]><svg/>", Some("svg")),
+            ("<!DOCTYPE svg [<!-- [ -->]><svg/>", Some("svg")),
+            ("<!DOCTYPE svg [<!ENTITY a \"]>\">]><svg/>", Some("svg")),
+            ("< svg/>", Some("")),
+            ("svg", None),
+            ("", None),
+            ("<!-- never closed <svg/>", None),
+            ("<?xml never closed <svg/>", None),
+            ("<!DOCTYPE never closed [<svg/>", None),
+            ("\u{a0}<svg/>", None),
+        ] {
+            assert_eq!(root_element_name(text), root, "{text:?}");
+        }
     }
 
     #[test]

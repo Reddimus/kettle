@@ -69,10 +69,14 @@ named regular files; only the requested collection face is inserted, with its
 index preserved and bounded metadata. The worker does no host font discovery
 and refuses embedded SVG/color/bitmap glyph formats. Actual shaped glyphs
 produce fallback and missing-script warnings; databases are isolated across
-jobs. Raster images and SVG are rendered; every other kind
-is refused as unsupported until its renderer lands. The client's `render` runs one job in a
+jobs. Raster images and SVG are rendered, and so is an Auto job: one held
+snapshot of a file, classified by its bytes as raster or SVG and rendered as
+that, with a typed reply that says which. Every other kind is refused as
+unsupported until its renderer lands. The client's `render` runs one job in a
 fresh worker under startup and job deadlines, with the worker in its own
-process group, killed before it is reaped; nothing in the GUI calls it yet. The byte layouts, digest
+process group, killed before it is reaped; `render_with_control` adds
+cancellation and one absolute deadline its caller owns. Nothing in the GUI
+calls them yet. The byte layouts, digest
 framing, availability codes and decisions are in
 [MEDIA-PROTOCOL.md](MEDIA-PROTOCOL.md).
 The campaign's ownership, distribution decisions and remaining acceptance
@@ -436,6 +440,44 @@ kettle-ui each pane records its child's identity right after spawning it,
 before anything on the UI thread can reap that child, and the App matches a
 checked chain against those identities across all windows. Only the
 connection thread builds the evidence an `AdmittedRequest` carries.
+
+`show` (kettle-ctl's `show` module) is parsed on that connection thread too,
+after admission, into an owned `ShowRequest`; with it the request carries its
+admission instant and the sender the kernel names, with the executable that
+process runs (`process::executable`, rechecked against the pid's start), and
+the program that asked: the sender, or for Kettle's own command line its
+checked parent, with the code signature `kettle_ctl::signing` validates on
+macOS. Every step is bound to the process's audit token, read again at the
+end, whose pid version changes when the process runs another program: the
+kernel's status for the running code (`CS_VALID`, kept only while every
+loaded page matched its code directory) and the code directory hash it runs,
+both from `csops_audittoken`; the file's signature and certificate chain
+checked against a requirement without hashing the file again and with no
+network lookup, before any signing information is read; and that file's code
+directory hash equal to the kernel's. The program's path shown is the one read
+inside that check. Requirements are Kettle's own constants, since one that
+fails to parse makes the Security framework throw past its C interface. In
+kettle-ui the `media` module routes it (`route`: the nearest live pane whose
+child is an ancestor, else full control's pane or a hint naming this
+Kettle, unverified), queues it (`queue`: one render, three waiting, one per
+sender, a deadline from admission), and renders it on the lane, one thread
+started on first use that drives `WorkerClient::render_media_with_control`.
+Each `Pane` owns its `Shelf`, so a shelf travels with its tab; completions
+come back through `UserEvent::MediaRendered`, the item's pixels are charged
+to the process preview account (releasing the least recently viewed off-screen
+pixels when it is full), and only then is the push answered.
+
+The user opens a shelf with `open_media_shelf`. `WindowState::media_viewer`
+names the pane and item; the App projects it into a
+`kettle_render::MediaViewerOverlay` (display text and pixels, never a path)
+and closes it when its pane leaves the active tab or becomes too small to
+hold it, the item leaves the shelf, or another modal opens. While it is open it takes every press and the
+wheel over it, ahead of the tab bar, and the paste receipt is not projected.
+kettle-render's `media_viewer` lays it out (`media_viewer_geometry`, shared
+with the App's hit testing), paints it into the menu layer, and draws its
+image through a lazily made image layer charged to the preview account, like
+card posters; its shaped text enters the retained chrome damage key and is
+reshaped when the font changes.
 
 ```mermaid
 graph LR
