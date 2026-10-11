@@ -13,7 +13,7 @@ use kettle_media::video::{
     DecodedStills, PlayGate, PlayRequest, StillsPlan, VideoContainer, VideoDecoder, VideoInput,
     VideoPlayer, sniff_video_container,
 };
-use kettle_media::{FailureCode, PathIdentity, VideoCodec, VideoInfo};
+use kettle_media::{AudioRequest, FailureCode, PathIdentity, VideoCodec, VideoInfo};
 use kettle_media_native::avfoundation::AvFoundation;
 
 mod support;
@@ -242,6 +242,7 @@ fn played(
                 max_height: room.1,
                 start_ms,
                 max_fps_milli,
+                audio: AudioRequest::On,
             },
             Instant::now() + Duration::from_secs(10),
         )
@@ -321,6 +322,7 @@ fn a_session_past_the_end_shows_the_last_frame() {
                     max_height: 36,
                     start_ms,
                     max_fps_milli,
+                    audio: AudioRequest::On,
                 },
                 Instant::now() + Duration::from_secs(10),
             )
@@ -354,6 +356,7 @@ fn a_webm_session_is_left_to_the_next_decoder() {
             max_height: 36,
             start_ms: 0,
             max_fps_milli: 30_000,
+            audio: AudioRequest::On,
         },
         Instant::now() + Duration::from_secs(10),
     );

@@ -28,9 +28,9 @@ turns it into an `ExternalRequest` with an `ExternalAttested` path or inline
 bytes, and Mermaid text or `kind: "mermaid"` selects the Mermaid job kind
 rather than Auto.
 
-## Wire version 6
+## Wire version 7
 
-The header is 11 bytes: `KMED`, u16 LE protocol version 6, a frame kind, then u32 LE payload
+The header is 11 bytes: `KMED`, u16 LE protocol version 7, a frame kind, then u32 LE payload
 length. No padding or compression is permitted. Binary data and UTF-8 strings have u32 LE
 byte lengths. Lists have u32 LE counts. Integers and f64 bit patterns use LE. Boolean and
 optional-value discriminants are exactly 0 or 1. Floats must satisfy the field validators.
@@ -46,11 +46,12 @@ platform refuses the other encoding.
 | 5 Rendered | Worker to parent | Width, height, RGBA blob, 32 digest bytes, optional path identity, display lines, fence count, optional index, fence sources, script names, warning codes, layout, optional exact source, optional video result |
 | 6 Failure | Worker to parent | One fixed error-code byte |
 | 7 DetectedRendered | Worker to parent | One media-kind byte, then exactly the Rendered payload |
-| 8 PlayOpen | Parent to worker | Worker source, max width u32, max height u32, start ms u64, max frame rate u32 |
-| 9 PlayCommand | Parent to worker | One command byte: 0 play, 1 pause, 2 heartbeat, 3 close |
-| 10 Opened | Worker to parent | Video result's fixed fields, width u32, height u32, frame rate u32, start ms u64 |
+| 8 PlayOpen | Parent to worker | Worker source, max width u32, max height u32, start ms u64, max frame rate u32, sound byte: 0 off, 1 on, 2 muted |
+| 9 PlayCommand | Parent to worker | One command byte: 0 play, 1 pause, 2 heartbeat, 3 close, 4 mute, 5 unmute |
+| 10 Opened | Worker to parent | Video result's fixed fields, width u32, height u32, frame rate u32, start ms u64, sound status byte |
 | 11 VideoFrame | Worker to parent | Sequence u64, presentation ms u64, width u32, height u32, RGBA blob |
 | 12 PlayState | Worker to parent | One state byte: 0 playing, 1 paused, 2 ended |
+| 13 AudioState | Worker to parent | One sound status byte: the session's sound changed from what Opened said |
 
 Job-kind tags 0 through 7 are Mermaid, Svg, Raster, MarkdownDiagrams, VideoProbe,
 VideoStills, Auto and CachedThumbnail. An Auto job asks the worker to classify the source by
@@ -65,6 +66,13 @@ a labels boolean. Single-frame time requires count 1, start 0 and no end time. I
 times must be finite, nonnegative and ordered. The still-count cap is 16. A worker job's
 edge cap is 4096, room for a lane's poster or sheet; the video-frame contract holds a
 model's own requests to 2560 before they become jobs.
+
+Sound status tags 0 through 5 are Ready (the video's own sound plays with it,
+unless muted), NoTrack (the video has none), DecoderSilent (the decoder plays
+no sound: ffmpeg's playback is silent), Unsupported (its sound cannot be
+played here), Unavailable (this machine's output could not play it) and Off
+(none was asked for). An Opened that says Ready for a video without sound is
+refused. A sound byte asks for sound and starts none: only Play makes a sound.
 
 A video reply, and only a video reply, ends with a video result (its flag 1; every other
 reply writes 0): duration ms u64, width and height u32 as shown, rotation u16 (0, 90, 180
@@ -477,11 +485,12 @@ write the parent held past that included) answers `RenderTimeout`, and its
 watchdog ends it a second later if that answer is held up too.
 
 The parent then sends commands, one byte each and nothing larger: Play and
-Pause, answered with the state they leave the session in, Heartbeat, and Close.
-A thread of their own reads them from the moment the worker is confined, the
-decoder's opening included, and keeps the latest Play or Pause and when the
-last command came rather than queueing them behind frames, so none waits on
-a write, a full queue or the opening. Play and Pause also move the
+Pause, answered with the state they leave the session in, Heartbeat, Close,
+and Mute and Unmute, which neither play nor pause. A thread of their own
+reads them from the moment the worker is confined, the decoder's opening
+included, and keeps the latest Play or Pause, the latest Mute or Unmute, and
+when the last command came rather than queueing them behind frames, so none
+waits on a write, a full queue or the opening. Play and Pause also move the
 decoder's gate as the reader hears them, and Close or the parent leaving ends
 it, whatever the session's thread is doing: the gate follows the latest
 command, and after a Pause only a frame already begun finishes.

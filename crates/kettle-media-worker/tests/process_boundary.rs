@@ -1187,6 +1187,7 @@ fn play_open(path: &std::path::Path, room: (u32, u32), start_ms: u64) -> Frame {
         max_height: room.1,
         start_ms,
         max_fps_milli: 30_000,
+        audio: kettle_media::AudioRequest::On,
     })
 }
 

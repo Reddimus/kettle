@@ -139,7 +139,8 @@ impl Asked {
                 heard.play = Some(play);
             }
             PlayCommand::Close => heard.closed = true,
-            PlayCommand::Heartbeat => {}
+            // No sound plays here yet: muting changes nothing but the lease.
+            PlayCommand::Heartbeat | PlayCommand::Mute | PlayCommand::Unmute => {}
         }
     }
 
@@ -690,6 +691,7 @@ mod tests {
             height,
             fps_milli,
             start_ms: 0,
+            audio: kettle_media::AudioStatus::NoTrack,
         }
     }
 
@@ -1553,6 +1555,7 @@ mod faults {
                 height,
                 fps_milli: self.fps_milli,
                 start_ms: next * 1_000_000 / fps_milli,
+                audio: kettle_media::AudioStatus::silent(request.audio, info.has_audio),
             };
             opened.validate().map_err(|_| FailureCode::BadParams)?;
             Ok(Playback {
