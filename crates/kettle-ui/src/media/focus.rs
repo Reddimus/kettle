@@ -1,6 +1,7 @@
 //! A preview lane holding the keyboard (`focus_preview`). While it does,
-//! every key is the lane's: a few move, zoom, fit, page or copy what it
-//! shows, Esc gives the keyboard back to the terminal, and every other key
+//! every key is the lane's: a few move, zoom, fit, page, copy what it shows
+//! or play a video's silent preview, Esc gives the keyboard back to the
+//! terminal, and every other key
 //! and chord, Enter, digits and the application's shortcuts included, does
 //! nothing, so none reaches the program in the pane by accident.
 
@@ -28,6 +29,8 @@ pub(crate) enum PreviewKey {
     /// Page Up and Page Down.
     Page(i32),
     Copy,
+    /// Start or stop a video's silent preview, as Space.
+    Play,
     /// Nothing: the key is the lane's all the same.
     Swallow,
 }
@@ -35,7 +38,7 @@ pub(crate) enum PreviewKey {
 impl PreviewKey {
     /// Whether the key acts once a press: holding it does not repeat.
     pub(crate) fn once(self) -> bool {
-        matches!(self, Self::Exit | Self::Copy | Self::Fit)
+        matches!(self, Self::Exit | Self::Copy | Self::Fit | Self::Play)
     }
 }
 
@@ -49,6 +52,7 @@ pub(crate) fn preview_key(key: &Key, mods: ModifiersState) -> PreviewKey {
     let shift = mods.shift_key();
     match key {
         Key::Named(NamedKey::Escape) => PreviewKey::Exit,
+        Key::Named(NamedKey::Space) if !shift => PreviewKey::Play,
         Key::Named(arrow) if !shift => match arrow {
             NamedKey::ArrowLeft => PreviewKey::Move(-1, 0),
             NamedKey::ArrowRight => PreviewKey::Move(1, 0),
@@ -77,10 +81,9 @@ mod tests {
         Key::Character(text.into())
     }
 
-    /// Esc, the arrows, Page Up and Page Down, `+`, `-`, `0` and `c` act;
-    /// Shift only makes `+`,
-    /// and with Ctrl, Alt or Command held nothing acts. Enter, digits, y and
-    /// n, Tab and every other key are swallowed.
+    /// Esc, the arrows, Page Up and Page Down, `+`, `-`, `0`, `c` and Space
+    /// act; Shift only makes `+`, and with Ctrl, Alt or Command held nothing
+    /// acts. Enter, digits, y and n, Tab and every other key are swallowed.
     #[test]
     fn a_focused_lane_takes_a_few_keys_and_swallows_the_rest() {
         let none = ModifiersState::empty();
@@ -124,10 +127,18 @@ mod tests {
         assert_eq!(preview_key(&character("0"), none), PreviewKey::Fit);
         assert_eq!(preview_key(&character("c"), none), PreviewKey::Copy);
         assert_eq!(preview_key(&character("C"), shift), PreviewKey::Swallow);
+        assert_eq!(
+            preview_key(&Key::Named(NamedKey::Space), none),
+            PreviewKey::Play
+        );
+        assert!(PreviewKey::Play.once());
+        assert_eq!(
+            preview_key(&Key::Named(NamedKey::Space), shift),
+            PreviewKey::Swallow
+        );
         for key in [
             Key::Named(NamedKey::Enter),
             Key::Named(NamedKey::Tab),
-            Key::Named(NamedKey::Space),
             Key::Named(NamedKey::Backspace),
             character("1"),
             character("9"),

@@ -204,7 +204,17 @@ Reports that fit any of these are welcome:
   client made to the lane, and kept only with the item's digest; once a
   file changed, nothing more is read for that item, whether its lane closes
   or not, until a reload. Those pixels are charged to the same account, never evict an
-  item's, and go with their item, lane or pane.
+  item's, and go with their item, lane or pane. A video's silent preview
+  re-reads the file the same way, in the sandboxed worker: one stills job
+  under the item's authorization, only on the user's own gesture (a press
+  or Space in a focused lane), never while a control request or a Lua
+  script's action is handled and never for a file found changed (a hover
+  loop, `video-preview-hover`, only plays frames such a preview left, and
+  reads nothing); its reply is refused from its header past
+  the size of the eight-frame sheet it asked for, checked to be that sheet,
+  kept only with the item's digest, charged to the same account, and held
+  by the lane, never the item, until the lane closes, shows another item or
+  the item changes. It plays no sound.
   While the user has given a lane the keyboard (`focus_preview`), no key
   pressed, chord, input-method text or control client's
   `send_keys`/`send_text` reaches a pane in that window; getting one

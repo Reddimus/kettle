@@ -311,8 +311,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Agents and `kettle show` can show a video: it lands as its poster, the
   middle frame, with a play glyph and its length on its card, and the lane,
   `kettle show` and `kettle_show`'s result say its size, codec, length and
-  sound. Nothing plays inside Kettle yet, and the model has still not seen
-  it. Quick select and the menus offer common video files for a preview.
+  sound. It plays only as the silent preview below, and the model has
+  still not seen it. Quick select and the menus offer common video files for
+  a preview.
   Without a decoder for it, the notice says to install ffmpeg.
 - The media worker confines itself before it reads a job: to the job's own
   files, a trusted video decoder's own programs, and nothing to write or
@@ -326,6 +327,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   file: a clone where the disk allows, otherwise a copy that leaves 2 GiB
   free, owner-only, quarantined on macOS, up to 4 GiB, and deleted when
   Kettle exits. It opens paused.
+- A video's lane plays a silent preview when you press its `▶` (Space while
+  the lane has the keyboard, or the `preview_play` action): eight frames from
+  across the video, shown in turn, each for its share of the length, until
+  `■` stops it. The sandboxed worker makes them within two seconds, or the
+  poster stays and the lane says why. With `video-preview-hover = on`, the
+  pointer resting on the picture loops a preview you played for up to four
+  seconds, unless `reduce-motion` (by default, macOS's Reduce Motion) says
+  otherwise. It never starts on its own, never for a control client or a Lua
+  script, and never makes a sound.
 - `kettle ctl get_state` says which video decoders a worker uses, under
   `media.video`: AVFoundation then your ffmpeg on macOS, your ffmpeg on
   Linux, and that no GStreamer is used.

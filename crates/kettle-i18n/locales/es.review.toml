@@ -29,6 +29,7 @@ palette_preview_source = "draft"
 palette_preview_canvas = "draft"
 palette_preview_copy = "draft"
 palette_preview_reload = "draft"
+palette_preview_play = "draft"
 palette_preview_zoom_in = "draft"
 palette_preview_zoom_out = "draft"
 palette_preview_fit = "draft"
@@ -75,6 +76,14 @@ media_lane_notice_copy_busy = "draft"
 media_lane_notice_rendering = "draft"
 media_lane_notice_render_failed = "draft"
 media_lane_notice_changed = "draft"
+media_lane_a11y_play_preview = "draft"
+media_lane_a11y_stop_preview = "draft"
+media_lane_notice_preview_loading = "draft"
+media_lane_notice_preview_playing = "draft"
+media_lane_notice_preview_failed = "draft"
+media_lane_notice_preview_timed_out = "draft"
+media_lane_notice_preview_needs_decoder = "draft"
+media_lane_notice_preview_needs_sandbox = "draft"
 window_title_new_media = "draft"
 card_a11y = "draft"
 card_a11y_open = "draft"
@@ -627,11 +636,13 @@ keys = [
     "media_lane_a11y_fit",
     "media_lane_a11y_next",
     "media_lane_a11y_next_diagram",
+    "media_lane_a11y_play_preview",
     "media_lane_a11y_previous",
     "media_lane_a11y_previous_diagram",
     "media_lane_a11y_reload",
     "media_lane_a11y_rendered",
     "media_lane_a11y_source",
+    "media_lane_a11y_stop_preview",
     "media_lane_a11y_zoom_in",
     "media_lane_a11y_zoom_out",
     "menu_a11y_terminal",
