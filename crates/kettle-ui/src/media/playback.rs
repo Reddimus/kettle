@@ -11,12 +11,18 @@
 //! lane cannot be seen the session pauses, and it stays paused once the lane
 //! shows again, until the user plays it. The playback, and its session, end
 //! with the lane, its item, or its pane.
+//!
+//! Its sound is the session's to say: heard, or none and why, which stays
+//! once the session goes. The user's mute holds across the playback's
+//! sessions, seeks included, and a new item starts heard. On macOS only
+//! Apple's decoder plays sound, so a session asking for it gets that decoder
+//! alone; one it turns down is opened again, once, silent, for ffmpeg.
 
 use std::time::Instant;
 
 use kettle_core::{GraphicsBudget, ImageData, ImageRefusal};
 use kettle_media::session::{PlaySession, SessionFrame, SessionStatus};
-use kettle_media::{FailureCode, PlayState};
+use kettle_media::{AudioRequest, AudioStatus, FailureCode, PlayState};
 
 /// Most lanes whose video has a session at once: the sessions the client
 /// allows. A lane starting to play past it takes the session of the one
@@ -32,6 +38,8 @@ pub(crate) trait Session {
     fn play(&self);
     fn pause(&self);
     fn keep(&self);
+    fn audio(&self) -> Option<AudioStatus>;
+    fn set_muted(&self, muted: bool);
 }
 
 impl Session for PlaySession {
@@ -53,6 +61,24 @@ impl Session for PlaySession {
     fn keep(&self) {
         PlaySession::keep(self);
     }
+    fn audio(&self) -> Option<AudioStatus> {
+        PlaySession::audio(self)
+    }
+    fn set_muted(&self, muted: bool) {
+        PlaySession::set_muted(self, muted);
+    }
+}
+
+/// Whether Apple's decoder turned a session down in a way ffmpeg may not:
+/// the container, the codec, or the stream.
+fn apple_refused(code: FailureCode) -> bool {
+    matches!(
+        code,
+        FailureCode::UnsupportedContainer
+            | FailureCode::CodecUnavailable
+            | FailureCode::BackendUnavailable
+            | FailureCode::RenderParse
+    )
 }
 
 /// What the lane's play button does now.
@@ -62,13 +88,25 @@ pub(crate) enum Button {
     Pause,
 }
 
-/// What the lane's footer says about its playback.
+/// A playback's sound, as its lane shows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Sound {
+    Heard,
+    Muted,
+    /// None: why, as the session said.
+    Silent(AudioStatus),
+}
+
+/// What the lane's footer says about its playback. One that plays with its
+/// sound heard says nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Notice {
     /// Opening, before the first frame.
     Opening,
-    /// Playing, without sound.
-    Playing,
+    /// Playing, muted.
+    Muted,
+    /// Playing without sound: why.
+    Silent(AudioStatus),
     Failed(FailureCode),
 }
 
@@ -100,6 +138,16 @@ pub(crate) struct LanePlayback {
     wants_play: bool,
     /// Its lane cannot be seen, so its session is paused for now.
     hidden: bool,
+    /// The user muted its sound: kept for every session it opens.
+    muted: bool,
+    /// Its sound as the latest session said, kept once that session goes.
+    audio: Option<AudioStatus>,
+    /// Only an external decoder plays it, and that plays no sound: its
+    /// sessions ask for none.
+    silent_decoder: bool,
+    /// Where to open it again, silent, and whether to play there, once
+    /// Apple's decoder turned down a session that asked for sound.
+    reopen: Option<(u64, bool)>,
     /// The session played the video to its end.
     ended: bool,
     failure: Option<FailureCode>,
@@ -116,6 +164,8 @@ impl std::fmt::Debug for LanePlayback {
             .field("session", &self.session.is_some())
             .field("position_ms", &self.position_ms)
             .field("wants_play", &self.wants_play)
+            .field("muted", &self.muted)
+            .field("audio", &self.audio)
             .field("ended", &self.ended)
             .field("failure", &self.failure)
             .finish_non_exhaustive()
@@ -144,6 +194,10 @@ impl LanePlayback {
             scrub_ms: None,
             wants_play: false,
             hidden: false,
+            muted: false,
+            audio: None,
+            silent_decoder: false,
+            reopen: None,
             ended: false,
             failure: None,
             touched: now,
@@ -196,6 +250,12 @@ impl LanePlayback {
         // says it ended, so a frame taken after is never one lost.
         let status = session.status();
         let mut changed = false;
+        if let Some(audio) = session.audio()
+            && self.audio != Some(audio)
+        {
+            self.audio = Some(audio);
+            changed = true;
+        }
         if let Some(frame) = session.take_frame() {
             match ImageData::try_with_budget(frame.width, frame.height, frame.rgba, budget) {
                 Ok(image) => {
@@ -218,6 +278,17 @@ impl LanePlayback {
                 ..
             } => {
                 self.ended = true;
+                self.wants_play = false;
+                self.session = None;
+                changed = true;
+            }
+            // Apple's decoder, all a session asking for sound gets, turned
+            // it down: open it again where it was, silent, for ffmpeg.
+            SessionStatus::Failed(code)
+                if cfg!(target_os = "macos") && !self.silent_decoder && apple_refused(code) =>
+            {
+                self.silent_decoder = true;
+                self.reopen = Some((self.position_ms, self.wants_play));
                 self.wants_play = false;
                 self.session = None;
                 changed = true;
@@ -262,6 +333,60 @@ impl LanePlayback {
                 at_ms: if self.ended { 0 } else { self.position_ms },
             },
         }
+    }
+
+    /// The sound button's press: mute the sound, or let it be heard again,
+    /// for this session and those to come. Only once the sound can play;
+    /// whether anything changed.
+    pub(crate) fn toggle_mute(&mut self) -> bool {
+        if self.audio != Some(AudioStatus::Ready) {
+            return false;
+        }
+        self.muted = !self.muted;
+        if let Some(session) = &self.session {
+            session.set_muted(self.muted);
+        }
+        true
+    }
+
+    /// Whether the user muted its sound.
+    pub(crate) fn muted(&self) -> bool {
+        self.muted
+    }
+
+    /// Where to open it again, silent, and whether to play there, when
+    /// Apple's decoder turned its session down; taken once.
+    pub(crate) fn take_reopen(&mut self) -> Option<(u64, bool)> {
+        self.reopen.take()
+    }
+
+    /// Say only an external decoder plays it: its sessions ask for no
+    /// sound, and its lane says that decoder plays the picture only.
+    pub(crate) fn play_silently(&mut self) {
+        self.silent_decoder = true;
+    }
+
+    /// The sound a new session of it asks for: the video's own, muted when
+    /// the user muted it, or none when only an external decoder plays it.
+    pub(crate) fn audio_request(&self) -> AudioRequest {
+        if self.silent_decoder {
+            AudioRequest::Off
+        } else if self.muted {
+            AudioRequest::Muted
+        } else {
+            AudioRequest::On
+        }
+    }
+
+    /// Its sound, once a session said what it is.
+    pub(crate) fn sound(&self) -> Option<Sound> {
+        Some(match self.audio? {
+            AudioStatus::Ready if self.muted => Sound::Muted,
+            AudioStatus::Ready => Sound::Heard,
+            // It asked for none because its decoder plays none.
+            AudioStatus::Off if self.silent_decoder => Sound::Silent(AudioStatus::DecoderSilent),
+            silent => Sound::Silent(silent),
+        })
     }
 
     /// Let the session go, keeping the frame shown and where the video
@@ -349,11 +474,15 @@ impl LanePlayback {
         }
         self.session.as_ref()?;
         if self.shown.is_none() {
-            Some(Notice::Opening)
-        } else if self.wants_play {
-            Some(Notice::Playing)
-        } else {
-            None
+            return Some(Notice::Opening);
+        }
+        if !self.wants_play {
+            return None;
+        }
+        match self.sound()? {
+            Sound::Heard => None,
+            Sound::Muted => Some(Notice::Muted),
+            Sound::Silent(why) => Some(Notice::Silent(why)),
         }
     }
 }
@@ -370,6 +499,8 @@ mod tests {
     #[derive(Default)]
     struct Script {
         commands: Vec<&'static str>,
+        /// Its sound, when it says one other than Opened's.
+        audio: Option<AudioStatus>,
         frames: Vec<SessionFrame>,
         status: Option<SessionStatus>,
         recycled: usize,
@@ -404,6 +535,19 @@ mod tests {
         }
         fn keep(&self) {
             self.0.borrow_mut().commands.push("keep");
+        }
+        fn audio(&self) -> Option<AudioStatus> {
+            let script = self.0.borrow();
+            script.audio.or(match script.status {
+                Some(SessionStatus::Open { opened, .. }) => Some(opened.audio),
+                _ => None,
+            })
+        }
+        fn set_muted(&self, muted: bool) {
+            self.0
+                .borrow_mut()
+                .commands
+                .push(if muted { "mute" } else { "unmute" });
         }
     }
 
@@ -466,7 +610,10 @@ mod tests {
         script.borrow_mut().status = Some(open(PlayState::Playing));
         assert!(playback.poll(&budget()));
         assert_eq!(playback.position_ms(), 100);
-        assert_eq!(playback.notice(), Some(Notice::Playing));
+        assert_eq!(
+            playback.notice(),
+            Some(Notice::Silent(AudioStatus::NoTrack))
+        );
         script.borrow_mut().frames.push(frame(200));
         assert!(playback.poll(&budget()));
         assert_eq!(
@@ -512,6 +659,7 @@ mod tests {
         let (session, script) = stand();
         let mut playback = LanePlayback::new(1, 2, 9000, session, 3000, true, now);
         script.borrow_mut().frames.push(frame(3500));
+        script.borrow_mut().status = Some(open(PlayState::Playing));
         playback.poll(&budget());
         playback.park();
         assert!(!playback.has_session());
@@ -519,20 +667,140 @@ mod tests {
         assert_eq!(playback.toggle(now), Toggled::Open { at_ms: 3500 });
         let (session, script) = stand();
         playback.reopen(session, 3500, true, now);
-        script.borrow_mut().status = Some(SessionStatus::Failed(FailureCode::CodecUnavailable));
+        script.borrow_mut().status = Some(SessionStatus::Failed(FailureCode::RenderTimeout));
         assert!(playback.poll(&budget()));
         assert_eq!(
             playback.notice(),
-            Some(Notice::Failed(FailureCode::CodecUnavailable))
+            Some(Notice::Failed(FailureCode::RenderTimeout))
         );
         assert_eq!(playback.toggle(now), Toggled::Open { at_ms: 3500 });
         let (session, _) = stand();
         playback.reopen(session, 3500, true, now);
         assert_eq!(
             playback.notice(),
-            Some(Notice::Playing),
-            "the old frame shows"
+            Some(Notice::Silent(AudioStatus::NoTrack)),
+            "the old frame shows, and the sound the last session said"
         );
+    }
+
+    /// On macOS a session asking for sound that Apple's decoder turns down
+    /// is opened again, once, silent, where it was and as the user had it;
+    /// that playback's lane then says its decoder plays the picture only,
+    /// and a second refusal is a failure.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_session_apple_turns_down_opens_again_silent() {
+        let now = Instant::now();
+        let (session, script) = stand();
+        let mut playback = LanePlayback::new(1, 2, 9000, session, 2000, true, now);
+        assert_eq!(playback.audio_request(), AudioRequest::On);
+        script.borrow_mut().status = Some(SessionStatus::Failed(FailureCode::UnsupportedContainer));
+        assert!(playback.poll(&budget()));
+        assert_eq!(playback.notice(), None, "no failure said");
+        assert_eq!(playback.take_reopen(), Some((2000, true)));
+        assert_eq!(playback.take_reopen(), None, "taken once");
+        assert_eq!(playback.audio_request(), AudioRequest::Off);
+        let (session, script) = stand();
+        playback.reopen(session, 2000, true, now);
+        let mut silent = match open(PlayState::Playing) {
+            SessionStatus::Open { opened, state } => (opened, state),
+            _ => unreachable!(),
+        };
+        silent.0.audio = AudioStatus::Off;
+        script.borrow_mut().status = Some(SessionStatus::Open {
+            opened: silent.0,
+            state: silent.1,
+        });
+        script.borrow_mut().frames.push(frame(2100));
+        assert!(playback.poll(&budget()));
+        assert_eq!(
+            playback.notice(),
+            Some(Notice::Silent(AudioStatus::DecoderSilent))
+        );
+        // Turned down again: a failure, not another try.
+        script.borrow_mut().status = Some(SessionStatus::Failed(FailureCode::UnsupportedContainer));
+        assert!(playback.poll(&budget()));
+        assert_eq!(playback.take_reopen(), None);
+        assert_eq!(
+            playback.notice(),
+            Some(Notice::Failed(FailureCode::UnsupportedContainer))
+        );
+        // Any other failure is said at once.
+        let (session, script) = stand();
+        let mut other = LanePlayback::new(1, 2, 9000, session, 0, true, now);
+        script.borrow_mut().status = Some(SessionStatus::Failed(FailureCode::RenderTimeout));
+        other.poll(&budget());
+        assert_eq!(other.take_reopen(), None);
+        assert_eq!(
+            other.notice(),
+            Some(Notice::Failed(FailureCode::RenderTimeout))
+        );
+        // One only an external decoder plays asks for no sound from the
+        // first, and says so.
+        let (session, _) = stand();
+        let mut external = LanePlayback::new(1, 2, 9000, session, 0, false, now);
+        external.play_silently();
+        assert_eq!(external.audio_request(), AudioRequest::Off);
+    }
+
+    /// A playback's sound is what its session says, kept once the session
+    /// goes; the user's mute reaches the session, holds for the sessions
+    /// after it, and needs sound that can play. Heard sound says nothing in
+    /// the footer; muted or none says so, and why.
+    #[test]
+    fn a_playback_s_sound_follows_its_session_and_the_user() {
+        let now = Instant::now();
+        let (session, script) = stand();
+        let mut playback = LanePlayback::new(1, 2, 9000, session, 0, true, now);
+        assert_eq!(playback.sound(), None);
+        assert!(!playback.toggle_mute(), "no sound to mute yet");
+        script.borrow_mut().audio = Some(AudioStatus::Ready);
+        script.borrow_mut().frames.push(frame(100));
+        assert!(playback.poll(&budget()));
+        assert_eq!(playback.sound(), Some(Sound::Heard));
+        assert_eq!(playback.notice(), None);
+        assert_eq!(playback.audio_request(), AudioRequest::On);
+        assert!(playback.toggle_mute());
+        assert_eq!(script.borrow().commands, ["play", "mute"]);
+        assert_eq!(
+            (playback.sound(), playback.notice()),
+            (Some(Sound::Muted), Some(Notice::Muted))
+        );
+        assert_eq!(playback.audio_request(), AudioRequest::Muted);
+        // Its sound goes: no button to press, and the footer says why.
+        script.borrow_mut().audio = Some(AudioStatus::Unavailable);
+        assert!(playback.poll(&budget()));
+        assert!(!playback.poll(&budget()), "said once");
+        assert_eq!(
+            playback.notice(),
+            Some(Notice::Silent(AudioStatus::Unavailable))
+        );
+        assert!(!playback.toggle_mute());
+        assert_eq!(script.borrow().commands, ["play", "mute"]);
+        // A seek's session keeps the mute, and the last sound said until it
+        // says its own.
+        let (session, script) = stand();
+        let (at_ms, play) = playback.seek_target(4000);
+        playback.reopen(session, at_ms, play, now);
+        assert_eq!(
+            playback.sound(),
+            Some(Sound::Silent(AudioStatus::Unavailable))
+        );
+        script.borrow_mut().audio = Some(AudioStatus::Ready);
+        assert!(playback.poll(&budget()));
+        assert_eq!(playback.sound(), Some(Sound::Muted));
+        assert!(playback.toggle_mute());
+        assert_eq!(script.borrow().commands, ["play", "unmute"]);
+        // Parked, it keeps its sound and the user's wish.
+        playback.park();
+        assert_eq!(playback.sound(), Some(Sound::Heard));
+        assert!(playback.toggle_mute());
+        assert!(playback.muted());
+        // A new item starts heard.
+        let (session, _) = stand();
+        let fresh = LanePlayback::new(3, 1, 9000, session, 0, false, now);
+        assert!(!fresh.muted());
+        assert_eq!(fresh.audio_request(), AudioRequest::On);
     }
 
     /// A hidden lane pauses a playing session, which stays paused once the
