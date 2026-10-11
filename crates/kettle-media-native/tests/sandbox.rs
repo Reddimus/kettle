@@ -69,11 +69,11 @@ fn report(name: &str, result: std::io::Result<impl std::fmt::Debug>) {
 }
 
 /// Play a fifth of a second of muted silence through an output queue:
-/// `ok` when its clock ran, else what was refused; `none` on a machine with
-/// no audio output at all.
+/// `ok` when its clock ran and its device said its latency, else what was
+/// refused; `none` on a machine with no audio output at all.
 #[cfg(all(target_os = "macos", feature = "avfoundation"))]
 fn attempt_sound() {
-    use kettle_media_native::audio_out::{BUFFER_FRAMES, Output};
+    use kettle_media_native::audio_out::{BUFFER_FRAMES, Output, latency};
     let played = (|| -> Result<(), &'static str> {
         let mut output = Output::open(true).map_err(|_| "open")?;
         let silence = vec![0f32; BUFFER_FRAMES * kettle_media::audio::CHANNELS];
@@ -84,7 +84,8 @@ fn attempt_sound() {
             output.start().map_err(|_| "start")?;
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        match output.played() {
+        latency().ok_or("latency")?;
+        match output.queued() {
             Some((frames, _)) if frames > 0.0 => Ok(()),
             _ => Err("clock"),
         }

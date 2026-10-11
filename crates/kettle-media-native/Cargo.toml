@@ -69,6 +69,12 @@ objc2-audio-toolbox = { version = "0.3.2", optional = true, default-features = f
     "objc2-core-audio-types",
     "objc2-core-foundation",
 ] }
+# The output device's presentation latency, which a session's frames allow
+# for.
+objc2-core-audio = { version = "0.3.2", optional = true, default-features = false, features = [
+    "std",
+    "AudioHardware",
+] }
 objc2-core-audio-types = { version = "0.3.2", optional = true, default-features = false, features = [
     "std",
     "CoreAudioBaseTypes",
@@ -102,6 +108,7 @@ avfoundation = [
     "dep:objc2",
     "dep:objc2-audio-toolbox",
     "dep:objc2-av-foundation",
+    "dep:objc2-core-audio",
     "dep:objc2-core-audio-types",
     "dep:objc2-core-foundation",
     "dep:objc2-core-graphics",

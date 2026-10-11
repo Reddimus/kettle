@@ -7,7 +7,10 @@
 use std::time::{Duration, Instant};
 
 use kettle_media::audio::CHANNELS;
-use kettle_media_native::audio_out::{BUFFER_FRAMES, BUFFERS, Output, Unavailable};
+use kettle_media::audio::SAMPLE_RATE;
+use kettle_media_native::audio_out::{
+    BUFFER_FRAMES, BUFFERS, MAX_LATENCY, Output, Unavailable, latency,
+};
 
 /// A muted output, or `None` on a machine with none.
 fn output() -> Option<Output> {
@@ -71,7 +74,7 @@ fn the_output_s_clock_runs_while_it_plays() {
     for _ in 0..10 {
         std::thread::sleep(Duration::from_millis(30));
         fill(&mut output, BUFFER_FRAMES);
-        let (played, _) = output.played().expect("a running clock");
+        let (played, _) = output.queued().expect("a running clock");
         assert!(played >= last, "{played} after {last}");
         last = played;
     }
@@ -79,9 +82,9 @@ fn the_output_s_clock_runs_while_it_plays() {
     assert!(last > 4_800.0, "{last} frames played");
     output.pause().unwrap();
     std::thread::sleep(Duration::from_millis(50));
-    let (held, _) = output.played().expect("a paused clock");
+    let (held, _) = output.queued().expect("a paused clock");
     std::thread::sleep(Duration::from_millis(100));
-    let (still, _) = output.played().expect("a paused clock");
+    let (still, _) = output.queued().expect("a paused clock");
     assert!(
         (still - held).abs() < 1.0,
         "{held} then {still} while paused"
@@ -91,8 +94,43 @@ fn the_output_s_clock_runs_while_it_plays() {
         std::thread::sleep(Duration::from_millis(30));
         fill(&mut output, BUFFER_FRAMES);
     }
-    let (resumed, _) = output.played().expect("a running clock");
+    let (resumed, _) = output.queued().expect("a running clock");
     assert!(resumed > still + 2_400.0, "{resumed} after {still}");
+}
+
+/// The output's device says how long after the queue plays a frame it is
+/// heard, more than nothing and at most `MAX_LATENCY`; what has been heard
+/// is what the queue played less that.
+#[test]
+fn what_is_heard_is_what_the_queue_played_less_its_latency() {
+    let Some(mut output) = output() else {
+        return;
+    };
+    let latency = latency().expect("a device that says its latency");
+    assert!(
+        latency > Duration::ZERO && latency <= MAX_LATENCY,
+        "{latency:?}"
+    );
+    assert_eq!(output.played(), None, "before it starts");
+    fill(&mut output, BUFFER_FRAMES);
+    output.start().unwrap();
+    if !clock_started(&mut output) {
+        return;
+    }
+    for _ in 0..5 {
+        std::thread::sleep(Duration::from_millis(30));
+        fill(&mut output, BUFFER_FRAMES);
+    }
+    // Paused, so its clock holds between the two.
+    output.pause().unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    let (queued, _) = output.queued().expect("a paused clock");
+    let (heard, _) = output.played().expect("a paused clock");
+    let late = latency.as_secs_f64() * f64::from(SAMPLE_RATE);
+    assert!(
+        (heard - (queued - late)).abs() < 1.0,
+        "{heard} heard of {queued} played, {latency:?} late"
+    );
 }
 
 /// A buffer is filled only within its size, by whole frames, and only one
