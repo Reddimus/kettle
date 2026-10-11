@@ -6,12 +6,16 @@
 //! before the work it would cost.
 //!
 //! Raster, SVG, Mermaid and Markdown diagram gallery jobs are rendered, and
-//! Auto jobs, which are classified by their bytes as one of those. Video
-//! answers `UnsupportedMedia` until its renderer lands, and on Windows,
+//! Auto jobs, which are classified by their bytes as one of those. A stills
+//! job's animation (GIF, APNG, WebP) is decoded and laid out here; a video's
+//! frames come from a decoder the worker holds, which this lays out
+//! ([`stills`]). VideoProbe answers `UnsupportedMedia`, and on Windows,
 //! where no worker runs, every job answers `UnsupportedPlatform`.
 
 use kettle_media::{FailureCode, Job, MediaKind, Rendered};
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod animation;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod auto;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -24,6 +28,8 @@ mod mermaid;
 mod raster;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod source;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod stills;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod svg;
 
@@ -60,7 +66,18 @@ pub fn render(job: &Job) -> Result<Rendered, FailureCode> {
 /// can narrow its deadline to that kind's.
 pub fn render_with_kind(
     job: &Job,
+    on_kind: impl FnMut(MediaKind),
+) -> Result<(MediaKind, Rendered), FailureCode> {
+    render_with_decoder(job, on_kind, None)
+}
+
+/// Render one job as [`render_with_kind`] does, with `decoder` for a video
+/// container's stills; without one they are `BackendUnavailable`. The
+/// renderer starts no process: the worker supplies the decoder.
+pub fn render_with_decoder(
+    job: &Job,
     mut on_kind: impl FnMut(MediaKind),
+    decoder: Option<&dyn kettle_media::video::VideoDecoder>,
 ) -> Result<(MediaKind, Rendered), FailureCode> {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
@@ -84,12 +101,14 @@ pub fn render_with_kind(
                 on_kind(MediaKind::Markdown);
                 markdown::render(job, index).map(|rendered| (MediaKind::Markdown, rendered))
             }
-            JobKind::VideoProbe | JobKind::VideoStills(_) => Err(FailureCode::UnsupportedMedia),
+            JobKind::VideoStills(stills) => stills::render(job, &stills, &mut on_kind, decoder)
+                .map(|rendered| (MediaKind::Video, rendered)),
+            JobKind::VideoProbe => Err(FailureCode::UnsupportedMedia),
         }
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        let _ = (job, &mut on_kind);
+        let _ = (job, &mut on_kind, decoder);
         Err(FailureCode::UnsupportedPlatform)
     }
 }
@@ -125,6 +144,8 @@ mod tests {
             ("source", include_str!("source.rs")),
             ("container", include_str!("container.rs")),
             ("markdown", include_str!("markdown.rs")),
+            ("animation", include_str!("animation.rs")),
+            ("stills", include_str!("stills.rs")),
             ("mermaid", include_str!("mermaid.rs")),
             ("svg", include_str!("svg/mod.rs")),
             ("svg/css", include_str!("svg/css.rs")),

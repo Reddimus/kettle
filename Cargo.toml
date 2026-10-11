@@ -8,6 +8,7 @@ members = [
     "crates/kettle-media",
     "crates/kettle-media-worker",
     "crates/kettle-media-render",
+    "crates/kettle-media-native",
     "crates/kettle-config",
     "crates/kettle-core",
     "crates/kettle-vt",
@@ -85,6 +86,7 @@ kettle-ui = { path = "crates/kettle-ui", version = "4.9.0" }
 kettle-i18n = { path = "crates/kettle-i18n", version = "4.9.0" }
 kettle-media = { path = "crates/kettle-media", version = "4.9.0" }
 kettle-media-render = { path = "crates/kettle-media-render", version = "4.9.0" }
+kettle-media-native = { path = "crates/kettle-media-native", version = "4.9.0" }
 
 anyhow = "1"
 thiserror = "2"

@@ -50,6 +50,10 @@ kettle-i18n.workspace = true
 kettle-media.workspace = true
 kettle-render.workspace = true
 kettle-state.workspace = true
+# The JPEG contact sheet `kettle video-frames` and kettle_video_frames return,
+# the latter as base64 image content.
+image = { workspace = true, features = ["jpeg"] }
+base64 = { version = "0.23", default-features = false, features = ["alloc"] }
 kettle-update.workspace = true
 kettle-ui.workspace = true
 tracing-subscriber.workspace = true
@@ -61,6 +65,8 @@ serde_json.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# The macOS ACL check the worker's file shares with the external decoder's.
+kettle-media-native.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # kettle is a GUI-subsystem app (`#![cfg_attr(all(windows,

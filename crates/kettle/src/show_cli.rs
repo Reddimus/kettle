@@ -193,7 +193,7 @@ fn native_len(path: &Path) -> usize {
 /// regular file. A file this command may look up but not read is refused
 /// here, as the worker would refuse it.
 #[cfg(unix)]
-fn attest(path: &Path) -> Result<ExternalAttested, FailureCode> {
+pub(crate) fn attest(path: &Path) -> Result<ExternalAttested, FailureCode> {
     use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -216,7 +216,7 @@ fn attest(path: &Path) -> Result<ExternalAttested, FailureCode> {
 /// Windows has no media worker, and Kettle refuses media there before it
 /// looks at the file.
 #[cfg(not(unix))]
-fn attest(path: &Path) -> Result<ExternalAttested, FailureCode> {
+pub(crate) fn attest(path: &Path) -> Result<ExternalAttested, FailureCode> {
     let metadata = std::fs::metadata(path).map_err(|error| match error.kind() {
         std::io::ErrorKind::PermissionDenied => FailureCode::FilePermission,
         _ => FailureCode::FileNotFound,

@@ -102,8 +102,20 @@ fn guard_pipe_writes() -> std::io::Result<()> {
     crate::exec::block_sigpipe_for_current_thread()
 }
 
+/// The external video decoder the worker is told of: the user's own ffmpeg,
+/// found only in the fixed places and the Nix profile under `HOME`, never in
+/// `PATH`, and only when trusted. The worker trusts it again before use.
+#[cfg(unix)]
+fn decoder() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    // By the name it was found under: its directory holds the ffprobe the
+    // search trusted beside it, which the worker looks for again.
+    kettle_media_native::ffmpeg::Ffmpeg::search(home.as_deref())
+        .map(|found| found.named().to_path_buf())
+}
+
 /// Start the worker with `kettle_media`'s command, leading a process group of
-/// its own.
+/// its own, its environment empty but for the decoder it may use.
 #[cfg(unix)]
 fn spawn(path: &Path) -> std::io::Result<SpawnedWorker> {
     if children_reap_themselves()? {
@@ -111,7 +123,11 @@ fn spawn(path: &Path) -> std::io::Result<SpawnedWorker> {
             "SIGCHLD is ignored, so a worker could be reaped before its group is killed",
         ));
     }
-    let mut child = kettle_media::client::worker_command(path).spawn()?;
+    let mut command = kettle_media::client::worker_command(path);
+    if let Some(decoder) = decoder() {
+        command.env(kettle_media::video::DECODER_ENV, decoder);
+    }
+    let mut child = command.spawn()?;
     let pipes = (child.stdin.take(), child.stdout.take());
     let mut process = GroupProcess {
         child,
@@ -333,7 +349,11 @@ mod footprint {
                     }
                     // Gone, or a reused pid now outside the group.
                     Ok(None) => self.forget(pid),
-                    Err(error) if pid != leader && gone(&error) => self.forget(pid),
+                    // Gone: for the worker itself, exited but not yet reaped
+                    // (no one else reaps it), which holds nothing while its
+                    // group, still its own, is measured on. A large reply
+                    // read after the worker exits makes this common.
+                    Err(error) if gone(&error) => self.forget(pid),
                     Err(error) => return Err(error),
                 }
             }
@@ -664,82 +684,9 @@ fn inspect(_: &Path) -> Result<FileIdentity, UnavailableCause> {
 }
 
 /// Extended ACLs, which on macOS can let another user write a file whose mode
-/// says otherwise. On Linux an entry that grants write shows in the group mode
-/// bits, which the mode check already refuses.
+/// says otherwise; the external decoder's binaries are checked the same way.
 #[cfg(target_os = "macos")]
-mod acl {
-    use std::ffi::{CStr, CString};
-    use std::os::unix::ffi::OsStrExt as _;
-    use std::path::Path;
-
-    use libc::{c_char, c_int, c_void, ssize_t};
-
-    const ACL_TYPE_EXTENDED: c_int = 0x0000_0100;
-    /// Permissions that only read. An entry that allows any other counts as
-    /// letting someone write.
-    const READ_ONLY: [&[u8]; 5] = [
-        b"read",
-        b"execute",
-        b"readattr",
-        b"readextattr",
-        b"readsecurity",
-    ];
-
-    unsafe extern "C" {
-        fn acl_get_link_np(path: *const c_char, kind: c_int) -> *mut c_void;
-        fn acl_to_text(acl: *mut c_void, length: *mut ssize_t) -> *mut c_char;
-        fn acl_free(object: *mut c_void) -> c_int;
-    }
-
-    /// Whether the ACL on `path` itself, not through a link, allows anyone
-    /// more than reading. Deny entries only take rights away. An ACL that
-    /// cannot be read counts as allowing.
-    pub(super) fn grants_write(path: &Path) -> bool {
-        let Ok(path) = CString::new(path.as_os_str().as_bytes()) else {
-            return true;
-        };
-        // SAFETY: `path` is NUL-terminated and outlives the call.
-        let acl = unsafe { acl_get_link_np(path.as_ptr(), ACL_TYPE_EXTENDED) };
-        if acl.is_null() {
-            // A file without an extended ACL reads as ENOENT.
-            return std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT);
-        }
-        let mut length: ssize_t = 0;
-        // SAFETY: `acl` is the live ACL just returned, and `length` a valid
-        // place for its text length.
-        let text = unsafe { acl_to_text(acl, &mut length) };
-        let grants = text.is_null() || {
-            // SAFETY: acl_to_text returns a NUL-terminated string, valid
-            // until it is freed below.
-            let grants = text_grants_write(unsafe { CStr::from_ptr(text) }.to_bytes());
-            // SAFETY: `text` came from acl_to_text and is freed once.
-            unsafe { acl_free(text.cast()) };
-            grants
-        };
-        // SAFETY: `acl` came from acl_get_link_np and is freed once.
-        unsafe { acl_free(acl) };
-        grants
-    }
-
-    /// Whether an `acl_to_text` listing has an entry that allows more than
-    /// reading. Entries read `tag:uuid:name:id:allow[,flags]:permissions`; an
-    /// entry in any other shape counts as allowing.
-    pub(super) fn text_grants_write(text: &[u8]) -> bool {
-        text.split(|&byte| byte == b'\n')
-            .filter(|entry| !entry.is_empty() && !entry.starts_with(b"!#"))
-            .any(|entry| {
-                let fields: Vec<&[u8]> = entry.split(|&byte| byte == b':').collect();
-                let [_, _, _, _, kind, permissions] = fields.as_slice() else {
-                    return true;
-                };
-                let deny = kind.split(|&byte| byte == b',').next() == Some(b"deny");
-                !deny
-                    && permissions
-                        .split(|&byte| byte == b',')
-                        .any(|permission| !READ_ONLY.contains(&permission))
-            })
-    }
-}
+use kettle_media_native::acl;
 
 /// The worker's code signature, checked with the `codesign` macOS ships, as
 /// the updater checks the app bundle.
@@ -1222,9 +1169,33 @@ mod tests {
 
         #[test]
         fn the_worker_starts_with_nothing_inherited() {
-            // `env` itself as the worker: an empty environment prints nothing.
+            // `env` itself as the worker: nothing is inherited, and the only
+            // variable is the decoder, when a trusted one is installed.
             let mut worker = spawn(Path::new("/usr/bin/env")).unwrap();
-            assert_eq!(all_output(&mut worker), "");
+            // The decoder is named as found, so the worker finds the same
+            // ffmpeg and ffprobe pair the search trusted.
+            if let Some(decoder) = decoder() {
+                kettle_media_native::ffmpeg::Ffmpeg::trust(&decoder).unwrap();
+                let directory = decoder.parent().unwrap();
+                let nix = std::env::var_os("HOME")
+                    .map(|home| PathBuf::from(home).join(".nix-profile/bin"));
+                assert!(
+                    kettle_media_native::tools::SEARCH_DIRS
+                        .iter()
+                        .any(|place| directory == Path::new(place))
+                        || nix.as_deref() == Some(directory),
+                    "named where it was found, not where its links lead: {}",
+                    decoder.display()
+                );
+            }
+            let expected = decoder().map_or_else(String::new, |decoder| {
+                format!(
+                    "{}={}\n",
+                    kettle_media::video::DECODER_ENV,
+                    decoder.display()
+                )
+            });
+            assert_eq!(all_output(&mut worker), expected);
             assert_eq!(wait_exit(worker.process.as_mut()), WorkerExit::Code(0));
             // `pwd`: the working directory is the root.
             let mut worker = spawn(Path::new("/bin/pwd")).unwrap();
@@ -1530,6 +1501,19 @@ mod tests {
         }
 
         #[test]
+        fn an_exited_worker_not_yet_reaped_holds_nothing() {
+            let directory = tempfile::tempdir().unwrap();
+            let path = script(directory.path(), "echo $$");
+            let mut worker = spawn_script(&path);
+            let line = first_line(&mut worker);
+            let leader: libc::pid_t = line.parse().unwrap();
+            // Exited, and not reaped: nothing here waits on it yet.
+            assert!(gone(&line), "the worker did not exit");
+            assert_eq!(footprint::Probe::default().measure(leader).unwrap(), 0);
+            assert_eq!(wait_exit(worker.process.as_mut()), WorkerExit::Code(0));
+        }
+
+        #[test]
         fn footprint_counts_what_descendants_hold() {
             // A child holds 32 MiB; the worker itself holds little. (The `:`
             // keeps the child shell alive: dash would replace it with its last
@@ -1613,7 +1597,6 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     mod macos {
-        use super::super::acl::text_grants_write;
         use super::super::signature::{
             Bounds, WORKER_IDENTIFIER, hardened_runtime, parse_architectures, reap, run_bounded,
             verify,
@@ -2018,33 +2001,6 @@ mod tests {
                 } else {
                     assert!(inspected.is_ok(), "{entry}: {inspected:?}");
                 }
-            }
-        }
-
-        #[test]
-        fn acl_text_counts_only_read_and_deny_entries_as_safe() {
-            let everyone = "group:ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000000C:everyone:12";
-            for (text, grants) in [
-                ("!#acl 1\n".to_string(), false),
-                (format!("!#acl 1\n{everyone}:deny:delete\n"), false),
-                (
-                    format!("!#acl 1\n{everyone}:deny,file_inherit:write,delete\n"),
-                    false,
-                ),
-                (format!("!#acl 1\n{everyone}:allow:read,readattr\n"), false),
-                (format!("!#acl 1\n{everyone}:allow:write\n"), true),
-                (
-                    format!("!#acl 1\n{everyone}:allow,file_inherit:read,chown\n"),
-                    true,
-                ),
-                (
-                    format!("!#acl 1\n{everyone}:deny:delete\n{everyone}:allow:append\n"),
-                    true,
-                ),
-                // An entry in another shape counts as allowing.
-                ("!#acl 1\nuser:allow:read\n".to_string(), true),
-            ] {
-                assert_eq!(text_grants_write(text.as_bytes()), grants, "{text}");
             }
         }
 

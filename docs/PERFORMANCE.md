@@ -13,7 +13,7 @@ migration reads the install record and capsule once; steady startup with an
 installed worker does not hash the install tree. This is an implementation
 property, not a measured startup-time claim.
 
-The media worker renders raster images and SVG under fixed bounds, and this
+The media worker renders raster images, SVG and video stills under fixed bounds, and this
 section records them as policy: nothing here is a timing claim, and none of
 these limits was calibrated on a quiet machine. Every bound is checked
 before the work it would cost, so a hostile input is refused rather than
@@ -34,6 +34,20 @@ slowed down.
   and no host discovery. Reads and per-job setup are inside the 3 s deadline.
   Coverage scans retained text/resource roots once, with a one-million-unit
   traversal cap; each fallback search examines at most nine loaded faces.
+
+- **Video stills:** at most 16 frames and a 4096-pixel edge (2560 for a
+  model's own request), a 2.5 s budget inside the 3 s deadline. Animations:
+  10,000 frames and two billion decoded pixels over both passes, one full
+  frame held at a time beside the kept tiles. External decoder: each run
+  starts a fresh ffmpeg or ffprobe with two decoder threads; ffprobe's
+  output is capped at 64 KiB for a description and 2 MiB (6 MiB for a stream
+  with no duration) for packets, a frame's output at exactly its size plus
+  one byte. When the frames left would miss the budget at the pace so far,
+  each remaining frame takes its keyframe, which decodes at once, and its
+  reported time says so. AVFoundation takes all frames in one cancellable
+  batch, each within a quarter of the gap to its neighbours. A model sheet
+  is a JPEG tried at qualities 90 down to 50, then shrunk a quarter at a
+  time to 320 pixels, until its whole MCP response fits 768 KiB.
 
 Area is not a time model: filter cost per pixel varies by primitive, and
 path tessellation, font shaping/outline scratch and filter scratch buffers

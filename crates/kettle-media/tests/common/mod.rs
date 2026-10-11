@@ -77,14 +77,44 @@ pub fn rendered() -> Rendered {
         fence_index: None,
         uncovered_scripts: vec![],
         warnings: vec![],
+        video: None,
+    }
+}
+/// A two-frame sheet's video result.
+pub fn video_result() -> kettle_media::VideoStillsResult {
+    kettle_media::VideoStillsResult {
+        info: kettle_media::VideoInfo {
+            duration_ms: 12_000,
+            width: 1280,
+            height: 720,
+            rotation: 90,
+            codec: kettle_media::VideoCodec::H264,
+            fps_milli: Some(29_970),
+            has_audio: true,
+            container: Some(kettle_media::video::VideoContainer::IsoBmff),
+        },
+        samples: vec![
+            kettle_media::StillSample {
+                requested_ms: 0,
+                actual_ms: 0,
+            },
+            kettle_media::StillSample {
+                requested_ms: 6_000,
+                actual_ms: 5_972,
+            },
+        ],
+        tolerance_ms: 100,
     }
 }
 /// The fixture as a render of `kind`: its source only when that kind is
-/// text.
+/// text, and a video result only for video.
 pub fn rendered_as(kind: MediaKind) -> Rendered {
     let mut rendered = rendered();
     if kind.exact_source_cap().is_none() {
         rendered.exact_source = None;
+    }
+    if kind == MediaKind::Video {
+        rendered.video = Some(video_result());
     }
     rendered
 }

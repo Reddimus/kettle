@@ -388,6 +388,25 @@ With `paste-video-preview` enabled, Kettle also shows a short-lived poster for
 the exact local file. The poster is informational; the program in the pane
 still decides whether to read the path.
 
+### Reading video frames (optional ffmpeg)
+
+`kettle video-frames` and the MCP tool `kettle_video_frames` read GIF, APNG
+and animated WebP themselves, and on macOS MP4 and QuickTime through
+AVFoundation. Other videos (WebM, Matroska, AVI and the rest, including the
+WebM that Playwright records) need ffmpeg and ffprobe:
+
+```sh
+brew install ffmpeg          # macOS (Homebrew)
+sudo apt install ffmpeg      # Debian / Ubuntu
+sudo dnf install ffmpeg-free # Fedora (or RPM Fusion's ffmpeg for more codecs)
+```
+
+Kettle looks for them only in `/opt/homebrew/bin`, `/usr/local/bin`,
+`/usr/bin`, `/run/current-system/sw/bin` and `~/.nix-profile/bin`, never in
+`PATH`, and uses them only when they and the directories on the way to them
+belong to you or root and no one else can write them. Kettle never installs
+them, and neither should an agent.
+
 ### AI agents / MCP
 
 kettle ships an opt-in agent surface (`kettle exec` / `kettle ctl` /

@@ -55,6 +55,7 @@ pub(crate) fn render_loaded(
         fence_index: None,
         uncovered_scripts: Vec::new(),
         warnings: Vec::new(),
+        video: None,
     };
     rendered
         .validate()
@@ -216,7 +217,11 @@ fn taps(from: u32, to: u32) -> Vec<Taps> {
 /// filtered across once and kept only while an output row still needs it:
 /// beside the result, memory holds those rows, never a full-size
 /// intermediate.
-fn resample(image: &RgbaImage, width: u32, height: u32) -> Result<RgbaImage, FailureCode> {
+pub(crate) fn resample(
+    image: &RgbaImage,
+    width: u32,
+    height: u32,
+) -> Result<RgbaImage, FailureCode> {
     let len = rgba_len(width, height, MAX_RENDERED_EDGE, MAX_RENDERED_BYTES)
         .map_err(|_| FailureCode::RenderResource)?;
     let columns = taps(image.width(), width);

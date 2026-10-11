@@ -28,9 +28,9 @@ turns it into an `ExternalRequest` with an `ExternalAttested` path or inline
 bytes, and Mermaid text or `kind: "mermaid"` selects the Mermaid job kind
 rather than Auto.
 
-## Wire version 3
+## Wire version 4
 
-The header is 11 bytes: `KMED`, u16 LE protocol version 3, a frame kind, then u32 LE payload
+The header is 11 bytes: `KMED`, u16 LE protocol version 4, a frame kind, then u32 LE payload
 length. No padding or compression is permitted. Binary data and UTF-8 strings have u32 LE
 byte lengths. Lists have u32 LE counts. Integers and f64 bit patterns use LE. Boolean and
 optional-value discriminants are exactly 0 or 1. Floats must satisfy the field validators.
@@ -43,7 +43,7 @@ platform refuses the other encoding.
 | 2 Ready | Worker to parent | Same BuildId representation |
 | 3 ExternalRequest | External to parent | Kind, restricted source, theme, canvas, target, fonts |
 | 4 Job | Parent to worker | Kind, worker source, theme, canvas, target, fonts |
-| 5 Rendered | Worker to parent | Width, height, RGBA blob, 32 digest bytes, optional path identity, display lines, fence count, optional index, fence sources, script names, warning codes, layout, optional exact source |
+| 5 Rendered | Worker to parent | Width, height, RGBA blob, 32 digest bytes, optional path identity, display lines, fence count, optional index, fence sources, script names, warning codes, layout, optional exact source, optional video result |
 | 6 Failure | Worker to parent | One fixed error-code byte |
 | 7 DetectedRendered | Worker to parent | One media-kind byte, then exactly the Rendered payload |
 
@@ -51,9 +51,26 @@ Job-kind tags 0 through 6 are Mermaid, Svg, Raster, MarkdownDiagrams, VideoProbe
 VideoStills and Auto. An Auto job asks the worker to classify the source by its bytes.
 Media-kind tags 0 through 4 are Raster, Svg, Mermaid, Markdown and Video: what a
 DetectedRendered reply actually rendered. Markdown adds one index byte. Stills adds count u8, edge u32, start f64, optional
-end f64 and optional single-frame time f64. Single-frame time requires count 1, start 0 and
-no end time. Interval times must be finite, nonnegative and ordered. The still-count cap is
-16 and the requested edge cap is 2560, as in the video-frame contract.
+end f64, optional single-frame time f64 and a layout: tag 0 for a poster, which requires
+count 1, or tag 1 for a sheet followed by its column count u8, from 1 to the frame count, and
+a labels boolean. Single-frame time requires count 1, start 0 and no end time. Interval
+times must be finite, nonnegative and ordered. The still-count cap is 16. A worker job's
+edge cap is 4096, room for a lane's poster or sheet; the video-frame contract holds a
+model's own requests to 2560 before they become jobs.
+
+A video reply, and only a video reply, ends with a video result (its flag 1; every other
+reply writes 0): duration ms u64, width and height u32 as shown, rotation u16 (0, 90, 180
+or 270 degrees clockwise), a codec byte (0 unknown, then H.264, HEVC, VP8, VP9, AV1, MPEG-4,
+MPEG-2, ProRes, MJPEG, QuickTime Animation, Theora, GIF, APNG and WebP), an optional frame
+rate in frames per thousand seconds (its flag, then u32, which must be 0 without the flag),
+an audio boolean, a container byte (0 for an animated image, then the sniffed families in
+`video::VideoContainer` order from 1), a count of 1 to 16 samples, each a requested and an
+actual time in ms u64 within the duration, and a tolerance ms u32. Sides are at most 16384,
+the duration about a year and the frame rate 1000 fps. The samples are in the order the
+frames are laid out, and an actual time is the frame shown, which a decoder may take from up
+to the tolerance away from the time asked: every sample is within the tolerance, and the
+tolerance is within the duration. Both checks run in the borrowed pass, before any pixel is
+copied.
 
 Source tag 0 carries a bounded byte blob. Mermaid, SVG and Markdown bytes require UTF-8.
 Tag 1 carries a native path followed by authorization tag 0 and dev/ino u64 values, or
@@ -229,7 +246,8 @@ same check availability runs, inside the startup deadline, and refuses without
 starting anything once two workers have been stuck. Nothing in the GUI calls it yet.
 
 The platform starts the worker with `client::worker_command`: no arguments, an
-empty environment, `/` as the working directory, stdin and stdout piped,
+empty environment (Kettle's own platform then adds only
+`KETTLE_MEDIA_DECODER`, naming a trusted ffmpeg when it finds one), `/` as the working directory, stdin and stdout piped,
 stderr discarded, and on Unix a process group of its own. Two threads move the
 bytes, so no blocked read or write can hold a deadline: one writes Hello, then
 the job once Ready has matched, then closes stdin; the other reads the first
@@ -391,8 +409,81 @@ worker's limits and the client's deadlines and memory limit are a second
 bound, not the only one. An empty target box, one over 4096 pixels on an
 edge, a scale that is not a positive finite number, or a crop that is empty or
 leaves the box, is `BadParams`. Raster, SVG, Mermaid, MarkdownDiagrams and
-Auto jobs are rendered; a video kind is `UnsupportedMedia` until its renderer
-lands. On Windows, where no worker runs, every job is `UnsupportedPlatform`.
+Auto jobs are rendered, and so are VideoStills jobs on animated images and,
+through the worker's external decoder, on video.
+VideoProbe is `UnsupportedMedia` until its renderer lands. On Windows, where
+no worker runs, every job is `UnsupportedPlatform`.
+
+**Stills jobs.** The source is held, not read: a file is opened as any other
+is and only its first 64 KiB are read, which say what it is by content,
+never by name. A GIF, PNG or WebP is an animation. It is read whole, under
+the raster cap, through the held descriptor, and checked unchanged after;
+it is decoded by the image crate's animation decoders twice, first for its
+frame delays and then for the frames the stills show, each resized to its
+tile as it is kept. A GIF delay under 20 ms shows for 100 ms, as browsers
+show it, and a delay of 0 in an APNG or WebP shows for 100 ms too. A single
+frame lasts 0 ms, and a PNG that does not animate is `UnsupportedMedia`.
+More than 10,000 frames, or more than two billion decoded pixels over both
+passes, is `RenderResource`, and the job has 2.5 s. A frame is scaled to
+its tile with premultiplied alpha, so a transparent pixel's hidden color
+never shows. Other bytes are
+`UnsupportedMedia`.
+
+A sniffed video container is decoded from the held file; inline video
+bytes are `UnsupportedMedia`, since a decoder reads a file and the worker
+writes none. On macOS, MP4 and QuickTime go first to AVFoundation, in the
+worker: the asset is opened through `/dev/fd/N` on a fresh descriptor with
+the sniffed MIME type, references outside the file forbidden and the VP9
+decoder registered; its properties load asynchronously within the deadline,
+and one batch request to an image generator, with the track's display
+transform applied, returns each frame with its actual time, each within
+a quarter of the gap to its neighbours, so no two instants take the keyframe
+between them (a single instant exactly); a frame longer than the gap still
+starts where it starts, outside its instant's share. At the deadline
+the batch is cancelled. Each frame is drawn at exactly the tile size in sRGB
+and un-premultiplied. A container it does not read is
+`UnsupportedContainer`, and a codec it cannot decode `CodecUnavailable`;
+either, or a stream it fails on, goes to the external decoder when there is
+one.
+
+The external decoder is the user's own ffmpeg, with ffprobe beside it,
+which Kettle finds in the fixed places (Homebrew, `/usr/local/bin`,
+`/usr/bin`, NixOS's system profile, then the Nix profile under `HOME`) and
+names when it starts the worker, in the worker's environment as
+`KETTLE_MEDIA_DECODER`; no job or request names one, and the worker trusts it
+again. With no decoder to try, the job is `BackendUnavailable`. ffprobe
+describes the streams (the first video stream that is not cover art; the
+size as shown, its pixel aspect and display rotation applied; the codec,
+frame rate and whether there is audio) and lists the packets from the
+keyframe before each instant to a second, or 32 frames when that is longer,
+past it, so frames a stream stores out of order are seen; with no duration it
+lists the whole stream's, which then gives its length. Time bases wider than
+32 bits are no time base. Each still is the frame showing at its instant,
+the last frame starting at or before it (the first of any starting in the
+same microsecond), decoded by that frame's own timestamp, so its actual time
+is that frame's start. When the remaining instants would miss the deadline at
+the pace so far, each takes its frame's keyframe instead, with the
+keyframe's time. A stream whose packets carry no timestamps is sought by
+time: each frame's actual time is its instant, and the tolerance is one
+frame's length, or the duration when that is shorter. A frame that is not
+exactly the tile size in RGBA, a byte short or over, is `RenderParse`, or
+`CodecUnavailable` when ffmpeg's codec list says it cannot decode the codec;
+a codec list that fails says nothing. A decoder past the deadline, or a codec
+list still coming at it, is `RenderTimeout`; a file changed while it was
+decoded is `Changed`. A video's digest covers its first 64 KiB and the held
+file's identity, since hashing the whole file would cost more than the job
+has.
+
+Each still is the frame showing at the middle of its equal share of the
+window (`start_s` to `end_s`, the duration by default), or at `at_s`, clamped
+to the duration. Its actual time is that frame's start, and the tolerance
+is the farthest any frame's start is from its instant. A tile keeps the picture's shape and is as large as
+the edge allows after 4-pixel gaps around and between tiles, never larger
+than the picture; a poster has no gaps. Transparent pixels are flattened
+onto a dark gray, so the reply is opaque. A sheet asked for labels marks
+each tile's lower left with the time shown (`mm:ss`, `h:mm:ss` from an hour,
+tenths under a minute). The reply is Video, with the video result described
+above.
 
 **Auto jobs.** The source is read once, under the larger of the raster and
 SVG caps, and that one snapshot is both classified and rendered, so a file

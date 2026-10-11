@@ -189,7 +189,8 @@ Reports that fit any of these are welcome:
   file-size, descriptor and (Linux) address-space limits and starts a
   watchdog. A descriptor that survives into the worker, a payload that
   reaches its stderr, or a worker that outlives its watchdog is in scope.
-  The client starts it with no arguments, an empty environment, `/` as its
+  The client starts it with no arguments, an empty environment but for
+  `KETTLE_MEDIA_DECODER` (the trusted ffmpeg Kettle found, if any), `/` as its
   working directory and stderr discarded, in a process group of its own that
   is killed before the worker is reaped, and accepts a reply only after the
   worker exits 0 with nothing after the reply. It measures the worker and
@@ -212,6 +213,43 @@ Reports that fit any of these are welcome:
   that allocates past those caps, a decoder panic reached from hostile
   input, or rendered output that carries a transparent pixel's hidden color
   is in scope.
+- **External video decoder** — a video's stills come from Apple's
+  decoder on macOS or the user's own ffmpeg and ffprobe, never bundled.
+  Kettle's launcher looks for ffmpeg only in fixed places and the Nix
+  profile under `HOME`, never `PATH`; the worker uses only the binary the
+  parent names in its environment, and trusts it only when
+  the file and every directory and link on the way to it belong to the user
+  or root and no one else can write them (a sticky directory passes; on
+  macOS the admin group counts as root, since its members are root through
+  sudo, and Homebrew's directories are writable by it). It is checked again
+  before each run. Each run is the worker's child in its process group,
+  with an empty environment, a fixed argument list into which only numbers
+  Kettle computed and the sniffed demuxer go, the `file` protocol alone, a
+  fresh descriptor of the held file (checked to be that file) as its only
+  input, stderr discarded, its output read to an exact size, and a
+  deadline. On Linux a seccomp filter stops it from starting a process or
+  leaving its process group or session; on macOS its process limit stops
+  it from starting a process (a decoder is never run as root, whom the
+  limit does not bind), but it could still leave its group itself, which
+  only the planned worker sandbox can prevent. On macOS, MP4 and QuickTime
+  are read first by AVFoundation inside the worker, opened by descriptor
+  with references outside the file forbidden; decoding runs in Apple's
+  decoder service, demuxing in the worker under its limits. Running a binary from
+  anywhere else, an argument a request or the media chose, a decoder that
+  starts a process, reads another file, or outlives its job, or a frame
+  accepted at the wrong size, is in scope.
+- **Model frames** — `kettle_video_frames` (full MCP only, never the
+  display server or Kettle's integrations, approved by nothing Kettle
+  sets) and `kettle video-frames` return a video's frames to the caller: a
+  separate, deliberate read, unlike showing. The file is opened by the
+  caller's own process, inside its sandbox, and decoded in a worker that
+  process starts. The image goes to the model, and the harness may keep it
+  in its session files (Claude Code does); the command writes its JPEG
+  privately (mode 0600), whole, and never over the video. Failures name no
+  path and carry no media. A frames result reaching a caller that did not
+  ask for it, the display server or an integration offering or approving
+  it, a read outside the caller's own permissions, or the command writing
+  anywhere but where it was told, is in scope.
 - **Diagram rendering** — Mermaid source is parsed and laid out by merman
   0.8.0, pinned exactly, with its resource-constrained policy, a deadline,
   no network or file access, and Kettle's own text measurement from the job's

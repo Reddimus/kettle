@@ -250,8 +250,10 @@ or selected (`render_selection_as_diagram`), or a file a pane names
 ## File paste (paths)
 
 Kettle's path-paste channel also works for a video, PDF, or arbitrary binary:
-the agent reads the **file path pasted as text** (`Read`, or `ffmpeg`/`ffprobe`
-via a shell for a video) rather than receiving bytes over an escape sequence.
+the agent reads the **file path pasted as text** (`Read`, or for a video
+Kettle's `kettle_video_frames` MCP tool or `kettle video-frames` command,
+which return a labeled contact sheet) rather than receiving bytes over an
+escape sequence.
 
 Kettle supports this three ways, all of which paste a shell-quoted path (never
 raw bytes):
@@ -275,7 +277,8 @@ for the focused pane's shell (POSIX single-quote, PowerShell `''`, or `cmd`
 double-quote), and when the pane runs **WSL** a Windows path is translated to
 its `/mnt/c/…` (or in-distro `/home/…` for a `\\wsl.localhost\…` share) form so
 the Linux-side agent can open it. There is no video decoder in either client;
-the path lets the agent drive `ffmpeg` itself.
+the path lets the agent read the video's frames with `kettle_video_frames` (full
+MCP) or `kettle video-frames` (any shell).
 
 An explicit copied or dropped video also gets a short-lived receipt when
 `paste-video-preview` is on. After bounded background validation it uses a

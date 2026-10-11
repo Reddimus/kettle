@@ -829,8 +829,17 @@ indices and every metadata bound; input caps, fonts and video options; the
 content digest changes with the content and each identity field (its framing
 is pinned against a value computed independently); build ID bounds and wire
 direction; the largest reply and its allocation budget; streaming at exact
-boundaries and through interrupted reads; version 1 and version 3 frames of
-every kind are `RestartRequired`; an Auto job has tag 6; a typed reply is its
+boundaries and through interrupted reads; version 1, 2, 3 and 5 frames of
+every kind are `RestartRequired`; a stills job's poster or sheet layout and its
+4096 edge round-trip, while a poster of several frames, a sheet of no columns
+or more columns than frames and an edge past 4096 are refused; a video reply's
+result round-trips plain and typed, is required on a video reply and refused
+on any other, and a rotation off the right angles, an empty or oversized
+frame list, a time past the end, a zero or excessive frame rate, a frame
+farther from its instant than the tolerance, a tolerance past the duration,
+an empty or oversized side, a duration past its bound and an
+unknown codec or container are refused on encode and, written past the
+encoder, on decode, before any pixel is copied; an Auto job has tag 6; a typed reply is its
 media-kind byte followed by exactly the plain reply's payload, round-trips
 for every kind and streams after Ready, and an unknown kind or a typed reply
 in another direction is refused. `tests/worker.rs` drives a
@@ -973,7 +982,21 @@ it rendered, a PNG as raster and an SVG as SVG, prose is
 Markdown gallery crosses whole: an Auto job's reply says Markdown and carries
 both pages, the document as read and the first page rendered; an explicit
 page comes back with its index and the same digest, and one past the last is
-`IndexOutOfRange`. With
+`IndexOutOfRange`. An animation's stills cross too: a labeled sheet of the
+WebP fixture comes back as a Video reply with its duration, codec and each
+frame's time, and inline MP4 bytes are `UnsupportedMedia`. So do a
+video's: with stand-in ffmpeg and ffprobe named in `KETTLE_MEDIA_DECODER`,
+shell built-ins only, a held MP4 comes back as a Video reply with the
+stand-in's description and the time of each frame shown, and its digest
+carries the file's identity (on macOS after AVFoundation turns the stand-in
+file down); without an external decoder, or with one anyone can write, it is
+`BackendUnavailable` on Linux and AVFoundation's `UnsupportedContainer` on
+macOS, and inline MP4 bytes are `UnsupportedMedia`. On macOS AVFoundation
+reads the MP4 fixture in the worker, under its limits, each frame's time a
+frame's own start within the tolerance. When a trusted ffmpeg is installed,
+the WebM fixture decodes through the worker to the frames showing at each
+instant (skipped, and said so, when none is). Taking the decoders away from
+the worker, or the fallback from AVFoundation to ffmpeg, fails these. With
 `test-faults`, a job can pause either side of its classification: a 2.2 s
 pause after it ends a raster job, explicit or Auto, at the watchdog (exit 4)
 while an SVG job of either kind answers; and two 1.2 s pauses either side of
@@ -991,6 +1014,92 @@ uncompared build, frame skew read as garbage, a second frame accepted and a
 truncated frame left unanswered each fail a test above, and so does a
 worker that answers without rendering.
 
+### kettle-media-native
+
+`src/tools.rs` trusts a binary through relative and absolute links, by the
+path it resolves to and the name it was given, finds ffprobe beside it, and
+refuses it once it changes. It refuses a relative path, nothing there, a
+directory, a file that is not executable or has a set-id bit, and a file or
+any directory on the way, the link's or the target's, that someone else can
+write; a sticky shared directory passes, and on macOS so does one the admin
+group can write (Homebrew's layout), but not one everyone can. A link loop
+is refused. The search finds a Nix profile under the home it is given and
+never looks in `PATH`. These tests assert first that the temporary
+directory's parents are themselves trusted. `src/contain.rs` starts copies
+of its test binary: contained, a child makes a thread but cannot start a
+process, and on Linux cannot call `setsid` or `setpgid` either; uncontained,
+the same child does all four. On Linux raw calls built to fail in the kernel
+show the filter's answers: `clone3` gets `ENOSYS`, a `clone` without
+`CLONE_THREAD` gets `EPERM` and one with it reaches the kernel, and on
+x86_64 an x32 number gets `EPERM`, where uncontained the kernel answers each.
+The seccomp filter's every jump lands inside it and it ends in a return. `src/reopen.rs` reopens a held file from its own
+start without moving the held offset, follows it through a rename, and
+refuses it once it is replaced at its path (macOS) or rewritten.
+`src/run.rs` runs shell stand-ins with an empty environment in `/`, reads
+output to its cap, calls a byte more an overrun, takes a failing exit as no
+success, refuses a binary changed since it was trusted, and kills one still
+running (silent, or with its output closed) at the deadline. `src/lib.rs`
+holds every process the crate starts to `run`, which contains each before
+starting it.
+
+`src/ffmpeg.rs` reads ffprobe's numbers exactly or not at all; a description
+gives the size as shown (a 90 degree counterclockwise display matrix turns
+1280x720 to 720x1280; a 16:15 pixel aspect widens 720 to 768), skips cover
+art, falls back to the stream's duration, and refuses no video or 64
+streams; ticks convert to and from milliseconds without drift, from a late
+start too; the frame showing is the last starting at or before an instant,
+past a discarded packet, and its keyframe the last before it; packets
+without timestamps make the list unusable; the decode and packet arguments
+are fixed but for the stream, the seek and the size; the codec list says
+what decodes; frames are hurried only once the pace would miss the
+deadline; time bases past 32 bits are refused; of frames starting in the
+same microsecond, which a seek cannot tell apart, the first is taken.
+
+`tests/ffmpeg.rs` drives the decoder with shell stand-ins that log their
+arguments: each instant takes the frame showing (125, 375, 625 and 875 ms
+take the frames at 100, 300, 600 and 800 ms) by its own timestamp
+(`-seek_timestamp 1`), packets are listed only around the instants (32
+frames past each, 3.2 s at 10 fps, and 32 s at one frame a second), and the
+description comes through; instants showing one frame decode it once; output
+a pixel short, a pixel over, a byte over or a failing exit is `RenderParse`,
+or `CodecUnavailable` when the codec list lacks the codec, but `RenderParse`
+when the codec list itself fails and `RenderTimeout` when it is still coming
+at the deadline; a decoder past the deadline is `RenderTimeout`; with no duration the whole stream is listed and
+gives the length; no video is `UnsupportedMedia` and a failing ffprobe
+`RenderParse`; untimed packets seek by time with a frame's length as the
+tolerance; a decoder anyone can write, or without ffprobe beside it, is
+refused, and a held file rewritten in place is `Changed` before any decoder
+runs. When a trusted ffmpeg is installed, the fixtures in
+`tests/fixtures/video` (provenance in their README; frame N shows N's six
+bits as black and white blocks, which no tone curve changes) decode to the
+frames showing at 666, 2000, 3333 and 3999 ms
+(frames 6, 20, 33 and 39), in MP4, WebM, a rotated MP4 shown upright and a
+WebM with no duration measured from its packets, and a clip cut in half is
+refused; without one these tests say they were skipped.
+
+`tests/avfoundation.rs` (macOS, with the `avfoundation` feature) reads the
+same fixtures with AVFoundation: each frame shows the fixture frame starting
+at the time reported, that time within the tolerance reported (at most a
+quarter of the closest gap), and instants whose shares meet at the clip's
+keyframes (every 1.5 s) each take a different frame inside their own share,
+where half the gap let two take the keyframe between them; the video is described as H.264 at 10 fps, 64x36, four
+seconds, no audio; a single instant is exact (666 ms is frame 6, 2050 ms
+frame 20); the rotated clip is shown upright, 36x64 at 270 degrees as ffmpeg
+reads it; WebM is `UnsupportedContainer`, which the chain passes on and,
+with no external decoder, answers `BackendUnavailable`; a clip cut in half
+fails as the stream's fault.
+
+Red checks: the frame after an instant taken, seeking by time, no
+`-seek_timestamp`, keyframes always, a run left uncontained, no macOS
+process limit, a group-writable directory trusted, frames of any length
+accepted, a reopened file not checked, no deadline on a run, no codec
+explanation, rotation read the wrong way, no scan for a stream without a
+duration, a one-second packet window, frames in one microsecond told
+apart, and a codec list's deadline taken for the stream's fault each fail a
+test; so do AVFoundation given the wrong MIME type, no display transform,
+its rotation read the wrong way, a single instant taken loosely and the
+instant reported as the frame's time.
+
 ### kettle-media-render
 
 `tests/raster.rs` renders through the crate's one entry point. Each supported
@@ -1005,7 +1114,49 @@ keeps it pure blue. An 8x8 box fits a 4x2 image at 8x4; a crop in box
 coordinates is transparent where the centered image does not reach; a box
 over the rendered edge or a crop outside it is `BadParams`. A file's digest
 covers its bytes and the open file's identity, the same bytes inline carry
-none, and video kinds are `UnsupportedMedia` for now.
+none, and a video probe is `UnsupportedMedia` for now.
+
+Stills: `src/stills.rs` pins the instants, the middles of equal shares of
+the window or of `start_s` to `end_s`, past the end the end, `at_s` on its
+own and clamped, and all at 0 for a still image; a sheet's grid; a tile as
+large as the edge allows after the gaps, its shape kept, never larger than
+the picture, and no tile when the gaps leave no room; labels in `mm:ss`,
+`h:mm:ss` and tenths under a minute. A sheet lays frames out in reading
+order with the gap around each, a transparent frame showing the background,
+the result opaque, a Video reply with each frame's times and the tolerance;
+a label marks a tile's lower left only when asked for, the upper right
+staying the frame; frames off the tile size, none or one too many are
+`RenderResource`. Through the crate's entry point a stills job on the WebP
+fixture renders as Video, reported once, an MP4's first bytes are
+`BackendUnavailable` and text is `UnsupportedMedia`. With a decoder in
+process (`a_video_is_decoded_by_the_decoder_given`), a held MP4 becomes a
+sheet of the decoder's frames with its times, its digest the first bytes and
+the held file's identity; a frame short, a frame for another time and a file
+rewritten while it was decoded are refused, and inline MP4 bytes are
+`UnsupportedMedia` with or without a decoder.
+`src/animation.rs` decodes GIFs and APNGs built in the test and the
+`tests/fixtures/stills/anim.webp` fixture (provenance in its README): each
+still is the frame showing at its time, with that frame's start as its time
+and the farthest of them from its instant as the tolerance, an `at_s` poster
+too; a frame shrinks with premultiplied alpha, so a transparent pixel's
+hidden color, white or red, leaves the poster the same opaque blue; a GIF delay
+under 20 ms shows for 100 ms and an APNG's 0 ms delay for 100 ms, even
+delays give a frame rate and uneven none, a single frame is a still image
+of no duration; WebP frames come back within 2 of their colors (the decoder
+blends each onto the last), a PNG that does not animate is
+`UnsupportedMedia`, a spent deadline is `RenderTimeout` and a broken GIF is
+`RenderParse`. `src/source.rs`'s `a_held_file_reads_through_its_descriptor`
+holds a file by its first bytes, reads it whole through the same descriptor
+whatever is renamed over its path, and calls it `Changed` once it is
+appended to or rewritten in place at the same size; inline bytes are their
+own prefix, and either over its cap is refused as a load refuses it. Red
+checks: samples at the ends of the shares, tiles grown past the picture,
+alpha kept rather than flattened, labels drawn unasked, the frame after the
+time taken, GIF short delays kept, no deadline between frames, still PNGs
+allowed and a held file not checked after reading each fail a test, as do
+a video's file not checked after decoding, a decoder's frames taken
+without checking their count and times, and an animation frame shrunk in
+straight alpha.
 
 Unit tests in `src/auto.rs` classify Auto jobs: a PNG is raster whatever the
 file is called (`.svg`, `.bin`, no suffix), and a declared SVG with a
@@ -2557,8 +2708,14 @@ deadline (`check_failed`); a child still running after its grace leaves the
 guard set, no run starts (a marker command never runs) until a reaper
 collects it, and then runs start again; and a finished one reports its exit
 status and stderr. In kettle-ui,
-`media_platform`'s process tests spawn stand-in workers: `/usr/bin/env` prints
-nothing (an empty environment), `/bin/pwd` prints `/`, and a script leads its
+`media_platform`'s process tests spawn stand-in workers: a worker that has
+exited but is not yet reaped measures as holding nothing rather than failing
+the measurement (macOS answers ESRCH for it; a large reply read after the
+worker exits made this a live race; counting it fatal fails the test);
+`/usr/bin/env` prints
+nothing inherited, only `KETTLE_MEDIA_DECODER` naming the trusted ffmpeg the
+search finds when one is installed (dropping it fails the test there),
+`/bin/pwd` prints `/`, and a script leads its
 own process group; a kill reaches a background child before anything is
 reaped; a worker that exits 0 by itself keeps that status while the child it
 left behind is killed before the reap; asking whether a running worker has
@@ -4126,7 +4283,7 @@ same columns, `ui_geometry` reports the lane under `preview_lanes`, a click on
 `▾` leaves a one-row strip and on `×` gives the terminal back its size
 exactly.
 
-Lane content: `kettle-media` tests pin protocol 3's layout and exact
+Lane content: `kettle-media` tests pin the protocol's layout and exact
 source; `kettle-ui` tests pin that a spec rebuilds the job it came from, that
 an item's text is its exact source until released and evicting its pixels
 releases it, that native path keys never merge by their printed form, that
@@ -4335,8 +4492,48 @@ pins where the server runs (a Kettle found the strict way, `TERM_PROGRAM`
 saying Kettle, tmux, and tmux's own `TERM_PROGRAM` saying nothing of
 Kettle), the instructions for each (the triggers, keeping the source,
 showing is not seeing, no retry and no changes inside; the tmux addition;
-not calling it outside; the full server saying the same after its tools),
+not calling it outside; the full server saying the same after its tools,
+then Appendix A's frames guidance, which the display server never gives),
 and both protocol eras carrying the same words.
+`mcp_tools` pins `kettle_video_frames` to the full server: listed and
+callable there, refused by the display server, its schema requiring only an
+absolute path with `count` up to 16, `max_edge` up to 2560 and `select` only
+`even`. Bad arguments (a relative path, another selection, an unknown
+argument, a count past 16 or fractional, `at_s` beside a window, none at
+all) come back as the fixed `bad_params` failure with no image, and a
+missing file is found missing before any worker starts. A sheet's result is
+exactly one JPEG image (base64 that decodes to a JPEG) and then the index,
+with no `structuredContent` and no `isError`; with a 40 KB request id it fits
+the 768 KiB response in both eras; under a quarter of its size it shrinks
+and stays whole, its index uncut; fitting nowhere is `too_large`. A missing
+decoder's failure adds the install hint; a parse failure does not.
+`video_frames` pins the request rules (nine frames, three across, on a 1568
+edge by default; `at_s` as one frame; a window narrowing the sheet; columns
+the fewest that hold the frames) and the refusals (times not finite or
+negative, a window ending at or before its start, `at_s` beside a window or
+several frames, no frames or seventeen, an edge of 0 or past 2560); the
+encoder keeping the best quality that fits and shrinking a quarter at a time,
+never cutting; the index's exact words, milliseconds under a second; the
+install hint only for a missing decoder; and the output written whole,
+private, never over the video and never left half-written, a folder others
+can change (0777, 0775) refused while a sticky or private one is not, and a
+failed write removing nothing it did not make, a look-alike temporary file
+included. A single frame is a labeled one-column sheet; `at_s` with any
+count, and a supplied path past 4 KiB however it normalizes, are refused;
+the encoder tries the 320-pixel minimum itself; the index rounds a tolerance
+up. MCP takes integer arguments written as 9.0, and the launcher names
+ffmpeg by the path it was found under, so the worker finds the same ffprobe. The model
+acceptance for `kettle_video_frames` used a nine-second clip of nine
+one-second colors (red, green, blue, yellow, magenta, cyan, white, orange,
+purple) as VP8 WebM, through ffmpeg, and H.264 MP4, through AVFoundation:
+Claude Code 2.1.296 (`claude -p` with the full server and only this tool
+allowed) and Codex 0.162.1 (`codex exec` with the server, and the tool
+approved by name, as `-c` overrides) each called the tool and named all nine
+colors in order with the index's times, on both clips. An earlier run on the
+MP4 named seven, two instants having taken the same keyframe, which led to
+AVFoundation's quarter-gap tolerance. Both eras were checked by hand over
+stdio: one image and the index, no `structuredContent`, every response under
+768 KiB, a 4K sheet of 16 frames at 2560 pixels included.
 `tests/mcp_stdio.rs` runs `kettle_show` to completion through the real
 `kettle mcp`, in display and full mode, in both protocol eras, from Mermaid
 source and from a file, against a Kettle with previews on that the test
@@ -4366,7 +4563,8 @@ tests), bounded at 256 characters.
 was missing. `just cli-smoke` runs the built `kettle show` for its options,
 a missing file, an overlong path and non-UTF-8 Mermaid on stdin, all refused
 before any Kettle is looked for, so the smoke never shows anything where it
-runs, and `kettle agent-setup` for its function, its removal text and the
+runs, `kettle video-frames` for its options and a missing file (refused, no
+sheet written, the command in the completions), and `kettle agent-setup` for its function, its removal text and the
 lines of its status (on Windows, that it is not available). `main`'s tests
 pin that a pending update (on Windows, where one waits for Kettle's windows
 to close) ends every `show`, `mcp` and `agent-setup` invocation without

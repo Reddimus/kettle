@@ -38,6 +38,8 @@ graph TD
     media["kettle-media<br/>bounded jobs and results · theme · caps<br/>source authorization · build handshake · binary frames<br/>worker availability client"]
     worker["kettle-media-worker (bin)<br/>early fd sweep · non-dumpable · rlimits<br/>watchdog · one job per process"] --> media
     worker --> mrender
+    worker --> mnative
+    mnative["kettle-media-native<br/>trusted user ffmpeg/ffprobe · contained runs<br/>exact frames by timestamp · deadlines"] --> media
     mrender["kettle-media-render<br/>held-handle source loads · raster decode under caps<br/>SVG sanitize · admission · resvg · straight RGBA<br/>no unsafe code"] --> media
 ```
 
@@ -77,7 +79,38 @@ of one CommonMark document (pulldown-cmark, the version merman-render
 already locks), at most 32 of at most 64 KiB each in at most 1 MiB; its
 reply carries every page, the document as read and its digest beside the
 one page rendered, so later pages render from those bytes and one gallery
-is one version of the file.
+is one version of the file. Video stills are laid out here too
+(`stills.rs`): which instants a job asks for, each frame's tile size, and the
+poster or sheet with each frame's time. The source is held rather than read
+(`source::Held`): an open descriptor, the identity it had when opened and
+its first bytes, which classify it. An animated GIF, APNG or WebP is decoded
+here (`animation.rs`); a video container needs a decoder this crate does not
+have and returns `BackendUnavailable` unless the worker supplies one.
+
+`kettle-media-native` supplies the decoders, as `Decoders`: on macOS
+AVFoundation first for MP4 and QuickTime, behind the `avfoundation`
+feature only the worker turns on (the GUI links the crate for its ACL check
+and must not load the frameworks), then the user's own ffmpeg and ffprobe.
+Its unsafe code is libc and Objective-C calls, each with a SAFETY comment.
+AVFoundation demuxes in the worker and decodes in Apple's decoder service;
+it opens the held file by descriptor and returns each frame's actual time.
+ffmpeg and ffprobe are never bundled or linked: Kettle's launcher finds them
+in fixed places and names them in the worker's environment
+(`KETTLE_MEDIA_DECODER`), which no request can set, and they are trusted
+only when no one but the user or root could have put them there. Each run is a child
+of the worker in its process group, contained so it starts no process of its
+own, with a fixed argument list, a fresh descriptor of the held file as its
+only input, stderr discarded, its output read up to an exact size and a
+deadline. ffprobe describes the streams and lists the packets around each
+instant, which gives the frame actually showing there; ffmpeg then decodes
+each frame by its own timestamp. The renderer lays the frames out and checks
+the held file is unchanged afterwards. The `kettle` crate's `video_frames`
+module takes those stills for a model to read: `kettle video-frames` and the
+full MCP server's `kettle_video_frames` open the file in their own process,
+start their own worker through the same client and launcher the GUI uses,
+and encode the sheet as one JPEG sized to its destination (any size for the
+command's file, the 768 KiB response line for MCP) with a text index of each
+frame's time.
 Mermaid goes through merman 0.8.0, pinned exactly with its layout and
 painting family, under a resource-constrained policy and a two-second
 `OperationControl` deadline that starts before its fonts load. Kettle
@@ -688,7 +721,7 @@ has just shrunk paints nothing in its lane.
 Every shelf item keeps what it was rendered from (`media::ItemSource`): the
 job as a `JobSpec` (kind, theme, canvas, target, fonts, and its input), the
 source's digest, and, for an SVG or a diagram read from a file, its text as
-the worker read it (protocol 3's `exact_source`). Bytes a request carried
+the worker read it (the protocol's `exact_source`). Bytes a request carried
 are kept once, charged to the process preview account through
 `GraphicsBudget::reserve_retained_cpu`, and shared by the queue, the render
 lane and the shelf; a push whose bytes do not fit is refused as over
