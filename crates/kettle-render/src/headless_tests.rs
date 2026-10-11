@@ -206,18 +206,36 @@ fn a_renderer_compiles_each_distinct_pipeline_once() {
         "text-only startup allocates no preview layer"
     );
     let (mut cards, snap, nonce) = crate::inline_cards::tests::fixture();
-    cards.set_poster(
-        nonce,
-        kettle_core::ImageData::new_with_budget(
-            2,
-            1,
-            vec![250, 20, 60, 255, 250, 20, 60, 255],
-            &kettle_core::GraphicsBudget::previews(),
-        ),
+    let poster = kettle_core::ImageData::new_with_budget(
+        2,
+        1,
+        vec![250, 20, 60, 255, 250, 20, 60, 255],
+        &kettle_core::GraphicsBudget::previews(),
     );
+    cards.set_poster(nonce, poster.as_ref());
     let mut view = pane(&snap, 1200, 400);
     view.inline_cards = Some(&cards);
+    let pane_id = view.id;
     capture(&mut renderer, &cfg, &[view], &focused(false));
+    let painted: Vec<_> = renderer
+        .painted_cards()
+        .iter()
+        .map(|card| (card.pane, card.nonce))
+        .collect();
+    assert_eq!(
+        painted,
+        [(pane_id, nonce)],
+        "the frame reports the card it accepted"
+    );
+    // A press inside the card's drawn rectangle is the card's.
+    let card = renderer.painted_cards()[0];
+    let [x, y, width, height] = card.rect;
+    assert!(width > 0.0 && height > 0.0);
+    assert_eq!(
+        renderer.card_at(x + width / 2.0, y + height / 2.0),
+        Some(card)
+    );
+    assert_eq!(renderer.card_at(x - 1.0, y), None);
     let replacing = [&renderer.pane_bases, &renderer.live_pane_bases];
     let blending = [
         &renderer.quads,
@@ -1459,15 +1477,13 @@ fn registered_poster_overwrite_removes_tiles_and_badges_in_the_same_frame() {
         };
         cfg.text_renderer = mode;
         let (mut cards, mut snap, nonce) = crate::inline_cards::tests::fixture();
-        cards.set_poster(
-            nonce,
-            kettle_core::ImageData::new_with_budget(
-                2,
-                1,
-                vec![250, 20, 60, 255, 250, 20, 60, 255],
-                &kettle_core::GraphicsBudget::previews(),
-            ),
+        let poster = kettle_core::ImageData::new_with_budget(
+            2,
+            1,
+            vec![250, 20, 60, 255, 250, 20, 60, 255],
+            &kettle_core::GraphicsBudget::previews(),
         );
+        cards.set_poster(nonce, poster.as_ref());
         snap.cursor.point = kettle_core::Point::new(kettle_core::Line(2), kettle_core::Column(8));
         snap.cursor.shape = alacritty_terminal::vte::ansi::CursorShape::Block;
         let mut view = pane(&snap, 1200, 400);
@@ -1488,7 +1504,10 @@ fn registered_poster_overwrite_removes_tiles_and_badges_in_the_same_frame() {
         assert_eq!(&before.0[0..3], &[250, 20, 60]);
         let badges = [
             label_rects(&renderer, crate::card_scene::CardLabelKind::Brand),
-            label_rects(&renderer, crate::card_scene::CardLabelKind::Claude),
+            label_rects(
+                &renderer,
+                crate::card_scene::CardLabelKind::Harness(crate::CardHarness::ClaudeHook),
+            ),
         ]
         .concat();
         assert_eq!(badges.len(), 2);
@@ -1531,15 +1550,13 @@ fn refused_card_poster_upload_paints_status_and_recovers_on_the_next_frame() {
         cfg.text_renderer = mode;
         let (mut cards, snap, nonce) = crate::inline_cards::tests::fixture();
         let budget = kettle_core::GraphicsBudget::previews();
-        cards.set_poster(
-            nonce,
-            kettle_core::ImageData::new_with_budget(
-                2,
-                1,
-                vec![250, 20, 60, 255, 250, 20, 60, 255],
-                &budget,
-            ),
+        let poster = kettle_core::ImageData::new_with_budget(
+            2,
+            1,
+            vec![250, 20, 60, 255, 250, 20, 60, 255],
+            &budget,
         );
+        cards.set_poster(nonce, poster.as_ref());
         // Exhaust accounting only; no large VRAM allocation or performance claim.
         let mut low = 0;
         let mut high = budget.limits().process_gpu_bytes;
@@ -1566,6 +1583,12 @@ fn refused_card_poster_upload_paints_status_and_recovers_on_the_next_frame() {
                 .is_none_or(|posters| posters.drawn_item_indices().next().is_none())
         );
         assert_eq!(renderer.card_scene.labels.len(), 3);
+        assert_eq!(renderer.painted_cards().len(), 1);
+        assert_eq!(
+            renderer.shown_cards().count(),
+            0,
+            "a refused poster leaves its card on screen without its image"
+        );
         let status = label_rects(&renderer, crate::card_scene::CardLabelKind::Unavailable);
         assert_eq!(status.len(), 1);
         assert!(
@@ -1586,6 +1609,11 @@ fn refused_card_poster_upload_paints_status_and_recovers_on_the_next_frame() {
             vec![0]
         );
         assert_eq!(renderer.card_scene.labels.len(), 2);
+        assert_eq!(
+            renderer.shown_cards().copied().collect::<Vec<_>>(),
+            renderer.painted_cards().to_vec(),
+            "the image shows once its poster is uploaded"
+        );
         let center = [
             cfg.padding_x + 11.0 * renderer.cell_w,
             cfg.padding_y + 2.5 * renderer.cell_h,
@@ -1664,15 +1692,13 @@ fn registered_poster_real_scroll_keeps_partial_pixels_and_offscreen_overwrite_re
             } else {
                 term.scroll_display(Scroll::Top);
             }
-            cards.set_poster(
-                nonce,
-                kettle_core::ImageData::new_with_budget(
-                    2,
-                    1,
-                    vec![250, 20, 60, 255, 250, 20, 60, 255],
-                    &kettle_core::GraphicsBudget::previews(),
-                ),
+            let poster = kettle_core::ImageData::new_with_budget(
+                2,
+                1,
+                vec![250, 20, 60, 255, 250, 20, 60, 255],
+                &kettle_core::GraphicsBudget::previews(),
             );
+            cards.set_poster(nonce, poster.as_ref());
             let mut snap = PaneSnapshot::default();
             snap.capture_with_card_marks(&term, true);
             let mut view = pane(&snap, 1200, 400);
@@ -1775,15 +1801,13 @@ fn exhausted_preview_account_keeps_new_terminal_windows_and_recovers_cards() {
             "terminal text is painted"
         );
         let (mut cards, snap, nonce) = crate::inline_cards::tests::fixture();
-        cards.set_poster(
-            nonce,
-            kettle_core::ImageData::new_with_budget(
-                2,
-                1,
-                vec![250, 20, 60, 255, 250, 20, 60, 255],
-                &budget,
-            ),
+        let poster = kettle_core::ImageData::new_with_budget(
+            2,
+            1,
+            vec![250, 20, 60, 255, 250, 20, 60, 255],
+            &budget,
         );
+        cards.set_poster(nonce, poster.as_ref());
         let mut view = pane(&snap, 1200, 400);
         view.inline_cards = Some(&cards);
         let unavailable = capture(&mut renderer, &cfg, &[view], &focused(false));
@@ -1817,4 +1841,247 @@ fn exhausted_preview_account_keeps_new_terminal_windows_and_recovers_cards() {
             "INLINE_CARD_GPU_ACCEPTANCE: new window with full previews and recovery {mode:?}"
         );
     }
+}
+
+/// A quick-select chip over an inline card sits above the card's poster and
+/// frame, so its label stays readable on any image.
+#[test]
+fn a_hint_chip_over_a_card_is_drawn_above_it() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(1200, 400) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let (mut cards, snap, nonce) = crate::inline_cards::tests::fixture();
+    let poster = kettle_core::ImageData::new_with_budget(
+        2,
+        1,
+        vec![20, 200, 60, 255, 20, 200, 60, 255],
+        &kettle_core::GraphicsBudget::previews(),
+    );
+    cards.set_poster(nonce, poster.as_ref());
+    let place = cards.placements(&snap)[0];
+    let mut view = pane(&snap, 1200, 400);
+    view.inline_cards = Some(&cards);
+    let chip = cfg.search_background.unwrap_or(cfg.theme.palette[3]);
+    let near_chip = |frame: &image::RgbaImage| {
+        frame
+            .pixels()
+            .filter(|p| {
+                [(p[0], chip.r), (p[1], chip.g), (p[2], chip.b)]
+                    .iter()
+                    .all(|(a, b)| a.abs_diff(*b) <= 12)
+            })
+            .count()
+    };
+    let plain = capture(&mut renderer, &cfg, &[view], &focused(false));
+    assert_eq!(
+        near_chip(&plain),
+        0,
+        "nothing chip-coloured before the hint"
+    );
+    let mut overlay = focused(false);
+    overlay.hint_labels = vec![HintLabel {
+        row: usize::try_from(place.line + i32::from(place.rows) / 2).unwrap(),
+        col: place.column + usize::from(place.columns) / 2,
+        label: "a".to_string(),
+        dim: false,
+    }];
+    let mut view = pane(&snap, 1200, 400);
+    view.inline_cards = Some(&cards);
+    let hinted = capture(&mut renderer, &cfg, &[view], &overlay);
+    assert!(
+        near_chip(&hinted) > 0,
+        "the chip shows over the card's poster"
+    );
+}
+
+/// A quick-select chip is cut to its pane like its label, so one at the
+/// last column never paints over the next pane.
+#[test]
+fn a_hint_chip_stays_inside_its_pane() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(1200, 400) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let snap = snapshot_of(80, 20, b"");
+    let left = pane(&snap, 600, 400);
+    let mut right = pane(&snap, 600, 400);
+    right.id = 2;
+    right.rect = (600.0, 0.0, 600.0, 400.0);
+    right.focused = false;
+    // A two-letter label from the left pane's last whole column runs past
+    // its edge.
+    let col = ((600.0 - cfg.padding_x) / renderer.cell_w).floor() as usize - 1;
+    let mut overlay = focused(false);
+    overlay.hint_labels = vec![HintLabel {
+        row: 1,
+        col,
+        label: "aa".to_string(),
+        dim: false,
+    }];
+    let frame = capture(&mut renderer, &cfg, &[left, right], &overlay);
+    let chip = cfg.search_background.unwrap_or(cfg.theme.palette[3]);
+    let chip_pixels = |from: u32, to: u32| {
+        (0..frame.height())
+            .flat_map(|y| (from..to).map(move |x| (x, y)))
+            .filter(|(x, y)| {
+                let p = frame.get_pixel(*x, *y);
+                [(p[0], chip.r), (p[1], chip.g), (p[2], chip.b)]
+                    .iter()
+                    .all(|(a, b)| a.abs_diff(*b) <= 12)
+            })
+            .count()
+    };
+    assert!(chip_pixels(0, 600) > 0, "the chip shows in its pane");
+    assert_eq!(chip_pixels(600, 1200), 0, "and nowhere in the next");
+}
+
+/// The card a click would open gets an accent outline over its frame, and
+/// only while the UI names it.
+#[test]
+fn a_hovered_card_is_outlined_in_the_accent() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(1200, 400) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let (mut cards, snap, nonce) = crate::inline_cards::tests::fixture();
+    let poster = kettle_core::ImageData::new_with_budget(
+        2,
+        1,
+        vec![20, 200, 60, 255, 20, 200, 60, 255],
+        &kettle_core::GraphicsBudget::previews(),
+    );
+    cards.set_poster(nonce, poster.as_ref());
+    let accent = renderer.ui_accent(&cfg, &cfg.theme);
+    // The outermost whole pixels of the card's visible part, which the
+    // outline covers whole.
+    let ring = |frame: &image::RgbaImage, rect: [f32; 4]| -> (usize, usize) {
+        let [x, y, width, height] = rect;
+        let (x0, y0) = (x.ceil() as u32, y.ceil() as u32);
+        let (x1, y1) = (
+            (x + width).floor() as u32 - 1,
+            (y + height).floor() as u32 - 1,
+        );
+        let mut cells = Vec::new();
+        for px in x0..=x1 {
+            cells.push((px, y0));
+            cells.push((px, y1));
+        }
+        for py in y0..=y1 {
+            cells.push((x0, py));
+            cells.push((x1, py));
+        }
+        let lit = cells
+            .iter()
+            .filter(|(px, py)| {
+                let p = frame.get_pixel(*px, *py);
+                (p[0], p[1], p[2]) == (accent.r, accent.g, accent.b)
+            })
+            .count();
+        (lit, cells.len())
+    };
+    let mut view = pane(&snap, 1200, 400);
+    view.inline_cards = Some(&cards);
+    let plain = capture(&mut renderer, &cfg, &[view], &focused(false));
+    let card = renderer.painted_cards()[0];
+    let (lit, all) = ring(&plain, card.rect);
+    assert!(lit < all, "no outline before the hover");
+    let mut overlay = focused(false);
+    overlay.card_hover = Some(card);
+    let mut view = pane(&snap, 1200, 400);
+    view.inline_cards = Some(&cards);
+    let hovered = capture(&mut renderer, &cfg, &[view], &overlay);
+    let (lit, all) = ring(&hovered, card.rect);
+    assert_eq!(lit, all, "the outline rings the card");
+    // A hover the UI computed for where the card was, or for another card
+    // or pane at the same spot, draws nothing.
+    let [x, y, width, height] = card.rect;
+    let moved = PaintedCard {
+        rect: [x, y + renderer.cell_h, width, height],
+        ..card
+    };
+    let other = PaintedCard {
+        nonce: kettle_core::InlineNonce::new([9, 9, 9, 9, 9, 9]).unwrap(),
+        ..card
+    };
+    let elsewhere = PaintedCard {
+        pane: card.pane + 1,
+        ..card
+    };
+    for stale in [moved, other, elsewhere] {
+        let mut overlay = focused(false);
+        overlay.card_hover = Some(stale);
+        let mut view = pane(&snap, 1200, 400);
+        view.inline_cards = Some(&cards);
+        let frame = capture(&mut renderer, &cfg, &[view], &overlay);
+        let (lit, all) = ring(&frame, stale.rect);
+        assert!(lit < all, "no outline for {stale:?}");
+    }
+}
+
+/// The viewer's open-outside button is drawn where its geometry puts it, a
+/// button cell with its glyph like the close button beside it, and is not
+/// there when the viewer does not offer it.
+#[test]
+fn the_viewer_draws_its_open_outside_button_only_when_offered() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(800, 600) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let snap = snapshot_of(80, 30, b"");
+    let viewer = |open_outside| MediaViewerOverlay {
+        pane_rect: (0.0, 0.0, 800.0, 600.0),
+        title: "Plot".into(),
+        detail: "Image · 4×4".into(),
+        sender: MediaViewerSender {
+            text: "From this pane".into(),
+            program: None,
+            signer: None,
+        },
+        hint: "Esc closes".into(),
+        position: (1, 1),
+        image: Some(kettle_core::ImageData::new(4, 4, vec![200; 64]).unwrap()),
+        status: String::new(),
+        canvas: MediaCanvas::Theme,
+        open_outside,
+    };
+    let geometry = media_viewer_geometry(
+        &viewer(true),
+        (renderer.cell_w, renderer.cell_h),
+        (
+            renderer.overlay_text_cell_width(),
+            renderer.metrics.line_height,
+        ),
+    )
+    .expect("the viewer fits");
+    let open = geometry.open_outside.expect("offered");
+    let corner = |frame: &image::RgbaImage, rect: (f32, f32, f32, f32)| {
+        let p = frame.get_pixel(rect.0.ceil() as u32 + 1, rect.1.ceil() as u32 + 1);
+        (p[0], p[1], p[2])
+    };
+    let mut overlay = focused(false);
+    overlay.media_viewer = Some(viewer(true));
+    let offered = capture(&mut renderer, &cfg, &[pane(&snap, 800, 600)], &overlay);
+    assert_eq!(
+        corner(&offered, open),
+        corner(&offered, geometry.close),
+        "a button cell like close"
+    );
+    assert!(
+        distinct_colors(&offered, [open.0, open.1, open.2, open.3]) > 1,
+        "its glyph is drawn"
+    );
+    let mut overlay = focused(false);
+    overlay.media_viewer = Some(viewer(false));
+    let plain = capture(&mut renderer, &cfg, &[pane(&snap, 800, 600)], &overlay);
+    assert_ne!(
+        corner(&plain, open),
+        corner(&plain, geometry.close),
+        "no button where none is offered"
+    );
+    eprintln!("MEDIA_VIEWER_GPU_ACCEPTANCE: open-outside button");
 }

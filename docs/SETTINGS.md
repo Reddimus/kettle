@@ -138,13 +138,19 @@ full restart. The GPU picker persists the selection per application.
 | Option | Config key | Notes |
 |---|---|---|
 | Agent previews | `agent-display` | On / Off — lets AI agents show media in Kettle without reading the screen or typing. Turning it on applies at once, also for agents already connected; turning it off applies when Kettle restarts |
+| Claude Code previews | `agent-display-claude-code` | On / Off — Claude Code started in a new pane gets Kettle's plugin, so the images and diagrams it sends show as cards under the call. Needs agent previews; panes already open keep what they started with |
 
 The footer explains the row's effect right now: what turning it on or off does;
 that a restart is needed to turn previews off; that a launch option
 (`--agent-display off`, or `--agent-server off` alone) keeps them off; that
 `agent-server = full` already includes previews; or that Kettle could not start
-its agent server. Agent control itself (`agent-server`) stays in the config
-file, because it grants reading and typing and applies at launch.
+its agent server. On the Claude Code row it says what the setting applies to,
+that agent previews must be on, or why new panes get no plugin: Claude Code's
+managed settings forbid plugins from the environment, Kettle is running from
+a temporary translocated copy, Kettle could not write or check its plugin, or
+the system cannot run the check yet. Agent control itself (`agent-server`)
+stays in the config file, because it grants reading and typing and applies at
+launch.
 
 **Keybinds** — rebind common actions interactively. Each row shows the chord
 currently bound to that action; press **Enter** on a row, then press the new

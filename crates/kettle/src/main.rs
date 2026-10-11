@@ -102,10 +102,12 @@ mod exec;
 // kettle-ctl (discover a running server, call a method, or stream events).
 mod ctl_cli;
 // `kettle show` — send media to the shelf of the pane it runs in.
+mod agent_setup;
 mod show_cli;
 // Agent-first: `kettle mcp` — stdio MCP server exposing kettle as
 // native agent tools (run a command, drive a running kettle).
 mod mcp;
+mod mcp_display;
 mod mcp_tools;
 mod media_platform;
 mod update_cli;
@@ -558,6 +560,10 @@ enum Cmd {
     /// stdin. The item waits on the shelf; nothing opens on screen. Agent
     /// previews must be on; full control is never needed.
     Show(ShowArgs),
+    /// Set up Codex to start with Kettle's display server: print a `codex`
+    /// shell function to review and add to your shell's startup file, report
+    /// its status, or print how to remove it. Kettle edits no file.
+    AgentSetup(agent_setup::SetupArgs),
     /// Install the latest authenticated stable release into an official
     /// installer-owned kettle layout.
     Update(UpdateArgs),
@@ -594,6 +600,20 @@ struct McpArgs {
     /// in and needs agent previews, never full control.
     #[arg(long, conflicts_with = "self_test")]
     display: bool,
+    /// Launched by Kettle's own Claude Code plugin, whose hook prints inline
+    /// cards: only then does an interactive Claude Code session ask Kettle
+    /// for one. Kettle still decides whether the caller may have it.
+    #[arg(long, hide = true, requires = "display")]
+    claude_card_hook: bool,
+    /// Launched by Kettle's Codex launch, whose hook prints inline cards.
+    /// Kettle still decides whether the caller may have one.
+    #[arg(
+        long,
+        hide = true,
+        requires = "display",
+        conflicts_with = "claude_card_hook"
+    )]
+    codex_card_hook: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -1168,10 +1188,20 @@ fn main() -> anyhow::Result<()> {
             Cmd::Show(args) => {
                 std::process::exit(show_cli::run_show(args));
             }
+            Cmd::AgentSetup(args) => {
+                std::process::exit(agent_setup::run(args));
+            }
             Cmd::Mcp(args) => {
                 std::process::exit(if args.self_test {
                     mcp::self_test()
                 } else if args.display {
+                    mcp_display::init_session(if args.claude_card_hook {
+                        Some(mcp_display::CardHook::Claude)
+                    } else if args.codex_card_hook {
+                        Some(mcp_display::CardHook::Codex)
+                    } else {
+                        None
+                    });
                     mcp::run_mcp(mcp_tools::ToolSelection::Display)
                 } else {
                     mcp::run_mcp(mcp_tools::ToolSelection::Full)
@@ -2539,6 +2569,37 @@ mod activation_cli_tests {
         let cli = Cli::try_parse_from(["kettle", "--new-process"]).unwrap();
         assert!(cli.new_process);
     }
+
+    /// The card hook rides only on a display server, and `--display` never
+    /// combines with the self-test.
+    #[test]
+    fn the_card_hook_needs_a_display_server() {
+        let parse = |args: &[&str]| Cli::try_parse_from(args.iter().copied());
+        let cli = parse(&["kettle", "mcp", "--display", "--claude-card-hook"]).unwrap();
+        let Some(crate::Cmd::Mcp(args)) = cli.cmd else {
+            panic!("an mcp command");
+        };
+        assert!(args.display && args.claude_card_hook);
+        assert!(parse(&["kettle", "mcp", "--claude-card-hook"]).is_err());
+        let cli = parse(&["kettle", "mcp", "--display", "--codex-card-hook"]).unwrap();
+        let Some(crate::Cmd::Mcp(args)) = cli.cmd else {
+            panic!("an mcp command");
+        };
+        assert!(args.display && args.codex_card_hook);
+        assert!(parse(&["kettle", "mcp", "--codex-card-hook"]).is_err());
+        assert!(
+            parse(&[
+                "kettle",
+                "mcp",
+                "--display",
+                "--claude-card-hook",
+                "--codex-card-hook"
+            ])
+            .is_err(),
+            "one harness's hook"
+        );
+        assert!(parse(&["kettle", "mcp", "--display", "--self-test"]).is_err());
+    }
 }
 
 #[cfg(test)]
@@ -3641,7 +3702,17 @@ mod tests {
         // (`--exec` is documented as `-e`) that the man page intentionally omits.
         // The `--record*` flags ship as a runtime feature and MUST be documented
         // in the man page (see docs/RECORDING.md), so they are not excluded here.
-        let allow_missing: &[&str] = &["tab-handoff", "tab-handoff-fd", "exec"];
+        // `--claude-card-hook` is passed only by Kettle's own Claude Code plugin.
+        // `--launch-codex` is run only by the function `agent-setup --print`
+        // prints.
+        let allow_missing: &[&str] = &[
+            "tab-handoff",
+            "tab-handoff-fd",
+            "exec",
+            "claude-card-hook",
+            "codex-card-hook",
+            "launch-codex",
+        ];
         fn collect_missing_flags(
             cmd: &clap::Command,
             path: &str,

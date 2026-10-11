@@ -16,6 +16,14 @@ pub(crate) struct CardScene {
     pub decoration: Vec<QuadInstance>,
     pub cursors: Vec<QuadInstance>,
     pub labels: Vec<CardLabel>,
+    /// Each drawn card's nonce and the part of it on screen, in surface
+    /// pixels, in the order drawn.
+    pub drawn: Vec<(kettle_core::InlineNonce, [f32; 4])>,
+    /// For each poster, the index in `drawn` of its card.
+    poster_cards: Vec<usize>,
+    /// For each drawn card, whether its image is in the frame: its poster
+    /// reached the GPU. Set by `apply_upload_results`.
+    pub shown: Vec<bool>,
 }
 
 #[derive(Clone, Copy)]
@@ -29,17 +37,21 @@ pub(crate) struct CardLabel {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CardLabelKind {
     Brand,
-    Claude,
+    /// The harness that printed the card.
+    Harness(crate::CardHarness),
     Pending,
     Unavailable,
+    /// The one-time tip that a click opens the card.
+    Tip,
 }
 impl CardLabel {
     pub fn text(&self) -> &'static str {
         match self.kind {
             CardLabelKind::Brand => "Kettle",
-            CardLabelKind::Claude => "Claude",
+            CardLabelKind::Harness(harness) => harness.name(),
             CardLabelKind::Pending => self.tr.text(kettle_i18n::Text::InlineCardPending),
             CardLabelKind::Unavailable => self.tr.text(kettle_i18n::Text::InlineCardUnavailable),
+            CardLabelKind::Tip => self.tr.text(kettle_i18n::Text::InlineCardTip),
         }
     }
 }
@@ -120,13 +132,21 @@ impl CardScene {
         self.decoration.clear();
         self.cursors.clear();
         self.labels.clear();
+        self.drawn.clear();
+        self.poster_cards.clear();
+        self.shown.clear();
     }
 
     pub fn apply_upload_results(&mut self, drawn: impl Iterator<Item = usize>) {
         let mut drawn = drawn.peekable();
+        self.shown.clear();
+        self.shown.resize(self.drawn.len(), false);
         for (index, failure) in self.poster_failures.iter().enumerate() {
             if drawn.peek().copied() == Some(index) {
                 drawn.next();
+                if let Some(&card) = self.poster_cards.get(index) {
+                    self.shown[card] = true;
+                }
             } else if let Some(failure) = failure {
                 self.labels.push(*failure);
             }
@@ -166,17 +186,19 @@ impl CardScene {
             let Some(clipped) = intersect(rect, geometry.clip) else {
                 continue;
             };
+            self.drawn.push((block.nonce, clipped));
             self.base.push(quad(clipped, colors.background, 1.0));
             let state = match visual {
                 CardVisual::Ready(image) => {
                     if let Some(target) = letterbox(rect, image.width, image.height) {
                         self.posters.push(ImageItem::placement(
                             target,
-                            image.clone(),
+                            image,
                             None,
                             None,
                             geometry.clip,
                         ));
+                        self.poster_cards.push(self.drawn.len() - 1);
                         let failure = status_label_rect(clipped, ch, false)
                             .filter(|_| intersect(target, geometry.clip).is_some())
                             .map(|rect| CardLabel {
@@ -207,7 +229,7 @@ impl CardScene {
             ];
             if let Some(badge) = intersect(badge, geometry.clip) {
                 self.decoration.push(quad(badge, colors.background, 1.0));
-                for (row, kind) in [CardLabelKind::Brand, CardLabelKind::Claude]
+                for (row, kind) in [CardLabelKind::Brand, CardLabelKind::Harness(block.harness)]
                     .into_iter()
                     .enumerate()
                 {
@@ -231,6 +253,20 @@ impl CardScene {
                         });
                     }
                 }
+            }
+            // The tip sits on a strip along the card's foot, over its image,
+            // so it reads on any poster and covers no terminal text.
+            if state == CardBadgeState::Ready
+                && cards.tip() == Some(block.nonce)
+                && let Some(strip) = status_label_rect(clipped, ch, true)
+            {
+                self.decoration.push(quad(strip, colors.background, 0.85));
+                self.labels.push(CardLabel {
+                    rect: strip,
+                    kind: CardLabelKind::Tip,
+                    tr: geometry.tr,
+                    scale: 1.0,
+                });
             }
             if state != CardBadgeState::Ready {
                 let kind = if state == CardBadgeState::Pending {
@@ -463,6 +499,52 @@ mod tests {
         assert!(intersect([50.0, 50.0, 20.0, 20.0], [0.0, 0.0, 50.0, 50.0]).is_none());
         assert!(intersect([f32::NAN, 0.0, 10.0, 10.0], [0.0, 0.0, 50.0, 50.0]).is_none());
     }
+    /// Each drawn card is recorded with the part of it on screen, which is
+    /// where a press is the card's.
+    #[test]
+    fn a_drawn_card_is_recorded_with_its_visible_part() {
+        let (cards, snap, nonce) = crate::inline_cards::tests::fixture();
+        let mut frame = CardFrame::default();
+        cards.recognize_into(&snap, &mut frame);
+        let drawn = |clip: [f32; 4]| {
+            let mut scene = CardScene::default();
+            scene.append(
+                &cards,
+                &frame,
+                &snap,
+                &CardGeometry {
+                    grid_origin: [0.0, 0.0],
+                    cell: [8.0, 16.0],
+                    clip,
+                    tr: kettle_i18n::Translator::default(),
+                },
+                &CardColors {
+                    background: Rgb::new(10, 10, 10),
+                    frame: Rgb::new(255, 0, 0),
+                    selection: Rgb::new(0, 0, 255),
+                },
+            );
+            scene.drawn
+        };
+        assert_eq!(
+            drawn([0.0, 0.0, 640.0, 128.0]),
+            [(nonce, [40.0, 16.0, 96.0, 48.0])]
+        );
+        assert_eq!(
+            drawn([0.0, 0.0, 640.0, 40.0]),
+            [(nonce, [40.0, 16.0, 96.0, 24.0])]
+        );
+        assert!(drawn([0.0, 100.0, 640.0, 28.0]).is_empty(), "off screen");
+        let card = crate::PaintedCard {
+            pane: 1,
+            nonce,
+            rect: [40.0, 16.0, 96.0, 48.0],
+        };
+        assert!(card.contains(40.0, 16.0) && card.contains(135.9, 63.9));
+        assert!(!card.contains(136.0, 20.0) && !card.contains(50.0, 64.0));
+        assert!(!card.contains(39.9, 20.0) && !card.contains(50.0, 15.9));
+    }
+
     #[test]
     fn selected_pending_card_keeps_the_full_gutter_and_frame_above_tint() {
         let (cards, mut snap, _) = crate::inline_cards::tests::fixture();
@@ -493,7 +575,10 @@ mod tests {
         assert_eq!(scene.labels.len(), 3);
         assert_eq!(scene.labels[0].kind, CardLabelKind::Brand);
         assert_eq!(scene.labels[0].rect, [0.0, 16.0, 40.0, 16.0]);
-        assert_eq!(scene.labels[1].kind, CardLabelKind::Claude);
+        assert_eq!(
+            scene.labels[1].kind,
+            CardLabelKind::Harness(crate::CardHarness::ClaudeHook)
+        );
         assert_eq!(scene.labels[1].rect, [0.0, 32.0, 40.0, 16.0]);
         assert_eq!(scene.labels[2].kind, CardLabelKind::Pending);
         assert_eq!(scene.labels[2].rect, [41.0, 48.0, 94.0, 16.0]);
@@ -532,6 +617,90 @@ mod tests {
         );
     }
 
+    /// The tip that a click opens a card shows on its foot, over a
+    /// backdrop, only on the card holding it and only once its image is
+    /// ready; only a registered card can hold it, and removing the card
+    /// takes it away.
+    #[test]
+    fn the_tip_shows_on_its_ready_card_only() {
+        let (mut cards, snap, nonce) = crate::inline_cards::tests::fixture();
+        let mut frame = CardFrame::default();
+        cards.recognize_into(&snap, &mut frame);
+        let scene_for = |cards: &InlineCards| {
+            let mut scene = CardScene::default();
+            scene.append(
+                cards,
+                &frame,
+                &snap,
+                &CardGeometry {
+                    grid_origin: [0.0, 0.0],
+                    cell: [8.0, 16.0],
+                    clip: [0.0, 0.0, 2000.0, 2000.0],
+                    tr: kettle_i18n::Translator::default(),
+                },
+                &CardColors {
+                    background: Rgb::new(10, 10, 10),
+                    frame: Rgb::new(255, 0, 0),
+                    selection: Rgb::new(0, 0, 255),
+                },
+            );
+            scene
+        };
+        let tips = |scene: &CardScene| {
+            scene
+                .labels
+                .iter()
+                .filter(|label| label.kind == CardLabelKind::Tip)
+                .copied()
+                .collect::<Vec<_>>()
+        };
+        cards.set_tip(Some(nonce));
+        assert!(tips(&scene_for(&cards)).is_empty(), "not while pending");
+        let poster = kettle_core::ImageData::new_with_budget(
+            2,
+            1,
+            vec![255; 8],
+            &kettle_core::GraphicsBudget::previews(),
+        );
+        cards.set_poster(nonce, poster.as_ref());
+        let scene = scene_for(&cards);
+        let tip = tips(&scene);
+        assert_eq!(tip.len(), 1);
+        assert_eq!(tip[0].text(), "Click to open");
+        let (_, drawn) = scene.drawn[0];
+        assert!(
+            tip[0].rect[0] >= drawn[0]
+                && tip[0].rect[1] >= drawn[1]
+                && tip[0].rect[0] + tip[0].rect[2] <= drawn[0] + drawn[2]
+                && tip[0].rect[1] + tip[0].rect[3] <= drawn[1] + drawn[3],
+            "on the card"
+        );
+        assert!(scene.decoration.len() > scene_for(&InlineCards::default()).decoration.len());
+        cards.set_tip(None);
+        assert!(tips(&scene_for(&cards)).is_empty());
+        let other = kettle_core::InlineNonce::new([6, 5, 4, 3, 2, 1]).unwrap();
+        cards.set_tip(Some(other));
+        assert_eq!(cards.tip(), None, "only a registered card");
+        // A tip held by another card, not on screen, leaves this one plain.
+        cards
+            .insert(
+                other,
+                crate::CardSpec {
+                    rows: 3,
+                    columns: 12,
+                    harness: crate::CardHarness::ClaudeHook,
+                    caption: "other.png - raster 2x1".into(),
+                    poster: None,
+                },
+            )
+            .unwrap();
+        cards.set_tip(Some(other));
+        assert!(tips(&scene_for(&cards)).is_empty(), "not on another card");
+        cards.set_tip(Some(nonce));
+        cards.remove(nonce);
+        assert_eq!(cards.tip(), None, "removal takes the tip");
+    }
+
     #[test]
     fn declined_upload_has_visible_status_and_accepted_upload_does_not() {
         let mut scene = CardScene {
@@ -554,15 +723,13 @@ mod tests {
     #[test]
     fn clipped_letterbox_margin_is_not_an_upload_failure() {
         let (mut cards, snap, nonce) = crate::inline_cards::tests::fixture();
-        cards.set_poster(
-            nonce,
-            kettle_core::ImageData::new_with_budget(
-                1,
-                2,
-                vec![255; 8],
-                &kettle_core::GraphicsBudget::previews(),
-            ),
+        let poster = kettle_core::ImageData::new_with_budget(
+            1,
+            2,
+            vec![255; 8],
+            &kettle_core::GraphicsBudget::previews(),
         );
+        cards.set_poster(nonce, poster.as_ref());
         let mut frame = CardFrame::default();
         cards.recognize_into(&snap, &mut frame);
         for (clip, should_fail) in [
@@ -610,7 +777,7 @@ mod tests {
         })
         .unwrap();
         let poster = kettle_core::ImageData::new_with_budget(2, 1, vec![255; 8], &account).unwrap();
-        cards.set_poster(nonce, Some(poster));
+        cards.set_poster(nonce, Some(&poster));
         let mut frame = CardFrame::default();
         cards.recognize_into(&snap, &mut frame);
         let mut scene = CardScene::default();
@@ -633,13 +800,14 @@ mod tests {
         assert_eq!(scene.posters.len(), 1);
         assert_eq!(scene.labels.len(), 2);
         assert!(
-            scene
-                .labels
-                .iter()
-                .all(|label| matches!(label.kind, CardLabelKind::Brand | CardLabelKind::Claude))
+            scene.labels.iter().all(|label| matches!(
+                label.kind,
+                CardLabelKind::Brand | CardLabelKind::Harness(_)
+            ))
         );
         assert!(kettle_core::ImageData::new_with_budget(1, 1, vec![0; 4], &account).is_none());
-        drop(cards);
+        // The shelf lets its pixels go; the frame still holds them.
+        drop(poster);
         assert!(kettle_core::ImageData::new_with_budget(1, 1, vec![0; 4], &account).is_none());
         scene.clear();
         assert!(kettle_core::ImageData::new_with_budget(2, 1, vec![0; 8], &account).is_some());
@@ -652,21 +820,17 @@ mod tests {
             CardBadgeState::Ready,
         ] {
             let (mut cards, snap, nonce) = crate::inline_cards::tests::fixture();
+            let poster = kettle_core::ImageData::new_with_budget(
+                2,
+                1,
+                vec![255; 8],
+                &kettle_core::GraphicsBudget::previews(),
+            )
+            .unwrap();
             match state {
                 CardBadgeState::Pending => {}
                 CardBadgeState::Failed => cards.set_poster(nonce, None),
-                CardBadgeState::Ready => cards.set_poster(
-                    nonce,
-                    Some(
-                        kettle_core::ImageData::new_with_budget(
-                            2,
-                            1,
-                            vec![255; 8],
-                            &kettle_core::GraphicsBudget::previews(),
-                        )
-                        .unwrap(),
-                    ),
-                ),
+                CardBadgeState::Ready => cards.set_poster(nonce, Some(&poster)),
             }
             let mut frame = CardFrame::default();
             cards.recognize_into(&snap, &mut frame);

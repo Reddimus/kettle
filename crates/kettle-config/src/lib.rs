@@ -1374,6 +1374,11 @@ pub struct Config {
     /// already includes display. Turning it on applies at once; turning it
     /// off applies at the next launch.
     pub agent_display: bool,
+    /// `agent-display-claude-code`: offer Claude Code, in each new pane,
+    /// Kettle's plugin for agent previews and inline cards. Default `false`.
+    /// It needs `agent-display`; panes that are already open keep what they
+    /// started with.
+    pub agent_display_claude_code: bool,
     /// Terminator parity (terminatorlib/config.py:79
     /// `ask_before_closing`): when to show the close-confirmation
     /// dialog on window close.
@@ -2731,6 +2736,7 @@ impl Default for Config {
             exit_action: ExitAction::Close,
             agent_server: AgentServer::Off,
             agent_display: false,
+            agent_display_claude_code: false,
             ask_before_closing: AskBeforeClosing::MultipleTerminals,
             close_button_on_tab: true,
             new_tab_after_current_tab: false,
@@ -3372,6 +3378,8 @@ impl Config {
         "update-check",
         "agent-display",
         "agent_display",
+        "agent-display-claude-code",
+        "agent_display_claude_code",
         "restore-session",
         "restore_session",
         "urgent-bell",
@@ -5246,6 +5254,11 @@ impl Config {
                 "agent-display" | "agent_display" => {
                     if let Some(b) = parse_bool(&e.value) {
                         cfg.agent_display = b;
+                    }
+                }
+                "agent-display-claude-code" | "agent_display_claude_code" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.agent_display_claude_code = b;
                     }
                 }
                 // Opt IN to restoring the last session on launch
@@ -8021,6 +8034,16 @@ cell-height = 1.2\n";
             Config::parse_text("agent-server = yolo").agent_server,
             AgentServer::Off
         );
+    }
+
+    #[test]
+    fn the_claude_code_integration_defaults_off_and_parses_in_both_spellings() {
+        assert!(!Config::default().agent_display_claude_code);
+        assert!(Config::BOOL_KEYS.contains(&"agent-display-claude-code"));
+        assert!(Config::BOOL_KEYS.contains(&"agent_display_claude_code"));
+        assert!(Config::parse_text("agent-display-claude-code = true").agent_display_claude_code);
+        assert!(Config::parse_text("agent_display_claude_code = on").agent_display_claude_code);
+        assert!(!Config::parse_text("agent-display-claude-code = maybe").agent_display_claude_code);
     }
 
     /// `agent-display` defaults off, parses as a boolean in both spellings,

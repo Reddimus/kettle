@@ -357,7 +357,41 @@ the window title starts with `[new media: N]` while the focused pane has
 some. The user opens them with `open_media_shelf` (the palette's "Open media
 shelf"): a viewer over the pane shows one item fitted, never enlarged past
 its pixels, on white for SVG and a checkerboard for raster, with its title,
-kind, size and sender, and `‹ › ×` to browse and close. Only the user opens
+kind, size and sender, and `‹ › ×` to browse and close. Where this platform
+permits an image viewer and the item still holds its pixels, the header also
+has `↗` and the footer says that O opens it there (Preview on macOS, Eye of
+GNOME on Linux), the same hand-off as a card menu's row. Clicking an inline
+card opens the viewer on that card's item. A card takes a primary press,
+and its release, before anything else in the window except open dialogs and
+the viewer, so the program behind it sees neither. The release opens the
+item when it lands on the same card and no dialog or viewer has opened over
+it since the press; otherwise it goes nowhere. A Shift-click selects text
+and the wheel scrolls or reaches the program, as they would without the
+card. A press on a card that has been on screen where it is for less than
+half a second is ordinary input, so one that scrolls under the pointer
+cannot take a click meant for text. The pointer turns into a hand over a
+card a click would open and the card is outlined in the accent, so it is
+clear which press the card will take; a still pointer gets them as the card
+settles. The first card a user ever sees with its image shown says "Click
+to open" on a strip along its foot for ten seconds, or until a card is
+opened; `ui-tips.json` beside the config file records that it showed, so it
+never shows again, and of two Kettles running at once only one shows it. It
+waits for a card whose image is on screen with no dialog, menu or viewer
+over it.
+A right-press on a settled card opens the card's menu instead of the
+terminal's: Open, as a click does, and, where this platform permits one
+viewer, Open in Preview (macOS) or Open in Image Viewer (Linux, Eye of
+GNOME at `/usr/bin/eog`). That row hands the viewer a fresh PNG of the pixels
+Kettle shows, from a private store that keeps the newest 32 copies and
+128 MiB and is deleted on exit; a row acts only while the card still shows
+the item, at the generation, the menu named. Nothing a program prints opens
+another app.
+`kettle ctl send_mouse` clicks a card the same way. Quick select (`hint_mode`) labels each card on screen in the
+focused pane, and picking its label opens it; text in a card's rows is its
+marks, so it gets no label of its own. Screen readers see each card as a
+button named for its item's title, kind, size and sender, as the viewer
+names it (never by its card id), and pressing it opens the viewer. Neither
+opens anything while a dialog, a menu or the viewer is up. Only the user, or full control, opens
 it, and `kettle ctl send_keys` still writes to the pane's terminal beneath. `list_panes` reports each pane's shelf as
 `media_shelf`: item, generation, title, kind, size, warnings, `verified`, the
 `sender` of an unverified item (`executable`, `pid` and `signer`, null when
@@ -506,7 +540,7 @@ so press Enter with `send_keys`, not a trailing `\n`.
 | `list_panes` | read-only | every window's panes: id, `window` (seq), tab, title, cwd, cols/rows, focused, argv, child_pid, agent_attached, read_only, `media_shelf` (see [Showing media](#showing-media)) |
 | `read_screen` | read-only | visible viewport text + cursor + `cursor_visible` (DEC ?25) + history metadata + selection presence/range; `include_selection: true` includes selected text only when its preflight is at most 128 KiB (otherwise it is omitted and `selection_truncated` is true); with `scrollback_lines`, returns requested history plus the active screen for command-output capture (params: `pane`, `scrollback_lines`, `include_selection`, and paging fields) |
 | `read_cells` | read-only | visible cell grid plus selected attributes (`any_underline`, underline variants, strikeout, underline-color presence) for renderer diagnostics without OCR |
-| `ui_geometry` | read-only | live window geometry and OS focus state: surface/content rects, renderer cell metrics, `text_presentation_face` (the monochrome face this system serves text-presentation codepoints from, or null when it has none and kettle leaves them on the platform cascade), resize-overlay grid, tab-bar segment/new-tab rects, tab segment `path`/`fitted_title` diagnostics, pane titlebar rect/title/path/`fitted_title` diagnostics, open context-menu rect/rows, cursor, tab drag armed/visible state, additive Search geometry/status/control metadata, the bounds/state of a visible pasted-media receipt, including whether its body is openable, `render_uploads` (the renderer's counts of frames presented, GPU buffer writes and bytes, texture writes, text prepares, main/menu prepares (`chrome_prepares`) and skipped writes, whether per-frame instances go through mapped buffers (`mapped_uploads`), and the mapped writes and bytes; a window that only blinks adds frames but no writes, and one printing on shared memory adds mapped writes but no buffer writes), and `cursor_blink` (who draws the blink, `gpu` or, on macOS, the window server's `layer`; the layer's device-pixel `layer_rect`; `phase_on` and `next_edge_ms` for the phase the screen shows; `handoffs`, `exits` (frames that ended a layer blink), `hides` (layer hidden without a frame on focus loss, occlusion, a size or scale change, or a renderer rebuild) and `exit_frame_us` (count, p50 and p95 of the last 64 exit frames, and the lifetime max; timing includes transaction begin, render, commit and flush); and `fallback`, why this window keeps the GPU blink, or null). Reading `ui_geometry` draws no frame, so it never ends a layer blink or forces a pending repaint. The resize performance probe must use its resize action to request the frame. Search omits its query and matched terminal text; receipts omit retained paths, extensions, and pixels; `render_uploads` and `cursor_blink` carry counts and geometry only |
+| `ui_geometry` | read-only | live window geometry and OS focus state: surface/content rects, renderer cell metrics, `text_presentation_face` (the monochrome face this system serves text-presentation codepoints from, or null when it has none and kettle leaves them on the platform cascade), resize-overlay grid, tab-bar segment/new-tab rects, tab segment `path`/`fitted_title` diagnostics, pane titlebar rect/title/path/`fitted_title` diagnostics, open context-menu rect/rows, cursor, tab drag armed/visible state, additive Search geometry/status/control metadata, the bounds/state of a visible pasted-media receipt, including whether its body is openable, the `inline_cards` on screen (`pane`, `instance`, `rect`, whether it has `settled` so a press is the card's, its shelf `item` and the `label` a screen reader hears; never a card id), `render_uploads` (the renderer's counts of frames presented, GPU buffer writes and bytes, texture writes, text prepares, main/menu prepares (`chrome_prepares`) and skipped writes, whether per-frame instances go through mapped buffers (`mapped_uploads`), and the mapped writes and bytes; a window that only blinks adds frames but no writes, and one printing on shared memory adds mapped writes but no buffer writes), and `cursor_blink` (who draws the blink, `gpu` or, on macOS, the window server's `layer`; the layer's device-pixel `layer_rect`; `phase_on` and `next_edge_ms` for the phase the screen shows; `handoffs`, `exits` (frames that ended a layer blink), `hides` (layer hidden without a frame on focus loss, occlusion, a size or scale change, or a renderer rebuild) and `exit_frame_us` (count, p50 and p95 of the last 64 exit frames, and the lifetime max; timing includes transaction begin, render, commit and flush); and `fallback`, why this window keeps the GPU blink, or null). Reading `ui_geometry` draws no frame, so it never ends a layer blink or forces a pending repaint. The resize performance probe must use its resize action to request the frame. Search omits its query and matched terminal text; receipts omit retained paths, extensions, and pixels; `render_uploads` and `cursor_blink` carry counts and geometry only |
 | `screenshot` | full | save a live PNG (`pane`, `full_window`, `path`, or all four window-relative physical-pixel `crop_*` fields); filesystem writes are never allowed through read-only mode |
 | `subscribe` | read-only | switches the connection to the event stream |
 | `wait_for` | read-only | block until the screen matches (`text` substring / `regex` / `quiet_ms` settle — AND when combined; `timeout_ms` default 30 000; `poll_ms` default 100, clamped to 50–5000). Returns `{matched, elapsed_ms, polls}`; a timeout is `matched: false`, not an error. Runs on the connection thread — the UI is never blocked. The screen-text regex runs against per-line right-trimmed, newline-joined text — use `(?m)` end-of-line anchors rather than end-of-string |
@@ -655,6 +689,167 @@ runs.
 ```sh
 claude mcp add kettle-display -- kettle mcp --display
 ```
+
+**Inline cards (Claude Code).** Launched by Kettle's own Claude Code plugin
+(with the hidden `--claude-card-hook`), in an interactive session
+(`CLAUDE_CODE_ENTRYPOINT=cli`), `kettle_show` also asks for a card under the
+call, keyed by the call's `_meta["claudecode/toolUseId"]`, never by anything in
+its arguments. Kettle gives one only to Claude Code as Anthropic signs it
+(on macOS, its running code validated against Anthropic's team and
+`com.anthropic.claude-code`), running in the very pane the item lands in, and
+that ran this server; anyone else's push goes to the shelf alone. Kettle
+builds the card: a block of placeholder cells, a quarter of the pane's lines
+(three to eight) and as wide as the image's shape allows, then a caption of
+the file's sanitized name and its kind and size (kind and size alone for media
+sent as bytes; a title never reaches a card). A pane too narrow to print the
+hook's label on one line, 61 columns, gets no card. The server keeps that text
+for five seconds; the plugin's hook collects it once through the hidden
+`kettle_card` tool (`{tool_use_id}`; a call carrying the model's own tool-use
+id is refused) and prints it under the call, where Kettle paints the image
+over the cells. The model's result says only that the media shows below the
+call (`delivery: "card"`) and that it has not seen it; nothing of the card
+reaches the model, and `kettle ctl`, whose output a model may read, refuses
+to ask for a card. A pane holds at most 64 cards, a harness owns at most 32
+and registers at most four a second; a card retires when its harness exits,
+its pane closes, or its item leaves the shelf or is replaced. Its pixels stay
+the shelf's: a card keeps none alive, and an item whose card is on screen is
+not released, nor dropped from a full shelf while another item can go
+instead. On other platforms, and without the plugin, the shelf has the
+item and the result says so.
+
+**Inline cards (Codex).** Launched by Kettle's Codex launch (with the hidden
+`--codex-card-hook`), `kettle_show` asks for a card keyed by the call's
+`_meta.callId`. Kettle gives one only to Codex as OpenAI signs it (on macOS,
+its running code validated against OpenAI's team and the identifier `codex`),
+under the same rules as Claude Code's: the same pane, the same limits, the
+same card. Codex prints the hook's message under the call after a `↳ Hook ·`
+line, its rows four columns in. The launch's own hook collects it once
+through `kettle_card`, which the server never lists; the launch enables it
+because Codex lets a hook call only an enabled tool. A call carrying the
+model's `_meta.callId` is refused, as is one carrying Claude Code's id. The
+model's result says only that the media shows below the call.
+
+### Kettle's Claude Code plugin
+
+`agent-display-claude-code` (Settings → Agents → Claude Code previews; off by
+default, and it needs agent previews) gives Claude Code started in a new
+Kettle pane Kettle's own plugin: the display server, run as this Kettle's
+absolute path with `mcp --display --claude-card-hook`, and the `PostToolUse`
+hook that prints its cards. The hook matches only
+`mcp__plugin_kettle_kettle__kettle_show`, and the plugin approves nothing, so
+Claude Code asks before the first `kettle_show` as it does for any tool.
+
+Kettle changes none of Claude Code's settings and nothing in its plugin list.
+It writes the plugin into its own data directory, in a directory named by the
+plugin's contents (`~/Library/Application Support/kettle/agent-plugins/kettle-<hash>`
+on macOS, `$XDG_DATA_HOME/kettle/agent-plugins/kettle-<hash>` or
+`~/.local/share/…` elsewhere), and puts that directory first in the pane's
+`CLAUDE_CODE_PLUGIN_DIRS` (Claude Code 2.1.280 and later). The pane keeps the
+entries it would have had, from your `env` or from Kettle's own environment,
+except Kettle plugin directories an outer Kettle or an older version left.
+Those go even when the pane gets no plugin, since they would skip this
+Kettle's checks. Kettles that share the plugins directory install one at a
+time. An install removes this executable's plugins from the same or an
+older version and plugins whose program is gone, but keeps another installed
+Kettle's and a newer version's.
+
+Before each new pane, Kettle checks the directory again without following
+links. Each part must be owned by you or root, with nothing writable, modes
+`0500` and `0400`, and no extra entries. Every file must be byte for byte what
+this Kettle wrote. If any check fails, the pane gets no plugin, Settings says
+why, and the next reload writes the plugin again.
+
+Claude Code refuses to start when its managed policy sets
+`disableSideloadFlags` and `CLAUDE_CODE_PLUGIN_DIRS` names a directory, so
+Kettle reads that policy where Claude Code does:
+- `managed-settings.json` and the drop-ins in `managed-settings.d`, merged in
+  order as Claude Code merges them, so the last to set the rule decides;
+- the remote policy cached in the pane's Claude Code configuration directory,
+  which is its `CLAUDE_CONFIG_DIR` or else `.claude` in its `HOME`;
+- on macOS, the managed preferences, through `plutil`.
+
+While any of these forbids plugins, or can't be read whole, new panes get no
+plugin. So does a pane whose configuration directory Kettle can't place: a
+relative `CLAUDE_CONFIG_DIR`, which Claude Code takes from wherever it
+starts, or no home. Claude Code may use only the highest of these sources,
+so Kettle can withhold the plugin where Claude Code would allow it. Kettle
+doesn't see policy that Claude Code gets from a helper command or a
+`--managed-settings` flag; if that forbids plugins, Claude Code says so at
+start, and turning the setting off clears it.
+
+Panes already open keep what they started with. Turning off the setting, or
+agent previews, stops new panes getting the plugin at once. A Kettle running
+from a translocated copy (macOS runs a quarantined app that was never moved
+from where it was downloaded from a temporary path) offers no plugin, since
+its path does not last.
+
+To check it, in a new pane `echo $CLAUDE_CODE_PLUGIN_DIRS` names Kettle's
+directory, and Claude Code's `/plugin` and `/mcp` list `kettle`. To remove
+it, turn the setting off. The directory stays in Kettle's data directory;
+delete it with `chmod -R u+w` and then `rm -r`.
+
+### Codex's launch function
+
+Codex gets Kettle's display server one launch at a time, through a shell
+function you add yourself. `kettle agent-setup --print` prints it for the
+shell `SHELL` names, or for `--shell bash`, `zsh` or `fish`, on macOS and
+Linux. PowerShell is not offered: it drops a bare `--` before a function sees
+its arguments, so no function there could pass them on exactly.
+
+```sh
+codex() {
+  command '/Applications/Kettle.app/Contents/MacOS/kettle' agent-setup --launch-codex -- "$@"
+}
+```
+
+Review it, then add it to your shell's startup file. Kettle edits no file and
+none of Codex's configuration, and runs nothing to set it up. The function
+hands its arguments to Kettle as they are; nothing in them is evaluated. In a
+Kettle pane, with Codex CLI 0.159 or a later 0.x, an interactive session (a
+fresh one, `codex resume` or `codex fork`) then starts with these, for that
+launch only:
+- `--no-daemon`, since a session on Codex's shared background server would
+  not get this launch's server;
+- `-c mcp_servers.kettle=…`: this Kettle's `mcp --display`, forwarding
+  `KETTLE_PANE_ID` and `KETTLE_PID` (Codex passes a server only the
+  variables it is told to) and enabling `kettle_show` alone. It approves
+  nothing, so Codex asks before a call as its own policy says.
+
+Kettle's options go right after `resume` or `fork`, or first, never after a
+prompt or `--`, and `--no-daemon` is not added twice. Everything else runs
+with its arguments unchanged:
+- every other command (`exec`, `queue`, `mcp` and the rest);
+- help and version;
+- a `--remote` session and `--image`;
+- any option Kettle doesn't know, an option's value given separately that
+  looks like an option (`--cd -x`; an attached `--cd=-x` is unambiguous), and
+  arguments that are not Unicode or more than the session takes, before `--`
+  or after it;
+- Codex outside a Kettle pane, or a version Kettle doesn't know, which it
+  says.
+
+Codex then sends media to the shelf of the pane it runs in. With Codex CLI
+0.162, whose hook output Kettle's cards are placed for, the launch on macOS
+also adds:
+- `--codex-card-hook` to the server, and `kettle_card` to its enabled tools;
+- a `PostToolUse` hook (`-c hooks.PostToolUse=…`) that, after each
+  `kettle_show`, calls `kettle_card` with the call's `${tool_use_id}`, so the
+  card prints under the call.
+
+Codex adds that hook to your own hooks; it does not replace them. Codex runs
+a new hook only after you trust it, so the first such launch opens Codex's
+"Hooks need review" screen. "Review hooks" lets you trust Kettle's hook
+alone; "Trust all and continue" trusts every hook waiting for review. Codex
+saves that choice in its own configuration, and Kettle's hook stays the same
+across launches and updates, so you are asked once. Kettle never trusts it
+for you. Until it is trusted, or with another Codex version, media goes to the
+shelf alone. So does a launch that sets hooks itself with `-c hooks…`, which
+would replace Kettle's.
+
+A session started this way does not show in `codex agents`. The function names the Kettle that
+printed it, and a Kettle running from a translocated copy refuses to print
+one. `kettle agent-setup --status` reports what a launch from this shell would
+get, and `--uninstall` prints how to remove the function.
 
 ### Protocol revisions
 
@@ -975,6 +1170,10 @@ This is also desktop-local because it opens real GUI terminal windows.
   caller's own environment, labeled unverified with the executable and pid
   the kernel names and, on macOS, the signer it validates. Never the focused pane, never another Kettle, and never
   anything opened on screen by a push.
+- **Kettle's Claude Code plugin is opt-in and checked per pane.** It is
+  offered only while `agent-display-claude-code` and agent previews are on,
+  from a read-only directory Kettle checks before every new pane, and never
+  while Claude Code's managed policy forbids plugins from the environment.
 - **Terminal-wide, not per-client.** Once enabled, every same-user client gets
   the selected mode across all windows in the process without an additional
   prompt, pairing token, or per-client capability grant.

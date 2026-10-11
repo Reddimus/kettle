@@ -842,10 +842,9 @@ pub(crate) struct WindowState {
     /// app.rs (`scan_links` re-scans only on output, resize, scroll, focus or
     /// cwd).
     pub(crate) links_scan_key: Option<LinksScanKey>,
-    pub(crate) mouse_btn: Option<u8>,
-    /// Side buttons (Back, Forward) whose press the terminal received, one
-    /// bit each, so only those get a release report.
-    pub(crate) reported_side_buttons: u8,
+    /// The buttons whose press a pane's program received, each with that
+    /// pane, until its one release goes there too.
+    pub(crate) held_buttons: crate::held_buttons::HeldButtons,
     /// Last `(pane, row, col)` reported to a mouse-tracking app, so
     /// cell-motion reports (1002/1003) fire only on a cell crossing. Pane
     /// identity is part of the key because wheel input can target a hovered
@@ -901,6 +900,27 @@ pub(crate) struct WindowState {
     /// The shelf item the user opened in this window, if any. Only a user
     /// action opens it; a push never does.
     pub(crate) media_viewer: Option<MediaViewer>,
+    /// The inline card, by pane and nonce, that took the primary press now
+    /// held; its release over the same card opens the card's item.
+    pub(crate) card_press: Option<(u64, kettle_core::InlineNonce)>,
+    /// The cards on screen as of the last presented frame: since when each
+    /// is where it is, and the instance that names it.
+    pub(crate) card_sightings: crate::media::CardSightings,
+    /// The card instance assistive technology moved focus to, until a key
+    /// press returns it to the pane.
+    pub(crate) card_focus: Option<u64>,
+    /// The card a primary press at the pointer would take, for the hand
+    /// cursor and the hover outline.
+    pub(crate) card_hover: Option<kettle_render::PaintedCard>,
+    /// When the card under a still pointer settles and takes the hand.
+    pub(crate) card_settle_wake: Option<std::time::Instant>,
+    /// Cards on screen changed since the pointer was last checked against
+    /// them.
+    pub(crate) card_hover_stale: bool,
+    /// Where the physical pointer is over this window's client area, from
+    /// native events only: a control client's moves set `cursor` but never
+    /// this, so they cannot light a card the user is not pointing at.
+    pub(crate) native_pointer: Option<PhysicalPosition<f64>>,
     /// When `Some`, the user is editing a window/tab/pane title via
     /// an inline overlay.
     pub(crate) editing_title: Option<TitleEditState>,
@@ -1171,6 +1191,14 @@ pub(crate) struct MovedPasteState {
 }
 
 impl WindowState {
+    /// Point `cursor` back at the physical pointer before a native button or
+    /// wheel acts there: a control client's move may have left it elsewhere.
+    pub(crate) fn resume_native_pointer(&mut self) {
+        if let Some(pointer) = self.native_pointer {
+            self.cursor = pointer;
+        }
+    }
+
     /// Take the receipt and pending video preview that belong to `tab`'s
     /// panes, leaving another tab's receipt where it is. Pixels move without
     /// copying and the receipt keeps its lifetime; a hover pause ends because
@@ -1340,8 +1368,7 @@ impl WindowState {
             scrollbar_hover: false,
             dragging_split: None,
             links_scan_key: None,
-            mouse_btn: None,
-            reported_side_buttons: 0,
+            held_buttons: crate::held_buttons::HeldButtons::default(),
             last_mouse_cell: None,
             links: Vec::new(),
             ssh_input: None,
@@ -1357,6 +1384,13 @@ impl WindowState {
             context_menu: None,
             theme_preview: None,
             media_viewer: None,
+            card_press: None,
+            card_sightings: crate::media::CardSightings::default(),
+            card_focus: None,
+            card_hover: None,
+            card_settle_wake: None,
+            card_hover_stale: false,
+            native_pointer: None,
             editing_title: None,
             pending_resize: false,
             confirm_dialog: None,
@@ -1424,6 +1458,22 @@ impl WindowState {
 mod tests {
     use super::*;
     use winit::keyboard::{KeyCode, PhysicalKey};
+
+    /// A native button acts at the physical pointer after a control client
+    /// moved the cursor, and a pointer outside the window leaves the cursor
+    /// where it was.
+    #[test]
+    fn native_input_resumes_at_the_physical_pointer() {
+        let mut ws = WindowState::new(1, false, Mux::new());
+        let control = PhysicalPosition::new(300.0, 40.0);
+        ws.cursor = control;
+        ws.resume_native_pointer();
+        assert_eq!(ws.cursor, control, "no native pointer, no change");
+        let pointer = PhysicalPosition::new(12.5, 80.0);
+        ws.native_pointer = Some(pointer);
+        ws.resume_native_pointer();
+        assert_eq!(ws.cursor, pointer);
+    }
 
     fn moving_tab(pane: u64) -> crate::mux::Tab {
         crate::mux::Tab {

@@ -299,12 +299,30 @@ owner, mode, `Thumb::URI`, and `Thumb::MTime`, then decodes that same descriptor
 A missing or untrusted cache entry leaves the generic poster visible. No
 platform path runs a video codec inside the Kettle process.
 
+The same store, as a second `PastedImages` of kind `paste_image::OPENED`,
+holds the PNG copies a card menu hands to the image viewer: prefix
+`kettle-open-`, 32 files and 128 MiB, and, since the viewer reads its copy
+when it opens it, it drops its oldest copies to make room (`drop_oldest`, for
+as much as the new PNG can take) instead of refusing, numbering on past its
+file count. A copy stays at least a minute (`StoreKind::min_age`) so its
+viewer can read it; a store full of newer copies refuses another, which the
+user hears as busy. A copy it cannot delete stays counted against the bounds
+(`StuckImage`) and cleanup tries it again. At exit the App closes the store
+(`PastedImages::close`), so an open still on its way cannot leave a copy
+behind. The App holds it behind a mutex so `media::external` can write
+off the window thread; `hand_over` checks the viewer, writes the copy, marks
+it downloaded through the held handle (`mark_downloaded`), checks it is still
+the file Kettle wrote (`path_still_matches`) and starts the viewer, all under
+that lock, and at most two opens are prepared at once.
+
 Crash cleanup recognizes only
-`kettle-paste-<canonical-pid>-<canonical-u128-nonce>` directories and canonical
-zero-padded `0001.png` through `0064.png` children. Cleanup runs on a background
+`kettle-paste-<canonical-pid>-<canonical-u128-nonce>` and
+`kettle-open-<canonical-pid>-<canonical-u128-nonce>` directories, with
+canonical zero-padded children from `0001.png` through `0064.png` for pasted
+images or `999999.png` for viewer copies. Cleanup runs on a background
 thread so a damaged namespace cannot delay event-loop/window creation. It stops
-after 250 ms, 8,192 root entries, 64 stale attempts, or 32 successful sessions;
-each session is capped at 64 files. A candidate must be older than 24 hours,
+after 250 ms, 8,192 root entries, 64 stale attempts, or 32 successful sessions
+per kind; each session is capped at its kind's file count (64 or 32). A candidate must be older than 24 hours,
 its creator must be definitively dead (`ESRCH` on Unix; queryable
 non-`STILL_ACTIVE`/invalid PID on Windows), and every child must open relative
 to the held directory as a current-user/private, non-reparse, single-link
@@ -467,14 +485,117 @@ come back through `UserEvent::MediaRendered`, the item's pixels are charged
 to the process preview account (releasing the least recently viewed off-screen
 pixels when it is full), and only then is the push answered.
 
-The user opens a shelf with `open_media_shelf`. `WindowState::media_viewer`
+A push that asks for an inline card (`ShowRequest::inline`, sent only by
+`kettle mcp --display` with `--claude-card-hook` or `--codex-card-hook`)
+gets one only when its connection thread (`card_harness`) found the program
+that asked to be the harness it asked as, under its maker's signature
+(`Requirement::CLAUDE_CODE` or `Requirement::CODEX`, macOS only), and the
+route is verified. After the item is published, `register_card` admits the
+harness against the `media::CardLedger` (32 live cards per harness, four a
+second), mints a nonce from the OS random source with unbiased digits and no
+live collision, sizes the card for its harness's column and label
+(`card_size`), builds its rows and caption (`card_message`, `card_caption`,
+whose file name drops control,
+format, private-use and zero-width characters), and registers it in the
+pane's `kettle_render::InlineCards` (64 per pane) with a `CardPoster`: a weak
+reference to the shelf item's pixels, so a card never holds the preview
+account. The message rides back to the adapter in `ShowResult::inline`; the
+MCP server keeps it in its `DisplaySession` for the hook's one-time
+`kettle_card`, which is answered outside the tool queue. The renderer reports
+each frame's accepted cards (`Renderer::painted_cards`), and their items count
+as visible when pixels are released. The tick retires cards whose harness
+exited, whose pane closed, or whose item left the shelf or was replaced.
+
+Codex has no plugin route. `kettle`'s `agent_setup` module prints a shell
+function that hands each launch to `agent-setup --launch-codex`, which
+classifies the arguments without a shell and execs `codex`, adding
+per-launch `-c` server options to interactive sessions only. On macOS, for
+the Codex release whose hook output Kettle has measured, it also adds a
+`PostToolUse` `mcp_tool` hook (elsewhere no card could be admitted); the display server then keys cards by Codex's call id, and
+`kettle_card` hands each to that hook once, as for Claude Code.
+
+Kettle's Claude Code plugin is `kettle-ui`'s `agent_plugin` module. With
+`agent-display-claude-code` and live agent previews, the App's
+`reconcile_claude_plugin`, run before the first pane and after each reload,
+builds the plugin's three files for this executable (`PluginFiles`). Under
+a lock shared by every Kettle using the directory, it writes them once into
+a contents-named directory under Kettle's data directory through a private
+staging directory and a rename, removes stale plugins, then offers it and
+checks it at once so Settings is current. `pane_environment` asks
+`for_new_pane` before each spawn, with the pane's own `CLAUDE_CONFIG_DIR` and
+`HOME`. That call checks Claude Code's managed policy (`PolicySources`,
+cached until a source changes on disk, and never beside a source whose
+metadata cannot be read) and verifies the directory without following links,
+so a pane gets the plugin only after both pass. `CLAUDE_CODE_PLUGIN_DIRS`
+then gets the directory first and keeps the pane's other entries, less any
+Kettle plugin, which goes even when the pane gets none. The last refusal is
+what the Settings footer reports.
+
+`media::CardSightings` keeps the cards of the last presented frame by
+spot, each with the time it appeared there and an instance number that is
+never reused. AccessKit names a card by that instance, as a `Button` child of
+its pane's `Terminal` node, so no node id carries a nonce, and an action for
+an instance no longer on screen does nothing. On screen means in a pane the
+active tab's layout shows now (`App::accessible_cards`), not merely in the
+last frame, so an action queued before a tab switch or a zoom cannot reach a
+card that has left view. Focusing a card focuses its pane and closes Search,
+which would otherwise keep the keys (its query is remembered). A press of
+any button, a key press, input-method text or a pane focus change moves
+focus off a card. Quick select places cards with
+`InlineCards::placements` on a snapshot taken under the same lock as the
+text it scans, not from the last frame, and draws its labels with the
+menus, above every card. A click, a quick-select label
+and an accessibility action all open a card through `App::open_card`, which
+refuses while a dialog, a menu or the viewer owns the pointer and checks the
+card's item is still on its pane's shelf. The renderer records each card it draws (`PaintedCard`: pane, nonce, the
+part inside its pane) in `drawn_cards`, whose items eviction spares, and
+copies them to `painted_cards` only once that frame is presented; `card_at`
+finds the card on screen under a press. After each presented frame the App
+notes when each card on screen first appeared at its spot (pane, nonce and
+rect, so two printed copies settle apart) with `CardSightings::note`, and a
+primary press on one settled for `CARD_SETTLE` is taken by `press_card`
+before anything but dialogs and the viewer. `release_card` then opens that
+card's item. Anything that takes the pointer while the button is held (a
+dialog through `close_all_modals` or `install_confirm_dialog`, the context
+menu, search) ends the card's press, as do focus loss and a new primary
+press after a release that never came, and `release_card` also opens
+nothing while a dialog or the viewer is up. `note_card_hover` names the card
+a press at the physical pointer would take (`native_pointer`, which a control
+client's moves never set), for the hand cursor and the overlay's accent
+outline (`Overlay::card_hover`, the whole `PaintedCard`, drawn only where that
+frame drew that same card in that pane). The cursor icon as a whole, with the
+hover state its hit tests set, and every native press, release and wheel step,
+works from `native_pointer` too (`WindowState::resume_native_pointer`), so a
+control client's moves change neither; with the physical pointer outside the
+window, `sync_cursor_icon` sets nothing at all. A card that has not settled leaves
+`card_settle_wake`, which `about_to_wait` folds into its deadline so a still
+pointer gets the hand when the card settles, and a presented frame whose
+cards changed marks the hover stale for the same recheck. The user opens a shelf with `open_media_shelf`, on `Shelf::latest()`, the item
+published last (a replacement by key keeps its place in the list).
+`media::CardsTip` puts the one-time tip on the first card a presented frame
+showed with its image (`Renderer::shown_cards`: the card's poster reached
+the GPU, which `CardScene::apply_upload_results` records beside each drawn
+card) while no dialog, menu or viewer covers the cards. `InlineCards::set_tip`
+names the card and `CardScene` draws the tip on a strip along its foot. At
+that moment it creates `ui-tips.json` with `kettle_state::atomic_create_new`,
+which writes the whole record to a staged file and publishes it by an
+exclusive link, so of two Kettles running at once only the first to create
+it shows the tip and neither ever sees it half written. Any entry already
+there, a record or not, means no tip and is left alone. At start a record it
+can read (through `kettle_state::open_trusted_file_read`: a regular file
+only, no link followed, no blocking open) marks the tip done. It ends when
+`open_card` runs or `TIP_TIME` passes, a deadline `about_to_wait` folds in. `WindowState::media_viewer`
 names the pane and item; the App projects it into a
 `kettle_render::MediaViewerOverlay` (display text and pixels, never a path)
 and closes it when its pane leaves the active tab or becomes too small to
 hold it, the item leaves the shelf, or another modal opens. While it is open it takes every press and the
 wheel over it, ahead of the tab bar, and the paste receipt is not projected.
 kettle-render's `media_viewer` lays it out (`media_viewer_geometry`, shared
-with the App's hit testing), paints it into the menu layer, and draws its
+with the App's hit testing, with an `open_outside` button before close when
+`MediaViewerOverlay::open_outside` offers one; the App offers it while
+`App::media_viewer_opens_outside` finds the permitted viewer, looked up once
+per process by `Viewer::find`, and the item holds its pixels, and binds a bare
+O to it too), paints it into the menu layer, and draws its
 image through a lazily made image layer charged to the preview account, like
 card posters; its shaped text enters the retained chrome damage key and is
 reshaped when the font changes.

@@ -8,6 +8,37 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- Inline media cards for Claude Code: `kettle mcp --display`, launched by
+  Kettle's Claude Code plugin, asks for a card under the `kettle_show` call,
+  and Kettle registers one only for Claude Code under Anthropic's signature
+  running in the pane the item lands in. Kettle builds the card's cells and
+  caption; the plugin's hook collects them once and prints them under the
+  call, where Kettle paints the image. The model is told only that the media
+  shows below the call.
+- `kettle agent-setup --print` prints a `codex` shell function to review and
+  add to your shell's startup file. In a Kettle pane, an interactive Codex
+  session started through it (fresh, `codex resume` or `codex fork`) gets
+  this Kettle's display server for that launch only, so `kettle_show` sends
+  media to the pane's shelf. Every other Codex command runs unchanged, and
+  Kettle edits neither the shell's startup files nor Codex's configuration.
+  `--status` reports what a launch would get, and `--uninstall` prints how
+  to remove the function. It is for bash, zsh and fish, on macOS and Linux.
+- Codex shows a card under the call for media it sends with `kettle_show`,
+  like Claude Code. On macOS with Codex CLI 0.162, the launch function adds a
+  `PostToolUse` hook that collects the card Kettle registers for the call, and
+  Codex prints it under the call, where Kettle paints the image. Codex asks
+  you once to trust the hook in its own hook review; until then, and with
+  other Codex versions, media goes to the pane's shelf. A card's provenance
+  tab names the harness that printed it.
+- Claude Code previews (`agent-display-claude-code`, Settings → Agents →
+  Claude Code previews; off by default, needs agent previews): Claude Code
+  started in a new pane gets Kettle's own plugin, the display server and the
+  hook that prints inline cards, through `CLAUDE_CODE_PLUGIN_DIRS`. Kettle
+  writes the plugin read-only into its own data directory and checks it
+  before every new pane. It changes none of Claude Code's settings, and new
+  panes get nothing while Claude Code's managed policy forbids plugins from
+  the environment, nor a plugin an outer Kettle passed down. Settings says
+  why when a pane gets no plugin.
 - `kettle ctl get_state` reports `caller`: whether the connecting process runs
   in one of this Kettle's panes, from the process tree rather than anything
   the caller says. A client's first request claims its own pid and start time;
@@ -61,9 +92,36 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   an image or SVG file to the media shelf of the pane the agent runs in. It
   needs only Agent previews and cannot read the screen, type or run
   anything.
-- The media shelf viewer: `open_media_shelf` (palette: "Open media shelf")
-  shows the focused pane's shelf over the pane, newest first, with each
-  item's title, kind, size and sender; `←`/`→` browse and Esc closes, and so
+- Inline cards for the keyboard and screen readers: quick select labels each
+  card in the focused pane and opens it when picked, and a screen reader
+  hears each card as a button named for its item's title, kind, size and
+  sender, which opens it in the viewer. In English and Spanish.
+- Right-click an inline card for its menu: Open, and Open in Preview on
+  macOS or Open in Image Viewer on Linux with Eye of GNOME. The viewer gets
+  a PNG copy of exactly what Kettle shows, never the bytes a program sent,
+  and never through the default app for the file type: Kettle checks it is
+  Apple's own Preview, or a root-owned `/usr/bin/eog`, first. Copies are
+  private to you, marked as downloaded on macOS, kept to the newest 32 and
+  128 MiB (each for at least a minute, so its viewer can read it), and
+  deleted when Kettle quits. The media viewer offers the same
+  from a `↗` button in its header and the O key.
+- The first inline card you see with its image shown says "Click to open"
+  along its foot for ten seconds, or until you open a card, and then never
+  again: Kettle records that it showed in `ui-tips.json` beside the config
+  file, so of two Kettles running at once only one shows it. It waits until
+  nothing covers the card.
+- The pointer turns into a hand over an inline card a click would open, and
+  the card gets an accent outline; one that just appeared gets them once it
+  has stayed put half a second, even if the pointer does not move.
+- Clicking an inline card opens its item in the media viewer. The card takes
+  both the press and its release, so the program behind it sees neither. A
+  Shift-click selects text as it does anywhere else, and the wheel, like a
+  press on a card that came on screen under the pointer less than half a
+  second ago, goes where it would without the card.
+- The media shelf viewer: `open_media_shelf` (palette: "Open media shelf";
+  `Ctrl+Shift+Cmd+I` on macOS) shows the focused pane's shelf over the pane,
+  on the item published last, newest first, with each item's title, kind,
+  size and sender; `←`/`→` browse and Esc closes, and so
   does the shortcut that opened it. A screen reader hears each item's place
   on the shelf. A pane titlebar marks unopened items as `▣N`, and the window
   title counts them.
@@ -218,6 +276,21 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   a press it received. A press that dismissed a context menu or that a dialog
   took used to leave the program a release with no press, and one it received
   lost its release when a dialog opened while the button was held.
+
+- Every mouse press a program receives gets exactly one release, in its own
+  pane. A button held while focus moves to another pane or tab keeps its drag
+  and release with the program that got the press; the release used to go to
+  the newly focused pane, leaving the first program a press with no release
+  and handing the other a release with no press. Two buttons held at once
+  each keep their own, and Back and Forward follow the same rule. When Kettle
+  ends a drag itself (the window loses focus, search or a menu opens, the
+  pane turns read-only or is reset, or the tab moves to another window), the
+  program gets its release at the last cell it saw instead of waiting
+  forever. Pressing Shift partway through no longer drops the release, a
+  press the program never got (its input was full) leaves no release behind,
+  and a release always gets through: each pane's input keeps a little room
+  that only mouse releases may use. The newest press owns the drag, so a
+  Shift-drag selection started while a program holds Back still selects.
 
 - `kettle ctl`, `kettle mcp` and other control clients keep finding running
   servers after many Kettle sessions. Each exit used to leave its control

@@ -4,24 +4,131 @@ use crate::{PaneSnapshot, SnapCell};
 use kettle_core::{InlineMarker, InlineNonce};
 use std::collections::HashMap;
 
-#[cfg(test)]
-const MAX_REGISTRATIONS: usize = 64;
-const CLAUDE_LEFT: usize = 5;
+/// Most cards one pane holds at once.
+pub const MAX_PANE_CARDS: usize = 64;
+/// Most columns a card spans; a wider block would wrap in the harness.
+pub const MAX_CARD_COLUMNS: u8 = 107;
 pub(crate) const MAX_CARD_ROWS: u8 = 12;
+
+/// Which harness prints a card, which fixes the label recognition expects
+/// above its rows and where its rows start.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CardHarness {
+    /// Claude Code's synchronous hook message under the tool call.
+    ClaudeHook,
+    /// Codex's hook message under the tool call (Codex CLI 0.162.0).
+    CodexHook,
+}
+
+impl CardHarness {
+    /// The label line above a card's rows as the harness prints it, from
+    /// the line's first character after any indent.
+    fn label(self) -> &'static str {
+        match self {
+            // Claude Code's `⎿` with its spacing, then the hook's label.
+            Self::ClaudeHook => {
+                "\u{23bf} \u{00a0}PostToolUse:mcp__plugin_kettle_kettle__kettle_show says:"
+            }
+            // Codex's hook line; the message's first line, which Kettle
+            // leaves empty, would follow it.
+            Self::CodexHook => "\u{21b3} Hook \u{00b7}",
+        }
+    }
+
+    /// The column a card's rows, and the caption under them, start at.
+    pub fn left(self) -> usize {
+        match self {
+            Self::ClaudeHook => 5,
+            Self::CodexHook => 4,
+        }
+    }
+
+    /// The harness's name, on a card's provenance tab.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::ClaudeHook => "Claude",
+            Self::CodexHook => "Codex",
+        }
+    }
+
+    /// The columns the harness's label line takes as it prints it: Claude
+    /// Code's two-column indent, then the label; Codex's label and the space
+    /// before the message's empty first line. A narrower pane wraps the
+    /// label, and the card under it is never found.
+    pub fn label_columns(self) -> usize {
+        match self {
+            Self::ClaudeHook => 2 + self.label().chars().count(),
+            Self::CodexHook => self.label().chars().count() + 1,
+        }
+    }
+}
+
+/// A card's poster, held weakly. Its pixels belong to the shelf item, so a
+/// card never keeps them charged to the preview account after the shelf
+/// lets them go.
+#[derive(Clone, Debug)]
+pub struct CardPoster {
+    width: u32,
+    height: u32,
+    rgba: std::sync::Weak<kettle_core::PixelBuffer>,
+}
+
+impl CardPoster {
+    pub fn new(image: &kettle_core::ImageData) -> Self {
+        Self {
+            width: image.width,
+            height: image.height,
+            rgba: std::sync::Arc::downgrade(&image.rgba),
+        }
+    }
+
+    fn upgrade(&self) -> Option<kettle_core::ImageData> {
+        Some(kettle_core::ImageData {
+            width: self.width,
+            height: self.height,
+            rgba: self.rgba.upgrade()?,
+        })
+    }
+}
+
+/// A card to register: its block's size, who prints it, its caption and its
+/// poster. Kettle builds every part; nothing comes from the harness.
+#[derive(Clone, Debug)]
+pub struct CardSpec {
+    pub rows: u8,
+    pub columns: u8,
+    pub harness: CardHarness,
+    pub caption: String,
+    pub poster: Option<CardPoster>,
+}
+
+/// Why a card was not registered.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CardRefusal {
+    /// Its block has no rows or columns, or more than a card may have.
+    BadSize,
+    /// The pane already holds as many cards as it may.
+    Full,
+    /// Another card in the pane has its nonce.
+    Duplicate,
+}
 
 struct RegisteredCard {
     rows: u8,
     columns: u8,
-    label: String,
+    harness: CardHarness,
     caption: String,
-    poster: Option<kettle_core::ImageData>,
+    poster: Option<CardPoster>,
     pending: bool,
 }
 
-/// Owned by Pane. Registration is test-only until the display caller lands.
+/// Owned by Pane: the cards the UI registered for it, as the renderer paints
+/// them. The UI decides who may register and when a card expires.
 #[derive(Default)]
 pub struct InlineCards {
     entries: HashMap<InlineNonce, RegisteredCard>,
+    /// The card that says a click opens it, while the UI shows that tip.
+    tip: Option<InlineNonce>,
 }
 
 impl InlineCards {
@@ -29,16 +136,76 @@ impl InlineCards {
         !self.entries.is_empty()
     }
 
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn contains(&self, nonce: InlineNonce) -> bool {
+        self.entries.contains_key(&nonce)
+    }
+
+    /// Register a card under `nonce`.
+    pub fn insert(&mut self, nonce: InlineNonce, spec: CardSpec) -> Result<(), CardRefusal> {
+        if spec.rows == 0
+            || spec.columns == 0
+            || spec.rows > MAX_CARD_ROWS
+            || spec.columns > MAX_CARD_COLUMNS
+        {
+            return Err(CardRefusal::BadSize);
+        }
+        if self.entries.contains_key(&nonce) {
+            return Err(CardRefusal::Duplicate);
+        }
+        if self.entries.len() >= MAX_PANE_CARDS {
+            return Err(CardRefusal::Full);
+        }
+        let pending = spec.poster.is_none();
+        self.entries.insert(
+            nonce,
+            RegisteredCard {
+                rows: spec.rows,
+                columns: spec.columns,
+                harness: spec.harness,
+                caption: spec.caption,
+                poster: spec.poster,
+                pending,
+            },
+        );
+        Ok(())
+    }
+
+    /// Forget the card under `nonce`; its text stays in the transcript and
+    /// paints as an unknown card from the next frame.
+    pub fn remove(&mut self, nonce: InlineNonce) -> bool {
+        if self.tip == Some(nonce) {
+            self.tip = None;
+        }
+        self.entries.remove(&nonce).is_some()
+    }
+
+    /// Show, on the registered card `nonce`, the tip that a click opens it,
+    /// or no tip with `None`.
+    pub fn set_tip(&mut self, nonce: Option<InlineNonce>) {
+        self.tip = nonce.filter(|nonce| self.entries.contains_key(nonce));
+    }
+
+    /// The card showing the tip, if any.
+    pub(crate) fn tip(&self) -> Option<InlineNonce> {
+        self.tip
+    }
+
     #[cfg(test)]
-    fn register(&mut self, nonce: InlineNonce, rows: u8, columns: u8) {
-        assert!(rows > 0 && columns > 0 && rows <= MAX_CARD_ROWS && columns < 108);
-        assert!(self.entries.len() < MAX_REGISTRATIONS);
+    fn register_for(&mut self, nonce: InlineNonce, rows: u8, columns: u8, harness: CardHarness) {
         self.entries.insert(
             nonce,
             RegisteredCard {
                 rows,
                 columns,
-                label: "PostToolUse:mcp__plugin_kettle_kettle__kettle_show says:".into(),
+                harness,
                 caption: "diagram.png - raster 640x480".into(),
                 poster: None,
                 pending: true,
@@ -46,22 +213,29 @@ impl InlineCards {
         );
     }
 
-    pub(crate) fn visual(&self, nonce: InlineNonce) -> Option<CardVisual<'_>> {
+    pub(crate) fn visual(&self, nonce: InlineNonce) -> Option<CardVisual> {
         let entry = self.entries.get(&nonce)?;
-        Some(match &entry.poster {
-            Some(image) => CardVisual::Ready(image),
+        Some(match entry.poster.as_ref().map(CardPoster::upgrade) {
+            Some(Some(image)) => CardVisual::Ready(image),
+            // The shelf released the pixels.
+            Some(None) => CardVisual::Failed,
             None if entry.pending => CardVisual::Pending,
             None => CardVisual::Failed,
         })
     }
 
+    /// The poster stays only while the caller, like a shelf, holds `image`.
     #[cfg(test)]
-    pub(crate) fn set_poster(&mut self, nonce: InlineNonce, image: Option<kettle_core::ImageData>) {
+    pub(crate) fn set_poster(
+        &mut self,
+        nonce: InlineNonce,
+        image: Option<&kettle_core::ImageData>,
+    ) {
         let entry = self
             .entries
             .get_mut(&nonce)
             .expect("test registration exists");
-        entry.poster = image;
+        entry.poster = image.map(CardPoster::new);
         entry.pending = false;
     }
 
@@ -94,7 +268,7 @@ impl InlineCards {
         for (&(nonce, line, column), group) in &mut frame.groups {
             let entry = &self.entries[&nonce];
             if group.cells != usize::from(entry.rows) * usize::from(entry.columns)
-                || column != CLAUDE_LEFT
+                || column != entry.harness.left()
             {
                 continue;
             }
@@ -126,8 +300,7 @@ impl InlineCards {
             let Some(caption_line) = line.checked_add(i32::from(entry.rows)) else {
                 continue;
             };
-            let label = "\u{23bf} \u{00a0}".chars().chain(entry.label.chars());
-            if !row_matches(snap, label_line, 0, label, true)
+            if !row_matches(snap, label_line, 0, entry.harness.label().chars(), true)
                 || !row_matches(snap, caption_line, column, entry.caption.chars(), false)
             {
                 continue;
@@ -139,6 +312,7 @@ impl InlineCards {
                 column,
                 rows: entry.rows,
                 columns: entry.columns,
+                harness: entry.harness,
             });
         }
         // Snapshot capture supplies each complete sequence once in row-major
@@ -181,6 +355,26 @@ impl InlineCards {
         ))
     }
 
+    /// The registered cards `snap` shows whole, as a frame would draw them:
+    /// each one's nonce, its first grid line and column, and its size in
+    /// cells. For a caller that must place cards against the same grid it
+    /// reads text from, not against the last frame drawn.
+    pub fn placements(&self, snap: &PaneSnapshot) -> Vec<CardPlacement> {
+        let mut frame = CardFrame::default();
+        self.recognize_into(snap, &mut frame);
+        frame
+            .blocks
+            .iter()
+            .map(|block| CardPlacement {
+                nonce: block.nonce,
+                line: block.line,
+                column: block.column,
+                rows: block.rows,
+                columns: block.columns,
+            })
+            .collect()
+    }
+
     #[cfg(test)]
     fn recognize(&self, snap: &PaneSnapshot) -> CardFrame {
         let mut frame = CardFrame::default();
@@ -189,8 +383,8 @@ impl InlineCards {
     }
 }
 
-pub(crate) enum CardVisual<'a> {
-    Ready(&'a kettle_core::ImageData),
+pub(crate) enum CardVisual {
+    Ready(kettle_core::ImageData),
     Pending,
     Failed,
 }
@@ -276,12 +470,26 @@ impl CardFrame {
     }
 }
 
+/// Where a recognized card sits in its pane's grid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CardPlacement {
+    pub nonce: InlineNonce,
+    /// Its first line, counted as the grid counts (the screen's top is 0,
+    /// history above it negative).
+    pub line: i32,
+    pub column: usize,
+    pub rows: u8,
+    pub columns: u8,
+}
+
 pub(crate) struct CardBlock {
     pub nonce: InlineNonce,
     pub line: i32,
     pub column: usize,
     pub rows: u8,
     pub columns: u8,
+    /// Who printed it, which its provenance tab names.
+    pub harness: CardHarness,
 }
 
 fn cell_at(snap: &PaneSnapshot, line: i32, column: usize) -> Option<&SnapCell> {
@@ -355,9 +563,21 @@ pub(crate) mod tests {
     pub(crate) fn fixture_term(
         prefix_lines: usize,
     ) -> (InlineCards, Term<EventProxy>, InlineNonce) {
+        let label = "  \u{23bf} \u{00a0}PostToolUse:mcp__plugin_kettle_kettle__kettle_show says:";
+        harness_term(prefix_lines, CardHarness::ClaudeHook, label, 5)
+    }
+
+    /// A card as `harness` prints it: `label` on its own line, then the
+    /// rows and the caption at column `left`.
+    fn harness_term(
+        prefix_lines: usize,
+        harness: CardHarness,
+        label: &str,
+        left: usize,
+    ) -> (InlineCards, Term<EventProxy>, InlineNonce) {
         let nonce = InlineNonce::new([2, 3, 4, 5, 6, 7]).unwrap();
         let mut cards = InlineCards::default();
-        cards.register(nonce, 3, 12);
+        cards.register_for(nonce, 3, 12, harness);
         let (tx, _rx) = crossbeam_channel::unbounded();
         let mut term = Term::new(
             Config::default(),
@@ -369,19 +589,90 @@ pub(crate) mod tests {
         for index in 0..prefix_lines {
             output.push_str(&format!("ordinary prefix {index}\r\n"));
         }
-        output.push_str(
-            "  \u{23bf} \u{00a0}PostToolUse:mcp__plugin_kettle_kettle__kettle_show says:\r\n",
-        );
+        output.push_str(label);
+        output.push_str("\r\n");
+        let indent = " ".repeat(left);
         for row in 0..3 {
-            output.push_str("     ");
+            output.push_str(&indent);
             for column in 0..12 {
                 output.push_str(&InlineMarker { row, column, nonce }.encode().unwrap());
             }
             output.push_str("\r\n");
         }
-        output.push_str("     diagram.png - raster 640x480");
+        output.push_str(&indent);
+        output.push_str("diagram.png - raster 640x480");
         processor.advance(&mut term, output.as_bytes());
         (cards, term, nonce)
+    }
+
+    fn spec(rows: u8, columns: u8, poster: Option<CardPoster>) -> CardSpec {
+        CardSpec {
+            rows,
+            columns,
+            harness: CardHarness::ClaudeHook,
+            caption: "plot.png - raster 64x48".into(),
+            poster,
+        }
+    }
+
+    #[test]
+    fn registration_refuses_bad_sizes_duplicates_and_a_full_pane() {
+        let nonce = |n: u8| InlineNonce::new([0, 0, 0, 0, 0, n]).unwrap();
+        let mut cards = InlineCards::default();
+        for (rows, columns) in [
+            (0, 12),
+            (3, 0),
+            (MAX_CARD_ROWS + 1, 12),
+            (3, MAX_CARD_COLUMNS + 1),
+        ] {
+            assert_eq!(
+                cards.insert(nonce(1), spec(rows, columns, None)),
+                Err(CardRefusal::BadSize),
+                "{rows}x{columns}"
+            );
+        }
+        assert_eq!(
+            cards.insert(nonce(1), spec(3, MAX_CARD_COLUMNS, None)),
+            Ok(())
+        );
+        assert_eq!(
+            cards.insert(nonce(1), spec(3, 12, None)),
+            Err(CardRefusal::Duplicate)
+        );
+        for n in 2..=MAX_PANE_CARDS as u8 {
+            assert_eq!(cards.insert(nonce(n), spec(3, 12, None)), Ok(()));
+        }
+        assert_eq!(cards.len(), MAX_PANE_CARDS);
+        assert_eq!(
+            cards.insert(nonce(MAX_PANE_CARDS as u8 + 1), spec(3, 12, None)),
+            Err(CardRefusal::Full)
+        );
+        assert!(cards.remove(nonce(1)));
+        assert!(!cards.remove(nonce(1)));
+        assert!(!cards.contains(nonce(1)));
+        assert_eq!(cards.insert(nonce(1), spec(3, 12, None)), Ok(()));
+    }
+
+    #[test]
+    fn a_card_never_keeps_its_posters_pixels_once_the_shelf_lets_go() {
+        let nonce = InlineNonce::new([1, 2, 3, 4, 5, 6]).unwrap();
+        let shelf = kettle_core::ImageData::new(2, 1, vec![255; 8]).unwrap();
+        let mut cards = InlineCards::default();
+        cards
+            .insert(nonce, spec(3, 12, Some(CardPoster::new(&shelf))))
+            .unwrap();
+        assert!(matches!(cards.visual(nonce), Some(CardVisual::Ready(_))));
+        let pixels = std::sync::Arc::downgrade(&shelf.rgba);
+        drop(shelf);
+        assert!(
+            pixels.upgrade().is_none(),
+            "the card held no strong reference"
+        );
+        assert!(matches!(cards.visual(nonce), Some(CardVisual::Failed)));
+        // A card registered before its poster is pending, not failed.
+        let other = InlineNonce::new([6, 5, 4, 3, 2, 1]).unwrap();
+        cards.insert(other, spec(3, 12, None)).unwrap();
+        assert!(matches!(cards.visual(other), Some(CardVisual::Pending)));
     }
 
     #[test]
@@ -480,6 +771,77 @@ pub(crate) mod tests {
             cell.fg = kettle_core::AnsiColor::Named(kettle_core::NamedColor::Red);
         }
         assert_eq!(cards.recognize(&snap).accepted_cells, first.accepted_cells);
+    }
+
+    /// Codex prints a hook message as `↳ Hook ·` and the message's first
+    /// line, then its other lines four columns in (Codex CLI 0.162.0).
+    /// A caller can place each registered card a snapshot shows whole, by
+    /// the same recognition a frame draws with; an unregistered one is not
+    /// a card.
+    #[test]
+    fn placements_name_each_registered_card_the_grid_shows() {
+        let (cards, snap, nonce) = fixture();
+        let placements = cards.placements(&snap);
+        let frame = cards.recognize(&snap);
+        assert_eq!(placements.len(), frame.blocks.len());
+        assert_eq!(placements.len(), 1);
+        let block = &frame.blocks[0];
+        assert_eq!(
+            placements[0],
+            CardPlacement {
+                nonce,
+                line: block.line,
+                column: block.column,
+                rows: block.rows,
+                columns: block.columns,
+            }
+        );
+        assert!(InlineCards::default().placements(&snap).is_empty());
+        // Recognition reads the marks a snapshot collects only when asked to.
+        let (_, term, _) = fixture_term(0);
+        let mut plain = PaneSnapshot::default();
+        plain.capture(&term);
+        assert!(cards.placements(&plain).is_empty());
+    }
+
+    #[test]
+    fn a_codex_hook_card_is_recognized_at_its_own_pin() {
+        let codex = |label: &str, left: usize| {
+            let (cards, term, nonce) = harness_term(0, CardHarness::CodexHook, label, left);
+            let mut snap = PaneSnapshot::default();
+            snap.capture_with_card_marks(&term, true);
+            (cards.recognize(&snap), nonce)
+        };
+        let (frame, nonce) = codex("\u{21b3} Hook \u{00b7} ", 4);
+        assert_eq!(frame.blocks.len(), 1);
+        assert_eq!(frame.blocks[0].nonce, nonce);
+        assert_eq!((frame.blocks[0].line, frame.blocks[0].column), (1, 4));
+        assert_eq!(frame.accepted_cells.len(), 36);
+        // Its provenance tab names Codex.
+        assert_eq!(frame.blocks[0].harness, CardHarness::CodexHook);
+        assert_eq!(frame.blocks[0].harness.name(), "Codex");
+        // Claude Code's label, Claude Code's column, or text after the
+        // label is not Codex's hook.
+        for (label, left) in [
+            (
+                "  \u{23bf} \u{00a0}PostToolUse:mcp__plugin_kettle_kettle__kettle_show says:",
+                4,
+            ),
+            ("\u{21b3} Hook \u{00b7}", 5),
+            ("\u{21b3} Hook \u{00b7} something", 4),
+            ("\u{21b3} Hook", 4),
+        ] {
+            assert!(
+                codex(label, left).0.blocks.is_empty(),
+                "{label:?} at {left}"
+            );
+        }
+        // Nor is Codex's label a Claude Code card's.
+        let (cards, term, _) =
+            harness_term(0, CardHarness::ClaudeHook, "\u{21b3} Hook \u{00b7}", 5);
+        let mut snap = PaneSnapshot::default();
+        snap.capture_with_card_marks(&term, true);
+        assert!(cards.recognize(&snap).blocks.is_empty());
     }
 
     #[test]

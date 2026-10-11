@@ -56,6 +56,9 @@ const ACCESSIBILITY_COMPLETION_CONTAINER_ID: NodeId = NodeId(ACCESSIBILITY_COMPL
 const ACCESSIBILITY_MEDIA_RECEIPT_ID: NodeId = NodeId(1 << 59);
 const ACCESSIBILITY_MEDIA_RECEIPT_DISMISS_ID: NodeId = NodeId((1 << 59) | 1);
 const ACCESSIBILITY_MODAL_ID_MASK: u64 = 1 << 58;
+/// Inline cards on screen, each by its placement's instance number, which
+/// stays below this bit; never by its nonce.
+const ACCESSIBILITY_CARD_ID_MASK: u64 = crate::media::MAX_CARD_INSTANCE;
 const ACCESSIBILITY_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
 fn accessibility_completion_geometry_key(
@@ -501,12 +504,19 @@ fn until_next_wall_minute() -> std::time::Duration {
 }
 
 /// The keys the open media viewer takes for itself: Esc and the arrows
-/// that browse. Any other key closes it and reaches the terminal.
-fn media_viewer_takes_key(key: &Key) -> bool {
+/// that browse, and a bare O when it offers to open its item outside
+/// (`opens_outside`). Any other key closes it and reaches the terminal.
+fn media_viewer_takes_key(key: &Key, mods: ModifiersState, opens_outside: bool) -> bool {
     matches!(
         key,
         Key::Named(NamedKey::Escape | NamedKey::ArrowLeft | NamedKey::ArrowRight)
-    )
+    ) || (opens_outside && media_viewer_open_outside_key(key, mods))
+}
+
+/// O, with nothing but Shift, opens the viewer's item outside Kettle.
+fn media_viewer_open_outside_key(key: &Key, mods: ModifiersState) -> bool {
+    matches!(key, Key::Character(c) if c.eq_ignore_ascii_case("o"))
+        && !(mods.control_key() || mods.alt_key() || mods.super_key())
 }
 
 /// A modal whose input bar is an active text surface keeps the terminal
@@ -804,6 +814,51 @@ fn media_viewer_accessibility(
         format!("{} {}", viewer.status, viewer.hint)
     };
     (label, description)
+}
+
+fn accessibility_card_id(instance: u64) -> NodeId {
+    NodeId(ACCESSIBILITY_CARD_ID_MASK | instance)
+}
+
+/// The card instance a node names, if it is a card's.
+fn accessibility_card_instance(id: NodeId) -> Option<u64> {
+    let instance = id.0 & (ACCESSIBILITY_CARD_ID_MASK - 1);
+    (id.0 & !(ACCESSIBILITY_CARD_ID_MASK - 1) == ACCESSIBILITY_CARD_ID_MASK && instance != 0)
+        .then_some(instance)
+}
+
+/// `text` without placeholder sequences. A label built from outside text,
+/// such as a sender's path, reaches a screen reader or a control client and
+/// must never carry a card's marks.
+fn without_card_marks(text: String) -> String {
+    match kettle_core::strip_placeholders(&text) {
+        std::borrow::Cow::Borrowed(_) => text,
+        std::borrow::Cow::Owned(stripped) => stripped,
+    }
+}
+
+/// A card's button for assistive technology: named by its item's title and
+/// the viewer's detail line, never by its nonce, at the part of the card on
+/// screen. Clicking it opens the item in the viewer.
+fn card_accessibility_node(
+    rect: [f32; 4],
+    title: &str,
+    detail: &str,
+    tr: &kettle_i18n::Translator,
+) -> Node {
+    let mut node = Node::new(Role::Button);
+    node.set_label(without_card_marks(tr.card_a11y(title, detail)));
+    node.set_description(tr.text(kettle_i18n::Text::CardA11yOpen));
+    node.add_action(AccessibilityAction::Focus);
+    node.add_action(AccessibilityAction::Click);
+    let [x, y, width, height] = rect;
+    node.set_bounds(accesskit::Rect::new(
+        f64::from(x),
+        f64::from(y),
+        f64::from(x + width),
+        f64::from(y + height),
+    ));
+    node
 }
 
 fn accessibility_modal_id(kind: u64, index: usize) -> NodeId {
@@ -1670,11 +1725,91 @@ fn media_path_key(path: &kettle_media::NativePath) -> String {
     }
 }
 
-/// The shelf items on screen in any window, which eviction spares.
-fn media_visible_items<'a>(windows: impl Iterator<Item = &'a WindowState>) -> Vec<u64> {
-    windows
-        .filter_map(|window| window.media_viewer.as_ref().map(|viewer| viewer.item))
-        .collect()
+/// The shelf items on screen in any window, whose pixels eviction spares:
+/// each open viewer's, and each item whose card the last frame drew.
+fn media_visible_items<'a>(
+    windows: impl Iterator<Item = &'a WindowState>,
+    cards: &crate::media::CardLedger,
+) -> Vec<u64> {
+    let mut visible = Vec::new();
+    for window in windows {
+        visible.extend(window.media_viewer.as_ref().map(|viewer| viewer.item));
+        if let Some(renderer) = &window.renderer {
+            visible.extend(
+                renderer
+                    .drawn_cards()
+                    .iter()
+                    .filter_map(|card| cards.item(card.pane, card.nonce)),
+            );
+        }
+    }
+    visible
+}
+
+/// Whether the release of a press card `pressed` took opens it: only over the
+/// very card it pressed, and only while nothing that owns the pointer (a
+/// dialog, a menu, the viewer) has opened over it since the press.
+fn card_release_opens(
+    pressed: (u64, kettle_core::InlineNonce),
+    over: Option<kettle_render::PaintedCard>,
+    covered: bool,
+) -> bool {
+    !covered && over.is_some_and(|card| (card.pane, card.nonce) == pressed)
+}
+
+/// Register an inline card for a published item and build the message its
+/// harness prints. `None` when the harness is over its limits, the pane
+/// cannot hold a card, no nonce could be had, or the message would not
+/// print whole: the item stays on the shelf either way.
+#[allow(clippy::too_many_arguments)]
+fn register_card(
+    cards: &mut crate::media::CardLedger,
+    (pane_id, pane_cards, grid): (u64, &mut kettle_render::InlineCards, (usize, usize)),
+    cell: (f32, f32),
+    item: (u64, u64),
+    kind: kettle_media::MediaKind,
+    image: &kettle_core::ImageData,
+    inline: crate::media::InlineDraft,
+    now: std::time::Instant,
+) -> Option<kettle_ctl::show::InlineDelivery> {
+    cards.admit(inline.owner, now).ok()?;
+    let size = crate::media::card_size(inline.harness, grid, cell, (image.width, image.height))?;
+    let nonce = cards.mint(|pool| getrandom::fill(pool).is_ok())?;
+    let room = grid.0.saturating_sub(inline.harness.left() + 1);
+    let caption = crate::media::card_caption(
+        inline.name.as_deref(),
+        kind,
+        (image.width, image.height),
+        room,
+    );
+    let delivery = kettle_ctl::show::InlineDelivery {
+        message: crate::media::card_message(nonce, size, &caption)?,
+    };
+    if !delivery.fits() {
+        return None;
+    }
+    pane_cards
+        .insert(
+            nonce,
+            kettle_render::CardSpec {
+                rows: size.0,
+                columns: size.1,
+                harness: inline.harness,
+                caption,
+                poster: Some(kettle_render::CardPoster::new(image)),
+            },
+        )
+        .ok()?;
+    cards.record(
+        nonce,
+        crate::media::CardRecord {
+            pane: pane_id,
+            item,
+            owner: inline.owner,
+        },
+        now,
+    );
+    Some(delivery)
 }
 
 /// The window holding `pane`: `ws` or one of `windows`.
@@ -3436,23 +3571,6 @@ const MOUSE_BACK: u8 = 128;
 /// The report code of xterm's button 9, the Forward button.
 const MOUSE_FORWARD: u8 = 129;
 
-/// The bit a side button's SGR code (128 or 129) has in
-/// `WindowState::reported_side_buttons`.
-fn side_button_bit(sgr: u8) -> u8 {
-    1 << (sgr & 1)
-}
-
-/// Note whether the terminal received a side-button press. Each press
-/// replaces what the last one of that button left, so a release that never
-/// arrived cannot pair with a later press.
-fn note_side_button_press(reported: &mut u8, sgr: u8, delivered: bool) {
-    if delivered {
-        *reported |= side_button_bit(sgr);
-    } else {
-        *reported &= !side_button_bit(sgr);
-    }
-}
-
 /// What a mouse event did on its way to a pane's terminal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MouseReport {
@@ -3471,12 +3589,18 @@ impl MouseReport {
     }
 }
 
-/// Whether a side-button release goes to the terminal: only after a press it
-/// received, once.
-fn take_side_button_release(reported: &mut u8, sgr: u8) -> bool {
-    let held = *reported & side_button_bit(sgr) != 0;
-    *reported &= !side_button_bit(sgr);
-    held
+/// Where a mouse report lands in its pane.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum MouseAt {
+    /// The pointer's cell in the pane's rect.
+    Pointer(Rect),
+    /// The drag or release of a held button whose press the pane's program
+    /// got: the pointer's cell in its rect while it is on screen, else the
+    /// cell it was last told of.
+    Held {
+        rect: Option<Rect>,
+        cell: (usize, usize),
+    },
 }
 
 /// Whether an OSC 7 working directory is safe to turn into a `file://` URL and
@@ -4137,7 +4261,7 @@ fn context_menu_snapshot_reuse_safe(ws: &WindowState) -> bool {
     !ws.selecting
         && ws.scrollbar_drag_offset.is_none()
         && ws.dragging_split.is_none()
-        && ws.mouse_btn.is_none()
+        && !ws.held_buttons.any()
         && !ws.tab_drag_active
         && ws.tab_drag_press.is_none()
         && ws.drag_press.is_none()
@@ -5359,13 +5483,64 @@ pub(crate) struct HintTarget {
     row: usize,
     col: usize,
     label: String,
-    kind: kettle_core::hints::Kind,
-    text: String,
     /// The pane the target was read from, whose directory a relative path
     /// resolves against, even if focus moved or that pane exited since.
     pane: u64,
-    /// The target meets a boundary on both sides (see `HintSpan::bounded`).
-    bounded: bool,
+    what: HintWhat,
+}
+
+/// What a quick-select target is.
+#[derive(Clone)]
+enum HintWhat {
+    /// Text the detector found: a URL, a path, or something to copy.
+    Text {
+        kind: kettle_core::hints::Kind,
+        text: String,
+        /// The text meets a boundary on both sides (see `HintSpan::bounded`).
+        bounded: bool,
+    },
+    /// An inline card on screen: picking it opens its item in the viewer.
+    Card(kettle_core::InlineNonce),
+}
+
+/// A card's place in a pane for quick select: its first and last visible
+/// cells, as (row, column), and its nonce.
+type CardCells = ((usize, usize), (usize, usize), kettle_core::InlineNonce);
+
+/// The quick-select targets in a pane, in reading order: each text span the
+/// detector found outside every card, and each card at its first visible
+/// cell. A card's rows hold its marks, not text a user would pick.
+fn hint_targets_with_cards(
+    spans: Vec<kettle_core::hints::HintSpan>,
+    cards: &[CardCells],
+) -> Vec<(usize, usize, HintWhat)> {
+    let inside_card = |row: usize, col: usize| {
+        cards.iter().any(|((top, left), (bottom, right), _)| {
+            (*top..=*bottom).contains(&row) && (*left..=*right).contains(&col)
+        })
+    };
+    let mut found: Vec<(usize, usize, HintWhat)> = spans
+        .into_iter()
+        .filter(|span| !inside_card(span.row, span.start))
+        .map(|span| {
+            (
+                span.row,
+                span.start,
+                HintWhat::Text {
+                    kind: span.kind,
+                    text: span.text,
+                    bounded: span.bounded,
+                },
+            )
+        })
+        .collect();
+    found.extend(
+        cards
+            .iter()
+            .map(|((row, col), _, nonce)| (*row, *col, HintWhat::Card(*nonce))),
+    );
+    found.sort_by_key(|(row, col, _)| (*row, *col));
+    found
 }
 
 /// What picking a quick-select hint does.
@@ -5995,6 +6170,11 @@ fn hint_path_url(text: &str, cwd: Option<&str>, home: Option<&str>) -> Option<St
 #[derive(Clone)]
 enum ContextMenuClick {
     Action(Action),
+    /// A media row: what it does, and to which shelf item.
+    Media {
+        target: MediaTarget,
+        action: MediaMenuAction,
+    },
     LuaMenuItem(usize),
     /// Terminator parity (`custom_commands.py`): a
     /// `menu-item = LABEL = CMD` config entry. Dispatch writes
@@ -6106,6 +6286,14 @@ enum ContextMenuItem {
         /// The pane whose output held the link, captured with it.
         pane: Option<u64>,
     },
+    /// A row of an inline card's menu: open its item in Kettle, or a copy of
+    /// it in the permitted image viewer. The card and its item, with the
+    /// item's generation, are captured when the menu opens.
+    Media {
+        label: &'static str,
+        target: MediaTarget,
+        action: MediaMenuAction,
+    },
     /// A static, non-dispatchable information line
     /// (the About panel's version/update rows). Rendered like a disabled row
     /// (dimmed), survives `filter_disabled`, never highlighted, claims no
@@ -6113,6 +6301,25 @@ enum ContextMenuItem {
     Info {
         label: String,
     },
+}
+
+/// The card a media menu row acts on, and the shelf item it showed when the
+/// menu opened.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MediaTarget {
+    pane: u64,
+    nonce: kettle_core::InlineNonce,
+    item: u64,
+    generation: u64,
+}
+
+/// What a media menu row does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MediaMenuAction {
+    /// Open the item in Kettle's viewer.
+    View,
+    /// Open a copy of it in the permitted image viewer.
+    OpenOutside(crate::media::Viewer),
 }
 
 /// What the title-edit overlay edits (Terminator parity).
@@ -6660,6 +6867,7 @@ fn context_menu_item_columns(item: &ContextMenuItem, hint: &str) -> usize {
         ContextMenuItem::ProfileChoice { label, .. } => (label, "", false),
         ContextMenuItem::NewTabShell { label, .. } => (label, "", true),
         ContextMenuItem::UrlItem { label, .. } => (label, "", false),
+        ContextMenuItem::Media { label, .. } => (label, "", false),
         ContextMenuItem::Info { label } => (label, "", false),
         ContextMenuItem::Separator => return 0,
     };
@@ -6694,6 +6902,7 @@ fn assign_mnemonics(items: &[ContextMenuItem], reserved: &[char]) -> Vec<Option<
             ContextMenuItem::ProfileChoice { label, .. } => label.as_str(),
             ContextMenuItem::NewTabShell { label, .. } => label.as_str(),
             ContextMenuItem::UrlItem { label, .. } => *label,
+            ContextMenuItem::Media { label, .. } => *label,
             // Info rows are non-dispatchable — no mnemonic to claim.
             ContextMenuItem::Info { .. } => "",
             ContextMenuItem::Separator => "",
@@ -6707,7 +6916,10 @@ fn assign_mnemonics(items: &[ContextMenuItem], reserved: &[char]) -> Vec<Option<
     // Address", which lead the menu, would take 'o'/'c' and silently remap
     // muscle-memory mnemonics ('p' would fire Copy instead of Paste).
     let round = |items: &[ContextMenuItem], idx: usize| -> usize {
-        usize::from(matches!(items[idx], ContextMenuItem::UrlItem { .. }))
+        usize::from(matches!(
+            items[idx],
+            ContextMenuItem::UrlItem { .. } | ContextMenuItem::Media { .. }
+        ))
     };
     for pass in 0..2 {
         for (i, label) in labels.iter().enumerate() {
@@ -6763,7 +6975,9 @@ fn typeahead_match(items: &[ContextMenuItem], buf: &str) -> Option<usize> {
         | ContextMenuItem::NewTabShell { label, .. } => {
             label.to_ascii_lowercase().starts_with(&needle)
         }
-        ContextMenuItem::UrlItem { label, .. } => label.to_ascii_lowercase().starts_with(&needle),
+        ContextMenuItem::UrlItem { label, .. } | ContextMenuItem::Media { label, .. } => {
+            label.to_ascii_lowercase().starts_with(&needle)
+        }
         // Info rows aren't dispatchable, so typeahead skips them.
         _ => false,
     })
@@ -7431,8 +7645,10 @@ fn item_is_dispatchable(item: &ContextMenuItem) -> bool {
             // navigable.
             | ContextMenuItem::NewTabShell { .. }
             // The URL-aware "Open Link" / "Copy Link Address" rows.
-            | ContextMenuItem::UrlItem { .. } // ContextMenuItem::Info is deliberately absent: a static info line
-                                              // (About panel) is not highlightable or clickable.
+            | ContextMenuItem::UrlItem { .. }
+            // A card's or the viewer's media rows.
+            | ContextMenuItem::Media { .. } // ContextMenuItem::Info is deliberately absent: a static info line
+                                            // (About panel) is not highlightable or clickable.
     )
 }
 
@@ -7472,6 +7688,10 @@ fn item_to_click(item: &ContextMenuItem, idx: usize) -> Option<ContextMenuClick>
             url: url.clone(),
             copy: *copy,
             pane: *pane,
+        }),
+        ContextMenuItem::Media { target, action, .. } => Some(ContextMenuClick::Media {
+            target: *target,
+            action: *action,
         }),
         ContextMenuItem::Item { enabled: false, .. }
         | ContextMenuItem::DynamicItem { enabled: false, .. }
@@ -8169,10 +8389,15 @@ pub struct App {
     pending_runs: std::collections::HashMap<u64, PendingRun>,
     /// `show` pushes: their render queue and the thread that renders them.
     media: crate::media::MediaService,
+    /// The one-time tip that a click opens an inline card.
+    cards_tip: crate::media::CardsTip,
     clipboard: Option<arboard::Clipboard>,
     /// Temporary PNGs materialized from clipboard bitmaps. Owner-only, bounded,
     /// and removed on exit — see [`crate::paste_image`].
     pasted_images: crate::paste_image::PastedImages,
+    /// The PNG copies handed to the image viewer, made off the window thread.
+    /// Owner-only, bounded, oldest dropped first, and removed on exit.
+    viewer_copies: std::sync::Arc<std::sync::Mutex<crate::paste_image::PastedImages>>,
     /// Bounded native-poster jobs. Paths cross only the private child-worker
     /// protocol; decoded pixels return through the event loop.
     video_previewer: crate::video_preview::VideoPreviewer,
@@ -9176,8 +9401,12 @@ impl App {
             ctl_start: CtlStart::NotReady,
             pending_runs: std::collections::HashMap::new(),
             media: crate::media::MediaService::default(),
+            cards_tip: crate::media::CardsTip::load(),
             clipboard,
-            pasted_images: crate::paste_image::PastedImages::new(),
+            pasted_images: crate::paste_image::PastedImages::new(crate::paste_image::PASTED),
+            viewer_copies: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::paste_image::PastedImages::new(crate::paste_image::OPENED),
+            )),
             video_previewer,
             next_video_preview_generation: 1,
             compiled_triggers: initial_triggers,
@@ -9205,6 +9434,8 @@ impl App {
             last_session_sweep: None,
         };
         app.runtime_tracker.set_window_count(app.windows.len());
+        // Before the first pane, which may start Claude Code.
+        app.reconcile_claude_plugin();
         crate::startup_trace::mark(crate::startup_trace::Phase::AppBuilt);
         let result: Result<()> = match app.start_first_pane_before_launch() {
             Ok(_) => event_loop.run_app(&mut app).map_err(Into::into),
@@ -9218,6 +9449,12 @@ impl App {
         // the session that produced them. Runs on the error path too — an exit
         // caused by a failure is exactly when leftovers would go unnoticed.
         app.pasted_images.cleanup();
+        // So are the copies handed to the image viewer, and the store closes
+        // so an open still on its way cannot leave a new one.
+        app.viewer_copies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .close();
         if let Err(error) = &result {
             app.runtime_tracker.record_exit(&error.to_string());
         }
@@ -9828,13 +10065,51 @@ impl App {
         hovered
     }
 
+    /// Note the card a primary press at the pointer would take, for the hand
+    /// cursor and the hover outline: one settled under it, with no Shift,
+    /// dialog, menu or viewer in the way. One that has not settled yet
+    /// leaves a wake for when it does, so a still pointer gets the hand
+    /// then.
+    fn note_card_hover(&self, ws: &mut WindowState) -> bool {
+        let now = std::time::Instant::now();
+        let card = ws
+            .native_pointer
+            .filter(|_| {
+                !ws.mods.shift_key() && !self.pointer_modal_open(ws) && ws.media_viewer.is_none()
+            })
+            .and_then(|pointer| {
+                ws.renderer
+                    .as_ref()?
+                    .card_at(pointer.x as f32, pointer.y as f32)
+            });
+        let settled = card.filter(|card| ws.card_sightings.settled(Some(*card), now).is_some());
+        ws.card_settle_wake = card
+            .filter(|_| settled.is_none())
+            .and_then(|card| ws.card_sightings.settles_at(&card, now));
+        if ws.card_hover != settled {
+            ws.card_hover = settled;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        }
+        settled.is_some()
+    }
+
     /// Set the OS mouse-cursor icon, deduped against the last value pushed
     /// to the window. Called on CursorMoved (position changes the
     /// hit-test) and on ModifiersChanged (the modifier state gates the
-    /// click-to-open affordance).
+    /// click-to-open affordance). The icon, and the hover state these hit
+    /// tests set, are the physical pointer's: every hit test reads where it
+    /// is, not where a control client last moved the cursor, and with the
+    /// pointer outside the window there is nothing to set.
     fn sync_cursor_icon(&mut self, ws: &mut WindowState) {
+        let Some(pointer) = ws.native_pointer else {
+            return;
+        };
+        let control = std::mem::replace(&mut ws.cursor, pointer);
         let media_receipt_hovered = self.media_paste_receipt_hovered(ws);
         self.sync_cursor_icon_with_media_receipt_hover(ws, media_receipt_hovered);
+        ws.cursor = control;
     }
 
     /// CursorMoved already computed the receipt hit test to update its hover
@@ -9908,6 +10183,8 @@ impl App {
                 .or_else(|| rect_contains(geometry.rect, x, y).then_some(CursorIcon::Default))
         });
         let media_receipt_hover = media_receipt_action_hovered.then_some(CursorIcon::Pointer);
+        // A settled card under the pointer takes a click: the pointing hand.
+        let card_hover = self.note_card_hover(ws).then_some(CursorIcon::Pointer);
         let chrome =
             chrome_cursor_icon(self.cursor_in_chrome_band(ws), self.pointer_modal_open(ws));
         // A live tab-drag owns the cursor, FIRST in the chain. Mid-drag the
@@ -9926,6 +10203,9 @@ impl App {
             .or(search_hover)
             .or(media_receipt_hover)
             .or(chrome)
+            // A card takes a press before a split seam does, so its hand
+            // wins where the two overlap.
+            .or(card_hover)
             .or_else(|| self.split_seam_hover_icon(ws))
             .unwrap_or_else(|| {
                 let want_pointer = (ws.mods.control_key() || ws.mods.super_key())
@@ -10012,7 +10292,7 @@ impl App {
             .mux
             .panes
             .get(&pane)
-            .and_then(|state| state.media_shelf.items().first())
+            .and_then(|state| state.media_shelf.latest())
             .map(|item| item.id)
         else {
             return;
@@ -10031,6 +10311,281 @@ impl App {
         if let Some(window) = &ws.window {
             window.request_redraw();
         }
+    }
+
+    /// Take a primary press on a settled inline card, before focus, links,
+    /// selection and mouse reporting, so nothing behind it gets the press.
+    /// Shift passes the press on, as does a card that only just appeared.
+    fn press_card(&mut self, ws: &mut WindowState, px: f32, py: f32, bcode: u8) -> bool {
+        if !matches!(bcode, 0 | 2) || ws.mods.shift_key() {
+            return false;
+        }
+        let card = ws
+            .renderer
+            .as_ref()
+            .and_then(|renderer| renderer.card_at(px, py));
+        let Some(card) = ws.card_sightings.settled(card, std::time::Instant::now()) else {
+            return false;
+        };
+        if bcode == 2 {
+            // A right-press on a card opens the card's menu, not the
+            // terminal's; its release is Kettle's own gesture's.
+            return self.open_card_menu(ws, card, (px, py));
+        }
+        ws.card_press = Some(card);
+        true
+    }
+
+    /// End a press a card took. Released over the same card, it opens the
+    /// card's item in the viewer; anywhere else, or once a dialog or the
+    /// viewer has opened over it, it is dropped. Either way the terminal saw
+    /// neither the press nor the release.
+    fn release_card(&mut self, ws: &mut WindowState, px: f32, py: f32, bcode: u8) -> bool {
+        if bcode != 0 {
+            return false;
+        }
+        let Some((pane, nonce)) = ws.card_press.take() else {
+            return false;
+        };
+        let over = ws
+            .renderer
+            .as_ref()
+            .and_then(|renderer| renderer.card_at(px, py));
+        let covered = self.pointer_modal_open(ws) || ws.media_viewer.is_some();
+        if card_release_opens((pane, nonce), over, covered) {
+            self.open_card(ws, pane, nonce);
+        }
+        true
+    }
+
+    /// Open the item `pane`'s card `nonce` shows in the viewer, for a click,
+    /// a hint or assistive technology. Nothing opens while a dialog, a menu
+    /// or the viewer owns the pointer, or once the card's item has left the
+    /// shelf.
+    fn open_card(
+        &mut self,
+        ws: &mut WindowState,
+        pane: u64,
+        nonce: kettle_core::InlineNonce,
+    ) -> bool {
+        if self.pointer_modal_open(ws) || ws.media_viewer.is_some() {
+            return false;
+        }
+        let Some(item) = self.media.cards.item(pane, nonce) else {
+            return false;
+        };
+        if !ws
+            .mux
+            .panes
+            .get(&pane)
+            .is_some_and(|state| state.media_shelf.items().iter().any(|it| it.id == item))
+        {
+            return false;
+        }
+        self.close_all_modals(ws);
+        self.show_media_item(ws, pane, item);
+        // Opening a card is what the tip taught.
+        self.end_cards_tip(ws);
+        true
+    }
+
+    /// End the tip that a click opens a card, and take it off its card in
+    /// whichever window holds that pane.
+    fn end_cards_tip(&mut self, ws: &mut WindowState) {
+        let Some(pane) = self.cards_tip.end() else {
+            return;
+        };
+        for window in std::iter::once(&mut *ws).chain(self.windows.values_mut()) {
+            if let Some(state) = window.mux.panes.get_mut(&pane) {
+                state.inline_cards.set_tip(None);
+                if let Some(handle) = &window.window {
+                    handle.request_redraw();
+                }
+            }
+        }
+    }
+
+    /// Open the menu of the card `nonce` in `pane` at (`px`, `py`): open its
+    /// item in Kettle, and open a copy of it in the permitted image viewer
+    /// where this platform has one. False when the card's item has left the
+    /// shelf, so the press goes where it would have.
+    fn open_card_menu(
+        &mut self,
+        ws: &mut WindowState,
+        (pane, nonce): (u64, kettle_core::InlineNonce),
+        (px, py): (f32, f32),
+    ) -> bool {
+        let Some(item) = self.media.cards.item(pane, nonce) else {
+            return false;
+        };
+        let Some(generation) = ws.mux.panes.get(&pane).and_then(|state| {
+            state
+                .media_shelf
+                .items()
+                .iter()
+                .find(|it| it.id == item)
+                .map(|it| it.generation)
+        }) else {
+            return false;
+        };
+        let target = MediaTarget {
+            pane,
+            nonce,
+            item,
+            generation,
+        };
+        let tr = self.ui_text;
+        let mut items = vec![ContextMenuItem::Media {
+            label: tr.text(kettle_i18n::Text::MenuOpenInKettle),
+            target,
+            action: MediaMenuAction::View,
+        }];
+        if let Some(viewer) = crate::media::Viewer::find() {
+            items.push(ContextMenuItem::Media {
+                label: viewer.label(&tr),
+                target,
+                action: MediaMenuAction::OpenOutside(viewer),
+            });
+        }
+        self.show_context_menu(ws, items, px, py);
+        true
+    }
+
+    /// Act on a card menu row, if the card still shows the item the menu
+    /// named: open it as a click would, or a PNG copy of it in the permitted
+    /// image viewer.
+    fn act_on_media(&mut self, ws: &mut WindowState, target: MediaTarget, action: MediaMenuAction) {
+        if self.media.cards.item(target.pane, target.nonce) != Some(target.item) {
+            return;
+        }
+        let Some(item) = ws.mux.panes.get(&target.pane).and_then(|state| {
+            state
+                .media_shelf
+                .items()
+                .iter()
+                .find(|it| it.id == target.item && it.generation == target.generation)
+        }) else {
+            return;
+        };
+        match action {
+            MediaMenuAction::View => {
+                self.open_card(ws, target.pane, target.nonce);
+            }
+            MediaMenuAction::OpenOutside(viewer) => self.open_item_outside(item, viewer),
+        }
+    }
+
+    /// The permitted image viewer the open media viewer offers its item to:
+    /// none when this platform has none or the item's pixels were let go.
+    fn media_viewer_opens_outside(&self, ws: &WindowState) -> Option<crate::media::Viewer> {
+        let viewer = ws.media_viewer?;
+        let item = ws
+            .mux
+            .panes
+            .get(&viewer.pane)?
+            .media_shelf
+            .items()
+            .iter()
+            .find(|it| it.id == viewer.item)?;
+        item.image()?;
+        crate::media::Viewer::find()
+    }
+
+    /// Open the media viewer's item in the permitted image viewer, when it
+    /// offers to.
+    fn open_viewer_item_outside(&self, ws: &WindowState) {
+        let Some(outside) = self.media_viewer_opens_outside(ws) else {
+            return;
+        };
+        let Some(viewer) = ws.media_viewer else {
+            return;
+        };
+        if let Some(item) = ws.mux.panes.get(&viewer.pane).and_then(|state| {
+            state
+                .media_shelf
+                .items()
+                .iter()
+                .find(|it| it.id == viewer.item)
+        }) {
+            self.open_item_outside(item, outside);
+        }
+    }
+
+    /// Open a PNG copy of `item` in `viewer`; a notice says why if it does
+    /// not open.
+    fn open_item_outside(&self, item: &crate::media::ShelfItem, viewer: crate::media::Viewer) {
+        let tr = self.ui_text;
+        let failed = move |why: crate::media::OpenFailure| {
+            fire_notify(
+                tr.text(kettle_i18n::Text::NotifyTitleOpenImage),
+                tr.text(match why {
+                    crate::media::OpenFailure::Busy => kettle_i18n::Text::NotifyBodyOpenImageBusy,
+                    crate::media::OpenFailure::Copy => kettle_i18n::Text::NotifyBodyOpenImageCopy,
+                    crate::media::OpenFailure::Viewer => {
+                        kettle_i18n::Text::NotifyBodyOpenImageViewer
+                    }
+                }),
+            );
+        };
+        match item.image() {
+            Some(image) => crate::media::open_externally(
+                std::sync::Arc::clone(&self.viewer_copies),
+                image.clone(),
+                viewer,
+                failed,
+            ),
+            // Its pixels were let go to stay within the budget.
+            None => failed(crate::media::OpenFailure::Copy),
+        }
+    }
+
+    /// The cards on screen that assistive technology can reach, in paint
+    /// order: each placement's instance, where it is, and the shelf item it
+    /// shows. None while a dialog, a menu or the viewer covers them.
+    fn accessible_cards<'a>(
+        &self,
+        ws: &'a WindowState,
+    ) -> Vec<(u64, kettle_render::PaintedCard, &'a crate::media::ShelfItem)> {
+        if self.pointer_modal_open(ws) || ws.media_viewer.is_some() {
+            return Vec::new();
+        }
+        let Some(renderer) = ws.renderer.as_ref() else {
+            return Vec::new();
+        };
+        // The last frame may still show a tab or pane that has since gone
+        // from view; only what the layout shows now is reachable.
+        let shown: Vec<u64> = ws
+            .mux
+            .layout(ws.mux.active, self.area(ws))
+            .into_iter()
+            .map(|(pane, _)| pane)
+            .collect();
+        renderer
+            .painted_cards()
+            .iter()
+            .filter(|card| shown.contains(&card.pane))
+            .filter_map(|card| {
+                let instance = ws.card_sightings.instance(card)?;
+                let item = self.media.cards.item(card.pane, card.nonce)?;
+                let item = ws
+                    .mux
+                    .panes
+                    .get(&card.pane)?
+                    .media_shelf
+                    .items()
+                    .iter()
+                    .find(|it| it.id == item)?;
+                Some((instance, *card, item))
+            })
+            .collect()
+    }
+
+    /// The viewer's detail line for a card's item, as assistive technology
+    /// hears it: kind, size and sender.
+    fn card_accessibility_detail(&self, item: &crate::media::ShelfItem) -> String {
+        let (kind, sender) = self.media_item_kind_and_sender(item);
+        let (width, height) = item.size;
+        format!("{kind} · {width}×{height} · {}", sender.text)
     }
 
     fn close_media_viewer(&self, ws: &mut WindowState) {
@@ -10101,6 +10656,43 @@ impl App {
         let index = items.iter().position(|item| item.id == viewer.item)?;
         let item = &items[index];
         let tr = &self.ui_text;
+        let (kind, sender) = self.media_item_kind_and_sender(item);
+        let (width, height) = item.size;
+        Some(kettle_render::MediaViewerOverlay {
+            pane_rect,
+            title: item.title.clone(),
+            detail: format!("{kind} · {width}×{height}"),
+            sender,
+            hint: {
+                let hint = tr.text(if items.len() > 1 {
+                    kettle_i18n::Text::MediaViewerHint
+                } else {
+                    kettle_i18n::Text::MediaViewerHintSingle
+                });
+                match self.media_viewer_opens_outside(ws) {
+                    Some(outside) => format!("{hint} · {}", outside.hint(tr)),
+                    None => hint.to_string(),
+                }
+            },
+            position: (index + 1, items.len()),
+            image: item.image().cloned(),
+            status: tr.text(kettle_i18n::Text::MediaViewerReleased).to_string(),
+            open_outside: self.media_viewer_opens_outside(ws).is_some(),
+            canvas: match item.kind {
+                kettle_media::MediaKind::Svg => kettle_render::MediaCanvas::White,
+                kettle_media::MediaKind::Raster => kettle_render::MediaCanvas::Checker,
+                _ => kettle_render::MediaCanvas::Theme,
+            },
+        })
+    }
+
+    /// How the viewer and assistive technology describe a shelf item: its
+    /// kind, and who sent it.
+    fn media_item_kind_and_sender(
+        &self,
+        item: &crate::media::ShelfItem,
+    ) -> (&'static str, kettle_render::MediaViewerSender) {
+        let tr = &self.ui_text;
         let kind = tr.text(match item.kind {
             kettle_media::MediaKind::Raster => kettle_i18n::Text::MediaViewerKindImage,
             kettle_media::MediaKind::Svg => kettle_i18n::Text::MediaViewerKindSvg,
@@ -10129,28 +10721,7 @@ impl App {
                 }
             }
         };
-        let (width, height) = item.size;
-        Some(kettle_render::MediaViewerOverlay {
-            pane_rect,
-            title: item.title.clone(),
-            detail: format!("{kind} · {width}×{height}"),
-            sender,
-            hint: tr
-                .text(if items.len() > 1 {
-                    kettle_i18n::Text::MediaViewerHint
-                } else {
-                    kettle_i18n::Text::MediaViewerHintSingle
-                })
-                .to_string(),
-            position: (index + 1, items.len()),
-            image: item.image().cloned(),
-            status: tr.text(kettle_i18n::Text::MediaViewerReleased).to_string(),
-            canvas: match item.kind {
-                kettle_media::MediaKind::Svg => kettle_render::MediaCanvas::White,
-                kettle_media::MediaKind::Raster => kettle_render::MediaCanvas::Checker,
-                _ => kettle_render::MediaCanvas::Theme,
-            },
-        })
+        (kind, sender)
     }
 
     fn media_viewer_geometry(
@@ -10197,6 +10768,7 @@ impl App {
                 }
                 kettle_render::MediaViewerHit::Previous => self.step_media_viewer(ws, -1),
                 kettle_render::MediaViewerHit::Next => self.step_media_viewer(ws, 1),
+                kettle_render::MediaViewerHit::OpenOutside => self.open_viewer_item_outside(ws),
                 kettle_render::MediaViewerHit::Inside => {}
             }
         }
@@ -12304,6 +12876,7 @@ impl App {
         // otherwise the visible highlight survives while copy-on-select is
         // silently lost.
         self.finish_selection_gesture(ws);
+        ws.card_press = None;
         // The question replaces the media viewer rather than sitting over it,
         // so cancelling it does not bring back a viewer the user moved past.
         self.close_media_viewer(ws);
@@ -14410,6 +14983,33 @@ impl App {
         };
         let g = t.grid();
         let (rows, cols) = (g.screen_lines(), g.columns());
+        // Each card the grid shows is a target too, read from the same grid
+        // as the text under the same lock, so a scroll or new output since
+        // the last frame moves both alike. It is labelled at its first
+        // visible cell; text inside it is its marks, not something to pick.
+        let mut snap = kettle_render::PaneSnapshot::default();
+        snap.capture_with_card_marks(&t, true);
+        let offset = i32::try_from(g.display_offset()).unwrap_or(i32::MAX);
+        let last_row = i32::try_from(rows).unwrap_or(i32::MAX).saturating_sub(1);
+        let cards: Vec<CardCells> = p
+            .inline_cards
+            .placements(&snap)
+            .into_iter()
+            .filter(|card| self.media.cards.item(pane, card.nonce).is_some())
+            .filter_map(|card| {
+                let top = card.line.checked_add(offset)?;
+                let bottom = top.checked_add(i32::from(card.rows).max(1) - 1)?;
+                if bottom < 0 || top > last_row || cols == 0 {
+                    return None;
+                }
+                let right = (card.column + usize::from(card.columns).max(1) - 1).min(cols - 1);
+                Some((
+                    (usize::try_from(top.max(0)).ok()?, card.column.min(cols - 1)),
+                    (usize::try_from(bottom.min(last_row)).ok()?, right),
+                    card.nonce,
+                ))
+            })
+            .collect();
         // Convert each viewport row to its grid-absolute line so hint detection
         // scans the visible rows (including history when scrolled back), not the
         // active screen. Otherwise a label drawn over a visible URL would open
@@ -14422,19 +15022,17 @@ impl App {
                 base.line.0
             })
             .collect();
-        let spans = hints::detect_rows(g, &lines, cols);
-        let labels = hints::labels(spans.len(), hints::ALPHABET);
-        spans
+        let found = hint_targets_with_cards(hints::detect_rows(g, &lines, cols), &cards);
+        let labels = hints::labels(found.len(), hints::ALPHABET);
+        found
             .into_iter()
             .zip(labels)
-            .map(|(s, label)| HintTarget {
-                row: s.row,
-                col: s.start,
+            .map(|((row, col, what), label)| HintTarget {
+                row,
+                col,
                 label,
-                kind: s.kind,
-                text: s.text,
                 pane,
-                bounded: s.bounded,
+                what,
             })
             .collect()
     }
@@ -14477,7 +15075,13 @@ impl App {
         self.report_mouse(ws, btn, pressed, motion).consumed()
     }
 
-    /// Send a mouse event to the focused pane's terminal and say what it did.
+    /// Send a mouse event to the terminal it belongs to and say what it did.
+    /// A press goes to the focused pane, and a program that gets one keeps
+    /// it: that button's drag and its one release go to the same pane,
+    /// wherever focus has gone since, so no program is left holding half a
+    /// click and no other gets a release it never had the press for. The
+    /// newest press owns the drag, so a gesture of Kettle's own started
+    /// since takes it. Hover goes to the focused pane.
     fn report_mouse(
         &mut self,
         ws: &mut WindowState,
@@ -14485,30 +15089,106 @@ impl App {
         pressed: bool,
         motion: bool,
     ) -> MouseReport {
+        let held = match (pressed, motion) {
+            (false, _) => match ws.held_buttons.take(btn) {
+                Some(held) if held.pane.is_some() => Some(held),
+                // No program had its press: Kettle's own gesture did, or
+                // nothing did, so no program gets its release.
+                _ => return MouseReport::Declined,
+            },
+            (true, true) => ws.held_buttons.dragging(),
+            (true, false) => None,
+        };
+        if let Some(held) = held
+            && let Some(pane) = held.pane
+        {
+            let rect = self.pane_rect(ws, self.area(ws), pane);
+            let at = MouseAt::Held {
+                rect,
+                cell: held.cell,
+            };
+            let button = if motion { held.button } else { btn };
+            return self.send_mouse_to(ws, pane, at, button, pressed, motion);
+        }
         let Some(pane_id) = ws.mux.active_focus() else {
             return MouseReport::Declined;
         };
         let Some(rect) = self.focused_rect(ws, self.area(ws)) else {
             return MouseReport::Declined;
         };
-        self.send_mouse_to(ws, pane_id, rect, btn, pressed, motion)
+        let report = self.send_mouse_to(ws, pane_id, MouseAt::Pointer(rect), btn, pressed, motion);
+        if pressed && !motion {
+            // The press is the button's gesture now: the program's if it got
+            // it, else Kettle's own.
+            let (pane, cell) = match (report, ws.last_mouse_cell) {
+                (MouseReport::Written, Some((pane, row, col))) => (Some(pane), (row, col)),
+                _ => (None, (0, 0)),
+            };
+            if let Some(stale) = ws.held_buttons.pressed(btn, pane, cell) {
+                self.release_held(ws, stale);
+            }
+        }
+        report
+    }
+
+    /// Send each held button `which` names its release now, in the pane its
+    /// press went to, at the cell that pane last saw. Kettle is ending the
+    /// gesture (focus left the window, a menu or search took the pointer,
+    /// the pane's tab is leaving, or the button was pressed again after a
+    /// release that went elsewhere), and the program must not be left
+    /// holding a press. Kettle's own gestures just end.
+    fn release_held_buttons(
+        &mut self,
+        ws: &mut WindowState,
+        which: impl FnMut(&crate::held_buttons::Held) -> bool,
+    ) {
+        for held in ws.held_buttons.take_where(which) {
+            self.release_held(ws, held);
+        }
+    }
+
+    /// Send `held`'s program its release at the cell it last saw.
+    fn release_held(&mut self, ws: &mut WindowState, held: crate::held_buttons::Held) {
+        let Some(pane) = held.pane else {
+            return;
+        };
+        let at = MouseAt::Held {
+            rect: None,
+            cell: held.cell,
+        };
+        self.send_mouse_to(ws, pane, at, held.button, false, false);
+    }
+
+    /// Release the held buttons of every pane in tab `idx` before it leaves
+    /// this window, whose events can no longer reach it.
+    fn release_held_buttons_in_tab(&mut self, ws: &mut WindowState, idx: usize) {
+        let panes = ws.mux.tab_pane_ids(idx);
+        self.release_held_buttons(ws, |held| {
+            held.pane.is_some_and(|pane| panes.contains(&pane))
+        });
     }
 
     fn send_mouse_to(
         &mut self,
         ws: &mut WindowState,
         pane_id: u64,
-        rect: Rect,
+        at: MouseAt,
         btn: u8,
         pressed: bool,
         motion: bool,
     ) -> MouseReport {
+        let held = matches!(at, MouseAt::Held { .. });
+        // A held button's pane that left the screen gets its release, but
+        // no drag: the pointer is nowhere over it.
+        if matches!(at, MouseAt::Held { rect: None, .. }) && pressed {
+            return MouseReport::Swallowed;
+        }
         self.sync_pane_focus_reports(ws);
         if search_bar_blocks_mouse_report(
             self.cursor_in_search_bar(ws),
             pressed,
             motion,
-            ws.mouse_btn.is_some(),
+            ws.held_buttons.any(),
         ) {
             return MouseReport::Swallowed;
         }
@@ -14516,8 +15196,9 @@ impl App {
         // (the xterm convention). Without it, a TUI in mouse mode (htop, vim,
         // tmux) consumes every click and the user cannot select text.
         // Returning `false` lets the caller run selection, scrollbar, and
-        // extend logic as if tracking were off.
-        if ws.mods.shift_key() {
+        // extend logic as if tracking were off. A button whose press the
+        // program got keeps its motion and release there, Shift or not.
+        if ws.mods.shift_key() && !held {
             return MouseReport::Declined;
         }
         // VTE input-enabled parity: a read-only pane gets
@@ -14536,21 +15217,27 @@ impl App {
         }
         // `motion_is_reported` owns the per-mode rule; see its comment for why
         // it is stated positively.
-        if motion && !input::motion_is_reported(track, ws.mouse_btn.is_some()) {
+        if motion && !input::motion_is_reported(track, held) {
             {
                 // A held button means the application owns the gesture even
                 // though this mode does not report the motion itself, so
                 // consume it. With no button held the pointer is only
                 // hovering, and kettle's own hover, scrollbar-drag and
                 // link-hover handling must still run.
-                return if ws.mouse_btn.is_some() {
+                return if held {
                     MouseReport::Swallowed
                 } else {
                     MouseReport::Declined
                 };
             }
         }
-        let (row, col) = self.cursor_cell_in_rect(ws, rect);
+        let (row, col) = match at {
+            MouseAt::Pointer(rect)
+            | MouseAt::Held {
+                rect: Some(rect), ..
+            } => self.cursor_cell_in_rect(ws, rect),
+            MouseAt::Held { rect: None, cell } => cell,
+        };
         // Cell-motion coalescing: a drag that stays inside one cell must not
         // re-report. xterm fires a 1002/1003 motion event only when the
         // pointer crosses into a new cell; without this a fast drag emits one
@@ -14564,14 +15251,25 @@ impl App {
             return MouseReport::Swallowed;
         }
         let seq = input::mouse_encode(sgr, btn, pressed, motion, col, row, ws.mods);
-        if let Some(pane) = ws.mux.panes.get(&pane_id) {
-            let result = pane.feed_input(&seq);
-            if !result.is_queued() {
-                self.report_input_result(result);
-            }
-            Self::dismiss_media_paste_receipt_after_input(ws, pane_id, result);
+        let Some(pane) = ws.mux.panes.get(&pane_id) else {
+            return MouseReport::Declined;
+        };
+        // A release takes the room the program's input keeps for releases,
+        // so it always lands behind its press.
+        let result = if pressed || motion {
+            pane.feed_input(&seq)
+        } else {
+            pane.feed_mouse_release(&seq)
+        };
+        Self::dismiss_media_paste_receipt_after_input(ws, pane_id, result);
+        if !result.is_queued() {
+            // The program never got it: a press it missed leaves no button
+            // held, so no release follows.
+            self.report_input_result(result);
+            return MouseReport::Swallowed;
         }
         ws.last_mouse_cell = Some((pane_id, row, col));
+        ws.held_buttons.told(pane_id, (row, col));
         MouseReport::Written
     }
 
@@ -14998,6 +15696,7 @@ impl App {
             .filter(|drag| drag.live)
             .and_then(|drag| drag.target)
             .map(|(_, rect, dir, before)| crate::mux::pane_drop_preview(rect, dir, before));
+        let card_hover = ws.card_hover;
         let s = &ws.search;
         // Both literals list every field: a defaulted overlay would paint
         // English and drop state such as the pane drop hint.
@@ -15021,6 +15720,7 @@ impl App {
                 completion,
                 media_paste_receipt,
                 media_viewer,
+                card_hover,
                 window_focused,
                 scrollbar_active,
                 cursor_visible,
@@ -15139,6 +15839,7 @@ impl App {
             completion: None,
             media_paste_receipt: None,
             media_viewer: None,
+            card_hover,
             window_focused,
             scrollbar_active,
             cursor_visible,
@@ -15569,6 +16270,9 @@ impl App {
             .native_material
             .as_ref()
             .and_then(|material| material.live_opacity_floor());
+        // Whether anything covers the cards, for the tip: no dialog, menu or
+        // viewer over them.
+        let cards_uncovered = !self.pointer_modal_open(ws) && ws.media_viewer.is_none();
         // Status bar and native fallback state are built BEFORE the &mut
         // renderer borrow (the helpers read other window state immutably).
         let Some(renderer) = ws.renderer.as_mut() else {
@@ -15622,6 +16326,29 @@ impl App {
             },
         );
         let frame_time = frame_started.elapsed();
+        // A card has been seen once a frame showing it reached the screen.
+        let presented = matches!(&frame_result, Ok(FrameOutcome::Presented));
+        if presented
+            && ws
+                .card_sightings
+                .note(renderer.painted_cards(), std::time::Instant::now())
+        {
+            // Assistive technology names each card on screen, and the
+            // pointer may rest on one that moved or arrived.
+            ws.accessibility_pending = true;
+            ws.card_hover_stale = true;
+        }
+        // The first card a user ever sees says a click opens it, once its
+        // image is on screen with nothing over it: a card that loads in
+        // place, or that a dialog or the viewer uncovers, qualifies then.
+        let tip_begun = if presented && cards_uncovered {
+            self.cards_tip.begin(
+                renderer.shown_cards().map(|card| (card.pane, card.nonce)),
+                std::time::Instant::now(),
+            )
+        } else {
+            None
+        };
         // C1 records only a presented scene. Reuse that scene immediately,
         // before any renderer setter can invalidate it, and with the same cfg.
         let cursor_patch = if blink_handoff && matches!(&frame_result, Ok(FrameOutcome::Presented))
@@ -15632,6 +16359,14 @@ impl App {
         };
         // Return the snapshot pool (cell-Vec capacity recycles next frame).
         drop(panes);
+        if let Some((pane, nonce)) = tip_begun
+            && let Some(state) = ws.mux.panes.get_mut(&pane)
+        {
+            state.inline_cards.set_tip(Some(nonce));
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        }
         ws.pane_snapshots = snaps;
         ws.pane_snapshot_keys = snapshot_keys;
         match frame_result {
@@ -15845,6 +16580,10 @@ impl App {
     /// cursor visible on the new pane right away.
     fn note_focus_change(&mut self, ws: &mut WindowState, pre: (usize, Option<u64>)) {
         if self.focus_key(ws) != pre {
+            // Focus moved to a pane, so not to a card any more.
+            if ws.card_focus.take().is_some() {
+                ws.accessibility_pending = true;
+            }
             // Vi mode belongs to the pane that owns alacritty_terminal's
             // engine cursor. A focus change must not leave that old pane in
             // TermMode::VI while the UI routes keys to a different pane.
@@ -15914,6 +16653,9 @@ impl App {
         // selection drag here so later motion cannot keep extending or
         // autoscrolling behind Command Palette, Settings, SSH, or title edit.
         self.finish_selection_gesture(ws);
+        // A card held under a modal that opened is not clicked, even if the
+        // modal is gone by the release.
+        ws.card_press = None;
         // A live title edit materialises a chrome strip (see `tab_bar_h`), so
         // dropping it here changes the content rectangle. Resize only when it
         // was actually open -- this runs before every other modal opens, and an
@@ -15951,7 +16693,8 @@ impl App {
 
     fn open_search(&mut self, ws: &mut WindowState) {
         self.close_all_modals(ws);
-        ws.mouse_btn = None;
+        self.release_held_buttons(ws, |_| true);
+        ws.card_press = None;
         ws.last_mouse_cell = None;
         ws.scrollbar_drag_offset = None;
         ws.dragging_split = None;
@@ -16763,7 +17506,8 @@ impl App {
         self.close_media_viewer(ws);
         ws.scrollbar_drag_offset = None;
         ws.dragging_split = None;
-        ws.mouse_btn = None;
+        self.release_held_buttons(ws, |_| true);
+        ws.card_press = None;
         ws.last_mouse_cell = None;
         ws.tab_drag_active = false;
         ws.tab_drag_press = None;
@@ -16798,6 +17542,7 @@ impl App {
                 | ContextMenuItem::ProfileChoice { .. }
                 | ContextMenuItem::NewTabShell { .. }
                 | ContextMenuItem::UrlItem { .. }
+                | ContextMenuItem::Media { .. }
                 | ContextMenuItem::Info { .. } => row_h,
             })
             .sum();
@@ -16963,7 +17708,13 @@ impl App {
                     active.fields.get(fld).map(|f| f.key),
                     ws.settings_restart_pending,
                     self.language_change_pending(),
-                    Some(self.agent_previews_note()),
+                    match active.fields.get(fld).map(|f| f.key) {
+                        Some("agent-display-claude-code") => Some(claude_code_note(
+                            self.agent_previews_live(),
+                            crate::agent_plugin::refusal(),
+                        )),
+                        _ => Some(self.agent_previews_note()),
+                    },
                 )
             },
         })
@@ -17392,6 +18143,13 @@ impl App {
                 ws.context_menu = None;
                 self.handle_action(ws, action, event_loop);
             }
+            ContextMenuClick::Media { target, action } => {
+                ws.context_menu = None;
+                self.act_on_media(ws, target, action);
+                if let Some(w) = &ws.window {
+                    w.request_redraw();
+                }
+            }
             ContextMenuClick::LuaMenuItem(idx) => {
                 ws.context_menu = None;
                 // Invoke the Lua callback + drain any
@@ -17623,6 +18381,13 @@ impl App {
                 // URL-aware leading rows ("Open Link" /
                 // "Copy Link Address") — normal clickable rows.
                 ContextMenuItem::UrlItem { label, .. } => ContextMenuRow {
+                    label: (*label).to_string(),
+                    separator: false,
+                    enabled: true,
+                    hint: String::new(),
+                },
+                // A card's media rows — normal clickable rows.
+                ContextMenuItem::Media { label, .. } => ContextMenuRow {
                     label: (*label).to_string(),
                     separator: false,
                     enabled: true,
@@ -18613,6 +19378,9 @@ impl App {
                 // hint mode and SSH launcher overlays), so sweep that too, or a
                 // stale highlight or open modal survives the reset.
                 if let Some(pane_id) = ws.mux.active_focus() {
+                    // The reset turns mouse reporting off, so a held button's
+                    // release goes to the program first.
+                    self.release_held_buttons(ws, |held| held.pane == Some(pane_id));
                     apply_terminal_control(&ws.mux, &[pane_id], b"\x1bc");
                 }
                 self.clear_selection_on_input(ws);
@@ -19248,6 +20016,13 @@ impl App {
             // dropped before it reaches the PTY; the child keeps producing
             // output. A `[RO]` titlebar badge shows the state.
             Action::TogglePaneReadOnly => {
+                // A pane turned read-only gets no more input, so a held
+                // button's release goes to it first.
+                if let Some(pane) = ws.mux.active_focus()
+                    && ws.mux.focused().is_some_and(|focused| !focused.read_only)
+                {
+                    self.release_held_buttons(ws, |held| held.pane == Some(pane));
+                }
                 let _ = ws.mux.toggle_focused_read_only();
                 // The `[RO]` titlebar badge reflects the new state.
                 if let Some(w) = &ws.window {
@@ -19405,6 +20180,7 @@ impl App {
                     return;
                 }
                 let closing_idx = ws.mux.active;
+                self.release_held_buttons_in_tab(ws, closing_idx);
                 let Some(dt) = ws.mux.detach_tab(closing_idx) else {
                     return;
                 };
@@ -19459,6 +20235,8 @@ impl App {
                 // ClearHistory (CSI 3 J) in one keybind, with Reset's sweep of
                 // Kettle's own UI state.
                 if let Some(pane_id) = ws.mux.active_focus() {
+                    // As for Reset, a held button's release goes first.
+                    self.release_held_buttons(ws, |held| held.pane == Some(pane_id));
                     // One request, so a full queue cannot accept RIS but reject
                     // the paired history clear.
                     apply_terminal_control(&ws.mux, &[pane_id], b"\x1bc\x1b[3J");
@@ -20314,6 +21092,7 @@ impl App {
         let font_size_changed = (new.font_size - previous_config_font_size).abs() > f32::EPSILON;
         self.cfg = new;
         self.reconcile_agent_display();
+        self.reconcile_claude_plugin();
         crate::dev_record::apply_retention_config(&self.cfg);
         self.sync_lua_active_theme();
         font_size_changed
@@ -20435,6 +21214,57 @@ impl App {
             self.ctl.is_some(),
             self.ctl_start == CtlStart::Attempted,
         )
+    }
+
+    /// Whether agent previews are on now and stay on: granted to this
+    /// process and still asked for. Turning them off reaches the server at
+    /// the next launch, but new panes stop getting the plugin at once.
+    fn agent_previews_live(&self) -> bool {
+        self.ctl_policy.display()
+            && ctl_overrides(&self.startup)
+                .resolve(self.cfg.ctl_policy())
+                .display()
+    }
+
+    /// Offer new panes Kettle's Claude Code plugin while agent previews and
+    /// the Claude Code integration are both on, writing it if needed; panes
+    /// already open keep what they started with.
+    fn reconcile_claude_plugin(&mut self) {
+        if !(self.agent_previews_live() && self.cfg.agent_display_claude_code) {
+            crate::agent_plugin::offer(None, None);
+            return;
+        }
+        let prepared = std::env::current_exe()
+            .and_then(std::fs::canonicalize)
+            .map_err(|_| crate::agent_plugin::PluginRefusal::UnnamedExecutable)
+            .and_then(|executable| {
+                crate::agent_plugin::PluginFiles::new(&executable, env!("CARGO_PKG_VERSION"))
+            })
+            .and_then(|files| {
+                let root = crate::agent_plugin::plugins_root()
+                    .ok_or(crate::agent_plugin::PluginRefusal::Unverified)?;
+                crate::agent_plugin::install(&root, &files).map(|directory| (directory, files))
+            })
+            .and_then(|(directory, files)| {
+                crate::agent_plugin::plugin_dir_entry(&directory)
+                    .ok_or(crate::agent_plugin::PluginRefusal::UnnamedDirectory)?;
+                Ok((directory, files))
+            });
+        match prepared {
+            Ok(plugin) => {
+                crate::agent_plugin::offer(Some(plugin), None);
+                // Check now, as for a new pane with the configured `env`, so
+                // Settings names a policy that forbids the plugin before the
+                // next pane opens.
+                let _ = crate::agent_plugin::for_new_pane(|| {
+                    crate::mux::claude_config_for(&self.cfg.env)
+                });
+            }
+            Err(refusal) => {
+                log::warn!("agent previews: the Claude Code plugin is unavailable ({refusal:?})");
+                crate::agent_plugin::offer(None, Some(refusal));
+            }
+        }
     }
 
     /// Start the control server if the policy allows anything, the first pane
@@ -20656,6 +21486,7 @@ impl App {
         let Some(crate::ctl_server::ShowAdmission {
             request: show,
             sender,
+            harness,
         }) = request.take_show()
         else {
             refuse(FailureCode::BadParams);
@@ -20730,7 +21561,11 @@ impl App {
             return;
         };
         let kettle_ctl::show::ShowRequest {
-            source, title, key, ..
+            source,
+            title,
+            key,
+            inline,
+            ..
         } = show;
         let kind = source.job_kind();
         let (source, file_name) = match source {
@@ -20756,6 +21591,7 @@ impl App {
             kettle_media::Source::Path { path, .. } => Some(media_path_key(path)),
             kettle_media::Source::Bytes(_) => None,
         });
+        let card_name = file_name.clone();
         let title = title
             .or(file_name)
             .map(|title| crate::media::display_title(&title))
@@ -20765,6 +21601,23 @@ impl App {
                     .text(kettle_i18n::Text::MediaShelfUntitled)
                     .into()
             });
+        // A card only for the harness Kettle checked, which runs in this very
+        // pane; everyone else's push goes to the shelf alone.
+        let inline = match (inline, harness) {
+            (Some(target), Some(owner)) if route.verified => Some(crate::media::InlineDraft {
+                owner,
+                harness: match target {
+                    kettle_ctl::show::InlineTarget::ClaudeHook => {
+                        kettle_render::CardHarness::ClaudeHook
+                    }
+                    kettle_ctl::show::InlineTarget::CodexHook => {
+                        kettle_render::CardHarness::CodexHook
+                    }
+                },
+                name: card_name,
+            }),
+            _ => None,
+        };
         let job = kettle_media::Job {
             kind,
             source,
@@ -20785,6 +21638,7 @@ impl App {
                 key,
                 title,
                 provenance,
+                inline,
             },
             job,
             kettle_media::client::RenderControl::with_deadline(deadline),
@@ -20850,6 +21704,7 @@ impl App {
     /// Advance `show`: drop pushes whose pane is gone, publish finished
     /// renders, and start the next one.
     fn media_tick(&mut self, ws: &mut WindowState) {
+        self.retire_cards(ws);
         if self.media.is_idle() {
             return;
         }
@@ -20876,6 +21731,53 @@ impl App {
         });
     }
 
+    /// Retire the cards that no longer stand for anything: their harness
+    /// exited, their pane closed, or their item left the shelf or was
+    /// replaced. Their text stays in the transcript and paints as unknown.
+    fn retire_cards(&mut self, ws: &mut WindowState) {
+        if self.media.cards.is_empty() {
+            return;
+        }
+        let gone: Vec<kettle_ctl::process::ProcessIdentity> = self
+            .media
+            .cards
+            .owners()
+            .into_iter()
+            .filter(|owner| kettle_ctl::process::identity(owner.pid()) != Ok(*owner))
+            .collect();
+        // Each live pane's items, by id and generation.
+        let shelves: std::collections::HashMap<u64, Vec<(u64, u64)>> = self
+            .all_windows(ws)
+            .flat_map(|window| window.mux.panes.iter())
+            .filter(|(_, pane)| !pane.closed)
+            .map(|(&id, pane)| {
+                let items = pane
+                    .media_shelf
+                    .items()
+                    .iter()
+                    .map(|item| (item.id, item.generation))
+                    .collect();
+                (id, items)
+            })
+            .collect();
+        let retired = self.media.cards.retire(|card| {
+            gone.contains(&card.owner)
+                || !shelves
+                    .get(&card.pane)
+                    .is_some_and(|items| items.contains(&card.item))
+        });
+        for (pane_id, nonce) in retired {
+            if let Some(window) = window_with_pane(ws, &mut self.windows, pane_id)
+                && let Some(pane) = window.mux.panes.get_mut(&pane_id)
+            {
+                pane.inline_cards.remove(nonce);
+                if let Some(handle) = &window.window {
+                    handle.request_redraw();
+                }
+            }
+        }
+    }
+
     /// Publish a finished render to its pane's shelf and answer its push.
     fn finish_show(&mut self, ws: &mut WindowState, finished: crate::media::Finished) {
         use kettle_media::FailureCode;
@@ -20891,7 +21793,7 @@ impl App {
         let kettle_media::RenderOutput { kind, rendered } = output;
         let (width, height) = (rendered.width, rendered.height);
         let warnings = rendered.warnings;
-        let visible = media_visible_items(self.all_windows(ws));
+        let visible = media_visible_items(self.all_windows(ws), &self.media.cards);
         let mut pixels = rendered.rgba;
         let image = loop {
             match kettle_core::ImageData::try_with_budget(
@@ -20913,11 +21815,17 @@ impl App {
             }
         };
         let item_id = self.media.next_item();
+        let crate::media::Draft {
+            key,
+            title,
+            provenance,
+            inline,
+        } = draft;
         let item = crate::media::ShelfItem::new(
             item_id,
-            draft.key,
-            draft.title,
-            draft.provenance,
+            key,
+            title,
+            provenance,
             kind,
             warnings.clone(),
             image,
@@ -20925,6 +21833,10 @@ impl App {
         let Some(window) = window_with_pane(ws, &mut self.windows, route.pane) else {
             return origin.refuse(FailureCode::NotInKettlePane);
         };
+        let cell = window
+            .renderer
+            .as_ref()
+            .map(|renderer| (renderer.cell_w, renderer.cell_h));
         let Some(pane) = window
             .mux
             .panes
@@ -20938,18 +21850,62 @@ impl App {
             .as_ref()
             .filter(|viewer| viewer.pane == route.pane)
             .map(|viewer| viewer.item);
-        let published = pane.media_shelf.publish(item, shown);
+        // A full shelf never drops an item on screen: the open viewer's, or
+        // one whose card the last frame painted.
+        let published = pane.media_shelf.publish(item, shown, &visible);
+        // Cards of the item this one replaced, or of the item a full shelf
+        // dropped, show what is gone; they never show the new pixels.
+        let current = pane
+            .media_shelf
+            .items()
+            .iter()
+            .find(|item| item.id == published.id)
+            .map(|item| (item.generation, item.image().cloned()));
+        let cards = &mut self.media.cards;
+        for (pane_id, nonce) in cards.retire(|card| {
+            card.pane == route.pane
+                && (Some(card.item.0) == published.dropped
+                    || (card.item.0 == published.id
+                        && current
+                            .as_ref()
+                            .is_none_or(|(generation, _)| card.item.1 != *generation)))
+        }) {
+            debug_assert_eq!(pane_id, route.pane);
+            pane.inline_cards.remove(nonce);
+        }
+        let grid = pane
+            .term
+            .term
+            .lock()
+            .ok()
+            .map(|term| (term.grid().columns(), term.grid().screen_lines()));
+        let delivery = match (inline, current, cell, grid) {
+            (Some(inline), Some((generation, Some(image))), Some(cell), Some(grid)) => {
+                register_card(
+                    cards,
+                    (route.pane, &mut pane.inline_cards, grid),
+                    cell,
+                    (published.id, generation),
+                    kind,
+                    &image,
+                    inline,
+                    std::time::Instant::now(),
+                )
+            }
+            _ => None,
+        };
         let seq = window.seq;
         if let Some(handle) = &window.window {
             handle.request_redraw();
         }
-        let result = kettle_ctl::show::ShowResult::new(
+        let mut result = kettle_ctl::show::ShowResult::new(
             (route.pane, route.verified, seq),
             published.id,
             kind,
             (width, height),
             &warnings,
         );
+        result.inline = delivery;
         let id = origin.request_id;
         origin.answer(kettle_ctl::protocol::Response::ok(
             id,
@@ -21666,6 +22622,7 @@ impl App {
                         ContextMenuItem::ProfileChoice { label, .. } => label.as_str(),
                         ContextMenuItem::NewTabShell { label, .. } => label.as_str(),
                         ContextMenuItem::UrlItem { label, .. } => *label,
+                        ContextMenuItem::Media { label, .. } => *label,
                         ContextMenuItem::Info { label } => label.as_str(),
                         ContextMenuItem::Separator => "",
                     };
@@ -21852,6 +22809,41 @@ impl App {
                 "focused": focused,
             })
         });
+        // The cards on screen, by instance, never by card id, so automation
+        // can find and click one as a user would.
+        let now = std::time::Instant::now();
+        let inline_cards: Vec<serde_json::Value> = target
+            .renderer
+            .as_ref()
+            .map_or(&[][..], |renderer| renderer.painted_cards())
+            .iter()
+            .map(|card| {
+                let item = self.media.cards.item(card.pane, card.nonce).and_then(|id| {
+                    target
+                        .mux
+                        .panes
+                        .get(&card.pane)?
+                        .media_shelf
+                        .items()
+                        .iter()
+                        .find(|item| item.id == id)
+                });
+                let [x, y, width, height] = card.rect;
+                serde_json::json!({
+                    "pane": card.pane,
+                    "instance": target.card_sightings.instance(card),
+                    "rect": {"x": x, "y": y, "width": width, "height": height},
+                    "settled": target.card_sightings.settled(Some(*card), now).is_some(),
+                    "item": item.map(|item| item.id),
+                    "label": item.map(|item| {
+                        without_card_marks(
+                            self.ui_text
+                                .card_a11y(&item.title, &self.card_accessibility_detail(item)),
+                        )
+                    }),
+                })
+            })
+            .collect();
         let mut geometry = serde_json::json!({
                 "window": target.seq,
                 "window_focused": target.window_focused,
@@ -21978,6 +22970,10 @@ impl App {
                 "cursor_blink": self.cursor_blink_diagnostics(target),
         });
         if let serde_json::Value::Object(fields) = &mut geometry {
+            fields.insert(
+                "inline_cards".into(),
+                serde_json::Value::Array(inline_cards),
+            );
             fields.insert(
                 "desktop".into(),
                 serde_json::json!({
@@ -22716,10 +23712,9 @@ impl App {
         // like 1002 while DECRQM still reports it set, and hover highlighting
         // in Neovim, lazygit, btop and fzf goes dead. `send_mouse` decides per
         // mode whether to report.
-        {
-            let btn = ws.mouse_btn.unwrap_or(input::MOUSE_NO_BUTTON);
-            let _ = self.send_mouse(ws, btn, true, true);
-        }
+        // A held button's drag goes where its press did; `report_mouse`
+        // picks the button.
+        let _ = self.send_mouse(ws, input::MOUSE_NO_BUTTON, true, true);
         if ws.selecting {
             note_selection_drag_motion(ws);
             let area = self.area(ws);
@@ -22737,6 +23732,18 @@ impl App {
         event_loop: &ActiveEventLoop,
         bcode: u8,
     ) -> bool {
+        // As natively: a card press whose release never came is over, a
+        // program still holding this button gets its release, and the press
+        // is Kettle's own gesture until a program receives it. Focus leaves
+        // any card.
+        if bcode == 0 {
+            ws.card_press = None;
+        }
+        if ws.card_focus.take().is_some() {
+            ws.accessibility_pending = true;
+        }
+        self.release_held_buttons(ws, |held| held.button == bcode);
+        ws.held_buttons.pressed(bcode, None, (0, 0));
         let bar = self.tab_bar(ws);
         let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
         if ws.context_menu.is_some()
@@ -22770,6 +23777,9 @@ impl App {
             return true;
         }
         if self.activate_media_viewer_at(ws, px, py, bcode) {
+            return true;
+        }
+        if self.press_card(ws, px, py, bcode) {
             return true;
         }
         if tab_bar_pointer_region_contains(&bar, px, py) && (bcode == 0 || bcode == 1) {
@@ -22864,7 +23874,6 @@ impl App {
             return true;
         }
         if self.send_mouse(ws, bcode, true, false) {
-            ws.mouse_btn = Some(bcode);
             return true;
         }
         if bcode == 0 {
@@ -22875,6 +23884,8 @@ impl App {
     }
 
     fn ctl_mouse_release(&mut self, ws: &mut WindowState, bcode: u8) -> bool {
+        // As natively: a gesture of Kettle's own ends with its release.
+        ws.held_buttons.end_own(bcode);
         if bcode == 0
             && search_pointer_route(ws.search.open, None, ws.search.pointer_captured())
                 == SearchPointerRoute::Bar
@@ -22883,11 +23894,12 @@ impl App {
             self.search_button_release(ws);
             return true;
         }
-        let mut handled = false;
-        if ws.mouse_btn == Some(bcode) {
-            ws.mouse_btn = None;
-            handled = self.send_mouse(ws, bcode, false, false);
+        let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
+        if self.release_card(ws, px, py, bcode) {
+            return true;
         }
+        // The release goes where its press did, if a program got it.
+        let mut handled = self.send_mouse(ws, bcode, false, false);
         if selection_release_matches(ws.selection_button, bcode) {
             self.finish_selection_gesture(ws);
             handled = true;
@@ -23094,7 +24106,14 @@ impl App {
                 let btn = if steps.lines > 0 { 64 } else { 65 };
                 for _ in 0..steps.lines.unsigned_abs().min(8) {
                     reported |= self
-                        .send_mouse_to(ws, wheel_pane, wheel_rect, btn, true, false)
+                        .send_mouse_to(
+                            ws,
+                            wheel_pane,
+                            MouseAt::Pointer(wheel_rect),
+                            btn,
+                            true,
+                            false,
+                        )
                         .consumed();
                 }
             }
@@ -23102,7 +24121,14 @@ impl App {
                 let btn = if steps.cols > 0 { 66 } else { 67 };
                 for _ in 0..steps.cols.unsigned_abs().min(8) {
                     reported |= self
-                        .send_mouse_to(ws, wheel_pane, wheel_rect, btn, true, false)
+                        .send_mouse_to(
+                            ws,
+                            wheel_pane,
+                            MouseAt::Pointer(wheel_rect),
+                            btn,
+                            true,
+                            false,
+                        )
                         .consumed();
                 }
             }
@@ -25428,16 +26454,28 @@ impl App {
     }
 
     fn act_hint(&mut self, ws: &mut WindowState, h: &HintTarget, alternate: bool) {
+        let (kind, text, bounded) = match &h.what {
+            // A card opens its item in the viewer, Shift or not.
+            HintWhat::Card(nonce) => {
+                self.open_card(ws, h.pane, *nonce);
+                return;
+            }
+            HintWhat::Text {
+                kind,
+                text,
+                bounded,
+            } => (*kind, text, *bounded),
+        };
         let pane = ws.mux.panes.get(&h.pane);
         // A pane that exited took its directory with it, so nothing local can
         // be resolved for it, and a remote pane's paths name files elsewhere.
         // Behind a multiplexer the path opens once the user confirms (see
         // `open_pane_link`).
         let remote = matches!(pane.map(pane_path_origin), None | Some(PathOrigin::Remote));
-        let action = hint_action(h.kind, alternate, remote || !h.bounded);
+        let action = hint_action(kind, alternate, remote || !bounded);
         let path_url = match action {
             HintAction::OpenPath => hint_path_url(
-                &h.text,
+                text,
                 pane.and_then(|pane| pane.term.current_dir_or_native())
                     .as_deref(),
                 crate::mux::home_dir_string().as_deref(),
@@ -25448,13 +26486,13 @@ impl App {
             // Route through open_pane_link so a hint honors the pane's origin,
             // the URL safety check, Lua URL handlers and the custom URL
             // handler, like a click.
-            (HintAction::OpenUrl, _) => self.open_pane_link(ws, Some(h.pane), &h.text),
+            (HintAction::OpenUrl, _) => self.open_pane_link(ws, Some(h.pane), text),
             (HintAction::OpenPath, Some(url)) => self.open_pane_link(ws, Some(h.pane), &url),
             // A path Kettle will not open (a climb with `..`, an unknown base,
             // any path on Windows) is copied instead, as for a plain label.
             (HintAction::OpenPath, None) | (HintAction::Copy, _) => {
                 if let Some(cb) = self.clipboard.as_mut()
-                    && let Err(e) = cb.set_text(h.text.clone())
+                    && let Err(e) = cb.set_text(text.clone())
                 {
                     // Log instead of silently swallowing.
                     log::warn!("clipboard set_text failed (hint copy): {e}");
@@ -27691,7 +28729,9 @@ fn settings_footer_note(
         notes.push(gpu);
     }
     match focused_key {
-        Some("agent-display") => notes.extend(agent_previews.map(|note| tr.text(note))),
+        Some("agent-display" | "agent-display-claude-code") => {
+            notes.extend(agent_previews.map(|note| tr.text(note)));
+        }
         Some("window-blur" | "background-opacity") => {
             notes.push(tr.text(Text::SettingsNoteBlur));
         }
@@ -27711,6 +28751,28 @@ fn settings_footer_note(
         notes.push(tr.text(Text::SettingsNoteRestart));
     }
     (!notes.is_empty()).then(|| notes.join("\n"))
+}
+
+/// What the Claude Code row's footer says: why new panes get no plugin, or
+/// else when the setting applies.
+fn claude_code_note(
+    display_on: bool,
+    refusal: Option<crate::agent_plugin::PluginRefusal>,
+) -> kettle_i18n::Text {
+    use crate::agent_plugin::PluginRefusal;
+    use kettle_i18n::Text;
+    match refusal {
+        Some(PluginRefusal::SideloadDisabled) => Text::SettingsNoteClaudeCodeForbidden,
+        Some(PluginRefusal::Translocated) => Text::SettingsNoteClaudeCodeTranslocated,
+        Some(
+            PluginRefusal::UnnamedExecutable
+            | PluginRefusal::UnnamedDirectory
+            | PluginRefusal::Unverified,
+        ) => Text::SettingsNoteClaudeCodeUnavailable,
+        Some(PluginRefusal::Unsupported) => Text::SettingsNoteClaudeCodeUnsupported,
+        None if !display_on => Text::SettingsNoteClaudeCodeNeedsPreviews,
+        None => Text::SettingsNoteClaudeCodeNewPanes,
+    }
 }
 
 /// What the Agent previews row's footer says: the one fact that explains
@@ -28960,8 +30022,9 @@ impl App {
         let area = self.area(ws);
         let layout = ws.mux.layout(ws.mux.active, area);
         let focused = ws.mux.active_focus();
+        let cards = self.accessible_cards(ws);
         let mut children = Vec::with_capacity(layout.len());
-        let mut nodes = Vec::with_capacity(layout.len() * 2 + 1);
+        let mut nodes = Vec::with_capacity(layout.len() * 2 + cards.len() + 1);
         for (pane_id, (x, y, width, height)) in layout {
             let Some(pane) = ws.mux.panes.get(&pane_id) else {
                 continue;
@@ -28976,7 +30039,21 @@ impl App {
                 pane.title.clone()
             };
             node.set_label(label);
-            node.set_children([text_id]);
+            let mut pane_children = vec![text_id];
+            for (instance, card, item) in cards.iter().filter(|(_, card, _)| card.pane == pane_id) {
+                let id = accessibility_card_id(*instance);
+                pane_children.push(id);
+                nodes.push((
+                    id,
+                    card_accessibility_node(
+                        card.rect,
+                        &item.title,
+                        &self.card_accessibility_detail(item),
+                        &self.ui_text,
+                    ),
+                ));
+            }
+            node.set_children(pane_children);
             let text = pane
                 .term
                 .screen_text(0)
@@ -29227,9 +30304,11 @@ impl App {
             if ws.search.open {
                 accessibility_search_control_id(ws.search.focused_control)
             } else {
-                focused
-                    .map(accessibility_pane_id)
-                    .filter(|id| nodes.iter().any(|(candidate, _)| candidate == id))
+                ws.card_focus
+                    .map(accessibility_card_id)
+                    .into_iter()
+                    .chain(focused.map(accessibility_pane_id))
+                    .find(|id| nodes.iter().any(|(candidate, _)| candidate == id))
                     .unwrap_or(ACCESSIBILITY_ROOT_ID)
             }
         });
@@ -29246,6 +30325,12 @@ impl App {
 
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         ws.mux.active_focus().hash(&mut hasher);
+        ws.card_focus.hash(&mut hasher);
+        for (instance, card, item) in self.accessible_cards(ws) {
+            instance.hash(&mut hasher);
+            card.rect.map(f32::to_bits).hash(&mut hasher);
+            (item.id, item.generation).hash(&mut hasher);
+        }
         if let Some(window) = &ws.window {
             let size = window.inner_size();
             size.width.hash(&mut hasher);
@@ -29860,6 +30945,7 @@ impl App {
         // The dragged tab is the ACTIVE tab. The drag-to-reorder gesture keeps
         // it active, while the FSM's armed index can go stale across reorders.
         let closing_idx = ws.mux.active;
+        self.release_held_buttons_in_tab(ws, closing_idx);
         let Some(dt) = ws.mux.detach_tab(closing_idx) else {
             return false;
         };
@@ -30413,6 +31499,7 @@ impl App {
         if td.seq == ws.seq {
             // Native loop: `ws` IS the torn window; the target is mapped.
             let donor_active = ws.mux.active;
+            self.release_held_buttons_in_tab(ws, donor_active);
             let Some(dt) = ws.mux.detach_tab(donor_active) else {
                 // Every early return after take() must clear the
                 // latched preview, or the marker (and a materialized auto
@@ -30451,6 +31538,7 @@ impl App {
                 return;
             };
             let donor_active = torn.mux.active;
+            self.release_held_buttons_in_tab(&mut torn, donor_active);
             let Some(dt) = torn.mux.detach_tab(donor_active) else {
                 self.windows.insert(td.seq, torn);
                 self.clear_dock_preview_at(ws, target_seq);
@@ -31325,6 +32413,39 @@ impl App {
             }
             return;
         }
+        if let Some(instance) = accessibility_card_instance(request.target_node) {
+            // Only a card the tree names answers: one on screen, under no
+            // dialog or viewer. A stale instance names nothing, so it can
+            // never focus or open another card.
+            let reachable = self
+                .accessible_cards(ws)
+                .iter()
+                .any(|(card, _, _)| *card == instance);
+            if reachable && let Some((pane, nonce)) = ws.card_sightings.by_instance(instance) {
+                match request.action {
+                    AccessibilityAction::Focus => {
+                        // The card's pane takes the keyboard with it, so text
+                        // typed next goes where the screen reader is. Search
+                        // would keep the keys, so it closes, remembering its
+                        // query.
+                        self.close_search(ws);
+                        let pre = self.focus_key(ws);
+                        ws.mux.focus_pane(pane);
+                        self.note_focus_change(ws, pre);
+                        ws.card_focus = Some(instance);
+                    }
+                    AccessibilityAction::Click => {
+                        self.open_card(ws, pane, nonce);
+                    }
+                    _ => return,
+                }
+                ws.accessibility_pending = true;
+                if let Some(window) = &ws.window {
+                    window.request_redraw();
+                }
+            }
+            return;
+        }
         if !ws.search.open {
             return;
         }
@@ -31817,6 +32938,10 @@ impl App {
                 ws.hovered_new_tab = false;
                 ws.hovered_new_tab_menu = false;
                 ws.search.hovered_control = None;
+                // No card is under a pointer that left.
+                ws.native_pointer = None;
+                ws.card_hover = None;
+                ws.card_settle_wake = None;
                 if let Some(receipt) = ws.media_paste_receipt.as_mut() {
                     receipt.set_hover(false, std::time::Instant::now());
                 }
@@ -31834,6 +32959,7 @@ impl App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 ws.cursor = position;
+                ws.native_pointer = Some(position);
                 ws.selection_autoscroll_edge = 0;
                 self.update_search_hover(ws);
                 if ws.selecting {
@@ -32096,8 +33222,7 @@ impl App {
                     // 1003 exists to deliver; `send_mouse` decides per mode
                     // whether this motion is reportable at all, so 1002 still
                     // needs a held button and 1000 still gets nothing.
-                    let btn = ws.mouse_btn.unwrap_or(input::MOUSE_NO_BUTTON);
-                    if self.send_mouse(ws, btn, true, true) {
+                    if self.send_mouse(ws, input::MOUSE_NO_BUTTON, true, true) {
                         return;
                     }
                 }
@@ -32139,6 +33264,7 @@ impl App {
                 button,
                 ..
             } => {
+                ws.resume_native_pointer();
                 // A fresh press while torn-drag tracking is live. For a NATIVE
                 // drag any client press means the tracking is stale (the OS
                 // modal loop / WM grab swallows presses mid-drag) — abandon,
@@ -32161,7 +33287,17 @@ impl App {
                 // gate as L/M/R + wheel keeps SGR out of a tracking TUI
                 // *behind* a palette/settings/… dialog. A lone context menu
                 // isn't a modal here.
+                // A press of any button is the pointer's: focus is no longer
+                // on a card.
+                if ws.card_focus.take().is_some() {
+                    ws.accessibility_pending = true;
+                }
                 if let Some(sgr) = extra_mouse_sgr(button) {
+                    // A press of a button still noted as held means its
+                    // release went elsewhere: its program gets it now. The
+                    // press is Kettle's until a program receives it.
+                    self.release_held_buttons(ws, |held| held.button == sgr);
+                    ws.held_buttons.pressed(sgr, None, (0, 0));
                     // A lone context menu must swallow the side-button press
                     // too. Dismiss the menu and DON'T forward.
                     // `modal_swallows_pointer` returns false for a lone menu,
@@ -32170,7 +33306,6 @@ impl App {
                     // open (every other button dismisses it).
                     if ws.context_menu.is_some() {
                         ws.context_menu = None;
-                        note_side_button_press(&mut ws.reported_side_buttons, sgr, false);
                         if let Some(w) = &ws.window {
                             w.request_redraw();
                         }
@@ -32179,13 +33314,14 @@ impl App {
                     // The media viewer owns every press while it is open; a
                     // side button does nothing there.
                     let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
-                    let reported = !self.activate_media_viewer_at(ws, px, py, sgr)
+                    if !self.activate_media_viewer_at(ws, px, py, sgr)
                         && !modal_swallows_pointer(
                             self.pointer_modal_open(ws),
                             ws.context_menu.is_some(),
                         )
-                        && self.report_mouse(ws, sgr, true, false) == MouseReport::Written;
-                    note_side_button_press(&mut ws.reported_side_buttons, sgr, reported);
+                    {
+                        self.report_mouse(ws, sgr, true, false);
+                    }
                     return;
                 }
                 let bcode = match button {
@@ -32194,6 +33330,16 @@ impl App {
                     MouseButton::Right => 2,
                     _ => return,
                 };
+                // A primary press while a card still holds one means that
+                // press's release went elsewhere: the card's gesture is over.
+                if bcode == 0 {
+                    ws.card_press = None;
+                }
+                // Likewise a program still noted as holding this button gets
+                // the release it missed, and the press is Kettle's own
+                // gesture until a program receives it.
+                self.release_held_buttons(ws, |held| held.button == bcode);
+                ws.held_buttons.pressed(bcode, None, (0, 0));
                 // Context menu: if the menu is open, a left-click
                 // either fires the row that was hit or — if the click landed
                 // outside the panel — closes the menu. Middle-click outside
@@ -32292,6 +33438,11 @@ impl App {
                 // The media viewer owns every press while it is open, the tab
                 // bar and update banner included: one outside closes it.
                 if self.activate_media_viewer_at(ws, px, py, bcode) {
+                    return;
+                }
+                // An inline card takes a primary press before anything else
+                // in the window does; its release opens the card's item.
+                if self.press_card(ws, px, py, bcode) {
                     return;
                 }
                 // Tab-bar interactions (left = switch / close-✕ / new-+;
@@ -32531,7 +33682,6 @@ impl App {
                     .focus_at(area, ws.cursor.x as f32, ws.cursor.y as f32);
                 self.note_focus_change(ws, pre);
                 if self.send_mouse(ws, bcode, true, false) {
-                    ws.mouse_btn = Some(bcode);
                     return;
                 }
                 // Middle-click in the content area pastes the PRIMARY
@@ -32613,15 +33763,15 @@ impl App {
                 button,
                 ..
             } => {
+                ws.resume_native_pointer();
                 // Release report for the side buttons, so a tracking app sees
                 // the matching button-up after the press. Only a press the
                 // app saw gets one: a press that a context menu, a modal or
                 // the media viewer took leaves no release behind, even when
                 // that surface closed while the button was held.
                 if let Some(sgr) = extra_mouse_sgr(button) {
-                    if take_side_button_release(&mut ws.reported_side_buttons, sgr) {
-                        self.send_mouse(ws, sgr, false, false);
-                    }
+                    ws.held_buttons.end_own(sgr);
+                    self.send_mouse(ws, sgr, false, false);
                     return;
                 }
                 let bcode = match button {
@@ -32630,6 +33780,10 @@ impl App {
                     MouseButton::Right => 2,
                     _ => return,
                 };
+                // A gesture of Kettle's own ends with this release, whichever
+                // handler below takes it; a program's goes on to get its
+                // release from `report_mouse`.
+                ws.held_buttons.end_own(bcode);
                 // A release ends an editor drag inside the search bar; any
                 // other release while the bar is open belongs to the grid
                 // gesture it started (selection end, copy-on-select, mouse
@@ -32642,6 +33796,14 @@ impl App {
                     self.search_button_release(ws);
                     return;
                 }
+                // The release of a press a card took is the card's too.
+                let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
+                if self.release_card(ws, px, py, bcode) {
+                    if let Some(w) = &ws.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
                 // Terminator parity: the release is where a titlebar press
                 // finally means something. Moved past the slop -> move the pane
                 // to the latched drop target; never moved -> the
@@ -32650,7 +33812,7 @@ impl App {
                 // FIRST among the left-release handlers, ahead of the tear-off
                 // and mouse-reporting branches that can return early. Those are
                 // all mutually exclusive with a pane drag today -- the titlebar
-                // press returns before `mouse_btn` is ever set -- but "today"
+                // press returns before any button is noted as held -- but "today"
                 // is exactly the kind of reasoning that leaves a gesture armed
                 // when one of them grows a new early return.
                 if bcode == 0
@@ -32705,11 +33867,9 @@ impl App {
                     }
                     self.finalize_torn_drag(ws, false);
                 }
-                if ws.mouse_btn == Some(bcode) {
-                    ws.mouse_btn = None;
-                    if self.send_mouse(ws, bcode, false, false) {
-                        return;
-                    }
+                // The release goes where its press did, if a program got it.
+                if self.send_mouse(ws, bcode, false, false) {
+                    return;
                 }
                 if selection_release_matches(ws.selection_button, bcode) {
                     self.finish_selection_gesture(ws);
@@ -32749,6 +33909,7 @@ impl App {
                         && ws.mux.tabs.len() > 1
                     {
                         let closing_idx = ws.mux.active;
+                        self.release_held_buttons_in_tab(ws, closing_idx);
                         if let Some(dt) = ws.mux.detach_tab(closing_idx) {
                             // `outer_position` errs on Wayland — `None` lets
                             // the compositor place the window.
@@ -32812,6 +33973,7 @@ impl App {
                 }
             }
             WindowEvent::MouseWheel { delta, phase, .. } => {
+                ws.resume_native_pointer();
                 // A gesture ending (macOS momentum scroll, and any backend that
                 // reports phases) drops leftover sub-detent residue so a partial
                 // step can't leak into the next, unrelated gesture.
@@ -32916,7 +34078,7 @@ impl App {
                 // A focus loss can swallow the button-UP that
                 // ends an in-progress drag (the release lands on whatever window
                 // took focus), latching `selecting` / `scrollbar_drag_offset` /
-                // `tab_drag_active` / a held `mouse_btn`. The next CursorMoved
+                // `tab_drag_active` / a held button. The next CursorMoved
                 // then kept extending the selection or dragging a tab with no
                 // button down. Disarm them on focus loss, committing any pending
                 // copy-on-select first (mirrors the left-button-up path).
@@ -32940,7 +34102,11 @@ impl App {
                     ws.tab_pressed_idx = None;
                     // A focus loss also ends any split-divider drag.
                     ws.dragging_split = None;
-                    ws.mouse_btn = None;
+                    // Releases now land in another window: each program
+                    // with a held button's press gets its release here.
+                    self.release_held_buttons(ws, |_| true);
+                    // And a card's press: its release may land elsewhere.
+                    ws.card_press = None;
                     // A focus loss also cancels an in-flight tab tear-off
                     // (the release will land on whatever window took focus).
                     ws.detach_drag = crate::detach::DragState::default();
@@ -33015,6 +34181,17 @@ impl App {
                 }
             }
             WindowEvent::Ime(ime) => {
+                // Text through an input method returns focus from a card to
+                // its pane, as a key press does; the method handles those
+                // presses, so none arrives.
+                let typing = match &ime {
+                    winit::event::Ime::Preedit(text, _) => !text.is_empty(),
+                    winit::event::Ime::Commit(_) => true,
+                    _ => false,
+                };
+                if typing && ws.card_focus.take().is_some() {
+                    ws.accessibility_pending = true;
+                }
                 let redraw = match ime {
                     winit::event::Ime::Enabled => {
                         if let Some(window) = &ws.window {
@@ -33070,6 +34247,11 @@ impl App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                // A key press returns focus from a card that assistive
+                // technology focused to the pane, where the key goes.
+                if event.state == ElementState::Pressed && ws.card_focus.take().is_some() {
+                    ws.accessibility_pending = true;
+                }
                 let ui_owns_key = !matches!(ws.detach_drag, crate::detach::DragState::Idle)
                     || ws.context_menu.is_some()
                     || ws.vi_mode.is_some()
@@ -33083,7 +34265,12 @@ impl App {
                     || ws.editing_title.is_some()
                     || ws.search.open
                     || ws.ime_preedit.is_some()
-                    || (ws.media_viewer.is_some() && media_viewer_takes_key(&event.logical_key));
+                    || (ws.media_viewer.is_some()
+                        && media_viewer_takes_key(
+                            &event.logical_key,
+                            ws.mods,
+                            self.media_viewer_opens_outside(ws).is_some(),
+                        ));
                 // The modal that gets this press, if any; a press after which
                 // it is no longer the top modal closed or replaced it.
                 let key_modal = top_modal(ws);
@@ -33250,6 +34437,12 @@ impl App {
                         }
                         Key::Named(NamedKey::ArrowRight) => {
                             self.step_media_viewer(ws, 1);
+                            return;
+                        }
+                        key if media_viewer_open_outside_key(key, ws.mods)
+                            && self.media_viewer_opens_outside(ws).is_some() =>
+                        {
+                            self.open_viewer_item_outside(ws);
                             return;
                         }
                         key if is_bare_modifier(key) => {}
@@ -33860,6 +35053,25 @@ impl App {
         } else if let Some(receipt) = ws.media_paste_receipt.as_mut() {
             media_receipt_redraw |= receipt.mark_collapsed_if_due(now);
         }
+        // Cards that moved under a still pointer, or one under it settling,
+        // change the cursor and the hover outline without a pointer event.
+        if ws.card_hover_stale || ws.card_settle_wake.is_some_and(|at| at <= now) {
+            ws.card_hover_stale = false;
+            self.sync_cursor_icon(ws);
+        }
+        // The tip leaves its card when its time is up.
+        if self.cards_tip.until().is_some_and(|until| until <= now) {
+            self.end_cards_tip(ws);
+        }
+        let cards_tip_wait = self.cards_tip.until().map(|until| {
+            until
+                .saturating_duration_since(now)
+                .max(std::time::Duration::from_millis(1))
+        });
+        let card_settle_wait = ws.card_settle_wake.map(|at| {
+            at.saturating_duration_since(now)
+                .max(std::time::Duration::from_millis(1))
+        });
         let media_receipt_wait = ws
             .media_paste_receipt
             .as_ref()
@@ -34099,6 +35311,12 @@ impl App {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         if let Some(next) = media_receipt_wait {
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
+        if let Some(next) = card_settle_wait {
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
+        if let Some(next) = cards_tip_wait {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         if let Some(next) = pending_video_receipt_wait {
@@ -34804,6 +36022,10 @@ mod tests {
             run.find("app.start_first_pane_before_launch()").unwrap(),
             run.find("event_loop.run_app(&mut app)").unwrap(),
             run.find("app.pasted_images.cleanup();").unwrap(),
+            // Copies handed to the image viewer go on exit too.
+            run.find("app.viewer_copies").unwrap(),
+            run.find(".close();\n        if let Err(error) = &result {")
+                .unwrap(),
             run.find("app.runtime_tracker.stop();").unwrap(),
         ];
         assert!(order.windows(2).all(|w| w[0] < w[1]));
@@ -37412,9 +38634,9 @@ mod tests {
         assert!(!context_menu_snapshot_reuse_safe(&ws));
         ws.dragging_split = None;
 
-        ws.mouse_btn = Some(0);
+        ws.held_buttons.pressed(0, Some(1), (0, 0));
         assert!(!context_menu_snapshot_reuse_safe(&ws));
-        ws.mouse_btn = None;
+        ws.held_buttons.take(0);
 
         ws.tab_drag_active = true;
         assert!(!context_menu_snapshot_reuse_safe(&ws));
@@ -39231,25 +40453,75 @@ mod tests {
         assert!(capped.is_char_boundary(capped.len()));
     }
 
-    /// The media viewer takes only Esc and the browsing arrows; every other
-    /// key goes on to the terminal, so nothing typed while it is open is lost.
+    /// The media viewer takes only Esc, the browsing arrows and, when it
+    /// offers to open its item outside, a bare O; every other key goes on
+    /// to the terminal, so nothing typed while it is open is lost.
     #[test]
-    fn the_media_viewer_takes_only_esc_and_the_arrows() {
-        use winit::keyboard::{Key, NamedKey};
-        for key in [
-            Key::Named(NamedKey::Escape),
-            Key::Named(NamedKey::ArrowLeft),
-            Key::Named(NamedKey::ArrowRight),
-        ] {
-            assert!(super::media_viewer_takes_key(&key), "{key:?}");
+    fn the_media_viewer_takes_only_esc_the_arrows_and_its_open_key() {
+        use winit::keyboard::{Key, ModifiersState, NamedKey};
+        let none = ModifiersState::empty();
+        for offered in [false, true] {
+            for key in [
+                Key::Named(NamedKey::Escape),
+                Key::Named(NamedKey::ArrowLeft),
+                Key::Named(NamedKey::ArrowRight),
+            ] {
+                assert!(
+                    super::media_viewer_takes_key(&key, none, offered),
+                    "{key:?}"
+                );
+            }
+            for key in [
+                Key::Named(NamedKey::Enter),
+                Key::Named(NamedKey::ArrowUp),
+                Key::Character("q".into()),
+            ] {
+                assert!(
+                    !super::media_viewer_takes_key(&key, none, offered),
+                    "{key:?}"
+                );
+            }
         }
-        for key in [
-            Key::Named(NamedKey::Enter),
-            Key::Named(NamedKey::ArrowUp),
-            Key::Character("q".into()),
-        ] {
-            assert!(!super::media_viewer_takes_key(&key), "{key:?}");
+        for o in ["o", "O"] {
+            let key = Key::Character(o.into());
+            assert!(super::media_viewer_takes_key(&key, none, true));
+            assert!(super::media_viewer_takes_key(
+                &key,
+                ModifiersState::SHIFT,
+                true
+            ));
+            assert!(
+                !super::media_viewer_takes_key(&key, none, false),
+                "not offered"
+            );
+            for chord in [
+                ModifiersState::CONTROL,
+                ModifiersState::ALT,
+                ModifiersState::SUPER,
+            ] {
+                assert!(
+                    !super::media_viewer_takes_key(&key, chord, true),
+                    "{chord:?} is a shortcut"
+                );
+            }
         }
+        // The key, the button and the footer all say the same thing.
+        let source = super::production_source()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(source.contains(
+            "key if media_viewer_open_outside_key(key, ws.mods) && self.media_viewer_opens_outside(ws).is_some() => { self.open_viewer_item_outside(ws); return; }"
+        ));
+        assert!(source.contains(
+            "kettle_render::MediaViewerHit::OpenOutside => self.open_viewer_item_outside(ws),"
+        ));
+        assert!(source.contains("open_outside: self.media_viewer_opens_outside(ws).is_some(),"));
+        assert!(source.contains("Some(outside) => format!(\"{hint} · {}\", outside.hint(tr)),"));
+        // Only an item that still holds its pixels is offered.
+        assert!(source.contains(
+            ".find(|it| it.id == viewer.item)?; item.image()?; crate::media::Viewer::find()"
+        ));
     }
 
     #[test]
@@ -39470,6 +40742,585 @@ mod tests {
         );
     }
 
+    /// A release opens the card it pressed only over that very card, and
+    /// only while nothing that owns the pointer has opened over it.
+    #[test]
+    fn a_card_release_opens_only_the_card_it_pressed() {
+        let nonce = kettle_core::InlineNonce::new([1, 2, 3, 4, 5, 6]).unwrap();
+        let other = kettle_core::InlineNonce::new([6, 5, 4, 3, 2, 1]).unwrap();
+        let card = |rect| kettle_render::PaintedCard {
+            pane: 7,
+            nonce,
+            rect,
+        };
+        let here = card([40.0, 16.0, 96.0, 48.0]);
+        let below = card([40.0, 96.0, 96.0, 48.0]);
+        assert!(super::card_release_opens((7, nonce), Some(here), false));
+        assert!(super::card_release_opens((7, nonce), Some(below), false));
+        assert!(!super::card_release_opens((7, nonce), Some(here), true));
+        assert!(!super::card_release_opens((7, nonce), None, false));
+        assert!(!super::card_release_opens((7, other), Some(here), false));
+        assert!(!super::card_release_opens((8, nonce), Some(here), false));
+    }
+
+    /// Each inline card on screen is a button assistive technology can name
+    /// and press: its own node id, apart from every other node's and never
+    /// its nonce, its item's title and the viewer's detail in either
+    /// language, the part of it on screen as bounds, and Focus and Click.
+    #[test]
+    fn a_card_is_a_button_assistive_technology_can_open() {
+        use accesskit::{Action, NodeId, Role};
+        use kettle_i18n::{Language, Text, Translator};
+        let id = super::accessibility_card_id(42);
+        assert_eq!(super::accessibility_card_instance(id), Some(42));
+        let last = crate::media::MAX_CARD_INSTANCE - 1;
+        assert_eq!(
+            super::accessibility_card_instance(super::accessibility_card_id(last)),
+            Some(last)
+        );
+        for other in [
+            super::ACCESSIBILITY_ROOT_ID,
+            super::accessibility_pane_id(42),
+            super::accessibility_text_id(42),
+            super::accessibility_modal_id(1, 2),
+            super::ACCESSIBILITY_MEDIA_RECEIPT_ID,
+            super::ACCESSIBILITY_SEARCH_CONTAINER_ID,
+            super::ACCESSIBILITY_COMPLETION_CONTAINER_ID,
+            NodeId(super::ACCESSIBILITY_CARD_ID_MASK),
+            NodeId(super::ACCESSIBILITY_CARD_ID_MASK | super::ACCESSIBILITY_MODAL_ID_MASK | 42),
+        ] {
+            assert_eq!(super::accessibility_card_instance(other), None, "{other:?}");
+        }
+        for language in [Language::En, Language::Es] {
+            let tr = Translator::new(language);
+            let node = super::card_accessibility_node(
+                [40.0, 16.0, 96.0, 48.0],
+                "Click test",
+                "Image · 640×480 · From this pane",
+                &tr,
+            );
+            assert_eq!(node.role(), Role::Button);
+            let label = node.label().expect("label");
+            assert!(
+                label.contains("Click test") && label.contains("640×480"),
+                "{label}"
+            );
+            // A sender's path never brings a card's marks along.
+            let marked = super::card_accessibility_node(
+                [0.0, 0.0, 8.0, 8.0],
+                "plot",
+                "Image · 1×1 · /tmp/\u{10eeee}\u{0305}\u{030d}/tool",
+                &tr,
+            );
+            let marked = marked.label().expect("label");
+            assert!(
+                !marked.contains('\u{10eeee}') && !marked.contains('\u{0305}'),
+                "{marked:?}"
+            );
+            assert_eq!(node.description(), Some(tr.text(Text::CardA11yOpen)));
+            assert!(node.supports_action(Action::Click) && node.supports_action(Action::Focus));
+            let bounds = node.bounds().expect("bounds");
+            assert_eq!(
+                (bounds.x0, bounds.y0, bounds.x1, bounds.y1),
+                (40.0, 16.0, 136.0, 64.0)
+            );
+        }
+    }
+
+    /// In quick select a card on screen is one target, labelled at its first
+    /// visible cell, among the text targets in reading order; text found in
+    /// a card's rows is its marks, not something to pick.
+    #[test]
+    fn a_card_is_a_quick_select_target_and_text_inside_it_is_not() {
+        use kettle_core::hints::{HintSpan, Kind};
+        let nonce = kettle_core::InlineNonce::new([1, 2, 3, 4, 5, 6]).unwrap();
+        let span = |row, start, text: &str| HintSpan {
+            row,
+            start,
+            end: start + text.len() - 1,
+            kind: Kind::Url,
+            text: text.to_string(),
+            bounded: true,
+        };
+        let cards = [((2, 4), (9, 30), nonce)];
+        let found = super::hint_targets_with_cards(
+            vec![
+                span(10, 0, "https://after.example"),
+                span(3, 5, "https://inside.example"),
+                span(2, 31, "https://beside.example"),
+                span(1, 0, "https://before.example"),
+            ],
+            &cards,
+        );
+        let found: Vec<(usize, usize, String)> = found
+            .into_iter()
+            .map(|(row, col, what)| {
+                let what = match what {
+                    super::HintWhat::Card(card) => {
+                        assert_eq!(card, nonce);
+                        "card".to_string()
+                    }
+                    super::HintWhat::Text { text, .. } => text,
+                };
+                (row, col, what)
+            })
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (1, 0, "https://before.example".to_string()),
+                (2, 4, "card".to_string()),
+                (2, 31, "https://beside.example".to_string()),
+                (10, 0, "https://after.example".to_string()),
+            ]
+        );
+    }
+
+    /// A click, a hint and assistive technology all open a card through one
+    /// door that refuses under a dialog, a menu or the viewer and checks the
+    /// item is still on the shelf; the tree names only cards on screen, by
+    /// instance, and a key press returns focus from a card to its pane.
+    #[test]
+    fn every_way_to_open_a_card_goes_through_one_door() {
+        let source = super::production_source()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let body = |name: &str| {
+            let start = [format!("fn {name}("), format!("fn {name}<")]
+                .iter()
+                .find_map(|head| source.find(head.as_str()))
+                .unwrap_or_else(|| panic!("{name}"));
+            let rest = &source[start..];
+            rest[..rest[1..].find(" fn ").map_or(rest.len(), |end| end + 1)].to_string()
+        };
+        let guard = "if self.pointer_modal_open(ws) || ws.media_viewer.is_some() {";
+        let open = body("open_card");
+        assert!(
+            open.contains(guard)
+                && open.contains("state.media_shelf.items().iter().any(|it| it.id == item)")
+        );
+        let reachable = body("accessible_cards");
+        assert!(reachable.contains(guard));
+        // Only cards in panes the active tab shows now, whatever the last
+        // frame drew.
+        assert!(reachable.contains(
+            "let shown: Vec<u64> = ws .mux .layout(ws.mux.active, self.area(ws)) .into_iter() .map(|(pane, _)| pane) .collect();"
+        ));
+        assert!(reachable.contains(".filter(|card| shown.contains(&card.pane))"));
+        assert!(body("release_card").contains("self.open_card(ws, pane, nonce);"));
+        // A card menu row acts only while the card still shows the item the
+        // menu named, and its Open row is a click.
+        let act = body("act_on_media");
+        assert!(act.contains(
+            "if self.media.cards.item(target.pane, target.nonce) != Some(target.item) { return; }"
+        ));
+        assert!(
+            act.contains(".find(|it| it.id == target.item && it.generation == target.generation)")
+        );
+        assert!(act.contains(
+            "MediaMenuAction::View => { self.open_card(ws, target.pane, target.nonce); }"
+        ));
+        assert!(body("dispatch_context_menu_click").contains(
+            "ContextMenuClick::Media { target, action } => { ws.context_menu = None; self.act_on_media(ws, target, action);"
+        ));
+        assert!(
+            body("act_hint").contains(
+                "HintWhat::Card(nonce) => { self.open_card(ws, h.pane, *nonce); return; }"
+            )
+        );
+        let hints = body("collect_hints");
+        assert!(
+            hints.contains("hint_targets_with_cards(hints::detect_rows(g, &lines, cols), &cards)")
+        );
+        // Cards come from the same grid as the text, under the same lock.
+        assert!(hints.contains("snap.capture_with_card_marks(&t, true);"));
+        assert!(hints.contains(".inline_cards .placements(&snap)"));
+        assert!(!hints.contains("painted_cards"));
+        let tree = body("accessibility_tree");
+        assert!(tree.contains("let cards = self.accessible_cards(ws);"));
+        assert!(tree.contains("cards.iter().filter(|(_, card, _)| card.pane == pane_id)"));
+        assert!(tree.contains("ws.card_focus .map(accessibility_card_id) .into_iter() .chain(focused.map(accessibility_pane_id))"));
+        assert!(
+            body("accessibility_key")
+                .contains("for (instance, card, item) in self.accessible_cards(ws) {")
+        );
+        let action = body("handle_accessibility_action");
+        assert!(action.contains(
+            "if let Some(instance) = accessibility_card_instance(request.target_node) {"
+        ));
+        assert!(
+            action
+                .contains("&& let Some((pane, nonce)) = ws.card_sightings.by_instance(instance) {")
+        );
+        assert!(
+            action.contains("AccessibilityAction::Click => { self.open_card(ws, pane, nonce); }")
+        );
+        assert!(source.contains(
+            "if event.state == ElementState::Pressed && ws.card_focus.take().is_some() {"
+        ));
+        assert!(source.contains("if typing && ws.card_focus.take().is_some() {"));
+        // Focus answers only a card the tree names, and leaves a card on a
+        // pane focus change or a press.
+        assert!(action.contains(
+            "let reachable = self .accessible_cards(ws) .iter() .any(|(card, _, _)| *card == instance); if reachable && let Some((pane, nonce)) = ws.card_sightings.by_instance(instance) {"
+        ));
+        assert!(body("note_focus_change").contains(
+            "// Focus moved to a pane, so not to a card any more. if ws.card_focus.take().is_some() {"
+        ));
+        assert_eq!(
+            source
+                .matches("if ws.card_focus.take().is_some() { ws.accessibility_pending = true; }")
+                .count(),
+            3,
+            "a pane focus change, a native press and a control press"
+        );
+        // A native press of any button leaves the card, side buttons too.
+        let native = source
+            .split("WindowEvent::MouseInput { state: ElementState::Pressed, button, .. } => {")
+            .nth(1)
+            .expect("native press");
+        let cleared = native
+            .find("if ws.card_focus.take().is_some()")
+            .expect("native clear");
+        assert!(
+            cleared
+                < native
+                    .find("extra_mouse_sgr(button)")
+                    .expect("side buttons")
+        );
+        assert!(action.contains(
+            "AccessibilityAction::Focus => { // The card's pane takes the keyboard with it, so text // typed next goes where the screen reader is. Search // would keep the keys, so it closes, remembering its // query. self.close_search(ws); let pre = self.focus_key(ws); ws.mux.focus_pane(pane); self.note_focus_change(ws, pre); ws.card_focus = Some(instance); }"
+        ));
+        // Automation finds cards on screen by instance, never by card id.
+        let geometry = body("ctl_ui_geometry");
+        assert!(
+            geometry.contains("\"inline_cards\".into(), serde_json::Value::Array(inline_cards)")
+        );
+        assert!(geometry.contains("\"instance\": target.card_sightings.instance(card),"));
+        assert!(!geometry.contains("\"nonce\""));
+    }
+
+    /// A settled card under the pointer gets the pointing hand and the
+    /// hover outline, after dialogs and chrome but before split seams, and
+    /// never with Shift or under the viewer; a card under a still pointer gets them when
+    /// it settles or moves there, and a pointer that left the window has
+    /// none.
+    #[test]
+    fn a_settled_card_under_the_pointer_shows_it_takes_a_click() {
+        let source = super::production_source()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(source.contains(
+            "let card = ws .native_pointer .filter(|_| { !ws.mods.shift_key() && !self.pointer_modal_open(ws) && ws.media_viewer.is_none() })"
+        ));
+        assert!(source.contains(
+            "let settled = card.filter(|card| ws.card_sightings.settled(Some(*card), now).is_some());"
+        ));
+        assert!(source.contains(".and_then(|card| ws.card_sightings.settles_at(&card, now));"));
+        assert!(source.contains(
+            ".or(chrome) // A card takes a press before a split seam does, so its hand // wins where the two overlap. .or(card_hover) .or_else(|| self.split_seam_hover_icon(ws)) .unwrap_or_else("
+        ));
+        assert!(source.contains(
+            "if ws.card_hover_stale || ws.card_settle_wake.is_some_and(|at| at <= now) { ws.card_hover_stale = false; self.sync_cursor_icon(ws); }"
+        ));
+        assert!(source.contains(
+            "if let Some(next) = card_settle_wait { wait = Some(wait.map_or(next, |current| current.min(next))); }"
+        ));
+        assert!(source.contains(
+            "ws.native_pointer = None; ws.card_hover = None; ws.card_settle_wake = None;"
+        ));
+        assert!(source.contains("ws.accessibility_pending = true; ws.card_hover_stale = true;"));
+        assert!(source.contains("let card_hover = ws.card_hover;"));
+        // The icon, native buttons and the wheel all follow the physical
+        // pointer, even after a control client moved the cursor.
+        assert!(source.contains(
+            "fn sync_cursor_icon(&mut self, ws: &mut WindowState) { let Some(pointer) = ws.native_pointer else { return; }; let control = std::mem::replace(&mut ws.cursor, pointer); let media_receipt_hovered = self.media_paste_receipt_hovered(ws); self.sync_cursor_icon_with_media_receipt_hover(ws, media_receipt_hovered); ws.cursor = control; }"
+        ));
+        for handler in [
+            "WindowEvent::MouseInput { state: ElementState::Pressed, button, .. } => {",
+            "WindowEvent::MouseInput { state: ElementState::Released, button, .. } => {",
+            "WindowEvent::MouseWheel { delta, phase, .. } => {",
+        ] {
+            assert!(
+                source.contains(&format!("{handler} ws.resume_native_pointer();")),
+                "{handler}"
+            );
+        }
+        // The viewer opens on the item published last.
+        assert!(source.contains(".and_then(|state| state.media_shelf.latest())"));
+        // A control client's moves never light a card the user is not
+        // pointing at.
+        let ctl = source
+            .split("fn ctl_send_mouse_for_window(")
+            .nth(1)
+            .and_then(|rest| rest.split(" fn ").next())
+            .expect("ctl send_mouse");
+        assert!(!ctl.contains("native_pointer"));
+        assert!(source.contains("ws.cursor = position; ws.native_pointer = Some(position);"));
+    }
+
+    /// The first card a user ever sees carries the tip that a click opens
+    /// it, from the first frame showing it, until a card is opened or the
+    /// tip's time is up, which wakes the loop; the tip state loads at start.
+    #[test]
+    fn the_first_card_shows_the_tip_until_opened_or_timed_out() {
+        let source = super::production_source()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(source.contains("cards_tip: crate::media::CardsTip::load(),"));
+        assert!(source.contains(
+            "let cards_uncovered = !self.pointer_modal_open(ws) && ws.media_viewer.is_none();"
+        ));
+        assert!(source.contains(
+            "let tip_begun = if presented && cards_uncovered { self.cards_tip.begin( renderer.shown_cards().map(|card| (card.pane, card.nonce)),"
+        ));
+        let begun = source
+            .find("drop(panes); if let Some((pane, nonce)) = tip_begun")
+            .expect("set after the views");
+        assert!(source[begun..].contains("state.inline_cards.set_tip(Some(nonce));"));
+        assert!(source.contains(
+            "self.show_media_item(ws, pane, item); // Opening a card is what the tip taught. self.end_cards_tip(ws);"
+        ));
+        assert!(source.contains(
+            "if self.cards_tip.until().is_some_and(|until| until <= now) { self.end_cards_tip(ws); }"
+        ));
+        assert!(source.contains(
+            "if let Some(next) = cards_tip_wait { wait = Some(wait.map_or(next, |current| current.min(next))); }"
+        ));
+        assert!(source.contains("state.inline_cards.set_tip(None);"));
+    }
+
+    /// A card takes its primary press before anything else in the window,
+    /// on the native and control paths alike, after only the dialogs and
+    /// the media viewer that own every press; its release is the card's too.
+    #[test]
+    fn a_card_takes_its_press_and_release_before_anything_behind_it() {
+        let source = super::production_source();
+        let source = source.as_str();
+        fn after<'a>(text: &'a str, from: &str) -> &'a str {
+            text.split_once(from).unwrap_or_else(|| panic!("{from}")).1
+        }
+        let native = after(
+            source,
+            "WindowEvent::MouseInput {\n                state: ElementState::Pressed,",
+        );
+        let viewer = native
+            .find("if self.activate_media_viewer_at(ws, px, py, bcode) {")
+            .expect("viewer");
+        let card = native
+            .find("if self.press_card(ws, px, py, bcode) {")
+            .expect("card");
+        let bar = native.find("let bar = self.tab_bar(ws);").expect("tab bar");
+        assert!(viewer < card && card < bar);
+        let ctl = after(source, "    fn ctl_mouse_press(");
+        let viewer = ctl
+            .find("if self.activate_media_viewer_at(ws, px, py, bcode) {")
+            .expect("ctl viewer");
+        let card = ctl
+            .find("if self.press_card(ws, px, py, bcode) {")
+            .expect("ctl card");
+        let bar = ctl
+            .find("if tab_bar_pointer_region_contains(&bar, px, py)")
+            .expect("ctl tab bar");
+        assert!(viewer < card && card < bar);
+        let release = after(
+            source,
+            "WindowEvent::MouseInput {\n                state: ElementState::Released,",
+        );
+        let card = release
+            .find("if self.release_card(ws, px, py, bcode) {")
+            .expect("release");
+        let drag = release
+            .find("&& let Some(drag) = ws.pane_drag.take()")
+            .expect("pane drag");
+        let report = release
+            .find("if self.send_mouse(ws, bcode, false, false) {")
+            .expect("mouse report");
+        assert!(card < drag && card < report);
+        let ctl_release = after(source, "    fn ctl_mouse_release(");
+        let card = ctl_release
+            .find("if self.release_card(ws, px, py, bcode) {")
+            .expect("ctl release");
+        let report = ctl_release
+            .find("let mut handled = self.send_mouse(ws, bcode, false, false);")
+            .expect("ctl report");
+        assert!(card < report);
+        // Only a primary or secondary press without Shift, and only on a
+        // settled card; the secondary one opens the card's menu.
+        let press = after(source, "    fn press_card(");
+        assert!(press.contains("if !matches!(bcode, 0 | 2) || ws.mods.shift_key() {"));
+        assert!(press.contains("return self.open_card_menu(ws, card, (px, py));"));
+        assert!(press.contains("ws.card_sightings.settled(card, std::time::Instant::now())"));
+        // Its release opens nothing once a dialog or the viewer is up.
+        let release = after(source, "    fn release_card(");
+        assert!(
+            release.contains(
+                "let covered = self.pointer_modal_open(ws) || ws.media_viewer.is_some();"
+            )
+        );
+        assert!(release.contains("card_release_opens((pane, nonce), over, covered)"));
+        // A primary press ends a card press whose release went elsewhere,
+        // before anything can take it, natively and over control.
+        let reset = "if bcode == 0 {\n            ws.card_press = None;\n        }";
+        let native_reset = native
+            .find(&reset.replace("\n        ", "\n                "))
+            .expect("native reset");
+        let menu = native
+            .find("&& let Some(click) = self.context_menu_click_action(ws, bcode)")
+            .expect("menu");
+        assert!(native_reset < menu);
+        let ctl_reset = ctl.find(reset).expect("ctl reset");
+        let ctl_menu = ctl
+            .find("&& let Some(click) = self.context_menu_click_action(ws, bcode)")
+            .expect("ctl menu");
+        assert!(ctl_reset < ctl_menu);
+        // So does anything else that ends the pointer's gestures.
+        let focus = after(source, "WindowEvent::Focused(f) => {");
+        let focus = &focus[..focus.find("WindowEvent::").unwrap_or(focus.len())];
+        assert!(focus.contains("ws.card_press = None;"));
+        for gesture_end in [
+            "    fn open_search(",
+            "    fn show_context_menu(",
+            "    fn close_all_modals(",
+            "    fn install_confirm_dialog(",
+        ] {
+            let body = after(source, gesture_end);
+            let body = &body[..body.find("\n    fn ").unwrap_or(body.len())];
+            assert!(body.contains("ws.card_press = None;"), "{gesture_end}");
+        }
+        // A card has been seen once a frame showing it reached the screen.
+        assert!(source.contains(
+            "let presented = matches!(&frame_result, Ok(FrameOutcome::Presented));\n        if presented\n            && ws\n                .card_sightings\n                .note(renderer.painted_cards(), std::time::Instant::now())"
+        ));
+    }
+
+    /// A verified harness's card is registered in its pane with the message
+    /// its harness prints; anything that cannot hold leaves the shelf alone.
+    #[test]
+    fn a_card_is_registered_with_the_message_its_harness_prints() {
+        use kettle_core::InlineMarker;
+        let owner = kettle_ctl::process::ProcessIdentity::new_for_tests(40, 400);
+        let image = kettle_core::ImageData::new(64, 48, vec![9; 64 * 48 * 4]).unwrap();
+        let draft = || crate::media::InlineDraft {
+            owner,
+            harness: kettle_render::CardHarness::ClaudeHook,
+            name: Some("plot.png".into()),
+        };
+        let now = std::time::Instant::now();
+        let mut ledger = crate::media::CardLedger::default();
+        let mut pane_cards = kettle_render::InlineCards::default();
+        let delivery = super::register_card(
+            &mut ledger,
+            (3, &mut pane_cards, (80, 40)),
+            (8.0, 16.0),
+            (9, 0),
+            kettle_media::MediaKind::Raster,
+            &image,
+            draft(),
+            now,
+        )
+        .expect("a card");
+        assert!(delivery.fits());
+        assert_eq!(pane_cards.len(), 1);
+        let lines: Vec<&str> = delivery.message.split('\n').collect();
+        assert_eq!(lines.last(), Some(&"plot.png - raster 64x48"));
+        let first: Vec<char> = lines[1].chars().skip(1).take(8).collect();
+        let marker = InlineMarker::decode(&first).expect("the first cell's marks");
+        assert_eq!((marker.row, marker.column), (0, 0));
+        assert!(pane_cards.contains(marker.nonce));
+        assert_eq!(ledger.item(3, marker.nonce), Some(9));
+        // A pane too small for a card, or a harness past its limit, gets none.
+        assert!(
+            super::register_card(
+                &mut ledger,
+                (3, &mut pane_cards, (80, 4)),
+                (8.0, 16.0),
+                (9, 0),
+                kettle_media::MediaKind::Raster,
+                &image,
+                draft(),
+                now,
+            )
+            .is_none()
+        );
+        for _ in 0..crate::media::HARNESS_CARDS_PER_SECOND {
+            let _ = super::register_card(
+                &mut ledger,
+                (3, &mut pane_cards, (80, 40)),
+                (8.0, 16.0),
+                (9, 0),
+                kettle_media::MediaKind::Raster,
+                &image,
+                draft(),
+                now,
+            );
+        }
+        let before = pane_cards.len();
+        assert!(
+            super::register_card(
+                &mut ledger,
+                (3, &mut pane_cards, (80, 40)),
+                (8.0, 16.0),
+                (9, 0),
+                kettle_media::MediaKind::Raster,
+                &image,
+                draft(),
+                now,
+            )
+            .is_none(),
+            "four a second"
+        );
+        assert_eq!(pane_cards.len(), before, "nothing registered");
+    }
+
+    /// The App gives a card only to a verified route, retires cards on its
+    /// tick and when their item is replaced or dropped, and keeps a painted
+    /// card's pixels.
+    #[test]
+    fn cards_are_for_verified_harnesses_and_retire_with_their_item() {
+        let source = super::production_source();
+        let body = |name: &str| {
+            source
+                .split(&format!("fn {name}("))
+                .nth(1)
+                .and_then(|rest| rest.split("\n    fn ").next())
+                .unwrap_or_else(|| panic!("{name} present"))
+        };
+        let show = body("ctl_show");
+        assert!(show.contains("(Some(target), Some(owner)) if route.verified =>"));
+        // Each harness's card is placed and sized as that harness prints it.
+        assert!(show.contains(
+            "kettle_ctl::show::InlineTarget::CodexHook => {\n                        kettle_render::CardHarness::CodexHook"
+        ));
+        assert!(
+            body("ctl_show").contains("name: card_name,"),
+            "a card's caption names only a file, never a title the sender chose"
+        );
+        assert!(body("finish_show").contains(".publish(item, shown, &visible)"));
+        let finish = body("finish_show");
+        let retired = finish.find("cards.retire(").expect("replaced cards retire");
+        let registered = finish.find("register_card(").expect("a card registers");
+        assert!(
+            retired < registered,
+            "old cards retire before a new one registers"
+        );
+        assert!(finish.contains("result.inline = delivery;"));
+        assert!(body("media_tick").contains("self.retire_cards(ws);"));
+        let retire = body("retire_cards");
+        assert!(retire.contains("kettle_ctl::process::identity(owner.pid()) != Ok(*owner)"));
+        assert!(retire.contains("pane.inline_cards.remove(nonce);"));
+        let visible = source
+            .split("fn media_visible_items<'a>(")
+            .nth(1)
+            .and_then(|rest| rest.split("\nfn ").next())
+            .expect("media_visible_items");
+        // Eviction spares what the next frame draws, presented or not.
+        assert!(visible.contains(".drawn_cards()"));
+    }
+
     /// The sender line knows where its program's path sits, whatever the
     /// language's word order and whatever the path holds.
     #[test]
@@ -39522,6 +41373,7 @@ mod tests {
             image: Some(kettle_core::ImageData::new(1, 1, vec![0; 4]).unwrap()),
             status: "Released.".into(),
             canvas: kettle_render::MediaCanvas::Theme,
+            open_outside: false,
         };
         let (label, description) = super::media_viewer_accessibility(&viewer, &tr);
         assert!(
@@ -41230,7 +43082,7 @@ mod tests {
                 && focused_arm.contains("ws.mux.panes.values().chain(")
                 && focused_arm.contains("self.windows\n                        .values()")
                 && focused_arm.contains("pane.term.invalidate_completion();")
-                && focused_arm.contains("ws.tab_drag_active = false;\n                    ws.tab_drag_press = None;\n                    ws.tab_pressed_idx = None;\n                    // A focus loss also ends any split-divider drag.\n                    ws.dragging_split = None;\n                    ws.mouse_btn = None;"),
+                && focused_arm.contains("ws.tab_drag_active = false;\n                    ws.tab_drag_press = None;\n                    ws.tab_pressed_idx = None;\n                    // A focus loss also ends any split-divider drag.\n                    ws.dragging_split = None;\n                    // Releases now land in another window: each program\n                    // with a held button's press gets its release here.\n                    self.release_held_buttons(ws, |_| true);"),
             "the Focused `!f` arm must disarm the latched drag and completion state"
         );
         // 3. Side-button dismisses a lone context menu instead of leaking SGR.
@@ -41493,7 +43345,10 @@ mod tests {
             .nth(1)
             .and_then(|body| body.split("\n    fn ").next())
             .expect("target-aware mouse sender");
-        assert!(mouse.contains("let result = pane.feed_input(&seq);"));
+        // Presses and drags take ordinary user input; a release takes the
+        // user lane's room for releases. Both stay in order with typing.
+        assert!(mouse.contains("pane.feed_input(&seq)"));
+        assert!(mouse.contains("pane.feed_mouse_release(&seq)"));
         assert!(!mouse.contains("queue_protocol_reply"));
 
         let focus = source
@@ -41511,6 +43366,12 @@ mod tests {
             .and_then(|body| body.split("\n    pub fn ").next())
             .expect("focus-report sender");
         assert!(focus_sender.contains("enqueue_user"));
+        let release_lane = mux
+            .split("fn enqueue_mouse_release(")
+            .nth(1)
+            .and_then(|body| body.split("\n    fn ").next())
+            .expect("mouse-release lane");
+        assert!(release_lane.contains("&self.user_tx,"));
         assert!(!focus_sender.contains("with_completion_input_admission"));
 
         let terminal_replies = source
@@ -44263,7 +46124,6 @@ mod tests {
     /// owns the pointer, and its release only when the press did, once.
     #[test]
     fn side_button_forward_is_modal_gated_and_releases_pair_with_presses() {
-        use super::{note_side_button_press, take_side_button_release};
         // Collapse all whitespace before scanning. rustfmt wraps the call
         // across lines, and the match must also survive a CRLF working tree
         // (which `.gitattributes eol=lf` normally prevents).
@@ -44273,23 +46133,23 @@ mod tests {
             .join(" ");
         assert!(
             src.contains(
-                "let reported = !self.activate_media_viewer_at(ws, px, py, sgr) \
+                "if !self.activate_media_viewer_at(ws, px, py, sgr) \
                  && !modal_swallows_pointer( self.pointer_modal_open(ws), ws.context_menu.is_some(), ) \
-                 && self.report_mouse(ws, sgr, true, false) == MouseReport::Written; \
-                 note_side_button_press(&mut ws.reported_side_buttons, sgr, reported);"
+                 { self.report_mouse(ws, sgr, true, false); }"
             ),
-            "a side-button press is forwarded past the viewer and modals, and noted"
+            "a side-button press is forwarded past the viewer and modals"
         );
-        assert!(src.contains(
-            "if take_side_button_release(&mut ws.reported_side_buttons, sgr) { \
-             self.send_mouse(ws, sgr, false, false); }"
-        ));
         assert!(
             src.contains(
-                "ws.context_menu = None; \
-                 note_side_button_press(&mut ws.reported_side_buttons, sgr, false);"
+                "if let Some(sgr) = extra_mouse_sgr(button) { ws.held_buttons.end_own(sgr); self.send_mouse(ws, sgr, false, false); return; }"
             ),
-            "a press that only dismisses the context menu is noted as taken"
+            "its release goes only where a press went: report_mouse declines one no program had"
+        );
+        assert!(
+            src.contains(
+                "self.release_held_buttons(ws, |held| held.button == sgr); ws.held_buttons.pressed(sgr, None, (0, 0)); // A lone context menu"
+            ),
+            "a side press first releases one whose release went elsewhere, and is Kettle's until a program gets it"
         );
         // A press the search bar keeps from the terminal is not one it saw.
         let send = production_source();
@@ -44299,33 +46159,105 @@ mod tests {
             .and_then(|rest| rest.split("\n    fn ").next())
             .expect("send_mouse_to");
         assert!(send_to.contains(
-            "ws.mouse_btn.is_some(),\n        ) {\n            return MouseReport::Swallowed;"
+            "ws.held_buttons.any(),\n        ) {\n            return MouseReport::Swallowed;"
         ));
         assert_eq!(send_to.matches("MouseReport::Written").count(), 1);
         assert!(
             super::MouseReport::Swallowed.consumed() && !super::MouseReport::Declined.consumed()
         );
+    }
 
-        let mut reported = 0;
-        note_side_button_press(&mut reported, 128, false);
+    /// A press a program got keeps its pane: that button's drag and its one
+    /// release go there wherever focus has gone, Shift or not, and one whose
+    /// pane left the screen gets only the release, at the cell it last saw.
+    /// A press no program got leaves no button held; a release takes room
+    /// the program's input keeps for releases, so a full queue cannot refuse
+    /// it. The newest press owns the drag, and a gesture of Kettle's own ends
+    /// with its release whoever handles it. Kettle ending a program's gesture
+    /// early (focus loss, search, the menu, a tab leaving, the button pressed
+    /// again) releases it in place.
+    #[test]
+    fn a_held_buttons_reports_stay_with_the_pane_its_press_went_to() {
+        let source = production_source();
+        let body = |name: &str| {
+            source
+                .split(&format!("    fn {name}("))
+                .nth(1)
+                .and_then(|rest| rest.split("\n    fn ").next())
+                .unwrap_or_else(|| panic!("{name}"))
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let report = body("report_mouse");
+        let release = report
+            .find("(false, _) => match ws.held_buttons.take(btn) { Some(held) if held.pane.is_some() => Some(held),")
+            .expect("a release takes its press's entry, and only a program's is reported");
+        let drag = report
+            .find("(true, true) => ws.held_buttons.dragging(),")
+            .expect("a drag follows the newest held button");
+        let routed = report
+            .find("return self.send_mouse_to(ws, pane, at, button, pressed, motion);")
+            .expect("held reports go to their pane");
+        let focus = report.find("ws.mux.active_focus()").expect("focus");
+        assert!(release < routed && drag < routed && routed < focus);
+        assert!(report.contains(
+            "(MouseReport::Written, Some((pane, row, col))) => (Some(pane), (row, col)), _ => (None, (0, 0)), }; if let Some(stale) = ws.held_buttons.pressed(btn, pane, cell) { self.release_held(ws, stale); }"
+        ));
+        let send = body("send_mouse_to");
+        assert!(send.contains("if ws.mods.shift_key() && !held {"));
+        assert!(send.contains(
+            "if matches!(at, MouseAt::Held { rect: None, .. }) && pressed { return MouseReport::Swallowed; }"
+        ));
+        assert!(send.contains("MouseAt::Held { rect: None, cell } => cell,"));
+        assert!(send.contains(
+            "let result = if pressed || motion { pane.feed_input(&seq) } else { pane.feed_mouse_release(&seq) };"
+        ));
+        assert!(send.contains(
+            "if !result.is_queued() { // The program never got it: a press it missed leaves no button // held, so no release follows. self.report_input_result(result); return MouseReport::Swallowed; }"
+        ));
+        assert!(send.contains("ws.held_buttons.told(pane_id, (row, col));"));
+        // Kettle releases what it ends early.
+        for ends in ["open_search", "show_context_menu"] {
+            assert!(
+                body(ends).contains("self.release_held_buttons(ws, |_| true);"),
+                "{ends}"
+            );
+        }
         assert!(
-            !take_side_button_release(&mut reported, 128),
-            "a taken press"
+            source.split_whitespace().collect::<Vec<_>>().join(" ").contains(
+                "Action::TogglePaneReadOnly => { // A pane turned read-only gets no more input, so a held // button's release goes to it first. if let Some(pane) = ws.mux.active_focus() && ws.mux.focused().is_some_and(|focused| !focused.read_only) { self.release_held_buttons(ws, |held| held.pane == Some(pane)); }"
+            ),
+            "a pane turning read-only gets its held releases first"
         );
-        note_side_button_press(&mut reported, 128, true);
-        note_side_button_press(&mut reported, 129, false);
-        assert!(
-            !take_side_button_release(&mut reported, 129),
-            "buttons are apart"
+        let flat_source = source.split_whitespace().collect::<Vec<_>>().join(" ");
+        for reset in [
+            "self.release_held_buttons(ws, |held| held.pane == Some(pane_id)); apply_terminal_control(&ws.mux, &[pane_id], b\"\\x1bc\");",
+            "self.release_held_buttons(ws, |held| held.pane == Some(pane_id)); // One request, so a full queue cannot accept RIS but reject // the paired history clear. apply_terminal_control(&ws.mux, &[pane_id], b\"\\x1bc\\x1b[3J\");",
+        ] {
+            assert!(
+                flat_source.contains(reset),
+                "a reset releases held buttons first: {reset}"
+            );
+        }
+        let flat = source.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_eq!(
+            flat.matches("self.release_held_buttons_in_tab(").count(),
+            flat.matches(".mux.detach_tab(").count(),
+            "every tab that leaves a window releases its held buttons first"
         );
-        assert!(take_side_button_release(&mut reported, 128));
-        assert!(!take_side_button_release(&mut reported, 128), "once");
-        note_side_button_press(&mut reported, 129, true);
-        note_side_button_press(&mut reported, 129, false);
-        assert!(
-            !take_side_button_release(&mut reported, 129),
-            "a lost release does not pair with a later taken press"
-        );
+        for needle in [
+            // Each press first releases one whose release went elsewhere, and
+            // is Kettle's own gesture until a program receives it.
+            "self.release_held_buttons(ws, |held| held.button == bcode); ws.held_buttons.pressed(bcode, None, (0, 0)); // Context menu:",
+            "if bcode == 0 { ws.card_press = None; } if ws.card_focus.take().is_some() { ws.accessibility_pending = true; } self.release_held_buttons(ws, |held| held.button == bcode); ws.held_buttons.pressed(bcode, None, (0, 0)); let bar",
+            // Each release ends a gesture of Kettle's own first.
+            "ws.held_buttons.end_own(bcode); // A release ends an editor drag inside the search bar;",
+            "if let Some(sgr) = extra_mouse_sgr(button) { ws.held_buttons.end_own(sgr); self.send_mouse(ws, sgr, false, false); return; }",
+            "// As natively: a gesture of Kettle's own ends with its release. ws.held_buttons.end_own(bcode);",
+        ] {
+            assert!(flat.contains(needle), "{needle}");
+        }
     }
 
     fn item(label: &'static str, enabled: bool) -> ContextMenuItem {
@@ -47209,6 +49141,58 @@ mod tests {
         // empty menu, but the guard exists.)
         let all_disabled = vec![ContextMenuItem::Separator];
         assert_eq!(next_context_menu_highlight(&all_disabled, 0, 1), 0);
+    }
+
+    /// A card menu's rows are ordinary rows: dispatchable, clicked with what
+    /// the menu captured, reachable by mnemonic and by typing, and measured
+    /// by their label.
+    #[test]
+    fn a_card_menu_row_is_an_ordinary_menu_row() {
+        use super::{
+            ContextMenuClick, ContextMenuItem, MediaMenuAction, MediaTarget, assign_mnemonics,
+            context_menu_item_columns, item_is_dispatchable, item_to_click, typeahead_match,
+        };
+        let target = MediaTarget {
+            pane: 3,
+            nonce: kettle_core::InlineNonce::new([1, 2, 3, 4, 5, 6]).unwrap(),
+            item: 9,
+            generation: 2,
+        };
+        let rows = [
+            ContextMenuItem::Media {
+                label: "Open",
+                target,
+                action: MediaMenuAction::View,
+            },
+            ContextMenuItem::Media {
+                label: "Open in Preview",
+                target,
+                action: MediaMenuAction::OpenOutside(crate::media::Viewer::Preview),
+            },
+        ];
+        for (index, row) in rows.iter().enumerate() {
+            assert!(item_is_dispatchable(row));
+            let Some(ContextMenuClick::Media {
+                target: clicked,
+                action,
+            }) = item_to_click(row, index)
+            else {
+                panic!("row {index} is not a media click");
+            };
+            assert_eq!(clicked, target);
+            assert_eq!(
+                action,
+                [
+                    MediaMenuAction::View,
+                    MediaMenuAction::OpenOutside(crate::media::Viewer::Preview)
+                ][index]
+            );
+        }
+        assert!(context_menu_item_columns(&rows[1], "") >= "Open in Preview".len());
+        let mnemonics = assign_mnemonics(&rows, &[]);
+        assert!(mnemonics.iter().all(Option::is_some), "{mnemonics:?}");
+        assert_ne!(mnemonics[0].map(|m| m.1), mnemonics[1].map(|m| m.1));
+        assert_eq!(typeahead_match(&rows, "open in"), Some(1));
     }
 
     /// The shared row→click mapper must recognise EVERY dispatchable row type,
@@ -50501,8 +52485,8 @@ mod hint_action_tests {
         for needle in [
             "ws.mux.panes.get(&h.pane)",
             "pane.map(pane_path_origin)",
-            "hint_action(h.kind, alternate, remote || !h.bounded)",
-            "!h.bounded",
+            "hint_action(kind, alternate, remote || !bounded)",
+            "!bounded",
             // A path it will not open falls back to the copy a plain label does.
             "(HintAction::OpenPath, None) | (HintAction::Copy, _) =>",
         ] {
@@ -50917,7 +52901,7 @@ mod hint_action_tests {
         for site in [
             "self.open_pane_link(ws, links_pane(ws), &uri);",
             "self.open_pane_link(ws, pane, &url);",
-            "self.open_pane_link(ws, Some(h.pane), &h.text)",
+            "self.open_pane_link(ws, Some(h.pane), text)",
             "self.open_pane_link(ws, Some(h.pane), &url)",
             "Some(url) => self.open_pane_link(ws, pane, &url),",
         ] {
@@ -51461,6 +53445,130 @@ mod settings_footer_text_tests {
             ),
             None
         );
+    }
+
+    /// The Claude Code row's footer names why new panes get no plugin, or
+    /// else when the setting applies.
+    #[test]
+    fn claude_code_note_names_why_new_panes_get_no_plugin() {
+        use crate::agent_plugin::PluginRefusal;
+        use kettle_i18n::Text;
+        let note = super::claude_code_note;
+        assert_eq!(note(true, None), Text::SettingsNoteClaudeCodeNewPanes);
+        assert_eq!(note(false, None), Text::SettingsNoteClaudeCodeNeedsPreviews);
+        for display_on in [true, false] {
+            assert_eq!(
+                note(display_on, Some(PluginRefusal::SideloadDisabled)),
+                Text::SettingsNoteClaudeCodeForbidden
+            );
+            assert_eq!(
+                note(display_on, Some(PluginRefusal::Translocated)),
+                Text::SettingsNoteClaudeCodeTranslocated
+            );
+            assert_eq!(
+                note(display_on, Some(PluginRefusal::UnnamedExecutable)),
+                Text::SettingsNoteClaudeCodeUnavailable
+            );
+            assert_eq!(
+                note(display_on, Some(PluginRefusal::UnnamedDirectory)),
+                Text::SettingsNoteClaudeCodeUnavailable
+            );
+            assert_eq!(
+                note(display_on, Some(PluginRefusal::Unverified)),
+                Text::SettingsNoteClaudeCodeUnavailable
+            );
+            assert_eq!(
+                note(display_on, Some(PluginRefusal::Unsupported)),
+                Text::SettingsNoteClaudeCodeUnsupported
+            );
+        }
+        assert_eq!(
+            settings_footer_note(
+                &EN,
+                None,
+                Some("agent-display-claude-code"),
+                false,
+                false,
+                Some(Text::SettingsNoteClaudeCodeForbidden)
+            )
+            .as_deref(),
+            Some("Claude Code's managed settings forbid plugins from the environment.")
+        );
+        // The row with focus picks its own note.
+        let src = super::production_source();
+        assert!(src.contains(
+            "Some(\"agent-display-claude-code\") => Some(claude_code_note(\n                            self.agent_previews_live(),\n                            crate::agent_plugin::refusal(),"
+        ));
+    }
+
+    /// New panes get the plugin from the first one on, and a reload that
+    /// turns the integration or agent previews on or off changes what the
+    /// next pane gets.
+    #[test]
+    fn the_claude_code_plugin_is_offered_before_the_first_pane_and_on_reload() {
+        let src = super::production_source();
+        let run = src
+            .split_once("pub fn run_with(mut startup: crate::Options) -> Result<()> {")
+            .expect("run_with")
+            .1;
+        let built = run.find("let mut app = App {").expect("app built");
+        let offered = run
+            .find("app.reconcile_claude_plugin();")
+            .expect("startup offers the plugin");
+        let first = run
+            .find("app.start_first_pane_before_launch()")
+            .expect("first pane");
+        assert!(built < offered && offered < first);
+        let load = src
+            .split_once("fn load_reloaded_config(&mut self) -> bool {")
+            .expect("load_reloaded_config")
+            .1
+            .split_once("\n    fn apply_reloaded_config(")
+            .expect("end of load_reloaded_config")
+            .0;
+        let display = load
+            .find("self.reconcile_agent_display();")
+            .expect("reload reconciles agent display");
+        let plugin = load
+            .find("self.reconcile_claude_plugin();")
+            .expect("reload reconciles the plugin");
+        assert!(display < plugin, "the plugin follows the live policy");
+        let reconcile = src
+            .split_once("fn reconcile_claude_plugin(&mut self) {")
+            .expect("reconcile_claude_plugin")
+            .1
+            .split_once("\n    }\n")
+            .expect("end of reconcile_claude_plugin")
+            .0;
+        let gate = reconcile
+            .find("if !(self.agent_previews_live() && self.cfg.agent_display_claude_code) {")
+            .expect("gated on both settings");
+        let withdrawn = reconcile
+            .find("crate::agent_plugin::offer(None, None);")
+            .expect("off withdraws the plugin");
+        let installed = reconcile
+            .find("crate::agent_plugin::install(")
+            .expect("on installs it");
+        let named = reconcile
+            .find("crate::agent_plugin::plugin_dir_entry(&directory)")
+            .expect("a directory the variable cannot hold is refused");
+        let offered = reconcile
+            .find("crate::agent_plugin::offer(Some(plugin), None);")
+            .expect("offered");
+        let rechecked = reconcile
+            .find("crate::mux::claude_config_for(&self.cfg.env)")
+            .expect("policy checked again for Settings, as a new pane would be");
+        assert!(gate < withdrawn && withdrawn < installed && installed < named);
+        assert!(named < offered && offered < rechecked);
+        let live = src
+            .split_once("fn agent_previews_live(&self) -> bool {")
+            .expect("agent_previews_live")
+            .1
+            .split_once("\n    }\n")
+            .expect("end of agent_previews_live")
+            .0;
+        assert!(live.contains("self.ctl_policy.display()"));
+        assert!(live.contains(".resolve(self.cfg.ctl_policy())"));
     }
 
     /// Display is turned on by a successful reload only, launch flags keep

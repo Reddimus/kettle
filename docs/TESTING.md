@@ -3724,7 +3724,205 @@ signature broke after it started, which CI cannot make;
 on a Developer ID build, Claude Code (236 MB) validates as `Anthropic PBC
 (Q6L2SF6YDW)` in about 2 ms after the first check in a process, which takes
 0.2 to 0.5 s. A signer reads as its certificate's name, or Apple for Apple's
-own code. The viewer's sender line finds its program's path and signer in
+own code. Inline cards: `kettle-render`'s `inline_cards` tests refuse a card
+of no or too many rows or columns, a duplicate nonce and a 65th card in a pane,
+and show that a card keeps no strong reference to its poster (released pixels
+paint as failed, a card without a poster as pending); a headless frame reports
+the card it accepted. `kettle-ui`'s `media::cards` tests bound a harness to 32
+live cards across panes and four a second, mint unbiased digits that never
+repeat a live card's nonce, and retire each card once; `media::inline` tests
+size a card at a quarter of the pane's lines and the image's shape within the
+width Claude Code prints, build its rows and caption, keep the widest card
+under Claude Code's message limit, and strip a file name of anything that
+could forge marks or break the caption's line, give media sent as bytes a
+caption of kind and size alone, and refuse a pane too narrow for the hook's
+61-column label. A full shelf drops an item whose card is on screen only when
+every other item is on screen too, and never grows past eight.
+`register_card` registers a
+card with the message its harness prints and nothing when the pane is too
+small or the harness past its rate; only Claude Code that ran Kettle's own
+command line is a harness, and source guards keep cards to verified routes,
+retirement on the tick and painted items' pixels. In `kettle`, `mcp_display`
+tests ask for a card only from an interactive session that Kettle's plugin
+launched, with a plain bounded tool-use id from the call's metadata, keep a
+delivery for one hook for five seconds, and bound the waiting deliveries;
+`kettle_card` is never listed, refuses the model's own call, needs its
+`tool_use_id`, refuses an in-flight request id before it can take a delivery,
+and answers once, even while the tool queue is full; a card's result carries
+none of its text; and `kettle ctl` never asks for a card. Kettle's Claude Code
+plugin: `kettle-ui`'s `agent_plugin` tests build a plugin that launches this
+Kettle's display server and hooks only `kettle_show`, refuse a translocated
+path, and install it read-only. The plugin must then verify, and a
+reinstall must keep it. An install waits while another holds the lock.
+Cleanup removes this executable's plugins from the same or an older
+version, one whose program is gone, an unreadable one, one whose server is
+not `kettle mcp` or whose file is too long, and any staging, but keeps
+another installed Kettle's plugin and a newer version's. They fail a
+changed file, an extra entry, a link and a writable directory, and repair
+each by installing again. On policy, they cover each source Claude Code
+reads: the managed file, its visible JSON drop-ins, the cached remote policy
+and, on macOS, managed preferences through `plutil`. The managed file and
+its drop-ins merge in Claude Code's order, by UTF-16 units, so a later one
+can lift the rule; other sources count beside them, and a byte-order mark is
+dropped. The user's own settings, a file that is not JSON, a
+hidden or non-JSON drop-in and a directory named like one forbid nothing; an
+oversized file, a FIFO, too many drop-ins, an unreadable plist and a
+configuration directory Kettle cannot place forbid the plugin. A change on
+disk is seen despite the cache, and a source that becomes unreadable is never
+answered from it. The configuration directory is the pane's `CLAUDE_CONFIG_DIR`
+or `.claude` in its `HOME`, never a relative one. The plugin directory comes
+first in `CLAUDE_CODE_PLUGIN_DIRS`. The pane keeps its configured or
+inherited entries, but not Kettle directories that an outer Kettle or an
+older version left there, wherever it keeps them and in any case, even when
+the pane gets no plugin or the value is not UTF-8. A path that cannot be an entry adds nothing, and Settings says so. App tests pin the
+footer note for each refusal, the offer before the first pane and after
+each reload's display reconcile, and the gate on both settings. Checked live
+with Claude Code 2.1.295: a new pane's Claude Code loaded the plugin and its
+server's `kettle_show`, the hook printed the card's rows and caption, and
+Kettle painted the image in those rows. `kettle`'s `agent_setup` tests
+tell interactive Codex sessions (fresh, resume, fork) from every other
+command, help and version, never take an option's value for a command or a
+prompt, and pass a remote session, images, unknown options, extra
+positionals, a value that looks like an option and arguments that are not
+Unicode through unchanged, after `--` as well. Kettle's options go right
+after the session's command, with no second `--no-daemon`; the server table
+reads back
+as written through a TOML parser for a path with spaces, quotes, `$`,
+backticks and backslashes, and carries no approval. A relative or
+translocated path is refused, only a 0.x Codex from 0.159 is known, and a
+Kettle pane needs both positive variables. The version probe reads its first
+line within three seconds even when a child keeps the output open, and gives
+up on a program that never answers. The printed function, run by bash and
+zsh, hands each argument to Kettle untouched. Checked live with Codex
+CLI 0.162.0: the function launched an interactive session with the display
+server, `kettle_show` reached the pane's shelf verified, and `codex mcp list`
+ran unchanged. Codex cards: `agent_setup` tests add Kettle's card hook, its
+retrieval and the server's flag only with cards. The hook reads back
+through a TOML parser as one `mcp_tool` handler matching
+`mcp__kettle__kettle_show`, asking `kettle_card` for `${tool_use_id}`. A
+launch setting its own hooks gets none, and only Codex 0.162 gets cards.
+`mcp_display` tests key a Codex session's cards by `_meta.callId`; and
+`kettle_card` refuses a call carrying either harness's model call id.
+`kettle-render` recognizes a Codex card under `↳ Hook ·` with rows and
+caption four columns in, and refuses Claude Code's label, the wrong column,
+or text after the label; its tab names Codex. `kettle-ui` sizes a Codex card
+from its own column and label, and gives a card only to a sender signed as
+the harness it asked as. Checked live with Codex CLI 0.162.0 (hooks bypassed
+for that one run, so no trust was saved): the function's launch printed the
+card under `↳ Hook ·` and Kettle painted the chart there, tabbed Codex.
+Clicking cards: `kettle-render` records each drawn card with the part of it
+on screen, clipped to its pane, and `card_at` finds a press inside it on a
+real frame; `kettle-ui` takes a press only on a card drawn in the same place
+for half a second, as a new sighting after a move, settles two printed
+copies of one card apart, and forgets a card no longer drawn. Only a
+presented frame puts cards on screen (a guard on the renderer's frame
+path), so one whose present timed out neither moves the hit targets nor
+starts a card's half second. The card's press and release come before
+everything but dialogs and the viewer on both the native and control paths,
+only for a primary press without Shift. The release opens nothing while a
+dialog or the viewer is up, and every dialog opener, the context menu,
+search, focus loss and a new primary press end a card press, so a dialog
+opened and closed while the button is held still cancels the click.
+`media::sightings` tests the half second per spot, two printed copies apart,
+and instance numbers: one per placement, a new one after a move or a return,
+none reused, and none once they run out. `a_card_is_a_button_assistive_technology_can_open`
+checks the card node id namespace against every other node's, and a card's
+button (role, label from title and detail, description, Focus and Click,
+bounds) in English and Spanish. `a_card_is_a_quick_select_target_and_text_inside_it_is_not`
+orders card and text targets and drops text inside a card,
+`placements_name_each_registered_card_the_grid_shows` pins the placements
+quick select reads from the grid it scans for text (a scroll or new output
+since the last frame moves both alike), and
+`a_hint_chip_over_a_card_is_drawn_above_it` renders a label over a card's
+poster on the GPU and finds its chip, and `a_hint_chip_stays_inside_its_pane`
+renders one at a pane's last column and finds none of it in the next pane.
+The placements test also pins that a snapshot taken without card marks
+finds no cards, which is why quick select captures them. `every_way_to_open_a_card_goes_through_one_door`
+guards that clicks, quick select and accessibility actions all go through
+`open_card`, that no card label carries a placeholder sequence, that only
+cards in panes the active tab shows now are reachable, that focusing a card
+closes Search so the keys follow it, and that a key press,
+text from an input method, or a native press of any button (side buttons
+included) returns a card's focus to its pane.
+The hover: `a_hovered_card_is_outlined_in_the_accent`
+renders a card with and without `card_hover` and checks the outline rings it,
+and that a hover naming a moved card, another card or another pane at that
+spot draws nothing;
+`a_settled_card_under_the_pointer_shows_it_takes_a_click` guards the hand
+cursor's place after dialogs and chrome but before split seams, its Shift,
+viewer and pointer-left exclusions, the settle wake in `about_to_wait`, and
+that the cursor icon, native buttons and the wheel follow the physical
+pointer even after a control client moved the cursor (the icon sets nothing
+while the pointer is outside the window)
+(`native_input_resumes_at_the_physical_pointer` checks the reset), and
+`media::sightings` tests `settles_at`. The shelf test pins that a
+replacement by key, kept in its place, is still `latest()`, and on macOS
+`macos_opens_the_media_viewer_with_ctrl_shift_cmd_i` pins the default
+chord. The card menu: `a_card_menu_row_is_an_ordinary_menu_row` checks its
+rows dispatch with what the menu captured and take mnemonics and typing, and
+`a_card_takes_its_press_and_release_before_anything_behind_it` and
+`every_way_to_open_a_card_goes_through_one_door` guard that a right-press on a
+settled card opens it, that a row acts only while the card shows the item at
+the generation the menu named, and that its Open row is `open_card`.
+`media::external` checks the copy the viewer gets is a 0600 PNG of exactly
+the pixels shown, marked downloaded, that a third open is refused at once
+and writes nothing, that the viewer commands are fixed, that a program is
+trusted only when root owns it and its directory, and that the copy reaches
+the viewer only after every check, in order; the ignored
+`preview_opens_a_marked_copy_live` opens Preview by hand on a Mac (checked
+live: Preview passed its signature check and showed the copy with no
+warning). `paste_image` checks the viewer-copy store drops its oldest by
+count and by bytes, keeps numbering, is swept under its own prefix and
+marks copies downloaded, keeps every copy for its minute and refuses
+another while full of newer ones (`a_full_store_of_new_copies_is_busy` turns
+that into the busy notice), and still counts a copy it could not delete,
+deleting it at cleanup, and takes nothing once closed
+(`a_copy_that_will_not_go_still_counts_until_cleanup`, skipped as root), and `signing::only_preview_passes_for_preview`
+that nothing else passes for Preview. In the viewer,
+`the_open_outside_button_sits_before_close` places the `↗` button between
+browsing and close and hit-tests it,
+`the_viewer_draws_its_open_outside_button_only_when_offered` renders it on
+the GPU as a button cell with its glyph only when offered, and
+`the_media_viewer_takes_only_esc_the_arrows_and_its_open_key` checks a bare O
+(Shift allowed, no Ctrl, Alt or Cmd) is taken only when offered and that the
+key, the button and the footer all reach the same hand-off. The tip: `media::tip` tests it shows once on the first card
+and is remembered, that of two Kettles that loaded before either showed it
+only the first to record it shows it, that a corrupt, oversized or empty
+record is left alone and stops the tip, and that only a regular file is read,
+never a link to a record or a pipe, and no tip is recorded over a link; its tests record only into a private
+temporary directory. `refused_card_poster_upload_paints_status_and_recovers_on_the_next_frame`
+checks that a card whose poster the GPU refused is on screen but not among
+`shown_cards`, and is once the upload recovers;
+`the_tip_shows_on_its_ready_card_only` places it on its card's foot only once
+the image is ready and only on a registered card, and
+`the_first_card_shows_the_tip_until_opened_or_timed_out` guards its start
+on a presented frame's first shown card with no dialog, menu or viewer over
+the cards (checked every presented frame while it waits, so a card that
+loads in place or is uncovered qualifies) and its end on an open or at its
+deadline. Checked live with Codex CLI 0.162.0: a
+`send_mouse` click on a Codex card opened the viewer on its item, and a
+press on the card released after Settings opened left Settings up and
+opened nothing. Held buttons in general:
+`held_buttons::tests` checks one entry per button, the newest dragging, each
+release taking its own entry once, the last cell told to each pane, a press
+after a lost release handing back the stale entry, and a newer gesture of
+Kettle's own taking the drag from a program's until its release.
+`a_mouse_release_queues_even_when_input_filled_the_lane` fills a pane's
+input lane by message count and by bytes and checks a release still queues,
+in order behind the input before it, within its own bounded room.
+`a_held_buttons_reports_stay_with_the_pane_its_press_went_to` guards the
+routing: a release takes its press's entry or goes nowhere, a drag follows
+the newest held button, both reach that pane before the focused one, Shift
+no longer declines them, a pane off screen gets only the release at the cell
+it last saw, a press refused by a full input queue holds nothing while a
+release takes the room kept for releases, every release handler ends a
+gesture of Kettle's own first, and focus loss, search, the context menu,
+turning the pane read-only, Reset and Reset and Clear, every tab detach and
+a repeated press release what they end. Checked live with a probe that logs SGR reports in each
+pane: a press in one tab released after switching tabs, and a press in one
+split released after moving focus to the other, used to leave the first
+probe a press alone and hand the second a drag and release; now the first
+gets the whole click and the second nothing. The viewer's sender line finds its program's path and signer in
 any language's word order, whatever they hold, and a line too narrow even for
 the path's last segment shortens around the signer, which stays whole. In
 `kettle-ui`'s `media` module, `route` tests: the nearest live pane ancestor
@@ -3792,7 +3990,9 @@ eras: initialize's instructions name `kettle_show`, `tools/list` is exactly
 `server/discover` is private. For a live check, run `kettle mcp --display`
 inside a pane of `kettle --agent-server off --agent-display on` and call
 `kettle_show` on an SVG: it lands verified in that pane. Titles lose control characters,
-separators and bidirectional formatting, bounded at 256 characters.
+separators, bidirectional formatting and placeholder sequences (the
+placeholder and the marks after it, which `strip_placeholders` in `kettle-vt`
+tests), bounded at 256 characters.
 `kettle-vt` hands a refused image's pixels back when only the account's room
 was missing. `kettle show`'s own tests pin its fixed failure wording, the
 absolute attested path and its confirmation. For a live check on macOS, the

@@ -239,6 +239,32 @@ pub struct AdmittedRequest {
 pub struct ShowAdmission {
     pub request: kettle_ctl::show::ShowRequest,
     pub sender: Option<SenderIdentity>,
+    /// The harness an inline card would belong to, when the request asks
+    /// for one and its asker is one Kettle trusts to print it.
+    pub harness: Option<ProcessIdentity>,
+}
+
+/// The harness a `show` asking for a `target` card came through: Claude
+/// Code as Anthropic signs it, or Codex as OpenAI signs it, which ran
+/// Kettle's own command line (`kettle mcp`) that carried the request. Anyone
+/// else gets no card.
+fn card_harness(
+    target: kettle_ctl::show::InlineTarget,
+    sender: &SenderIdentity,
+) -> Option<ProcessIdentity> {
+    // The asker differs from the sender only when the sender runs Kettle's
+    // own executable and its checked ancestry names who ran it.
+    let asker = sender.asker.process;
+    if asker == sender.process {
+        return None;
+    }
+    let requirement = match target {
+        kettle_ctl::show::InlineTarget::ClaudeHook => kettle_ctl::signing::Requirement::CLAUDE_CODE,
+        kettle_ctl::show::InlineTarget::CodexHook => kettle_ctl::signing::Requirement::CODEX,
+    };
+    kettle_ctl::signing::signature(asker, requirement)
+        .ok()
+        .map(|_| asker)
 }
 
 /// The connecting process as the kernel names it, the executable it ran when
@@ -446,9 +472,14 @@ fn prepare(
             let sender = capture
                 .peer()
                 .map(|process| SenderIdentity::read(process, chain));
+            let harness = show
+                .inline
+                .zip(sender.as_ref())
+                .and_then(|(target, sender)| card_harness(target, sender));
             request.show = Some(Box::new(ShowAdmission {
                 request: show,
                 sender,
+                harness,
             }));
         }
         _ => {}
@@ -1740,6 +1771,48 @@ mod tests {
             program.executable.as_deref(),
             Some(std::path::Path::new("/tmp/earlier-program"))
         );
+    }
+
+    /// Only Claude Code or Codex, as their makers sign them, which ran
+    /// Kettle's own command line, can have a card: a sender that asked for
+    /// itself has none, nor does any other program.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn only_a_signed_harness_running_kettles_command_line_is_a_harness() {
+        let mut sleeper = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("start /bin/sleep");
+        let sleep = kettle_ctl::process::identity(sleeper.id()).expect("its identity");
+        let program = |process| super::ProgramIdentity {
+            process,
+            executable: None,
+            signature: None,
+        };
+        let peer = ProcessIdentity::new_for_tests(30, 300);
+        let asked_for_itself = super::SenderIdentity {
+            process: sleep,
+            executable: None,
+            asker: program(sleep),
+        };
+        let through_kettle = super::SenderIdentity {
+            process: peer,
+            executable: None,
+            asker: program(sleep),
+        };
+        use kettle_ctl::show::InlineTarget;
+        let found: Vec<_> = [InlineTarget::ClaudeHook, InlineTarget::CodexHook]
+            .into_iter()
+            .flat_map(|target| {
+                [
+                    super::card_harness(target, &asked_for_itself),
+                    super::card_harness(target, &through_kettle),
+                ]
+            })
+            .collect();
+        let _ = sleeper.kill();
+        let _ = sleeper.wait();
+        assert_eq!(found, [None; 4], "sleep is Apple's, not a harness's");
     }
 
     /// Kettle's own command line carries another program's request, so the

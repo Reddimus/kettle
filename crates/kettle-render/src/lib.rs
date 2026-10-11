@@ -13,7 +13,27 @@ mod bg_image;
 mod card_marks;
 mod card_scene;
 mod inline_cards;
-pub use inline_cards::InlineCards;
+/// A card a frame drew: its pane, its nonce, and the part of it inside its
+/// pane in surface pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PaintedCard {
+    pub pane: u64,
+    pub nonce: kettle_core::InlineNonce,
+    pub rect: [f32; 4],
+}
+
+impl PaintedCard {
+    /// Whether surface point (`x`, `y`) falls on it.
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        let [left, top, width, height] = self.rect;
+        x >= left && x < left + width && y >= top && y < top + height
+    }
+}
+
+pub use inline_cards::{
+    CardHarness, CardPlacement, CardPoster, CardRefusal, CardSpec, InlineCards, MAX_CARD_COLUMNS,
+    MAX_PANE_CARDS,
+};
 mod color;
 mod cursor_patch;
 mod cursor_policy;
@@ -1114,6 +1134,9 @@ pub struct Overlay {
     pub media_paste_receipt: Option<MediaPasteReceiptOverlay>,
     /// The shelf item the user opened, over its pane.
     pub media_viewer: Option<MediaViewerOverlay>,
+    /// The inline card a click at the pointer would open, as a frame drew
+    /// it; its visible part is outlined in the accent.
+    pub card_hover: Option<PaintedCard>,
     /// `Some(typed)` while the SSH launcher is open.
     pub ssh_query: Option<String>,
     /// Keyboard help for the SSH input lane. Ranked hosts are projected through
@@ -2934,6 +2957,14 @@ pub struct Renderer {
     card_image_shared: imgpipe::ImageShared,
     card_frames: Vec<inline_cards::CardFrame>,
     card_scene: card_scene::CardScene,
+    /// The cards the last frame drew, presented or not: the next frame
+    /// draws them again, so their shelf items' pixels must stay.
+    drawn_cards: Vec<PaintedCard>,
+    /// The cards on screen: those of the last frame presented. A press there
+    /// is the card's, so a frame that never reached the screen leaves them.
+    painted_cards: Vec<PaintedCard>,
+    /// For each of `painted_cards`, whether that frame showed its image.
+    painted_shown: Vec<bool>,
     card_text_renderer: TextRenderer,
     card_label_buffers: Vec<TextBuffer>,
     card_label_texts: Vec<String>,
@@ -4111,6 +4142,52 @@ mod live_screenshot_tests {
         (0..width * height)
             .flat_map(|pixel| [pixel as u8, 0, 0, 255])
             .collect()
+    }
+
+    /// The cards a press can hit are the ones on screen: a frame that never
+    /// reached it (a timed-out or occluded acquire) keeps the last presented
+    /// frame's, or a click could open a card the user cannot see, or miss one
+    /// that is still there.
+    #[test]
+    fn cards_reach_the_screen_only_with_a_presented_frame() {
+        let src = production_source();
+        let body = src
+            .split("pub fn render_frame_with_status_and_pre_present")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("render_frame_with_status_and_pre_present body");
+        let normalized = body.split_whitespace().collect::<Vec<_>>().join(" ");
+        let commit = "self.commit_painted_cards();";
+        let present = normalized
+            .find("self.gpu.queue.present(frame);")
+            .expect("presentation");
+        let headless = normalized
+            .find("// Headless (tests): the offscreen capture is the whole frame.")
+            .expect("headless branch");
+        let headless_end = headless
+            + normalized[headless..]
+                .find("return Ok(FrameOutcome::Occluded);")
+                .expect("headless return");
+        let commits: Vec<usize> = normalized.match_indices(commit).map(|(at, _)| at).collect();
+        assert_eq!(commits.len(), 2, "{commits:?}");
+        assert!(
+            headless < commits[0] && commits[0] < headless_end,
+            "a headless capture stands in for a presented frame"
+        );
+        assert!(
+            present < commits[1],
+            "only a presented frame shows its cards"
+        );
+        for field in ["painted_cards", "painted_shown"] {
+            assert_eq!(src.matches(&format!("self.{field} =")).count(), 0);
+            assert_eq!(src.matches(&format!("{field}.extend(")).count(), 0);
+            assert_eq!(src.matches(&format!("{field}.push(")).count(), 0);
+            assert_eq!(
+                src.matches(&format!("self.{field}.clone_from(")).count(),
+                1,
+                "only commit_painted_cards puts {field} on screen"
+            );
+        }
     }
 
     /// Metal returns `SurfaceError::Occluded` before it vends a drawable. The
@@ -5455,6 +5532,9 @@ impl Renderer {
             card_image_shared: shared.images,
             card_frames: Vec::new(),
             card_scene: card_scene::CardScene::default(),
+            drawn_cards: Vec::new(),
+            painted_cards: Vec::new(),
+            painted_shown: Vec::new(),
             card_text_renderer,
             card_label_buffers: Vec::new(),
             card_label_texts: Vec::new(),
@@ -5618,6 +5698,42 @@ impl Renderer {
 
     pub fn surface_size(&self) -> (u32, u32) {
         (self.config.width, self.config.height)
+    }
+
+    /// The cards the last frame drew, whether or not it reached the screen.
+    pub fn drawn_cards(&self) -> &[PaintedCard] {
+        &self.drawn_cards
+    }
+
+    /// The cards on screen: those the last presented frame drew.
+    pub fn painted_cards(&self) -> &[PaintedCard] {
+        &self.painted_cards
+    }
+
+    /// The cards on screen whose image the last presented frame showed: the
+    /// poster reached the GPU, not only the card's frame and status.
+    pub fn shown_cards(&self) -> impl Iterator<Item = &PaintedCard> + '_ {
+        self.painted_cards
+            .iter()
+            .zip(&self.painted_shown)
+            .filter_map(|(card, shown)| shown.then_some(card))
+    }
+
+    /// Put the frame's cards on screen, as presented: where each is, and
+    /// whether its image showed.
+    fn commit_painted_cards(&mut self) {
+        debug_assert_eq!(self.drawn_cards.len(), self.card_scene.shown.len());
+        self.painted_cards.clone_from(&self.drawn_cards);
+        self.painted_shown.clone_from(&self.card_scene.shown);
+    }
+
+    /// The card on screen under surface point (`x`, `y`), if any.
+    pub fn card_at(&self, x: f32, y: f32) -> Option<PaintedCard> {
+        self.painted_cards
+            .iter()
+            .rev()
+            .find(|card| card.contains(x, y))
+            .copied()
     }
 
     /// Line height used by chrome text buffers. Terminal rows may be shorter
@@ -6781,6 +6897,8 @@ impl Renderer {
         card_frames.truncate(panes.len());
         let mut card_scene = std::mem::take(&mut self.card_scene);
         card_scene.clear();
+        let mut drawn_cards = std::mem::take(&mut self.drawn_cards);
+        drawn_cards.clear();
         for (i, pv) in panes.iter().enumerate() {
             let (rx, ry, rw, rh) = pv.rect;
             // Pane separators / focus border. Both colors are config-
@@ -6889,6 +7007,7 @@ impl Renderer {
             let card_frame = &mut card_frames[i];
             if let Some(cards) = pv.inline_cards {
                 cards.recognize_into(pv.snap, card_frame);
+                let drawn_before = card_scene.drawn.len();
                 if let Some(pane_body) =
                     pane_backdrop_rect(pv.rect, bw, pane_titlebar_h, cfg.title_at_bottom)
                     && let Some(clip) = inline_image_clip(
@@ -6915,6 +7034,13 @@ impl Renderer {
                         },
                     );
                 }
+                drawn_cards.extend(card_scene.drawn[drawn_before..].iter().map(
+                    |&(nonce, rect)| PaintedCard {
+                        pane: pv.id,
+                        nonce,
+                        rect,
+                    },
+                ));
             } else {
                 card_frame.clear();
             }
@@ -7034,21 +7160,32 @@ impl Renderer {
                         1.0,
                     ));
                 }
-                // Quick-select hint label chips.
+                // Quick-select hint label chips, with the menus on top of
+                // everything, inline cards included: a card's label sits on
+                // its poster and provenance tab. Hint mode closes any menu
+                // first, so nothing else is up there. A chip is cut to its
+                // pane, as its label is, so one at the last column never
+                // covers the next pane.
                 for hint in &overlay.hint_labels {
                     let n = hint.label.chars().count().max(1) as f32;
-                    quads.push(rect(
-                        grid_origin.0 + hint.col as f32 * cw,
-                        grid_origin.1 + hint.row as f32 * ch,
-                        n * cw,
-                        ch,
-                        if hint.dim {
-                            theme.palette[8]
-                        } else {
-                            cfg.search_background.unwrap_or(theme.palette[3])
-                        },
-                        if hint.dim { 0.6 } else { 0.96 },
-                    ));
+                    let left = grid_origin.0 + hint.col as f32 * cw;
+                    let top = grid_origin.1 + hint.row as f32 * ch;
+                    let (x0, y0) = (left.max(rx), top.max(ry));
+                    let (x1, y1) = ((left + n * cw).min(rx + rw), (top + ch).min(ry + rh));
+                    if x1 > x0 && y1 > y0 {
+                        menu_q.push(rect(
+                            x0,
+                            y0,
+                            x1 - x0,
+                            y1 - y0,
+                            if hint.dim {
+                                theme.palette[8]
+                            } else {
+                                cfg.search_background.unwrap_or(theme.palette[3])
+                            },
+                            if hint.dim { 0.6 } else { 0.96 },
+                        ));
+                    }
                 }
                 if let Some(preedit) = &overlay.ime_preedit {
                     let cells = unicode_width::UnicodeWidthStr::width(preedit.text.as_str()).max(1);
@@ -7137,7 +7274,35 @@ impl Renderer {
             }
         }
 
+        // The card a click would open: an accent outline just inside its
+        // visible part, over its frame. Static, so there is no motion to
+        // reduce.
+        // Only over that same card, drawn there by this frame: one that
+        // moved, or another card in its place, leaves no outline behind.
+        if let Some(card) = overlay.card_hover
+            && drawn_cards.contains(&card)
+        {
+            let [x, y, width, height] = card.rect;
+            let edge = (2.0 * self.scale)
+                .round()
+                .max(1.0)
+                .min(width / 2.0)
+                .min(height / 2.0);
+            let accent = self.ui_accent(cfg, theme);
+            over.push(rect(x, y, width, edge, accent, 1.0));
+            over.push(rect(x, y + height - edge, width, edge, accent, 1.0));
+            over.push(rect(x, y + edge, edge, height - 2.0 * edge, accent, 1.0));
+            over.push(rect(
+                x + width - edge,
+                y + edge,
+                edge,
+                height - 2.0 * edge,
+                accent,
+                1.0,
+            ));
+        }
         self.card_frames = card_frames;
+        self.drawn_cards = drawn_cards;
         self.card_scene = card_scene;
         if self.card_posters.is_none() && !self.card_scene.posters.is_empty() {
             // Preview pressure cannot prevent a text window. Retry admission
@@ -8604,9 +8769,14 @@ impl Renderer {
             menu_q.push(rect(x, y + height - 1.0, width, 1.0, palette.border, 1.0));
             menu_q.push(rect(x, y, 1.0, height, palette.border, 1.0));
             menu_q.push(rect(x + width - 1.0, y, 1.0, height, palette.border, 1.0));
-            for button in [geometry.previous, geometry.next, Some(geometry.close)]
-                .into_iter()
-                .flatten()
+            for button in [
+                geometry.previous,
+                geometry.next,
+                geometry.open_outside,
+                Some(geometry.close),
+            ]
+            .into_iter()
+            .flatten()
             {
                 menu_q.push(rect(
                     button.0,
@@ -9080,7 +9250,8 @@ impl Renderer {
                 custom_glyphs: &[],
             });
         }
-        // Hint labels over the focused pane (chips drawn above as quads).
+        // Hint labels over the focused pane, drawn with the menus, above
+        // their chips and every card.
         if let Some((frx, fry, frw, frh)) = focus_origin {
             let focus_grid_origin = pane_grid_origin(
                 (frx, fry, frw, frh),
@@ -9092,7 +9263,7 @@ impl Renderer {
             // the theme-yellow chip) unless overridden.
             let lab = cfg.search_foreground.unwrap_or(theme.background);
             for (i, hint) in overlay.hint_labels.iter().enumerate() {
-                areas.push(TextArea {
+                menu_areas.push(TextArea {
                     buffer: &self.hint_buffers[i],
                     left: focus_grid_origin.0 + hint.col as f32 * cw,
                     top: focus_grid_origin.1 + hint.row as f32 * ch,
@@ -9838,6 +10009,7 @@ impl Renderer {
                 live_window: false,
                 ..scene_facts
             });
+            self.commit_painted_cards();
             return Ok(FrameOutcome::Occluded);
         };
         let (frame, reconfigure_after_present) = match acquired {
@@ -9975,6 +10147,7 @@ impl Renderer {
         }
         self.frames_presented += 1;
         self.last_scene = Some(scene_facts);
+        self.commit_painted_cards();
         Ok(FrameOutcome::Presented)
     }
 

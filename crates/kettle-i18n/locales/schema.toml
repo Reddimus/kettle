@@ -137,6 +137,27 @@ context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row.
 [messages.menu_new_window]
 context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row."
 
+[messages.menu_open_in_kettle]
+context = "crates/kettle-ui/src/app.rs card menu: right-click menu row on an inline media card that opens its item in Kettle's own media viewer."
+
+[messages.menu_open_in_preview]
+context = "crates/kettle-ui/src/media/external.rs: right-click menu row on an inline media card or in the media viewer, macOS only, that opens a copy of the image in Apple's Preview app. 'Preview' is the app's name; Spanish macOS calls it 'Vista Previa'."
+
+[messages.menu_open_in_image_viewer]
+context = "crates/kettle-ui/src/media/external.rs: right-click menu row on an inline media card or in the media viewer, Linux only, that opens a copy of the image in GNOME's image viewer."
+
+[messages.notify_title_open_image]
+context = "crates/kettle-ui/src/app.rs act_on_media: desktop notification title when opening a copy of a media item in the image viewer did not work."
+
+[messages.notify_body_open_image_busy]
+context = "crates/kettle-ui/src/app.rs act_on_media: desktop notification body when too many opens are already running."
+
+[messages.notify_body_open_image_copy]
+context = "crates/kettle-ui/src/app.rs act_on_media: desktop notification body when the private PNG copy could not be written, or the item's pixels are no longer held."
+
+[messages.notify_body_open_image_viewer]
+context = "crates/kettle-ui/src/app.rs act_on_media: desktop notification body when the permitted image viewer (Preview on macOS, Eye of GNOME on Linux) is missing or failed its check."
+
 [messages.menu_open_link]
 context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row. Shown when the right-click lands on a link."
 
@@ -1042,6 +1063,9 @@ context = "crates/kettle-ui/src/settings.rs categories(): Settings category tab 
 [messages.settings_field_agent_previews]
 context = "crates/kettle-ui/src/settings.rs categories(): Settings row. Lets AI agents show images and diagrams in Kettle; it grants no screen reading or typing."
 
+[messages.settings_field_agent_previews_claude_code]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row under Agents. Offers Claude Code, in new panes, Kettle's plugin so its images and diagrams show as cards."
+
 [messages.settings_field_background_animation]
 context = "crates/kettle-ui/src/settings.rs categories(): Settings row label. When the animated background moves."
 
@@ -1247,6 +1271,24 @@ context = "crates/kettle-ui/src/app.rs agent_previews_note: footer note on the A
 [messages.settings_note_blur]
 context = "crates/kettle-ui/src/app.rs settings_footer_note: shown on the Window blur and Background opacity rows."
 
+[messages.settings_note_claude_code_forbidden]
+context = "crates/kettle-ui/src/app.rs claude_code_note: footer note on the Claude Code previews row when the organization's Claude Code policy (disableSideloadFlags) forbids plugins that the environment names, so new panes get none."
+
+[messages.settings_note_claude_code_needs_previews]
+context = "crates/kettle-ui/src/app.rs claude_code_note: footer note on the Claude Code previews row when agent previews are off, so new panes get no Claude Code plugin. Infinitive in Spanish, like the other notes."
+
+[messages.settings_note_claude_code_new_panes]
+context = "crates/kettle-ui/src/app.rs claude_code_note: footer note on the Claude Code previews row while new panes get the plugin, or the row is off: Claude Code started in a new pane gets Kettle's plugin, and Kettle edits none of Claude Code's settings."
+
+[messages.settings_note_claude_code_translocated]
+context = "crates/kettle-ui/src/app.rs claude_code_note: footer note on the Claude Code previews row when macOS runs Kettle from a temporary translocated copy whose path does not last. Infinitive in Spanish, like the other notes."
+
+[messages.settings_note_claude_code_unavailable]
+context = "crates/kettle-ui/src/app.rs claude_code_note: footer note on the Claude Code previews row when Kettle could not write or check its plugin directory."
+
+[messages.settings_note_claude_code_unsupported]
+context = "crates/kettle-ui/src/app.rs claude_code_note: footer note on the Claude Code previews row when this platform cannot check the plugin directory yet (Windows)."
+
 [messages.settings_note_language]
 context = "crates/kettle-ui/src/app.rs settings_footer_note: footer note while the Language row is focused. A new window keeps the current language; only a restart changes it."
 
@@ -1410,6 +1452,9 @@ context = "crates/kettle-render/src/card_scene.rs: status inside an owned inline
 [messages.inline_card_unavailable]
 context = "crates/kettle-render/src/card_scene.rs: status inside an owned inline media card whose poster is unavailable."
 
+[messages.inline_card_tip]
+context = "crates/kettle-render/src/card_scene.rs: a short, one-time tip drawn on a strip along the foot of the first inline media card a user sees, saying that clicking the card opens it in Kettle's media viewer. Keep it very short: it must fit a card a few cells wide."
+
 [messages.media_shelf_untitled]
 context = "crates/kettle-ui/src/app.rs ctl_show: title of a media shelf item an agent sent as inline image or SVG bytes without a title. The item is a picture; keep it short."
 
@@ -1445,12 +1490,25 @@ context = "crates/kettle-render/src/media_viewer.rs: footer of the media viewer 
 [messages.media_viewer_hint_single]
 context = "crates/kettle-render/src/media_viewer.rs: footer of the media viewer when the shelf has one item. Esc is the key name."
 
+[messages.media_viewer_hint_open_preview]
+context = "crates/kettle-ui/src/media/external.rs Viewer::hint: appended to the media viewer's footer after ' · ' on macOS. O is the letter key that opens the item in Apple's Preview app; 'Preview' is the app's name, which Spanish macOS calls 'Vista Previa'."
+
+[messages.media_viewer_hint_open_image_viewer]
+context = "crates/kettle-ui/src/media/external.rs Viewer::hint: appended to the media viewer's footer after ' · ' on Linux. O is the letter key that opens the item in GNOME's image viewer."
+
 [messages.media_viewer_released]
 context = "crates/kettle-ui/src/app.rs media_viewer_projection: shown in the media viewer in place of an image whose pixels Kettle released to stay within its memory budget."
 
 [messages.media_viewer_a11y]
 context = "crates/kettle-ui/src/app.rs media_viewer_accessibility: screen-reader name of the open media viewer: the item's place on the shelf (index of count, counting from 1), its title and its detail line."
 args = [{ name = "index", type = "u64" }, { name = "count", type = "u64" }, { name = "title", type = "str" }, { name = "detail", type = "str" }]
+
+[messages.card_a11y]
+context = "crates/kettle-ui/src/app.rs card_accessibility_node: screen-reader name of an inline media card drawn in a terminal pane, a button that opens the item in Kettle's media viewer. title is the item's title (as the agent or command named it); detail is its kind, pixel size and sender, as the viewer shows them, e.g. \"Image · 640×480 · From this pane\"."
+args = [{ name = "title", type = "str" }, { name = "detail", type = "str" }]
+
+[messages.card_a11y_open]
+context = "crates/kettle-ui/src/app.rs card_accessibility_node: screen-reader description of an inline media card's button: what activating it does. 'Kettle' is the product name; 'media viewer' is Kettle's own viewer, not another app."
 
 [messages.window_title_new_media]
 context = "crates/kettle-ui/src/app.rs desired_window_title: prefix of the OS window title while the focused pane's media shelf holds items the user has not opened. ASCII only: Linux window-manager title fonts may lack symbols. count is how many."

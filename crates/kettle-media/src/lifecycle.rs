@@ -1816,13 +1816,21 @@ mod tests {
         assert_eq!(fake.reaped.load(Ordering::SeqCst), 1);
     }
 
+    /// A render waiting for the slot another holds gives up at its own
+    /// deadline. The one holding it renders until the test cancels it, so
+    /// a slow runner cannot end it before the waiter does.
     #[test]
     fn admission_deadline_includes_waiting_for_another_render() {
         use crate::client::RenderError;
+        let budgets = Budgets {
+            render: Some(Duration::from_secs(5)),
+            ..FAST
+        };
         let fake = Fake::new(vec![Script::silent_with(ready(build_id()))]);
-        let client = client(&fake);
+        let client = WorkerClient::with(build_id(), Box::new(Arc::clone(&fake)), budgets);
+        let holder = RenderControl::default();
         std::thread::scope(|scope| {
-            let rendering = scope.spawn(|| client.render(&job(1)));
+            let rendering = scope.spawn(|| client.render_with_control(&job(1), &holder));
             wait_for_count(&fake.observed_jobs, 1);
             let control = RenderControl::with_deadline(Instant::now() + Duration::from_millis(50));
             assert_eq!(
@@ -1834,7 +1842,8 @@ mod tests {
                 "mutex waiter outlived the rendering job"
             );
             assert_eq!(fake.spawn_calls.load(Ordering::SeqCst), 1);
-            assert_eq!(rendering.join().unwrap(), Err(FailureCode::RenderTimeout));
+            holder.cancel();
+            assert_eq!(rendering.join().unwrap(), Err(RenderError::Cancelled));
         });
     }
 
