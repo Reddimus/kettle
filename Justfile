@@ -682,6 +682,15 @@ macos-standing-session LABEL *ARGS:
 macos-perf:
     @echo "macos-perf is a macOS desktop benchmark."
 
+# Live smoke of media lanes under Xvfb: an image, an SVG, a Mermaid diagram
+# and a video shown and rendered in lanes, the video played and stepped with
+# native X input (a control client may do neither), the worker's sandbox
+# flags, and a Spanish lane for review. Needs xvfb-run, ffmpeg and xdotool;
+# results go under target/diagnostics/lane-media-smoke/.
+[linux]
+lane-media-smoke: release media-worker
+    xvfb-run -a -s "-screen 0 1600x1000x24" env LIBGL_ALWAYS_SOFTWARE=1 python3 scripts/check-lane-media-smoke.py --kettle ./target/release/kettle --worker ./target/media-worker/kettle-media-worker
+
 # === Install / uninstall ===========================================
 
 # Drop a build under ~/.local/ (scripts/install.sh — Linux
