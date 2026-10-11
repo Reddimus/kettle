@@ -16,11 +16,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   call, where Kettle paints the image. The model is told only that the media
   shows below the call.
 - `kettle agent-setup --print` prints a `codex` shell function to review and
-  add to your shell's startup file. In a Kettle pane, an interactive Codex
-  session started through it (fresh, `codex resume` or `codex fork`) gets
-  this Kettle's display server for that launch only, so `kettle_show` sends
-  media to the pane's shelf. Every other Codex command runs unchanged, and
-  Kettle edits neither the shell's startup files nor Codex's configuration.
+  add to your shell's startup file. In a Kettle pane, with Codex CLI 0.159
+  or a later 0.x, an interactive Codex session started through it (fresh,
+  `codex resume` or `codex fork`) gets this Kettle's display server for that
+  launch only, so `kettle_show` sends media to the pane's shelf; such a
+  session runs without Codex's shared background server, so it does not
+  appear in `codex agents`. Every other Codex command, and any other version,
+  runs unchanged, and Kettle edits neither the shell's startup files nor
+  Codex's configuration.
   `--status` reports whether the shell reaches its Kettle with agent previews
   on, what a launch would get, and Claude Code's plugin and policy state for
   the pane, and `--uninstall` prints how
@@ -85,8 +88,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 - Inline media-card rendering foundation: bounded marker capture and registered
   card recognition, owned fallback glyphs, clipped posters, caller labels and
-  selection tint in Grid and Legacy text modes. Registrations remain test-only;
-  production display callers are introduced separately. Preview accounts are
+  selection tint in Grid and Legacy text modes. Preview accounts are
   separate from terminal images, and unavailable preview capacity leaves text
   windows usable.
 
@@ -109,8 +111,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   place is labeled unverified with the program the system names for it (for
   `kettle show` and `kettle mcp`, the program that ran them) and, on macOS,
   who signed that program's code once macOS validates it.
-  Each pane keeps its last eight items; `list_panes` reports them. A push
-  never opens anything on screen.
+  Each pane keeps up to eight items: a full shelf lets go of the one viewed
+  least recently, never the one its lane shows; `list_panes` reports them.
+  Showing the same file again replaces its item in place, and `--key` (an
+  agent's `key`) names the item to replace. A push never opens anything on
+  screen. Media previews run on macOS and Linux; elsewhere the worker says
+  `unsupported_platform`.
 - `kettle_show` takes inline Mermaid source (`mermaid`) as well as a file
   `path`, and the full MCP server (`kettle mcp`) offers it too. Its
   instructions follow where the server runs: inside a Kettle pane they say
@@ -173,8 +179,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Cmd+wheel (Ctrl+wheel off macOS) at the pointer zoom the picture, the
   wheel or a drag pans it, and `⤢` fits it again. Also as
   `preview_zoom_in`, `preview_zoom_out` and `preview_fit`.
-- An agent's Mermaid diagram keeps its inline card's picture when its
-  preview lane draws it on another background.
+- An agent's Mermaid diagram card shows the new picture when its preview
+  lane draws it again on another background.
 - Preview a diagram an agent printed: `/copy` it in Claude Code or Codex and
   use `render_clipboard_as_diagram`, or select the reply and use
   `render_selection_as_diagram` (also on right-click), and the lane renders
@@ -217,7 +223,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   extended.
 - The media worker can classify a file by its content, raster or SVG,
   whatever it is called, and says what it rendered. Kettle and its worker now
-  speak media protocol 3; a worker from an older build is refused until
+  speak media protocol 7; a worker from an older build is refused until
   Kettle restarts, as before.
 - `kettle-media`, a new crate, defines the bounded media protocol for the
   agent visuals: jobs and results, caps, source authorization, the
@@ -243,9 +249,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   name, and decodes PNG, JPEG, WebP, BMP and a GIF's first frame only after
   checking the image's size against the decoded caps. The image is scaled
   down to fit the requested box, never enlarged past its own size, keeping its
-  aspect ratio, without transparent pixels bleeding color. Video rendering
-  remains later work; GUI preview
-  callers are introduced separately.
+  aspect ratio, without transparent pixels bleeding color.
 - The media worker renders Mermaid diagrams, every family merman 0.8.0
   pins, from flowcharts and sequences to gantt charts, mind maps and
   timelines: `kettle show diagram.mmd`, a small one on stdin, or an agent's
@@ -277,8 +281,6 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   both executables; updates journal the pair. The first restart after a Linux
   4.9-to-5.0 update installs the worker from packaged compatibility data through
   the same recovery journal. macOS updates exchange the whole paired bundle.
-  Raster and SVG are internal services; preview UI and public display callers
-  are introduced separately.
 - `kettle ctl dispatch_ui_key` drives quick-select hint mode too, in the order
   the keyboard reaches it: right after a confirmation.
 - In quick-select hint mode (`Ctrl+Shift+H`), holding Shift while typing a
@@ -310,7 +312,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   QuickTime through AVFoundation; any other video needs your own ffmpeg and
   ffprobe, which Kettle finds only in fixed places, trusts only when no one
   else could have changed them, and runs contained, with a deadline. Kettle
-  never installs them. The display server never offers the tool.
+  never installs them. The display server never offers the tool. `--start`
+  and `--end` narrow the window, `--at` takes one frame, `--count` takes 1
+  to 16 (9 by default), and `--max-edge` sets the sheet's longer edge, up to
+  2560 pixels (1568 by default).
 - Agents and `kettle show` can show a video: it lands as its poster, the
   middle frame, with a play glyph and its length on its card, and the lane,
   `kettle show` and `kettle_show`'s result say its size, codec, length and
@@ -348,12 +353,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   control client or a Lua script may pause or mute it, never play, move or
   unmute it.
 - The `preview_play` action plays a video's silent preview instead: eight
-  frames from across the video, shown in turn, each for its share of the
-  length, until `■` stops it. The sandboxed worker makes them within two seconds, or the
+  frames from across the video, shown in turn, each for an eighth of its
+  length, at most twelve a second and at least two, until `■` stops it. The sandboxed worker makes them within two seconds, or the
   poster stays and the lane says why. With `video-preview-hover = on`, the
   pointer resting on the picture loops a preview you played for up to four
-  seconds, unless `reduce-motion` (by default, macOS's Reduce Motion) says
-  otherwise. It never starts on its own, never for a control client or a Lua
+  seconds, unless `reduce-motion` says otherwise: `auto`, the default,
+  follows macOS's Reduce Motion and holds the hover preview back on Linux,
+  where the system does not say; `off` allows it there. It never starts on its own, never for a control client or a Lua
   script, and never makes a sound.
 - `kettle ctl get_state` says which video decoders a worker uses, under
   `media.video`: AVFoundation then your ffmpeg on macOS, your ffmpeg on
@@ -411,8 +417,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   as before, though a file link's `?query` or `#fragment` is no longer passed
   on, and one with an encoded `/` or `\` (`%2F`, `%5C`) is refused.
 - `TRANSLATING.md` explains how Kettle's text is translated and reviewed, and
-  each Spanish message's review status is recorded by key. The Spanish
-  catalogue is a draft until a fluent reviewer accepts it.
+  each Spanish message's review status is recorded by key. Every Spanish
+  message has been reviewed in context on the rendered Spanish build and
+  accepted.
 - The tab bar's numbered fallback label (`tab 2`) and an untitled pane's
   screen-reader name follow the UI language. `kettle ctl` tab titles keep the
   English `tab 2`.
@@ -421,12 +428,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Screen readers read a picker row's hint after its name, such as a
   command's shortcut or a theme's appearance.
 - Stepping through themes (`next_theme`, `prev_theme`, and ←/→ on the Settings
-  Theme row) stays with the current theme's appearance and moves to the most
-  similar theme each time, judged by background, foreground and accent. It used
-  to follow the themes' names or the popular list's order, flipping between
-  light and dark palettes. `toggle_light_dark` still switches appearance.
-- Close confirmations count in words that match the number: "Close tab with 1
-  pane?", "Close window with 3 panes?". The paste prompt says "1 line" or "2 lines". They
+  Theme row) stays with the current theme's appearance and follows an order
+  of likeness, judged by background, foreground and accent; the Settings row
+  steps through the popular themes in that order. It used to follow the
+  themes' names or the popular list's order, flipping between light and dark
+  palettes. `toggle_light_dark` still switches appearance.
+- Close confirmations name the tab or window and count in words that match
+  the number: "Close tab with 1 pane?", "Close window with 3 panes?" rather
+  than "Close 3 panes?". The paste prompt says "1 line" or "2 lines". They
   used to say "pane(s)" and "lines" whatever the count.
 
 ### Fixed
@@ -489,12 +498,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   preview while dragging a pane now matches the pane the split creates,
   rounded the same way.
 
-- The window close confirmation names the window: "Close window with 3
-  panes?" rather than "Close 3 panes?". In Spanish, the pasted-path receipt
-  titles said "pasted image" and "pasted video" where the card shows a pasted
-  path; they now say "Ruta de imagen" and "Ruta de video". "Ocultar el
-  puntero al escribir" replaces "ratón", since the setting also hides the
-  trackpad pointer.
+- In Spanish, the pasted-path receipt titles said "pasted image" and "pasted
+  video" where the card shows a pasted path; they now say "Ruta de imagen"
+  and "Ruta de video". "Ocultar el puntero al escribir" replaces "ratón",
+  since the setting also hides the trackpad pointer.
 
 - Automatic window accents follow a palette change that keeps the theme's
   name, such as a config reload that edits one palette color. Accents were
