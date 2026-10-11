@@ -2,6 +2,7 @@
 
 #[cfg(unix)]
 mod executable;
+pub mod mutate;
 #[cfg(unix)]
 pub use executable::copy_executable_fixture;
 
