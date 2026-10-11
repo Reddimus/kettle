@@ -1645,6 +1645,9 @@ context = "crates/kettle-config/src/palette.rs: command palette row that starts 
 [messages.palette_video_play]
 context = "crates/kettle-config/src/palette.rs: command palette row for video_play, which plays the video the focused pane's preview lane shows, in the lane, or pauses it."
 
+[messages.palette_video_mute]
+context = "crates/kettle-config/src/palette.rs: command palette row for video_mute, which mutes the sound of the video playing in the focused pane's preview lane, or lets it be heard again."
+
 [messages.palette_preview_zoom_in]
 context = "crates/kettle-config/src/palette.rs: command palette entry for preview_zoom_in, which magnifies the image in the focused pane's preview lane by one step about its center."
 
@@ -1829,10 +1832,16 @@ context = "crates/kettle-ui/src/app.rs lane_notice_text: no decoder Kettle may u
 context = "crates/kettle-ui/src/app.rs lane_notice_text: Kettle decodes video only in its sandbox, and this system cannot provide one, so there is no preview."
 
 [messages.media_lane_a11y_play_video]
-context = "crates/kettle-ui/src/app.rs: screen-reader name and tooltip of a preview lane's button that plays the video the lane shows, in the lane, from where it stands. It plays without sound."
+context = "crates/kettle-ui/src/app.rs: screen-reader name and tooltip of a preview lane's button that plays the video the lane shows, in the lane, from where it stands, with its sound unless muted."
 
 [messages.media_lane_a11y_pause_video]
 context = "crates/kettle-ui/src/app.rs: screen-reader name and tooltip of the same button while the video plays; pressing it holds the frame shown."
+
+[messages.media_lane_a11y_mute_video]
+context = "crates/kettle-ui/src/app.rs: screen-reader name and tooltip of a preview lane's sound button while the video's sound is heard; pressing it silences the sound and the video plays on."
+
+[messages.media_lane_a11y_unmute_video]
+context = "crates/kettle-ui/src/app.rs: screen-reader name and tooltip of the same button while the video is muted; pressing it lets its sound be heard again."
 
 [messages.media_lane_a11y_video_position]
 context = "crates/kettle-ui/src/app.rs: screen-reader name of the bar under a playing video, a slider that moves the video to another moment."
@@ -1849,7 +1858,22 @@ args = [{ name = "time", type = "str" }, { name = "length", type = "str" }]
 context = "crates/kettle-ui/src/app.rs lane_notice_text: shown in a preview lane's footer while the video the user asked to play is opened; the poster stays until its first frame."
 
 [messages.media_lane_notice_video_playing]
-context = "crates/kettle-ui/src/app.rs lane_notice_text: shown in a preview lane's footer while its video plays, because Kettle plays video without its sound."
+context = "crates/kettle-ui/src/app.rs: shown in a preview lane's footer while its video plays without sound, when no sound was asked for."
+
+[messages.media_lane_notice_video_muted]
+context = "crates/kettle-ui/src/app.rs: shown in a preview lane's footer while its video plays with its sound muted by the user."
+
+[messages.media_lane_notice_video_no_sound_track]
+context = "crates/kettle-ui/src/app.rs: shown in a preview lane's footer while its video plays, saying why there is no sound: the video has no sound of its own."
+
+[messages.media_lane_notice_video_silent_decoder]
+context = "crates/kettle-ui/src/app.rs: shown in a preview lane's footer while its video plays, saying why there is no sound: the video plays through ffmpeg, which Kettle runs for the picture only. ffmpeg is a program's name, verbatim."
+
+[messages.media_lane_notice_video_sound_unsupported]
+context = "crates/kettle-ui/src/app.rs: shown in a preview lane's footer while its video plays, saying why there is no sound: the video's sound is in a format that cannot be played here."
+
+[messages.media_lane_notice_video_sound_unavailable]
+context = "crates/kettle-ui/src/app.rs: shown in a preview lane's footer while its video plays, saying why there is no sound: the computer's sound output could not be used, or stopped working while the video played."
 
 [messages.media_lane_notice_video_failed]
 context = "crates/kettle-ui/src/app.rs lane_notice_text: the video could not be opened or stopped while it played; the last frame or the poster stays."
