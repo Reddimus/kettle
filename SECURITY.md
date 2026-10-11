@@ -218,8 +218,11 @@ Reports that fit any of these are welcome:
   file in a worker of its own (see Video playback sessions), under the same
   rules: the user's own gesture, never a control request, a Lua action or a
   changed file; its frames are checked to be the size it opened at before a
-  byte of their pixels is read, charged to the same account and held by the
-  lane, never the item, and it plays no sound.
+    byte of their pixels is read, charged to the same account and held by the
+  lane, never the item. Its sound plays only from that worker, granted sound
+  on macOS only when asked for (see Media worker sandbox), and only once the
+  user played it; a control request or a Lua action may mute it, never
+  unmute it.
   While the user has given a lane the keyboard (`focus_preview`), no key
   pressed, chord, input-method text or control client's
   `send_keys`/`send_text` reaches a pane in that window; getting one
@@ -317,8 +320,9 @@ Reports that fit any of these are welcome:
 - **Video playback sessions** — a video the user plays runs in a media
   worker of its own, which confines itself to the one file and its decoder,
   exactly as a video job does, before reading a byte of it, and stays
-  confined for the whole session, granted sound (see Media worker sandbox)
-  only on macOS and only when sound was asked for. It reads nothing from
+    confined for the whole session, granted sound (see Media worker sandbox)
+  only on macOS, only when sound was asked for, and then with Apple's
+  decoder alone: an external decoder never runs with that grant. It reads nothing from
   the parent but one-byte commands, writes frames only of the size it
   opened at, decodes
   only while playing into three buffers, and ends when the parent closes

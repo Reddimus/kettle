@@ -729,7 +729,7 @@ lane the keyboard, and its footer says "Keyboard: preview": the arrows move
 the picture (or scroll a source), Page Up and Page Down show a gallery's
 previous and next diagram, `+` and `-` zoom, `0` fits it (or shows a source
 from its start), `c` copies, Space plays or pauses a video (or stops its
-silent preview), Left and Right step a video five seconds while it shows
+silent preview), `m` mutes or unmutes its sound, Left and Right step a video five seconds while it shows
 in the lane, and every other key and chord, Enter,
 digits and Kettle's own shortcuts included, does nothing, so nothing typed
 reaches the program in the pane (Option chords count on macOS). Esc, a
