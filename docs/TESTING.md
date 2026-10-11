@@ -362,6 +362,7 @@ Current performance automation is native to the supported platforms:
 ```sh
 just macos-perf
 just macos-standing
+just macos-avsync
 just linux-perf
 ```
 
@@ -376,6 +377,17 @@ after `--latency-check`), since it posts keys and needs its probe's grants. A pu
 machine quiet. See [scripts/perf/README.md](../scripts/perf/README.md). The Linux
 comparator remains a narrower diagnostic gate and requires the documented peer
 terminals and a real X11 or Wayland session.
+
+`just macos-avsync` measures a lane's A/V sync from real presentation times.
+For each flash of a fixture it compares when the window server displayed it
+with when its click reached the system mix, plus the output device's
+latency. It does that after a native play press and after each of three
+native seeks, against the −125 to +45 ms target. Each run launches its own
+Kettle and plays the fixture out loud, so it needs Screen Recording for the
+terminal that runs it and an uncovered window. `just macos-avsync-self-test`
+is its GUI-free part: the analysis on synthetic captures, including both
+edges of the target, recovery after a seek, a dropped click and the
+refusals; and the probe's pure helpers. CI runs it on macOS.
 
 The standing self-test also checks schema-1 `.dat` reconstruction, schema-2
 reads and schema-3 absence rules; typed MiB/rate/signed comparisons; metric

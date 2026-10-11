@@ -345,6 +345,13 @@ vm-launcher-test:
 macos-standing-self-test:
     python3 scripts/perf/macos-standing-self-test.py
 
+# GUI-free checks for macos-avsync.py's capture analysis (pairing, the
+# latency band, recovery, refusals) and avsync-probe's pure helpers.
+[macos]
+macos-avsync-self-test:
+    python3 scripts/perf/macos-avsync.py --self-test
+    tmp=$(mktemp -d) && swiftc -O -swift-version 5 -o "$tmp/avsync-probe" scripts/perf/macos-avsync/avsync-probe.swift && "$tmp/avsync-probe" --self-test; status=$?; rm -rf "$tmp"; exit $status
+
 # Pin the eligibility rule in macos-compare.sh's embedded scorer: Kettle-only
 # measurements cannot count as competitive evidence. The fixture is GUI-free
 # and portable even though the comparator it guards is macOS-specific.
@@ -407,7 +414,7 @@ full-native-gates: icons-check-required package-templates update-manifest-test r
     @echo "NOT APPLICABLE on Linux: macOS actool and native appearance gates."
 
 [macos]
-full-native-gates: icons-check-required package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test icns-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke split-exit-resize-smoke text-presentation-smoke line-edit-chords-smoke dock-menu-smoke macos-compare-score-self-test macos-standing-self-test agent-cli-smoke
+full-native-gates: icons-check-required package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test icns-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke split-exit-resize-smoke text-presentation-smoke line-edit-chords-smoke dock-menu-smoke macos-compare-score-self-test macos-standing-self-test macos-avsync-self-test agent-cli-smoke
     @echo "NOT APPLICABLE on macOS: Linux installer and Xvfb gates."
 
 # === End-to-end smoke ==============================================
@@ -654,6 +661,15 @@ macos-perf:
 [macos]
 macos-standing *ARGS:
     python3 scripts/perf/macos-standing.py {{ARGS}}
+
+# Measure a lane's A/V sync: each run launches a Kettle of its own, plays a
+# flash/click fixture out loud, and judges every flash against its click
+# (scripts/perf/README.md). Nothing else may play, the window must stay
+# uncovered, and the terminal that runs it needs Screen Recording. Results go
+# under target/perf-results/avsync/.
+[macos]
+macos-avsync *ARGS: release media-worker
+    python3 scripts/perf/macos-avsync.py run --kettle ./target/release/kettle --worker ./target/media-worker/kettle-media-worker {{ARGS}}
 
 # One publication session against the installed app, with the publication
 # defaults, into a new target/perf-results/sessions/<date-time>-<LABEL>/.

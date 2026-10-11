@@ -32,6 +32,55 @@ just macos-perf
 just macos-compare-score-self-test
 ```
 
+## macOS A/V sync
+
+`macos-avsync.py` measures how far a video's sound and picture drift apart
+while it plays in a lane, using real presentation times rather than decoder
+timestamps. It plays a fixture out loud: 40 s of black at 30 frames a
+second, with a white frame pair and a 20 ms 1 kHz click at 0.5 s past each
+second. `avsync-probe` (`macos-avsync/avsync-probe.swift`) streams the
+lane's picture and the system's sound through ScreenCaptureKit, both
+stamped on the host clock. For each flash it records when the window server
+displayed it, and for each click when the system mix had it.
+
+```sh
+just macos-avsync               # three runs
+just macos-avsync --runs 5
+just macos-avsync-self-test     # GUI-free; CI runs it
+```
+
+Each run launches a Kettle of its own with an isolated configuration. The
+script presses the lane's play control natively, gives the lane the keyboard
+through ctl, and steps the video back five seconds with a native Left at 10,
+16 and 22 s. A control client may neither start nor step a video, which is
+why those presses are native. The sync error is E = t_video_display −
+t_audio_output, positive when the sound is early, and the target is
+−125 ms ≤ E ≤ +45 ms after ITU-R BT.1359-1's detectability thresholds. That
+target must hold for every pair from a segment's recovery onwards. A
+segment is the playback after the press, or after one of the seeks.
+
+Each E is a band, not a point. A click's output time is its time in the
+tap plus the output device's latency and stream latency. Where that tap
+time falls between the mix and its I/O, a safety offset and an I/O buffer
+apart, is not known. So each E spans that interval, at the device's rate,
+and a pass needs the whole band inside the target. The panel's own response
+is not in the flash's time.
+
+At 30 frames a second on a 60 Hz display, each flash meets the same phase
+of the refresh until the next seek. A run therefore samples one phase per
+segment; the seeks and the runs sample the spread.
+
+The worker is staged beside a copy of Kettle and signed with the machine's
+one Developer ID Application identity (`--sign-identity` names another),
+since Kettle runs only a worker its own signing requirement accepts. The
+terminal that runs the measurement needs Screen Recording; the probe runs
+under that grant. Nothing else may play meanwhile, the clicks are heard,
+and the window must stay uncovered. Results go to
+`target/perf-results/avsync/<UTC time>/`: a `result.json` for each run and
+a `summary.json`. Each capture's sound is every app's, so it is deleted once
+judged. What stays is each frame's display time and mean luma, each sound
+buffer's time and length, the device's latency and the judged bands.
+
 ## macOS standing
 
 `macos-standing.py` measures what the comparator above cannot resolve. It
