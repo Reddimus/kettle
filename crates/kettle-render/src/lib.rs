@@ -21882,7 +21882,7 @@ mod completion_panel_tests {
         let geometry = media_paste_receipt_geometry(&compact, None, CELL, CELL.0, CELL.1).unwrap();
         assert_eq!(
             media_paste_receipt_text(&compact, &geometry, CELL.0).0,
-            "Ruta de imagen"
+            "Imagen: ruta pegada"
         );
         compact.remote = true;
         let geometry = media_paste_receipt_geometry(&compact, None, CELL, CELL.0, CELL.1).unwrap();
@@ -21929,7 +21929,7 @@ mod completion_panel_tests {
         pending.tr = es;
         let geometry = media_paste_receipt_geometry(&pending, None, CELL, CELL.0, CELL.1).unwrap();
         let (title, detail) = media_paste_receipt_text(&pending, &geometry, CELL.0);
-        assert_eq!(title, "Ruta de video");
+        assert_eq!(title, "Video: ruta pegada");
         assert!(detail.contains("1 de 3 · MP4 · 35.7 MB"), "{detail}");
         assert!(detail.contains("Preparando portada"), "{detail}");
 

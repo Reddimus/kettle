@@ -50198,7 +50198,7 @@ mod tests {
         );
         assert_eq!(
             super::media_receipt_accessibility_label(&batch, true, &es),
-            "3 rutas de video pegadas, la primera es WEBM, 999 B, panel remoto, solo ruta local"
+            "3 rutas de video pegadas; el primer video es WEBM y ocupa 999 B, panel remoto, solo ruta local"
         );
         let image = kettle_render::MediaPasteReceiptKind::Image {
             original_width: 1920,
