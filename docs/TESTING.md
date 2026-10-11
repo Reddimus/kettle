@@ -4371,7 +4371,12 @@ AVFoundation plays MP4 every frame in order, upright when rotated, mirrored
 when its display matrix mirrors it (as its stills show it), at half the
 rate, from past its end on its last frame, the video's own last frame in
 `long-audio.mp4`, at the video's rate or a slower one, and leaves WebM to
-ffmpeg;
+ffmpeg; it decodes `ticks.mp4`'s sound to four seconds of 48 kHz stereo
+floats, each block placed on the video's timeline and none overlapping the
+last, every tick within 10 ms of its second and quiet between, from a second
+and a half in starting exactly there with its first tick at two seconds, and
+gives no source, saying why, for no sound asked or none in the video
+(`audio::trim` drops what plays before the start or the block before);
 `frame_slots_keep_a_video_within_its_rate` keeps ten seconds of video at 24
 to 60 frames a second, from two starts, within rates of one to thirty, never
 above them, a video no faster keeping every frame;

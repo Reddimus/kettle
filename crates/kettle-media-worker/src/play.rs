@@ -237,7 +237,13 @@ pub(crate) fn serve(
         Ok(playback) => playback,
         Err(code) => return reply(output, code, 0),
     };
-    let opened = playback.opened;
+    let mut opened = playback.opened;
+    // No output plays a session's sound yet: what the player decoded goes,
+    // and Opened says the sound is unavailable.
+    drop(playback.audio);
+    if opened.audio == kettle_media::AudioStatus::Ready {
+        opened.audio = kettle_media::AudioStatus::Unavailable;
+    }
     // The worker's own processor time, now the video's length is known.
     let left = opened.info.duration_ms.saturating_sub(opened.start_ms);
     if crate::early_unix::limit_session_cpu(left).is_err() {
@@ -1563,6 +1569,7 @@ mod faults {
                     stall: self.stall,
                     fail: self.fail,
                 }),
+                audio: None,
             })
         }
     }

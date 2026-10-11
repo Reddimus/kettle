@@ -479,7 +479,14 @@ scaled and passes on the frame left at the end, and AVFoundation, which gives ev
 slot of the rate's frame length counted from the first, a frame counting from
 an eighth of a frame early as container times are rounded
 (`video::FrameSlots`), so a video faster than the rate plays at it and one no
-faster keeps every frame. A session that cannot open answers with the
+faster keeps every frame. A player decodes the sound too when it can and the
+session asked for it (`audio::AudioSource`): AVFoundation reads the first
+audio track through a reader of its own over the same asset, from the same
+start, as interleaved stereo 32-bit floats at 48 kHz, each block placed on
+the video's timeline and none before the last one ended, a buffer of more
+than a quarter of a second or with a sample that is not a number refused;
+ffmpeg plays no sound. No output plays it yet: the worker lets the decoded
+sound go, and Opened says Unavailable where a player could decode it. A session that cannot open answers with the
 failure and exits 0; one whose first frame is not written within 5 s (a
 write the parent held past that included) answers `RenderTimeout`, and its
 watchdog ends it a second later if that answer is held up too.

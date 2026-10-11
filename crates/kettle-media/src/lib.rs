@@ -4,6 +4,7 @@
 //! caller supplies.
 //! External requests cannot express GUI-only path authorization. See [`GuiActionWitness`].
 
+pub mod audio;
 pub mod client;
 mod digest;
 #[cfg(any(test, feature = "fuzzing"))]
