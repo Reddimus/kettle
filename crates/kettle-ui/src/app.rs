@@ -519,6 +519,53 @@ fn modal_holds_cursor_steady(ws: &WindowState) -> bool {
 /// A control request that only reads UI state, so it needs no frame. A
 /// frame would also end the Core Animation cursor blink `ui_geometry` is
 /// there to observe.
+/// `get_state`'s `caller`: whether the caller runs in one of this Kettle's
+/// panes. Verified means the pane's own child process is an ancestor of the
+/// connecting process; the nearest such pane wins. A hint from the caller's
+/// environment is reported separately and never makes it verified.
+fn ctl_caller_report(
+    caller: &crate::ctl_server::CallerEvidence,
+    roots: &[(kettle_ctl::process::ProcessIdentity, u64, u64)],
+    panes: &[(u64, u64)],
+    kettle_pid: u32,
+) -> serde_json::Value {
+    use kettle_ctl::identity::UnverifiedReason;
+    let hint = caller
+        .hint()
+        .filter(|hint| hint.kettle_pid == kettle_pid)
+        .and_then(|hint| panes.iter().find(|(pane, _)| *pane == hint.pane))
+        .map(|(pane, window)| serde_json::json!({"pane": pane, "window": window}));
+    let (chain, reason) = match caller.chain() {
+        Some(Ok(chain)) => (Some(chain), None),
+        Some(Err(reason)) => (None, Some(reason)),
+        // Not checked: only requests that report their caller are.
+        None => (None, Some(UnverifiedReason::MissingClaim)),
+    };
+    let found = chain.and_then(|chain| {
+        chain.iter().find_map(|identity| {
+            roots
+                .iter()
+                .find(|(root, _, _)| root == identity)
+                .map(|&(_, pane, window)| (pane, window))
+        })
+    });
+    let reason = reason.or_else(|| found.is_none().then_some(UnverifiedReason::NoPane));
+    let peer = chain.and_then(|chain| chain.first()).map(|peer| {
+        serde_json::json!({
+            "pid": peer.pid(),
+            "start_token": peer.start().to_string(),
+        })
+    });
+    serde_json::json!({
+        "verified": found.is_some(),
+        "reason": reason.map(UnverifiedReason::as_str),
+        "pane": found.map(|(pane, _)| pane),
+        "window": found.map(|(_, window)| window),
+        "peer": peer,
+        "hint": hint,
+    })
+}
+
 /// The control-server launch flags.
 fn ctl_overrides(startup: &crate::Options) -> kettle_ctl::CtlOverrides {
     kettle_ctl::CtlOverrides {
@@ -20114,7 +20161,7 @@ impl App {
         let resp = match method {
             Method::GetState => {
                 let policy = self.ctl.as_ref().map(|c| c.policy()).unwrap_or_default();
-                Response::ok(req.id, self.ctl_get_state(ws, policy))
+                Response::ok(req.id, self.ctl_get_state(ws, policy, request.caller()))
             }
             Method::ListTabs => self.ctl_list_tabs(ws, req),
             Method::ListPanes => self.ctl_list_panes(ws, req),
@@ -20151,8 +20198,29 @@ impl App {
     }
 
     /// `get_state`: version, theme, pid, server mode, focused pane.
-    fn ctl_get_state(&self, ws: &WindowState, policy: kettle_ctl::CtlPolicy) -> serde_json::Value {
+    fn ctl_get_state(
+        &self,
+        ws: &WindowState,
+        policy: kettle_ctl::CtlPolicy,
+        caller: &crate::ctl_server::CallerEvidence,
+    ) -> serde_json::Value {
+        // Live panes only: a closed or held pane's child no longer hosts
+        // anyone who could be calling.
+        let mut roots = Vec::new();
+        let mut panes = Vec::new();
+        for window in self.all_windows(ws) {
+            for (&id, pane) in &window.mux.panes {
+                panes.push((id, window.seq));
+                if let Some(root) = pane.caller_root
+                    && !pane.closed
+                    && !pane.held
+                {
+                    roots.push((root, id, window.seq));
+                }
+            }
+        }
         serde_json::json!({
+            "caller": ctl_caller_report(caller, &roots, &panes, std::process::id()),
             "version": env!("CARGO_PKG_VERSION"),
             "pid": std::process::id(),
             // `mode` keeps its original spelling (`readonly`); `policy` uses
@@ -38240,6 +38308,78 @@ mod tests {
         assert!(capped.is_char_boundary(capped.len()));
     }
 
+    /// `get_state`'s caller is verified in the nearest live pane whose child
+    /// is one of its ancestors. Hints and failures never verify.
+    #[test]
+    fn caller_report_names_the_nearest_live_pane() {
+        use crate::ctl_server::{CallerEvidence, PaneHint};
+        use kettle_ctl::identity::UnverifiedReason;
+        use kettle_ctl::process::ProcessIdentity;
+        let id = |pid, start| ProcessIdentity::new_for_tests(pid, start);
+        // caller 30 → tool 31 → inner pane's shell 20 → outer pane's shell 10.
+        let chain = vec![id(30, 300), id(31, 290), id(20, 200), id(10, 100)];
+        let roots = [(id(10, 100), 1, 1), (id(20, 200), 7, 2)];
+        let panes = [(1, 1), (7, 2), (9, 2)];
+        let report = |caller| super::ctl_caller_report(&caller, &roots, &panes, 4242);
+
+        let verified = report(CallerEvidence::for_tests(Ok(chain.clone()), None));
+        assert_eq!(verified["verified"], true);
+        assert_eq!(verified["pane"], 7, "the nearest pane wins");
+        assert_eq!(verified["window"], 2);
+        assert_eq!(verified["reason"], serde_json::Value::Null);
+        assert_eq!(verified["peer"]["pid"], 30);
+        assert_eq!(verified["peer"]["start_token"], "300");
+
+        // A root whose start differs is another process that reused the pid.
+        let reused = super::ctl_caller_report(
+            &CallerEvidence::for_tests(Ok(vec![id(30, 300), id(20, 201)]), None),
+            &roots,
+            &panes,
+            4242,
+        );
+        assert_eq!(reused["verified"], false);
+        assert_eq!(reused["reason"], "no_pane");
+        assert_eq!(reused["pane"], serde_json::Value::Null);
+
+        let failed = report(CallerEvidence::for_tests(
+            Err(UnverifiedReason::ClaimMismatch),
+            Some(PaneHint {
+                pane: 9,
+                kettle_pid: 4242,
+            }),
+        ));
+        assert_eq!(failed["verified"], false);
+        assert_eq!(failed["reason"], "claim_mismatch");
+        assert_eq!(failed["peer"], serde_json::Value::Null);
+        assert_eq!(
+            failed["hint"]["pane"], 9,
+            "a hint for this Kettle is reported"
+        );
+        assert_eq!(failed["hint"]["window"], 2);
+
+        // A hint naming another Kettle, or a pane this one does not have, is
+        // dropped; a hint never verifies.
+        for hint in [
+            PaneHint {
+                pane: 9,
+                kettle_pid: 1,
+            },
+            PaneHint {
+                pane: 99,
+                kettle_pid: 4242,
+            },
+        ] {
+            let dropped = report(CallerEvidence::for_tests(
+                Err(UnverifiedReason::MissingClaim),
+                Some(hint),
+            ));
+            assert_eq!(dropped["hint"], serde_json::Value::Null, "{hint:?}");
+        }
+        let unchecked = report(CallerEvidence::default());
+        assert_eq!(unchecked["verified"], false);
+        assert_eq!(unchecked["reason"], "missing_claim");
+    }
+
     #[test]
     fn control_pages_are_bounded_and_snapshot_consistent() {
         let values: Vec<serde_json::Value> = (0..5).map(serde_json::Value::from).collect();
@@ -38248,6 +38388,7 @@ mod tests {
             id: 1,
             method: "list_panes".into(),
             params: serde_json::json!({"limit": 2}),
+            caller: None,
         };
         let response = super::ctl_page_values(&first, "panes", values.clone());
         assert!(response.ok);

@@ -14,10 +14,12 @@
 pub mod activation;
 pub mod client;
 pub mod discovery;
+pub mod identity;
+pub mod policy;
 // Cross-process window-presence registry (Peacock accent dedupe). No
 // endpoint, always on, best-effort — see the module docs.
-pub mod policy;
 pub mod presence;
+pub mod process;
 pub mod protocol;
 pub mod transport;
 

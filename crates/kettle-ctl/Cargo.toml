@@ -45,6 +45,13 @@ windows-sys = { version = "0.61", features = [
     # Multi-window (Peacock presence): pid-liveness via OpenProcess +
     # GetExitCodeProcess for stale-entry cleanup.
     "Win32_System_Threading",
+    # Caller verification: NtQueryInformationProcess is resolved at run time.
+    "Win32_System_LibraryLoader",
+    # Caller verification: GetSystemTimeAsFileTime for the accept instant.
+    "Win32_System_SystemInformation",
+    # Discovery: the Local AppData known folder, independent of the environment.
+    "Win32_UI_Shell",
+    "Win32_System_Com",
 ] }
 
 [dev-dependencies]

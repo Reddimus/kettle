@@ -599,7 +599,8 @@ struct CtlArgs {
     /// Regex for `wait_for` (alternative/addition to `--text`).
     #[arg(long, value_name = "REGEX", allow_hyphen_values = true)]
     regex: Option<String>,
-    /// Connect to a specific kettle pid (else the newest running server).
+    /// Connect to a specific kettle pid (else the kettle this runs inside,
+    /// then the one KETTLE_PID names, then the newest running server).
     #[arg(long)]
     pid: Option<u32>,
     /// Print the raw JSON result instead of a pretty summary.
