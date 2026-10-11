@@ -22,6 +22,11 @@ mod animation;
 mod auto;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod container;
+#[cfg(all(
+    any(target_os = "macos", target_os = "linux"),
+    any(test, feature = "fuzzing")
+))]
+pub mod fuzzing;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod markdown;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -48,6 +53,8 @@ pub(crate) fn guarded<T>(
     failure: FailureCode,
     work: impl FnOnce() -> Result<T, FailureCode>,
 ) -> Result<T, FailureCode> {
+    #[cfg(any(test, feature = "fuzzing"))]
+    let _guard = fuzzing::Guard::enter();
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).unwrap_or(Err(failure))
 }
 
