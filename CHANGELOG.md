@@ -294,7 +294,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   screen-reader names. The Linux desktop entry has Spanish too. The CLI's
   output stays English, byte for byte, whatever the language. `auto`, the default, follows the
   operating system's locale. A change applies when Kettle restarts. The
-  Spanish text is a first draft awaiting review.
+  Spanish is neutral Latin American, reviewed in context on the rendered
+  Spanish build.
 - A theme picker: type to filter the 500+ bundled themes by name, or move
   through them with the arrows, and the window previews the selected theme.
   Enter keeps it and Esc puts back the theme you started with. With nothing
