@@ -1071,7 +1071,20 @@ after it stay a tenth of a second apart; a session whose file is appended
 to, paused, before its first frame or while its last frame's write is held
 up, ends as `Changed`, not `Ended`; a decoder that fails just after the file
 changes fails the session as `Changed`; and a decoder handed a buffer after a
-Pause decodes nothing until Play. What the parent asked keeps its latest
+Pause decodes nothing until Play. With a stand-in speaker whose clock the
+test moves, a session with sound holds each frame until its sound comes due
+(40 ms early), drops one the sound passed, sends Play and Mute on to the
+speaker and ends only once all of its sound was heard; a speaker that fails
+is said (`AudioState` Unavailable) and the session plays on silent to its
+end. The sound's own thread fills the speaker before Play and nothing
+plays until it, queues the sound in place with its gap and all after its
+end silent, keeps the speaker's clock from where the sound starts, and
+gives the sound up when the speaker refuses a piece, gives no clock a
+second after starting, or its thread stops. On macOS the confined worker
+plays `ticks.mp4` muted with its sound: Opened says Ready, every frame
+comes in order to the last, and the session ends about four seconds after
+Play (skipped without an audio output unless `KETTLE_REQUIRE_AUDIO`). What
+the parent asked keeps its latest
 Play or Pause, taken once, and the moment of its last command.
 
 Red checks: no sweep, a sweep after the hook or not first in its function,

@@ -20,6 +20,8 @@ mod early_unix;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod play;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
+mod sound;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod worker;
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -186,7 +188,7 @@ mod tests {
         );
         let session = body(&play, "serve(");
         let confined = session
-            .find("if confine(open, &decoders).is_err() || !watchdog.confined()")
+            .find("if confine(open, &decoders, sound).is_err() || !watchdog.confined()")
             .unwrap();
         assert!(confined < session.find("source::hold(").unwrap());
         assert!(confined < session.find("player.play(").unwrap());

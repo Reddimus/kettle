@@ -317,8 +317,10 @@ Reports that fit any of these are welcome:
 - **Video playback sessions** — a video the user plays runs in a media
   worker of its own, which confines itself to the one file and its decoder,
   exactly as a video job does, before reading a byte of it, and stays
-  confined for the whole session. It reads nothing from the parent but
-  one-byte commands, writes frames only of the size it opened at, decodes
+  confined for the whole session, granted sound (see Media worker sandbox)
+  only on macOS and only when sound was asked for. It reads nothing from
+  the parent but one-byte commands, writes frames only of the size it
+  opened at, decodes
   only while playing into three buffers, and ends when the parent closes
   it, leaves, or sends nothing for 5 s (it then kills its own process
   group, decoder and all), when a frame goes unread for 5 s, when a playing
