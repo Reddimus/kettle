@@ -1309,8 +1309,8 @@ const MAX_LANE_IMAGES: usize = 64;
 
 pub use media_lane::{
     MediaCanvas, MediaLaneEdge, MediaLaneFrame, MediaLaneGeometry, MediaLaneHit, MediaLaneMode,
-    MediaLanePanel, MediaLanePlay, MediaLaneScrubber, MediaLaneSender, MediaLaneSource,
-    MediaLaneTile, media_lane_geometry,
+    MediaLanePanel, MediaLanePlay, MediaLaneScrubber, MediaLaneSender, MediaLaneSound,
+    MediaLaneSource, MediaLaneTile, media_lane_geometry,
 };
 pub use media_viewport::{MAX_MEDIA_ZOOM, MEDIA_ZOOM_STEP, MIN_MEDIA_ZOOM, MediaViewport};
 
@@ -8918,6 +8918,19 @@ impl Renderer {
                     [content.0, content.1, content.2, content.3],
                 ));
             }
+            // A muted video's sound button: its glyph struck through.
+            if let (Some(MediaLaneSound::Muted), Some(button)) = (lane.sound, geometry.sound) {
+                let thick = (1.5 * self.scale).round().max(1.0);
+                let glyph = self.overlay_text_cell_width();
+                lane_q.push(rect(
+                    button.0 + ((button.2 - glyph) / 2.0).max(0.0).round(),
+                    button.1 + ((button.3 - thick) / 2.0).round(),
+                    glyph.min(button.2).round(),
+                    thick,
+                    palette.description,
+                    1.0,
+                ));
+            }
             // A playing video's bar: the track, the part played in the
             // accent, and a knob where the video is.
             if let (Some(bar), Some(track)) = (&lane.scrubber, geometry.scrubber) {
@@ -8954,6 +8967,7 @@ impl Renderer {
                     lane.mode,
                     lane.page,
                     lane.play,
+                    lane.sound,
                     (
                         gc(palette.label),
                         gc(palette.description),
