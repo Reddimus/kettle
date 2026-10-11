@@ -8,7 +8,9 @@
 //! decoder: ffmpeg and ffprobe, run as the worker's children with a fixed
 //! argument list, exactly sized output and a deadline, contained so they
 //! start no process of their own. `acl` (macOS) reads extended ACLs, which
-//! can let another user write a file its mode says is private.
+//! can let another user write a file its mode says is private. [`sandbox`]
+//! is the worker's self-sandbox: Landlock and seccomp on Linux, a Seatbelt
+//! profile on macOS.
 //!
 //! The unsafe code here is libc calls, each with its own SAFETY comment: the
 //! user id, a descriptor's path, ACLs, and the containment hook that runs
@@ -27,6 +29,8 @@ pub mod ffmpeg;
 mod reopen;
 #[cfg(unix)]
 mod run;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod sandbox;
 #[cfg(unix)]
 pub mod tools;
 
@@ -72,6 +76,26 @@ mod decoders {
                 native: None,
                 ffmpeg,
             }
+        }
+
+        /// What these decoders need a sandbox to let them do: the programs
+        /// they run, and the trees those load from. Apple's decoder runs in
+        /// the worker and needs neither.
+        pub fn sandbox_needs(&self) -> (Vec<std::path::PathBuf>, Vec<std::path::PathBuf>) {
+            self.ffmpeg
+                .as_ref()
+                .map_or_else(Default::default, |ffmpeg| {
+                    let programs = ffmpeg.programs().map(std::path::Path::to_path_buf).to_vec();
+                    // Each program's own: ffprobe may come from another
+                    // package.
+                    let mut trees: Vec<_> = programs
+                        .iter()
+                        .filter_map(|program| crate::tools::library_tree(program))
+                        .collect();
+                    trees.sort();
+                    trees.dedup();
+                    (programs, trees)
+                })
         }
 
         /// Whether there is any decoder to try.

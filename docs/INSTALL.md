@@ -410,6 +410,18 @@ Kettle looks for them only in `/opt/homebrew/bin`, `/usr/local/bin`,
 belong to you or root and no one else can write them. Kettle never installs
 them, and neither should an agent.
 
+### The media sandbox
+
+Kettle decodes a video only inside a sandbox, which confines the media
+worker to the job's own files and the decoder's own programs. macOS has it
+built in. On Linux it is Landlock (kernel 5.13 or later), which Ubuntu 22.04
+and later, Debian 12, Fedora and Arch turn on; `/sys/kernel/security/lsm`
+lists `landlock` when it is. Without it, Kettle still previews images,
+SVG and Mermaid, but says a video cannot be shown, and `kettle video-frames`
+refuses videos; no package install changes that, only a kernel with Landlock
+on. Inside a container, the container's own seccomp profile must allow the
+three Landlock calls.
+
 ### Opening videos outside Kettle
 
 A video card's menu, and the preview lane's `↗`, open a shown video in one

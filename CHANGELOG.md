@@ -314,6 +314,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   sound. Nothing plays inside Kettle yet, and the model has still not seen
   it. Quick select and the menus offer common video files for a preview.
   Without a decoder for it, the notice says to install ffmpeg.
+- The media worker confines itself before it reads a job: to the job's own
+  files, a trusted video decoder's own programs, and nothing to write or
+  connect to (Landlock and seccomp on Linux, a Seatbelt profile on macOS).
+  Kettle decodes video only inside it; on a Linux kernel without Landlock,
+  videos are not shown or read while images and diagrams still are.
 - A video card's menu, and the lane's open button, open the video in
   QuickTime Player on macOS or mpv on Linux (`/usr/bin/mpv` only), never your
   default application, and only in a format that player plays. The player

@@ -103,6 +103,11 @@ impl Ffmpeg {
         self.ffmpeg.path()
     }
 
+    /// Both programs that are run, every link resolved: ffmpeg and ffprobe.
+    pub fn programs(&self) -> [&Path; 2] {
+        [self.ffmpeg.path(), self.ffprobe.path()]
+    }
+
     /// The path ffmpeg was found by, whose directory holds the ffprobe beside
     /// it: what a parent names to the worker, so the worker finds the same
     /// pair.
