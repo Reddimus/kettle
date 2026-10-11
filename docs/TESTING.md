@@ -322,6 +322,19 @@ Vulkan through Mesa llvmpipe and reported `Adapter type: Cpu`. This proves the
 software-rendered Vulkan and Wayland paths. It does not prove accelerated
 virtio GPU rendering.
 
+On Linux, `just lane-media-smoke` checks media lanes live under Xvfb. It
+shows an image, an SVG, a Mermaid diagram and a video with `kettle show`,
+and checks that each renders in a lane, the video as its poster. It then
+plays the video and steps it back five seconds with native X input
+(xdotool), since a control client may do neither, and checks that a control
+client's step moves nothing and its pause pauses. It also reads the
+worker's `NoNewPrivs` and `Seccomp` flags and captures a Spanish lane for
+review. Kettle runs only a worker file no one else can write, so the script
+stages both binaries in a private directory first. It needs xvfb-run,
+ffmpeg and xdotool, and writes results under
+`target/diagnostics/lane-media-smoke/`. `--self-test` covers its fixture
+writer and staging without a display.
+
 The retained Windows CI runner compiles and tests portable and conditional
 Windows code, including native ConPTY and PowerShell fixtures. Kettle 4.0 does
 not publish or support a Windows package, installer, GPU smoke, or live-window
