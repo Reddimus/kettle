@@ -3889,7 +3889,24 @@ was a shell, Codex, or another TUI, while the shell keeps the check
 deterministic and credential-independent. Commands are typed literally and
 submitted with `send_keys enter`; a raw `\n` is not an Enter key on ConPTY
 and would leave the Windows child alive without testing the reap path.
+#### macOS menu bar
+
+`macos_menu`'s `the_app_menu_keeps_winit_s_rows_in_the_ui_s_language` holds
+the application menu to winit's rows, standard actions and key equivalents
+(Command-H, Option-Command-H, Command-Q, nothing else), titled in English and
+Spanish, and `resumed_installs_the_app_menu` to the first `resumed`, with no
+`cfg` at the call site. `kettle`'s `tests/cli_language.rs` runs every help
+text, the listings, the zsh, bash and fish completions, the default config, a
+config check and `--version` under an English and two Spanish locales, and
+with `language = en` and `es` in the config every command reads (named by
+`XDG_CONFIG_HOME`, so on Windows too, and checked to be the one read), in a
+home of its own: the output is byte-identical, compared
+unaltered (checked red by making one config-check label follow either). `kettle-i18n`'s
+`the_desktop_entry_speaks_spanish` keeps the desktop entry's Spanish keys
+present and translated.
+
 #### macOS Dock menu
+
 
 `just dock-menu-smoke` drives the real Dock. It reads the menu back through
 accessibility, requires the New Window and New Tab rows plus at least one

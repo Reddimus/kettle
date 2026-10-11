@@ -225,8 +225,13 @@ protocol text never pass through it. Settings, the command palette, the theme,
 layout and SSH pickers, the right-click menu with its Preferences submenu, the new-tab
 dropdown, the About panel, the close, paste and key-rebind confirmations, the
 title editors, the search bar, the completion card, the paste receipts, the
-update banner, the screen-reader names and Kettle's desktop notifications are
-on it so far; the other surfaces move in the 5.0 localization track. Crates below the UI keep returning data: the
+update banner, the screen-reader names, Kettle's desktop notifications, the
+macOS Dock menu and the macOS menu bar's application menu are on it. The
+application menu is Kettle's own (`macos_menu`): winit builds an English one
+as the app finishes launching, before the first `resumed`, and Kettle's
+replaces it there with the same rows, standard actions and key equivalents,
+so no chord that reaches the PTY changes. The Linux desktop entry carries its
+Spanish beside its English; the CLI never takes a translator. Crates below the UI keep returning data: the
 reconnect row for a detected remote session is worded in `kettle-ui` from
 `kettle-remote`'s typed context. The palette ranks a query against the label shown and,
 outside English, against the English label too, so a command name from the
