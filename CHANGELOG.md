@@ -311,8 +311,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Agents and `kettle show` can show a video: it lands as its poster, the
   middle frame, with a play glyph and its length on its card, and the lane,
   `kettle show` and `kettle_show`'s result say its size, codec, length and
-  sound. It plays only as the silent preview below, and the model has
-  still not seen it. Quick select and the menus offer common video files for
+  sound. It plays in its lane when you play it, and the model has still not
+  seen it. Quick select and the menus offer common video files for
   a preview.
   Without a decoder for it, the notice says to install ffmpeg.
 - The media worker confines itself before it reads a job: to the job's own
@@ -327,10 +327,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   file: a clone where the disk allows, otherwise a copy that leaves 2 GiB
   free, owner-only, quarantined on macOS, up to 4 GiB, and deleted when
   Kettle exits. It opens paused.
-- A video's lane plays a silent preview when you press its `▶` (Space while
-  the lane has the keyboard, or the `preview_play` action): eight frames from
-  across the video, shown in turn, each for its share of the length, until
-  `■` stops it. The sandboxed worker makes them within two seconds, or the
+- A video plays in its lane when you press its `▶` (Space while the lane has
+  the keyboard, or the `video_play` action), without sound: every frame at
+  its time, up to 1080p and 30 frames a second, decoded in a sandboxed worker
+  of its own (AVFoundation for MP4 and QuickTime on macOS, otherwise your
+  ffmpeg). `‖` pauses it; the bar under the picture shows where it is and
+  moves it there when you press or drag along it; Left and Right step it
+  five seconds while the lane has the keyboard; screen readers get the bar
+  as a slider. It pauses when its lane is hidden, until you play it again,
+  holds its last frame at the end, and at most two lanes play at once (the
+  one played least recently waits on its frame). It never starts on its
+  own, for a control client or a Lua script, or for a file that changed.
+- The `preview_play` action plays a video's silent preview instead: eight
+  frames from across the video, shown in turn, each for its share of the
+  length, until `■` stops it. The sandboxed worker makes them within two seconds, or the
   poster stays and the lane says why. With `video-preview-hover = on`, the
   pointer resting on the picture loops a preview you played for up to four
   seconds, unless `reduce-motion` (by default, macOS's Reduce Motion) says
