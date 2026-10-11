@@ -65,17 +65,29 @@ pub struct MediaLaneTile {
     pub coverage: (f64, f64, f64, f64),
 }
 
-/// The silent-preview button a video's lane offers: play while the poster
-/// shows, stop while a preview is made or plays.
+/// The play button a video's lane offers: play while the poster or a paused
+/// frame shows, pause while the video plays, and stop while a silent
+/// preview is made or plays.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MediaLanePlay {
     Play,
+    Pause,
     Stop,
 }
 
-/// A frame of a silent preview, shown in the item's place: part of the
-/// preview's sheet, in its pixels (x, y, width, height), drawn where an
-/// image `size` large would be.
+/// Where a playing video is, for the bar under its picture: its place and
+/// length in ms, and the time shown beside the bar.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MediaLaneScrubber {
+    pub position_ms: u64,
+    pub duration_ms: u64,
+    pub label: String,
+}
+
+/// A frame of a silent preview or of the video playing, shown in the item's
+/// place: part of `sheet` (a preview's sheet, or the whole of a played
+/// frame), in its pixels (x, y, width, height), drawn where an image `size`
+/// large would be.
 #[derive(Clone)]
 pub struct MediaLaneFrame {
     pub sheet: kettle_core::ImageData,
@@ -152,9 +164,12 @@ pub struct MediaLanePanel {
     pub edge: Option<MediaLaneEdge>,
     /// The silent-preview button the header offers, for a video.
     pub play: Option<MediaLanePlay>,
-    /// While a silent preview plays, the frame shown instead of the
-    /// item's pixels: fitted where they would be, and never zoomed.
+    /// While a silent preview or the video plays, the frame shown instead
+    /// of the item's pixels: fitted where they would be, and never zoomed.
     pub frame: Option<MediaLaneFrame>,
+    /// While the video plays, or is paused in place, the bar under its
+    /// picture.
+    pub scrubber: Option<MediaLaneScrubber>,
 }
 
 /// Who sent an item, in the UI language, with where the sending program's
@@ -250,8 +265,12 @@ pub struct MediaLaneGeometry {
     pub copy: Option<Rect4>,
     /// Reads the item's file again.
     pub reload: Option<Rect4>,
-    /// Starts or stops a video's silent preview.
+    /// Plays or pauses a video, or starts or stops its silent preview.
     pub play: Option<Rect4>,
+    /// The bar under a playing video's picture, which a press or drag
+    /// moves the video along, and the time beside it.
+    pub scrubber: Option<Rect4>,
+    pub scrub_label: Option<Rect4>,
     /// Zoom the rendered item out, in, and back to its fit.
     pub zoom_out: Option<Rect4>,
     pub zoom_in: Option<Rect4>,
@@ -312,8 +331,10 @@ pub enum MediaLaneHit {
     Copy,
     /// Read the item's file again.
     Reload,
-    /// Start or stop a video's silent preview.
+    /// Play or pause a video, or start or stop its silent preview.
     Play,
+    /// The bar under a playing video, for a press or drag along it.
+    Scrub,
     ZoomOut,
     ZoomIn,
     /// Back to the fit.
@@ -356,6 +377,14 @@ impl MediaLaneGeometry {
         ))
     }
 
+    /// How far along the scrubber `x` is, from 0 at its start to 1 at its
+    /// end, held to it: where a press or drag there moves the video.
+    pub fn scrub_at(&self, x: f32) -> Option<f64> {
+        let bar = self.scrubber?;
+        (bar.2 > 0.0)
+            .then(|| ((f64::from(x) - f64::from(bar.0)) / f64::from(bar.2)).clamp(0.0, 1.0))
+    }
+
     /// What a press at `(x, y)` does; `None` outside the lane.
     pub fn hit_test(&self, x: f32, y: f32) -> Option<MediaLaneHit> {
         if !contains(self.rect, x, y) {
@@ -368,6 +397,8 @@ impl MediaLaneGeometry {
             Some(MediaLaneHit::Toggle)
         } else if self.play.is_some_and(|rect| contains(rect, x, y)) {
             Some(MediaLaneHit::Play)
+        } else if self.scrubber.is_some_and(|rect| contains(rect, x, y)) {
+            Some(MediaLaneHit::Scrub)
         } else if self.reload.is_some_and(|rect| contains(rect, x, y)) {
             Some(MediaLaneHit::Reload)
         } else if self.mode.is_some_and(|rect| contains(rect, x, y)) {
@@ -406,6 +437,18 @@ pub fn media_lane_counter(position: (usize, usize)) -> String {
 /// The fewest overlay columns a header's title keeps before a control gives
 /// way; the collapse and close buttons never do.
 const MIN_TITLE_COLUMNS: f32 = 4.0;
+/// The fewest columns a playing video's bar keeps beside its time; with
+/// fewer the lane shows no bar.
+const MIN_SCRUBBER_COLUMNS: f32 = 4.0;
+
+/// Where a bar's knob `knob` wide sits on `track` with `played` pixels of it
+/// played: centered on where the video is, kept on the track, and at its
+/// start when the track is narrower than the knob.
+pub(crate) fn knob_left(track: Rect4, played: f32, knob: f32) -> f32 {
+    (track.0 + played - knob / 2.0)
+        .min(track.0 + track.2 - knob)
+        .max(track.0)
+}
 
 /// Lay a lane out in its rectangle. `cell` is the terminal cell, and
 /// `text_cell` the overlay text's column width and line height. An expanded
@@ -517,6 +560,8 @@ pub fn media_lane_geometry(
             copy,
             reload,
             play,
+            scrubber: None,
+            scrub_label: None,
             zoom_out,
             zoom_in,
             zoom_fit,
@@ -560,7 +605,23 @@ pub fn media_lane_geometry(
     let sender = (left, detail.1 + lh, right - left, lh);
     let hint = (left, rect.1 + rect.3 - pad - lh, right - left, lh);
     let area_top = sender.1 + lh + pad;
-    let area_bottom = hint.1 - pad;
+    // A playing video's bar takes a line above the hint, its time at the
+    // end, when the picture keeps a line of its own above it and the bar
+    // keeps a few columns beside its time.
+    let (mut scrubber, mut scrub_label) = (None, None);
+    let mut area_bottom = hint.1 - pad;
+    if let Some(bar) = &lane.scrubber
+        && area_bottom - lh - pad >= area_top + lh
+    {
+        let row = hint.1 - pad - lh;
+        let label = (bar.label.chars().count() as f32 + 1.0) * tw;
+        let label_left = right - label;
+        if label_left - pad - left >= MIN_SCRUBBER_COLUMNS * tw {
+            scrub_label = Some((label_left, row, right - label_left, lh));
+            scrubber = Some((left, row, label_left - pad - left, lh));
+            area_bottom = row - pad;
+        }
+    }
     let image_area = (
         left,
         area_top,
@@ -595,6 +656,8 @@ pub fn media_lane_geometry(
         copy,
         reload,
         play,
+        scrubber,
+        scrub_label,
         zoom_out,
         zoom_in,
         zoom_fit,
@@ -723,13 +786,14 @@ pub(crate) struct LaneText {
     hint: TextBuffer,
     status: TextBuffer,
     page_counter: TextBuffer,
+    scrub_label: TextBuffer,
     /// Previous, next, open outside, collapse, expand, close, show source,
     /// show rendered, canvas, copy, reload, zoom out, zoom in, fit, a
-    /// gallery's page before and after, and a video's play and stop.
-    controls: [TextBuffer; 18],
+    /// gallery's page before and after, and a video's play, stop and pause.
+    controls: [TextBuffer; 19],
     /// What each line buffer was last shaped with; `None` until it is, or
     /// once a font change means it must be again.
-    shaped: [Option<String>; 7],
+    shaped: [Option<String>; 8],
     /// One buffer per source row in view, and what each was shaped with.
     rows: Vec<TextBuffer>,
     rows_shaped: Vec<String>,
@@ -760,6 +824,7 @@ impl LaneText {
             hint: line(font_system),
             status: line(font_system),
             page_counter: line(font_system),
+            scrub_label: line(font_system),
             controls: [
                 control(font_system, "‹"),
                 control(font_system, "›"),
@@ -779,6 +844,7 @@ impl LaneText {
                 control(font_system, "›"),
                 control(font_system, "▶"),
                 control(font_system, "■"),
+                control(font_system, "‖"),
             ],
             shaped: Default::default(),
             rows: Vec::new(),
@@ -789,7 +855,7 @@ impl LaneText {
     /// What each line and source row was last shaped with, for the
     /// renderer's text damage key: buffers keep their addresses when the
     /// lane changes item.
-    pub(crate) fn shaped(&self) -> (&[Option<String>; 7], &[String]) {
+    pub(crate) fn shaped(&self) -> (&[Option<String>; 8], &[String]) {
         (&self.shaped, &self.rows_shaped)
     }
 
@@ -869,7 +935,12 @@ impl LaneText {
             buffer.shape_until_scroll(font_system, false);
         }
         let page_rect = geometry.page_counter.unwrap_or_default();
-        let lines: [(&mut TextBuffer, &str, Rect4, bool); 7] = [
+        let scrub_label = match (&lane.scrubber, geometry.scrub_label) {
+            (Some(bar), Some(_)) => bar.label.clone(),
+            _ => String::new(),
+        };
+        let scrub_rect = geometry.scrub_label.unwrap_or_default();
+        let lines: [(&mut TextBuffer, &str, Rect4, bool); 8] = [
             (&mut self.title, &lane.title, geometry.title, true),
             (&mut self.detail, &detail, geometry.detail, false),
             (&mut self.counter, &counter, geometry.counter, false),
@@ -877,6 +948,7 @@ impl LaneText {
             (&mut self.status, &status, geometry.image_area, false),
             (&mut self.sender, &sender, geometry.sender, false),
             (&mut self.page_counter, &page_counter, page_rect, false),
+            (&mut self.scrub_label, &scrub_label, scrub_rect, false),
         ];
         for ((buffer, text, rect, bold), shaped) in lines.into_iter().zip(&mut self.shaped) {
             buffer.set_metrics(metrics);
@@ -939,6 +1011,9 @@ impl LaneText {
         if let Some(rect) = geometry.page_counter {
             areas.push(area(&self.page_counter, rect, description));
         }
+        if let Some(rect) = geometry.scrub_label {
+            areas.push(area(&self.scrub_label, rect, description));
+        }
         if let Some(status) = self.shaped[4]
             .as_deref()
             .filter(|status| !status.is_empty())
@@ -984,6 +1059,7 @@ impl LaneText {
             geometry.page_next,
             geometry.play.filter(|_| play == Some(MediaLanePlay::Play)),
             geometry.play.filter(|_| play == Some(MediaLanePlay::Stop)),
+            geometry.play.filter(|_| play == Some(MediaLanePlay::Pause)),
         ];
         let (first, last) =
             page.map_or((true, true), |(shown, count)| (shown <= 1, shown >= count));
@@ -1037,6 +1113,7 @@ mod tests {
         MediaLanePanel {
             play: None,
             frame: None,
+            scrubber: None,
             pane: 1,
             rect: (0.0, 0.0, 800.0, 600.0),
             collapsed: false,
@@ -1184,6 +1261,70 @@ mod tests {
             media_lane_geometry(&lane, CELL, CELL).unwrap().image,
             poster.fit
         );
+    }
+
+    /// A playing video's bar takes a line above the hint, its time at the
+    /// end and the picture's room above it; a press on it is a scrub, and
+    /// where along it says where to; a lane too short for it has none.
+    #[test]
+    fn a_playing_video_lane_has_its_bar_above_the_hint() {
+        let mut lane = viewer((1, 1), Some((640, 360)));
+        let poster = media_lane_geometry(&lane, CELL, CELL).unwrap();
+        lane.play = Some(MediaLanePlay::Pause);
+        lane.scrubber = Some(MediaLaneScrubber {
+            position_ms: 3000,
+            duration_ms: 9000,
+            label: "0:03 / 0:09".into(),
+        });
+        let geometry = media_lane_geometry(&lane, CELL, CELL).unwrap();
+        let (bar, label) = (geometry.scrubber.unwrap(), geometry.scrub_label.unwrap());
+        assert_eq!(bar.1, label.1);
+        assert_eq!(bar.3, CELL.1);
+        assert!(bar.1 + bar.3 <= geometry.hint.1, "above the hint");
+        assert!(bar.0 + bar.2 < label.0, "the time after the bar");
+        assert_eq!(label.2, 12.0 * CELL.0, "the time and a column");
+        assert_eq!(label.0 + label.2, geometry.hint.0 + geometry.hint.2);
+        assert!(geometry.image_area.1 + geometry.image_area.3 <= bar.1);
+        assert!(
+            geometry.image_area.3 < poster.image_area.3,
+            "the picture gives the room"
+        );
+        let middle = bar.1 + bar.3 / 2.0;
+        assert_eq!(
+            geometry.hit_test(bar.0 + 1.0, middle),
+            Some(MediaLaneHit::Scrub)
+        );
+        assert_eq!(
+            geometry.hit_test(label.0 + 1.0, middle),
+            Some(MediaLaneHit::Inside)
+        );
+        assert_eq!(geometry.scrub_at(bar.0), Some(0.0));
+        assert_eq!(geometry.scrub_at(bar.0 + bar.2 / 4.0), Some(0.25));
+        assert_eq!(geometry.scrub_at(bar.0 + bar.2), Some(1.0));
+        assert_eq!(
+            geometry.scrub_at(bar.0 - 50.0),
+            Some(0.0),
+            "held to the bar"
+        );
+        assert_eq!(geometry.scrub_at(bar.0 + bar.2 + 50.0), Some(1.0));
+        assert_eq!(poster.scrub_at(bar.0), None);
+        // Too narrow for a few columns of bar beside its time: no bar.
+        let mut narrow = lane.clone();
+        narrow.rect.2 = 2.0 * 8.0 + 15.0 * CELL.0;
+        let narrow = media_lane_geometry(&narrow, CELL, CELL).unwrap();
+        assert_eq!((narrow.scrubber, narrow.scrub_label), (None, None));
+        // A knob stays on its track, and at its start when the track is
+        // narrower than it, never past either end.
+        assert_eq!(knob_left((10.0, 0.0, 100.0, 4.0), 50.0, 6.0), 57.0);
+        assert_eq!(knob_left((10.0, 0.0, 100.0, 4.0), 0.0, 6.0), 10.0);
+        assert_eq!(knob_left((10.0, 0.0, 100.0, 4.0), 100.0, 6.0), 104.0);
+        assert_eq!(knob_left((10.0, 0.0, 3.0, 4.0), 3.0, 6.0), 10.0);
+        assert_eq!(knob_left((10.0, 0.0, 0.0, 4.0), 0.0, 6.0), 10.0);
+        // Full, but with only a line of picture: no bar under it.
+        lane.rect.3 = 5.0 * CELL.1 + 4.0 * 8.0;
+        let short = media_lane_geometry(&lane, CELL, CELL).unwrap();
+        assert!(short.full);
+        assert_eq!((short.scrubber, short.scrub_label), (None, None));
     }
 
     #[test]
@@ -1388,6 +1529,60 @@ mod tests {
             8.0,
         );
         assert_eq!(family(&text), Family::Name("Courier"));
+    }
+
+    /// The play button shows the glyph for what a press does: play,
+    /// pause, or stop a preview; a playing video's time is shaped beside
+    /// its bar.
+    #[test]
+    fn the_play_button_shows_what_a_press_does() {
+        let mut font_system = FontSystem::new();
+        let metrics = Metrics::new(14.0, 18.0);
+        let mut text = LaneText::new(&mut font_system, metrics);
+        let mut lane = viewer((1, 1), Some((640, 360)));
+        lane.scrubber = Some(MediaLaneScrubber {
+            position_ms: 0,
+            duration_ms: 9000,
+            label: "0:00 / 0:09".into(),
+        });
+        let colors = (
+            GColor::rgb(1, 1, 1),
+            GColor::rgb(2, 2, 2),
+            GColor::rgb(3, 3, 3),
+        );
+        for (play, glyph) in [
+            (MediaLanePlay::Play, 16),
+            (MediaLanePlay::Stop, 17),
+            (MediaLanePlay::Pause, 18),
+        ] {
+            lane.play = Some(play);
+            let geometry = media_lane_geometry(&lane, CELL, CELL).unwrap();
+            text.shape(&mut font_system, metrics, "Menlo", &lane, &geometry, 8.0);
+            let areas = text.areas(
+                &geometry,
+                false,
+                MediaLaneMode::Rendered,
+                None,
+                Some(play),
+                colors,
+                8.0,
+                18.0,
+            );
+            let shown: Vec<usize> = (16..19)
+                .filter(|&at| {
+                    areas
+                        .iter()
+                        .any(|area| std::ptr::eq(area.buffer, &text.controls[at]))
+                })
+                .collect();
+            assert_eq!(shown, [glyph], "{play:?}");
+            assert!(
+                areas
+                    .iter()
+                    .any(|area| std::ptr::eq(area.buffer, &text.scrub_label))
+            );
+        }
+        assert_eq!(text.shaped().0[7].as_deref(), Some("0:00 / 0:09"));
     }
 
     #[test]

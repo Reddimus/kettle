@@ -1309,8 +1309,8 @@ const MAX_LANE_IMAGES: usize = 64;
 
 pub use media_lane::{
     MediaCanvas, MediaLaneEdge, MediaLaneFrame, MediaLaneGeometry, MediaLaneHit, MediaLaneMode,
-    MediaLanePanel, MediaLanePlay, MediaLaneSender, MediaLaneSource, MediaLaneTile,
-    media_lane_geometry,
+    MediaLanePanel, MediaLanePlay, MediaLaneScrubber, MediaLaneSender, MediaLaneSource,
+    MediaLaneTile, media_lane_geometry,
 };
 pub use media_viewport::{MAX_MEDIA_ZOOM, MEDIA_ZOOM_STEP, MIN_MEDIA_ZOOM, MediaViewport};
 
@@ -8916,6 +8916,30 @@ impl Renderer {
                     source,
                     None,
                     [content.0, content.1, content.2, content.3],
+                ));
+            }
+            // A playing video's bar: the track, the part played in the
+            // accent, and a knob where the video is.
+            if let (Some(bar), Some(track)) = (&lane.scrubber, geometry.scrubber) {
+                let thick = (3.0 * self.scale).round().max(2.0);
+                let top = track.1 + ((track.3 - thick) / 2.0).round();
+                let along = if bar.duration_ms == 0 {
+                    0.0
+                } else {
+                    (bar.position_ms.min(bar.duration_ms) as f64 / bar.duration_ms as f64) as f32
+                };
+                let played = (track.2 * along).round();
+                lane_q.push(rect(track.0, top, track.2, thick, palette.divider, 1.0));
+                lane_q.push(rect(track.0, top, played, thick, palette.emphasis, 1.0));
+                let knob = (thick * 2.0).max(4.0);
+                let knob_height = (track.3 * 0.6).round().max(thick);
+                lane_q.push(rect(
+                    media_lane::knob_left(track, played, knob),
+                    track.1 + ((track.3 - knob_height) / 2.0).round(),
+                    knob,
+                    knob_height,
+                    palette.emphasis,
+                    1.0,
                 ));
             }
             // Source rows sit on the pane's background, as a terminal's do.
