@@ -2,17 +2,20 @@
 //! owns, fed from a fixed set of buffers. Its callback, on the queue's own
 //! thread, only marks the buffer it gives back as free: nothing there
 //! decodes, allocates, locks or blocks. The queue's timeline says how much
-//! of what was queued it has played, which is the clock a session's frames
-//! follow once its sound plays.
+//! of what was queued it has played; less the output device's presentation
+//! latency, asked of it again each second as the device may change, that
+//! is how much has been heard, the clock a session's frames follow once its
+//! sound plays.
 //!
 //! Every call into AudioToolbox here has its own SAFETY comment. The queue
 //! is disposed, immediately, before the state its callback writes is
 //! freed, so no callback can outlive it.
 
+use std::cell::Cell;
 use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use kettle_media::audio::{CHANNELS, SAMPLE_RATE};
 use objc2_audio_toolbox::{
@@ -20,6 +23,15 @@ use objc2_audio_toolbox::{
     AudioQueueEnqueueBuffer, AudioQueueGetCurrentTime, AudioQueueNewOutput, AudioQueuePause,
     AudioQueueRef, AudioQueueSetParameter, AudioQueueStart, AudioQueueTimelineRef,
     kAudioQueueParam_Volume,
+};
+use objc2_core_audio::{
+    AudioObjectGetPropertyData, AudioObjectID, AudioObjectPropertyAddress,
+    kAudioDevicePropertyBufferFrameSize, kAudioDevicePropertyLatency,
+    kAudioDevicePropertyNominalSampleRate, kAudioDevicePropertySafetyOffset,
+    kAudioDevicePropertyStreams, kAudioHardwarePropertyDefaultOutputDevice,
+    kAudioObjectPropertyElementMain, kAudioObjectPropertyScopeGlobal,
+    kAudioObjectPropertyScopeOutput, kAudioObjectSystemObject, kAudioObjectUnknown,
+    kAudioStreamPropertyLatency,
 };
 use objc2_core_audio_types::{
     AudioStreamBasicDescription, AudioTimeStamp, AudioTimeStampFlags, kAudioFormatFlagIsFloat,
@@ -31,6 +43,13 @@ pub const BUFFER_FRAMES: usize = 960;
 /// Buffers the queue holds at once: one playing, one next, one being
 /// filled.
 pub const BUFFERS: usize = 3;
+
+/// The longest presentation latency believed: AirPlay's is about two
+/// seconds.
+pub const MAX_LATENCY: Duration = Duration::from_secs(3);
+/// How often the output's latency is asked again: the default device, which
+/// the queue plays on, may change while it plays.
+const LATENCY_EVERY: Duration = Duration::from_secs(1);
 
 /// The output could not be made or could not play: there is no sound, and
 /// the session goes on silent.
@@ -51,6 +70,8 @@ pub struct Output {
     /// the queue is disposed.
     freed: Box<Freed>,
     started: bool,
+    /// The device's latency as last asked, and when.
+    latency: Cell<Option<(Duration, Instant)>>,
 }
 
 // SAFETY: the queue and its timeline are AudioToolbox objects that may be
@@ -115,6 +136,7 @@ impl Output {
             timeline: std::ptr::null_mut(),
             freed,
             started: false,
+            latency: Cell::new(None),
         };
         let bytes = (BUFFER_FRAMES * CHANNELS * size_of::<f32>()) as u32;
         for index in 0..BUFFERS {
@@ -211,10 +233,27 @@ impl Output {
         }
     }
 
+    /// How many frames of what was queued have been heard, and when it was
+    /// so: what the queue played ([`Output::queued`]), less its device's
+    /// latency, so fewer than none until the first is heard.
+    pub fn played(&self) -> Option<(f64, Instant)> {
+        let (queued, at) = self.queued()?;
+        let latency = match self.latency.get() {
+            Some((latency, asked)) if asked.elapsed() < LATENCY_EVERY => latency,
+            _ => {
+                // A device that cannot say counts as none.
+                let latency = latency().unwrap_or(Duration::ZERO);
+                self.latency.set(Some((latency, Instant::now())));
+                latency
+            }
+        };
+        Some((queued - latency.as_secs_f64() * f64::from(SAMPLE_RATE), at))
+    }
+
     /// How many frames of what was queued the queue has played, and when it
     /// was so; `None` before it starts, or when its clock has no time to
     /// give or broke off.
-    pub fn played(&self) -> Option<(f64, Instant)> {
+    pub fn queued(&self) -> Option<(f64, Instant)> {
         if !self.started {
             return None;
         }
@@ -237,6 +276,80 @@ impl Output {
         (status == 0 && valid && broke == 0 && stamp.mSampleTime.is_finite())
             .then(|| (stamp.mSampleTime.max(0.0), before + (after - before) / 2))
     }
+}
+
+/// How long after the queue plays a frame it is heard, on the default
+/// output device the queue plays on: the device's latency, its safety
+/// offset, its I/O buffer and its output stream's latency, at its rate, and
+/// at most [`MAX_LATENCY`]; `None` when the device cannot say.
+pub fn latency() -> Option<Duration> {
+    let device: AudioObjectID = property(
+        kAudioObjectSystemObject as AudioObjectID,
+        kAudioHardwarePropertyDefaultOutputDevice,
+        kAudioObjectPropertyScopeGlobal,
+    )?;
+    if device == kAudioObjectUnknown {
+        return None;
+    }
+    let output = |selector| property::<u32>(device, selector, kAudioObjectPropertyScopeOutput);
+    // A device of one output stream or more says the first's latency.
+    let stream = output(kAudioDevicePropertyStreams)
+        .and_then(|stream| {
+            property::<u32>(
+                stream,
+                kAudioStreamPropertyLatency,
+                kAudioObjectPropertyScopeGlobal,
+            )
+        })
+        .unwrap_or(0);
+    let frames = u64::from(output(kAudioDevicePropertyLatency)?)
+        + u64::from(output(kAudioDevicePropertySafetyOffset)?)
+        + u64::from(property::<u32>(
+            device,
+            kAudioDevicePropertyBufferFrameSize,
+            kAudioObjectPropertyScopeGlobal,
+        )?)
+        + u64::from(stream);
+    let rate: f64 = property(
+        device,
+        kAudioDevicePropertyNominalSampleRate,
+        kAudioObjectPropertyScopeGlobal,
+    )?;
+    (rate.is_finite() && rate >= 1.0)
+        .then(|| Duration::from_secs_f64(frames as f64 / rate).min(MAX_LATENCY))
+}
+
+/// A number an audio object's property is: an object, a count of frames, or
+/// a rate.
+trait Plain: Copy {}
+impl Plain for u32 {}
+impl Plain for f64 {}
+
+/// `object`'s property `selector` in `scope`, when it has one of exactly
+/// that size; the first of an array of them.
+fn property<T: Plain>(object: AudioObjectID, selector: u32, scope: u32) -> Option<T> {
+    let address = AudioObjectPropertyAddress {
+        mSelector: selector,
+        mScope: scope,
+        mElement: kAudioObjectPropertyElementMain,
+    };
+    let mut value = std::mem::MaybeUninit::<T>::zeroed();
+    let mut size = size_of::<T>() as u32;
+    // SAFETY: the address and size are valid for the call, and the out
+    // pointer is `size` writable bytes.
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            object,
+            NonNull::from(&address),
+            0,
+            std::ptr::null(),
+            NonNull::from(&mut size),
+            NonNull::from(&mut value).cast(),
+        )
+    };
+    // SAFETY: a `Plain` value is a number, valid all zero, and the call
+    // wrote all of it when it said so.
+    (status == 0 && size as usize == size_of::<T>()).then(|| unsafe { value.assume_init() })
 }
 
 impl Drop for Output {
