@@ -293,8 +293,8 @@ off applies at the next launch. `get_state` reports the policy in force as
 
 `show` sends an image, SVG, Mermaid diagram, Markdown diagram gallery (a
 Markdown file's Mermaid diagrams, paged in the lane) or video (its poster,
-the middle frame, with what the video is; it plays only as a silent preview
-the user starts in the lane) to the media shelf
+the middle frame, with what the video is; it plays in the lane only when the
+user plays it) to the media shelf
 of the pane its caller runs in. It needs only Display, so `agent-display` is enough; it grants no reads
 or mutations, and a display-only client learns nothing about the screen from
 it. `kettle show PATH` and `kettle show` (or `kettle show -`, bytes on
@@ -448,15 +448,22 @@ length on the poster's foot, and a caption with its own size and length
 (`clip.webm - video 1280x720 0:12`); the lane's detail line gives its own
 size, codec, length and whether it has sound, and a screen reader hears the
 same. Nothing plays on its own and nothing makes a sound: a card never
-starts a video, and the lane's `▶` (Space while it holds the keyboard;
-`perform_action` `preview_play`) plays a silent preview the user starts,
-eight frames from across the video shown in turn for its eighth of the
-length, at most twelve a second and two at the least, until `■` stops it.
-Its footer says "Silent preview" with the moment each frame shows. The
-frames come from the sandboxed worker within two seconds, or the poster
-stays and the footer says why. A control client may press `▶`, but no
-preview starts while Kettle handles a control request or a Lua script's
-action: making one reads the file again. With `video-preview-hover` on, and
+starts a video. The lane's `▶` (Space while it holds the keyboard;
+`perform_action` `video_play`) plays the video in the lane, without sound,
+in a sandboxed worker of its own: `‖` pauses it, the bar under the picture
+shows where it is and a press or drag moves it there, and the footer says
+it plays without sound or why it stopped. `perform_action` `preview_play`
+plays a silent preview instead, eight frames from across the video shown in
+turn for its eighth of the length, at most twelve a second and two at the
+least, until `■` stops it; its footer says "Silent preview" with the moment
+each frame shows, and its frames come from the sandboxed worker within two
+seconds, or the poster stays and the footer says why. A control client may
+press `▶` or run either action, but no video or preview starts while Kettle
+handles a control request or a Lua script's action: either reads the file
+again. `ui_geometry` reports a lane's bar among its controls (`scrubber`)
+and, while a video plays, is paused or stopped where it stood, its
+`playback`: `state` (`playing`, `paused` or `stopped`), `position_ms`,
+`duration_ms` and whether a frame shows, never the frame. With `video-preview-hover` on, and
 motion allowed (`reduce-motion`, macOS's Reduce Motion), the real pointer
 resting on the lane's picture loops the frames a preview the user started
 left, for at most four seconds, reading nothing; a pointer a control client

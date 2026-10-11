@@ -214,7 +214,12 @@ Reports that fit any of these are welcome:
   the size of the eight-frame sheet it asked for, checked to be that sheet,
   kept only with the item's digest, charged to the same account, and held
   by the lane, never the item, until the lane closes, shows another item or
-  the item changes. It plays no sound.
+  the item changes. It plays no sound. A video the user plays re-reads the
+  file in a worker of its own (see Video playback sessions), under the same
+  rules: the user's own gesture, never a control request, a Lua action or a
+  changed file; its frames are checked to be the size it opened at before a
+  byte of their pixels is read, charged to the same account and held by the
+  lane, never the item, and it plays no sound.
   While the user has given a lane the keyboard (`focus_preview`), no key
   pressed, chord, input-method text or control client's
   `send_keys`/`send_text` reaches a pane in that window; getting one

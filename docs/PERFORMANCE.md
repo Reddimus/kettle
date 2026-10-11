@@ -60,6 +60,19 @@ slowed down.
   hidden. These are bounds, not measurements: the plan's S-K latency, CPU and
   memory measurement of the preview was skipped for this release (no quiet
   machine, as decided on 2026-10-02), so no budget is claimed to pass.
+- **A lane's video playback:** frames at most 1920 on a side and 1920 by 1080
+  pixels (8.3 MB of RGBA), fitted to the lane's picture and never enlarged,
+  at most 30 a second: at most 249 MB a second across the worker's pipe,
+  for the largest lane. The worker holds three frame buffers a session, the
+  client the newest frame and two spares; the lane makes each frame an image
+  on the preview account and the image pipeline hands it the last frame's
+  texture, one texture write a frame and no texture made. At most two
+  sessions run at once, each worker group measured every 25 ms and killed
+  above 768 MiB; a session's CPU time is 30 s and a second for each second of
+  video left, and its ffmpeg's 30 s and four. A paused session decodes
+  nothing; a hidden lane's pauses. These are bounds, not measurements: the
+  plan's text-latency A/B of playback was skipped for this release (no quiet
+  machine, as decided on 2026-10-02), so no budget is claimed to pass.
 
 Area is not a time model: filter cost per pixel varies by primitive, and
 path tessellation, font shaping/outline scratch and filter scratch buffers

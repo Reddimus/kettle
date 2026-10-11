@@ -463,11 +463,18 @@ programs before reading a byte of it, exactly as a video job does: where the
 sandbox cannot be applied the session is refused `SandboxUnavailable`, and no
 decoder runs unconfined. It sniffs the container from the file's first bytes,
 then opens it with its decoders (ffmpeg on Linux; on macOS also AVFoundation,
-first) within 5 s: Opened, then the first frame at the start asked for, then
-PlayState `Paused`. A session that cannot open answers with the failure and
-exits 0; one whose first frame is not written within 5 s (a write the parent
-held past that included) answers `RenderTimeout`, and its watchdog ends it a
-second later if that answer is held up too.
+first) within 5 s: Opened, then the first frame at the start asked for (one
+past the video's last frame shows that frame, at the video track's own end
+where the file's sound runs on), then PlayState `Paused`. Each decoder keeps
+to the rate asked: ffmpeg's `fps` filter drops frames before they are
+scaled and passes on the frame left at the end, and AVFoundation, which gives every frame, keeps at most one in each
+slot of the rate's frame length counted from the first, a frame counting from
+an eighth of a frame early as container times are rounded
+(`video::FrameSlots`), so a video faster than the rate plays at it and one no
+faster keeps every frame. A session that cannot open answers with the
+failure and exits 0; one whose first frame is not written within 5 s (a
+write the parent held past that included) answers `RenderTimeout`, and its
+watchdog ends it a second later if that answer is held up too.
 
 The parent then sends commands, one byte each and nothing larger: Play and
 Pause, answered with the state they leave the session in, Heartbeat, and Close.
@@ -539,7 +546,9 @@ edge, a scale that is not a positive finite number, or a crop that is empty or
 leaves the box, is `BadParams`. Raster, SVG, Mermaid, MarkdownDiagrams and
 Auto jobs are rendered, and so are VideoStills jobs on animated images and,
 through the worker's external decoder, on video, and CachedThumbnail jobs.
-VideoProbe is `UnsupportedMedia` until its renderer lands. On Windows, where
+VideoProbe is `UnsupportedMedia`: a playback session's opening (Opened and a
+first frame, or the failure saying why) is what says whether Kettle can play
+a video, and a probe would only open it twice. On Windows, where
 no worker runs, every job is `UnsupportedPlatform`.
 
 **Stills jobs.** The source is held, not read: a file is opened as any other

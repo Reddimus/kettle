@@ -4274,7 +4274,7 @@ action is handled or for a changed file, a hover that only replays held
 frames and only within reach of the pointer, ended with its lane, ticked
 with the event loop); the lane's accessibility test hears a notice in place
 of where keys go. `kettle_media`'s edge search starts at the smallest edge
-with room for the margins, where a picture's frames begin. Checked live on macOS 27 with a signed worker: `▶` played the
+with room for the margins, where a picture's frames begin. Checked live on macOS 27 with a signed worker, when the lane's button still started the preview: `▶` played the
 nine-color MP4's frames in turn (green at 0:01, yellow at 0:03, cyan at
 0:05) with "Silent preview · 0:03 of 0:09" in the footer, `■` brought the
 poster back still, a control client's `preview_play` started nothing, the
@@ -4282,7 +4282,79 @@ real pointer resting on the picture with `video-preview-hover` on looped it
 for four seconds and again after leaving and coming back, and with
 `reduce-motion = on` resting did nothing. The plan's S-K latency, CPU and
 memory measurement was skipped for this release (no quiet machine); the
-bounds in PERFORMANCE are policy, not measurements. The tip: `media::tip` tests it shows once on the first card
+bounds in PERFORMANCE are policy, not measurements.
+
+A video playing in its lane: `kettle_media::session`'s tests run a session
+against an in-process stand-in worker speaking the session's frames:
+opened paused on its first frame, played to Ended and reaped without a kill;
+only the newest frame waiting and one wake until the caller looks; dropping
+it sends Close and stops it counting at once; a third session refused and
+one made after a drop; only the latest Play or Pause sent; a refusal kept or
+flattened as a render's is, before Ready only a handshake's, and none with a
+byte after it, and kept only when the worker then exits as a render's must
+(after Ready exit 0, else the exit says why: 4 `RenderTimeout`, 9
+`RestartRequired`, a signal `RenderResource`); a worker that
+leaves without ending the session, at Hello or once open, failing it; an
+Opened that comes after the open budget leaving its `RenderTimeout` standing;
+a
+misframed frame, a signal, a footprint over the limit and a silent worker
+each failing as they should; and heartbeats
+each second while the caller keeps the session, none three seconds after
+(`heartbeats_follow_the_caller`, about ten seconds).
+`a_session_reads_its_frames_into_one_buffer` reads a frame's pixels straight
+into the caller's buffer and refuses one of another size before its pixels
+are read. `kettle-media-native`'s ffmpeg tests play the stand-in's frames
+from a start at a rate, timed from that start and held to the length, under
+a CPU limit of 30 s and four a second left, refuse a buffer of another size,
+fail a misframed run, explain one with no frame, and fail one that exits 1
+after whole frames (`RenderParse`) or is killed by a signal
+(`RenderResource`); with a real ffmpeg every
+fixture frame plays in order (MP4, WebM, rotated, unsized, from a start, at
+half the rate, mirrored), and a start past the video in `long-audio.mp4`, whose sound
+runs six seconds longer, shows its last frame, at the video's rate and at a
+tenth of it (with the stand-in, a file two
+seconds longer than its video stream seeks to that stream's last frame).
+AVFoundation plays MP4 every frame in order, upright when rotated, mirrored
+when its display matrix mirrors it (as its stills show it), at half the
+rate, from past its end on its last frame, the video's own last frame in
+`long-audio.mp4`, at the video's rate or a slower one, and leaves WebM to
+ffmpeg;
+`frame_slots_keep_a_video_within_its_rate` keeps ten seconds of video at 24
+to 60 frames a second, from two starts, within rates of one to thirty, never
+above them, a video no faster keeping every frame;
+`frames_turn_upright_as_they_are_copied` pins all eight, each quarter turn
+mirrored or not, pixel by pixel, and `display_transforms_that_reflect_mirror_the_picture` a
+reflection as a mirror and a turn. In the
+worker on macOS, AVFoundation plays a session inside the sandbox with no
+ffmpeg (a video composition's renderer was refused there,
+so the decoder service scales instead). `kettle-render`'s
+`a_playing_video_lane_has_its_bar_above_the_hint`,
+`the_play_button_shows_what_a_press_does`,
+`a_playing_lane_draws_its_frame_and_bar` (on the GPU) and
+`frames_of_one_size_keep_one_texture` (thirty frames, one texture, thirty
+writes, each replaced frame's pixels free to reuse) cover the lane;
+`media::playback` covers the lane's playback (opened playing, each newest
+frame shown and the one it replaced given back, paused, ended keeping its
+frame and replayed from the start, parked or failed and reopened where it
+stood, a hidden lane pausing what plays and staying paused once shown, a
+drag along the bar moving it on release, a frame without room given back), `a_failed_playback_says_why`
+the footer for each failure, and `video_playback_is_wired` the wiring. All
+were checked red by reverting what each protects. Checked live on macOS 27
+with a signed worker: `▶` played the nine-color MP4 in real time (rate
+1.001 over five seconds) with the bar, "0:05 / 0:09" and "Playing without
+sound"; at its end it held the last frame with no worker left; `▶` replayed
+it from the start, `‖` held it with its worker paused, a drag along the bar
+opened it paused (stopped) or playing (playing) at the place dragged to;
+Space played and paused it and Left and Right stepped it five seconds;
+closing the lane ended its worker; and three lanes playing left two
+workers, the one played least recently stopped on its frame. Checked again
+live on 2026-10-11 after the review rounds: a control client's `new_tab`
+paused it with its worker kept, and its `goto_tab` back left it paused until
+`▶`; the client's `video_play` paused a playing video but did not play a
+paused one; and appending a byte to the file of a paused video ended its
+worker at once with "The file changed since it was shown", `▶` then started
+nothing until `↻` reloaded it, after which it played. The plan's text-latency A/B of playback was
+skipped for this release (no quiet machine). The tip: `media::tip` tests it shows once on the first card
 and is remembered, that of two Kettles that loaded before either showed it
 only the first to record it shows it, that a corrupt, oversized or empty
 record is left alone and stops the tip, and that only a regular file is read,

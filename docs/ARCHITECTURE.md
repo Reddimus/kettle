@@ -178,9 +178,32 @@ control request or a Lua script's action is handled. A hover loop
 user-started preview left: the real pointer (`native_pointer`) resting still
 on the picture, out from under any menu or dialog, plays them for at most
 four seconds, once a rest. Screen readers hear the lane's notices and that a
-preview is being made, but not each frame's time. Real playback
-is V2a's: the separate `VideoProbe` job, whose answer says whether Kettle can
-play a video, waits for the playback worker. The client's `render` runs one job in a
+preview is being made, but not each frame's time.
+
+The lane plays the video itself on the user's gesture (`media::playback`),
+in a worker of its own: `WorkerClient::play` opens a playback session
+(`kettle_media::session`) on three threads of the session's, never the render
+slot, sized to the lane's picture, and the worker serves it (`play`):
+confined to the file and its decoder before reading it, it opens paused on
+its first frame, and paces every frame at its time from a decoder that fills
+three buffers only while it plays. The client keeps the newest frame, waking
+the window once until it looks; the lane makes it an image on the preview
+account (the frame it replaces gives its pixels back for the next) and draws
+it where the poster is, at the video's size, so the image pipeline hands each
+frame the last one's texture and writes it once. A playback outlives its
+session: pausing keeps it, but the end, a failure, a seek (always a new
+session) or a third lane playing lets it go, keeping the last frame and the
+position, so Play opens a new one there. At most two lanes have a session; a
+hidden lane's pauses, and stays paused until the user plays it again (a
+control client or a script can be what showed it); the window comes round
+each second to keep its
+sessions, so a stalled loop loses them, and the worker ends a session after
+five seconds without word. A session's opening is also what says whether
+Kettle can play a video: Opened and a first frame, or the failure saying why
+(`UnsupportedContainer`, `CodecUnavailable`, `BackendUnavailable`,
+`SandboxUnavailable`), which the lane says in its footer; the `VideoProbe`
+job tag stays reserved and is refused, a second open being only a slower
+copy of the first. The client's `render` runs one job in a
 fresh worker under startup and job deadlines, with the worker in its own
 process group, killed before it is reaped; `render_with_control` adds
 cancellation and one absolute deadline its caller owns. Nothing in the GUI
