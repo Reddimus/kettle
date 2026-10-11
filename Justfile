@@ -96,6 +96,20 @@ media-protocol-test:
     cargo clippy --locked -p kettle-media-worker --all-targets --features test-faults -- -D warnings
     cargo test --locked -p kettle-media-worker --features test-faults
 
+# The media fuzz targets (fuzz/, a workspace of its own) format, compile and
+# lint on stable with the entry points' feature on, so a change to what they
+# call shows here rather than in the nightly fuzz run. Running them needs a
+# nightly and cargo-fuzz (docs/TESTING.md, Media fuzzing). The renderer the
+# targets call is Unix-only.
+[unix]
+fuzz-check:
+    cargo fmt --manifest-path fuzz/Cargo.toml --check
+    cargo clippy --locked --manifest-path fuzz/Cargo.toml --bins --target-dir target/fuzz-check -- -D warnings
+
+[windows]
+fuzz-check:
+    @echo "fuzz-check: the media fuzz targets are Unix-only"
+
 # `cargo doc` with `-D warnings` — rustdoc has its own warning class
 # (broken intra-doc-links, missing docs on public items) that
 # `clippy -D warnings` doesn't catch. CI runs this on Linux only
@@ -343,7 +357,7 @@ macos-compare-score-self-test:
 # This is the fast pre-commit loop; run it before every commit. It does NOT
 # cover the packaging/installer/update-manifest/GPU-render checks ci.yml
 # also runs; see `gauntlet-full` below for those.
-gauntlet: live-ui-helper-selftest shell-integration-check vm-launcher-test
+gauntlet: live-ui-helper-selftest shell-integration-check vm-launcher-test fuzz-check
     cargo fmt --all --check
     cargo clippy --locked --workspace --all-targets -- -D warnings
     # Feature unification hides a crate that leans on an optional dependency,

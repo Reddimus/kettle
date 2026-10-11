@@ -1,0 +1,62 @@
+# The media parsers' cargo-fuzz targets. A workspace of its own, so the
+# product's builds, lockfile and audits never include libFuzzer; its own
+# lockfile pins what a fuzz run builds. Run by .github/workflows/media-fuzz.yml
+# on a pinned nightly (cargo fuzz needs one); see docs/TESTING.md.
+[package]
+name = "kettle-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "MIT"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+kettle-media = { path = "../crates/kettle-media", features = ["fuzzing"] }
+kettle-media-native = { path = "../crates/kettle-media-native", features = ["fuzzing"] }
+kettle-media-render = { path = "../crates/kettle-media-render", features = ["fuzzing"] }
+
+[profile.release]
+# Symbols for a crash's stack, and overflow checks as the tests have them.
+debug = 1
+overflow-checks = true
+
+[[bin]]
+name = "wire"
+path = "fuzz_targets/wire.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "session"
+path = "fuzz_targets/session.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sniff"
+path = "fuzz_targets/sniff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "render"
+path = "fuzz_targets/render.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ffprobe"
+path = "fuzz_targets/ffprobe.rs"
+test = false
+doc = false
+bench = false
