@@ -1193,10 +1193,10 @@ mod tests {
         let fake = Fake::new(vec![Script::silent_with(header)]);
         let started = Instant::now();
         assert_eq!(
-            client(&fake).render(&job(1)),
+            prompt(&fake).render(&job(1)),
             Err(FailureCode::WorkerUnavailable)
         );
-        assert!(started.elapsed() < FAST.ready);
+        assert!(started.elapsed() < PROMPT.ready, "{:?}", started.elapsed());
     }
 
     #[test]
@@ -1289,8 +1289,8 @@ mod tests {
         ] {
             let fake = Fake::new(vec![script]);
             let started = Instant::now();
-            assert_eq!(client(&fake).render(&job(1)), Err(expected));
-            assert!(started.elapsed() < FAST.ready, "{:?}", started.elapsed());
+            assert_eq!(prompt(&fake).render(&job(1)), Err(expected));
+            assert!(started.elapsed() < PROMPT.ready, "{:?}", started.elapsed());
             assert_eq!(fake.spawns.load(Ordering::SeqCst), 1);
         }
     }
@@ -1445,10 +1445,10 @@ mod tests {
             let fake = Fake::new(vec![script]);
             let started = Instant::now();
             assert_eq!(
-                client(&fake).render(&job(1)),
+                prompt(&fake).render(&job(1)),
                 Err(FailureCode::RenderResource)
             );
-            assert!(started.elapsed() < FAST.ready, "{:?}", started.elapsed());
+            assert!(started.elapsed() < PROMPT.ready, "{:?}", started.elapsed());
             assert_eq!(fake.spawns.load(Ordering::SeqCst), 1);
             assert_eq!(fake.kills.load(Ordering::SeqCst), 1);
         }
@@ -1731,6 +1731,18 @@ mod tests {
 
     /// Budgets no test waits out: a job that ends while a test runs ended
     /// because it was cancelled, not because a deadline passed.
+    /// Deadlines an answer given at once beats on any runner, and one that
+    /// waits for a deadline does not.
+    const PROMPT: Budgets = Budgets {
+        ready: Duration::from_secs(5),
+        render: Some(Duration::from_secs(5)),
+        ..FAST
+    };
+
+    fn prompt(fake: &Arc<Fake>) -> WorkerClient {
+        WorkerClient::with(build_id(), Box::new(Arc::clone(fake)), PROMPT)
+    }
+
     const PATIENT: Budgets = Budgets {
         ready: Duration::from_secs(60),
         render: Some(Duration::from_secs(60)),
