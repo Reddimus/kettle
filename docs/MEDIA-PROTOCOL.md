@@ -485,8 +485,21 @@ audio track through a reader of its own over the same asset, from the same
 start, as interleaved stereo 32-bit floats at 48 kHz, each block placed on
 the video's timeline and none before the last one ended, a buffer of more
 than a quarter of a second or with a sample that is not a number refused;
-ffmpeg plays no sound. No output plays it yet: the worker lets the decoded
-sound go, and Opened says Unavailable where a player could decode it. A session that cannot open answers with the
+ffmpeg plays no sound. The worker plays it on macOS, confined with the sound
+grant when sound was asked for: a thread of its own feeds an output queue
+20 ms at a time from the decoded sound, filling the sound's gaps and all
+that follows its end with silence so the queue's clock runs as long as the
+session; it fills the queue before Play so Play starts at once, and plays,
+pauses and mutes it as the session asks. While it plays, each frame goes out
+40 ms before its sound is heard (what the parent takes to show it), from the
+queue's own clock; a frame the sound has passed by more than a frame is
+dropped, never the video's last, which the lane holds; the end waits for
+the last of the sound as for the last frame, and past the video's last
+frame no stall is counted. A queue that refuses a piece or to play, gives no
+clock within a second of starting, or a feeding thread that stops, leaves
+the session silent: AudioState says Unavailable and the frames go out on the
+session's own clock from there. Where no output can be made, or on Linux,
+Opened says Unavailable. A session that cannot open answers with the
 failure and exits 0; one whose first frame is not written within 5 s (a
 write the parent held past that included) answers `RenderTimeout`, and its
 watchdog ends it a second later if that answer is held up too.
