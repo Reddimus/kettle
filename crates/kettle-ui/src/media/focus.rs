@@ -1,7 +1,7 @@
 //! A preview lane holding the keyboard (`focus_preview`). While it does,
 //! every key is the lane's: a few move, zoom, fit, page, copy what it shows
-//! or play a video's silent preview, Esc gives the keyboard back to the
-//! terminal, and every other key
+//! or play or pause a video (left and right then step it), Esc gives the
+//! keyboard back to the terminal, and every other key
 //! and chord, Enter, digits and the application's shortcuts included, does
 //! nothing, so none reaches the program in the pane by accident.
 
@@ -29,7 +29,7 @@ pub(crate) enum PreviewKey {
     /// Page Up and Page Down.
     Page(i32),
     Copy,
-    /// Start or stop a video's silent preview, as Space.
+    /// Play or pause a video, or stop its silent preview, as Space.
     Play,
     /// Nothing: the key is the lane's all the same.
     Swallow,
