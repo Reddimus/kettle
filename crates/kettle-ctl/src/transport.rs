@@ -645,8 +645,9 @@ mod windows_io {
     use super::*;
     use std::os::windows::io::AsRawHandle as _;
     use windows_sys::Win32::Foundation::{
-        CloseHandle, ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_NOT_FOUND, ERROR_PIPE_CONNECTED,
-        ERROR_PIPE_NOT_CONNECTED, HANDLE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+        CloseHandle, ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_NO_DATA, ERROR_NOT_FOUND,
+        ERROR_PIPE_CONNECTED, ERROR_PIPE_NOT_CONNECTED, HANDLE, WAIT_FAILED, WAIT_OBJECT_0,
+        WAIT_TIMEOUT,
     };
     use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
     use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
@@ -704,6 +705,17 @@ mod windows_io {
                 "unexpected overlapped connect wait result {other}"
             ))),
         }
+    }
+
+    /// Whether a failed [`connect`] means only that its client already left:
+    /// the instance then needs DisconnectNamedPipe before it can wait for
+    /// another client, and is otherwise sound.
+    pub(super) fn client_left(error: &io::Error) -> bool {
+        error.raw_os_error().is_some_and(|code| {
+            [ERROR_NO_DATA, ERROR_BROKEN_PIPE, ERROR_PIPE_NOT_CONNECTED]
+                .iter()
+                .any(|&left| code == left as i32)
+        })
     }
 
     pub(super) fn read(file: &std::fs::File, buf: &mut [u8]) -> io::Result<usize> {
@@ -1245,10 +1257,8 @@ mod imp {
         }
 
         pub fn accept(&self) -> io::Result<CtlStream> {
-            // Retry-bounded so a transient ConnectNamedPipe failure on one
-            // instance (e.g. a client that connected then vanished) tears that
-            // instance down + recreates a fresh one instead of poisoning the
-            // accept loop forever.
+            // Retry-bounded, so clients that keep coming and going cannot
+            // hold the accept loop here forever.
             for _ in 0..16 {
                 // Ensure a pending instance exists (a prior accept may have left
                 // none if creating the next one failed).
@@ -1259,18 +1269,29 @@ mod imp {
                 }
                 // Wait through an explicit OVERLAPPED operation. Passing null
                 // here on an overlapped handle can falsely report completion.
-                if super::windows_io::connect(handle).is_err() {
-                    // Poisoned instance: disconnect + close + recreate, retry.
-                    unsafe {
-                        DisconnectNamedPipe(handle);
-                        CloseHandle(handle);
+                match super::windows_io::connect(handle) {
+                    Ok(()) => {}
+                    Err(error) if super::windows_io::client_left(&error) => {
+                        // Its client came and went before ConnectNamedPipe.
+                        // Disconnecting readies the same instance for the
+                        // next client, so the name keeps an instance
+                        // throughout: a client opening it meanwhile finds it
+                        // busy and waits, where a missing name reads as a
+                        // dead server.
+                        // SAFETY: `handle` is the pending instance this
+                        // listener owns.
+                        unsafe { DisconnectNamedPipe(handle) };
+                        continue;
                     }
-                    self.pending.set(create_instance(&self.name_w, false)?);
-                    continue;
+                    // Anything else failed here, not at a client: the
+                    // instance, and any client on it, stay for the next
+                    // accept().
+                    Err(error) => return Err(error),
                 }
                 // Connected. Create the NEXT pending instance; if that fails,
                 // STILL return this (valid) client and leave `pending` invalid so
-                // the next accept() recreates it — don't abandon a live client.
+                // the next accept() recreates it, or reports why it cannot —
+                // don't abandon a live client.
                 match create_instance(&self.name_w, false) {
                     Ok(next) => self.pending.set(next),
                     Err(_) => self.pending.set(INVALID_HANDLE_VALUE),
@@ -1955,7 +1976,7 @@ pub(crate) mod tests {
             let (release, released) = std::sync::mpsc::channel();
             // A Windows client can connect before the server's pending
             // ConnectNamedPipe completes. Do not let the timed-out client vanish
-            // first: accept would see ERROR_NO_DATA, retry on a fresh instance,
+            // first: accept would see ERROR_NO_DATA, ready the instance again,
             // and wait forever for a second client this fixture never creates.
             let (accepted, wait_for_accept) = std::sync::mpsc::channel();
             let server = std::thread::spawn(move || {
