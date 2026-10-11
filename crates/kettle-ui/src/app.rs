@@ -1333,10 +1333,12 @@ fn media_lane_accessibility(
 const ACCESSIBILITY_LANE_ID_MASK: u64 = 1 << 56;
 const MAX_LANE_ACCESSIBILITY_PANE: u64 = 1 << 51;
 const LANE_ACCESSIBILITY_PARTS: u64 = 32;
+/// A lane's controls, at parts 1 and on (see [`lane_controls`]).
+const LANE_CONTROLS: usize = 16;
 /// A playing video's bar, a slider: the part after the controls', below
 /// the stride.
-const LANE_SCRUBBER_PART: u64 = 16;
-const _: () = assert!(LANE_SCRUBBER_PART > 15 && LANE_SCRUBBER_PART < LANE_ACCESSIBILITY_PARTS);
+const LANE_SCRUBBER_PART: u64 = LANE_CONTROLS as u64 + 1;
+const _: () = assert!(LANE_SCRUBBER_PART < LANE_ACCESSIBILITY_PARTS);
 
 /// How far a step along a playing video's bar moves it, from the keyboard
 /// or an assistive technology.
@@ -1369,7 +1371,7 @@ fn lane_controls(
     u64,
     Option<kettle_render::Rect4>,
     kettle_render::MediaLaneHit,
-); 15] {
+); LANE_CONTROLS] {
     use kettle_render::MediaLaneHit as Hit;
     [
         (1, geometry.previous, Hit::Previous),
@@ -1387,6 +1389,7 @@ fn lane_controls(
         (13, geometry.page_previous, Hit::PreviousPage),
         (14, geometry.page_next, Hit::NextPage),
         (15, geometry.play, Hit::Play),
+        (16, geometry.sound, Hit::Sound),
     ]
 }
 
@@ -1406,6 +1409,7 @@ fn lane_control_name(hit: kettle_render::MediaLaneHit) -> &'static str {
         Hit::Copy => "copy",
         Hit::Reload => "reload",
         Hit::Play => "play",
+        Hit::Sound => "sound",
         Hit::Scrub => "scrubber",
         Hit::ZoomOut => "zoom_out",
         Hit::ZoomIn => "zoom_in",
@@ -13344,6 +13348,7 @@ impl App {
         let mode = lane_mode(item, panel);
         let mut lane = kettle_render::MediaLanePanel {
             play: None,
+            sound: None,
             frame: None,
             scrubber: None,
             pane,
@@ -13707,6 +13712,7 @@ impl App {
             Hit::Copy => self.copy_preview(ws, pane),
             Hit::Reload => self.reload_preview(ws, pane),
             Hit::Play => self.toggle_lane_play(ws, pane),
+            Hit::Sound => {}
             Hit::ZoomOut => self.zoom_preview(ws, pane, 1.0 / kettle_render::MEDIA_ZOOM_STEP),
             Hit::ZoomIn => self.zoom_preview(ws, pane, kettle_render::MEDIA_ZOOM_STEP),
             Hit::Fit => self.fit_preview(ws, pane),
@@ -34332,6 +34338,7 @@ impl App {
                         }
                         kettle_render::MediaLaneHit::Resize
                         | kettle_render::MediaLaneHit::Scrub
+                        | kettle_render::MediaLaneHit::Sound
                         | kettle_render::MediaLaneHit::Inside => continue,
                     };
                     let mut button = Node::new(Role::Button);
@@ -45696,14 +45703,10 @@ mod tests {
         assert!(unsigned.program.is_some());
     }
 
-    /// A screen reader hears a lane's item, its place on the shelf and,
-    /// when its pixels were released, that too; the tree is republished when
-    /// either changes, and each lane's nodes are its pane's alone.
-    #[test]
-    fn a_preview_lane_speaks_its_place_and_republishes_on_change() {
-        let tr = kettle_i18n::Translator::new(kettle_i18n::Language::En);
-        let mut lane = kettle_render::MediaLanePanel {
+    pub(super) fn test_lane_panel() -> kettle_render::MediaLanePanel {
+        kettle_render::MediaLanePanel {
             play: None,
+            sound: None,
             frame: None,
             scrubber: None,
             pane: 7,
@@ -45733,7 +45736,16 @@ mod tests {
             view: kettle_render::MediaViewport::FIT,
             tile: None,
             edge: None,
-        };
+        }
+    }
+
+    /// A screen reader hears a lane's item, its place on the shelf and,
+    /// when its pixels were released, that too; the tree is republished when
+    /// either changes, and each lane's nodes are its pane's alone.
+    #[test]
+    fn a_preview_lane_speaks_its_place_and_republishes_on_change() {
+        let tr = kettle_i18n::Translator::new(kettle_i18n::Language::En);
+        let mut lane = test_lane_panel();
         let (label, description) = super::media_lane_accessibility(&lane, &tr, None);
         assert!(
             label.contains("2 of 3") && label.contains("Plot"),
@@ -59592,16 +59604,36 @@ mod lane_control_tests {
             Hit::Fit,
             Hit::PreviousPage,
             Hit::NextPage,
+            Hit::Play,
+            Hit::Sound,
+            Hit::Scrub,
+            Hit::Resize,
             Hit::Inside,
         ];
         let names: std::collections::HashSet<_> =
             hits.iter().map(|hit| lane_control_name(*hit)).collect();
         assert_eq!(names.len(), hits.len());
-        let ids: std::collections::HashSet<_> = (0..=14)
+        // The lane, each control, and the bar after them.
+        use super::{LANE_CONTROLS, LANE_SCRUBBER_PART, lane_controls};
+        let parts = 0..=LANE_SCRUBBER_PART;
+        let ids: std::collections::HashSet<_> = parts
+            .clone()
             .map(|part| super::accessibility_lane_id(7, part).expect("in range"))
             .collect();
-        assert_eq!(ids.len(), 15);
-        for part in 0..=14 {
+        assert_eq!(ids.len(), LANE_CONTROLS + 2);
+        let controls: std::collections::HashSet<_> = lane_controls(
+            &kettle_render::media_lane_geometry(
+                &super::tests::test_lane_panel(),
+                (10.0, 20.0),
+                (10.0, 20.0),
+            )
+            .unwrap(),
+        )
+        .iter()
+        .map(|(part, _, _)| *part)
+        .collect();
+        assert_eq!(controls, (1..=LANE_CONTROLS as u64).collect());
+        for part in parts {
             let id = super::accessibility_lane_id(7, part).unwrap();
             assert_eq!(super::accessibility_lane_part(id), Some((7, part)));
         }

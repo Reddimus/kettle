@@ -68,11 +68,20 @@ pub struct MediaLaneTile {
 /// The play button a video's lane offers: play while the poster or a paused
 /// frame shows, pause while the video plays, and stop while a silent
 /// preview is made or plays.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MediaLanePlay {
     Play,
     Pause,
     Stop,
+}
+
+/// The sound button a video's lane offers once its sound can play: the
+/// sound heard, or muted. A video with no sound, or whose sound cannot play
+/// here, has none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MediaLaneSound {
+    Heard,
+    Muted,
 }
 
 /// Where a playing video is, for the bar under its picture: its place and
@@ -164,6 +173,8 @@ pub struct MediaLanePanel {
     pub edge: Option<MediaLaneEdge>,
     /// The silent-preview button the header offers, for a video.
     pub play: Option<MediaLanePlay>,
+    /// The sound button beside it, while the video's sound can play.
+    pub sound: Option<MediaLaneSound>,
     /// While a silent preview or the video plays, the frame shown instead
     /// of the item's pixels: fitted where they would be, and never zoomed.
     pub frame: Option<MediaLaneFrame>,
@@ -267,6 +278,8 @@ pub struct MediaLaneGeometry {
     pub reload: Option<Rect4>,
     /// Plays or pauses a video, or starts or stops its silent preview.
     pub play: Option<Rect4>,
+    /// Mutes the video's sound, or lets it be heard again.
+    pub sound: Option<Rect4>,
     /// The bar under a playing video's picture, which a press or drag
     /// moves the video along, and the time beside it.
     pub scrubber: Option<Rect4>,
@@ -333,6 +346,8 @@ pub enum MediaLaneHit {
     Reload,
     /// Play or pause a video, or start or stop its silent preview.
     Play,
+    /// Mute the video's sound, or let it be heard.
+    Sound,
     /// The bar under a playing video, for a press or drag along it.
     Scrub,
     ZoomOut,
@@ -397,6 +412,8 @@ impl MediaLaneGeometry {
             Some(MediaLaneHit::Toggle)
         } else if self.play.is_some_and(|rect| contains(rect, x, y)) {
             Some(MediaLaneHit::Play)
+        } else if self.sound.is_some_and(|rect| contains(rect, x, y)) {
+            Some(MediaLaneHit::Sound)
         } else if self.scrubber.is_some_and(|rect| contains(rect, x, y)) {
             Some(MediaLaneHit::Scrub)
         } else if self.reload.is_some_and(|rect| contains(rect, x, y)) {
@@ -484,7 +501,7 @@ pub fn media_lane_geometry(
     };
     // Controls take the header from the right, close first; each one past
     // collapse appears only while the title keeps its few columns, in order
-    // of need: a video's preview, reload, the mode, the canvas, browsing,
+    // of need: a video's play, its sound, reload, the mode, the canvas, browsing,
     // copy, fit, zoom in, zoom out, open outside, then the counter. One that
     // does not fit leaves the rest to try.
     let title_floor = left + MIN_TITLE_COLUMNS * tw + pad;
@@ -498,6 +515,11 @@ pub fn media_lane_geometry(
     let close = take(button, true).unwrap_or_default();
     let toggle = take(button, true).unwrap_or_default();
     let play = if lane.play.is_some() {
+        take(button, false)
+    } else {
+        None
+    };
+    let sound = if lane.sound.is_some() {
         take(button, false)
     } else {
         None
@@ -560,6 +582,7 @@ pub fn media_lane_geometry(
             copy,
             reload,
             play,
+            sound,
             scrubber: None,
             scrub_label: None,
             zoom_out,
@@ -656,6 +679,7 @@ pub fn media_lane_geometry(
         copy,
         reload,
         play,
+        sound,
         scrubber,
         scrub_label,
         zoom_out,
@@ -789,8 +813,9 @@ pub(crate) struct LaneText {
     scrub_label: TextBuffer,
     /// Previous, next, open outside, collapse, expand, close, show source,
     /// show rendered, canvas, copy, reload, zoom out, zoom in, fit, a
-    /// gallery's page before and after, and a video's play, stop and pause.
-    controls: [TextBuffer; 19],
+    /// gallery's page before and after, and a video's play, stop, pause and
+    /// sound.
+    controls: [TextBuffer; 20],
     /// What each line buffer was last shaped with; `None` until it is, or
     /// once a font change means it must be again.
     shaped: [Option<String>; 8],
@@ -845,6 +870,7 @@ impl LaneText {
                 control(font_system, "▶"),
                 control(font_system, "■"),
                 control(font_system, "‖"),
+                control(font_system, "♪"),
             ],
             shaped: Default::default(),
             rows: Vec::new(),
@@ -974,7 +1000,7 @@ impl LaneText {
     /// The text areas to paint, in `label`, `description` and `emphasis`
     /// colors. Control glyphs are centered in their cells by `glyph_width`;
     /// a gallery's page control with no page that way, at `page`'s first or
-    /// last, is in the description color.
+    /// last, and the sound button while muted, are in the description color.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn areas<'a>(
         &'a self,
@@ -983,6 +1009,7 @@ impl LaneText {
         mode: MediaLaneMode,
         page: Option<(usize, usize)>,
         play: Option<MediaLanePlay>,
+        sound: Option<MediaLaneSound>,
         colors: (GColor, GColor, GColor),
         glyph_width: f32,
         line_height: f32,
@@ -1060,12 +1087,15 @@ impl LaneText {
             geometry.play.filter(|_| play == Some(MediaLanePlay::Play)),
             geometry.play.filter(|_| play == Some(MediaLanePlay::Stop)),
             geometry.play.filter(|_| play == Some(MediaLanePlay::Pause)),
+            geometry.sound,
         ];
         let (first, last) =
             page.map_or((true, true), |(shown, count)| (shown <= 1, shown >= count));
         for (at, (buffer, rect)) in self.controls.iter().zip(buttons).enumerate() {
             if let Some(rect) = rect {
-                let idle = (at == 14 && first) || (at == 15 && last);
+                let idle = (at == 14 && first)
+                    || (at == 15 && last)
+                    || (at == 19 && sound == Some(MediaLaneSound::Muted));
                 let mut glyph = area(buffer, rect, if idle { description } else { emphasis });
                 glyph.left = rect.0 + ((rect.2 - glyph_width) / 2.0).max(0.0);
                 glyph.top = rect.1 + ((rect.3 - line_height) / 2.0).max(0.0);
@@ -1112,6 +1142,7 @@ mod tests {
     fn viewer(position: (usize, usize), image: Option<(u32, u32)>) -> MediaLanePanel {
         MediaLanePanel {
             play: None,
+            sound: None,
             frame: None,
             scrubber: None,
             pane: 1,
@@ -1228,6 +1259,43 @@ mod tests {
         );
         video.play = None;
         assert_eq!(media_lane_geometry(&video, CELL, CELL).unwrap().play, None);
+    }
+
+    /// A video whose sound can play offers its sound button just left of
+    /// play, and a press on it says so; without sound there is none, and a
+    /// header too narrow for it gives it up before the title's columns.
+    #[test]
+    fn a_video_lane_offers_its_sound_button_beside_play() {
+        let mut video = viewer((1, 1), Some((640, 360)));
+        video.play = Some(MediaLanePlay::Pause);
+        video.sound = Some(MediaLaneSound::Heard);
+        let geometry = media_lane_geometry(&video, CELL, CELL).unwrap();
+        let (play, sound) = (geometry.play.unwrap(), geometry.sound.expect("offered"));
+        assert_eq!(sound.0 + sound.2, play.0);
+        assert_eq!(sound.1, play.1);
+        let center = (sound.0 + sound.2 / 2.0, sound.1 + sound.3 / 2.0);
+        assert_eq!(
+            geometry.hit_test(center.0, center.1),
+            Some(MediaLaneHit::Sound)
+        );
+        video.sound = None;
+        assert_eq!(media_lane_geometry(&video, CELL, CELL).unwrap().sound, None);
+        // As the header narrows the sound button goes before play, and
+        // never takes the title's few columns.
+        video.sound = Some(MediaLaneSound::Muted);
+        let mut gone = false;
+        for width in (40..=800).rev().step_by(5) {
+            video.rect.2 = width as f32;
+            let Some(header) = media_lane_geometry(&video, CELL, CELL) else {
+                break;
+            };
+            if let Some(sound) = header.sound {
+                assert!(header.play.is_some(), "sound without play at {width}");
+                assert!(sound.0 >= header.title.0 + MIN_TITLE_COLUMNS * CELL.0);
+            }
+            gone |= header.sound.is_none() && header.play.is_some();
+        }
+        assert!(gone, "never shown without its sound button");
     }
 
     /// A preview's frame is drawn where the item's pixels would be, at
@@ -1556,6 +1624,7 @@ mod tests {
             (MediaLanePlay::Pause, 18),
         ] {
             lane.play = Some(play);
+            lane.sound = None;
             let geometry = media_lane_geometry(&lane, CELL, CELL).unwrap();
             text.shape(&mut font_system, metrics, "Menlo", &lane, &geometry, 8.0);
             let areas = text.areas(
@@ -1564,11 +1633,12 @@ mod tests {
                 MediaLaneMode::Rendered,
                 None,
                 Some(play),
+                None,
                 colors,
                 8.0,
                 18.0,
             );
-            let shown: Vec<usize> = (16..19)
+            let shown: Vec<usize> = (16..20)
                 .filter(|&at| {
                     areas
                         .iter()
@@ -1583,6 +1653,34 @@ mod tests {
             );
         }
         assert_eq!(text.shaped().0[7].as_deref(), Some("0:00 / 0:09"));
+        // The sound button: in the emphasis color while heard, and the
+        // description color while muted.
+        lane.play = Some(MediaLanePlay::Pause);
+        for (sound, color) in [
+            (MediaLaneSound::Heard, colors.2),
+            (MediaLaneSound::Muted, colors.1),
+        ] {
+            lane.sound = Some(sound);
+            let geometry = media_lane_geometry(&lane, CELL, CELL).unwrap();
+            text.shape(&mut font_system, metrics, "Menlo", &lane, &geometry, 8.0);
+            let areas = text.areas(
+                &geometry,
+                false,
+                MediaLaneMode::Rendered,
+                None,
+                lane.play,
+                Some(sound),
+                colors,
+                8.0,
+                18.0,
+            );
+            let glyph: Vec<_> = areas
+                .iter()
+                .filter(|area| std::ptr::eq(area.buffer, &text.controls[19]))
+                .map(|area| area.default_color)
+                .collect();
+            assert_eq!(glyph, [color], "{sound:?}");
+        }
     }
 
     #[test]
