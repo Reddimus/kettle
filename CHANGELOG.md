@@ -328,16 +328,22 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   free, owner-only, quarantined on macOS, up to 4 GiB, and deleted when
   Kettle exits. It opens paused.
 - A video plays in its lane when you press its `▶` (Space while the lane has
-  the keyboard, or the `video_play` action), without sound: every frame at
-  its time, up to 1080p and 30 frames a second, decoded in a sandboxed worker
-  of its own (AVFoundation for MP4 and QuickTime on macOS, otherwise your
-  ffmpeg). `‖` pauses it; the bar under the picture shows where it is and
+  the keyboard, or the `video_play` action): every frame at its time, up to
+  1080p and 30 frames a second, decoded in a sandboxed worker of its own.
+  On macOS, AVFoundation plays MP4 and QuickTime with their sound, from that
+  worker's own output, each frame kept to the sound as you hear it (the
+  output device's delay, Bluetooth's included, allowed for); `♪` mutes it
+  (M while the lane has the keyboard, or `video_mute`), across seeks, until
+  you unmute it. Otherwise your ffmpeg plays the picture only. The footer
+  says when a video plays muted, or why it plays without sound. `‖` pauses it; the bar under the picture shows where it is and
   moves it there when you press or drag along it; Left and Right step it
   five seconds while the lane has the keyboard; screen readers get the bar
   as a slider. It pauses when its lane is hidden, until you play it again,
   holds its last frame at the end, and at most two lanes play at once (the
-  one played least recently waits on its frame). It never starts on its
-  own, for a control client or a Lua script, or for a file that changed.
+    one played least recently waits on its frame). It never starts on its
+  own, for a control client or a Lua script, or for a file that changed; a
+  control client or a Lua script may pause or mute it, never play, move or
+  unmute it.
 - The `preview_play` action plays a video's silent preview instead: eight
   frames from across the video, shown in turn, each for its share of the
   length, until `■` stops it. The sandboxed worker makes them within two seconds, or the
