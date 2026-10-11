@@ -38,6 +38,19 @@ pub fn commands() -> Vec<(Text, Action)> {
         (T::PaletteOpenLayoutPicker, OpenLayoutPicker),
         (T::PaletteOpenThemePicker, OpenThemePicker),
         (T::PaletteOpenMediaShelf, OpenMediaShelf),
+        (T::PalettePreviewLink, PreviewLink),
+        (T::PalettePreviewClipboardPath, PreviewClipboardPath),
+        (T::PalettePreviewNext, PreviewNext),
+        (T::PalettePreviewPrevious, PreviewPrevious),
+        (T::PaletteClosePreview, ClosePreview),
+        (T::PalettePreviewSource, PreviewSource),
+        (T::PalettePreviewCanvas, PreviewCanvas),
+        (T::PalettePreviewCopy, PreviewCopy),
+        (T::PalettePreviewReload, PreviewReload),
+        (T::PalettePreviewZoomIn, PreviewZoomIn),
+        (T::PalettePreviewZoomOut, PreviewZoomOut),
+        (T::PalettePreviewFit, PreviewFit),
+        (T::PaletteFocusPreview, FocusPreview),
         (T::PaletteOpenSettings, OpenSettings),
         (T::PaletteAbout, About),
         (T::PaletteEditConfig, EditConfig),
@@ -263,6 +276,19 @@ mod tests {
             OpenLayoutPicker,
             OpenThemePicker,
             OpenMediaShelf,
+            PreviewLink,
+            PreviewClipboardPath,
+            PreviewNext,
+            PreviewPrevious,
+            ClosePreview,
+            PreviewSource,
+            PreviewCanvas,
+            PreviewCopy,
+            PreviewReload,
+            PreviewZoomIn,
+            PreviewZoomOut,
+            PreviewFit,
+            FocusPreview,
             EditConfig,
             SetScrollbarAlways,
             SetScrollbarAuto,
@@ -403,6 +429,19 @@ mod tests {
                 | OpenLayoutPicker
                 | OpenThemePicker
                 | OpenMediaShelf
+                | PreviewLink
+                | PreviewClipboardPath
+                | PreviewNext
+                | PreviewPrevious
+                | ClosePreview
+                | PreviewSource
+                | PreviewCanvas
+                | PreviewCopy
+                | PreviewReload
+                | PreviewZoomIn
+                | PreviewZoomOut
+                | PreviewFit
+                | FocusPreview
                 | EditConfig
                 | SetScrollbarAlways
                 | SetScrollbarAuto

@@ -121,6 +121,48 @@ Reports that fit any of these are welcome:
   allocates, caps each direction, keeps external requests from expressing a
   GUI user pull, and never echoes input in a failure. A frame that gets past
   those checks with oversized or hostile content is in scope.
+- **Previews the user asks for** — Kettle reads a file a pane names into a
+  preview lane only on the user's own gesture, a `preview_link` label or
+  the right-click menu's "Preview in Kettle" row, and only past the gate
+  that opening the link passes: refused for a pane on another machine or
+  one that has gone, asked about behind tmux, screen or zellij and checked
+  again on confirm. A copied path or `file://` link
+  (`preview_clipboard_path`, or Shift+right-click's "Preview Copied File")
+  passes the focused pane's gate the same way, since it may have been
+  copied from that pane; a file a file manager copied is this computer's,
+  as no pane's output can put one on the clipboard, and must still be an
+  absolute path that a file URL carries unchanged, never a `\\host\share`
+  path (a share mounted as a folder reads like any other folder). Input a
+  control client sends (`perform_action`, `dispatch_ui_key`, `send_mouse`)
+  never counts as that gesture: while Kettle handles a control request it
+  starts no such read. Terminal output, a control client or a remote host
+  that starts such a read without that gesture, or past that gate, is in
+  scope.
+- **What a preview keeps** — a shelf item keeps the bytes a request carried,
+  and an SVG's or a diagram's text as the worker read it from a file, both
+  charged to the bounded preview account and released with the item's
+  pixels; a file is kept only as its path and the authorization it was read
+  under. Rendering an item again for another background re-reads a file only
+  under that authorization, never while a control request is handled, and
+  keeps the result only if it has the digest the item was rendered from.
+  Reloading reads the item's own file again, as the user's pull, only on the
+  user's gesture. A zoomed lane's sharper pixels re-read a file the same
+  way: under the item's authorization, only for a view the user changed,
+  never one a control client changed last nor for a change a control
+  client made to the lane, and kept only with the item's digest; once a
+  file changed, nothing more is read for that item, whether its lane closes
+  or not, until a reload. Those pixels are charged to the same account, never evict an
+  item's, and go with their item, lane or pane.
+  While the user has given a lane the keyboard (`focus_preview`), no key
+  pressed, chord, input-method text or control client's
+  `send_keys`/`send_text` reaches a pane in that window; getting one
+  through is in scope. The release of a key the terminal already had when
+  the lane took the keyboard still goes to the terminal, to the pane
+  focused when it comes, as every release does.
+  The lane's source view shows control, format and bidirectional characters
+  as U+FFFD. Getting a preview to keep source or pixels past that account,
+  to read a file for a control client, or to show a changed file as the
+  item it was, is in scope.
 - **Media worker selection** — Kettle looks for its media worker only beside
   its own executable, at the path recorded at startup, never in `PATH`, the
   working directory or the environment. The worker must be a regular

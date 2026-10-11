@@ -79,9 +79,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     # Per-job timeout. GitHub Actions defaults each job to 360 min, so a
     # hung test or runaway loop would burn six hours before failing. This
-    # job takes ~15-25 min (cold-cache Rust build on 3 OSes); 45 min is ~2x
-    # headroom for a slow runner.
-    timeout-minutes: 45
+    # job takes ~25-30 min with a warm cache, and ~45 min on macOS when the
+    # cache was evicted (the repository's 10 GiB limit fills on busy days),
+    # with the media worker, its native and render crates and their tests;
+    # 60 min leaves headroom for a cold build on a slow runner.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:

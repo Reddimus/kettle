@@ -227,8 +227,18 @@ impl GraphicsBudget {
         self.reserve(Resource::Cpu, bytes, true)
     }
 
+    /// Reserve retained CPU storage that is not an image, such as a
+    /// preview's source bytes or text, in this scope and the process: held
+    /// to the retained and process limits, not the per-image cap.
+    pub fn reserve_retained_cpu(&self, bytes: usize) -> Option<GraphicsReservation> {
+        if bytes == 0 {
+            return None;
+        }
+        self.reserve(Resource::Cpu, bytes, true)
+    }
+
     /// Reserve short-lived decode/escape storage in the process account only.
-    pub(crate) fn reserve_transient_cpu(&self, bytes: usize) -> Option<GraphicsReservation> {
+    pub fn reserve_transient_cpu(&self, bytes: usize) -> Option<GraphicsReservation> {
         if bytes == 0 {
             return None;
         }
@@ -467,6 +477,25 @@ mod tests {
         drop(a);
         assert_eq!(b.usage(), (16, 16, 0, 0));
         drop(c);
+        assert_eq!(b.usage(), (0, 0, 0, 0));
+    }
+
+    /// Retained storage that is not an image is held to the scope and the
+    /// process, but not to the per-image cap, and goes back when dropped.
+    #[test]
+    fn retained_cpu_storage_bypasses_only_the_per_image_limit() {
+        let b = GraphicsBudget::isolated(tiny_limits()).unwrap();
+        assert!(b.reserve_retained_cpu(0).is_none(), "nothing to hold");
+        let text = b
+            .reserve_retained_cpu(24)
+            .expect("a source may exceed one image's cap");
+        assert_eq!(b.usage(), (24, 24, 0, 0));
+        assert!(
+            b.reserve_retained_cpu(9).is_none(),
+            "the retained scope holds 32"
+        );
+        assert_eq!(b.usage(), (24, 24, 0, 0), "a refusal holds nothing");
+        drop(text);
         assert_eq!(b.usage(), (0, 0, 0, 0));
     }
 

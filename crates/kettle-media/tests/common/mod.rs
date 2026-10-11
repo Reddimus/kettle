@@ -48,12 +48,29 @@ pub fn external() -> ExternalRequest {
         fallback_fonts: j.fallback_fonts,
     }
 }
+/// The layout of an uncropped `width` x `height` render that fills its box.
+pub fn layout(width: u32, height: u32) -> RenderLayout {
+    let whole = Crop {
+        x: 0,
+        y: 0,
+        width,
+        height,
+    };
+    RenderLayout {
+        source_width: f64::from(width),
+        source_height: f64::from(height),
+        image_in_target: whole,
+        result_in_target: whole,
+    }
+}
 pub fn rendered() -> Rendered {
     Rendered {
         width: 1,
         height: 1,
         rgba: vec![255, 0, 0, 128],
         digest: content_digest(&[7], None).unwrap(),
+        layout: layout(1, 1),
+        exact_source: Some("<svg/>".into()),
         source_text: vec![],
         fence_sources: vec![],
         fence_count: 0,
@@ -61,6 +78,15 @@ pub fn rendered() -> Rendered {
         uncovered_scripts: vec![],
         warnings: vec![],
     }
+}
+/// The fixture as a render of `kind`: its source only when that kind is
+/// text.
+pub fn rendered_as(kind: MediaKind) -> Rendered {
+    let mut rendered = rendered();
+    if kind.exact_source_cap().is_none() {
+        rendered.exact_source = None;
+    }
+    rendered
 }
 pub fn path() -> NativePath {
     #[cfg(unix)]

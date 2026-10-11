@@ -61,7 +61,7 @@ fn raster_exact_replies_and_reap() {
     ));
     let mut expected = encoded(Frame::Ready(common::ready()), Direction::WorkerToParent);
     expected.extend(encoded(
-        Frame::Rendered(common::rendered()),
+        Frame::Rendered(common::rendered_as(MediaKind::Raster)),
         Direction::WorkerToParent,
     ));
     assert_eq!(exchange(&input), expected);

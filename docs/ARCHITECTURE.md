@@ -500,7 +500,8 @@ fails to parse makes the Security framework throw past its C interface. In
 kettle-ui the `media` module routes it (`route`: the nearest live pane whose
 child is an ancestor, else full control's pane or a hint naming this
 Kettle, unverified), queues it (`queue`: one render, three waiting, one per
-sender, a deadline from admission), and renders it on the lane, one thread
+sender, a deadline from admission, and apart from those a slot for the
+user's own request, which goes first), and renders it on the lane, one thread
 started on first use that drives `WorkerClient::render_media_with_control`.
 Each `Pane` owns its `Shelf`, so a shelf travels with its tab; completions
 come back through `UserEvent::MediaRendered`, the item's pixels are charged
@@ -596,7 +597,7 @@ focus off a card. Quick select places cards with
 text it scans, not from the last frame, and draws its labels with the
 menus, above every card. A click, a quick-select label
 and an accessibility action all open a card through `App::open_card`, which
-refuses while a dialog, a menu or the viewer owns the pointer and checks the
+refuses while a dialog or a menu owns the pointer and checks the
 card's item is still on its pane's shelf. The renderer records each card it draws (`PaintedCard`: pane, nonce, the
 part inside its pane) in `drawn_cards`, whose items eviction spares, and
 copies them to `painted_cards` only once that frame is presented; `card_at`
@@ -604,12 +605,12 @@ finds the card on screen under a press. After each presented frame the App
 notes when each card on screen first appeared at its spot (pane, nonce and
 rect, so two printed copies settle apart) with `CardSightings::note`, and a
 primary press on one settled for `CARD_SETTLE` is taken by `press_card`
-before anything but dialogs and the viewer. `release_card` then opens that
+before anything but dialogs and the preview lanes. `release_card` then opens that
 card's item. Anything that takes the pointer while the button is held (a
 dialog through `close_all_modals` or `install_confirm_dialog`, the context
 menu, search) ends the card's press, as do focus loss and a new primary
 press after a release that never came, and `release_card` also opens
-nothing while a dialog or the viewer is up. `note_card_hover` names the card
+nothing while a dialog is up. `note_card_hover` names the card
 a press at the physical pointer would take (`native_pointer`, which a control
 client's moves never set), for the hand cursor and the overlay's accent
 outline (`Overlay::card_hover`, the whole `PaintedCard`, drawn only where that
@@ -634,21 +635,198 @@ it shows the tip and neither ever sees it half written. Any entry already
 there, a record or not, means no tip and is left alone. At start a record it
 can read (through `kettle_state::open_trusted_file_read`: a regular file
 only, no link followed, no blocking open) marks the tip done. It ends when
-`open_card` runs or `TIP_TIME` passes, a deadline `about_to_wait` folds in. `WindowState::media_viewer`
-names the pane and item; the App projects it into a
-`kettle_render::MediaViewerOverlay` (display text and pixels, never a path)
-and closes it when its pane leaves the active tab or becomes too small to
-hold it, the item leaves the shelf, or another modal opens. While it is open it takes every press and the
-wheel over it, ahead of the tab bar, and the paste receipt is not projected.
-kettle-render's `media_viewer` lays it out (`media_viewer_geometry`, shared
-with the App's hit testing, with an `open_outside` button before close when
-`MediaViewerOverlay::open_outside` offers one; the App offers it while
-`App::media_viewer_opens_outside` finds the permitted viewer, looked up once
-per process by `Viewer::find`, and the item holds its pixels, and binds a bare
-O to it too), paints it into the menu layer, and draws its
-image through a lazily made image layer charged to the preview account, like
-card posters; its shaped text enters the retained chrome damage key and is
-reshaped when the font changes.
+`open_card` runs or `TIP_TIME` passes, a deadline `about_to_wait` folds in.
+
+A pane's geometry comes from one place: `kettle-ui`'s `pane_partition`
+divides each split leaf `Mux::layout` hands out into a `PanePartition`, its
+titlebar (on a tab showing more than one pane), its terminal with the
+padding inside, and its preview lane, by a `LayoutStyle` of the window's
+cells, padding and titlebar. Everything about a terminal (PTY sizes in
+`resize_all`, split and restore prediction, pointer and IME mapping, the
+scrollbar, selection autoscroll, overlays placed at the grid, the renderer's
+`PaneView::terminal`, accessibility bounds and ctl `ui_geometry`) reads the
+partition's `terminal`; structural questions (which pane is where, which
+way is up, a drag's target, a screenshot's crop) read `Mux::leaves`. A
+lane request (`Tab::lanes`, by pane: side, share and whether expanded) is
+transient: never saved, cleared from a torn-off tab, and pruned with its
+pane. `partition_leaf` carves the lane in whole terminal cells and keeps
+the terminal at 20 columns and 5 rows at least; a lane without room to
+expand (a right one needs 16 columns for its header) is a one-row strip
+along the body's bottom whichever its side, and one without room for that a
+badge that changes nothing. Opening a lane into a badge is refused with a
+notice. What a lane shows is `WindowState::preview_panels` (by
+pane, the shelf item); `prune_previews`, on every pass of the event loop,
+closes a lane whose pane closed or left the window or whose item left the
+shelf. The App projects each visible lane into a
+`kettle_render::MediaLanePanel` (display text and pixels, never a path).
+A lane takes every press, plain pointer motion and the wheel over it, ahead
+of inline cards and the receipt (a drag a press in the terminal began still
+reaches the program); keys still go to the terminal, and modals open over it
+without closing it, out of the pointer's and assistive technology's reach. kettle-render's `media_lane` lays it out (`media_lane_geometry`,
+shared with the App's hit testing and accessibility: header controls close
+and collapse, then, while the title keeps four columns, open outside,
+previous and next, and the counter; the rows below only when expanded with
+room), and the renderer draws lanes in their own layer (quads,
+a lazily made image layer charged to the preview account, and a text
+renderer) after the terminal's text and cursor and before its dimming,
+scrollbar and every overlay, so a menu covers a lane whole. Each lane's
+shaped text is kept by pane, enters the retained chrome damage key and is
+reshaped when the font changes. Every quad a pane's cells add is clipped to
+its terminal (`clip_quads`), so a snapshot still taller than a terminal that
+has just shrunk paints nothing in its lane.
+
+Every shelf item keeps what it was rendered from (`media::ItemSource`): the
+job as a `JobSpec` (kind, theme, canvas, target, fonts, and its input), the
+source's digest, and, for an SVG or a diagram read from a file, its text as
+the worker read it (protocol 3's `exact_source`). Bytes a request carried
+are kept once, charged to the process preview account through
+`GraphicsBudget::reserve_retained_cpu`, and shared by the queue, the render
+lane and the shelf; a push whose bytes do not fit is refused as over
+budget, and a file's text that does not fit is simply not kept. A file is
+kept as its path and the authorization it was read under. Evicting an
+item's pixels releases its charged bytes too. The render lane builds each
+`Job` from its spec, copying the bytes under a transient charge, off the UI
+thread. A shelf key is a `ShelfKey`: the key a `show` named, or a file's
+native path, so two paths that print alike never replace each other.
+
+A lane's header can switch to the item's source (`MediaLaneMode::Source`),
+whose visible rows `media::display_rows` takes out of the text for the
+room the lane has, with tabs expanded and characters that act shown as
+U+FFFD; the wheel over a lane (its own `WindowState::lane_wheel`
+accumulator) scrolls them. A raster's or an SVG's canvas is painted behind
+its pixels; a diagram's colors follow its canvas, so `◐` renders it again
+as a `Requester::Lane` push, a sender of its own (`Sender::Lane`), whose
+result `finish_lane_render` takes only for the same item and generation
+read from a source with the same digest (`lane_render_verdict`), keeping
+the item's id, generation and place; a changed file is said in the lane
+instead. Such a render never reads a file while a control request is
+handled. `↻` (`reload_preview`) reads an item's file again as the user's
+own pull (`pull_preview` with a `ReloadOf`): a fresh read with a new action
+witness, under the item's key and title and on the canvas chosen for its
+lane (`reload_of`), so the result replaces the item in place as
+`Provenance::User`, and a file that now holds a diagram is drawn for the
+background the lane showed; showing it again clears what the lane last
+said. The worker read that path on this computer before, so the
+pane's gate for files its output names adds nothing; the read is still
+refused while a control request is handled. Copying goes to
+`media::CopyService`, one thread with its own
+clipboard handle for the life of the process, one copy running and one
+waiting; a source copy shares the item's charged text rather than copying
+it, and the lane says what came of it. A wheel over a lane scrolls it only
+while no menu or dialog is open (`lane_takes_wheel`), from a wheel account
+of the window's own that is emptied when a gesture ends, the wheel moves to
+the terminal, or a lane closes; a source replaced under its key by a
+shorter one shows from a row it has (`lane_source`), and source rows are
+bounded in bytes as well as columns, so marks that take no column cannot
+make one long.
+
+A rendered item zooms and pans through `kettle_render::MediaViewport`, which
+the panel keeps and the renderer and the UI share: a zoom relative to the
+item's fit, bounded to an eighth and 32 times it, and the image point at the
+content's center, so a resized lane keeps showing the same part. Every
+change places the image by one rule, an axis longer than the content
+covering it and a shorter one centered, and `media_lane_geometry` reports
+the fit, the placed image and the whole-pixel `content` that clips it; the
+renderer draws the one image item it always did, clipped to that content,
+with its canvas behind the part that shows. Over a rendered item the wheel
+pans and, with Cmd held on macOS or Ctrl elsewhere, zooms at the pointer
+(`lane_wheel`), as a pinch does; a primary press on the content arms a
+`LaneDrag` that pans once it moves three logical pixels and owns the
+pointer's motion and its release, natively and from a control client, until
+the release, another press, a menu or dialog opening, or focus loss. A
+control client's whole wheel steps zoom and pan as the wheel's lines do
+(`lane_wheel_steps`).
+
+An expanded lane resizes by the padding along the edge it shares with its
+terminal (`MediaLaneGeometry::resize`, marked by a grip, with resize arrows
+for the cursor). A press there arms a `LaneResize`; its motion moves the
+edge through `Mux::drag_lane_edge`, which measures the pane in its own tab
+and holds the share with `pane_partition::fraction_at_edge` so the terminal
+keeps its floor and the lane its least: a drag never turns the lane into a
+strip. The lane repaints at once, and the PTYs are resized at most every
+33 ms, once more when the drag ends, and when a paused drag's interval is
+up (`flush_lane_resize`, on the event loop's wait). A release, another
+press, a menu or dialog, or focus loss ends it. The lanes otherwise set the
+cursor too: a pointing hand over a control, a hand over a rendered item to
+pan, grabbing while it pans.
+
+`focus_preview` gives a lane the keyboard (`WindowState::preview_focus`, a
+`media::PreviewFocus` of its pane and item). It is the last `KeyModal`
+and `TextModal`, so another modal opened over it takes keys first, and
+its branch in the key path comes before keybind resolution: every key
+is the lane's, `media::preview_key` mapping Esc, the arrows, `+`/`=`,
+`-`, `0` and `c` and swallowing the rest, any Ctrl, Alt or Command chord
+included, Option on macOS too (`held_modifiers`). `ui_owns_key` keeps
+the releases of those presses from the PTY; a key the terminal already
+had when the lane took the keyboard still sends its release, to the pane
+focused when it comes, as every release does. It is no
+pointer modal and not in `any_modal_open`: the pointer, the wheel and
+file drops work elsewhere as ever. Entering ends an input method's composition and turns it off;
+preedit and commits meanwhile are dropped, and leaving bumps the
+composition generation and turns it back on. `send_keys` and `send_text`
+to a pane in that window answer `busy` before encoding anything.
+`check_preview_focus`, on each event-loop pass, gives the keyboard back
+once the lane cannot use it: another modal on top, its pane no longer
+focused, another item, or no room for its content; so do Esc, a press
+outside the lane (a side button's too), a file drop, focus loss, and any
+modal opening (`close_all_modals`, a confirmation), even one that closes
+again within the same pass.
+
+Zoomed past its own pixels, a lane asks the worker for the part in view at
+the size shown (`media::crop`). Any change to the view, or to the lanes,
+marks the lane's `LaneCrop` due once the view is quiet for 75 ms, or at
+most 150 ms after the change began; `about_to_wait` asks then and wakes for
+the next. `plan_crop` makes the target a box of the image's own shape, its
+longer side the size shown and the other rounded up so the worker's fit
+fills it, a raster's never past its own pixels and none past 4096 on an
+edge, with the crop the part in view plus a two-pixel guard, shrinking the
+box until an SVG's crop meets its ceiling; it asks only for a quarter more
+detail than the lane holds. The render is a `Requester::Lane` with a
+ticket, queued as `Sender::LaneTile` so it never displaces a render on
+another canvas. It reads no file when a control client changed the view
+last (a later change to the lane, such as a copy, leaves the view whose it
+was) or its action led to the ask, once the file changed
+(`ItemSource::changed`, which stays with the item whatever becomes of its
+lane, until a reload replaces it; the lane's renders still waiting for it
+are withdrawn, and a canvas change reads it no more either), or for
+released bytes. An ask that needs
+nothing, or finds the pixels it holds enough, drops the ticket it asked
+before; a finished render on another canvas asks again. `finish_lane_crop` keeps only the last ticket's pixels, for the same
+item and source, charged without evicting anything, as a `LaneTile` with
+the part of the image they cover from the reply's layout. The renderer draws
+the tile in place of the item's pixels only while it covers all of the view
+(`MediaLaneGeometry::tile`), one image a lane either way; the shelf item's
+own pixels never change, so copying copies them.
+
+The user can pull a file into a lane too: `preview_link` runs quick select
+with `hint_previews` keeping only the image, SVG and Mermaid files a pane
+names (a whole path, off Windows, or a local `file://` link), and the
+right-click menu adds a "Preview in Kettle" row (`UrlHow::Preview`) on a
+link to one. Both reach `preview_pane_link`, which passes the pane's
+`link_gate` as opening the link would: a remote pane, or one that has gone,
+is refused, and one behind a multiplexer is asked about
+(`ConfirmAction::PreviewLocalFile`), its origin read again on confirm
+(`confirmed_preview_path`). `pull_preview` sends a `Source::user_pull`
+carrying a `GuiActionWitness`, which only a user's gesture in the GUI makes,
+as a `media::Push` whose `Requester::User` answers no client: it waits in
+the queue's user slot (`Sender::User`), and a newer request takes its place
+without a word. A failure before rendering (busy, out of time, no worker)
+is kept in `MediaService::user_failures` (eight at most) until the App
+tells it; one the render returns, `finish_show` tells at once. Both are
+notifications. `pull_preview` refuses outright while a control client's
+request is being handled (`App::ctl_driving`): a client may drive the UI
+(`perform_action`, `dispatch_ui_key`, `send_mouse`), but its input never
+stands for the user's gesture, which is what the witness asserts.
+A finished pull lands on the shelf as `Provenance::User` and waits in
+`App::previews_ready` (eight at most) for its window's next pass of the
+event loop, which opens it in the pane's lane if the pane is still open.
+`preview_clipboard_path` reaches the same two calls from the clipboard
+(`copied_preview`): a file list a file manager copied goes straight to
+`pull_preview` as this computer's, after a round trip through a file URL
+that refuses a relative path, a share or `..`; one copied path or
+`file://` link goes through `preview_pane_link` and the focused pane's
+gate. Shift+right-click reads the clipboard to offer it as a menu row; a
+plain right-click never does.
 
 ```mermaid
 graph LR

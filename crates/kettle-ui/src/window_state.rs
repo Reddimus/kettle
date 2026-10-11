@@ -698,11 +698,81 @@ pub(crate) struct ThemePickerState {
     pub(crate) opened_on: String,
 }
 
-/// The shelf item open in a window's media viewer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct MediaViewer {
-    pub(crate) pane: u64,
+/// What a pane's preview lane shows: one item of the pane's shelf. Where the
+/// lane sits is its tab's [`crate::mux::Tab::lanes`] entry; the two come and
+/// go together.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PreviewPanel {
     pub(crate) item: u64,
+    /// The rendered item, or its source.
+    pub(crate) mode: kettle_render::MediaLaneMode,
+    /// The canvas the user chose for the item, over its kind's own.
+    pub(crate) canvas: Option<kettle_render::MediaCanvas>,
+    /// The first source row and column in view.
+    pub(crate) scroll: (usize, usize),
+    /// What the lane last did, shown until the next thing it does.
+    pub(crate) notice: Option<LaneNotice>,
+    /// How the rendered item is zoomed and panned.
+    pub(crate) view: kettle_render::MediaViewport,
+}
+
+impl PreviewPanel {
+    /// A lane showing `item` rendered and fitted, on its kind's canvas.
+    pub(crate) fn new(item: u64) -> Self {
+        Self {
+            item,
+            mode: kettle_render::MediaLaneMode::Rendered,
+            canvas: None,
+            scroll: (0, 0),
+            notice: None,
+            view: kettle_render::MediaViewport::FIT,
+        }
+    }
+}
+
+/// A primary press on a lane's edge, which resizes the lane as it moves. The
+/// lane repaints at once; its terminal's PTY is resized at most every
+/// [`LANE_RESIZE_PTY_INTERVAL`], and once more when the drag ends.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct LaneResize {
+    pub(crate) pane: u64,
+    /// When the PTYs were last resized for it.
+    pub(crate) resized: std::time::Instant,
+    /// Whether the lane moved since.
+    pub(crate) pending: bool,
+}
+
+/// How often a lane's edge drag resizes the PTYs.
+pub(crate) const LANE_RESIZE_PTY_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(33);
+
+/// A primary press on a lane's rendered item, which pans it once it moves
+/// past a few pixels. The release is the lane's, wherever it lands.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct LaneDrag {
+    pub(crate) pane: u64,
+    /// Where the press was, in physical pixels.
+    pub(crate) from: (f64, f64),
+    /// Where the pointer was at the last pan.
+    pub(crate) last: (f64, f64),
+    /// Past the threshold: the pointer's motion pans the item.
+    pub(crate) panning: bool,
+}
+
+/// What a lane says it did, in place of its hint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LaneNotice {
+    ImageCopied,
+    SourceCopied,
+    CopyFailed,
+    /// A copy runs, and another waits.
+    CopyBusy,
+    /// Rendering the item again on the canvas chosen.
+    Rendering,
+    /// That render failed; the item shows as it was.
+    RenderFailed,
+    /// The file changed since the item was rendered.
+    Changed,
 }
 
 pub(crate) struct WindowState {
@@ -804,6 +874,16 @@ pub(crate) struct WindowState {
     /// and the wheel does nothing at all. Per-window because each OS window has
     /// its own independent pointer-event stream.
     pub(crate) wheel: crate::input::WheelAccum,
+    /// The wheel's motion over a preview lane, apart from the terminal's.
+    pub(crate) lane_wheel: crate::input::WheelAccum,
+    /// A press on a lane's rendered item, until its release.
+    pub(crate) lane_drag: Option<LaneDrag>,
+    /// A press on a lane's edge, until its release.
+    pub(crate) lane_resize: Option<LaneResize>,
+    /// The preview lane holding the keyboard (`focus_preview`), if one is.
+    pub(crate) preview_focus: Option<crate::media::PreviewFocus>,
+    /// Each lane's sharper pixels for its zoomed view, by pane.
+    pub(crate) lane_crops: std::collections::HashMap<u64, crate::media::LaneCrop>,
     pub(crate) selecting: bool,
     /// Pane that owns the active pointer selection gesture. Focus can
     /// move through ctl/Lua while a drag is live; pinning the id prevents the
@@ -887,6 +967,9 @@ pub(crate) struct WindowState {
     pub(crate) theme_picker_input: Option<ThemePickerState>,
     /// Active quick-select hint mode: detected targets + typed prefix.
     pub(crate) hint_state: Option<(Vec<HintTarget>, String)>,
+    /// Whether that quick select is for previews (`preview_link`): it labels
+    /// only files a lane can show, and a pick previews the file.
+    pub(crate) hint_preview: bool,
     /// Right-click context menu state (`Some` while open). Lives next
     /// to the other modal overlays — same close-all-modals discipline,
     /// same Esc-to-dismiss key route.
@@ -897,9 +980,10 @@ pub(crate) struct WindowState {
     /// one (`commit_theme`) clears it first. Reverted by the single post-event
     /// chokepoint in `window_event` (`theme_preview_change`).
     pub(crate) theme_preview: Option<(String, kettle_config::Theme)>,
-    /// The shelf item the user opened in this window, if any. Only a user
-    /// action opens it; a push never does.
-    pub(crate) media_viewer: Option<MediaViewer>,
+    /// What each pane's preview lane shows, by pane, for the panes of this
+    /// window that have one. Only a user action opens a lane; a push never
+    /// does.
+    pub(crate) preview_panels: std::collections::HashMap<u64, PreviewPanel>,
     /// The inline card, by pane and nonce, that took the primary press now
     /// held; its release over the same card opens the card's item.
     pub(crate) card_press: Option<(u64, kettle_core::InlineNonce)>,
@@ -1358,6 +1442,11 @@ impl WindowState {
             fullscreen,
             cursor: PhysicalPosition::new(0.0, 0.0),
             wheel: crate::input::WheelAccum::default(),
+            lane_wheel: crate::input::WheelAccum::default(),
+            lane_drag: None,
+            lane_resize: None,
+            preview_focus: None,
+            lane_crops: std::collections::HashMap::new(),
             selecting: false,
             selecting_pane: None,
             selection_autoscroll_edge: 0,
@@ -1381,9 +1470,10 @@ impl WindowState {
             layout_picker_entries: Vec::new(),
             theme_picker_input: None,
             hint_state: None,
+            hint_preview: false,
             context_menu: None,
             theme_preview: None,
-            media_viewer: None,
+            preview_panels: std::collections::HashMap::new(),
             card_press: None,
             card_sightings: crate::media::CardSightings::default(),
             card_focus: None,
@@ -1484,6 +1574,7 @@ mod tests {
             last_output_at: None,
             last_seen_at: None,
             bell: false,
+            lanes: Default::default(),
         }
     }
 

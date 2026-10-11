@@ -20,9 +20,9 @@ protocol version, requiring the local protocol too. It returns RestartRequired o
 helper retries. State sequencing and verification of which spawned worker supplied a reply
 belong to P2.
 
-## Wire version 2
+## Wire version 3
 
-The header is 11 bytes: `KMED`, u16 LE protocol version 2, a frame kind, then u32 LE payload
+The header is 11 bytes: `KMED`, u16 LE protocol version 3, a frame kind, then u32 LE payload
 length. No padding or compression is permitted. Binary data and UTF-8 strings have u32 LE
 byte lengths. Lists have u32 LE counts. Integers and f64 bit patterns use LE. Boolean and
 optional-value discriminants are exactly 0 or 1. Floats must satisfy the field validators.
@@ -35,7 +35,7 @@ platform refuses the other encoding.
 | 2 Ready | Worker to parent | Same BuildId representation |
 | 3 ExternalRequest | External to parent | Kind, restricted source, theme, canvas, target, fonts |
 | 4 Job | Parent to worker | Kind, worker source, theme, canvas, target, fonts |
-| 5 Rendered | Worker to parent | Width, height, RGBA blob, 32 digest bytes, optional path identity, display lines, fence count, optional index, fence sources, script names, warning codes |
+| 5 Rendered | Worker to parent | Width, height, RGBA blob, 32 digest bytes, optional path identity, display lines, fence count, optional index, fence sources, script names, warning codes, layout, optional exact source |
 | 6 Failure | Worker to parent | One fixed error-code byte |
 | 7 DetectedRendered | Worker to parent | One media-kind byte, then exactly the Rendered payload |
 
@@ -61,6 +61,20 @@ Path identity stores dev, ino and size u64, signed seconds i64, then nanoseconds
 one billion. Rendered rows use straight RGBA, without premultiplication. There is no stride
 field. The byte count must equal checked width * height * 4. Digests refer to source content,
 so the codec cannot verify them from returned pixels alone.
+
+A Rendered layout stores the source's own width and height as f64 (a raster's pixels, an
+SVG's user units), then two rectangles of x/y/width/height u32 in target-box pixels: the
+fitted image, centered in the box, and the region the returned pixels cover (the fitted
+image, or the crop asked for). The extents must be finite and positive, both rectangles
+nonempty and within u32, and the pixels no wider or taller than the region they cover: an
+SVG held to its pixel ceiling covers its region more sparsely. The optional exact source is
+a textual kind's input exactly as it was read, from the snapshot the digest covers (an SVG
+file, or a Mermaid diagram's source, never the generated SVG), at most 2 MiB; a raster
+returns none. A DetectedRendered reply is held to its kind on encode, on decode and when
+the parent takes it: an SVG, Mermaid or Markdown reply must carry its source, within that
+kind's input cap (2 MiB, 64 KiB, 1 MiB), and a raster or video reply must carry none.
+Display lines may drop carriage returns and clip long lines; the exact source does
+neither.
 
 Encoding validates first, measures with checked lengths, then requests one exact frame
 capacity. Decoding validates the header and the entire borrowed payload before requesting
@@ -104,10 +118,10 @@ names and hashes are refused; hex letter case is preserved, and exact build equa
 intentional. Changing tags, layouts or acceptance rules requires a protocol version decision
 and updated golden fixtures.
 
-Version 2 adds the Auto job tag and the DetectedRendered frame to version 1 and changes
-nothing else; no version negotiates, so a version 1 peer is `RestartRequired` either way.
-Neither frame carries the source text a file preview was rendered from: retaining it
-would be another version.
+Version 2 added the Auto job tag and the DetectedRendered frame to version 1. Version 3
+appends the layout and the exact source to every Rendered payload, so a zoomed preview can
+ask for the crop it shows and the GUI can copy a diagram's source as it was. No version
+negotiates, so a version 1 or 2 peer is `RestartRequired` either way.
 
 ## Build identity and worker availability
 

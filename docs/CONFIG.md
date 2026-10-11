@@ -142,6 +142,7 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `agent-server` | `off`\|`read-only`\|`full` | `off` | The agent control server mode. **Off by default.** When enabled, kettle starts a local-IPC control server that an AI agent / `kettle ctl` / `kettle mcp` can use to read the screen and drive panes (`read-only` reads / lists / subscribes; `full` also sends text + runs commands). Security: local-only — a Unix domain socket (mode `0600`) or a Windows named pipe (current-user DACL); no TCP. `--agent-server <mode>` is the per-launch override. `agent-server` applies at launch; a reload does not change it. See [docs/AGENT.md](AGENT.md) |
 | `agent-display` (alias `agent_display`) | bool | `false` | Agent previews: let agents show media in kettle without granting them screen reads or input. On its own it starts the control server for display requests only, which refuse every read (`display_only`) and mutation (`read_only`); `agent-server = full` already includes display. Agents show media with `show` (or `kettle show`), which lands on the media shelf of the pane they run in. Turning it on (here or in Settings → Agents) applies at once, also for open connections; turning it off applies at the next launch. `--agent-display on\|off` is the per-launch override; `--agent-server off` alone also turns display off, and a reload never overrides either flag. See [docs/AGENT.md](AGENT.md) |
 | `agent-display-codex` (alias `agent_display_codex`) | bool | `false` | Codex previews: the zsh or fish a new pane starts defines `codex` as the function `kettle agent-setup --print` prints: zsh through a Kettle-owned, read-only `.zshenv` and a borrowed `ZDOTDIR` it puts back, fish through code run after your configuration (`fish -C`). Needs `agent-display`. A `codex` you define or can autoload still wins; other shells use the printed function; panes already open keep what they started with. See [AGENT.md](AGENT.md#kettle-defines-it-for-you). |
+| `preview-lane-side` (alias `preview_lane_side`) | `bottom`\|`right` | `bottom` | Where a pane's preview lane opens: `bottom` keeps the terminal's columns, `right` keeps its rows. A lane takes about 40% of the pane and leaves the terminal at least 20 columns and 5 rows. Applies to lanes opened after it changes. See **Media** under keybind actions. |
 | `agent-display-claude-code` (alias `agent_display_claude_code`) | bool | `false` | Claude Code previews: Claude Code started in a new pane gets Kettle's own plugin (the display server and the hook that prints inline cards) through `CLAUDE_CODE_PLUGIN_DIRS`. Needs `agent-display`. Kettle writes the plugin into its own data directory, checks it before every new pane, and offers nothing while Claude Code's managed policy forbids plugins from the environment; it changes none of Claude Code's settings. Panes already open keep what they started with. See [docs/AGENT.md](AGENT.md#kettles-claude-code-plugin) |
 | `agent-badge` | string | `"[agent] "` | The per-pane titlebar prefix shown while an agent connection has the pane attached. Set to any glyph you like (`agent-badge = 🤖 `); empty disables it |
 | `scroll-on-keystroke` (`scroll-on-input`) | bool | `true` | Jump back to the bottom when the user types while scrolled back |
@@ -605,17 +606,84 @@ menu as "Theme…", and Enter or a click on the Settings Theme row opens it.
 **Titles**: `edit_window_title`, `edit_tab_title`, `edit_pane_title` (open the
 inline rename overlay for the OS window / active tab / focused pane).
 
-**Media**: `open_media_shelf` opens the focused pane's media shelf (images and
-SVGs an agent or `kettle show` sent there) in the viewer, on the item published
-last (a replacement by key counts as new),
-or closes the viewer if one is open, whatever key it is bound to. In the
-viewer, `←`/`→` move along the shelf and Esc closes it; any other key closes
-it and goes on to the terminal or its shortcut, and a modifier alone leaves it
-open. The viewer takes every press while it is open: a click
-outside it, the tab bar included, closes it, and other buttons and the wheel
-over it reach nothing beneath. Opening another modal or a confirmation closes
-it. The command palette lists it as "Open media shelf". On macOS its
-default chord is `Ctrl+Shift+Cmd+I`; elsewhere it has no default binding.
+**Media**: `open_media_shelf` opens the focused pane's preview lane on its
+media shelf (images, SVGs and diagrams an agent or `kettle show` sent there),
+on the item published last (a replacement by key counts as new), or closes
+the pane's lane if it has one, whatever key it is bound to. The lane takes
+about 40% of the pane along its bottom (`preview-lane-side`), and the
+terminal shrinks to make room, never below 20 columns and 5 rows: with less
+room the lane is a one-row strip along the pane's bottom (a right lane
+too), and a pane too small even for that gets a notice instead.
+Keys still go to the terminal while a lane shows. Drag the lane's edge
+beside the terminal, marked by a short grip, to give it more or less of the
+pane: the terminal keeps its 20 columns and 5 rows and the lane its least,
+and the program in the pane sees its new size as you drag. The lane's header browses
+the shelf (`‹`/`›`), opens the item outside (`↗`), collapses or expands the
+lane (`▾`/`▴`) and closes it (`×`). For an SVG or a Mermaid diagram it also
+shows the source the item was rendered from (`≡`, and `▣` back to the
+picture), a row per line, with tabs expanded and characters that would
+reorder or hide text shown as `�`; the wheel scrolls the source, and a
+sideways swipe, or the wheel with Shift held, scrolls it sideways. The
+picture zooms with `−` and `+`, a pinch, or the wheel with Cmd held on
+macOS and Ctrl elsewhere, at the pointer, from an eighth of its fit to 32
+times it; the wheel or a drag pans it, and `⤢` shows it fitted again.
+Zoomed past the pixels the lane holds, the picture sharpens a moment after
+it stops moving: the part in view is drawn again at the size shown (a
+raster up to its own pixels), read from its file again only when you
+zoomed or panned it yourself, and not at all once the file changed.
+`◐` puts the picture on the next background: the pane's, white,
+then a checkerboard; a diagram is drawn again for it, as its colors follow
+the background, from the same source, and if the file changed since, the
+lane says so and keeps the picture as it was. `⧉` copies the picture, or the
+source while the source shows, exactly as it was read. An item read from a
+file has `↻`, which reads the file again and shows what it holds now, in the
+same place on the shelf. Where the header is too narrow, these give way,
+open outside first, then zoom out, zoom in and fit, copy, browsing, the
+background and the source, and reload last. A press or the wheel over a lane never
+reaches the terminal, and menus and dialogs open over it without closing it.
+The command palette lists it as "Open media shelf". On macOS its default
+chord is `Ctrl+Shift+Cmd+I`; elsewhere it has no default binding.
+`preview_link` (`preview-link`) is quick select for previews: it labels the
+image (PNG, JPEG, WebP, BMP, GIF), SVG and Mermaid (`.mmd`, `.mermaid`)
+files the focused pane names, by their extension, as a whole path (not on
+Windows, where path hints are never resolved) or a local `file://` link.
+Type a label to render that file in its pane's lane, which opens when it is
+ready; a link from another machine's pane is refused, and behind tmux,
+screen or zellij Kettle asks first, as `hint_mode` does for a path it opens.
+A control client can open this quick select but not pick from it: only your
+own key press or click reads a file. With nothing to label it says so; a
+file that cannot be previewed (gone, unreadable, too large, not an image, or
+previews unavailable) is explained in a notification. The right-click menu
+offers the same as "Preview in Kettle" on a link to such a file. The command
+palette lists it as "Preview a file in Kettle"; it has no default binding.
+`preview_clipboard_path` (`preview-clipboard-path`) previews the file the
+clipboard names in the focused pane's lane: the first image, SVG or Mermaid
+file a file manager copied, or else one copied path (resolved from the
+pane's folder; quotes and a shell's backslash escapes around it are undone)
+or `file://` link. A copied path or link meets the focused pane's gate, as
+one in its output would; a file a file manager copied is this computer's. On
+Windows only a drive path counts, never a `\\host\share` path.
+Shift+right-click offers it too, as "Preview Copied File", when the
+clipboard names such a file; only Shift+right-click reads the clipboard for
+that. As with `preview_link`, a control client cannot have it read a file.
+The palette lists it as "Preview the copied file in Kettle". `preview_next`,
+`preview_previous` and `close_preview` browse and close the focused pane's
+lane as its `›`, `‹` and `×` do ("Next preview", "Previous preview" and
+"Close preview lane" in the palette), and `preview_source`,
+`preview_canvas`, `preview_copy`, `preview_reload`, `preview_zoom_in`,
+`preview_zoom_out` and `preview_fit` as its `≡`, `◐`, `⧉`, `↻`, `+`, `−` and
+`⤢` do ("Show preview source", "Next preview canvas", "Copy preview",
+"Reload preview", "Zoom preview in", "Zoom preview out" and "Fit preview to
+lane"). `focus_preview` ("Focus preview") gives the focused pane's expanded
+lane the keyboard, and its footer says "Keyboard: preview": the arrows move
+the picture (or scroll a source), `+` and `-` zoom, `0` fits it (or shows a
+source from its start), `c` copies, and every other key and chord, Enter,
+digits and Kettle's own shortcuts included, does nothing, so nothing typed
+reaches the program in the pane (Option chords count on macOS). Esc, a
+click outside the lane, a file drop, another menu or dialog opening, or the
+lane closing, collapsing or changing item gives the keyboard back; the
+pointer and the wheel work as ever elsewhere, and an input method stays off
+meanwhile. None has a default binding.
 
 **Modals + UI**: `command_palette` (`palette`), `hint_mode` (`hints` /
 `quick_select`; labels the URLs, paths (a quoted or backticked path may hold

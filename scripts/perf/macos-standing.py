@@ -904,7 +904,7 @@ keybind keybind-yield language light-theme link-single-click log-strip-ansi logi
 macos-cursor-blink-layer macos-option-as-alt menu-item minimum-contrast modify-other-keys mouse-autohide mouse-hide
 mouse-hide-while-typing mouse-scroll-multiplier new-tab-after-current-tab osc52 padding-x padding-y
 palette paste-files paste-image paste-image-preview paste-images paste-video-preview
-putty-paste-style putty-paste-style-source-clipboard record record-dir record-max-bytes
+preview-lane-side putty-paste-style putty-paste-style-source-clipboard record record-dir record-max-bytes
 record-max-directory-bytes record-max-files record-raw-input resize-overlay restore-session
 scroll-multiplier scroll-on-input scroll-on-keystroke scroll-on-output scroll-tabbar scrollback
 scrollback-byte-limit scrollback-bytes scrollback-infinite scrollback-limit scrollback-lines

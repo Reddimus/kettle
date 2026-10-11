@@ -315,9 +315,40 @@ pub enum Action {
     /// them by look with the arrows (each previews live), Enter keeps one and
     /// Esc restores the theme it opened on.
     OpenThemePicker,
-    /// Open the focused pane's media shelf in the viewer, on its newest
-    /// item, or close the viewer when it is already open there.
+    /// Open the focused pane's media shelf in its preview lane, on its newest
+    /// item, or close the lane when it is already open there.
     OpenMediaShelf,
+    /// Quick select for previews: label the image, SVG and Mermaid files the
+    /// focused pane names, and preview the one picked in its lane.
+    PreviewLink,
+    /// Preview, in the focused pane's lane, the file the clipboard names: a
+    /// file copied in a file manager, or a copied path or `file://` link.
+    PreviewClipboardPath,
+    /// Show the next item on the shelf in the focused pane's lane.
+    PreviewNext,
+    /// Show the previous item on the shelf in the focused pane's lane.
+    PreviewPrevious,
+    /// Close the focused pane's preview lane.
+    ClosePreview,
+    /// Show the source of the focused pane's preview, or the rendered item
+    /// again.
+    PreviewSource,
+    /// Show the focused pane's preview on its next canvas.
+    PreviewCanvas,
+    /// Copy what the focused pane's preview shows: its image, or its source.
+    PreviewCopy,
+    /// Read the focused pane's preview from its file again.
+    PreviewReload,
+    /// Zoom the focused pane's rendered preview in a step.
+    PreviewZoomIn,
+    /// Zoom the focused pane's rendered preview out a step.
+    PreviewZoomOut,
+    /// Show the focused pane's rendered preview fitted to its lane again.
+    PreviewFit,
+    /// Give the focused pane's preview lane the keyboard until Esc: arrows
+    /// move, `+`, `-` and `0` zoom and fit, `c` copies, and every other key
+    /// does nothing.
+    FocusPreview,
     /// Terminator parity (`key_send_newline`). Writes a literal `\n` to the focused
     /// pane's PTY. Mostly useful for inserting a newline into a
     /// shell line-editor that's otherwise consuming Enter
@@ -714,6 +745,19 @@ pub fn action_names() -> Vec<&'static str> {
         "open_layout_picker",
         "open_theme_picker",
         "open_media_shelf",
+        "preview_link",
+        "preview_clipboard_path",
+        "preview_next",
+        "preview_previous",
+        "close_preview",
+        "preview_source",
+        "preview_canvas",
+        "preview_copy",
+        "preview_reload",
+        "preview_zoom_in",
+        "preview_zoom_out",
+        "preview_fit",
+        "focus_preview",
         "preferences",
         "edit_config",
         "settings",
@@ -1005,6 +1049,19 @@ impl Action {
             | "layout_picker" | "layout-picker" => OpenLayoutPicker,
             "open_theme_picker" | "open-theme-picker" => OpenThemePicker,
             "open_media_shelf" | "open-media-shelf" => OpenMediaShelf,
+            "preview_link" | "preview-link" => PreviewLink,
+            "preview_clipboard_path" | "preview-clipboard-path" => PreviewClipboardPath,
+            "preview_next" | "preview-next" => PreviewNext,
+            "preview_previous" | "preview-previous" => PreviewPrevious,
+            "close_preview" | "close-preview" => ClosePreview,
+            "preview_source" | "preview-source" => PreviewSource,
+            "preview_canvas" | "preview-canvas" => PreviewCanvas,
+            "preview_copy" | "preview-copy" => PreviewCopy,
+            "preview_reload" | "preview-reload" => PreviewReload,
+            "preview_zoom_in" | "preview-zoom-in" => PreviewZoomIn,
+            "preview_zoom_out" | "preview-zoom-out" => PreviewZoomOut,
+            "preview_fit" | "preview-fit" => PreviewFit,
+            "focus_preview" | "focus-preview" => FocusPreview,
             "preferences"
             | "preferences_keybindings"
             | "preferences-keybindings"

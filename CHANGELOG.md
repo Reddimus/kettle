@@ -103,7 +103,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Inline cards for the keyboard and screen readers: quick select labels each
   card in the focused pane and opens it when picked, and a screen reader
   hears each card as a button named for its item's title, kind, size and
-  sender, which opens it in the viewer. In English and Spanish.
+  sender, which opens it in the pane's preview lane. In English and Spanish.
 - Right-click an inline card for its menu: Open, and Open in Preview on
   macOS or Open in Image Viewer on Linux with Eye of GNOME. The viewer gets
   a PNG copy of exactly what Kettle shows, never the bytes a program sent,
@@ -111,8 +111,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Apple's own Preview, or a root-owned `/usr/bin/eog`, first. Copies are
   private to you, marked as downloaded on macOS, kept to the newest 32 and
   128 MiB (each for at least a minute, so its viewer can read it), and
-  deleted when Kettle quits. The media viewer offers the same
-  from a `↗` button in its header and the O key.
+  deleted when Kettle quits. The preview lane offers the same from a `↗`
+  button in its header.
 - The first inline card you see with its image shown says "Click to open"
   along its foot for ten seconds, or until you open a card, and then never
   again: Kettle records that it showed in `ui-tips.json` beside the config
@@ -121,21 +121,68 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - The pointer turns into a hand over an inline card a click would open, and
   the card gets an accent outline; one that just appeared gets them once it
   has stayed put half a second, even if the pointer does not move.
-- Clicking an inline card opens its item in the media viewer. The card takes
+- Clicking an inline card opens its item in its pane's preview lane. The card takes
   both the press and its release, so the program behind it sees neither. A
   Shift-click selects text as it does anywhere else, and the wheel, like a
   press on a card that came on screen under the pointer less than half a
   second ago, goes where it would without the card.
-- The media shelf viewer: `open_media_shelf` (palette: "Open media shelf";
-  `Ctrl+Shift+Cmd+I` on macOS) shows the focused pane's shelf over the pane,
-  on the item published last, newest first, with each item's title, kind,
-  size and sender; `←`/`→` browse and Esc closes, and so
-  does the shortcut that opened it. A screen reader hears each item's place
-  on the shelf. A pane titlebar marks unopened items as `▣N`, and the window
+- Preview lanes: `open_media_shelf` (palette: "Open media shelf";
+  `Ctrl+Shift+Cmd+I` on macOS) opens a lane along the bottom of the focused
+  pane, about 40% of it, on the item published last, with its title, kind,
+  size and sender, and closes it again. The terminal shrinks to make room,
+  so nothing is covered, and its program sees the new size; keys still go
+  to it. The lane's header browses the shelf (`‹`/`›`), opens the item
+  outside (`↗`), collapses the lane to a one-row strip (`▾`) or closes it
+  (`×`); a lane with no room for its rows shows as that strip, along the
+  pane's bottom whichever side it opened on, and a header too narrow for
+  every control keeps close and collapse first. The terminal always keeps
+  at least 20 columns and 5 rows; opening a lane in a pane too small even
+  for the strip says so instead. Each pane has its own lane; lanes are
+  never saved, and leave with their pane or a torn-off tab.
+  `preview-lane-side = right` opens lanes beside the terminal instead. A
+  screen reader hears each lane, its item's place on the shelf and each of
+  its buttons. A pane titlebar marks unopened items as `▣N`, and the window
   title counts them.
+- A preview lane can show the source an SVG or Mermaid diagram was rendered
+  from (`≡`), scrolled with the wheel; put the picture on another
+  background (`◐`), drawing a diagram again for it; and copy the picture, or
+  the source exactly as it was read (`⧉`); and read an item's file again
+  (`↻`), replacing it in place. Also as `preview_source`, `preview_canvas`,
+  `preview_copy` and `preview_reload`. In English and Spanish.
+- Zoom and pan a preview: `−` and `+` in the lane's header, a pinch, or
+  Cmd+wheel (Ctrl+wheel off macOS) at the pointer zoom the picture, the
+  wheel or a drag pans it, and `⤢` fits it again. Also as
+  `preview_zoom_in`, `preview_zoom_out` and `preview_fit`.
+- `focus_preview` ("Focus preview") gives a preview lane the keyboard until
+  Esc: arrows, `+`, `-`, `0` and `c` move, zoom, fit and copy, and nothing
+  else typed reaches the program in the pane.
+- Drag a preview lane's edge to resize it; the terminal keeps at least 20
+  columns and 5 rows, and its program sees the new size as you drag.
+- A zoomed preview sharpens a moment after it stops moving: the part in view
+  is drawn again at the size shown, from its file only when you moved it
+  yourself and not once the file changed.
+- Preview a file without an agent: `preview_link` (palette: "Preview a file
+  in Kettle") labels the image, SVG and Mermaid files in the focused pane,
+  and typing a label renders that file in its pane's lane; right-clicking a
+  link to one offers "Preview in Kettle". A link from another machine's pane is
+  refused and one from behind tmux, screen or zellij is asked about first,
+  as opening it is. Your preview goes ahead of anything agents are
+  showing, and a notification says why when one cannot open. In English
+  and Spanish.
+- Preview a copied file: `preview_clipboard_path` (palette: "Preview the
+  copied file in Kettle") opens the image, SVG or Mermaid file you copied
+  in a file manager, or whose path or `file://` link you copied, in the
+  focused pane's lane. Shift+right-click offers it as "Preview Copied File".
+  `preview_next`, `preview_previous` and `close_preview` browse and close
+  the focused pane's lane from the keyboard or the palette.
+- Shift+right-click on selected text opens the menu instead of extending
+  the selection; off the selection it still extends it. With nothing
+  selected it opens the menu too, mouse reporting or not: a plain click
+  used to leave an empty selection that Shift+right-click silently
+  extended.
 - The media worker can classify a file by its content, raster or SVG,
   whatever it is called, and says what it rendered. Kettle and its worker now
-  speak media protocol 2; a worker from an older build is refused until
+  speak media protocol 3; a worker from an older build is refused until
   Kettle restarts, as before.
 - `kettle-media`, a new crate, defines the bounded media protocol for the
   agent visuals: jobs and results, caps, source authorization, the
