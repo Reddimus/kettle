@@ -60,6 +60,10 @@ pulldown-cmark = { version = "=0.13.4", default-features = false }
 # These dependencies constrain the renderer family rather than expose APIs.
 ignored = ["merman-core", "merman-render", "dugong", "dugong-graphlib", "manatee", "roughr-merman"]
 
+[features]
+# The entry point the fuzz targets (fuzz/) call. Never in a shipped build.
+fuzzing = []
+
 [dev-dependencies]
 toml.workspace = true
 # APNG fixtures for the animation path, at the version image already locks.
