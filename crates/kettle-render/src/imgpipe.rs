@@ -254,6 +254,66 @@ mod cache_lifetime_tests {
         });
     }
 
+    /// A video playing in a lane hands the pipeline a new image of the
+    /// same size each frame: each takes over the last one's texture, one
+    /// write a frame and no texture made, and the frame it replaced keeps
+    /// no pixels alive, so its buffer can serve the next.
+    #[test]
+    fn frames_of_one_size_keep_one_texture() {
+        let _serialized = crate::gpu_tests::gpu_test_guard();
+        pollster::block_on(async {
+            let Ok((_, adapter)) = crate::resolve_headless_adapter(
+                &crate::gpu_tests::gpu_test_config(),
+                "image-frames",
+            )
+            .await
+            else {
+                eprintln!("no GPU adapter on this host; skipped");
+                return;
+            };
+            let (device, queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("image-frames"),
+                    required_limits: crate::live_device_limits(adapter.limits()),
+                    ..Default::default()
+                })
+                .await
+                .expect("GPU device");
+            let mut pipeline = ImagePipeline::new_with_budget_and_instance_limit(
+                &device,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+                kettle_core::GraphicsBudget::default(),
+                2,
+            )
+            .unwrap();
+            let mut texture = None;
+            let mut previous: Option<ImageData> = None;
+            for shade in 0..30u8 {
+                let frame = ImageData::new(64, 36, vec![shade; 64 * 36 * 4]).unwrap();
+                let key = frame.allocation_key();
+                let items = [ImageItem::full(0.0, 0.0, 64.0, 36.0, frame)];
+                pipeline.prepare_frame(&device, &items);
+                pipeline.upload(&device, &queue, [64.0, 36.0], &items);
+                let now = pipeline.cache[&key].texture.clone();
+                assert_eq!(
+                    *texture.get_or_insert_with(|| now.clone()),
+                    now,
+                    "frame {shade}"
+                );
+                assert_eq!(pipeline.cache.len(), 1);
+                if let Some(previous) = previous.take() {
+                    assert!(
+                        previous.into_pixels().is_ok(),
+                        "frame {shade} kept the last one"
+                    );
+                }
+                let [ImageItem { image, .. }] = items;
+                previous = Some(image);
+            }
+            assert_eq!(pipeline.upload_counts().texture_writes, 30);
+        });
+    }
+
     fn assert_handoff_released_on_buffer_growth_failure(
         device: &wgpu::Device,
         queue: &wgpu::Queue,

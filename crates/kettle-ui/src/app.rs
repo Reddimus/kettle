@@ -1372,6 +1372,7 @@ fn lane_control_name(hit: kettle_render::MediaLaneHit) -> &'static str {
         Hit::Copy => "copy",
         Hit::Reload => "reload",
         Hit::Play => "play",
+        Hit::Scrub => "scrubber",
         Hit::ZoomOut => "zoom_out",
         Hit::ZoomIn => "zoom_in",
         Hit::Fit => "fit",
@@ -12883,6 +12884,7 @@ impl App {
         let mut lane = kettle_render::MediaLanePanel {
             play: None,
             frame: None,
+            scrubber: None,
             pane,
             rect,
             collapsed,
@@ -13174,8 +13176,9 @@ impl App {
             Hit::ZoomOut => self.zoom_preview(ws, pane, 1.0 / kettle_render::MEDIA_ZOOM_STEP),
             Hit::ZoomIn => self.zoom_preview(ws, pane, kettle_render::MEDIA_ZOOM_STEP),
             Hit::Fit => self.fit_preview(ws, pane),
-            // The edge moves with a drag, not a click.
-            Hit::Resize | Hit::Inside => {}
+            // The edge moves with a drag, and the bar with a press or a
+            // drag, not a click.
+            Hit::Resize | Hit::Scrub | Hit::Inside => {}
         }
     }
 
@@ -33734,6 +33737,7 @@ impl App {
                             self.ui_text.text(kettle_i18n::Text::MediaLaneA11yFit)
                         }
                         kettle_render::MediaLaneHit::Resize
+                        | kettle_render::MediaLaneHit::Scrub
                         | kettle_render::MediaLaneHit::Inside => continue,
                     };
                     let mut button = Node::new(Role::Button);
@@ -45062,6 +45066,7 @@ mod tests {
         let mut lane = kettle_render::MediaLanePanel {
             play: None,
             frame: None,
+            scrubber: None,
             pane: 7,
             rect: (0.0, 360.0, 800.0, 240.0),
             collapsed: false,

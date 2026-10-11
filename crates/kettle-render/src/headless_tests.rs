@@ -2038,6 +2038,7 @@ fn a_lane_draws_its_open_outside_button_only_when_offered() {
     let viewer = |open_outside| MediaLanePanel {
         play: None,
         frame: None,
+        scrubber: None,
         pane: 1,
         rect: (0.0, 0.0, 800.0, 600.0),
         collapsed: false,
@@ -2117,6 +2118,7 @@ fn a_lane_draws_a_gallerys_page_controls() {
     let viewer = |page| MediaLanePanel {
         play: None,
         frame: None,
+        scrubber: None,
         pane: 1,
         rect: (0.0, 0.0, 800.0, 600.0),
         collapsed: false,
@@ -2264,6 +2266,7 @@ fn a_lane_in_source_mode_shows_rows_instead_of_the_image() {
     let lane = |mode| MediaLanePanel {
         play: None,
         frame: None,
+        scrubber: None,
         pane: 1,
         rect: (0.0, 40.0, 480.0, 280.0),
         collapsed: false,
@@ -2353,6 +2356,7 @@ fn a_zoomed_lane_covers_its_content_and_stays_inside_it() {
     let lane = |view| MediaLanePanel {
         play: None,
         frame: None,
+        scrubber: None,
         pane: 1,
         rect: (0.0, 40.0, 480.0, 280.0),
         collapsed: false,
@@ -2433,6 +2437,7 @@ fn a_tile_that_covers_the_view_is_drawn_instead_of_the_image() {
     let lane = |view, tile| MediaLanePanel {
         play: None,
         frame: None,
+        scrubber: None,
         pane: 1,
         rect: (0.0, 40.0, 480.0, 280.0),
         collapsed: false,
@@ -2517,6 +2522,7 @@ fn a_preview_lane_paints_its_panel_and_leaves_the_terminal() {
     let lane = MediaLanePanel {
         play: None,
         frame: None,
+        scrubber: None,
         pane: 1,
         rect: (0.0, 180.0, 480.0, 140.0),
         collapsed: false,
@@ -2575,5 +2581,92 @@ fn a_preview_lane_paints_its_panel_and_leaves_the_terminal() {
     assert!(
         distinct_colors(&with, [8.0, 184.0, 200.0, 24.0]) > 2,
         "the title is drawn"
+    );
+}
+
+/// A playing video's lane draws its frame in the item's place and its bar
+/// under it: the part played in the accent up to where the video is, the
+/// rest in the divider's color.
+#[test]
+fn a_playing_lane_draws_its_frame_and_bar() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(480, 320) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let snap = snapshot_of(40, 8, b"hello");
+    let view = || PaneView {
+        terminal: (0.0, 0.0, 480.0, 60.0),
+        ..pane(&snap, 480, 320)
+    };
+    let lane = MediaLanePanel {
+        play: Some(crate::MediaLanePlay::Pause),
+        frame: Some(crate::MediaLaneFrame {
+            sheet: kettle_core::ImageData::new(4, 2, [0, 0, 255, 255].repeat(8)).unwrap(),
+            source: (0, 0, 4, 2),
+            size: (160, 80),
+        }),
+        scrubber: Some(crate::MediaLaneScrubber {
+            position_ms: 2000,
+            duration_ms: 8000,
+            label: "0:02 / 0:08".into(),
+        }),
+        pane: 1,
+        rect: (0.0, 60.0, 480.0, 260.0),
+        collapsed: false,
+        title: "clip.mp4".into(),
+        detail: "Video · 0:08".into(),
+        sender: MediaLaneSender {
+            text: "From this pane".into(),
+            program: None,
+            signer: None,
+        },
+        hint: "Keys still go to the terminal".into(),
+        position: (1, 1),
+        page: None,
+        image: Some(kettle_core::ImageData::new(2, 2, vec![255; 16]).unwrap()),
+        status: String::new(),
+        canvas: MediaCanvas::Theme,
+        open_outside: false,
+        mode: MediaLaneMode::Rendered,
+        source: None,
+        copy: false,
+        reload: false,
+        notice: None,
+        view: crate::MediaViewport::FIT,
+        tile: None,
+        edge: None,
+    };
+    let geometry = media_lane_geometry(
+        &lane,
+        (renderer.cell_w, renderer.cell_h),
+        (
+            renderer.overlay_text_cell_width(),
+            renderer.metrics.line_height,
+        ),
+    )
+    .expect("the lane fits");
+    let bar = geometry.scrubber.expect("a bar under the picture");
+    let picture = geometry.image.expect("the frame in the item's place");
+    let overlay = Overlay {
+        media_lanes: vec![lane],
+        ..focused(false)
+    };
+    let frame = capture(&mut renderer, &cfg, &[view()], &overlay);
+    let palette = crate::completion_palette(&cfg.theme, cfg.theme.palette[4]);
+    let at = |x: f32, y: f32| {
+        let p = frame.get_pixel(x as u32, y as u32);
+        (p[0], p[1], p[2])
+    };
+    let middle = bar.1 + bar.3 / 2.0;
+    let accent = (palette.emphasis.r, palette.emphasis.g, palette.emphasis.b);
+    let divider = (palette.divider.r, palette.divider.g, palette.divider.b);
+    assert_eq!(at(bar.0 + bar.2 * 0.1, middle), accent, "played");
+    assert_eq!(at(bar.0 + bar.2 * 0.6, middle), divider, "to come");
+    assert_eq!(at(bar.0 + bar.2 * 0.95, middle), divider, "to come");
+    let center = at(picture.0 + picture.2 / 2.0, picture.1 + picture.3 / 2.0);
+    assert!(
+        center.2 > 200 && center.0 < 40,
+        "the frame, blue: {center:?}"
     );
 }
