@@ -174,12 +174,16 @@ fn every_spanish_message_has_a_review_status() {
 }
 
 /// No Spanish message is left in English, formatted and plural ones included,
-/// except words Spanish shares.
+/// except words Spanish shares and a message with no words.
 #[test]
 fn no_spanish_message_is_left_in_english() {
     let english: toml::Table = include_str!("../locales/en.toml").parse().unwrap();
     let spanish: toml::Table = include_str!("../locales/es.toml").parse().unwrap();
-    let cognates = ["settings_gpu_kind_software", "settings_gpu_kind_virtual"];
+    let cognates = [
+        "settings_gpu_kind_software",
+        "settings_gpu_kind_virtual",
+        "media_lane_video_time",
+    ];
     for (key, text) in &english {
         if !cognates.contains(&key.as_str()) {
             assert_ne!(Some(text), spanish.get(key), "{key} is untranslated");
