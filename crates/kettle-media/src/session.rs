@@ -8,13 +8,14 @@
 //! measuring its process group every tick and killing it above the memory
 //! limit. The reader takes each frame straight into a buffer of the opened
 //! size and keeps only the newest one not yet taken, waking the caller once
-//! until it looks. The writer sends the caller's commands, and a heartbeat
+//! until it looks, and the session's sound as the worker says it, which
+//! only ever goes once open. The writer sends the caller's latest Play or
+//! Pause and, apart from it, the latest Mute or Unmute, and a heartbeat
 //! each second while the caller keeps looking at the session: one whose
 //! caller stops (its event loop stalled) loses its lease, and the worker
 //! ends it. Dropping the session closes it: Close, then the worker's exit,
 //! or a kill.
 
-use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -25,8 +26,8 @@ use crate::client::{RenderControl, Shared, SpawnedWorker, WorkerExit};
 use crate::lifecycle::{self, Budgets, Running, Stopped, Wait};
 use crate::wire::{self, Direction, Frame, MAX_READY_FRAME_BYTES, SessionRead};
 use crate::{
-    BuildId, FailureCode, HandshakeOutcome, Hello, Opened, PlayCommand, PlayOpen, PlayState, Ready,
-    check_ready,
+    AudioStatus, BuildId, FailureCode, HandshakeOutcome, Hello, Opened, PlayCommand, PlayOpen,
+    PlayState, Ready, check_ready,
 };
 
 /// Most sessions open at once. One being closed no longer counts: its
@@ -93,20 +94,40 @@ struct Inner {
 
 struct State {
     status: SessionStatus,
+    /// The session's sound: Opened's, until the worker says it went.
+    audio: Option<AudioStatus>,
     frame: Option<SessionFrame>,
     spares: Vec<Vec<u8>>,
-    commands: VecDeque<PlayCommand>,
+    wishes: Wishes,
     closing: bool,
     kept: Instant,
     /// A wake is out and the caller has not looked since.
     woken: bool,
 }
 
-impl State {
-    /// Only the latest wish counts: Play then Pause is Pause.
-    fn wish(&mut self, command: PlayCommand) {
-        self.commands.clear();
-        self.commands.push_back(command);
+/// What the caller asked that the writer has not sent yet: the latest Play
+/// or Pause, and apart from it the latest Mute or Unmute, so neither kind
+/// takes the other's place.
+#[derive(Default)]
+struct Wishes {
+    play: Option<PlayCommand>,
+    mute: Option<PlayCommand>,
+}
+
+impl Wishes {
+    fn is_empty(&self) -> bool {
+        self.play.is_none() && self.mute.is_none()
+    }
+
+    /// Take `command` in place of the last of its kind: Play then Pause is
+    /// Pause, and Mute then Unmute is Unmute, whatever came between.
+    fn add(&mut self, command: PlayCommand) {
+        match command {
+            PlayCommand::Play | PlayCommand::Pause => self.play = Some(command),
+            PlayCommand::Mute | PlayCommand::Unmute => self.mute = Some(command),
+            // Not wishes: the writer sends these itself.
+            PlayCommand::Heartbeat | PlayCommand::Close => {}
+        }
     }
 }
 
@@ -184,9 +205,10 @@ impl PlaySession {
         let inner = Arc::new(Inner {
             state: Mutex::new(State {
                 status: SessionStatus::Opening,
+                audio: None,
                 frame: None,
                 spares: Vec::new(),
-                commands: VecDeque::new(),
+                wishes: Wishes::default(),
                 closing: false,
                 kept: Instant::now(),
                 woken: false,
@@ -234,12 +256,28 @@ impl PlaySession {
         }
     }
 
+    /// The session's sound once it opened: what Opened said, until the
+    /// worker says it went (its output failed); `None` before.
+    pub fn audio(&self) -> Option<AudioStatus> {
+        self.inner.lock().audio
+    }
+
     pub fn play(&self) {
-        self.command(PlayCommand::Play);
+        self.wish(PlayCommand::Play);
     }
 
     pub fn pause(&self) {
-        self.command(PlayCommand::Pause);
+        self.wish(PlayCommand::Pause);
+    }
+
+    /// Silence the session's sound, or let it be heard: it neither plays
+    /// nor pauses.
+    pub fn set_muted(&self, muted: bool) {
+        self.wish(if muted {
+            PlayCommand::Mute
+        } else {
+            PlayCommand::Unmute
+        });
     }
 
     /// Say the caller still looks at the session. Without this for a few
@@ -248,10 +286,11 @@ impl PlaySession {
         self.inner.lock().kept = Instant::now();
     }
 
-    fn command(&self, command: PlayCommand) {
+    /// Only the latest of each wish counts (see [`Wishes::add`]).
+    fn wish(&self, command: PlayCommand) {
         let mut state = self.inner.lock();
         state.kept = Instant::now();
-        state.wish(command);
+        state.wishes.add(command);
         drop(state);
         self.inner.changed.notify_all();
     }
@@ -427,6 +466,7 @@ fn start_reader(
                         opened,
                         state: PlayState::Paused,
                     };
+                    state.audio = Some(opened.audio);
                 }
             });
             if said.send(Said::Opened).is_err() {
@@ -470,6 +510,15 @@ fn start_reader(
                                 continue;
                             }
                             Said::Ended
+                        }
+                        // Sound only ever goes: a session without it never
+                        // gains it.
+                        Frame::AudioState(now)
+                            if now != AudioStatus::Ready
+                                && inner.lock().audio == Some(AudioStatus::Ready) =>
+                        {
+                            inner.publish(|state| state.audio = Some(now));
+                            continue;
                         }
                         Frame::Failure(failure) => refusal(&mut stdout, failure.code),
                         _ => Said::Broken,
@@ -520,9 +569,9 @@ fn start_writer(
             };
             let mut beat = Instant::now() + HEARTBEAT;
             loop {
-                let (commands, closing, kept) = {
+                let (wishes, closing, kept) = {
                     let mut state = inner.lock();
-                    while state.commands.is_empty() && !state.closing && Instant::now() < beat {
+                    while state.wishes.is_empty() && !state.closing && Instant::now() < beat {
                         let left = beat.saturating_duration_since(Instant::now());
                         state = inner
                             .changed
@@ -530,17 +579,13 @@ fn start_writer(
                             .unwrap_or_else(PoisonError::into_inner)
                             .0;
                     }
-                    (
-                        std::mem::take(&mut state.commands),
-                        state.closing,
-                        state.kept,
-                    )
+                    (std::mem::take(&mut state.wishes), state.closing, state.kept)
                 };
                 if closing {
                     let _ = send(&encode(PlayCommand::Close));
                     return;
                 }
-                for command in commands {
+                for command in wishes.play.into_iter().chain(wishes.mute) {
                     if send(&encode(command)).is_err() {
                         return;
                     }
@@ -610,6 +655,10 @@ mod tests {
         dies_after: Option<u64>,
         /// How it exits after a refusal.
         refused_exit: WorkerExit,
+        /// Opens a video whose sound plays.
+        sounds: bool,
+        /// Says its sound is this as it starts playing.
+        says_sound: Option<AudioStatus>,
     }
 
     const PLAYS: Behavior = Behavior {
@@ -626,6 +675,8 @@ mod tests {
         footprint: 1 << 20,
         dies_after: None,
         refused_exit: WorkerExit::Code(0),
+        sounds: false,
+        says_sound: None,
     };
 
     /// What the fake worker saw, for the test to look at.
@@ -731,6 +782,16 @@ mod tests {
         start_ms: 0,
     };
 
+    /// [`OPENED`], of a video whose sound plays.
+    const SOUNDING: Opened = Opened {
+        info: VideoInfo {
+            has_audio: true,
+            ..OPENED.info
+        },
+        audio: AudioStatus::Ready,
+        ..OPENED
+    };
+
     fn frame(seq: u64, misframed: bool) -> Frame {
         let (width, height) = if misframed { (2, 2) } else { (4, 2) };
         Frame::VideoFrame(VideoFrame {
@@ -787,7 +848,10 @@ mod tests {
             return behavior.refused_exit;
         }
         std::thread::sleep(behavior.opens_after);
-        out(&mut stdout, &Frame::Opened(OPENED));
+        out(
+            &mut stdout,
+            &Frame::Opened(if behavior.sounds { SOUNDING } else { OPENED }),
+        );
         out(&mut stdout, &frame(0, false));
         out(&mut stdout, &Frame::PlayState(PlayState::Paused));
         if behavior.leaves_open {
@@ -803,6 +867,9 @@ mod tests {
             match command {
                 PlayCommand::Play => {
                     out(&mut stdout, &Frame::PlayState(PlayState::Playing));
+                    if let Some(status) = behavior.says_sound {
+                        out(&mut stdout, &Frame::AudioState(status));
+                    }
                     while sent < behavior.frames {
                         sent += 1;
                         if behavior.dies_after == Some(sent) {
@@ -1002,33 +1069,79 @@ mod tests {
         );
     }
 
-    /// Only the latest wish reaches the worker: Play then Pause is Pause.
+    /// Only the latest of each wish reaches the worker: Play then Pause is
+    /// Pause, Unmute then Mute is Mute, and neither kind takes the other's
+    /// place.
     #[test]
-    fn only_the_latest_command_is_sent() {
+    fn only_the_latest_of_each_wish_is_sent() {
         let (client, seen) = client(PLAYS);
         let session = client.play(&open(), Box::new(|| {})).unwrap();
         until("opened", || {
             matches!(session.status(), SessionStatus::Open { .. })
         });
-        {
-            // Both before the writer can look.
-            let mut state = session.inner.lock();
-            state.wish(PlayCommand::Play);
-            state.wish(PlayCommand::Pause);
-        }
-        session.inner.changed.notify_all();
-        until("paused", || !seen.commands.lock().unwrap().is_empty());
-        std::thread::sleep(Duration::from_millis(50));
-        assert_eq!(*seen.commands.lock().unwrap(), [PlayCommand::Pause]);
+        // Each run of wishes taken before the writer can look, then sent.
+        let wish = |wishes: &[PlayCommand], count: usize| {
+            {
+                let mut state = session.inner.lock();
+                for &command in wishes {
+                    state.wishes.add(command);
+                }
+            }
+            session.inner.changed.notify_all();
+            until("sent", || seen.commands.lock().unwrap().len() >= count);
+            std::thread::sleep(Duration::from_millis(50));
+            seen.commands.lock().unwrap().clone()
+        };
+        use PlayCommand::{Mute, Pause, Play, Unmute};
+        assert_eq!(wish(&[Pause, Unmute, Mute], 2), [Pause, Mute]);
+        assert_eq!(
+            wish(&[Play, Unmute, Pause], 4),
+            [Pause, Mute, Pause, Unmute]
+        );
+    }
+
+    /// A session's sound is Opened's until the worker says it went, and
+    /// none before it opened.
+    #[test]
+    fn a_session_s_sound_is_what_the_worker_says() {
+        let (sounding, _seen) = client(Behavior {
+            sounds: true,
+            says_sound: Some(AudioStatus::Unavailable),
+            ..PLAYS
+        });
+        let session = sounding.play(&open(), Box::new(|| {})).unwrap();
+        until("opened", || {
+            matches!(session.status(), SessionStatus::Open { .. })
+        });
+        assert_eq!(session.audio(), Some(AudioStatus::Ready));
+        session.play();
+        until("its sound went", || {
+            session.audio() == Some(AudioStatus::Unavailable)
+        });
+        until("the end", || {
+            matches!(
+                session.status(),
+                SessionStatus::Open {
+                    state: PlayState::Ended,
+                    ..
+                }
+            )
+        });
+        let (silent, _seen) = client(Behavior {
+            silent: true,
+            ..PLAYS
+        });
+        let opening = silent.play(&open(), Box::new(|| {})).unwrap();
+        assert_eq!(opening.audio(), None);
     }
 
     /// A session the worker refuses says why, though before Ready only a
     /// handshake refusal does and only with nothing after it, as for a
-    /// render; one whose worker leaves
-    /// without ending it, exit 0 or not, fails; one whose frames are not the
-    /// size it opened at, whose worker dies by a signal, or that holds too
-    /// much memory, fails as the worker's fault; one that never becomes
-    /// ready times out.
+    /// render; one whose worker leaves without ending it, exit 0 or not,
+    /// fails; one whose frames are not the size it opened at, whose sound
+    /// the worker says came where it had none, whose worker dies by a
+    /// signal, or that holds too much memory, fails as the worker's fault;
+    /// one that never becomes ready times out.
     #[test]
     fn a_session_that_cannot_go_on_says_why() {
         for (behavior, why) in [
@@ -1135,6 +1248,23 @@ mod tests {
             (
                 Behavior {
                     misframes: true,
+                    ..PLAYS
+                },
+                FailureCode::WorkerUnavailable,
+            ),
+            // Sound only goes: a silent session never gains it, and a sound
+            // that goes never comes back as Ready.
+            (
+                Behavior {
+                    says_sound: Some(AudioStatus::Unavailable),
+                    ..PLAYS
+                },
+                FailureCode::WorkerUnavailable,
+            ),
+            (
+                Behavior {
+                    sounds: true,
+                    says_sound: Some(AudioStatus::Ready),
                     ..PLAYS
                 },
                 FailureCode::WorkerUnavailable,
