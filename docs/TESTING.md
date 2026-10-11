@@ -333,7 +333,12 @@ review. Kettle runs only a worker file no one else can write, so the script
 stages both binaries in a private directory first. It needs xvfb-run,
 ffmpeg and xdotool, and writes results under
 `target/diagnostics/lane-media-smoke/`. `--self-test` covers its fixture
-writer and staging without a display.
+writer and staging without a display. On 2026-10-11 it passed on the guest
+against the 5.0.0 release candidate (`1fec1dd4`), all twelve checks, under
+Xvfb with Mesa llvmpipe. The worker reported `ffmpeg` alone, no
+GStreamer, and ran with `NoNewPrivs` 1 and `Seccomp` 2. A native Left from
+7.2 s stepped back 5.09 s, and the Spanish lane read "Video · 640×360 ·
+H.264 · 0:40 · con audio".
 
 The retained Windows CI runner compiles and tests portable and conditional
 Windows code, including native ConPTY and PowerShell fixtures. Kettle 4.0 does
