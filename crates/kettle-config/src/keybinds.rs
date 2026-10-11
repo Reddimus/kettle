@@ -345,6 +345,12 @@ pub enum Action {
     PreviewZoomOut,
     /// Show the focused pane's rendered preview fitted to its lane again.
     PreviewFit,
+    /// Preview, in the focused pane's lane, the Mermaid diagram on the
+    /// clipboard, as `/copy` in Claude Code or Codex puts it there.
+    RenderClipboardAsDiagram,
+    /// Preview the Mermaid diagram in the selection, joined back across the
+    /// rows its harness wrapped.
+    RenderSelectionAsDiagram,
     /// Give the focused pane's preview lane the keyboard until Esc: arrows
     /// move, `+`, `-` and `0` zoom and fit, `c` copies, and every other key
     /// does nothing.
@@ -758,6 +764,8 @@ pub fn action_names() -> Vec<&'static str> {
         "preview_zoom_out",
         "preview_fit",
         "focus_preview",
+        "render_clipboard_as_diagram",
+        "render_selection_as_diagram",
         "preferences",
         "edit_config",
         "settings",
@@ -1062,6 +1070,12 @@ impl Action {
             "preview_zoom_out" | "preview-zoom-out" => PreviewZoomOut,
             "preview_fit" | "preview-fit" => PreviewFit,
             "focus_preview" | "focus-preview" => FocusPreview,
+            "render_clipboard_as_diagram" | "render-clipboard-as-diagram" => {
+                RenderClipboardAsDiagram
+            }
+            "render_selection_as_diagram" | "render-selection-as-diagram" => {
+                RenderSelectionAsDiagram
+            }
             "preferences"
             | "preferences_keybindings"
             | "preferences-keybindings"
@@ -1757,6 +1771,30 @@ mod tests {
             "the production slice retained a test-only item"
         );
         production
+    }
+
+    /// The copied and selected diagram previews parse by either spelling
+    /// and claim no default shortcut.
+    #[test]
+    fn diagram_previews_parse_without_a_default_shortcut() {
+        for (names, action) in [
+            (
+                ["render_clipboard_as_diagram", "render-clipboard-as-diagram"],
+                Action::RenderClipboardAsDiagram,
+            ),
+            (
+                ["render_selection_as_diagram", "render-selection-as-diagram"],
+                Action::RenderSelectionAsDiagram,
+            ),
+        ] {
+            for name in names {
+                assert_eq!(Action::from_name(name), Some(action.clone()), "{name}");
+            }
+            assert!(
+                !defaults().values().any(|bound| *bound == action),
+                "{action:?} has no default binding"
+            );
+        }
     }
 
     /// Only F1..=F12 are real keys (the winit→Key bridge maps no

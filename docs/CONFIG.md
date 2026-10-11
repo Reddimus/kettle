@@ -666,7 +666,26 @@ Windows only a drive path counts, never a `\\host\share` path.
 Shift+right-click offers it too, as "Preview Copied File", when the
 clipboard names such a file; only Shift+right-click reads the clipboard for
 that. As with `preview_link`, a control client cannot have it read a file.
-The palette lists it as "Preview the copied file in Kettle". `preview_next`,
+The palette lists it as "Preview the copied file in Kettle".
+`render_clipboard_as_diagram` (`render-clipboard-as-diagram`) renders the
+Mermaid diagram on the clipboard in the focused pane's lane, as `/copy` in
+Claude Code or Codex leaves it: each ```` ```mermaid ```` fence as written
+(the first shows, and the title says how many there were), or else the
+diagram in the text, from its front matter, directives or header to its end,
+with the harness's bullet, label, notice, leading and trailing prose and
+common indentation taken off. `render_selection_as_diagram`
+(`render-selection-as-diagram`) does the same for the selected text, and also
+joins back the rows the agent's UI wrapped at the pane's width; where a wrap
+cannot be told from a new line for sure, as for text wrapped at another
+width or a word Codex may have broken at a hyphen, it refuses and suggests
+`/copy` rather than guess, and where an unindented diagram's end cannot be
+told from the prose after it, it asks for just the diagram. The right-click
+menu offers "Preview Selected Diagram" when the selection holds a diagram,
+and Shift+right-click offers "Preview Copied Diagram" when the clipboard
+does. Neither has a default binding, and a control client cannot have either
+read the clipboard or a selection, nor have a menu it opens look at them for
+its rows. The palette lists them as "Preview the copied
+diagram in Kettle" and "Preview the selected diagram in Kettle". `preview_next`,
 `preview_previous` and `close_preview` browse and close the focused pane's
 lane as its `›`, `‹` and `×` do ("Next preview", "Previous preview" and
 "Close preview lane" in the palette), and `preview_source`,

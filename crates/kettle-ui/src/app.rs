@@ -18999,20 +18999,58 @@ impl App {
         if in_focused_pane && let Some(url) = self.link_at_cursor(ws).map(|l| l.uri.clone()) {
             items.extend(link_menu_rows(&url, links_pane(ws), tr));
         }
-        // Shift+right-click also offers the file the clipboard names. Only
-        // then is the clipboard read, so a slow clipboard owner never holds
-        // up a plain right-click or a menu opened from the keyboard.
-        if in_focused_pane
-            && offer_copied
-            && let Some(pane) = ws.mux.active_focus()
-            && self.copied_preview(ws, pane).is_some()
+        // A selection holding a diagram an agent printed offers it, even
+        // one whose wraps will turn out not to join: picking it says why.
+        let offers_diagram = |result: &Result<Vec<String>, kettle_core::DiagramCopyError>| {
+            !matches!(
+                result,
+                Err(kettle_core::DiagramCopyError::Empty | kettle_core::DiagramCopyError::NoDiagram)
+            )
+        };
+        // Only the user's own click reads a selection or the clipboard: a
+        // control client driving the menu gets neither probed.
+        let reads = !self.ctl_driving;
+        let selection_pane = ws.selecting_pane.or_else(|| ws.mux.active_focus());
+        if reads
+            && in_focused_pane
+            && let Some(pane) = selection_pane
+            && offers_diagram(&self.selected_diagram(ws, pane))
         {
             items.push(ContextMenuItem::Item {
-                label: tr.text(T::MenuPreviewCopiedFile),
-                action: kettle_config::Action::PreviewClipboardPath,
+                label: tr.text(T::MenuPreviewSelectedDiagram),
+                action: kettle_config::Action::RenderSelectionAsDiagram,
                 enabled: true,
             });
             items.push(ContextMenuItem::Separator);
+        }
+        // Shift+right-click also offers the file the clipboard names, and
+        // the diagram it holds. Only then is the clipboard read, so a slow
+        // clipboard owner never holds up a plain right-click or a menu
+        // opened from the keyboard.
+        if reads
+            && in_focused_pane
+            && offer_copied
+            && let Some(pane) = ws.mux.active_focus()
+        {
+            let file = self.copied_preview(ws, pane).is_some();
+            let diagram = offers_diagram(&self.copied_diagram());
+            if file {
+                items.push(ContextMenuItem::Item {
+                    label: tr.text(T::MenuPreviewCopiedFile),
+                    action: kettle_config::Action::PreviewClipboardPath,
+                    enabled: true,
+                });
+            }
+            if diagram {
+                items.push(ContextMenuItem::Item {
+                    label: tr.text(T::MenuPreviewCopiedDiagram),
+                    action: kettle_config::Action::RenderClipboardAsDiagram,
+                    enabled: true,
+                });
+            }
+            if file || diagram {
+                items.push(ContextMenuItem::Separator);
+            }
         }
         items.extend(self.context_menu_items(ws));
         self.append_config_menu_items(&mut items);
@@ -21104,6 +21142,8 @@ impl App {
             Action::OpenMediaShelf => self.open_media_shelf(ws),
             Action::PreviewClipboardPath => self.preview_copied_file(ws),
             Action::FocusPreview => self.focus_preview(ws),
+            Action::RenderClipboardAsDiagram => self.preview_copied_diagram(ws, false),
+            Action::RenderSelectionAsDiagram => self.preview_copied_diagram(ws, true),
             Action::PreviewNext
             | Action::PreviewPrevious
             | Action::ClosePreview
@@ -23570,6 +23610,100 @@ impl App {
         )
     }
 
+    /// Preview, in the focused pane's lane, the Mermaid diagram the user
+    /// copied (`/copy` in Claude Code or Codex) or, with `selection`,
+    /// selected in a pane: the source taken back from what the agent's UI
+    /// added and wrapped, rendered as the user's own pull. The first of
+    /// several copied diagrams shows. A control client cannot have the
+    /// clipboard or a selection read.
+    fn preview_copied_diagram(&mut self, ws: &mut WindowState, selection: bool) {
+        use kettle_core::DiagramCopyError as E;
+        use kettle_i18n::Text as T;
+        if self.ctl_driving {
+            log::info!("preview: a control client cannot preview copied or selected text");
+            return;
+        }
+        let tr = self.ui_text;
+        let pane = if selection {
+            ws.selecting_pane.or_else(|| ws.mux.active_focus())
+        } else {
+            ws.mux.active_focus()
+        };
+        let Some(pane) = pane else {
+            return;
+        };
+        let sources = if selection {
+            self.selected_diagram(ws, pane)
+        } else {
+            self.copied_diagram()
+        };
+        let sources = match sources {
+            Ok(sources) => sources,
+            Err(E::TooLarge) => {
+                return notify_preview_failure(tr, Some(kettle_media::FailureCode::TooLarge));
+            }
+            Err(error) => {
+                let body = match error {
+                    E::Wrapped => T::NotifyBodyPreviewDiagramWrapped,
+                    E::Unbounded => T::NotifyBodyPreviewDiagramUnbounded,
+                    _ => T::NotifyBodyPreviewNoDiagram,
+                };
+                return fire_notify(tr.text(T::NotifyTitlePreviewNothing), tr.text(body));
+            }
+        };
+        let count = sources.len();
+        let Some(source) = sources.into_iter().next() else {
+            return;
+        };
+        let title = if selection {
+            tr.text(T::MediaShelfSelectedDiagram).to_owned()
+        } else if count > 1 {
+            tr.media_shelf_copied_diagrams(count as u64)
+        } else {
+            tr.text(T::MediaShelfCopiedDiagram).to_owned()
+        };
+        if let Some(failure) = media_unavailable(self.startup.media.as_deref()) {
+            return notify_preview_failure(tr, Some(failure));
+        }
+        self.admit_user_pull(
+            ws,
+            pane,
+            kettle_media::JobKind::Mermaid,
+            kettle_media::Source::Bytes(source.into_bytes()),
+            None,
+            title,
+            kettle_media::Canvas::Theme,
+        );
+    }
+
+    /// The Mermaid sources on the clipboard.
+    fn copied_diagram(&mut self) -> Result<Vec<String>, kettle_core::DiagramCopyError> {
+        let text = self
+            .clipboard
+            .as_mut()
+            .and_then(|clipboard| clipboard.get_text().ok());
+        kettle_core::diagram_sources(&text.unwrap_or_default(), None)
+    }
+
+    /// The Mermaid sources in `pane`'s selection.
+    fn selected_diagram(
+        &self,
+        ws: &WindowState,
+        pane: u64,
+    ) -> Result<Vec<String>, kettle_core::DiagramCopyError> {
+        let selected = ws
+            .mux
+            .panes
+            .get(&pane)
+            .and_then(|state| state.term.term.lock().ok())
+            .map(|term| kettle_core::selected_diagram_sources(&term));
+        match selected {
+            Some(Ok(Some(sources))) => Ok(sources),
+            Some(Err(error)) => Err(error),
+            _ => Err(kettle_core::DiagramCopyError::Empty),
+        }
+    }
+
     /// Preview, in the focused pane's lane, the file the clipboard names. A
     /// copied path or link meets the pane's gate, as a link in its output
     /// would; a file copied in a file manager is on this computer.
@@ -23628,9 +23762,6 @@ impl App {
         if let Some(failure) = media_unavailable(self.startup.media.as_deref()) {
             return notify_preview_failure(tr, Some(failure));
         }
-        let Some((theme, target)) = self.media_surface(ws, pane) else {
-            return;
-        };
         let Ok(native) = kettle_media::NativePath::from_path(path) else {
             return notify_preview_failure(tr, Some(kettle_media::FailureCode::FileNotFound));
         };
@@ -23648,13 +23779,43 @@ impl App {
                 kettle_media::Canvas::Theme,
             ),
         };
-        let key = Some(key);
+        let source = kettle_media::Source::user_pull(
+            native,
+            kettle_media::GuiActionWitness::from_explicit_gui_action(),
+        );
+        self.admit_user_pull(
+            ws,
+            pane,
+            kettle_media::JobKind::Auto,
+            source,
+            Some(key),
+            title,
+            canvas,
+        );
+    }
+
+    /// Queue the user's own pull for `pane`'s lane: `source` as `kind`,
+    /// under `key` and `title`, on `canvas`. It waits in the queue's slot
+    /// for the user, opens the lane when it is ready, and says why when it
+    /// cannot. Its caller has refused a control client already.
+    #[allow(clippy::too_many_arguments)]
+    fn admit_user_pull(
+        &mut self,
+        ws: &mut WindowState,
+        pane: u64,
+        kind: kettle_media::JobKind,
+        source: kettle_media::Source,
+        key: Option<crate::media::ShelfKey>,
+        title: String,
+        canvas: kettle_media::Canvas,
+    ) {
+        let tr = self.ui_text;
+        let Some((theme, target)) = self.media_surface(ws, pane) else {
+            return;
+        };
         let Some(spec) = crate::media::JobSpec::from_job(kettle_media::Job {
-            kind: kettle_media::JobKind::Auto,
-            source: kettle_media::Source::user_pull(
-                native,
-                kettle_media::GuiActionWitness::from_explicit_gui_action(),
-            ),
+            kind,
+            source,
             theme,
             canvas,
             target,
@@ -23813,14 +23974,26 @@ impl App {
             Ok(image) => image,
             Err(_) => return tell(self, ws, LaneNotice::RenderFailed),
         };
+        // The item's cards show its new pixels: their posters hold the old
+        // ones only weakly, and those go now.
+        let cards = self
+            .media
+            .cards
+            .cards_of(render.pane, (render.item, render.generation));
         let Some(window) = self.window_by_seq(ws, render.window) else {
             return;
         };
-        let Some(item) = window.mux.panes.get_mut(&render.pane).and_then(|pane| {
-            pane.media_shelf
-                .get_mut(render.item)
-                .filter(|item| item.generation == render.generation)
-        }) else {
+        let Some(pane) = window.mux.panes.get_mut(&render.pane) else {
+            return;
+        };
+        for nonce in cards {
+            pane.inline_cards.set_poster(nonce, Some(&image));
+        }
+        let Some(item) = pane
+            .media_shelf
+            .get_mut(render.item)
+            .filter(|item| item.generation == render.generation)
+        else {
             return;
         };
         item.pixels = crate::media::ItemPixels::Ready(image);
@@ -43573,6 +43746,40 @@ mod tests {
         ));
     }
 
+    /// A Mermaid diagram an agent shows gets a card with its rendered poster,
+    /// from inline source (no file name) or from a file, captioned as one.
+    #[test]
+    fn a_mermaid_item_gets_a_card_from_source_or_file() {
+        let owner = kettle_ctl::process::ProcessIdentity::new_for_tests(41, 410);
+        let image = kettle_core::ImageData::new(64, 48, vec![9; 64 * 48 * 4]).unwrap();
+        let now = std::time::Instant::now();
+        let mut ledger = crate::media::CardLedger::default();
+        let mut pane_cards = kettle_render::InlineCards::default();
+        for (name, caption) in [
+            (None, "mermaid 64x48"),
+            (Some("flow.mmd"), "flow.mmd - mermaid 64x48"),
+        ] {
+            let delivery = super::register_card(
+                &mut ledger,
+                (3, &mut pane_cards, (80, 40)),
+                (8.0, 16.0),
+                (9, 0),
+                kettle_media::MediaKind::Mermaid,
+                &image,
+                crate::media::InlineDraft {
+                    owner,
+                    harness: kettle_render::CardHarness::ClaudeHook,
+                    name: name.map(Into::into),
+                },
+                now,
+            )
+            .expect("a card");
+            assert_eq!(delivery.message.split('\n').next_back(), Some(caption));
+        }
+        assert_eq!(pane_cards.len(), 2);
+        assert_eq!(ledger.cards_of(3, (9, 0)).len(), 2);
+    }
+
     /// A verified harness's card is registered in its pane with the message
     /// its harness prints; anything that cannot hold leaves the shelf alone.
     #[test]
@@ -57121,6 +57328,73 @@ mod lane_control_tests {
         ] {
             assert!(check.contains(condition), "{condition}");
         }
+    }
+
+    /// A copied or selected diagram is the user's own pull of the source
+    /// taken back from the agent's UI: refused for a control client before
+    /// the clipboard or a selection is read, rendered from bytes as
+    /// Mermaid, and offered in the menu, the clipboard's only on
+    /// Shift+right-click and neither probed for a menu a control client
+    /// opens. A path pull shares the same admission.
+    #[test]
+    fn copied_diagrams_are_wired() {
+        let src = super::production_source();
+        let body = |name: &str| {
+            src.split(&format!("fn {name}("))
+                .nth(1)
+                .and_then(|rest| rest.split("\n    fn ").next())
+                .unwrap_or_else(|| panic!("{name}"))
+        };
+        let preview = body("preview_copied_diagram");
+        let refused = preview.find("if self.ctl_driving {").expect("refused");
+        let read = preview
+            .find("self.copied_diagram()")
+            .expect("the clipboard read");
+        let selected = preview
+            .find("self.selected_diagram(ws, pane)")
+            .expect("the selection read");
+        assert!(refused < read && refused < selected);
+        assert!(preview.contains("kettle_media::JobKind::Mermaid,"));
+        assert!(preview.contains("kettle_media::Source::Bytes(source.into_bytes()),"));
+        let flat = src.split_whitespace().collect::<Vec<_>>().join(" ");
+        for needle in [
+            "Action::RenderClipboardAsDiagram => self.preview_copied_diagram(ws, false),",
+            "Action::RenderSelectionAsDiagram => self.preview_copied_diagram(ws, true),",
+            "action: kettle_config::Action::RenderSelectionAsDiagram,",
+            "let reads = !self.ctl_driving;",
+            "if reads && in_focused_pane && let Some(pane) = selection_pane && offers_diagram(&self.selected_diagram(ws, pane))",
+            "if reads && in_focused_pane && offer_copied && let Some(pane) = ws.mux.active_focus() { let file = self.copied_preview(ws, pane).is_some(); let diagram = offers_diagram(&self.copied_diagram());",
+        ] {
+            assert!(flat.contains(needle), "{needle}");
+        }
+        assert!(body("pull_preview").contains("self.admit_user_pull("));
+        assert_eq!(
+            src.matches("GuiActionWitness::from_explicit_gui_action()")
+                .count(),
+            1,
+            "a path pull is still the one witness site"
+        );
+    }
+
+    /// A lane's render on another canvas shows on the item's inline cards
+    /// too: their posters move to the new pixels before the old go.
+    #[test]
+    fn a_rerendered_items_cards_show_its_new_pixels() {
+        let src = super::production_source();
+        let flat = src.split_whitespace().collect::<Vec<_>>().join(" ");
+        let finish = flat
+            .split("fn finish_lane_render(")
+            .nth(1)
+            .and_then(|rest| rest.split(" fn ").next())
+            .expect("finish_lane_render");
+        let moved = finish
+            .find("for nonce in cards { pane.inline_cards.set_poster(nonce, Some(&image)); }")
+            .expect("posters move");
+        let replaced = finish
+            .find("item.pixels = crate::media::ItemPixels::Ready(image);")
+            .expect("pixels replaced");
+        assert!(moved < replaced);
+        assert!(finish.contains(".cards_of(render.pane, (render.item, render.generation));"));
     }
 
     /// Copying copies what the lane shows: the source in source mode, else

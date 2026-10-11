@@ -138,6 +138,14 @@ Reports that fit any of these are welcome:
   starts no such read. Terminal output, a control client or a remote host
   that starts such a read without that gesture, or past that gate, is in
   scope.
+- **Copied and selected diagrams** — `render_clipboard_as_diagram` and
+  `render_selection_as_diagram` read the clipboard or a pane's selection only
+  on the user's own key press, palette pick or menu click, never for a control
+  client, and refuse more than 1 MiB of text before taking a diagram from it
+  (a selection is measured cell by cell before its text is built). What they
+  take is rendered as the user's own bytes, never a path, so nothing on disk is
+  read. Getting either to read for a control client, or to render something
+  other than the text's own diagram, is in scope.
 - **What a preview keeps** — a shelf item keeps the bytes a request carried,
   and an SVG's or a diagram's text as the worker read it from a file, both
   charged to the bounded preview account and released with the item's

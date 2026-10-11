@@ -1,0 +1,728 @@
+[
+ {
+  "file": "cc60/01-reply.message.txt",
+  "width": 60,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc60/01-reply.tight.txt",
+  "width": 60,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc60/02-resized70.message.txt",
+  "width": 70,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc60/02-resized70.tight.txt",
+  "width": 70,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc60/02-resized80.message.txt",
+  "width": 80,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc60/02-resized80.tight.txt",
+  "width": 80,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc60/03-back60.message.txt",
+  "width": 60,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc60/03-back60.tight.txt",
+  "width": 60,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc60/09-clip.clipboard.txt",
+  "width": null,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc60classic/01-reply.message.txt",
+  "width": 60,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc60classic/01-reply.tight.txt",
+  "width": 60,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc60classic/02-resized70.message.txt",
+  "width": 70,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc60classic/02-resized70.tight.txt",
+  "width": 70,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc60classic/02-resized80.message.txt",
+  "width": 80,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc60classic/02-resized80.tight.txt",
+  "width": 80,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc60classic/03-back60.message.txt",
+  "width": 60,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc60classic/03-back60.tight.txt",
+  "width": 60,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc60classic/09-clip.clipboard.txt",
+  "width": null,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc60full/01-reply.message.txt",
+  "width": 60,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc60full/01-reply.tight.txt",
+  "width": 60,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc60full/02-resized70.message.txt",
+  "width": 70,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc60full/02-resized70.tight.txt",
+  "width": 70,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc60full/02-resized80.message.txt",
+  "width": 80,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc60full/02-resized80.tight.txt",
+  "width": 80,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc60full/03-back60.message.txt",
+  "width": 60,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc60full/03-back60.tight.txt",
+  "width": 60,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc60full/09-clip.clipboard.txt",
+  "width": null,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc60multi/01-reply.message.txt",
+  "width": 60,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc60multi/01-reply.tight.txt",
+  "width": 60,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc60multi/02-resized70.message.txt",
+  "width": 70,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc60multi/02-resized70.tight.txt",
+  "width": 70,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc60multi/02-resized80.message.txt",
+  "width": 80,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc60multi/02-resized80.tight.txt",
+  "width": 80,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc60multi/03-back60.message.txt",
+  "width": 60,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc60multi/03-back60.tight.txt",
+  "width": 60,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc60multi/09-clip.clipboard.txt",
+  "width": null,
+  "expect": [
+   "source-2.mmd"
+  ]
+ },
+ {
+  "file": "cc70/01-reply.message.txt",
+  "width": 70,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc70/01-reply.tight.txt",
+  "width": 70,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc70/02-resized60.message.txt",
+  "width": 60,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc70/02-resized60.tight.txt",
+  "width": 60,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc70/02-resized80.message.txt",
+  "width": 80,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc70/02-resized80.tight.txt",
+  "width": 80,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc70/03-back70.message.txt",
+  "width": 70,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc70/03-back70.tight.txt",
+  "width": 70,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc70/09-clip.clipboard.txt",
+  "width": null,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc80/01-reply.message.txt",
+  "width": 80,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc80/01-reply.tight.txt",
+  "width": 80,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc80/02-resized60.message.txt",
+  "width": 60,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc80/02-resized60.tight.txt",
+  "width": 60,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc80/02-resized70.message.txt",
+  "width": 70,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc80/02-resized70.tight.txt",
+  "width": 70,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc80/03-back80.message.txt",
+  "width": 80,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc80/03-back80.tight.txt",
+  "width": 80,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cc80/09-clip.clipboard.txt",
+  "width": null,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cx60/01-reply.message.txt",
+  "width": 60,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cx60/01-reply.tight.txt",
+  "width": 60,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cx60/02-resized70.message.txt",
+  "width": 70,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cx60/02-resized70.tight.txt",
+  "width": 70,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cx60/02-resized71.message.txt",
+  "width": 71,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cx60/02-resized71.tight.txt",
+  "width": 71,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cx60/02-resized72.boxart.txt",
+  "width": 72,
+  "expect": null
+ },
+ {
+  "file": "cx60/02-resized80.boxart.txt",
+  "width": 80,
+  "expect": null
+ },
+ {
+  "file": "cx60/03-back60.message.txt",
+  "width": 60,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cx60/03-back60.tight.txt",
+  "width": 60,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cx60/08-clip.clipboard.txt",
+  "width": null,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cx60inline/01-reply.message.txt",
+  "width": 60,
+  "expect": null
+ },
+ {
+  "file": "cx60inline/01-reply.tight.txt",
+  "width": 60,
+  "expect": null
+ },
+ {
+  "file": "cx60inline/02-resized70.message.txt",
+  "width": 70,
+  "expect": null
+ },
+ {
+  "file": "cx60inline/02-resized70.tight.txt",
+  "width": 70,
+  "expect": null
+ },
+ {
+  "file": "cx60inline/02-resized71.message.txt",
+  "width": 71,
+  "expect": null
+ },
+ {
+  "file": "cx60inline/02-resized71.tight.txt",
+  "width": 71,
+  "expect": null
+ },
+ {
+  "file": "cx60inline/03-back60.message.txt",
+  "width": 60,
+  "expect": null
+ },
+ {
+  "file": "cx60inline/03-back60.tight.txt",
+  "width": 60,
+  "expect": null
+ },
+ {
+  "file": "cx60inline/08-clip.clipboard.txt",
+  "width": null,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cx60multi/01-reply.message.txt",
+  "width": 60,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cx60multi/01-reply.tight.txt",
+  "width": 60,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cx60multi/02-resized70.message.txt",
+  "width": 70,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cx60multi/02-resized70.tight.txt",
+  "width": 70,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cx60multi/02-resized71.message.txt",
+  "width": 71,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cx60multi/02-resized71.tight.txt",
+  "width": 71,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cx60multi/02-resized72.message.txt",
+  "width": 72,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cx60multi/02-resized72.tight.txt",
+  "width": 72,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cx60multi/02-resized80.message.txt",
+  "width": 80,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cx60multi/02-resized80.tight.txt",
+  "width": 80,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cx60multi/03-back60.message.txt",
+  "width": 60,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cx60multi/03-back60.tight.txt",
+  "width": 60,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cx60multi/08-clip.clipboard.txt",
+  "width": null,
+  "expect": [
+   "source-2.mmd"
+  ]
+ },
+ {
+  "file": "cx70/01-reply.message.txt",
+  "width": 70,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cx70/01-reply.tight.txt",
+  "width": 70,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cx70/02-resized60.message.txt",
+  "width": 60,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cx70/02-resized60.tight.txt",
+  "width": 60,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cx70/02-resized71.message.txt",
+  "width": 71,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cx70/02-resized71.tight.txt",
+  "width": 71,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cx70/02-resized72.boxart.txt",
+  "width": 72,
+  "expect": null
+ },
+ {
+  "file": "cx70/02-resized80.boxart.txt",
+  "width": 80,
+  "expect": null
+ },
+ {
+  "file": "cx70/03-back70.message.txt",
+  "width": 70,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cx70/03-back70.tight.txt",
+  "width": 70,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cx70/08-clip.clipboard.txt",
+  "width": null,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cx80/01-reply.boxart.txt",
+  "width": 80,
+  "expect": null
+ },
+ {
+  "file": "cx80/02-resized60.message.txt",
+  "width": 60,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cx80/02-resized60.tight.txt",
+  "width": 60,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cx80/02-resized70.message.txt",
+  "width": 70,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cx80/02-resized70.tight.txt",
+  "width": 70,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cx80/02-resized71.message.txt",
+  "width": 71,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cx80/02-resized71.tight.txt",
+  "width": 71,
+  "expect": [
+   "source-1.mmd"
+  ]
+ },
+ {
+  "file": "cx80/02-resized72.boxart.txt",
+  "width": 72,
+  "expect": null
+ },
+ {
+  "file": "cx80/03-back80.boxart.txt",
+  "width": 80,
+  "expect": null
+ },
+ {
+  "file": "cx80/08-clip.clipboard.txt",
+  "width": null,
+  "expect": [
+   "source-1.mmd"
+  ]
+ }
+]
