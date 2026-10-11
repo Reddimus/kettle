@@ -96,6 +96,9 @@ avfoundation = [
     "dep:objc2-foundation",
 ]
 
+# The entry point the fuzz targets (fuzz/) call. Never in a shipped build.
+fuzzing = []
+
 [dev-dependencies]
 kettle-test-support.workspace = true
 tempfile = "3"
