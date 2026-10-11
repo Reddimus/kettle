@@ -407,8 +407,17 @@ pub fn generate(schema: &str, en: &str, es: &str) -> Result<String, String> {
             expression(&en[key], msg, true)
         )
         .unwrap();
-        // The fallback chooses a branch before formatting, so arguments are preserved.
-        writeln!(out, "if self.language == Language::Es && self.spanish_entry(Some(())).is_some() {{ {} }} else {{ {} }}\n}}", expression(&es[key], msg, false), expression(&en[key], msg, false)).unwrap();
+        // The fallback chooses a branch before formatting, so arguments are
+        // preserved. A message both languages say alike has no branch.
+        let (spanish, english) = (
+            expression(&es[key], msg, false),
+            expression(&en[key], msg, false),
+        );
+        if spanish == english {
+            writeln!(out, "{english}\n}}").unwrap();
+        } else {
+            writeln!(out, "if self.language == Language::Es && self.spanish_entry(Some(())).is_some() {{ {spanish} }} else {{ {english} }}\n}}").unwrap();
+        }
     }
     out.push_str("}\n");
     Ok(out)
