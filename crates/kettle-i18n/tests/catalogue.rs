@@ -13,7 +13,11 @@ fn every_static_message_has_clean_text_in_both_languages() {
         }
         // Model-drafted Spanish is a draft, but it is never left as English,
         // except for words Spanish shares.
-        let cognate = [Text::SettingsGpuKindVirtual, Text::SettingsGpuKindSoftware];
+        let cognate = [
+            Text::SettingsGpuKindVirtual,
+            Text::SettingsGpuKindSoftware,
+            Text::MediaViewerKindVideo,
+        ];
         if !cognate.contains(key) {
             assert_ne!(en.text(*key), es.text(*key), "{key:?} is untranslated");
         }
@@ -183,6 +187,7 @@ fn no_spanish_message_is_left_in_english() {
         "settings_gpu_kind_software",
         "settings_gpu_kind_virtual",
         "media_lane_video_time",
+        "media_viewer_kind_video",
     ];
     for (key, text) in &english {
         if !cognates.contains(&key.as_str()) {

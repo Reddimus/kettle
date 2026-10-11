@@ -113,6 +113,11 @@ One neutral Latin American catalogue serves every Spanish locale: no
 | read-only | solo lectura | |
 | clipboard | portapapeles | |
 | scroll bar | barra de desplazamiento | |
+| video | video | Latin American, no accent; never `vídeo` |
+| preview (Kettle's lane) | vista previa | |
+| Preview (Apple's app) | Vista Previa | The app's name on Spanish macOS |
+| buffer | búfer | |
+| media (kind) | contenido multimedia | Never `medio` alone |
 
 ### Widths
 
