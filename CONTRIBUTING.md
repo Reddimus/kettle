@@ -115,7 +115,7 @@ Each change has the same shape:
    supported Windows package or installer. CI also runs a headless GPU smoke
    under Xvfb on Linux, a `--screenshot`
    end-to-end check, a `--screenshot-menu` visual regression, a
-   MSRV (Rust 1.89) build verification, and a `cargo audit` advisory
+   MSRV (Rust 1.95) build verification, and a `cargo audit` advisory
    scan. The local gate must be green before pushing.
 
    **Optional pre-commit hook**: `.githooks/pre-commit` runs the

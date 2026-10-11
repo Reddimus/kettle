@@ -3234,7 +3234,7 @@ struct ScreenshotPersistencePermit(std::sync::Arc<std::sync::atomic::AtomicUsize
 
 impl ScreenshotPersistencePermit {
     fn try_acquire(outstanding: &std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Option<Self> {
-        // Rust 1.99 renames fetch_update to try_update; the MSRV (1.89) predates it.
+        // Rust 1.99 renames fetch_update to try_update; the MSRV (1.95) predates it.
         #[allow(deprecated)]
         let acquired = outstanding.fetch_update(
             std::sync::atomic::Ordering::AcqRel,
