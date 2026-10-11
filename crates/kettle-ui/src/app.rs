@@ -1235,6 +1235,7 @@ fn lane_notice_text(
         N::CopyFailed => T::MediaLaneNoticeCopyFailed,
         N::CopyBusy => T::MediaLaneNoticeCopyBusy,
         N::Rendering => T::MediaLaneNoticeRendering,
+        N::RenderingPage => T::MediaLaneNoticeRenderingPage,
         N::RenderFailed => T::MediaLaneNoticeRenderFailed,
         N::Changed => T::MediaLaneNoticeChanged,
         N::PreviewFailed => T::MediaLaneNoticePreviewFailed,
@@ -12287,17 +12288,18 @@ impl App {
             tile: None,
             page,
         };
-        self.render_for_lane(ws, render, spec);
+        self.render_for_lane(ws, render, spec, crate::window_state::LaneNotice::Rendering);
     }
 
     /// Ask the worker for `render` of `spec`, for `pane`'s lane, which says
-    /// it is rendering until it comes back. A newer render for the lane
-    /// takes the place of one still waiting.
+    /// `notice` (what it is rendering) until it comes back. A newer render
+    /// for the lane takes the place of one still waiting.
     fn render_for_lane(
         &mut self,
         ws: &mut WindowState,
         render: crate::media::LaneRender,
         spec: crate::media::JobSpec,
+        notice: crate::window_state::LaneNotice,
     ) {
         let pane = render.pane;
         let deadline = std::time::Instant::now() + kettle_ctl::show::SHOW_SERVER_DEADLINE;
@@ -12319,7 +12321,7 @@ impl App {
             kettle_media::client::RenderControl::with_deadline(deadline),
         );
         if let Some(panel) = ws.preview_panels.get_mut(&pane) {
-            panel.notice = Some(crate::window_state::LaneNotice::Rendering);
+            panel.notice = Some(notice);
         }
         self.media
             .admit(crate::media::Sender::Lane(pane), deadline, push);
@@ -12387,7 +12389,12 @@ impl App {
             tile: None,
             page: Some(ask),
         };
-        self.render_for_lane(ws, render, spec);
+        self.render_for_lane(
+            ws,
+            render,
+            spec,
+            crate::window_state::LaneNotice::RenderingPage,
+        );
         self.lanes_changed(ws, false);
     }
 
@@ -59132,6 +59139,20 @@ mod lane_control_tests {
         }
     }
 
+    /// A gallery page being drawn says so, not that the canvas changed.
+    #[test]
+    fn a_gallery_page_being_drawn_is_not_a_new_canvas() {
+        use crate::window_state::LaneNotice as N;
+        for language in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
+            let tr = kettle_i18n::Translator::new(language);
+            assert_ne!(
+                super::lane_notice_text(N::RenderingPage, &tr),
+                super::lane_notice_text(N::Rendering, &tr),
+                "{language:?}"
+            );
+        }
+    }
+
     /// Only MP4 and QuickTime, or a container not known yet, may go to
     /// Apple's decoder on macOS, and so ask for sound; elsewhere every
     /// container asks, its decoder saying it plays none.
@@ -59696,7 +59717,7 @@ mod lane_control_tests {
             "let spec = item.source.page_spec(page).map(|mut spec| { if let Some(canvas) = canvas { spec.canvas = canvas; } spec });",
             "if page == shown { panel.page = None; panel.notice = None;",
             "self.page_tickets += 1; let ask = crate::media::PageAsk { page, ticket: self.page_tickets, }; panel.page = Some((generation, ask));",
-            "page: Some(ask), }; self.render_for_lane(ws, render, spec);",
+            "page: Some(ask), }; self.render_for_lane( ws, render, spec, crate::window_state::LaneNotice::RenderingPage, );",
         ] {
             assert!(page.contains(needle), "page_preview: {needle}");
         }
@@ -59723,7 +59744,7 @@ mod lane_control_tests {
             ".and_then(|panel| page_waited_on(panel, generation)) .and_then(|ask| item.source.page_spec(ask.page).map(|spec| (ask.page, spec)));",
             "spec = page_spec; self.page_tickets += 1;",
             "panel.page = Some((generation, ask));",
-            "tile: None, page, }; self.render_for_lane(ws, render, spec);",
+            "tile: None, page, }; self.render_for_lane(ws, render, spec, crate::window_state::LaneNotice::Rendering);",
         ] {
             assert!(again.contains(needle), "render_preview_again: {needle}");
         }
@@ -60265,7 +60286,7 @@ mod lane_control_tests {
             .find("if self.ctl_driving && reads_a_file")
             .expect("no file read for a control client");
         let admitted = again
-            .find("self.render_for_lane(ws, render, spec);")
+            .find("self.render_for_lane(ws, render, spec, crate::window_state::LaneNotice::Rendering);")
             .expect("queued as the lane");
         assert!(refused < admitted);
         assert!(
