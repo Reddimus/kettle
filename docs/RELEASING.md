@@ -206,13 +206,14 @@ scripts/release.sh X.Y.Z
 
 The script requires a clean topic branch, the dated changelog heading, and no
 local or remote `vX.Y.Z` tag. It updates the workspace and inter-crate versions,
-`Cargo.lock`, the release version in `flake.nix`, and the maintained version
-references in `docs/INSTALL.md` and `docs/VERSION-HISTORY.md`. `README.md` is
-intentionally excluded so historical release references remain immutable. It runs
-`cargo build --workspace --quiet`, stages its files, and unconditionally
-creates the release commit with `git commit -S`. A missing or unusable signing
-identity therefore aborts the script; release commits cannot be unsigned when
-created by this path.
+`Cargo.lock`, `fuzz/Cargo.lock` (re-resolved offline, so only the workspace
+crates it fuzzes move), the release version in `flake.nix`, and the maintained
+version references in `docs/INSTALL.md` and `docs/VERSION-HISTORY.md`.
+`README.md` is intentionally excluded so historical release references remain
+immutable. It runs `cargo build --workspace --quiet`, stages its files, and
+unconditionally creates the release commit with `git commit -S`. A missing or
+unusable signing identity therefore aborts the script; release commits cannot be
+unsigned when created by this path.
 
 The script neither pushes the branch nor creates a tag. Review the signed
 commit, push the topic branch, and merge its pull request only after required CI
