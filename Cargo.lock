@@ -2433,7 +2433,9 @@ dependencies = [
  "flate2",
  "gethostname",
  "image",
+ "kettle-test-support",
  "memchr",
+ "vte",
 ]
 
 [[package]]

@@ -40,7 +40,7 @@ pub enum Chunk {
     /// Bytes to forward to the terminal engine unchanged.
     Pass(Vec<u8>),
     /// Bytes for the terminal engine only. Emitted when Kettle rewrites a
-    /// control sequence (OSC 1 → OSC 2, 8-bit ST → `ESC \`) and a raw consumer
+    /// control sequence or escape prefix and a raw consumer
     /// already received the original through [`Chunk::Raw`]. With no raw
     /// consumer these sequences stay ordinary [`Chunk::Pass`] bytes.
     Terminal(Vec<u8>),
@@ -176,6 +176,49 @@ const MAX_REPORTED_CWD_BYTES: usize = 8192;
 const MAX_SEQ_RESYNC_BYTES: usize = 64 * 1024;
 const PRIVATE_OSC_START_LEN: usize = 2 + completion::PREFIX.len();
 
+fn escape_continues(byte: u8) -> bool {
+    matches!(byte, 0x00..=0x17 | 0x19 | 0x1b..=0x1f | 0x7f..=0xff)
+}
+
+fn escape_executes(byte: u8) -> bool {
+    matches!(byte, 0x00..=0x17 | 0x19 | 0x1c..=0x1f)
+}
+
+#[derive(Default)]
+struct EscapePrefix {
+    bytes: Vec<u8>,
+}
+
+impl EscapePrefix {
+    fn hold(&mut self, byte: u8) -> Vec<u8> {
+        // Overlong escape prefixes lose only no-op bytes; executed controls
+        // survive, and parsing stays in Escape so a following OSC is recognized.
+        let controls = if self.bytes.len() == MAX_SEQ_RESYNC_BYTES {
+            self.take(true, true)
+        } else {
+            Vec::new()
+        };
+        if self.bytes.is_empty() {
+            self.bytes.push(0x1b);
+        }
+        self.bytes.push(byte);
+        controls
+    }
+
+    fn take(&mut self, private: bool, capture: bool) -> Vec<u8> {
+        let mut bytes = std::mem::take(&mut self.bytes);
+        if !capture {
+            return Vec::new();
+        }
+        if private {
+            bytes.retain(|byte| escape_executes(*byte));
+        } else if bytes.is_empty() {
+            bytes.push(0x1b);
+        }
+        bytes
+    }
+}
+
 fn private_osc_start_byte(index: usize) -> u8 {
     match index {
         0 => 0x1b,
@@ -211,6 +254,7 @@ enum OutputFilterMode {
 #[derive(Default)]
 pub struct PrivateOutputFilter {
     mode: OutputFilterMode,
+    escape_prefix: EscapePrefix,
     private_tail: [u8; 3],
     private_tail_len: u8,
     discard_utf8_continuations: u8,
@@ -281,11 +325,17 @@ impl PrivateOutputFilter {
                 OutputFilterMode::Escape => {
                     let byte = input[index];
                     index += 1;
-                    if byte == b']' {
+                    if escape_continues(byte) {
+                        if capture {
+                            output.extend(self.escape_prefix.hold(byte));
+                        }
+                    } else if byte == b']' {
                         self.mode = OutputFilterMode::CompletionPrefix { matched: 0 };
                     } else {
+                        let prefix = self.escape_prefix.take(false, capture);
                         if capture {
-                            output.extend_from_slice(&[0x1b, byte]);
+                            output.extend(prefix);
+                            output.push(byte);
                         }
                         self.mode = OutputFilterMode::Ground;
                     }
@@ -296,6 +346,10 @@ impl PrivateOutputFilter {
                     if completion::PREFIX.get(matched) == Some(&byte) {
                         let next = matched + 1;
                         self.mode = if next == completion::PREFIX.len() {
+                            let controls = self.escape_prefix.take(true, capture);
+                            if capture {
+                                output.extend(controls);
+                            }
                             self.private_tail_len = 0;
                             OutputFilterMode::Completion {
                                 message_bytes: completion::PREFIX.len(),
@@ -311,8 +365,10 @@ impl PrivateOutputFilter {
                     // This OSC only shared a prefix with Kettle's namespace.
                     // Replay every withheld byte exactly, then let an ESC at
                     // the mismatch point begin the next control string.
+                    let prefix = self.escape_prefix.take(false, capture);
                     if capture {
-                        output.extend_from_slice(b"\x1b]");
+                        output.extend(prefix);
+                        output.push(b']');
                         output.extend_from_slice(&completion::PREFIX[..matched]);
                     }
                     if byte == 0x1b {
@@ -574,9 +630,10 @@ impl PrivateOutputFilter {
     pub fn finish(&mut self, capture: bool) -> Vec<u8> {
         let output = if capture {
             match self.mode {
-                OutputFilterMode::Escape => b"\x1b".to_vec(),
+                OutputFilterMode::Escape => self.escape_prefix.take(false, true),
                 OutputFilterMode::CompletionPrefix { matched } => {
-                    let mut bytes = b"\x1b]".to_vec();
+                    let mut bytes = self.escape_prefix.take(false, true);
+                    bytes.push(b']');
                     bytes.extend_from_slice(&completion::PREFIX[..matched]);
                     bytes
                 }
@@ -586,6 +643,7 @@ impl PrivateOutputFilter {
             Vec::new()
         };
         self.mode = OutputFilterMode::Ground;
+        self.escape_prefix = EscapePrefix::default();
         self.private_tail_len = 0;
         self.discard_utf8_continuations = 0;
         self.recovery_private_prefix = 0;
@@ -648,6 +706,9 @@ pub struct Extractor {
     pass: Vec<u8>,
     seq: Vec<u8>,
     esc_pending: bool,
+    escape_prefix: EscapePrefix,
+    seq_prefix: Vec<u8>,
+    escape_controls: Vec<u8>,
     st_pending: bool,
     /// Exactly which terminator ended the sequence being finished, so
     /// pass-through bytes echo it and the raw tap can reproduce the original
@@ -720,6 +781,9 @@ impl Extractor {
             pass: Vec::with_capacity(8192),
             seq: Vec::new(),
             esc_pending: false,
+            escape_prefix: EscapePrefix::default(),
+            seq_prefix: Vec::new(),
+            escape_controls: Vec::new(),
             st_pending: false,
             term: SeqTerminator::EscSt,
             kitty_primary: KittyState::new(budget.clone()),
@@ -1098,6 +1162,9 @@ impl Extractor {
         if !self.pass.is_empty() {
             out.push(Chunk::Pass(std::mem::take(&mut self.pass)));
         }
+        if !self.escape_controls.is_empty() {
+            out.push(Chunk::Terminal(std::mem::take(&mut self.escape_controls)));
+        }
     }
 
     /// Open a control string, having flushed and *delivered* everything that
@@ -1119,13 +1186,40 @@ impl Extractor {
     where
         F: FnMut(&mut Self, Chunk),
     {
+        if escape_continues(b) {
+            if escape_executes(b) {
+                if self.raw_tap {
+                    self.escape_controls.push(b);
+                } else {
+                    self.pass.push(b);
+                }
+            }
+            let controls = self.escape_prefix.hold(b);
+            if self.raw_tap && !controls.is_empty() {
+                self.flush_pass(out);
+                out.push(Chunk::Raw(controls));
+            }
+            self.esc_pending = true;
+            return;
+        }
         let mode = match b {
             b'P' => Mode::Dcs,
             b'_' => Mode::Apc,
             b']' => Mode::Osc,
             _ => {
-                self.pass.push(0x1b);
-                self.pass.push(b);
+                if self.escape_prefix.bytes.is_empty() {
+                    self.pass.extend_from_slice(&[0x1b, b]);
+                } else {
+                    self.flush_pass(out);
+                    let mut raw = self.escape_prefix.take(false, self.raw_tap);
+                    if self.raw_tap {
+                        raw.push(b);
+                        out.push(Chunk::Raw(raw));
+                        out.push(Chunk::Terminal(vec![0x1b, b]));
+                    } else {
+                        out.push(Chunk::Pass(vec![0x1b, b]));
+                    }
+                }
                 return;
             }
         };
@@ -1135,9 +1229,11 @@ impl Extractor {
         self.handle_pending_chunks(out, handle);
         self.mode = mode;
         self.begin_seq();
+        self.seq_prefix = std::mem::take(&mut self.escape_prefix.bytes);
     }
 
     fn begin_seq(&mut self) {
+        self.seq_prefix = Vec::new();
         self.seq.clear();
         self.seq_reservation = None;
         self.discarding_seq = false;
@@ -1409,6 +1505,11 @@ impl Extractor {
         // candidates and paths never reach the grid, session logs, recordings,
         // or plugin output hooks.
         if mode == Mode::Osc && seq.starts_with(completion::PREFIX) {
+            let mut controls = std::mem::take(&mut self.seq_prefix);
+            controls.retain(|byte| escape_executes(*byte));
+            if self.raw_tap && !controls.is_empty() {
+                out.push(Chunk::Raw(controls));
+            }
             if let Some(update) = completion::parse(&seq) {
                 out.push(Chunk::Completion(update));
             }
@@ -1857,6 +1958,12 @@ impl Extractor {
                 });
             }
             R::None => {
+                if self.raw_tap && !terminal_only && !self.seq_prefix.is_empty() {
+                    if !raw_emitted {
+                        self.emit_raw_control(mode, &seq, out);
+                    }
+                    terminal_only = true;
+                }
                 // Not an image (or unsupported): forward verbatim, terminator
                 // included, so the VT engine handles it.
                 //
@@ -1935,11 +2042,17 @@ impl Extractor {
             Mode::Pass => return,
         };
         let terminator = self.term.bytes(mode);
-        let Some(capacity) = seq.len().checked_add(2 + terminator.len()) else {
+        let prefix: &[u8] = if self.seq_prefix.is_empty() {
+            &[0x1b]
+        } else {
+            &self.seq_prefix
+        };
+        let Some(capacity) = seq.len().checked_add(prefix.len() + 1 + terminator.len()) else {
             return;
         };
         let mut raw = Vec::with_capacity(capacity);
-        raw.extend_from_slice(&[0x1b, introducer]);
+        raw.extend_from_slice(prefix);
+        raw.push(introducer);
         raw.extend_from_slice(seq);
         raw.extend_from_slice(terminator);
         out.push(Chunk::Raw(raw));

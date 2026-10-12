@@ -35,6 +35,8 @@ memchr = "2.7"
 gethostname = "1"
 
 [dev-dependencies]
+vte = "=0.15.0"
+kettle-test-support.workspace = true
 # Criterion benches (`benches/extract.rs`: plain-text flood, SGR-heavy,
 # OSC-spam). Slim feature set: no rayon, no plotters/HTML reports. CI and
 # the gauntlet only need `cargo bench` to run.
