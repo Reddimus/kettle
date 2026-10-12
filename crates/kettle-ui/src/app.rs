@@ -33395,6 +33395,9 @@ impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let runtime_tracker = self.runtime_tracker.clone();
         let _phase = runtime_tracker.enter("resumed");
+        // winit's English application menu is up by now; Kettle's, in the
+        // UI's language, takes its place once.
+        crate::macos_menu::install(&self.ui_text);
         let seq = self.focused_seq;
         let Some(mut ws) = self.windows.remove(&seq) else {
             return;

@@ -195,3 +195,26 @@ fn no_spanish_message_is_left_in_english() {
         }
     }
 }
+
+/// The Linux desktop entry names Kettle in Spanish too: a launcher in a
+/// Spanish session describes and finds it in Spanish, each key beside its
+/// English one.
+#[test]
+fn the_desktop_entry_speaks_spanish() {
+    let entry = include_str!("../../../packaging/linux/kettle.desktop");
+    let value = |key: &str| {
+        entry
+            .lines()
+            .find_map(|line| line.strip_prefix(key)?.strip_prefix('='))
+            .unwrap_or_else(|| panic!("{key} is missing"))
+    };
+    for key in ["GenericName", "Comment", "Keywords"] {
+        let spanish = value(&format!("{key}[es]"));
+        assert!(!spanish.trim().is_empty(), "{key}[es] is empty");
+        // "Terminal" is the same word in Spanish.
+        if key != "GenericName" {
+            assert_ne!(spanish, value(key), "{key}[es] is untranslated");
+        }
+    }
+    assert!(value("Keywords[es]").ends_with(';'));
+}

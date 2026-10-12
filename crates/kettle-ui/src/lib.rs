@@ -59,6 +59,7 @@ mod macos_display;
 mod macos_cursor_layer;
 // macOS Dock context menu (right-click the Dock icon). No-op elsewhere.
 mod macos_dock;
+mod macos_menu;
 mod media;
 mod modal_input;
 mod mux;
