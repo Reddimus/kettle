@@ -19,6 +19,11 @@ just gauntlet
 
 Use a non-root user and `docker run --init` for Linux container runs. Root
 bypasses mode-bit tests, and a bare PID 1 may leave killed fixtures as zombies.
+Fixtures for trusted decoders and IPC explicitly create private roots and
+non-writable executable paths. Run them under umask `002` to catch accidental
+inheritance. The private-parent regression fails when either fresh-parent
+creation branch uses the ambient mode; existing unrelated directories stay as
+they were. Release-script fixtures require Git as well as Cargo.
 
 ### Strict and full gates
 
@@ -909,6 +914,9 @@ worker, and a missing helper leaves the destination untouched. Installer
 fixtures also reject held or untrusted update locks, remove an idle lock on
 uninstall and preserve unrelated prefix files. Installer and updater share
 the same lock; Rust lock acquisition rejects a removed or replaced inode.
+The Linux smoke checks the published 5.0.0 archive's retained empty lock as
+legacy behavior. Current installs and later archives must remove it; a
+regression distinguishes those policies and rejects nonempty or symlink locks.
 Linux updater tests require both package binaries, promote the 4.9 compatibility
 capsule on
 first restart, recover an interrupted bootstrap idempotently, and restore the
@@ -2600,9 +2608,12 @@ fail with the former epoch-day modulo 365 calculation.
 
 `just modal-shortcuts-smoke` runs a macOS fixture under the user's GUI session.
 It verifies Command chords leave hints, vi selection and menus unchanged, while
-ordinary letters still act. The three Command cases fail against 5.0.0. Native
-input requires the fixture PID to be frontmost; teardown owns its processes and
-clears the clipboard. macOS CI runs the same smoke. Portable window-state tests
+ordinary letters still act. The three Command cases fail against 5.0.0.
+The smoke deliberately hides its own window, then reacquires native and
+renderer focus before input and measured captures. That recovery failed before
+the focus helper was added. Input still requires the fixture PID to be frontmost;
+teardown owns its processes and clears the clipboard. macOS CI runs the same
+smoke. Portable window-state tests
 also reject control-plane typing into search beneath a menu or vi mode.
 
 ### kettle-remote
@@ -3977,7 +3988,8 @@ with `language = en` and `es` in the config every command reads (named by
 home of its own: the output is byte-identical, compared
 unaltered (checked red by making one config-check label follow either). `kettle-i18n`'s
 `the_desktop_entry_speaks_spanish` keeps the desktop entry's Spanish keys
-present and translated.
+present and translated. The CLI fixture explicitly creates private directories
+and files; the old construction failed under umask `002` before the correction.
 
 #### macOS Dock menu
 
