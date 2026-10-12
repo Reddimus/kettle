@@ -43,11 +43,16 @@ def focus(live):
     ], timeout=10)
     result.check_returncode()
     deadline = time.monotonic() + 5
-    while not (
-        frontmost_pid() == live.pid
-        and live.json_ctl("ui_geometry").get("window_focused") is True
-    ):
+    while True:
+        current = frontmost_pid()
+        focused = live.json_ctl("ui_geometry").get("window_focused")
+        if current == live.pid and focused is True:
+            return
         if time.monotonic() >= deadline:
+            (live.log.parent / "focus-failure.json").write_text(json.dumps({
+                "expected_pid": live.pid, "frontmost_pid": current,
+                "window_focused": focused,
+            }, indent=2) + "\n")
             raise RuntimeError("fixture Kettle did not become frontmost")
         time.sleep(0.05)
 
@@ -75,13 +80,14 @@ def check(kettle, out):
         "window-blur = false\nvim-menu-nav = true\n"
     )
     results = {}
+    hint_path = "/tmp/kettle-modal-selection-fixture"
     command = 1 << 20
     try:
         with RecordedLive(kettle, config, out / "kettle.log", extra_env={"SHELL": "/bin/sh"}) as live:
             focus(live)
             live_ui.live_shell_command(
                 live,
-                "printf 'https://example.invalid/fixture\nMODAL_READY\n'",
+                f"printf '{hint_path}\nMODAL_READY\n'",
                 "MODAL_READY",
             )
             live.json_ctl("perform_action", {"action": "hint_mode"})
@@ -92,9 +98,13 @@ def check(kettle, out):
             )
             if not results["hint_command_keeps_mode"]:
                 live.json_ctl("perform_action", {"action": "hint_mode"})
+            subprocess.run(["/usr/bin/pbcopy"], input=b"", timeout=10, check=True)
             live.json_ctl("dispatch_ui_key", {"keys": ["a"]})
-            results["ordinary_hint_still_selects"] = not live_ui.modal_open(
-                live.json_ctl("ui_geometry"), "hint_mode"
+            copied = live_ui.run(["/usr/bin/pbpaste"], timeout=10)
+            copied.check_returncode()
+            results["ordinary_hint_still_selects"] = (
+                not live_ui.modal_open(live.json_ctl("ui_geometry"), "hint_mode")
+                and copied.stdout == hint_path
             )
 
             focus(live)

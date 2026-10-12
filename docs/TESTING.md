@@ -2618,12 +2618,15 @@ fail with the former epoch-day modulo 365 calculation.
 
 `just modal-shortcuts-smoke` runs a macOS fixture under the user's GUI session.
 It verifies Command chords leave hints, vi selection and menus unchanged, while
-ordinary letters still act. The three Command cases fail against 5.0.0.
+ordinary letters still act. The hint copies a fixture path and must match the
+clipboard, keeping desktop focus inside Kettle. The former URL fixture fails
+this copy check with a harmless URL-handler stub. The three Command cases
+fail against 5.0.0.
 The smoke deliberately hides its own window, then reacquires native and
 renderer focus before input and measured captures. That recovery failed before
 the focus helper was added. Input still requires the fixture PID to be frontmost;
 teardown owns its processes and clears the clipboard. macOS CI runs the same
-smoke. Portable window-state tests
+smoke and retains failure logs, focus state and captures. Portable window-state tests
 also reject control-plane typing into search beneath a menu or vi mode.
 
 ### kettle-remote
