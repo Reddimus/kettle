@@ -1992,6 +1992,9 @@ fn real_ffmpeg_plays_a_session_to_its_end() {
             Some(Frame::PlayState(PlayState::Ended)) => break,
             other => panic!("unexpected {other:?}"),
         }
+        // The parent keeps the lease as it would: a busy machine can
+        // stretch the clip past the 5 s a silent parent is given.
+        command(&mut child, PlayCommand::Heartbeat);
     }
     // Paced at ten a second, none dropped on an idle machine is not
     // promised: every one sent is in order and on the clip's frames.
@@ -2302,6 +2305,9 @@ fn apples_decoder_plays_a_session_in_the_worker() {
             Some(Frame::PlayState(PlayState::Ended)) => break,
             other => panic!("unexpected {other:?}"),
         }
+        // The parent keeps the lease as it would: a busy machine can
+        // stretch the clip past the 5 s a silent parent is given.
+        command(&mut child, PlayCommand::Heartbeat);
     }
     assert_eq!(
         shown.iter().map(|frame| frame.pts_ms).collect::<Vec<_>>(),

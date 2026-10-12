@@ -70,7 +70,7 @@ def write(path: Path, text: str) -> None:
 
 @contextmanager
 def release_fixture(
-    *, install: str = INSTALL, history: str = HISTORY
+    *, install: str = INSTALL, history: str = HISTORY, fuzz: bool = False
 ) -> Iterator[tuple[Path, dict[str, str], str]]:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
@@ -104,6 +104,13 @@ kettle-i18n = { path = "crates/kettle-i18n", version = "3.3.0" }
         write(root / "README.md", README)
         write(root / "docs" / "INSTALL.md", install)
         write(root / "docs" / "VERSION-HISTORY.md", history)
+        if fuzz:
+            write(root / "fuzz" / "Cargo.toml", "[package]\nname = \"fixture-fuzz\"\n")
+            write(
+                root / "fuzz" / "Cargo.lock",
+                '[[package]]\nname = "kettle-media"\nversion = "3.3.0"\n\n'
+                '[[package]]\nname = "libfuzzer-sys"\nversion = "0.4.9"\n',
+            )
 
         real_git = shutil.which("git")
         if real_git is None:
@@ -125,10 +132,22 @@ fi
 exec "$KETTLE_TEST_REAL_GIT" "$@"
 """,
         )
+        # `metadata` on the fuzz manifest moves its path crates to the
+        # workspace's version, as a real offline re-resolution does, unless
+        # the test makes it fail.
         write(
             fake_bin / "cargo",
             """#!/usr/bin/env sh
-test "${1:-}" = build
+case "${1:-}" in
+build) exit 0 ;;
+metadata)
+    [ "${KETTLE_TEST_FUZZ_METADATA:-ok}" = ok ] || exit 101
+    version=$(sed -n 's/^version = "\\(.*\\)"$/\\1/p' Cargo.toml | head -1)
+    sed "/kettle-media/{n;s/^version = .*/version = \\"$version\\"/;}" \
+        fuzz/Cargo.lock > fuzz/Cargo.lock.new
+    mv fuzz/Cargo.lock.new fuzz/Cargo.lock ;;
+*) exit 1 ;;
+esac
 """,
         )
         for executable in (fake_bin / "git", fake_bin / "cargo"):
@@ -273,6 +292,41 @@ class ReleaseScriptTests(unittest.TestCase):
                     text=True,
                 )
                 self.assertEqual(status.stdout, "")
+
+
+@unittest.skipIf(os.name == "nt", "release.sh requires a Unix shell")
+class ReleaseFuzzLockTests(unittest.TestCase):
+    def test_the_release_commit_refreshes_the_fuzz_lockfile(self) -> None:
+        with release_fixture(fuzz=True) as (root, environment, real_git):
+            result = run_release(root, environment)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            lock = (root / "fuzz" / "Cargo.lock").read_text(encoding="utf-8")
+            self.assertIn('name = "kettle-media"\nversion = "4.0.0"', lock)
+            # Registry pins stay as they were.
+            self.assertIn('name = "libfuzzer-sys"\nversion = "0.4.9"', lock)
+            committed = subprocess.run(
+                [real_git, "show", "--name-only", "--format=", "HEAD"],
+                cwd=root,
+                check=True,
+                stdout=subprocess.PIPE,
+                text=True,
+            ).stdout.split()
+            self.assertIn("fuzz/Cargo.lock", committed)
+
+    def test_a_fuzz_lockfile_that_cannot_refresh_fails_closed(self) -> None:
+        with release_fixture(fuzz=True) as (root, environment, real_git):
+            environment["KETTLE_TEST_FUZZ_METADATA"] = "fail"
+            result = run_release(root, environment)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn("could not refresh fuzz/Cargo.lock", result.stderr)
+            status = subprocess.run(
+                [real_git, "status", "--porcelain=v1"],
+                cwd=root,
+                check=True,
+                stdout=subprocess.PIPE,
+                text=True,
+            )
+            self.assertEqual(status.stdout, "")
 
 
 @unittest.skipIf(os.name == "nt", "macOS package loop requires a Unix shell")

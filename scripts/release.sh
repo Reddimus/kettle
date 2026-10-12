@@ -9,7 +9,7 @@
 #   1. Asserts working tree is clean.
 #   2. Asserts CHANGELOG.md has the target [VERSION] section.
 #   3. Bumps Cargo.toml's workspace `version`.
-#   4. Builds once to refresh Cargo.lock.
+#   4. Builds once to refresh Cargo.lock, and refreshes fuzz/Cargo.lock.
 #   5. Signs and commits the bump + lock + already-committed CHANGELOG section.
 #   6. Leaves the release commit on the current branch for a pull request.
 #
@@ -80,7 +80,7 @@ fi
 # to restore these files if any command fails before the release commit lands.
 RESTORE_FILES=(
     Cargo.toml Cargo.lock CHANGELOG.md flake.nix
-    docs/INSTALL.md docs/VERSION-HISTORY.md
+    docs/INSTALL.md docs/VERSION-HISTORY.md fuzz/Cargo.lock
 )
 MUTATIONS_STARTED=0
 cleanup_release_attempt() {
@@ -296,6 +296,18 @@ if ! "$CARGO" build --workspace --quiet; then
     echo "  fix the build error and re-run" >&2
     exit 1
 fi
+# The fuzz workspace has a lockfile of its own, which records the workspace
+# crates it fuzzes at their versions; `--locked` checks of it fail until it
+# names the new one. Re-resolve it offline, which moves only those path crates
+# and keeps every registry pin.
+if [ -f fuzz/Cargo.toml ]; then
+    echo "refreshing fuzz/Cargo.lock"
+    if ! "$CARGO" metadata --manifest-path fuzz/Cargo.toml --format-version 1 \
+        --offline >/dev/null; then
+        echo "::error::could not refresh fuzz/Cargo.lock offline" >&2
+        exit 1
+    fi
+fi
 
 # Commit. Add flake.nix only when it exists, matching the conditional bump
 # above. `git add` of a missing path exits 128, which aborts the release under
@@ -305,7 +317,7 @@ if [ -f flake.nix ]; then
     ADD_FILES+=(flake.nix)
 fi
 # Stage the release docs whose current-version anchors were bumped above.
-for doc in docs/INSTALL.md docs/VERSION-HISTORY.md; do
+for doc in docs/INSTALL.md docs/VERSION-HISTORY.md fuzz/Cargo.lock; do
     if [ -f "$doc" ] && ! git diff --quiet -- "$doc"; then
         ADD_FILES+=("$doc")
     fi

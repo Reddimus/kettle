@@ -192,6 +192,61 @@ script requires Xcode 26.x. The macOS 26 CI icon job covers it.
 `package-templates` skipped its release-asset check because v4.9.0 is not
 published yet; the post-release check runs it with `--require-release`.
 
+## 5.0.0 cut - 2026-10-11
+
+macOS 27.0.1 (26A434), M5 Max. Release build of the cut's release commit
+`158153a9`, built as `58b5bd76`: the same tree, before the cut was rebased onto
+the merged changelog pull request.
+
+Window chrome, material and icon sources are unchanged since 4.5.0, so the
+4.5.0 visual results still apply. 5.0 adds surfaces of its own (inline media
+cards, preview lanes beside a pane, and an Agents category in Settings) rather
+than changing how the existing ones draw. The cut was compared with the
+installed 4.9.0 (`ea0e36fd`) pixel for pixel, on the fixture the 4.9.0 cut
+used: one fixed screen of text with the 16, 256 and truecolor palettes, every
+underline style, bold, italic, reverse and padded rows, wide, emoji, combining
+and right-to-left text, box drawing, braille and ligatures. Their `kettle ctl
+screenshot` frames were identical opaque and at 86% opacity with blur.
+
+Split in two, 180 pixels differed, and all of them belong to the two panes'
+scrollbar thumbs. 5.0 runs a pane's scrollbar along its terminal, clear of the
+pane's titlebar, so that a preview lane can sit beside the terminal; 4.9.0 ran
+it the whole height of the pane. Only split panes have titlebars, so only they
+show the change. The text is identical.
+
+Settings was captured from both builds, wide and in a 64-column window. In
+the wide window 5.0 adds the Agents category, and the panel grows to fit it.
+The 64-column captures are identical: the categories and the key hints end in
+an ellipsis before Agents would show, as they do in 4.9.0.
+
+`just gauntlet-strict` passed on the release commit. The 17 macOS native gates
+passed on the first release commit, `7ed542a5`: `icons-check-required`,
+`package-templates`, `update-manifest-test`, `release-assets-test`,
+`package-manifest-test`, `online-installer-test`, `gpu-render-smoke`,
+`cli-smoke`, `touchpad-scroll-smoke`, `split-exit-resize-smoke`,
+`text-presentation-smoke`, `line-edit-chords-smoke`, `dock-menu-smoke`,
+`macos-compare-score-self-test`, `macos-standing-self-test`,
+`macos-avsync-self-test` and `agent-cli-smoke`. That commit left
+`fuzz/Cargo.lock` naming the media crates at 4.9.0, which gauntlet-strict
+refused, so `scripts/release.sh` now refreshes it and the release commit was
+made again. The release commit differs from `7ed542a5` only in that lockfile,
+the release script, its tests and `RELEASING.md`.
+
+`just macos-update-smoke` cannot pass against published v4.9.0. Since 5.0
+the updater requires the media worker in every macOS archive, and the 4.9.0
+archive predates the worker. A 4.9.0 install updating to 5.0.0 runs 4.9.0's
+own updater, which replaces the whole bundle, so installs are unaffected. As
+[`RELEASING.md`](RELEASING.md) directs at such a boundary, `release.yml` was
+dispatched on main `a9fda8f9` (run `38182915046`) for a signed, notarized
+candidate archive in the 5.0 shape, and the live updater test passed against
+it, its sidecar checked. Neither the updater nor the macOS packaging changed
+between that commit and the cut.
+
+`icns-smoke` was skipped again: this host has Xcode 27, and the release icon
+script requires Xcode 26.x. The macOS 26 CI icon job covers it.
+`package-templates` skipped its release-asset check because v5.0.0 is not
+published yet; the post-release check runs it with `--require-release`.
+
 ## 4.3.0 cut — 2026-09-04
 
 Host: macOS 26.6.2 (25G83), Apple silicon, system appearance **Dark**. Bundle: a
