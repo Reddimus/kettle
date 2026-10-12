@@ -360,6 +360,9 @@ jobs:
           path: |
             ${{ runner.temp }}/image-paste/*.json
             ${{ runner.temp }}/image-paste/*.log
+            ${{ runner.temp }}/modal-shortcuts/*.json
+            ${{ runner.temp }}/modal-shortcuts/*.log
+            ${{ runner.temp }}/modal-shortcuts/*.png
           if-no-files-found: ignore
           retention-days: 7
       - name: Agent CLI non-interactive smoke (macOS)

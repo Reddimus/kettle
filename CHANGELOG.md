@@ -25,7 +25,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Create missing private data directories with owner-only modes, so agent
   plugins can install under a group-writable default umask.
 - Stop video-session test heartbeats after the final frame, avoiding a write
-  racing the worker's normal exit.
+  racing the worker's normal exit; read queued failures after closed input
+  and check still timestamps against the decoder's bounded keyframe fallback.
+- Copy a path in the native hint fixture, keeping browser activation from
+  interfering with modal shortcut checks.
 
 ## [5.0.0] — 2026-10-11
 
