@@ -107,7 +107,7 @@ covers pane movement, tabs, search, and first-run troubleshooting.
 ## Agent previews
 
 Coding agents in a Kettle pane can show you images, SVG and Mermaid diagrams,
-a Markdown file's diagrams as a gallery, and videos as their posters, without
+a Markdown file's diagrams as a gallery, and video posters, without
 reading your screen or typing. Turn on Settings, Agents, Agent
 previews (`agent-display`), then:
 
@@ -118,13 +118,17 @@ previews (`agent-display`), then:
   Codex shows media when asked: say "show it in Kettle".
 - Any shell: `kettle show plot.png`, `kettle show notes.md`, `kettle show
   clip.webm`, or `kettle show --mermaid < flow.mmd`, sends media to the
-  pane's shelf. A video shows its middle frame, its length and what it is; a
-  card's menu opens it in QuickTime Player (macOS) or mpv (Linux).
+  pane's shelf.
 - Reading a video yourself: the full MCP server's `kettle_video_frames`, or
   `kettle video-frames clip.webm -o sheet.jpg`, returns a contact sheet of its
   frames, each labeled with its time, and an index of what each shows.
 
-Without any agent, `/copy` a diagram and use `render_clipboard_as_diagram`,
+Choose **Open media shelf** in the command palette to preview items in a
+lane inside the pane. Zoom images, browse diagram galleries, or play a video
+with sound when its decoder supports it. Nothing plays automatically. The
+lane also offers an external viewer or video player.
+
+Without an agent, `/copy` a diagram and use `render_clipboard_as_diagram`,
 or select one and use `render_selection_as_diagram`. `kettle agent-setup
 --status` says what this shell would get. New panes get `kettle` on their
 `PATH` when they have none. Read [Automation and MCP](docs/AGENT.md) for the

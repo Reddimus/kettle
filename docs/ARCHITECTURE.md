@@ -2663,7 +2663,8 @@ no context reads, clock queries, formatting or writes.
   destroying that master on the UI thread can therefore make the window "not
   responding". Drop closes the writer when immediately available, moves child
   kill/reap and master destruction to a detached teardown worker, and
-  **detaches** the parser handle. Before starting that worker, Drop switches
+  **detaches** the parser handle. Unix checks cached child status before
+  signaling, so it never signals a PID whose child was already reaped. Before starting that worker, Drop switches
   the pump into direct discard/drain mode; an interruptible bounded handoff
   lets it bypass a full parser queue, so draining cannot depend on parser or UI
   progress. The pump remains live while the worker closes the master; only
@@ -2839,10 +2840,11 @@ integration), out of the byte stream. It also consumes Kettle's bounded private
 OSC 777 completion metadata before the VT engine can see it. A separate bounded
 filter removes only that private sequence from logs and output hooks once per
 PTY read; parser chunking can therefore never flood their bounded queues.
-Everything else is forwarded
-**byte-for-byte** (terminator preserved: BEL vs ST) so the engine still sees a
-correct, untouched VT stream. This keeps us on a battle-tested engine while
-adding modern features it lacks.
+Unhandled payloads retain their bytes and BEL/ST terminators. Repeated ESC and
+ignored bytes keep escape parsing active; C0 controls execute immediately,
+except CAN/SUB, which cancel it. Consumed sequences leave no pending escape in
+the engine. Raw output remains byte-exact, except private completions and
+overlong escape prefixes: beyond 64 KiB, only their executed controls survive.
 
 Completion protocol v4 adds two bounded presentation hints to the v3 sequenced
 envelope. Fish and PowerShell capture the replacement token and current-line

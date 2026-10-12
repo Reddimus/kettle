@@ -6,6 +6,22 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+
+- Keep paths containing wide characters whole during double-click selection.
+- Avoid signaling an already reaped Unix PTY child during pane teardown.
+- Keep Command shortcuts from selecting hints, changing vi selection or
+  activating menu mnemonics; prevent control-plane typing into a field
+  covered by a menu or vi mode.
+- Use the actual UTC calendar day for solar theme scheduling, including leap years.
+- Recognize working-directory, prompt and completion OSCs after repeated
+  escapes or intervening controls; preserve ordinary recorded output and
+  strip those escape prefixes correctly in session logs and `exec --strip-ansi`.
+- Coordinate Linux installation and removal with the updater, and remove its
+  idle lock during uninstall without allowing stale lock holders to proceed.
+- Make copied-diagram complexity, macOS missing-process and Linux leaked-PTY
+  tests independent of runner scheduling while retaining the production bounds.
+
 ## [5.0.0] — 2026-10-11
 
 ### Added

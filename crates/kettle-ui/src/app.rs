@@ -14457,12 +14457,8 @@ impl App {
         area
     }
 
-    /// Tab-bar geometry — the single source of truth shared by the renderer
-    /// (drawing) and the click hit-testing below.
-    /// v2.40.0 (tear-off UX): this window's live tear-lift — non-zero only
-    /// while its own drag FSM is in a Dragging state. Same `dock_band` +
-    /// `1.5 × tab_bar_h` pair `maybe_tear_off` uses, so the ghost's lift
-    /// saturates exactly where the tear fires and the two can't drift.
+    /// Lift the drag ghost toward the same threshold that triggers tear-off.
+    /// A window without its own active drag has no lift.
     fn tear_lift_for(&self, ws: &WindowState) -> f32 {
         if !self.cfg.detachable_tabs {
             return 0.0;

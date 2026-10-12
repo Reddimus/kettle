@@ -47,9 +47,9 @@ matrix.
 
 ### Inline-card rendering foundation
 
-The registration API is test-only until a production display caller lands.
-Exercise the shared marker and text projection, real terminal scroll capture,
-recognition, image exclusion and both live renderer modes:
+Production display callers register inline cards for supported agents. These
+tests exercise marker recognition, text projection, terminal scrolling, image
+exclusion and both renderer modes; live agent routing is checked separately:
 
 ```sh
 cargo test --locked -p kettle-vt --lib inline_marker
@@ -728,7 +728,12 @@ The `user_facing_docs_have_no_internal_cycle_refs` drift guard scans
 user-facing docs for hardcoded "N workspace tests" claims that go stale. This
 file is exempt, being contributor-facing, but follows the same discipline.
 
-### kettle-vt (80+ tests)
+### kettle-vt
+
+Escape-prefix regressions compare OSC recognition and executed controls with
+vendored vte across deterministic random read splits. They cover raw-tap
+identity, private completions, cancellation, EOF and the 64 KiB prefix bound.
+Each new regression fails with the escape-state correction reverted.
 
 Plain-text passthrough is byte-exact;
 iTerm2 / Sixel / kitty (incl. zlib-less RGBA + chunked reassembly)
@@ -897,8 +902,12 @@ formatted (`<version> (<hash>)`) identities.
 
 Worker distribution is covered by `python3 scripts/test-install-media.py`:
 both binaries are installed, recorded and uninstalled without starting the
-worker, and a missing helper leaves the destination untouched. Linux updater
-tests require both package binaries, promote the 4.9 compatibility capsule on
+worker, and a missing helper leaves the destination untouched. Installer
+fixtures also reject held or untrusted update locks, remove an idle lock on
+uninstall and preserve unrelated prefix files. Installer and updater share
+the same lock; Rust lock acquisition rejects a removed or replaced inode.
+Linux updater tests require both package binaries, promote the 4.9 compatibility
+capsule on
 first restart, recover an interrupted bootstrap idempotently, and restore the
 old pair after either binary publication. macOS fixtures require the helper
 and exchange/restore the whole pair. `installed_worker_renders_svg_and_raster`
@@ -1651,8 +1660,10 @@ Creates and replaces private state without leaving staging
 files on handled outcomes, safely reclaims exact dead-creator crash remnants,
 preserves an existing destination's permissions, rejects symlink
 destinations, and proves exclusive advisory locks block competing handles
-and release on drop. Reaping tests preserve live-PID, noncanonical,
-multi-link, and nonregular lookalikes. Scheduler regressions pin in-flight
+and release on drop. Acquisition checks the held file against its path, so a
+waiter on a retired inode cannot proceed. Reaping tests preserve live-PID,
+noncanonical, multi-link and nonregular lookalikes. Scheduler regressions pin
+in-flight
 coalescing, the five-minute completion cooldown, eviction rather than
 permanent saturation after 256 tracked destinations, and completion after a
 worker guard failure; the live queue is bounded at 32 destinations. Native
@@ -2570,7 +2581,31 @@ prose punctuation, Markdown backticks and `*` emphasis, and closing brackets
 only when unbalanced, while the same characters inside a URL stay; a backtick-
 or asterisk-wrapped URL is detected without its marks.
 
-### kettle-remote (50+ tests)
+Session-log and `exec --strip-ansi` regressions cover C0 controls and DEL
+between an escape and an OSC introducer, including an escape from an earlier
+OSC or DCS. Every split preserves executed controls and removes the payload;
+both tests fail against the former reset-to-ground behavior.
+
+Double-click selection uses the same grid-column mapping as quick select. A
+Unicode path fixture checks every cell, including both wide spacers, and fails
+when the row is rebuilt as a string containing spacer spaces. Existing URL,
+address, hash and plain-path selection cases use the grid entry point too.
+
+Solar schedule tests cover Gregorian boundaries and every day of a 400-year
+cycle. A daily decision fixture uses the actual UTC ordinal; all three tests
+fail with the former epoch-day modulo 365 calculation.
+
+`just modal-shortcuts-smoke` runs a macOS fixture under the user's GUI session.
+It verifies Command chords leave hints, vi selection and menus unchanged, while
+ordinary letters still act. The three Command cases fail against 5.0.0. Native
+input requires the fixture PID to be frontmost; teardown owns its processes and
+clears the clipboard. macOS CI runs the same smoke. Portable window-state tests
+also reject control-plane typing into search beneath a menu or vi mode.
+
+### kettle-remote
+
+The macOS missing-root fixture uses a controlled clock and checks expiration
+at the exact 25 ms boundary, independent of test-thread scheduling.
 
 Injected process-tree fixtures cover SSH and
 container detection, deterministic breadth-first selection, cwd/shell clone
@@ -3192,9 +3227,13 @@ publishes an orderly EOF; an 810-ms cross-platform fallback is a failing
 mutant because silence can mean the reader has not been scheduled yet. An
 unexpected reader error and a five-second Unix no-EOF bound return explicit
 internal failures, but the bound does not override queued raw bytes or
-downstream stdout backpressure. A Linux self-reexec fixture exits its direct
+downstream stdout backpressure. A Unix mock-child regression also refuses to signal a reaped child and retains
+termination of a live child. A Linux self-reexec fixture exits its direct
 child while a `setsid()` descendant retains the slave, proving non-reaping child
-status—not the unavailable parser Exit event—starts that bound. A failed-reader
+status—not the unavailable parser Exit event—starts that bound. It cleans up
+the escaped descendant before asserting the result. Pure deadline tests pin
+the five-second policy; the native fixture does not time runner scheduling.
+A failed-reader
 model separately keeps multiple admitted parser chunks and an occupied stdout
 worker ahead of the final 125; a disconnected parser with an irreducible
 pending count must fail rather than deadlock. Windows ConPTY retains a bounded quiet interval

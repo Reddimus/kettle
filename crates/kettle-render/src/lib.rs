@@ -2864,9 +2864,7 @@ pub struct Renderer {
     /// across openings to amortize allocation; trimmed when the row
     /// count shrinks for a smaller menu.
     context_menu_buffers: Vec<TextBuffer>,
-    /// v2.38.2 P1b: last text shaped into each `context_menu_buffers` slot —
-    /// same equality gate `tab_texts`/`hint_texts` use, so a static open menu
-    /// doesn't re-shape every row on every blink/hover redraw.
+    /// Last shaped text per menu row; unchanged rows skip reshaping.
     context_menu_texts: Vec<String>,
     /// Dropdown-parity: one buffer per row's right-aligned shortcut
     /// hint (empty-hint rows shape nothing). Pooled like its sibling.
@@ -2883,10 +2881,7 @@ pub struct Renderer {
     /// overlay change, but this gate skips the reshape for every row whose text
     /// is unaffected.
     settings_texts: Vec<String>,
-    /// v2.38.2 P1b: memoizes `settings_display_lines(set)` — a `format!()`
-    /// per display line — keyed on the last `SettingsOverlay` it was computed
-    /// from. `None`/mismatched source means `settings_lines_cache` is stale
-    /// (or never populated) and must be recomputed.
+    /// Source overlay for `settings_lines_cache`; a mismatch invalidates it.
     settings_lines_source: Option<SettingsOverlay>,
     settings_lines_cache: Vec<String>,
     /// Label and secondary-description buffers for the focused pane's
@@ -16377,12 +16372,10 @@ pub fn capture_png_with_annotation(
         q.push(rect(0.0, ly, 1.0, lh, foc, 1.0));
         q.push(rect(split_x - 1.0, ly, 1.0, lh, foc, 1.0));
 
-        // Block cursor sitting at the end of the left pane's idle prompt
-        // (`kevim@kettle:~/Repos/kettle$ ` = 29 columns, so the cursor's empty
-        // input cell is column 29). Keep `cur_col` in sync with the final
-        // prompt line in the `left` buffer below, or the cursor lands mid-path.
+        let demo_user = "demo@kettle";
+        let demo_directory = "~/projects/demo";
         let cur_row = 6.0;
-        let cur_col = 29.0;
+        let cur_col = (demo_user.len() + demo_directory.len() + 3) as f32;
         q.push(rect(
             pad + cur_col * cw,
             ly + pad + cur_row * ch,
@@ -16425,9 +16418,9 @@ pub fn capture_png_with_annotation(
         left.set_size(Some(split_x - pad), Some(lh));
         left.set_rich_text(
             [
-                ("kevim@kettle", grn.clone()),
+                (demo_user, grn.clone()),
                 (":", fg.clone()),
-                ("~/Repos/kettle", blu.clone()),
+                (demo_directory, blu.clone()),
                 // Keep this command short enough that it never wraps even in the
                 // narrow showcase split (~50-col left pane) — a wrap would push
                 // every line down one and strand the hardcoded `cur_row` cursor
@@ -16442,9 +16435,9 @@ pub fn capture_png_with_annotation(
                 ("test result: ", fg.clone()),
                 ("ok", grn.clone()),
                 (". workspace checks passed\n\n", fg.clone()),
-                ("kevim@kettle", grn.clone()),
+                (demo_user, grn.clone()),
                 (":", fg.clone()),
-                ("~/Repos/kettle", blu.clone()),
+                (demo_directory, blu.clone()),
                 ("$ ", fg.clone()),
             ],
             &base,

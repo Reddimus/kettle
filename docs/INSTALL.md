@@ -101,6 +101,9 @@ links, devices, aliases, unsafe permissions, and path traversal. Archives from
   records each managed file's path, mode, size, and SHA-256 plus each directory
   it created in `share/kettle/install-files.json`. Upgrade and uninstall first
   verify the complete recorded tree, then touch only those recorded paths.
+  Installation, updating and removal share an exclusive update lock. A busy or
+  changed lock refuses the operation; successful uninstall removes the idle
+  `.kettle-update.lock` after removing its recorded files.
   Unrelated files in a shared prefix such as `~/.local` or `/usr/local` are left
   alone. A legacy install, a changed recorded file, a symlink in the path, or a
   package-manager-owned collision has no trustworthy provenance and is refused;

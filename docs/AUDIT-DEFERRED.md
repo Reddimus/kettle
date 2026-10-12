@@ -1,26 +1,19 @@
 # Audit follow-up — deferred items
 
-The v2.32.0 audit (two exhaustive multi-agent passes: per-crate + seven
-cross-cutting dimensions, every finding adversarially re-verified) confirmed
-~114 findings. v2.32.0 shipped every HIGH-severity correctness / robustness /
-security bug plus the cheap high-value mediums and the full docs sweep. The
-items below were **deliberately deferred** because they are large, structural,
-or need a live GPU / the maintainer's interactive desktop to validate. They are
-tracked here so they are not lost.
+Follow-up work and verification history from earlier audits. Completed entries
+are marked explicitly; historical measurements are not current acceptance.
 
 ## Large / structural
 
 - **RUSTSEC-2026-0192 upstream exit for `ttf-parser`.** Issue
   Reddimus/kettle#36 stays open until `ttf-parser` disappears from the dependency
   graph. The only accepted temporary path is `glyphon → cosmic-text → fontdb`;
-  `scripts/check-ttf-parser-scope.sh` guards that scope in CI. Upstream tracking:
+  `scripts/check-ttf-parser-scope.py` guards that scope in CI. Upstream tracking:
   RazrFalcon/fontdb#90, pop-os/cosmic-text#352, pop-os/cosmic-text#526, and
-  grovesNL/glyphon#123. Rechecked 2026-08-11: crates.io still publishes
-  `cosmic-text 0.19.0` and `glyphon 0.12.0`; both projects' `main` manifests
-  still select that pair, and cosmic-text still pins `fontdb 0.23`. The focused
-  upstream bump to `fontdb 0.24` is open as cosmic-text PR #526, currently
-  mergeable but blocked, so Kettle cannot consume the already-published fontdb
-  fix without maintaining a fork or unreleased Git dependency. Close this only
+  grovesNL/glyphon#123. Rechecked 2026-10-12: published versions remain
+  `cosmic-text 0.19.0` and `glyphon 0.12.0`. Cosmic-text's `main` now uses
+  `fontdb 0.24` after #526 merged, but no release contains that change. Next recheck: 2026-10-19, or the next
+  upstream release. The local cosmic-text copy retains only its required bidi fix. Close this
   after an upstream release, updating the text-rendering stack, confirming
   `cargo tree -i ttf-parser` reports no matches, and removing
   RUSTSEC-2026-0192 ignores from `deny.toml` and `.github/workflows/audit.yml`.
@@ -50,9 +43,8 @@ tracked here so they are not lost.
   use the live keybind-hint column. The focused regression fails when the
   projection is collapsed back to the former one-line representation.
 
-The 4.0.0 platform-retirement work leaves the `app.rs` split and the three
-Kitty graphics items below deferred. The first is a multi-session structural
-refactor. The Kitty items need protocol probes and have no current consumer.
+The `app.rs` split remains a separate structural change. Kitty frame and
+composition replies and animation compatibility shipped in 5.0.0.
 
 ## Found by the 3.2.0 appearance gate
 
@@ -73,19 +65,8 @@ refactor. The Kitty items need protocol probes and have no current consumer.
 
 ## Terminal / protocol
 
-- **Kitty animation-frame and composition acknowledgements.** Ordinary
-  transmission (`t`, `T`) and placement (`p`) commands now report typed
-  success/error replies with the original identifiers and effective quiet
-  level. Placement success follows actual Core admission, including
-  synchronized-output replay and its deadline. Capability queries retain
-  their immediate wire-order replies. Frame upload (`f`) and composition
-  (`c`) now have typed completion paths and focused regressions in the working
-  candidate. The compiled pre-fix baseline reproduced the failures. Post-fix
-  VT/Core tests, lint, builds, minimum-toolchain regressions, and four actual
-  waiting PTY children pass. Four compiled mutation checks reproduced their
-  expected runtime failures before source restoration. The full ordinary
-  workspace gate passes, including headless rendering tests and documentation
-  builds. Independent review and merge remain pending.
+- ~~**Kitty animation-frame and composition acknowledgements.**~~ Shipped in
+  5.0.0, including typed replies, admission ordering and runtime red checks.
 - ~~**Inline-image scrolling inside partial DECSTBM margins.**~~ Done in the
   next release: the terminal engine now emits bounded, ordered scroll-region
   events with direction, margins, count, and monotonic screen-top ids. Images
@@ -133,27 +114,13 @@ refactor. The Kitty items need protocol probes and have no current consumer.
   dismissing click should also pass through to what is underneath (the context
   menu currently swallows it). Both are choices worth making deliberately
   rather than inside a correctness fix.
-- **Two more raw-`text` consumers still carry the Command-chord bug.**
-  `vi_mode_key` and `context_menu_key` both take `KeyEvent::text` and act on it
-  without a modifier check, the same way the five text fields did. Neither
-  builds a buffer, so `modal_input::accept_text` is not a drop-in for either;
-  they need arm-level guards like the confirm dialog's. Listed with `hint_key`
-  below so the remaining set is named rather than partially recorded.
-- **`hint_key` has the same Command-chord bug the modal fields just lost.** It
-  still takes raw `KeyEvent::text`, so on macOS the `v` that `⌘V` produces is a
-  candidate hint selection. It is outside the five append-only text fields this
-  round covered — hint mode consumes single characters as labels rather than
-  building a buffer, so it needs a different shape of fix, not
-  `modal_input::accept_text`. Named here so it is not rediscovered as new.
-- **`open_text_modal` cannot see the modals that outrank it.** It resolves the
-  six text fields, but a confirm dialog, the context menu, vi-mode, or hint mode
-  can own the keyboard *above* one of them. When that happens `dispatch_ui_key`
-  types into a field a real keystroke would not reach. This is pre-existing
-  rather than new — the old search-only gate had exactly the same hole — and the
-  precedence drift guard cannot catch it, because it compares the two orders
-  against each other rather than against the modals neither one lists. The fix
-  is for the resolver to report "some other modal owns the keyboard" and refuse,
-  which needs the non-text modals enumerated in the same place.
+- ~~**Command chords in vi mode, hints and menus.**~~ These handlers now
+  share the modifier filter. The macOS native smoke keeps each Command chord
+  inert while checking that its ordinary letter still acts; all three
+  Command cases fail against 5.0.0.
+- ~~**Control-plane modal ownership.**~~ `open_text_modal` now uses the
+  keyboard's `top_modal` resolver and refuses unsupported owners. A real
+  headless window-state test fails when vi or a menu lets search take its keys.
 
   Consolidating them behind `search_input::SearchEditor` is the finish line, and
   it is a bigger change than it looks: `TitleEditOverlay` and its siblings carry
@@ -222,15 +189,11 @@ tests can lower it.
 
 ### Needs an API change
 
-- **`hints::detect` takes a char index and calls it a column**
-  (`kettle-core/src/hints.rs:79`, medium). Callers hand it row text whose wide
-  characters occupy two columns, so every hint past a CJK character or emoji is
-  offset, and quick-select copies or opens a truncated string. The fix is not
-  local: column identity has to travel with the text rather than be inferred,
-  which means `detect` taking a byte-to-column map or an iterator of
-  `(column, char)` and every caller changing with it. `links.rs:118` has the
-  same root cause in a smaller form, under-reporting `end_col` by one cell when
-  a link ends in a wide glyph.
+- ~~**Hint and selection columns after wide characters.**~~ Quick-select
+  and double-click selection use the same grid-aware detector, preserving wide
+  spacers and combining marks. A whole Unicode path now stays one selection;
+  its regression fails against the former cell-to-string conversion. Link
+  endpoints already include a trailing wide character's spacer.
 
 - **Graphics transient budget is process-wide with no per-terminal ceiling**
   (`kettle-vt/src/extract.rs:1087`, medium). `reserve_transient_cpu` charges
@@ -257,30 +220,24 @@ tests can lower it.
   the signed release version. All three want a real Windows machine to confirm
   the timing, and the VM cannot currently build the workspace.
 
-### Protocol conformance, kitty graphics
+### Completed Kitty conformance work
 
-- **A frame transmitted without `z=` is stored with gap 0 and never displayed**
-  (`kettle-vt/src/kitty.rs:684`, low), and **`a=f,r=1` appends a frame instead
-  of editing the root frame** (`:729`, low). Both are real divergences from the
-  kitty specification and neither has a consumer today. They belong with the
-  other kitty graphics items already in this file rather than as one-off fixes.
+5.0.0 supplies the 40 ms default gap for appended frames and edits `r=1`
+in place. Portable wire and real-PTY regressions cover these semantics;
+`TESTING.md` records their runtime red checks.
 
-### Bounded, but not yet done
+### Completed teardown correction
 
-- **`Terminal::drop` sends SIGHUP to a raw PID that `exit-action=hold` may
-  already have reaped** (`kettle-core/src/term.rs:9027`, low to medium). The
-  window is narrow and needs the PID to be recycled, but the fix is a `try_wait`
-  before the `kill`.
+Unix terminal teardown checks the child's cached exit status before signaling.
+A portable Unix mock-child regression fails if a reaped child is signaled and
+also checks that a running child is terminated. Windows retains its job cleanup.
 
 ### Smaller, individually cheap
 
 Each is a few lines and none is urgent: the Windows named-pipe listener keeps a
 closed handle in `pending` on one error path (`kettle-ctl/src/transport.rs:1224`);
-one long-argv descendant suppresses the process snapshot for every pane on Linux
-(`kettle-ctl/src/lib.rs:522`); `ssh -P tag` is neither reproduced nor marked
-unreproducible, so Reconnect can open a shell on a different host (`:1804`); the
-activation accept loop retries a failing `accept()` with no backoff
-(`kettle-ctl/src/activation.rs:469`); an
+`ssh -P tag` is neither reproduced nor marked
+unreproducible, so Reconnect can open a shell on a different host (`:1804`); an
 overlapped write discards its transferred-byte count on cancellation
 (`transport.rs:808`); an interrupted `install-unix.py` wedges both upgrade and
 uninstall with no documented recovery (`install-unix.py:700`).
@@ -950,9 +907,8 @@ destination cells, pixel offsets, aspect ratio, and cursor-movement intent.
 Exact `(image id, placement id)` `Q=` parent resolution now uses one keyed
 resolver for rendering and live/synchronized spatial deletion, including chains
 and virtual prototypes. Ordinary transmission/placement acknowledgements now
-follow actual decode/storage/placement results. Frame and composition completion
-also pass compiled regression and workspace validation; their independent
-review and merge remain tracked above.
+follow actual decode/storage/placement results. Frame and composition completion also shipped in 5.0.0 with runtime
+regressions and independent review.
 
 ## Deferred from the #187 review round
 

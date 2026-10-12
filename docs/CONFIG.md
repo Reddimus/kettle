@@ -298,7 +298,7 @@ dark-theme     = TokyoNight Night
 theme-schedule = 19:00 dark,07:00 light
 ```
 
-…or compute sunrise/sunset from your location:
+…or compute sunrise/sunset from your location using the current UTC calendar date:
 
 ```ini
 theme-mode          = auto
