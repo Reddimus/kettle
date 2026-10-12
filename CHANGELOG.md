@@ -22,6 +22,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Make complexity, deadline and private video-output fixtures independent of
   runner scheduling and umask while retaining the production bounds.
 - Accept absolute cache directories in the macOS release update smoke.
+- Create missing private data directories with owner-only modes, so agent
+  plugins can install under a group-writable default umask.
 
 ## [5.0.0] — 2026-10-11
 

@@ -261,6 +261,10 @@ the non-reparse parent across each open or publication. A failed creation is
 discarded through its still-open handle, so cleanup cannot delete a path that
 was swapped after the create.
 
+Private directory creation requests `0700` for each missing ancestor and leaf.
+Only recognized Kettle namespaces repair existing modes; unrelated directories
+keep their permissions and remain subject to the usual trust checks.
+
 Crash-remnant scans run through one process-wide best-effort reaper, not on the
 caller that requested an atomic write. Its synchronous queue holds at most 32
 destinations. The scheduler distinguishes in-flight work from completed work,
