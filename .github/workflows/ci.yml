@@ -195,6 +195,12 @@ jobs:
         # GUI-free parsing and statistics checks for macos-standing.py.
         if: runner.os == 'macOS'
         run: just macos-standing-self-test
+      - name: macOS A/V sync self-test
+        # GUI-free: macos-avsync.py's analysis on synthetic captures, and
+        # avsync-probe compiled and its pure helpers run (no Screen
+        # Recording needed).
+        if: runner.os == 'macOS'
+        run: just macos-avsync-self-test
       - name: Shell integration snippets — native interpreters
         # The source/CLI string checks below cannot see interpreter behavior.
         # macOS supplies stock zsh with PROMPT_SUBST off and /bin/bash 3.2;

@@ -116,6 +116,23 @@ archive shape the updater expects has not drifted before you publish another one
 built the same way. Record an unavailable network or `gh` login as a skipped
 release check.
 
+When a release changes what the updater requires of an archive, the previous
+archive cannot pass, and that is expected. 5.0.0's updater requires
+`Contents/MacOS/kettle-media-worker`, which no 4.x archive has. A 4.x client
+is not affected, because its own updater swaps the whole bundle, worker
+included. In that case, test a candidate of the new archive instead:
+
+```sh
+gh workflow run release.yml --ref main     # signs and notarizes; publishes nothing
+gh run download <run> -n kettle-macos-universal.zip -D <empty dir>
+just macos-update-smoke <dir>/kettle-macos-universal.zip
+```
+
+A `workflow_dispatch` run builds, signs, notarizes and uploads every package
+as an artifact, and finalizes or publishes nothing. Given an archive with its
+`.sha256` beside it, the smoke checks the sidecar and runs the same live
+test. Record which candidate run and commit it tested.
+
 ## 1. Merge the changelog prep pull request
 
 Create `release/prep-vX.Y.Z` from synchronized `main`. Promote

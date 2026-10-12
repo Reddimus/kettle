@@ -322,6 +322,24 @@ Vulkan through Mesa llvmpipe and reported `Adapter type: Cpu`. This proves the
 software-rendered Vulkan and Wayland paths. It does not prove accelerated
 virtio GPU rendering.
 
+On Linux, `just lane-media-smoke` checks media lanes live under Xvfb. It
+shows an image, an SVG, a Mermaid diagram and a video with `kettle show`,
+and checks that each renders in a lane, the video as its poster. It then
+plays the video and steps it back five seconds with native X input
+(xdotool), since a control client may do neither, and checks that a control
+client's step moves nothing and its pause pauses. It also reads the
+worker's `NoNewPrivs` and `Seccomp` flags and captures a Spanish lane for
+review. Kettle runs only a worker file no one else can write, so the script
+stages both binaries in a private directory first. It needs xvfb-run,
+ffmpeg and xdotool, and writes results under
+`target/diagnostics/lane-media-smoke/`. `--self-test` covers its fixture
+writer and staging without a display. On 2026-10-11 it passed on the guest
+against the 5.0.0 release candidate (`1fec1dd4`), all twelve checks, under
+Xvfb with Mesa llvmpipe. The worker reported `ffmpeg` alone, no
+GStreamer, and ran with `NoNewPrivs` 1 and `Seccomp` 2. A native Left from
+7.2 s stepped back 5.09 s, and the Spanish lane read "Video · 640×360 ·
+H.264 · 0:40 · con audio".
+
 The retained Windows CI runner compiles and tests portable and conditional
 Windows code, including native ConPTY and PowerShell fixtures. Kettle 4.0 does
 not publish or support a Windows package, installer, GPU smoke, or live-window
@@ -362,6 +380,7 @@ Current performance automation is native to the supported platforms:
 ```sh
 just macos-perf
 just macos-standing
+just macos-avsync
 just linux-perf
 ```
 
@@ -376,6 +395,17 @@ after `--latency-check`), since it posts keys and needs its probe's grants. A pu
 machine quiet. See [scripts/perf/README.md](../scripts/perf/README.md). The Linux
 comparator remains a narrower diagnostic gate and requires the documented peer
 terminals and a real X11 or Wayland session.
+
+`just macos-avsync` measures a lane's A/V sync from real presentation times.
+For each flash of a fixture it compares when the window server displayed it
+with when its click reached the system mix, plus the output device's
+latency. It does that after a native play press and after each of three
+native seeks, against the −125 to +45 ms target. Each run launches its own
+Kettle and plays the fixture out loud, so it needs Screen Recording for the
+terminal that runs it and an uncovered window. `just macos-avsync-self-test`
+is its GUI-free part: the analysis on synthetic captures, including both
+edges of the target, recovery after a seek, a dropped click and the
+refusals; and the probe's pure helpers. CI runs it on macOS.
 
 The standing self-test also checks schema-1 `.dat` reconstruction, schema-2
 reads and schema-3 absence rules; typed MiB/rate/signed comparisons; metric

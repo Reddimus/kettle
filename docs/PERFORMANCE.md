@@ -5,7 +5,54 @@ Windows-supported release, and the PowerShell benchmark suite is available in
 the [`v3.3.0` source tree](https://github.com/Reddimus/kettle/tree/v3.3.0/scripts/perf).
 Kettle 4.0 keeps the macOS and Linux comparators in the current checkout.
 
-## Unreleased — media worker bounds (policy, not measurements)
+## 5.0.0 — release checks
+
+Measured on the release candidate (`1fec1dd4`, the 5.0.0 code before its
+version bump), built with the release profile for arm64, on an M5 Max that
+was running its owner's usual long jobs. No quiet window was available, as
+for 4.9.0 (decided 2026-10-02), so these are checks against budgets, not
+standings, and the plan's launch-timing and text-latency A/B were skipped.
+
+### A lane's video A/V sync (macOS)
+
+`just macos-avsync` ran three times, each in a Kettle of its own, through
+the built-in speakers. Those report a device latency of 60 frames, a stream
+latency of 690, a safety offset of 48 and an I/O buffer of 512, at 48 kHz:
+15.6 ms added to each click's tap time, and a band of 11.7 ms
+(scripts/perf/README.md explains the band). Each run pressed play natively
+and then sought back five seconds three times, natively. That made
+12 segments and 84 flash/click pairs.
+
+| | Result |
+|---|---|
+| Pairs outside −125 to +45 ms | 0 of 84 |
+| Bands, all segments | −19.8 to +10.2 ms |
+| First pair after a press or seek | 257 to 943 ms later, the next flash; inside the target in every segment |
+| Sound buffers missing or out of order | none |
+
+At 30 frames a second on this 60 Hz display, a segment keeps the vsync
+phase it starts with, so the twelve segments sampled twelve phases; the
+widest single segment spanned 28 ms. Earlier trial runs through a USB
+converter (12.75 ms reported latency) gave −13.6 to +14.8 ms while a full
+gauntlet loaded the machine.
+
+What this does not say: the panel's own response is not in a flash's time.
+One display and one output device were measured, and Bluetooth output was
+not. On Linux, ffmpeg plays the picture alone, so there is no sync to
+measure there.
+
+### D13: size and idle memory
+
+- `kettle`: 27,195,120 bytes, against 25,665,936 for the arm64 slice of the
+  installed 4.9.0. That is +1.53 MB, inside the 10 MB budget.
+- `kettle-media-worker` (`--profile media-worker`): 24,890,304 bytes,
+  packaged beside `kettle` and reported apart from it (D13 option 1).
+- Idle memory 10 s after launch, two rounds alternating with 4.9.0: 4.9.0
+  had 103.2 and 103.5 MB resident and 5.0 had 104.3 and 104.0 MB; both had a
+  physical footprint of 49 MB, the figure Activity Monitor shows. No worker
+  runs while Kettle is idle.
+
+## 5.0.0 — media worker bounds (policy, not measurements)
 
 Distribution builds compile the worker separately with `--profile media-worker`.
 Report its artifact size separately from the terminal. First-restart Linux
