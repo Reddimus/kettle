@@ -1322,21 +1322,10 @@ impl Node {
         }
     }
 
-    /// v2.20.0 (`equalize_splits`, Ghostty/Terminator parity): rebalance the
-    /// whole tree so every LEAF gets equal area. Each split's ratio becomes
-    /// `leaves(a) / (leaves(a) + leaves(b))` — for a chain of N panes along
-    /// one axis that yields 1/N each; mixed orientations get equal areas
-    /// proportionally. Returns the subtree's leaf count. Pure tree math
-    /// (unit-tested); the caller follows with `resize_all` to push the new
-    /// geometry into the PTYs.
-    ///
-    /// The exact `la / (la + lb)` is stored, with no ratio band applied. A
-    /// balanced chain of N panes on one axis needs ratios of `1/N`, and the old
-    /// fixed `[0.05, 0.95]` clamp could not represent anything past twenty —
-    /// past that the outermost panes were handed more than their share and every
-    /// pane after them was starved, so "equalize" visibly stopped equalizing.
-    /// The floor that keeps a pane usable lives in `split_extent_px`, measured
-    /// in pixels against the space actually available.
+    /// Give every leaf equal area by setting each ratio to its share of leaves.
+    /// Ratios remain unclamped so chains longer than twenty panes stay equal;
+    /// `split_extent_px` enforces the usable pixel floor. Returns the leaf count.
+    /// Call `resize_all` afterward to update the PTYs.
     pub(crate) fn equalize(&mut self) -> usize {
         match self {
             Node::Leaf(_) => 1,

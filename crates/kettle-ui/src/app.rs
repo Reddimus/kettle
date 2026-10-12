@@ -6097,25 +6097,6 @@ fn substitute_trigger_groups(argv: &[String], caps: &regex::Captures) -> Vec<Str
         .collect()
 }
 
-/// Smart selection (iTerm2 parity). When a double-click
-/// lands inside a `kettle_core::hints::detect` match (URL, file path,
-/// IPv4, git SHA), return the match's `[start_col, end_col]` inclusive
-/// range so the caller can build a `Simple` selection spanning the
-/// whole match instead of the alacritty_terminal `Semantic` word that
-/// usually under- or over-shoots a structured token.
-///
-/// Pure helper: takes the single line of text the click landed on
-/// plus the click's column, returns `Some((start, end))` if any hint
-/// match contains the cursor, or `None` to fall through to the
-/// existing word-boundary semantic selection.
-fn smart_selection_at(line: &str, col: usize) -> Option<(usize, usize)> {
-    let spans = kettle_core::hints::detect(&[line]);
-    spans
-        .into_iter()
-        .find(|s| s.start <= col && col <= s.end)
-        .map(|s| (s.start, s.end))
-}
-
 /// One on-screen quick-select target: where its label sits and what it is.
 #[derive(Clone)]
 pub(crate) struct HintTarget {
@@ -14476,12 +14457,8 @@ impl App {
         area
     }
 
-    /// Tab-bar geometry — the single source of truth shared by the renderer
-    /// (drawing) and the click hit-testing below.
-    /// v2.40.0 (tear-off UX): this window's live tear-lift — non-zero only
-    /// while its own drag FSM is in a Dragging state. Same `dock_band` +
-    /// `1.5 × tab_bar_h` pair `maybe_tear_off` uses, so the ghost's lift
-    /// saturates exactly where the tear fires and the two can't drift.
+    /// Lift the drag ghost toward the same threshold that triggers tear-off.
+    /// A window without its own active drag has no lift.
     fn tear_lift_for(&self, ws: &WindowState) -> f32 {
         if !self.cfg.detachable_tabs {
             return 0.0;
@@ -15155,30 +15132,23 @@ impl App {
         )
     }
 
-    fn line_text_for_smart_select(&mut self, ws: &mut WindowState, row: usize) -> Option<String> {
+    fn smart_selection_for_cell(
+        &self,
+        ws: &WindowState,
+        row: usize,
+        col: usize,
+    ) -> Option<(usize, usize)> {
         use kettle_core::Dimensions;
-        let pane = ws.mux.focused()?;
-        let t = pane.term.term.lock().ok()?;
-        let cols = t.columns();
-        let rows = t.screen_lines();
-        if row >= rows {
+        let pane = ws.mux.panes.get(&ws.mux.active_focus()?)?;
+        let term = pane.term.term.lock().ok()?;
+        if row >= term.screen_lines() {
             return None;
         }
-        // `row` is viewport-relative; index the grid-absolute line so the
-        // smart-select regex runs on the row the user double-clicked even when
-        // scrolled back into history.
-        let base = viewport_point_to_grid(
-            kettle_core::Point::new(kettle_core::Line(row as i32), kettle_core::Column(0)),
-            t.grid().display_offset(),
+        let point = viewport_point_to_grid(
+            kettle_core::Point::new(kettle_core::Line(row as i32), kettle_core::Column(col)),
+            term.grid().display_offset(),
         );
-        let mut out = String::with_capacity(cols);
-        for c in 0..cols {
-            let p = kettle_core::Point::new(base.line, kettle_core::Column(c));
-            out.push(t.grid()[p].c);
-        }
-        // Trim trailing spaces so the regex doesn't try to match across
-        // padding.
-        Some(out.trim_end().to_string())
+        kettle_core::hints::selection_at(term.grid(), point.line.0, col)
     }
 
     /// Install a `Simple` selection from `(row, start)` to
@@ -16036,10 +16006,7 @@ impl App {
         if clicks == 2
             && !ws.mods.alt_key()
             && let Some((row, col)) = cell
-            && let Some((start, end)) = self
-                .line_text_for_smart_select(ws, row)
-                .as_deref()
-                .and_then(|line| smart_selection_at(line, col))
+            && let Some((start, end)) = self.smart_selection_for_cell(ws, row, col)
             && self.apply_smart_selection(ws, area, row, start, end)
         {
             smart_selected = true;
@@ -23688,11 +23655,6 @@ impl App {
     /// or `None` without a schedule.
     fn theme_schedule_is_dark(&self) -> Option<bool> {
         let schedule = self.cfg.theme_schedule?;
-        let secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let day_secs = secs % 86_400;
         Some(match schedule {
             // Clock times are local wall-clock times.
             kettle_config::ThemeSchedule::Clock { .. } => {
@@ -23700,15 +23662,7 @@ impl App {
                 kettle_config::schedule_decision_clock((h, m), schedule)
             }
             kettle_config::ThemeSchedule::SunriseSunset { lat, long } => {
-                // Day-of-year approximation: days since unix
-                // epoch mod 365. Good enough — sunrise/sunset
-                // varies very slowly day-to-day, and we re-poll
-                // every redraw tick anyway. A follow-up could
-                // refine with a real Gregorian-calendar
-                // conversion if needed.
-                let days_since_epoch = (secs / 86_400) as u32;
-                let approx_doy = ((days_since_epoch % 365) + 1) as u16;
-                kettle_config::schedule_decision_sunrise(day_secs as u32, approx_doy, lat, long)
+                crate::wall_clock::solar_is_dark(lat, long)
             }
         })
     }
@@ -29620,37 +29574,22 @@ impl TextModal {
     }
 }
 
-/// Which control-plane-supported modal currently owns the keyboard, if any.
-///
-/// The order mirrors the supported branches of the `KeyboardInput` arm
-/// exactly. If those two ever disagree, `dispatch_ui_key` would drive a
-/// different surface than a real keystroke would.
+/// The supported text surface owned by the same modal as a real key event.
 fn open_text_modal(ws: &WindowState) -> Option<TextModal> {
-    if ws.confirm_dialog.is_some() {
-        Some(TextModal::Confirm)
-    } else if ws.hint_state.is_some() {
-        Some(TextModal::Hint)
-    } else if ws.palette_input.is_some() {
-        Some(TextModal::Palette)
-    } else if ws.theme_picker_input.is_some() {
-        Some(TextModal::ThemePicker)
-    } else if ws.settings_nav.is_some() && ws.settings_text_edit.is_some() {
-        Some(TextModal::SettingsText)
-    } else if ws.settings_nav.is_some() {
-        Some(TextModal::Settings)
-    } else if ws.layout_picker_input.is_some() {
-        Some(TextModal::LayoutPicker)
-    } else if ws.ssh_input.is_some() {
-        Some(TextModal::Ssh)
-    } else if ws.editing_title.is_some() {
-        Some(TextModal::TitleEdit)
-    } else if ws.search.open {
-        Some(TextModal::Search)
-    } else if ws.preview_focus.is_some() {
-        Some(TextModal::Preview)
-    } else {
-        None
-    }
+    Some(match top_modal(ws)? {
+        KeyModal::ConfirmDialog => TextModal::Confirm,
+        KeyModal::ContextMenu | KeyModal::ViMode => return None,
+        KeyModal::Hint => TextModal::Hint,
+        KeyModal::Palette => TextModal::Palette,
+        KeyModal::ThemePicker => TextModal::ThemePicker,
+        KeyModal::SettingsText => TextModal::SettingsText,
+        KeyModal::SettingsCapture | KeyModal::Settings => TextModal::Settings,
+        KeyModal::LayoutPicker => TextModal::LayoutPicker,
+        KeyModal::Ssh => TextModal::Ssh,
+        KeyModal::TitleEdit => TextModal::TitleEdit,
+        KeyModal::Search => TextModal::Search,
+        KeyModal::Preview => TextModal::Preview,
+    })
 }
 
 impl App {
@@ -30553,7 +30492,9 @@ impl App {
             return;
         }
 
-        let ch = text.and_then(|s| s.chars().next()).unwrap_or('\0');
+        let ch = crate::modal_input::accept_text(text, ws.mods)
+            .and_then(|s| s.chars().next())
+            .unwrap_or('\0');
         let motion = match (ch, key) {
             ('h', _) | ('\0', Key::Named(NamedKey::ArrowLeft)) => Some(kettle_core::ViMotion::Left),
             ('l', _) | ('\0', Key::Named(NamedKey::ArrowRight)) => {
@@ -30662,7 +30603,7 @@ impl App {
                 }
             }
             _ => {
-                let Some(ch) = text
+                let Some(ch) = crate::modal_input::accept_text(text, ws.mods)
                     .and_then(|t| t.chars().next())
                     .filter(|c| c.is_ascii_alphabetic())
                     .map(|c| c.to_ascii_lowercase())
@@ -31650,7 +31591,9 @@ impl App {
                 // keystroke dispatches a row whose mnemonic char matches;
                 // multi-char accumulates into `typeahead_buf` for
                 // prefix-match. Buffer clears after 750ms of inactivity.
-                let Some(t) = text else { return };
+                let Some(t) = crate::modal_input::accept_text(text, ws.mods) else {
+                    return;
+                };
                 let mut chars = t.chars();
                 let Some(c) = chars.next() else { return };
                 if chars.next().is_some() || !c.is_ascii_alphabetic() {
@@ -48129,22 +48072,62 @@ mod tests {
         }
     }
 
-    /// `open_text_modal` decides which modal `dispatch_ui_key` drives. If it
-    /// ever disagrees with the precedence the real `KeyboardInput` arm applies,
-    /// an agent's keystroke lands somewhere a user's would not — and the tests
-    /// built on it would be certifying the wrong field. Pin the two orders
-    /// against each other at the source.
+    #[test]
+    fn non_text_modals_block_control_plane_typing_into_search() {
+        use super::{ContextMenuState, TextModal, ViState, open_text_modal};
+
+        let mut ws = WindowState::new(1, false, Mux::new());
+        ws.search.open = true;
+        assert_eq!(open_text_modal(&ws), Some(TextModal::Search));
+        ws.vi_mode = Some(ViState {
+            pane_id: 1,
+            visual: false,
+        });
+        assert_eq!(
+            open_text_modal(&ws),
+            None,
+            "vi owns the keyboard above search"
+        );
+        ws.context_menu = Some(ContextMenuState {
+            anchor: (0.0, 0.0),
+            anchor_scale: 1.0,
+            items: Vec::new(),
+            highlight: 0,
+            drill_stack: Vec::new(),
+            scroll_offset: 0,
+            scroll_stack: Vec::new(),
+            typeahead_buf: String::new(),
+            typeahead_until: None,
+        });
+        assert_eq!(
+            open_text_modal(&ws),
+            None,
+            "the menu owns the keyboard above vi"
+        );
+        ws.vi_mode = None;
+        assert_eq!(
+            open_text_modal(&ws),
+            None,
+            "the menu also blocks search alone"
+        );
+        ws.context_menu = None;
+        assert_eq!(open_text_modal(&ws), Some(TextModal::Search));
+    }
+
+    /// Keep the shared owner resolver aligned with native keyboard dispatch.
     #[test]
     fn the_control_plane_modal_order_matches_the_real_key_handler() {
         let src = production_source();
 
         let resolver = src
-            .split("fn open_text_modal(")
+            .split("fn top_modal(")
             .nth(1)
             .and_then(|rest| rest.split("\n}").next())
-            .expect("open_text_modal present");
+            .expect("top_modal present");
         let resolver_order: Vec<&str> = [
             ("ws.confirm_dialog.is_some()", "confirm"),
+            ("ws.context_menu.is_some()", "context_menu"),
+            ("ws.vi_mode.is_some()", "vi_mode"),
             ("ws.hint_state.is_some()", "hint"),
             ("ws.palette_input.is_some()", "palette"),
             ("ws.theme_picker_input.is_some()", "theme_picker"),
@@ -48163,10 +48146,7 @@ mod tests {
         ]
         .iter()
         .map(|(probe, name)| {
-            assert!(
-                resolver.contains(probe),
-                "open_text_modal must test {probe}"
-            );
+            assert!(resolver.contains(probe), "top_modal must test {probe}");
             (resolver.find(probe).expect("probe present"), *name)
         })
         .collect::<std::collections::BTreeMap<_, _>>()
@@ -48182,6 +48162,8 @@ mod tests {
             .expect("KeyboardInput arm present");
         let handler_order: Vec<&str> = [
             ("if ws.confirm_dialog.is_some() {", "confirm"),
+            ("if ws.context_menu.is_some() {", "context_menu"),
+            ("if ws.vi_mode.is_some() {", "vi_mode"),
             ("if ws.hint_state.is_some() {", "hint"),
             ("if ws.palette_input.is_some() {", "palette"),
             ("if ws.theme_picker_input.is_some() {", "theme_picker"),
@@ -54610,47 +54592,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn smart_selection_at_returns_full_token_range() {
-        use super::smart_selection_at;
-        // Drift guard. The function should pick up every hint
-        // kettle-core::hints::detect knows about (URL / path / IPv4 /
-        // git SHA), return the inclusive `[start, end]` of the match
-        // when the cursor lands inside it, and None otherwise.
-        let url_line = "see https://example.com/path?x=1 for more";
-        // cursor anywhere inside the URL gets the whole URL.
-        let (s, e) = smart_selection_at(url_line, 10).unwrap();
-        assert_eq!(&url_line[s..=e], "https://example.com/path?x=1");
-        let (s, e) = smart_selection_at(url_line, 31).unwrap();
-        assert_eq!(&url_line[s..=e], "https://example.com/path?x=1");
-        // Cursor outside the URL returns None — the caller falls back to
-        // the alacritty Semantic word.
-        assert!(smart_selection_at(url_line, 0).is_none());
-        assert!(smart_selection_at(url_line, 39).is_none());
-
-        // IPv4 — dots aren't word chars so the alacritty Semantic word
-        // would under-select; smart selection grabs the whole thing.
-        let ip_line = "connect to 192.168.1.100 now";
-        let (s, e) = smart_selection_at(ip_line, 15).unwrap();
-        assert_eq!(&ip_line[s..=e], "192.168.1.100");
-
-        // git SHA.
-        let sha_line = "commit a1b2c3d4e5f6 landed";
-        let (s, e) = smart_selection_at(sha_line, 10).unwrap();
-        assert_eq!(&sha_line[s..=e], "a1b2c3d4e5f6");
-
-        // A relative path, from its first segment: double-clicking `out`
-        // selects the whole path, as does double-clicking the file name.
-        let path_line = "wrote out/diagram.png ok";
-        for col in [7, 15] {
-            let (s, e) = smart_selection_at(path_line, col).unwrap();
-            assert_eq!(&path_line[s..=e], "out/diagram.png");
-        }
-
-        // No hint at all — None.
-        assert!(smart_selection_at("plain prose with nothing structured", 5).is_none());
-    }
-
     /// Drift guard on the pane count behind every close prompt: it decides
     /// whether `ask-before-closing = multiple-terminals` fires at all, so
     /// undercounting a nested split silently closes panes without asking.
@@ -60111,7 +60052,7 @@ mod lane_control_tests {
         assert!(preview < keybinds, "before the application's shortcuts");
         for needle in [
             "} else if ws.preview_focus.is_some() { KeyModal::Preview } else { return None; })",
-            "} else if ws.preview_focus.is_some() { Some(TextModal::Preview) } else { None }",
+            "KeyModal::Preview => TextModal::Preview,",
             "TextModal::Preview => self.preview_focus_key(ws, key, false),",
             "if self.preview_holds_keyboard(ws, pane) { return Response::err(req.id, ec::BUSY, PREVIEW_HOLDS_KEYBOARD); } let Some(p) = Self::ctl_pane_ref(ws, &self.windows, pane) else {",
             "if ws.preview_focus.is_some() && matches!( ime, winit::event::Ime::Preedit(..) | winit::event::Ime::Commit(_) ) { return; }",

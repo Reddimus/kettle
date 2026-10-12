@@ -482,9 +482,9 @@ pub fn open_trusted_file_read_following_leaf(
     open_trusted_file_read_following_leaf_impl(path)
 }
 
-/// Create `directory` and set every Kettle-owned component to `0700` rather
-/// than inheriting a permissive process umask. Existing user-owned components
-/// are repaired from the outer namespace through the leaf. The final component
+/// Request `0700` for every newly created directory in the path. Existing
+/// user-owned Kettle components are repaired from the outer namespace through
+/// the leaf. The final component
 /// is opened with `O_NOFOLLOW`; ancestor links resolve to their real directory.
 pub fn create_private_dirs(directory: &Path) -> io::Result<()> {
     create_private_dirs_impl(directory)
@@ -522,13 +522,13 @@ fn create_private_dirs_impl(directory: &Path) -> io::Result<()> {
 
     let Some(owned) = owned else {
         if let Some(parent) = directory.parent() {
-            std::fs::create_dir_all(parent)?;
+            private(parent)?;
         }
         return private(directory);
     };
 
     if let Some(root) = owned.parent() {
-        std::fs::create_dir_all(root)?;
+        private(root)?;
     }
     private(directory)?;
 
@@ -6177,11 +6177,7 @@ mod tests {
 
         let root = crate::test_tempdir();
         let directory = root.path().join("one/two/three/four/five/six");
-        // The whole synthetic path is part of this trust fixture. Name the
-        // mode for every component rather than relying on the ambient umask:
-        // `create_private_dirs` deliberately repairs only directories in a
-        // real kettle namespace, so a `002` umask otherwise leaves `one/` at
-        // 0775 and this test fails the trust check before measuring FD use.
+        // The synthetic path is private before measuring descriptor use.
         use std::os::unix::fs::DirBuilderExt as _;
         std::fs::DirBuilder::new()
             .recursive(true)
@@ -6651,6 +6647,73 @@ mod tests {
         assert_eq!(
             dir.path().metadata().unwrap().permissions().mode() & 0o777,
             before
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_private_parents_ignore_a_permissive_umask() {
+        const CHILD: &str = "KETTLE_NEW_PRIVATE_PARENTS_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "private::tests::new_private_parents_ignore_a_permissive_umask",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(status.success(), "private-parent child failed: {status}");
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt as _;
+        let base = kettle_test_support::private_tempdir("kettle-private-parents-");
+        // SAFETY: only this re-executed child changes its process-wide umask.
+        unsafe { libc::umask(0o002) };
+        let directory = base.path().join("generic/nested/leaf");
+        create_private_dirs(&directory).unwrap();
+        for name in ["generic", "generic/nested", "generic/nested/leaf"] {
+            assert_eq!(
+                base.path()
+                    .join(name)
+                    .metadata()
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700,
+                "new parent {name} must be private",
+            );
+        }
+        let state = base.path().join("new-state/nested");
+        // SAFETY: the child has no application threads or concurrent env users.
+        unsafe { std::env::set_var("XDG_STATE_HOME", &state) };
+        create_private_dirs(&state.join("kettle/cache")).unwrap();
+        for name in [
+            "new-state",
+            "new-state/nested",
+            "new-state/nested/kettle/cache",
+        ] {
+            assert_eq!(
+                base.path()
+                    .join(name)
+                    .metadata()
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700,
+                "new state parent {name} must be private",
+            );
+        }
+        let existing = base.path().join("existing");
+        std::fs::create_dir(&existing).unwrap();
+        std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o775)).unwrap();
+        create_private_dirs(&existing.join("leaf")).unwrap();
+        assert_eq!(
+            existing.metadata().unwrap().permissions().mode() & 0o777,
+            0o775
         );
     }
 

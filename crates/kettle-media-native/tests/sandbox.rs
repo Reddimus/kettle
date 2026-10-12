@@ -51,11 +51,8 @@ fn run(scenario: &str, dir: &Path) -> BTreeMap<String, String> {
 }
 
 /// A directory with a held file and a sibling, both the user's own.
-fn files() -> tempfile::TempDir {
-    let dir = tempfile::Builder::new()
-        .prefix("kettle-sandbox-")
-        .tempdir()
-        .unwrap();
+fn files() -> kettle_test_support::PrivateTempDir {
+    let dir = kettle_test_support::private_tempdir("kettle-sandbox-");
     std::fs::write(dir.path().join("held.bin"), b"HELD").unwrap();
     std::fs::write(dir.path().join("sibling.bin"), b"SIBLING").unwrap();
     dir
@@ -328,9 +325,12 @@ fn probe() {
 /// with that group.
 fn past_its_deadline(dir: &Path, held: &File) {
     use kettle_media::video::{VideoContainer, VideoDecoder as _, VideoInput};
-    use std::os::unix::fs::PermissionsExt as _;
+    use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
     let decoder = dir.join("decoder");
-    std::fs::create_dir_all(&decoder).unwrap();
+    std::fs::DirBuilder::new()
+        .mode(0o755)
+        .create(&decoder)
+        .unwrap();
     for name in ["ffmpeg", "ffprobe"] {
         let path = decoder.join(name);
         std::fs::write(

@@ -57,12 +57,94 @@ class MediaInstallTests(unittest.TestCase):
         self.assertFalse((self.prefix / "bin/kettle").exists())
         self.assertFalse((self.prefix / "bin/kettle-media-worker").exists())
 
+    def test_uninstall_smoke_distinguishes_legacy_and_current_locks(self):
+        source = (ROOT / "scripts/check-linux-installers.sh").read_text()
+        function = "assert_uninstalled_prefix() {" + source.split(
+            "assert_uninstalled_prefix() {", 1
+        )[1].split("\n}\n", 1)[0] + "\n}\n"
+        program = "set -euo pipefail\nfail() { echo \"$*\" >&2; exit 1; }\n" + function
+        program += 'assert_uninstalled_prefix "$1" "$2"\n'
+        self.prefix.mkdir()
+        lock = self.prefix / ".kettle-update.lock"
+
+        def check(policy):
+            return subprocess.run(
+                ["bash", "-c", program, "lock-smoke", str(self.prefix), policy],
+                capture_output=True, text=True, timeout=10,
+            )
+
+        self.assertEqual(check("removed").returncode, 0)
+        lock.touch(mode=0o600)
+        self.assertEqual(check("legacy-5.0.0").returncode, 0)
+        self.assertNotEqual(check("removed").returncode, 0)
+        lock.write_bytes(b"unexpected")
+        self.assertNotEqual(check("legacy-5.0.0").returncode, 0)
+        lock.unlink()
+        target = self.root / "other"
+        target.touch()
+        lock.symlink_to(target)
+        self.assertNotEqual(check("legacy-5.0.0").returncode, 0)
+        target.unlink()
+        self.assertNotEqual(check("removed").returncode, 0)
+
     def test_missing_worker_leaves_prefix_untouched(self):
         self.worker.unlink()
         result = self.run_installer()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("kettle-media-worker", result.stderr)
         self.assertFalse(self.prefix.exists())
+
+    def test_uninstall_removes_an_idle_update_lock_and_preserves_other_files(self):
+        self.assertEqual(self.run_installer().returncode, 0)
+        lock = self.prefix / ".kettle-update.lock"
+        lock.touch(mode=0o600)
+        unrelated = self.prefix / "unrelated.txt"
+        unrelated.write_bytes(b"keep")
+        result = self.run_installer("--uninstall")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(lock.exists())
+        self.assertEqual(unrelated.read_bytes(), b"keep")
+
+    def test_a_held_update_lock_refuses_install_and_uninstall(self):
+        import fcntl
+
+        self.assertEqual(self.run_installer().returncode, 0)
+        lock = self.prefix / ".kettle-update.lock"
+        lock.touch(mode=0o600)
+        managed = self.prefix / "share/kettle/install-files.json"
+        before = managed.read_bytes()
+        with lock.open("rb") as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            for arguments in [(), ("--uninstall",)]:
+                result = self.run_installer(*arguments)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(managed.read_bytes(), before)
+                self.assertEqual((self.prefix / "bin/kettle").read_bytes(), self.gui.read_bytes())
+
+    def test_untrusted_update_lock_leaves_the_installation_untouched(self):
+        for kind in ["contents", "mode", "symlink", "hardlink", "directory"]:
+            with self.subTest(kind=kind):
+                self.prefix = self.root / kind
+                self.assertEqual(self.run_installer().returncode, 0)
+                lock = self.prefix / ".kettle-update.lock"
+                lock.unlink(missing_ok=True)
+                unrelated = self.root / (kind + "-unrelated")
+                unrelated.write_bytes(b"keep")
+                if kind == "symlink":
+                    lock.symlink_to(unrelated)
+                elif kind == "hardlink":
+                    os.link(unrelated, lock)
+                elif kind == "directory":
+                    lock.mkdir()
+                else:
+                    lock.write_bytes(b"foreign" if kind == "contents" else b"")
+                    lock.chmod(0o600 if kind == "contents" else 0o666)
+                managed = self.prefix / "share/kettle/install-files.json"
+                before = managed.read_bytes()
+                result = self.run_installer("--uninstall")
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(managed.read_bytes(), before)
+                self.assertEqual(unrelated.read_bytes(), b"keep")
 
 
 if __name__ == "__main__":

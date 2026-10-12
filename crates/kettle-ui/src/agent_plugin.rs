@@ -766,6 +766,7 @@ mod tests {
         let base = kettle_test_support::private_tempdir("kettle-plugin-");
         let root = base.path().join("kettle/agent-plugins");
         let stale = root.join("kettle-0000000000000000");
+        kettle_state::create_private_dirs(&root).unwrap();
         std::fs::create_dir_all(&stale).unwrap();
         let files = files();
         let directory = install(&root, &files).unwrap();

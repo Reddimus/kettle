@@ -336,6 +336,12 @@ jobs:
           python3 scripts/check-image-paste-parity.py \
             --kettle ./target/release/kettle --out-dir "$RUNNER_TEMP/image-paste" \
             --codex "$CODEX_PASTE_TEST_BIN"
+      - name: Native modal shortcut regression (macOS)
+        if: runner.os == 'macOS'
+        timeout-minutes: 3
+        run: |
+          launchctl asuser "$(id -u)" python3 scripts/check-modal-shortcuts.py \
+            --kettle ./target/release/kettle --out-dir "$RUNNER_TEMP/modal-shortcuts"
       - name: Image paste environment
         if: runner.os != 'Windows' && always()
         shell: bash

@@ -440,6 +440,10 @@ impl FakeKettle {
         use std::io::BufRead as _;
         let runtime = tempfile::Builder::new()
             .prefix("kmcp")
+            .permissions({
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::Permissions::from_mode(0o700)
+            })
             .tempdir_in("/tmp")
             .expect("runtime dir");
         let registry = runtime.path().join("kettle").join("ctl");

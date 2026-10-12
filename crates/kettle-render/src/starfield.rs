@@ -440,9 +440,6 @@ mod tests {
 
     #[test]
     fn center_stars_are_invisible_and_bloom_with_proximity() {
-        // v2.24.1: a freshly-emerged star at the center is COMPLETELY invisible
-        // (no floor), the inner-middle stays near-dark, and brightness blooms
-        // sharply (cubic) as the star nears — a strong "warp toward you" feel.
         assert_eq!(star_brightness(0.0), 0.0, "center star must be invisible");
         assert!(
             star_brightness(0.15) < 0.01,

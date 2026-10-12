@@ -71,3 +71,7 @@ criterion = { version = "0.8", default-features = false, features = ["cargo_benc
 [[bench]]
 name = "relative_delete"
 harness = false
+
+[[bench]]
+name = "diagram_copy"
+harness = false

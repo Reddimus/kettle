@@ -23,12 +23,24 @@ fn run(
     language: &str,
 ) -> (Option<i32>, Vec<u8>, Vec<u8>) {
     let config = config_path(home);
-    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let mut directory = std::fs::DirBuilder::new();
+    directory.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        directory.mode(0o700);
+    }
+    directory.create(config.parent().unwrap()).unwrap();
     std::fs::write(
         &config,
         format!("language = {language}\nupdate-check = false\n"),
     )
     .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
     let mut command = Command::new(env!("CARGO_BIN_EXE_kettle"));
     command
         .args(args)

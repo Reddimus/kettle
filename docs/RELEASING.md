@@ -104,6 +104,8 @@ Also before merging the release-cut pull request, run:
 just macos-update-smoke
 ```
 
+`KETTLE_MACOS_ARCHIVE_CACHE` accepts a relative or absolute cache directory.
+
 This downloads the current published `kettle-macos-universal.zip`, checks it
 against its sidecar, and drives the real bundle updater over it with the real
 `codesign` and `spctl`. Unit tests cover staging, refusal, and the swap with a

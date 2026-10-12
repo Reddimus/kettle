@@ -52,7 +52,15 @@ impl MacProcessTree {
     /// time bound cut the walk short; the caller then keeps its last complete
     /// snapshot.
     pub(crate) fn refresh_roots(&mut self, roots: &[u32]) -> bool {
-        let deadline = Instant::now() + MAX_PROC_SCAN_DURATION;
+        self.refresh_roots_with_clock(roots, Instant::now)
+    }
+
+    fn refresh_roots_with_clock(
+        &mut self,
+        roots: &[u32],
+        mut now: impl FnMut() -> Instant,
+    ) -> bool {
+        let deadline = now() + MAX_PROC_SCAN_DURATION;
         self.entries.clear();
         self.partial_roots.clear();
         let mut queue: VecDeque<_> = roots.iter().copied().map(|pid| (pid, None)).collect();
@@ -67,7 +75,7 @@ impl MacProcessTree {
                 .and_then(|parent| root_of.get(&parent).copied())
                 .unwrap_or(pid);
             root_of.insert(pid, root);
-            if Instant::now() >= deadline {
+            if now() >= deadline {
                 complete = false;
                 break;
             }
@@ -460,8 +468,17 @@ mod tests {
     fn a_missing_root_publishes_an_empty_complete_tree() {
         let mut tree = MacProcessTree::default();
         // Pids are bounded well below this on macOS (`PID_MAX` is 99998).
-        assert!(tree.refresh_roots(&[999_999]));
+        let start = Instant::now();
+        assert!(tree.refresh_roots_with_clock(&[999_999], || start));
         assert!(tree.all_pids().is_empty());
+        let mut started = false;
+        assert!(!tree.refresh_roots_with_clock(&[999_999], || {
+            if std::mem::replace(&mut started, true) {
+                start + MAX_PROC_SCAN_DURATION
+            } else {
+                start
+            }
+        }));
     }
 
     #[test]

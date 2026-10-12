@@ -289,7 +289,7 @@ mod tests {
     /// replaced after it was trusted is not run.
     #[test]
     fn a_run_reads_bounded_output_from_a_clean_start() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = kettle_test_support::private_tempdir("kettle-native-run-");
         let echo = script(
             directory.path(),
             "echo",
@@ -344,7 +344,7 @@ mod tests {
     /// deadline and nothing of it is left running.
     #[test]
     fn a_run_ends_at_its_deadline() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = kettle_test_support::private_tempdir("kettle-native-run-");
         // `exec` replaces the shell without forking, which containment allows.
         let silent = script(directory.path(), "silent", "exec /bin/sleep 30");
         let started = Instant::now();

@@ -2,13 +2,13 @@
 //! `QuickSelect` style): scan the visible rows for interesting tokens —
 //! URLs, filesystem paths, git hashes, IPv4 addresses — and assign each a
 //! short, easy-to-type label. Pure and fully unit-tested; the UI hint overlay
-//! consumes [`detect_rows`] and [`labels`], and double-click selection uses
-//! [`detect`].
+//! consumes [`detect_rows`] and [`labels`]; double-click selection uses the
+//! same grid mapping through [`selection_at`].
 
 use regex::Regex;
 use std::sync::OnceLock;
 
-use alacritty_terminal::grid::Grid;
+use alacritty_terminal::grid::{Dimensions, Grid};
 use alacritty_terminal::term::cell::Cell;
 
 /// What a detected hint points at (drives the copy-vs-open action later).
@@ -555,6 +555,14 @@ pub fn detect_rows(grid: &Grid<Cell>, lines: &[i32], cols: usize) -> Vec<HintSpa
     out
 }
 
+/// The complete structured token under one grid cell, including wide spacers.
+pub fn selection_at(grid: &Grid<Cell>, line: i32, col: usize) -> Option<(usize, usize)> {
+    detect_rows(grid, &[line], grid.columns())
+        .into_iter()
+        .find(|span| span.start <= col && col <= span.end)
+        .map(|span| (span.start, span.end))
+}
+
 /// Default label alphabet — home-row first so the common (few) targets are
 /// one comfortable keystroke.
 pub const ALPHABET: &str = "asdfghjklqwertyuiopzxcvbnm";
@@ -617,6 +625,81 @@ mod tests {
             h2.iter()
                 .any(|s| s.kind == Kind::Ip && s.text == "10.0.0.2")
         );
+    }
+
+    #[test]
+    fn smart_selection_at_returns_full_token_range() {
+        let smart_selection_at = |text: &str, col| {
+            use alacritty_terminal::index::{Column, Line, Point};
+            let mut grid: Grid<Cell> = Grid::new(1, text.len(), 0);
+            for (column, ch) in text.chars().enumerate() {
+                grid[Point::new(Line(0), Column(column))].c = ch;
+            }
+            selection_at(&grid, 0, col)
+        };
+        let url_line = "see https://example.com/path?x=1 for more";
+        // cursor anywhere inside the URL gets the whole URL.
+        let (s, e) = smart_selection_at(url_line, 10).unwrap();
+        assert_eq!(&url_line[s..=e], "https://example.com/path?x=1");
+        let (s, e) = smart_selection_at(url_line, 31).unwrap();
+        assert_eq!(&url_line[s..=e], "https://example.com/path?x=1");
+        // Cursor outside the URL returns None — the caller falls back to
+        // the alacritty Semantic word.
+        assert!(smart_selection_at(url_line, 0).is_none());
+        assert!(smart_selection_at(url_line, 39).is_none());
+
+        // IPv4 — dots aren't word chars so the alacritty Semantic word
+        // would under-select; smart selection grabs the whole thing.
+        let ip_line = "connect to 192.168.1.100 now";
+        let (s, e) = smart_selection_at(ip_line, 15).unwrap();
+        assert_eq!(&ip_line[s..=e], "192.168.1.100");
+
+        // git SHA.
+        let sha_line = "commit a1b2c3d4e5f6 landed";
+        let (s, e) = smart_selection_at(sha_line, 10).unwrap();
+        assert_eq!(&sha_line[s..=e], "a1b2c3d4e5f6");
+
+        // A relative path, from its first segment: double-clicking `out`
+        // selects the whole path, as does double-clicking the file name.
+        let path_line = "wrote out/diagram.png ok";
+        for col in [7, 15] {
+            let (s, e) = smart_selection_at(path_line, col).unwrap();
+            assert_eq!(&path_line[s..=e], "out/diagram.png");
+        }
+
+        // No hint at all — None.
+        assert!(smart_selection_at("plain prose with nothing structured", 5).is_none());
+    }
+
+    #[test]
+    fn smart_selection_keeps_a_wide_path_whole() {
+        use alacritty_terminal::index::{Column, Line, Point};
+        use alacritty_terminal::term::cell::Flags;
+        let mut grid: Grid<Cell> = Grid::new(1, 10, 0);
+        for (column, ch) in [
+            (0, '/'),
+            (1, '用'),
+            (3, '户'),
+            (5, '/'),
+            (6, 'f'),
+            (7, 'i'),
+            (8, 'l'),
+            (9, 'e'),
+        ] {
+            grid[Point::new(Line(0), Column(column))].c = ch;
+        }
+        for column in [1, 3] {
+            grid[Point::new(Line(0), Column(column))]
+                .flags
+                .insert(Flags::WIDE_CHAR);
+            grid[Point::new(Line(0), Column(column + 1))]
+                .flags
+                .insert(Flags::WIDE_CHAR_SPACER);
+        }
+        for col in 0..10 {
+            assert_eq!(selection_at(&grid, 0, col), Some((0, 9)), "column={col}");
+        }
+        assert_eq!(selection_at(&grid, 0, 10), None);
     }
 
     #[test]
