@@ -34,6 +34,8 @@ objc2-av-foundation = { version = "0.3.2", optional = true, default-features = f
     "objc2-core-media",
     "AVAsset",
     "AVAssetImageGenerator",
+    "AVAssetReader",
+    "AVAssetReaderOutput",
     "AVAssetTrack",
     "AVAsynchronousKeyValueLoading",
     "AVMediaFormat",
@@ -52,9 +54,21 @@ objc2-core-graphics = { version = "0.3.2", optional = true, default-features = f
 ] }
 objc2-core-media = { version = "0.3.2", optional = true, default-features = false, features = [
     "std",
+    "objc2-core-video",
     "CMBase",
     "CMFormatDescription",
+    "CMSampleBuffer",
     "CMTime",
+    "CMTimeRange",
+] }
+# A session's frames, read from the pixel buffers AVFoundation decodes into.
+objc2-core-video = { version = "0.3.2", optional = true, default-features = false, features = [
+    "std",
+    "CVBase",
+    "CVBuffer",
+    "CVImageBuffer",
+    "CVPixelBuffer",
+    "CVReturn",
 ] }
 objc2-foundation = { version = "0.3.2", optional = true, default-features = false, features = [
     "std",
@@ -78,6 +92,7 @@ avfoundation = [
     "dep:objc2-core-foundation",
     "dep:objc2-core-graphics",
     "dep:objc2-core-media",
+    "dep:objc2-core-video",
     "dep:objc2-foundation",
 ]
 

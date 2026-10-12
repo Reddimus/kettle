@@ -231,6 +231,8 @@ pub(crate) struct Shared {
     abandoned: Mutex<Vec<Box<dyn WorkerProcess>>>,
     /// Starts still running after their attempt stopped waiting.
     pub(crate) late_spawns: AtomicUsize,
+    /// Playback sessions open now (see [`crate::session`]).
+    pub(crate) sessions: AtomicUsize,
 }
 
 #[derive(Default)]
@@ -288,6 +290,7 @@ impl WorkerClient {
                 stuck: AtomicUsize::new(0),
                 abandoned: Mutex::new(Vec::new()),
                 late_spawns: AtomicUsize::new(0),
+                sessions: AtomicUsize::new(0),
             }),
             budgets,
             rendering: Mutex::new(()),
@@ -367,6 +370,26 @@ impl WorkerClient {
         } else {
             result.map_err(RenderError::Failure)
         }
+    }
+
+    /// Open a playback session in a fresh worker of its own, at once: the
+    /// worker starts, opens the video and plays on threads of the
+    /// session's, never the caller's, and never while a render waits for
+    /// the one-at-a-time slot. `wake` is called from those threads when
+    /// the session has something new; it must not block. Refused when the
+    /// request is not valid, media is off, or
+    /// [`MAX_PLAY_SESSIONS`](crate::session::MAX_PLAY_SESSIONS) are open.
+    pub fn play(
+        &self,
+        open: &crate::PlayOpen,
+        wake: Box<dyn Fn() + Send + Sync>,
+    ) -> Result<crate::session::PlaySession, FailureCode> {
+        open.validate().map_err(|_| FailureCode::BadParams)?;
+        self.shared.reap_abandoned();
+        if self.shared.stuck.load(Ordering::Acquire) >= MAX_STUCK_WORKERS {
+            return Err(FailureCode::WorkerUnavailable);
+        }
+        crate::session::PlaySession::start(&self.shared, &self.build_id, self.budgets, open, wake)
     }
 
     fn render_inner(

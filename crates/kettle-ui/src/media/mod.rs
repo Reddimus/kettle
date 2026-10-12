@@ -13,6 +13,7 @@ mod crop;
 mod external;
 mod focus;
 mod inline;
+mod playback;
 mod preview;
 mod queue;
 mod route;
@@ -43,6 +44,10 @@ pub(crate) use external::{
 };
 pub(crate) use focus::{PreviewFocus, PreviewKey, preview_key};
 pub(crate) use inline::{card_caption, card_message, card_size};
+pub(crate) use playback::{
+    Button as PlaybackButton, LanePlayback, MAX_PLAYING, Notice as PlaybackNotice,
+    Session as PlaybackSession, Toggled as PlaybackToggled,
+};
 pub(crate) use preview::{
     FIRST_FRAME_WITHIN as PREVIEW_FIRST_FRAME_WITHIN, Frames as PreviewFrames,
     HOVER_DWELL as PREVIEW_HOVER_DWELL, LanePreview, Layout as PreviewLayout, Seen as PreviewSeen,

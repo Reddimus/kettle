@@ -2,9 +2,12 @@
 //! seam a video decoder outside the renderer plugs into.
 
 use std::fs::File;
+use std::sync::{Condvar, Mutex, PoisonError};
 use std::time::Instant;
 
-use crate::{FailureCode, PathIdentity, StillSample, StillsLayout, VideoInfo, VideoStills};
+use crate::{
+    FailureCode, Opened, PathIdentity, PlayOpen, StillSample, StillsLayout, VideoInfo, VideoStills,
+};
 
 /// The environment variable the parent names the external decoder's ffmpeg
 /// in, when it starts a worker. Only Kettle's own platform code sets it, so
@@ -36,6 +39,183 @@ pub trait VideoDecoder {
         plan: &mut dyn FnMut(&VideoInfo) -> Result<StillsPlan, FailureCode>,
         deadline: Instant,
     ) -> Result<DecodedStills, FailureCode>;
+}
+
+/// A video decoder that also plays: it opens a held video for a session.
+pub trait VideoPlayer {
+    /// Open `input` as `request` asks, by `deadline`: what the session will
+    /// show, and its frames. Nothing is decoded past the first frame until
+    /// the session plays.
+    fn play(
+        &self,
+        input: VideoInput<'_>,
+        request: PlayRequest,
+        deadline: Instant,
+    ) -> Result<Playback, FailureCode>;
+}
+
+/// What a session asks of its decoder: frames fitted within `max_width` by
+/// `max_height` as [`crate::play_size`] fits them, from `start_ms` of the
+/// video, at most `max_fps_milli` frames per thousand seconds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlayRequest {
+    pub max_width: u32,
+    pub max_height: u32,
+    pub start_ms: u64,
+    pub max_fps_milli: u32,
+}
+
+impl PlayRequest {
+    /// What `open` asks for.
+    pub fn of(open: &PlayOpen) -> Self {
+        Self {
+            max_width: open.max_width,
+            max_height: open.max_height,
+            start_ms: open.start_ms,
+            max_fps_milli: open.max_fps_milli,
+        }
+    }
+}
+
+/// An opened session: what it shows, and where its frames come from.
+pub struct Playback {
+    pub opened: Opened,
+    pub frames: Box<dyn FrameSource>,
+}
+
+impl std::fmt::Debug for Playback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Playback")
+            .field("opened", &self.opened)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A session's frames in presentation order, each exactly the opened size in
+/// straight RGBA. One thread takes them while the session plays.
+pub trait FrameSource: Send {
+    /// Write the next frame into `rgba`, exactly its size, and return its
+    /// time in ms of the video; `Ok(None)` once the video has ended. A
+    /// decoder with a clock of its own pauses while `gate` does, and every
+    /// decoder gives up once the session has ended.
+    fn next_frame(&mut self, rgba: &mut [u8], gate: &PlayGate) -> Result<Option<u64>, FailureCode>;
+}
+
+/// Whether a session is playing, shared by the thread that paces it and the
+/// one that takes its frames: a session starts paused, and once it has ended
+/// it stays ended.
+#[derive(Debug, Default)]
+pub struct PlayGate {
+    state: Mutex<GateState>,
+    changed: Condvar,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct GateState {
+    playing: bool,
+    ended: bool,
+}
+
+impl PlayGate {
+    pub fn play(&self) {
+        self.set(|state| state.playing = true);
+    }
+
+    pub fn pause(&self) {
+        self.set(|state| state.playing = false);
+    }
+
+    pub fn end(&self) {
+        self.set(|state| state.ended = true);
+    }
+
+    pub fn is_playing(&self) -> bool {
+        let state = self.lock();
+        state.playing && !state.ended
+    }
+
+    pub fn has_ended(&self) -> bool {
+        self.lock().ended
+    }
+
+    /// Wait while the session is paused, until `deadline` when there is one:
+    /// `Some(true)` once it plays, `Some(false)` once it has ended, `None`
+    /// at the deadline.
+    pub fn wait_to_play(&self, deadline: Option<Instant>) -> Option<bool> {
+        let mut state = self.lock();
+        loop {
+            if state.ended {
+                return Some(false);
+            }
+            if state.playing {
+                return Some(true);
+            }
+            state = match deadline {
+                None => self
+                    .changed
+                    .wait(state)
+                    .unwrap_or_else(PoisonError::into_inner),
+                Some(deadline) => {
+                    let left = deadline.checked_duration_since(Instant::now())?;
+                    self.changed
+                        .wait_timeout(state, left)
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .0
+                }
+            };
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, GateState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn set(&self, change: impl FnOnce(&mut GateState)) {
+        change(&mut self.lock());
+        self.changed.notify_all();
+    }
+}
+
+/// Which of a video's frames a player keeps to stay within a rate, for a
+/// decoder that gives every frame: at most one in each slot of the rate's
+/// frame length, slots counted from the first frame. A frame counts toward
+/// a slot from an eighth of a frame before it, as a container's times are
+/// rounded. A video faster than the rate plays at it, never above it; one
+/// no faster keeps every frame.
+#[derive(Clone, Copy, Debug)]
+pub struct FrameSlots {
+    fps_milli: u64,
+    first_us: Option<u64>,
+    last_slot: u64,
+}
+
+impl FrameSlots {
+    pub fn new(fps_milli: u32) -> Self {
+        Self {
+            fps_milli: u64::from(fps_milli.max(1)),
+            first_us: None,
+            last_slot: 0,
+        }
+    }
+
+    /// Whether to keep the frame at `pts_us`, frames coming in order.
+    pub fn keep(&mut self, pts_us: u64) -> bool {
+        let Some(first_us) = self.first_us else {
+            self.first_us = Some(pts_us);
+            return true;
+        };
+        // An eighth of a frame: 10^9 / fps_milli µs, over eight. Wide
+        // enough that no time saturates into a later frame's slot.
+        let early_us = 125_000_000 / self.fps_milli;
+        let since_us = u128::from(pts_us.saturating_sub(first_us)) + u128::from(early_us);
+        let slot = since_us * u128::from(self.fps_milli) / 1_000_000_000;
+        let slot = u64::try_from(slot).unwrap_or(u64::MAX);
+        if slot <= self.last_slot {
+            return false;
+        }
+        self.last_slot = slot;
+        true
+    }
 }
 
 /// The video to decode: the open file the renderer holds, what it was when
@@ -592,6 +772,98 @@ pub fn edge_for_tiles(stills: &VideoStills, width: u32, height: u32, longest: u3
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// How many of `count` frames, `gap_us` apart from `start_us`, a rate
+    /// of `fps_milli` keeps.
+    fn kept(fps_milli: u32, start_us: u64, gap_us: f64, count: u64) -> u64 {
+        let mut slots = FrameSlots::new(fps_milli);
+        (0..count)
+            .filter(|n| slots.keep(start_us + (*n as f64 * gap_us).round() as u64))
+            .count() as u64
+    }
+
+    /// A video faster than the rate plays at it, never above, and one no
+    /// faster keeps every frame, its times rounded to the µs as containers
+    /// round them.
+    #[test]
+    fn frame_slots_keep_a_video_within_its_rate() {
+        // Ten seconds of each.
+        for (fps_milli, video_fps, expected) in [
+            (30_000, 60.0_f64, 300),
+            (30_000, 40.0, 300),
+            (30_000, 50.0, 300),
+            // Frames 33 ms apart, a hair over 30 a second.
+            (30_000, 1000.0 / 33.0, 300),
+            (30_000, 30.0, 300),
+            (30_000, 29.97, 300),
+            (30_000, 24.0, 240),
+            (29_970, 30.0, 300),
+            (5_000, 30.0, 50),
+            (1_000, 1.0, 10),
+        ] {
+            let count = (video_fps * 10.0).round() as u64;
+            let gap_us = 1_000_000.0 / video_fps;
+            for start_us in [0, 1_234_567] {
+                let kept = kept(fps_milli, start_us, gap_us, count);
+                // Never above the rate, over any ten seconds.
+                assert!(
+                    kept <= u64::from(fps_milli) / 100 + 1,
+                    "{video_fps} fps under {fps_milli}: {kept}"
+                );
+                assert!(
+                    kept.abs_diff(expected.min(count)) <= 1,
+                    "{video_fps} fps under {fps_milli}: {kept}, not {expected}"
+                );
+            }
+        }
+        // Every frame of a video no faster than the rate.
+        assert_eq!(kept(30_000, 0, 1_000_000.0 / 29.97, 1000), 1000);
+        assert_eq!(kept(30_000, 0, 1_000_000.0 / 30.0, 1000), 1000);
+        // A frame before the first is never kept.
+        let mut slots = FrameSlots::new(30_000);
+        assert!(slots.keep(1_000_000));
+        assert!(!slots.keep(900_000));
+        assert!(slots.keep(1_033_334));
+        // Frames a frame apart at the end of time keep slots of their own.
+        let mut slots = FrameSlots::new(29_000);
+        assert!(slots.keep(0));
+        assert!(slots.keep(u64::MAX - 34_483));
+        assert!(slots.keep(u64::MAX));
+    }
+
+    /// A session starts paused; play and pause wake a waiting taker, a
+    /// deadline ends its wait, and once ended it stays ended whatever is
+    /// asked after.
+    #[test]
+    fn a_play_gate_starts_paused_and_stays_ended() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let gate = Arc::new(PlayGate::default());
+        assert!(!gate.is_playing());
+        let soon = Instant::now() + Duration::from_millis(20);
+        assert_eq!(gate.wait_to_play(Some(soon)), None);
+        let waiter = {
+            let gate = Arc::clone(&gate);
+            std::thread::spawn(move || gate.wait_to_play(None))
+        };
+        std::thread::sleep(Duration::from_millis(20));
+        gate.play();
+        assert_eq!(waiter.join().unwrap(), Some(true));
+        assert!(gate.is_playing());
+        gate.pause();
+        assert!(!gate.is_playing());
+        let waiter = {
+            let gate = Arc::clone(&gate);
+            std::thread::spawn(move || gate.wait_to_play(None))
+        };
+        std::thread::sleep(Duration::from_millis(20));
+        gate.end();
+        assert_eq!(waiter.join().unwrap(), Some(false));
+        gate.play();
+        assert!(!gate.is_playing() && gate.has_ended());
+        assert_eq!(gate.wait_to_play(None), Some(false));
+    }
 
     fn sheet(count: u8, cols: u8) -> VideoStills {
         VideoStills {

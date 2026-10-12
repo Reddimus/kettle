@@ -1642,6 +1642,9 @@ context = "crates/kettle-config/src/palette.rs: command palette entry for previe
 [messages.palette_preview_play]
 context = "crates/kettle-config/src/palette.rs: command palette row that starts a silent preview of the video the focused pane's preview lane shows, or stops it."
 
+[messages.palette_video_play]
+context = "crates/kettle-config/src/palette.rs: command palette row for video_play, which plays the video the focused pane's preview lane shows, in the lane, or pauses it."
+
 [messages.palette_preview_zoom_in]
 context = "crates/kettle-config/src/palette.rs: command palette entry for preview_zoom_in, which magnifies the image in the focused pane's preview lane by one step about its center."
 
@@ -1824,6 +1827,41 @@ context = "crates/kettle-ui/src/app.rs lane_notice_text: no decoder Kettle may u
 
 [messages.media_lane_notice_preview_needs_sandbox]
 context = "crates/kettle-ui/src/app.rs lane_notice_text: Kettle decodes video only in its sandbox, and this system cannot provide one, so there is no preview."
+
+[messages.media_lane_a11y_play_video]
+context = "crates/kettle-ui/src/app.rs: screen-reader name and tooltip of a preview lane's button that plays the video the lane shows, in the lane, from where it stands. It plays without sound."
+
+[messages.media_lane_a11y_pause_video]
+context = "crates/kettle-ui/src/app.rs: screen-reader name and tooltip of the same button while the video plays; pressing it holds the frame shown."
+
+[messages.media_lane_a11y_video_position]
+context = "crates/kettle-ui/src/app.rs: screen-reader name of the bar under a playing video, a slider that moves the video to another moment."
+
+[messages.media_lane_a11y_video_time]
+context = "crates/kettle-ui/src/app.rs: what a screen reader says the video position slider is at. time is the moment of the video shown and length the video's length, both as 0:03 or 1:02:05, verbatim."
+args = [{ name = "time", type = "str" }, { name = "length", type = "str" }]
+
+[messages.media_lane_video_time]
+context = "crates/kettle-ui/src/app.rs: the time beside the bar under a playing video, kept short to fit. time is the moment shown and length the video's length, both as 0:03 or 1:02:05, verbatim."
+args = [{ name = "time", type = "str" }, { name = "length", type = "str" }]
+
+[messages.media_lane_notice_video_loading]
+context = "crates/kettle-ui/src/app.rs lane_notice_text: shown in a preview lane's footer while the video the user asked to play is opened; the poster stays until its first frame."
+
+[messages.media_lane_notice_video_playing]
+context = "crates/kettle-ui/src/app.rs lane_notice_text: shown in a preview lane's footer while its video plays, because Kettle plays video without its sound."
+
+[messages.media_lane_notice_video_failed]
+context = "crates/kettle-ui/src/app.rs lane_notice_text: the video could not be opened or stopped while it played; the last frame or the poster stays."
+
+[messages.media_lane_notice_video_timed_out]
+context = "crates/kettle-ui/src/app.rs lane_notice_text: the video did not open within its few seconds; the poster stays."
+
+[messages.media_lane_notice_video_needs_decoder]
+context = "crates/kettle-ui/src/app.rs lane_notice_text: no decoder Kettle may use reads this video; ffmpeg is the program to install, verbatim."
+
+[messages.media_lane_notice_video_needs_sandbox]
+context = "crates/kettle-ui/src/app.rs lane_notice_text: Kettle decodes video only in its sandbox, and this system cannot provide one, so the video cannot play."
 
 [messages.media_lane_notice_render_failed]
 context = "crates/kettle-ui/src/app.rs lane_notice_text: shown in a preview lane's footer when rendering the item again (for another background) failed; the old picture stays."

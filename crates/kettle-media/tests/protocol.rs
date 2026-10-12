@@ -958,13 +958,13 @@ fn a_replys_source_goes_with_its_kind() {
     assert!(decode(&bytes, Direction::WorkerToParent).is_err());
 }
 
-/// Neither end reads the other version's frames: a version 4 worker or
+/// Neither end reads the other version's frames: a version 5 worker or
 /// parent is restarted, never half understood, and so is a newer one.
 #[test]
 fn version_skew_either_way_is_restart_required() {
-    assert_eq!(PROTOCOL_VERSION, 5);
+    assert_eq!(PROTOCOL_VERSION, 6);
     for (_, direction, golden) in vectors() {
-        for version in [1u16, 2, 3, 4, 6] {
+        for version in [1u16, 2, 3, 4, 5, 7] {
             let mut skewed = bytes(golden);
             skewed[4..6].copy_from_slice(&version.to_le_bytes());
             assert_eq!(
@@ -1173,4 +1173,479 @@ fn rendered_layout_and_exact_source_are_checked() {
     let at = bytes.len() - (8 * 2 + 16 * 2 + 1 + 4 + "<svg/>".len());
     bytes[at..at + 8].copy_from_slice(&nan);
     assert!(decode(&bytes, Direction::WorkerToParent).is_err());
+}
+
+fn video_info() -> VideoInfo {
+    VideoInfo {
+        duration_ms: 9_000,
+        width: 640,
+        height: 360,
+        rotation: 90,
+        codec: VideoCodec::H264,
+        fps_milli: Some(30_000),
+        has_audio: true,
+        container: Some(kettle_media::video::VideoContainer::IsoBmff),
+    }
+}
+
+/// A playback session's frames cross the wire as they were, each only in
+/// its own direction.
+#[test]
+fn a_playback_session_s_frames_roundtrip_in_their_direction() {
+    let open = Frame::PlayOpen(PlayOpen {
+        source: Source::user_pull(common::path(), GuiActionWitness::from_explicit_gui_action()),
+        max_width: 1280,
+        max_height: 720,
+        start_ms: 4_500,
+        max_fps_milli: 30_000,
+    });
+    let opened = Frame::Opened(Opened {
+        info: video_info(),
+        width: 640,
+        height: 360,
+        fps_milli: 30_000,
+        start_ms: 4_500,
+    });
+    let frame = Frame::VideoFrame(VideoFrame {
+        seq: 7,
+        pts_ms: 4_733,
+        width: 2,
+        height: 1,
+        rgba: vec![1, 2, 3, 255, 4, 5, 6, 255],
+    });
+    for (frame, direction) in [
+        (open.clone(), Direction::ParentToWorker),
+        (
+            Frame::PlayCommand(PlayCommand::Play),
+            Direction::ParentToWorker,
+        ),
+        (
+            Frame::PlayCommand(PlayCommand::Pause),
+            Direction::ParentToWorker,
+        ),
+        (
+            Frame::PlayCommand(PlayCommand::Heartbeat),
+            Direction::ParentToWorker,
+        ),
+        (
+            Frame::PlayCommand(PlayCommand::Close),
+            Direction::ParentToWorker,
+        ),
+        (opened.clone(), Direction::WorkerToParent),
+        (frame.clone(), Direction::WorkerToParent),
+        (
+            Frame::PlayState(PlayState::Playing),
+            Direction::WorkerToParent,
+        ),
+        (
+            Frame::PlayState(PlayState::Paused),
+            Direction::WorkerToParent,
+        ),
+        (
+            Frame::PlayState(PlayState::Ended),
+            Direction::WorkerToParent,
+        ),
+    ] {
+        roundtrip(frame.clone(), direction);
+        for other in [
+            Direction::ExternalToParent,
+            Direction::ParentToWorker,
+            Direction::WorkerToParent,
+        ] {
+            if other != direction {
+                assert!(encode(&frame, other).is_err(), "{frame:?} as {other:?}");
+            }
+        }
+    }
+}
+
+/// A session opens only within its bounds: a room of at most 1920 on a
+/// side, one to thirty frames a second, a start within any video's length,
+/// an opened size of at most 1920 on a side and 1080p's pixels; and an
+/// unknown command or state does not decode.
+#[test]
+fn a_playback_session_opens_only_within_its_bounds() {
+    let good = PlayOpen {
+        source: Source::user_pull(common::path(), GuiActionWitness::from_explicit_gui_action()),
+        max_width: 1920,
+        max_height: 1080,
+        start_ms: 0,
+        max_fps_milli: MAX_PLAY_FPS_MILLI,
+    };
+    assert!(good.validate().is_ok());
+    // The room is a bound only: more pixels than a frame may have is fine.
+    assert!(
+        PlayOpen {
+            max_width: 1920,
+            max_height: 1920,
+            ..good.clone()
+        }
+        .validate()
+        .is_ok()
+    );
+    // A decoder holds an open to the same bounds: the source (its tag, the
+    // path's tag, length and bytes, the authorization tag) comes before the
+    // width.
+    let mut wide = encode(&Frame::PlayOpen(good.clone()), Direction::ParentToWorker).unwrap();
+    let at = HEADER_BYTES + 1 + 1 + 4 + common::path().as_bytes().len() + 1;
+    assert_eq!(wide[at..at + 4], 1920_u32.to_le_bytes());
+    wide[at..at + 4].copy_from_slice(&1921_u32.to_le_bytes());
+    assert!(decode(&wide, Direction::ParentToWorker).is_err());
+    // A session plays a file, never inline bytes, on either side.
+    let inline = PlayOpen {
+        source: Source::Bytes(vec![0; 16]),
+        ..good.clone()
+    };
+    assert!(inline.validate().is_err());
+    let mut bytes = encode(&Frame::PlayOpen(good.clone()), Direction::ParentToWorker).unwrap();
+    let source = HEADER_BYTES..HEADER_BYTES + at - HEADER_BYTES;
+    let mut blob = vec![0u8];
+    blob.extend_from_slice(&16_u32.to_le_bytes());
+    blob.extend_from_slice(&[0; 16]);
+    bytes.splice(source, blob);
+    let payload = u32::try_from(bytes.len() - HEADER_BYTES).unwrap();
+    bytes[7..HEADER_BYTES].copy_from_slice(&payload.to_le_bytes());
+    assert_eq!(
+        decode(&bytes, Direction::ParentToWorker),
+        Err(WireError::Validation(ValidationError::BadParams))
+    );
+    for bad in [
+        PlayOpen {
+            max_width: 1921,
+            max_height: 1,
+            ..good.clone()
+        },
+        PlayOpen {
+            max_width: 1,
+            max_height: 1921,
+            ..good.clone()
+        },
+        PlayOpen {
+            max_width: 0,
+            ..good.clone()
+        },
+        PlayOpen {
+            max_fps_milli: 0,
+            ..good.clone()
+        },
+        PlayOpen {
+            max_fps_milli: MAX_PLAY_FPS_MILLI + 1,
+            ..good.clone()
+        },
+        PlayOpen {
+            start_ms: MAX_VIDEO_DURATION_MS + 1,
+            ..good.clone()
+        },
+    ] {
+        assert!(
+            bad.validate().is_err(),
+            "{:?}",
+            (bad.max_width, bad.max_height, bad.max_fps_milli)
+        );
+        assert!(encode(&Frame::PlayOpen(bad), Direction::ParentToWorker).is_err());
+    }
+    let opened = Opened {
+        info: video_info(),
+        width: 640,
+        height: 360,
+        fps_milli: 30_000,
+        start_ms: 9_000,
+    };
+    assert!(opened.validate().is_ok());
+    assert!(
+        Opened {
+            start_ms: 9_001,
+            ..opened
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(
+        Opened {
+            fps_milli: 30_001,
+            ..opened
+        }
+        .validate()
+        .is_err()
+    );
+    // And an opened session too: the video's 26 bytes, then the size and
+    // rate before the start.
+    let mut late = encode(&Frame::Opened(opened), Direction::WorkerToParent).unwrap();
+    let at = HEADER_BYTES + 26 + 12;
+    late[at..at + 8].copy_from_slice(&9_001_u64.to_le_bytes());
+    assert!(decode(&late, Direction::WorkerToParent).is_err());
+    for (frame, direction, tag) in [
+        (
+            Frame::PlayCommand(PlayCommand::Close),
+            Direction::ParentToWorker,
+            4,
+        ),
+        (
+            Frame::PlayState(PlayState::Ended),
+            Direction::WorkerToParent,
+            3,
+        ),
+    ] {
+        let mut bytes = encode(&frame, direction).unwrap();
+        *bytes.last_mut().unwrap() = tag;
+        assert_eq!(decode(&bytes, direction), Err(WireError::UnknownEnum));
+    }
+}
+
+/// A frame's pixels are exactly its size, and a header claiming more than a
+/// frame may hold is refused before any pixel is held.
+#[test]
+fn a_video_frame_is_exactly_its_size() {
+    let frame = |width: u32, height: u32, len: usize| VideoFrame {
+        seq: 0,
+        pts_ms: 0,
+        width,
+        height,
+        rgba: vec![0; len],
+    };
+    roundtrip(
+        Frame::VideoFrame(frame(1920, 1080, 1920 * 1080 * 4)),
+        Direction::WorkerToParent,
+    );
+    for bad in [
+        frame(1921, 1, 1921 * 4),
+        frame(1920, 1081, 1920 * 1081 * 4),
+        frame(2, 1, 7),
+        frame(2, 1, 9),
+        frame(0, 1, 0),
+    ] {
+        assert!(bad.validate().is_err());
+        assert!(encode(&Frame::VideoFrame(bad), Direction::WorkerToParent).is_err());
+    }
+    // A header that says 1920 by 1080 but a length past it.
+    let mut bytes = encode(
+        &Frame::VideoFrame(frame(2, 1, 8)),
+        Direction::WorkerToParent,
+    )
+    .unwrap();
+    let at = HEADER_BYTES + 16;
+    bytes[at..at + 4].copy_from_slice(&1920_u32.to_le_bytes());
+    bytes[at + 4..at + 8].copy_from_slice(&1080_u32.to_le_bytes());
+    bytes[at + 8..at + 12].copy_from_slice(&u32::MAX.to_le_bytes());
+    let report = decode_with_stats(&bytes, Direction::WorkerToParent);
+    assert!(report.result.is_err());
+    assert_eq!(report.allocations.requested_bytes, 0);
+    // A size whose pixels are more than the blob holds.
+    let mut short = encode(
+        &Frame::VideoFrame(frame(2, 1, 8)),
+        Direction::WorkerToParent,
+    )
+    .unwrap();
+    short[at..at + 4].copy_from_slice(&3_u32.to_le_bytes());
+    assert!(decode(&short, Direction::WorkerToParent).is_err());
+    // And a frame past what one may be, even with exactly its pixels; the
+    // same bytes at the largest width decode.
+    let sized = |width: u32| {
+        let mut bytes = encode(
+            &Frame::VideoFrame(frame(1920, 1, 1920 * 4)),
+            Direction::WorkerToParent,
+        )
+        .unwrap();
+        bytes.resize(at + 12 + width as usize * 4, 0);
+        bytes[at..at + 4].copy_from_slice(&width.to_le_bytes());
+        bytes[at + 8..at + 12].copy_from_slice(&(width * 4).to_le_bytes());
+        let payload = u32::try_from(bytes.len() - HEADER_BYTES).unwrap();
+        bytes[7..HEADER_BYTES].copy_from_slice(&payload.to_le_bytes());
+        bytes
+    };
+    assert!(decode(&sized(1920), Direction::WorkerToParent).is_ok());
+    assert!(decode(&sized(1921), Direction::WorkerToParent).is_err());
+}
+
+/// A frame written from its buffer is the frame encoded, and refused as it
+/// is: the same bytes, the same bounds.
+#[test]
+fn a_video_frame_written_from_its_buffer_is_the_frame_encoded() {
+    let frame = VideoFrame {
+        seq: 41,
+        pts_ms: 1_366,
+        width: 3,
+        height: 2,
+        rgba: (0..24).collect(),
+    };
+    let mut written = Vec::new();
+    write_video_frame(&mut written, frame.borrowed()).unwrap();
+    assert_eq!(
+        written,
+        encode(&Frame::VideoFrame(frame.clone()), Direction::WorkerToParent).unwrap()
+    );
+    assert_eq!(
+        decode(&written, Direction::WorkerToParent).unwrap(),
+        Frame::VideoFrame(frame.clone())
+    );
+    let short = VideoFrameRef {
+        rgba: &frame.rgba[..23],
+        ..frame.borrowed()
+    };
+    let wide = VideoFrameRef {
+        width: 1921,
+        height: 1,
+        rgba: &[0; 1921 * 4],
+        ..frame.borrowed()
+    };
+    for bad in [short, wide] {
+        let mut written = Vec::new();
+        assert!(write_video_frame(&mut written, bad).is_err());
+        assert!(written.is_empty());
+    }
+}
+
+/// A session's picture is the video as shown, fitted to the room it has with
+/// its shape kept, never enlarged, and never past 1920 on a side or 1080p's
+/// pixels.
+#[test]
+fn a_session_fits_its_picture_to_the_room() {
+    for (shown, room, fitted) in [
+        // Smaller than the room: as it is.
+        ((640, 360), (1280, 720), Some((640, 360))),
+        // Wider than the room: its width, the height kept in shape.
+        ((3840, 2160), (1280, 1280), Some((1280, 720))),
+        // Taller: its height.
+        ((1080, 1920), (1280, 960), Some((540, 960))),
+        // A large room is held to the session's edge and pixels.
+        ((3840, 2160), (4000, 4000), Some((1920, 1080))),
+        ((4000, 4000), (1920, 1920), Some((1440, 1440))),
+        // Held to the pixels after the room: rounded once, from the video.
+        ((1139, 2001), (1920, 1920), Some((1086, 1908))),
+        ((7680, 100), (1920, 1080), Some((1920, 25))),
+        // A sliver keeps at least a pixel.
+        ((10_000, 1), (100, 100), Some((100, 1))),
+        ((0, 360), (100, 100), None),
+        ((640, 360), (0, 100), None),
+    ] {
+        assert_eq!(
+            play_size(shown.0, shown.1, room.0, room.1),
+            fitted,
+            "{shown:?} in {room:?}"
+        );
+    }
+    // Every fit is within its room and the session's bounds.
+    for shown in [
+        (1, 1),
+        (1919, 1081),
+        (2001, 999),
+        (1139, 2001),
+        (2001, 1139),
+        (16_384, 16_384),
+        (3, 16_384),
+        (4097, 2161),
+    ] {
+        for room in [(1, 1), (1920, 1080), (1920, 1920), (333, 777)] {
+            let (width, height) = play_size(shown.0, shown.1, room.0, room.1).unwrap();
+            assert!(width <= room.0.min(shown.0).max(1) && height <= room.1.min(shown.1).max(1));
+            assert!(width <= MAX_PLAY_EDGE && height <= MAX_PLAY_EDGE);
+            assert!(u64::from(width) * u64::from(height) <= u64::from(MAX_PLAY_PIXELS));
+            // Its shape kept to within a pixel on either side.
+            let (shown_width, shown_height) = (u64::from(shown.0), u64::from(shown.1));
+            let drift = (u64::from(width) * shown_height).abs_diff(u64::from(height) * shown_width);
+            assert!(
+                drift <= shown_width.max(shown_height),
+                "{shown:?} in {room:?} drew {width}x{height}"
+            );
+        }
+    }
+}
+
+/// A session's reader takes a frame's pixels straight into the buffer it is
+/// given, at the size the session opened at; other frames come whole, under
+/// their cap; a frame of another size is refused before its pixels are read.
+#[test]
+fn a_session_reads_its_frames_into_one_buffer() {
+    use std::io::Cursor;
+
+    let frame = VideoFrame {
+        seq: 3,
+        pts_ms: 300,
+        width: 2,
+        height: 1,
+        rgba: vec![9, 8, 7, 6, 5, 4, 3, 2],
+    };
+    let mut stream = Vec::new();
+    write_video_frame(&mut stream, frame.borrowed()).unwrap();
+    write_frame(
+        &mut stream,
+        &Frame::PlayState(PlayState::Ended),
+        Direction::WorkerToParent,
+    )
+    .unwrap();
+    let mut reader = Cursor::new(stream);
+    let mut pixels = Vec::with_capacity(64);
+    assert_eq!(
+        read_session_frame(&mut reader, 2, 1, &mut pixels, 256).unwrap(),
+        Some(SessionRead::Pixels {
+            seq: 3,
+            pts_ms: 300
+        })
+    );
+    assert_eq!(pixels, frame.rgba);
+    assert_eq!(
+        read_session_frame(&mut reader, 2, 1, &mut pixels, 256).unwrap(),
+        Some(SessionRead::Frame(Box::new(Frame::PlayState(
+            PlayState::Ended
+        ))))
+    );
+    assert_eq!(
+        read_session_frame(&mut reader, 2, 1, &mut pixels, 256).unwrap(),
+        None
+    );
+
+    // Another size, by its length or only by its fields: nothing of its
+    // pixels is read.
+    let other = VideoFrame {
+        width: 1,
+        height: 2,
+        ..frame.clone()
+    };
+    let mut swapped = Vec::new();
+    write_video_frame(&mut swapped, other.borrowed()).unwrap();
+    let mut reader = Cursor::new(swapped);
+    assert_eq!(
+        read_session_frame(&mut reader, 2, 1, &mut pixels, 256),
+        Err(WireError::Validation(ValidationError::BadParams))
+    );
+    assert_eq!(reader.position() as usize, HEADER_BYTES + 28);
+    let wider = VideoFrame {
+        width: 3,
+        rgba: vec![0; 12],
+        ..frame.clone()
+    };
+    let mut longer = Vec::new();
+    write_video_frame(&mut longer, wider.borrowed()).unwrap();
+    let mut reader = Cursor::new(longer);
+    assert_eq!(
+        read_session_frame(&mut reader, 2, 1, &mut pixels, 256),
+        Err(WireError::Validation(ValidationError::BadParams))
+    );
+    assert_eq!(reader.position() as usize, HEADER_BYTES);
+
+    // Pixels cut short; another frame over its cap; a size no session has.
+    let mut cut = Vec::new();
+    write_video_frame(&mut cut, frame.borrowed()).unwrap();
+    cut.truncate(cut.len() - 1);
+    assert_eq!(
+        read_session_frame(&mut Cursor::new(cut), 2, 1, &mut pixels, 256),
+        Err(WireError::Truncated)
+    );
+    let opened = encode(
+        &Frame::Opened(Opened {
+            info: video_info(),
+            width: 2,
+            height: 1,
+            fps_milli: 30_000,
+            start_ms: 0,
+        }),
+        Direction::WorkerToParent,
+    )
+    .unwrap();
+    assert_eq!(
+        read_session_frame(&mut Cursor::new(opened.clone()), 2, 1, &mut pixels, 32),
+        Err(WireError::Validation(ValidationError::TooLarge))
+    );
+    assert!(read_session_frame(&mut Cursor::new(opened), 2, 1, &mut pixels, 256).is_ok());
+    assert!(read_session_frame(&mut Cursor::new(Vec::new()), 1921, 1, &mut pixels, 256).is_err());
 }

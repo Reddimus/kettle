@@ -1,5 +1,6 @@
 //! The worker's side of the protocol: Hello in, Ready out, one Job in, one
-//! reply out, then exit. A watchdog bounds each phase.
+//! reply out, then exit; or a PlayOpen in, and the playback session it
+//! opens. A watchdog bounds each phase.
 
 use std::io::{Read, Write};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
@@ -37,6 +38,7 @@ pub(crate) fn report_panic() {
 /// Ends the process with [`EXIT_TIMEOUT`] when the current phase's deadline
 /// passes, whatever the main thread is blocked on. It needs nothing from the
 /// parent, so a parent that stalls or dies cannot keep the worker alive.
+#[derive(Clone)]
 pub(crate) struct Watchdog {
     deadline: Arc<(Mutex<Instant>, Condvar)>,
     /// Whether its thread confined itself to nothing. A job counts as
@@ -78,8 +80,34 @@ impl Watchdog {
         Ok(Self { deadline, confined })
     }
 
+    /// One with no thread, which never ends the process: for a test that
+    /// runs a session in its own.
+    #[cfg(test)]
+    pub(crate) fn unwatched() -> Self {
+        Self {
+            deadline: Arc::new((Mutex::new(Instant::now()), Condvar::new())),
+            confined: true,
+        }
+    }
+
+    /// How long the current phase has left.
+    #[cfg(test)]
+    pub(crate) fn left(&self) -> Duration {
+        let at = *self
+            .deadline
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        at.saturating_duration_since(Instant::now())
+    }
+
+    /// Whether its thread confined itself: nothing may be decoded otherwise.
+    pub(crate) fn confined(&self) -> bool {
+        self.confined
+    }
+
     /// Give the next phase `budget` from now.
-    fn arm(&self, budget: Duration) {
+    pub(crate) fn arm(&self, budget: Duration) {
         let (at, changed) = &*self.deadline;
         *at.lock().unwrap_or_else(PoisonError::into_inner) = Instant::now() + budget;
         changed.notify_one();
@@ -96,14 +124,18 @@ impl Watchdog {
     }
 }
 
-/// Serve one job read from `input`, answering on `output`, and return the
-/// exit code.
-pub(crate) fn serve(input: &mut impl Read, output: &mut impl Write, watchdog: &Watchdog) -> i32 {
+/// Serve one job or playback session read from `input`, answering on
+/// `output`, and return the exit code.
+pub(crate) fn serve(
+    mut input: impl Read + Send + 'static,
+    output: &mut impl Write,
+    watchdog: &Watchdog,
+) -> i32 {
     let Ok(own) = BuildId::from_embedded(env!("CARGO_PKG_VERSION"), env!("KETTLE_SOURCE_HASH"))
     else {
         return EXIT_SETUP;
     };
-    let hello = match read_frame(input, Direction::ParentToWorker) {
+    let hello = match read_frame(&mut input, Direction::ParentToWorker) {
         Ok(Some(Frame::Hello(hello))) => hello,
         // The parent left before saying Hello.
         Ok(None) => return 0,
@@ -120,11 +152,18 @@ pub(crate) fn serve(input: &mut impl Read, output: &mut impl Write, watchdog: &W
         return EXIT_PROTOCOL;
     }
     watchdog.arm(JOB_ARRIVAL_DEADLINE);
-    let job = match read_frame(input, Direction::ParentToWorker) {
+    let job = match read_frame(&mut input, Direction::ParentToWorker) {
         Ok(Some(Frame::Job(job))) => job,
+        Ok(Some(Frame::PlayOpen(open))) => {
+            return crate::play::serve(&open, input, output, watchdog);
+        }
         Ok(None) => return 0,
         other => return refuse(output, other),
     };
+    // The job's processor time is pinned before a byte of its input is read.
+    if crate::early_unix::limit_job_cpu().is_err() {
+        return EXIT_SETUP;
+    }
     let arrived = Instant::now();
     watchdog.arm(job.kind.render_deadline());
     let classified = |kind: MediaKind| {
@@ -238,7 +277,7 @@ impl kettle_media::video::VideoDecoder for Refusing {
 }
 
 /// Answer a frame other than the one expected, or one that could not be read.
-fn refuse(output: &mut impl Write, read: Result<Option<Frame>, WireError>) -> i32 {
+pub(crate) fn refuse(output: &mut impl Write, read: Result<Option<Frame>, WireError>) -> i32 {
     match read {
         Err(WireError::RestartRequired) => reply(output, FailureCode::RestartRequired, EXIT_SKEW),
         Err(WireError::Validation(ValidationError::TooLarge)) => {
@@ -250,7 +289,7 @@ fn refuse(output: &mut impl Write, read: Result<Option<Frame>, WireError>) -> i3
     }
 }
 
-fn reply(output: &mut impl Write, code: FailureCode, exit: i32) -> i32 {
+pub(crate) fn reply(output: &mut impl Write, code: FailureCode, exit: i32) -> i32 {
     let failure = Frame::Failure(Failure { code });
     match write_frame(output, &failure, Direction::WorkerToParent) {
         Ok(()) => exit,

@@ -28,9 +28,9 @@ turns it into an `ExternalRequest` with an `ExternalAttested` path or inline
 bytes, and Mermaid text or `kind: "mermaid"` selects the Mermaid job kind
 rather than Auto.
 
-## Wire version 5
+## Wire version 6
 
-The header is 11 bytes: `KMED`, u16 LE protocol version 5, a frame kind, then u32 LE payload
+The header is 11 bytes: `KMED`, u16 LE protocol version 6, a frame kind, then u32 LE payload
 length. No padding or compression is permitted. Binary data and UTF-8 strings have u32 LE
 byte lengths. Lists have u32 LE counts. Integers and f64 bit patterns use LE. Boolean and
 optional-value discriminants are exactly 0 or 1. Floats must satisfy the field validators.
@@ -46,6 +46,11 @@ platform refuses the other encoding.
 | 5 Rendered | Worker to parent | Width, height, RGBA blob, 32 digest bytes, optional path identity, display lines, fence count, optional index, fence sources, script names, warning codes, layout, optional exact source, optional video result |
 | 6 Failure | Worker to parent | One fixed error-code byte |
 | 7 DetectedRendered | Worker to parent | One media-kind byte, then exactly the Rendered payload |
+| 8 PlayOpen | Parent to worker | Worker source, max width u32, max height u32, start ms u64, max frame rate u32 |
+| 9 PlayCommand | Parent to worker | One command byte: 0 play, 1 pause, 2 heartbeat, 3 close |
+| 10 Opened | Worker to parent | Video result's fixed fields, width u32, height u32, frame rate u32, start ms u64 |
+| 11 VideoFrame | Worker to parent | Sequence u64, presentation ms u64, width u32, height u32, RGBA blob |
+| 12 PlayState | Worker to parent | One state byte: 0 playing, 1 paused, 2 ended |
 
 Job-kind tags 0 through 7 are Mermaid, Svg, Raster, MarkdownDiagrams, VideoProbe,
 VideoStills, Auto and CachedThumbnail. An Auto job asks the worker to classify the source by
@@ -74,6 +79,18 @@ frames are laid out, and an actual time is the frame shown, which a decoder may 
 to the tolerance away from the time asked: every sample is within the tolerance, and the
 tolerance is within the duration. Both checks run in the borrowed pass, before any pixel is
 copied.
+
+Kinds 8 through 12 are a playback session, the only frames a worker started for
+playback reads or writes after Hello and Ready. PlayOpen names the video file as a job
+names its source (inline bytes are refused: a decoder reads a file); frames fit within its max width and height,
+a room of at most 1920 on a side, and are at most 1920 on a side and 1920 * 1080 pixels; it starts within any video's length and
+asks for 1 to 30,000 frames per thousand seconds. Opened carries the video result's fixed
+fields (duration through container, with no samples), the size frames will have and their
+rate, within the same bounds, and the time playback starts, within the duration.
+VideoFrame's size is checked against those bounds first, then its blob must be exactly
+width * height * 4 bytes, so a frame claiming more is refused before any pixel is held;
+its presentation time is at most about a year. Unknown command and state bytes do not
+decode.
 
 Source tag 0 carries a bounded byte blob. Mermaid, SVG and Markdown bytes require UTF-8.
 Tag 1 carries a native path followed by authorization tag 0 and dev/ino u64 values, or
@@ -283,8 +300,9 @@ file. The caller's thread watches the clock:
   typed one of that same kind; a typed reply naming another kind is
   `WorkerUnavailable` too.
 - **A refusal** keeps the worker's code only when a worker can mean it (input,
-  file, render, skew and unavailability codes); a code naming GUI or agent
-  state becomes `WorkerUnavailable`.
+  file, render, skew and unavailability codes, a video's container, codec,
+  decoder and sandbox among them); a code naming GUI or agent state becomes
+  `WorkerUnavailable`.
 - **An exit without a usable reply** says why: 4 (the worker's watchdog) is
   `RenderTimeout`, 9 is `RestartRequired`, a signal (a CPU, file-size or memory
   limit, or a crash) is `RenderResource`, and anything else, including a
@@ -356,6 +374,34 @@ not proof: an allocation can cross the limit briefly between samples.
 Not yet: the GUI's preview account and admission, and cancellation follow in
 later slices.
 
+### Playing a video
+
+`WorkerClient::play` opens a playback session (`kettle_media::session`) in a
+fresh worker of its own and returns at once: three threads of the session's,
+never the caller's, and never the render slot, start the worker within the
+same startup deadline, send Hello, then PlayOpen once Ready matches, and wait
+6 s for Opened. For the rest of the session the worker's process group is
+measured every 25 ms and killed above 768 MiB, as a render's is. At most two
+sessions are open at once (a third is `WorkerUnavailable`); one being closed
+no longer counts. The reader takes each frame straight into a buffer of the
+size the session opened at, keeps only the newest one the caller has not
+taken (with two spare buffers for those to come), and wakes the caller once
+until it looks. Play and Pause replace any command not yet sent, so only the
+latest wish goes out. The writer sends a heartbeat each second while the
+caller has kept the session within 3 s: a caller whose event loop stalls lets
+the worker's 5 s lease lapse, and the worker ends the session. Dropping the
+session sends Close and lets the worker exit within the cleanup budget, or
+kills its group; until it exits it decodes at most the frame it had begun,
+and another session or job may start beside it, as beside a cancelled
+render's worker on its way out. A refusal keeps the worker's code as a
+render's does, through the same functions: before Ready only a handshake
+refusal's, from a worker that then exits rather than crashes, and after it
+only from a worker that then exits 0; only with nothing after it; otherwise
+the worker's exit says why. A worker whose
+output closes before the session ends fails it, even with exit 0, as one
+that exits without a reply fails a render; a frame of another size, or a
+footprint over the limit, is what it is for a render.
+
 ## The worker executable
 
 `crates/kettle-media-worker` builds `kettle-media-worker`, a separate
@@ -377,9 +423,13 @@ both binaries of one source answer with one `BuildId`. On Linux and macOS:
    else: no message, payload, location, backtrace or crash file. The GUI will
    discard the worker's stderr anyway.
 3. **Resource limits**, each lowered to its value or to an inherited soft or
-   hard limit that is already lower, never raised: CPU 5 s, regular-file size 0,
-   descriptors 32, and on Linux address space 1 GiB (macOS does not enforce
-   one). Failure exits 8.
+   hard limit that is already lower, never raised: CPU 5 s (soft; the hard
+   limit is 12 hours until the first frame after Ready says what this worker
+   is for), regular-file size 0, descriptors 32, and on Linux address space
+   1 GiB (macOS does not enforce one). A job pins CPU to 5 s, soft and hard,
+   as it arrives, before a byte of its input is read; a playback session pins
+   it to 30 s and a second for each second of video left once it is open.
+   Failure exits 8.
 4. **A watchdog thread** that exits 4 when the current phase's deadline
    passes, whatever the main thread is blocked on: 5 s from start until Ready
    is written, 5 s from Ready until the job arrives, and the job kind's
@@ -388,10 +438,10 @@ both binaries of one source answer with one `BuildId`. On Linux and macOS:
    narrows to its kind's deadline, still counted from its arrival, so learning
    the kind never restarts the clock. A parent that stalls or dies cannot keep
    the worker alive. A watchdog that cannot start exits 8.
-5. **One job.** Hello must carry this build's identity. A different build, or
-   a frame header of another protocol version, is answered
+5. **One job, or one session.** Hello must carry this build's identity. A
+   different build, or a frame header of another protocol version, is answered
    `RestartRequired` and exits 9. Ready follows, then one Job and one reply,
-   then exit 0. The reply to an Auto job is DetectedRendered; to any other,
+   then exit 0; or one PlayOpen and the playback session below. The reply to an Auto job is DetectedRendered; to any other,
    Rendered. A frame out of order, cut short or that does not decode is
    answered `BadParams` (or `TooLarge`) and exits 2; a parent that closes stdin
    between frames ends the worker quietly with 0. stdout carries frames only, through one writer.
@@ -403,6 +453,85 @@ worker is built with the workspace but not packaged or started yet; the
 release profile pins it at `opt-level = 3`. The feature `test-faults` lets a
 test job make it panic, for the panic test, or pause either side of its
 classification, for the deadline tests; no shipped build enables it.
+
+## A playback session
+
+A video the user plays runs in a worker of its own, started as any other, whose
+first frame after Ready is PlayOpen. The worker holds the file it names, checked
+as rendering checks a source, and confines itself to that file and its decoder's
+programs before reading a byte of it, exactly as a video job does: where the
+sandbox cannot be applied the session is refused `SandboxUnavailable`, and no
+decoder runs unconfined. It sniffs the container from the file's first bytes,
+then opens it with its decoders (ffmpeg on Linux; on macOS also AVFoundation,
+first) within 5 s: Opened, then the first frame at the start asked for (one
+past the video's last frame shows that frame, at the video track's own end
+where the file's sound runs on), then PlayState `Paused`. Each decoder keeps
+to the rate asked: ffmpeg's `fps` filter drops frames before they are
+scaled and passes on the frame left at the end, and AVFoundation, which gives every frame, keeps at most one in each
+slot of the rate's frame length counted from the first, a frame counting from
+an eighth of a frame early as container times are rounded
+(`video::FrameSlots`), so a video faster than the rate plays at it and one no
+faster keeps every frame. A session that cannot open answers with the
+failure and exits 0; one whose first frame is not written within 5 s (a
+write the parent held past that included) answers `RenderTimeout`, and its
+watchdog ends it a second later if that answer is held up too.
+
+The parent then sends commands, one byte each and nothing larger: Play and
+Pause, answered with the state they leave the session in, Heartbeat, and Close.
+A thread of their own reads them from the moment the worker is confined, the
+decoder's opening included, and keeps the latest Play or Pause and when the
+last command came rather than queueing them behind frames, so none waits on
+a write, a full queue or the opening. Play and Pause also move the
+decoder's gate as the reader hears them, and Close or the parent leaving ends
+it, whatever the session's thread is doing: the gate follows the latest
+command, and after a Pause only a frame already begun finishes.
+While it plays, every frame goes out in order at its time on the worker's
+clock, set when the first frame after Play is written (a Play the reader
+took before the first frame's write ended, the first of any sent again,
+counts as before that frame),
+never early; a frame
+whose write ends more than a frame past its time (a slow decoder, or a parent
+that stopped reading for a while) sets the clock again where it ended, so the
+frames after keep their spacing and the session runs behind rather than
+bursting to catch up: a silent video has nothing to keep up with. Each frame is numbered from 0, carries its time in the video, and is
+written straight from the buffer it was decoded into. The decoder takes frames into
+three buffers at most, the first at once (none once the session was closed
+while it opened) and each after it only while the session plays, asked once a buffer is free: a Pause stops it before its next
+frame (one already begun finishes), so a paused session decodes nothing and
+holds three frames. After the
+last frame comes PlayState `Ended` and exit 0. A seek is a new session.
+
+A session ends when:
+
+- the parent sends Close or closes stdin (exit 0, at once; should the
+  session's thread be held, in a write the parent no longer reads or in the
+  decoder's opening, the command reader moves the watchdog past it and ends
+  the process with 0 half a second later);
+- the parent sends anything but a command, or a frame that does not decode
+  (`BadParams` or `TooLarge`, exit 2);
+- no command comes for 5 s (the parent sends a heartbeat each second),
+  counted from when the reader took the last one, however long it then
+  waited behind a write, and held by a thread of its own so it runs out on
+  time whatever the session's thread is held on: the worker kills its own
+  process group, its decoder with it, needing nothing from the parent; a
+  worker that does not lead its group just exits. Once the parent has sent
+  Close or closed stdin the lease is over, and the session ends with 0 as
+  above;
+- the session's thread does not come round for 5 s once its first frame is
+  out (before it, the open's 5 s and a second), a frame or state the parent
+  does not read included: the watchdog exits 4;
+- a playing session gets no frame for 5 s and two frame lengths
+  (`RenderTimeout`), the decoder fails (its failure: ffmpeg exiting other
+  than 0 after a frame is `RenderParse`, and killed by a signal, its
+  processor-time limit, `RenderResource`), or the file is no longer what was
+  opened, checked on each pass of the session's loop, at least four times a
+  second, opening, paused or playing, and before Ended, and once the decoder
+  has opened it or failed to (`Changed`, whatever the decoder said). A stall
+  or a decoder's failure on a file that changed meanwhile is `Changed` too.
+
+The worker's CPU time is pinned to 30 s and a second for each second of video
+left once it is open; an ffmpeg decoder gets its own limit, set before it runs:
+30 s and four seconds for each second left.
 
 ## Rendering a job
 
@@ -417,7 +546,9 @@ edge, a scale that is not a positive finite number, or a crop that is empty or
 leaves the box, is `BadParams`. Raster, SVG, Mermaid, MarkdownDiagrams and
 Auto jobs are rendered, and so are VideoStills jobs on animated images and,
 through the worker's external decoder, on video, and CachedThumbnail jobs.
-VideoProbe is `UnsupportedMedia` until its renderer lands. On Windows, where
+VideoProbe is `UnsupportedMedia`: a playback session's opening (Opened and a
+first frame, or the failure saying why) is what says whether Kettle can play
+a video, and a probe would only open it twice. On Windows, where
 no worker runs, every job is `UnsupportedPlatform`.
 
 **Stills jobs.** The source is held, not read: a file is opened as any other

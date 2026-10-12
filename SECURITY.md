@@ -214,7 +214,12 @@ Reports that fit any of these are welcome:
   the size of the eight-frame sheet it asked for, checked to be that sheet,
   kept only with the item's digest, charged to the same account, and held
   by the lane, never the item, until the lane closes, shows another item or
-  the item changes. It plays no sound.
+  the item changes. It plays no sound. A video the user plays re-reads the
+  file in a worker of its own (see Video playback sessions), under the same
+  rules: the user's own gesture, never a control request, a Lua action or a
+  changed file; its frames are checked to be the size it opened at before a
+  byte of their pixels is read, charged to the same account and held by the
+  lane, never the item, and it plays no sound.
   While the user has given a lane the keyboard (`focus_preview`), no key
   pressed, chord, input-method text or control client's
   `send_keys`/`send_text` reaches a pane in that window; getting one
@@ -303,6 +308,20 @@ Reports that fit any of these are welcome:
   reaching the network, running another program, leaving its group, or
   decoding a video unconfined, is in scope. The policy is `kettle-media-native`'s
   `sandbox`; the barrier is the worker's `answer`.
+- **Video playback sessions** — a video the user plays runs in a media
+  worker of its own, which confines itself to the one file and its decoder,
+  exactly as a video job does, before reading a byte of it, and stays
+  confined for the whole session. It reads nothing from the parent but
+  one-byte commands, writes frames only of the size it opened at, decodes
+  only while playing into three buffers, and ends when the parent closes
+  it, leaves, or sends nothing for 5 s (it then kills its own process
+  group, decoder and all), when a frame goes unread for 5 s, when a playing
+  decoder gives no frame for 5 s and two frame lengths, or when the file
+  changes at any point before it ends. Its CPU time, and its
+  ffmpeg's, is limited to what the video's remaining length needs. A
+  session that outlives its parent, decodes unconfined, reads another file,
+  or holds more than its buffers, is in scope. The session is
+  `kettle-media-worker`'s `play`.
 - **Media rendering** — the worker renders with `kettle-media-render`, safe
   code that writes nothing. A source path is opened once, read-only and
   non-blocking, and decided from that open file: it must be a regular file
@@ -340,10 +359,18 @@ Reports that fit any of these are welcome:
   `setpgid`, so it cannot leave its group either. On macOS, MP4 and QuickTime
   are read first by AVFoundation inside the worker, opened by descriptor
   with references outside the file forbidden; decoding runs in Apple's
-  decoder service, demuxing in the worker under its limits. Running a binary from
+  decoder service, demuxing in the worker under its limits. A session reads
+  them the same way, the decoder service scaling each frame, so nothing is
+  drawn in the worker and its sandbox grants no GPU. A video the user
+  plays streams from one ffmpeg run per session, held to all of the above
+  but the deadline: video only, read a whole frame at a time (output ending
+  inside a frame fails the session), and within a processor-time limit set
+  before it runs, half a minute and four seconds for each second of video
+  left, so a run that spins without writing goes when it is spent, whether
+  or not anyone still reads it. Running a binary from
   anywhere else, an argument a request or the media chose, a decoder that
-  starts a process, reads another file, or outlives its job, or a frame
-  accepted at the wrong size, is in scope.
+  starts a process, reads another file, or outlives its job or session, or a
+  frame accepted at the wrong size, is in scope.
 - **Video paste receipts** — a pasted or dropped video's receipt starts
   with a check, Kettle itself run as a short-lived helper with a two-second
   deadline: it opens the file only through a parent chain no other

@@ -301,8 +301,15 @@ class StableProcessHandle:
             library.mach_port_deallocate.argtypes = [ctypes.c_uint, ctypes.c_uint]
             library.mach_port_deallocate.restype = ctypes.c_int
             port = ctypes.c_uint()
-            result = library.task_name_for_pid(task_self, pid, ctypes.byref(port))
-            if result != 0:
+            # A process in its exit teardown loses its task name a moment
+            # before kill(0) stops answering for it, and a zombie answers
+            # kill(0) until it is reaped. Neither is a live process: wait out
+            # the teardown, and count a zombie as gone.
+            deadline = time.monotonic() + 0.5
+            while True:
+                result = library.task_name_for_pid(task_self, pid, ctypes.byref(port))
+                if result == 0:
+                    break
                 try:
                     os.kill(pid, 0)
                 except ProcessLookupError:
@@ -311,9 +318,13 @@ class StableProcessHandle:
                     raise RuntimeError(
                         f"could not prove whether Darwin process {pid} vanished"
                     ) from error
-                raise RuntimeError(
-                    f"could not retain Darwin task name for {pid}: kern_return={result}"
-                )
+                if darwin_zombie(pid):
+                    raise ProcessLookupError(pid)
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        f"could not retain Darwin task name for {pid}: kern_return={result}"
+                    )
+                time.sleep(0.01)
             token = (ctypes.c_uint32 * 8)()
             count = ctypes.c_uint(8)
             # TASK_AUDIT_TOKEN. Its pidversion field distinguishes a reused PID.
@@ -8477,6 +8488,35 @@ def process_pid_is_running(pid: int) -> bool:
     return sampled.returncode == 0 and bool(state) and not state.startswith("Z")
 
 
+def darwin_zombie(pid: int) -> bool:
+    """Whether a Darwin pid names a zombie: exited, its status not yet
+    collected by its parent."""
+    stat = run(["ps", "-o", "stat=", "-p", str(pid)], timeout=5)
+    return stat.returncode == 0 and stat.stdout.strip().startswith("Z")
+
+
+def darwin_zombie_selftest() -> None:
+    """A zombie still answers kill(0) but has no task to retain: a stable
+    handle reports it gone rather than failing to verify it."""
+    if platform.system() != "Darwin":
+        return
+    child = subprocess.Popen(["/usr/bin/true"])
+    try:
+        # Not waited for, so it stays a zombie.
+        deadline = time.monotonic() + 5
+        while not darwin_zombie(child.pid):
+            assert time.monotonic() < deadline, "the child never became a zombie"
+            time.sleep(0.01)
+        try:
+            StableProcessHandle.open(child.pid).close()
+        except ProcessLookupError:
+            pass
+        else:
+            raise AssertionError("a zombie was retained as a live process")
+    finally:
+        child.wait()
+
+
 def darwin_process_environment_selftest() -> None:
     import ctypes
     from types import SimpleNamespace
@@ -8575,6 +8615,7 @@ def live_helper_selftest() -> None:
     image_paste_spec.loader.exec_module(image_paste_helpers)
     image_paste_helpers.composer_readiness_selftest(sys.modules[__name__])
     darwin_process_environment_selftest()
+    darwin_zombie_selftest()
     assert "mapped_writes" in STEADY_UPLOAD_QUIET_KEYS, "a blink must not write through the mapped ring"
     import inspect
     assert "quiet_keys = STEADY_UPLOAD_QUIET_KEYS" in inspect.getsource(run_steady_uploads), \

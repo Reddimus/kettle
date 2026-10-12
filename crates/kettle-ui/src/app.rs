@@ -1241,6 +1241,10 @@ fn lane_notice_text(
         N::PreviewTimedOut => T::MediaLaneNoticePreviewTimedOut,
         N::PreviewNeedsDecoder => T::MediaLaneNoticePreviewNeedsDecoder,
         N::PreviewNeedsSandbox => T::MediaLaneNoticePreviewNeedsSandbox,
+        N::VideoFailed => T::MediaLaneNoticeVideoFailed,
+        N::VideoTimedOut => T::MediaLaneNoticeVideoTimedOut,
+        N::VideoNeedsDecoder => T::MediaLaneNoticeVideoNeedsDecoder,
+        N::VideoNeedsSandbox => T::MediaLaneNoticeVideoNeedsSandbox,
     })
 }
 
@@ -1259,6 +1263,23 @@ fn lane_announced(
         );
     }
     notice.map(|notice| lane_notice_text(notice, tr).to_string())
+}
+
+/// What a lane says when its video stops playing, or cannot open, with
+/// `failure`: which decoder to install, that there is no sandbox, that the
+/// file changed, that it took too long, or that it stopped.
+fn playback_failure_notice(failure: kettle_media::FailureCode) -> crate::window_state::LaneNotice {
+    use crate::window_state::LaneNotice as N;
+    use kettle_media::FailureCode as F;
+    match failure {
+        F::UnsupportedContainer | F::CodecUnavailable | F::BackendUnavailable => {
+            N::VideoNeedsDecoder
+        }
+        F::SandboxUnavailable => N::VideoNeedsSandbox,
+        F::Changed => N::Changed,
+        F::RenderTimeout => N::VideoTimedOut,
+        _ => N::VideoFailed,
+    }
 }
 
 /// What a lane says when its video's preview fails with `failure`: which
@@ -1310,8 +1331,21 @@ fn media_lane_accessibility(
 /// its controls after it. Pane ids at or past [`MAX_LANE_ACCESSIBILITY_PANE`]
 /// have no lane nodes rather than ones that could collide.
 const ACCESSIBILITY_LANE_ID_MASK: u64 = 1 << 56;
-const MAX_LANE_ACCESSIBILITY_PANE: u64 = 1 << 52;
-const LANE_ACCESSIBILITY_PARTS: u64 = 16;
+const MAX_LANE_ACCESSIBILITY_PANE: u64 = 1 << 51;
+const LANE_ACCESSIBILITY_PARTS: u64 = 32;
+/// A playing video's bar, a slider: the part after the controls', below
+/// the stride.
+const LANE_SCRUBBER_PART: u64 = 16;
+const _: () = assert!(LANE_SCRUBBER_PART > 15 && LANE_SCRUBBER_PART < LANE_ACCESSIBILITY_PARTS);
+
+/// How far a step along a playing video's bar moves it, from the keyboard
+/// or an assistive technology.
+const LANE_SEEK_STEP: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How often a window whose lanes have video sessions comes round to keep
+/// them: each session's worker ends it after five seconds without word, and
+/// its client sends word only while the lane keeps it.
+const LANE_PLAYBACK_KEEP: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// The node of `pane`'s lane (`part` 0) or one of its controls.
 fn accessibility_lane_id(pane: u64, part: u64) -> Option<NodeId> {
@@ -1372,6 +1406,7 @@ fn lane_control_name(hit: kettle_render::MediaLaneHit) -> &'static str {
         Hit::Copy => "copy",
         Hit::Reload => "reload",
         Hit::Play => "play",
+        Hit::Scrub => "scrubber",
         Hit::ZoomOut => "zoom_out",
         Hit::ZoomIn => "zoom_in",
         Hit::Fit => "fit",
@@ -2482,6 +2517,9 @@ pub enum UserEvent {
     /// The media lane finished a `show` render; publish it and start the
     /// next.
     MediaRendered,
+    /// A lane's video playback has something new: a frame, or a change of
+    /// state. Coalesced by the session until the lane looks.
+    LanePlayback,
     /// The background update-check thread found a newer GitHub
     /// release. Carries the tag (e.g. `v2.6.0`) + the release-page URL so the
     /// UI can show a passive bottom banner. The banner is mouse-driven
@@ -6206,7 +6244,7 @@ fn lane_action_hit(action: &Action) -> Option<kettle_render::MediaLaneHit> {
         Action::PreviewCanvas => Some(Hit::Canvas),
         Action::PreviewCopy => Some(Hit::Copy),
         Action::PreviewReload => Some(Hit::Reload),
-        Action::PreviewPlay => Some(Hit::Play),
+        Action::VideoPlay => Some(Hit::Play),
         Action::PreviewZoomIn => Some(Hit::ZoomIn),
         Action::PreviewZoomOut => Some(Hit::ZoomOut),
         Action::PreviewFit => Some(Hit::Fit),
@@ -11269,6 +11307,7 @@ impl App {
         ws.lane_wheel.reset();
         ws.lane_crops.remove(&pane);
         self.end_lane_preview(ws, pane);
+        ws.lane_playbacks.remove(&pane);
         let had_panel = ws.preview_panels.remove(&pane).is_some();
         let resized = ws.mux.close_lane(pane);
         if had_panel || resized {
@@ -11343,6 +11382,11 @@ impl App {
         if let Some(panel) = ws.preview_panels.get_mut(&pane) {
             panel.notice = None;
         }
+        // One decoder a lane: a video playing there lets its session go,
+        // keeping its frame for when the preview stops.
+        if let Some(playback) = ws.lane_playbacks.get_mut(&pane) {
+            playback.park();
+        }
         // Frames held for the item as it is play again without a job.
         if ws
             .lane_previews
@@ -11392,6 +11436,367 @@ impl App {
             .admit(crate::media::Sender::LanePreview(pane), deadline, push);
         self.media_tick(ws);
         self.lanes_changed(ws, false);
+    }
+
+    /// What opens the video `pane`'s lane shows, from `start_ms`: the item,
+    /// its generation and length, and the request, its frames fitted to the
+    /// room the lane's picture has now. `None` unless the lane shows a video
+    /// with a length, rendered, read from a file it can read again.
+    fn lane_play_open(
+        &self,
+        ws: &WindowState,
+        pane: u64,
+        start_ms: u64,
+    ) -> Option<(u64, u64, u64, kettle_media::PlayOpen)> {
+        let panel = ws.preview_panels.get(&pane)?;
+        let item = preview_item(ws, pane)?;
+        lane_previews_item(item, panel)?;
+        let info = item.video?;
+        let crate::media::SourceInput::Path {
+            path,
+            authorization,
+        } = &item.source.spec.input
+        else {
+            return None;
+        };
+        let edge = |value: f32| {
+            if value.is_finite() {
+                (value.round() as u32).clamp(1, kettle_media::MAX_PLAY_EDGE)
+            } else {
+                1
+            }
+        };
+        let room = self
+            .preview_lane_geometry_of(ws, pane)
+            .map(|geometry| geometry.content)
+            .filter(|content| content.2 >= 1.0 && content.3 >= 1.0)
+            .map_or((item.size.0 as f32, item.size.1 as f32), |content| {
+                (content.2, content.3)
+            });
+        Some((
+            item.id,
+            item.generation,
+            info.duration_ms,
+            kettle_media::PlayOpen {
+                source: kettle_media::Source::Path {
+                    path: path.clone(),
+                    authorization: authorization.clone(),
+                },
+                max_width: edge(room.0),
+                max_height: edge(room.1),
+                start_ms: start_ms.min(info.duration_ms),
+                max_fps_milli: kettle_media::MAX_PLAY_FPS_MILLI,
+            },
+        ))
+    }
+
+    /// The lane's play button, Space while it holds the keyboard, and
+    /// `video_play`: stop a silent preview that plays, else play or pause
+    /// the video itself, opening it where it stands when it has no session.
+    fn toggle_lane_play(&mut self, ws: &mut WindowState, pane: u64) {
+        if ws
+            .lane_previews
+            .get(&pane)
+            .is_some_and(crate::media::LanePreview::active)
+        {
+            return self.toggle_lane_preview(ws, pane);
+        }
+        let now = std::time::Instant::now();
+        let current = preview_item(ws, pane).map(|item| (item.id, item.generation));
+        let changed = preview_item(ws, pane).is_some_and(|item| item.source.changed);
+        let playback = ws.lane_playbacks.get_mut(&pane).filter(|playback| {
+            current.is_some_and(|(item, generation)| playback.serves(item, generation))
+        });
+        // A control client or a Lua script may pause a video, but only the
+        // user plays one, and never from a file found changed, which a
+        // reload reads again: resuming reads the file as opening it does.
+        let pauses = playback
+            .as_ref()
+            .is_some_and(|playback| playback.button() == crate::media::PlaybackButton::Pause);
+        if !pauses && (self.ctl_driving || self.lua_driving) {
+            return;
+        }
+        if !pauses && changed {
+            if let Some(panel) = ws.preview_panels.get_mut(&pane) {
+                panel.notice = Some(crate::window_state::LaneNotice::Changed);
+            }
+            return self.lanes_changed(ws, false);
+        }
+        let at_ms = match playback {
+            Some(playback) => match playback.toggle(now) {
+                crate::media::PlaybackToggled::Done => {
+                    if let Some(panel) = ws.preview_panels.get_mut(&pane) {
+                        panel.notice = None;
+                    }
+                    return self.lanes_changed(ws, false);
+                }
+                crate::media::PlaybackToggled::Open { at_ms } => at_ms,
+            },
+            None => 0,
+        };
+        self.open_lane_playback(ws, pane, at_ms, true);
+    }
+
+    /// Open the video `pane`'s lane shows from `at_ms`, playing when
+    /// `play`, in a session of its own. Only on the user's own gesture:
+    /// never while a control client's request or a Lua script's action is
+    /// handled, and never for a file found changed, which a reload reads
+    /// again. Its silent preview ends first, and a lane past the most that
+    /// play at once gives its session up, the one played least recently.
+    fn open_lane_playback(&mut self, ws: &mut WindowState, pane: u64, at_ms: u64, play: bool) {
+        use crate::window_state::LaneNotice;
+        if self.ctl_driving || self.lua_driving {
+            return;
+        }
+        let Some((item, generation, duration_ms, open)) = self.lane_play_open(ws, pane, at_ms)
+        else {
+            return;
+        };
+        let tell = |ws: &mut WindowState, notice: Option<LaneNotice>| {
+            if let Some(panel) = ws.preview_panels.get_mut(&pane) {
+                panel.notice = notice;
+            }
+        };
+        if preview_item(ws, pane).is_some_and(|item| item.source.changed) {
+            tell(ws, Some(LaneNotice::Changed));
+            return self.lanes_changed(ws, false);
+        }
+        let Some(client) = self.startup.media.clone() else {
+            tell(ws, Some(LaneNotice::VideoFailed));
+            return self.lanes_changed(ws, false);
+        };
+        self.end_lane_preview(ws, pane);
+        // The lane's own session goes first: it is the one replaced.
+        if let Some(playback) = ws.lane_playbacks.get_mut(&pane) {
+            playback.park();
+        }
+        self.make_room_for_playback(ws);
+        let proxy = self.proxy.clone();
+        let wake: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+            let _ = proxy.send_event(UserEvent::LanePlayback);
+        });
+        let now = std::time::Instant::now();
+        match client.play(&open, wake) {
+            Ok(session) => {
+                let session: Box<dyn crate::media::PlaybackSession> = Box::new(session);
+                match ws
+                    .lane_playbacks
+                    .get_mut(&pane)
+                    .filter(|playback| playback.serves(item, generation))
+                {
+                    Some(playback) => playback.reopen(session, open.start_ms, play, now),
+                    None => {
+                        ws.lane_playbacks.insert(
+                            pane,
+                            crate::media::LanePlayback::new(
+                                item,
+                                generation,
+                                duration_ms,
+                                session,
+                                open.start_ms,
+                                play,
+                                now,
+                            ),
+                        );
+                    }
+                }
+                tell(ws, None);
+            }
+            Err(failure) => tell(ws, Some(playback_failure_notice(failure))),
+        }
+        ws.accessibility_pending = true;
+        self.lanes_changed(ws, false);
+    }
+
+    /// Park playbacks, least recently played first, until fewer than the
+    /// most that play at once have a session, here and in every other
+    /// window: each keeps its frame and where it stands.
+    fn make_room_for_playback(&mut self, ws: &mut WindowState) {
+        loop {
+            let mut live = 0;
+            let mut oldest: Option<(std::time::Instant, Option<u64>, u64)> = None;
+            let mut consider = |touched, window, pane| {
+                live += 1;
+                if oldest.is_none_or(|(at, _, _)| touched < at) {
+                    oldest = Some((touched, window, pane));
+                }
+            };
+            for (&pane, playback) in &ws.lane_playbacks {
+                if playback.has_session() {
+                    consider(playback.touched, None, pane);
+                }
+            }
+            for (&seq, window) in &self.windows {
+                for (&pane, playback) in &window.lane_playbacks {
+                    if playback.has_session() {
+                        consider(playback.touched, Some(seq), pane);
+                    }
+                }
+            }
+            if live < crate::media::MAX_PLAYING {
+                return;
+            }
+            let Some((_, window, pane)) = oldest else {
+                return;
+            };
+            let window = match window {
+                None => &mut *ws,
+                Some(seq) => match self.windows.get_mut(&seq) {
+                    Some(window) => window,
+                    None => return,
+                },
+            };
+            if let Some(playback) = window.lane_playbacks.get_mut(&pane) {
+                playback.park();
+            }
+            window.accessibility_pending = true;
+            if let Some(handle) = &window.window {
+                handle.request_redraw();
+            }
+        }
+    }
+
+    /// An assistive technology's move along `pane`'s bar: to the value it
+    /// sets, in seconds, or a step either way, the video opened there and
+    /// playing if it played. Only while the lane shows the bar.
+    fn seek_lane_by_accessibility(
+        &mut self,
+        ws: &mut WindowState,
+        pane: u64,
+        request: &accesskit::ActionRequest,
+    ) {
+        let shown = self
+            .preview_lane_projections(ws)
+            .into_iter()
+            .find(|lane| lane.pane == pane)
+            .is_some_and(|lane| {
+                lane.scrubber.is_some()
+                    && self
+                        .preview_lane_geometry(ws, &lane)
+                        .is_some_and(|geometry| geometry.scrubber.is_some())
+            });
+        let Some(playback) = ws.lane_playbacks.get_mut(&pane).filter(|_| shown) else {
+            return;
+        };
+        let at = playback.position_ms();
+        let step = LANE_SEEK_STEP.as_millis() as u64;
+        let target = match (request.action, &request.data) {
+            (AccessibilityAction::SetValue, Some(accesskit::ActionData::NumericValue(seconds)))
+                if seconds.is_finite() =>
+            {
+                (seconds.max(0.0) * 1000.0).round() as u64
+            }
+            (AccessibilityAction::Increment, _) => at.saturating_add(step),
+            (AccessibilityAction::Decrement, _) => at.saturating_sub(step),
+            _ => return,
+        };
+        let (at_ms, play) = playback.seek_target(target);
+        self.open_lane_playback(ws, pane, at_ms, play);
+    }
+
+    /// The release of a drag along `pane`'s bar: open the video where it
+    /// ended, playing if it played.
+    fn seek_lane_playback(&mut self, ws: &mut WindowState, pane: u64) {
+        let Some((at_ms, play)) = ws
+            .lane_playbacks
+            .get_mut(&pane)
+            .and_then(crate::media::LanePlayback::release_scrub)
+        else {
+            return;
+        };
+        self.open_lane_playback(ws, pane, at_ms, play);
+    }
+
+    /// Take what each lane's session has: its newest frame and where it is.
+    /// One that ended keeps its last frame; one that failed says why.
+    fn poll_lane_playbacks(&mut self, ws: &mut WindowState) {
+        let budget = kettle_core::GraphicsBudget::previews();
+        let mut redraw = false;
+        let mut failed = Vec::new();
+        for (&pane, playback) in &mut ws.lane_playbacks {
+            let before = (playback.button(), playback.notice());
+            redraw |= playback.poll(&budget);
+            let after = (playback.button(), playback.notice());
+            if before != after {
+                ws.accessibility_pending = true;
+                if let Some(crate::media::PlaybackNotice::Failed(failure)) = after.1 {
+                    failed.push((pane, failure));
+                }
+            }
+        }
+        for (pane, failure) in failed {
+            if let Some(panel) = ws.preview_panels.get_mut(&pane) {
+                panel.notice = Some(playback_failure_notice(failure));
+            }
+            // A file found changed is read no more for its item, played or
+            // previewed, until a reload replaces it.
+            if failure == kettle_media::FailureCode::Changed
+                && let Some(playback) = ws.lane_playbacks.get(&pane)
+                && let Some(item) = ws
+                    .mux
+                    .panes
+                    .get_mut(&pane)
+                    .and_then(|pane| pane.media_shelf.get_mut(playback.item))
+                    .filter(|item| item.generation == playback.generation)
+            {
+                item.source.changed = true;
+            }
+        }
+        if redraw && let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+    }
+
+    /// Keep each lane's session while this window's loop runs, pause it
+    /// while its lane cannot be seen, and drop a playback whose lane shows
+    /// another item. When the loop should come round again to keep them.
+    fn tick_lane_playbacks(
+        &mut self,
+        ws: &mut WindowState,
+        now: std::time::Instant,
+    ) -> Option<std::time::Duration> {
+        if ws.lane_playbacks.is_empty() {
+            return None;
+        }
+        let stale: Vec<u64> = ws
+            .lane_playbacks
+            .iter()
+            .filter(|(pane, playback)| {
+                preview_item(ws, **pane)
+                    .is_none_or(|item| !playback.serves(item.id, item.generation))
+            })
+            .map(|(pane, _)| *pane)
+            .collect();
+        for pane in stale {
+            ws.lane_playbacks.remove(&pane);
+        }
+        let hidden = window_is_render_hidden(ws);
+        let visible: std::collections::HashSet<u64> = if hidden {
+            std::collections::HashSet::new()
+        } else {
+            ws.lane_playbacks
+                .keys()
+                .copied()
+                .filter(|&pane| {
+                    self.preview_lane_geometry_of(ws, pane)
+                        .is_some_and(|geometry| geometry.full && geometry.image.is_some())
+                })
+                .collect()
+        };
+        // A drag along a bar that ended without its release, by a menu
+        // opening or another press, leaves the video where it was.
+        let scrubbing = ws.lane_drag.filter(|drag| drag.scrub).map(|drag| drag.pane);
+        let mut live = false;
+        for (pane, playback) in &mut ws.lane_playbacks {
+            if scrubbing != Some(*pane) {
+                playback.cancel_scrub();
+            }
+            playback.set_hidden(!visible.contains(pane));
+            playback.keep();
+            live |= playback.has_session();
+        }
+        let _ = now;
+        live.then_some(LANE_PLAYBACK_KEEP)
     }
 
     /// Let `pane`'s preview go, frames and all: a job still making frames is
@@ -11583,6 +11988,7 @@ impl App {
         // left, once; a hover never makes frames, which would read the file.
         if motion
             && let Some(hover) = ws.lane_hover.filter(|hover| !hover.used)
+            && !ws.lane_playbacks.contains_key(&hover.pane)
             && ws
                 .lane_previews
                 .get(&hover.pane)
@@ -11641,6 +12047,17 @@ impl App {
     /// or that a silent preview is being made. A preview that plays is said
     /// by its button's name, never frame by frame.
     fn lane_announcement(&self, ws: &WindowState, pane: u64) -> Option<String> {
+        // A video opening says so, as a preview being made does; one that
+        // plays is said by its button's name, never frame by frame.
+        if ws.lane_playbacks.get(&pane).is_some_and(|playback| {
+            playback.notice() == Some(crate::media::PlaybackNotice::Opening)
+        }) {
+            return Some(
+                self.ui_text
+                    .text(kettle_i18n::Text::MediaLaneNoticeVideoLoading)
+                    .to_string(),
+            );
+        }
         lane_announced(
             ws.lane_previews.get(&pane),
             ws.preview_panels.get(&pane).and_then(|panel| panel.notice),
@@ -12241,6 +12658,21 @@ impl App {
             return false;
         }
         let at = (ws.cursor.x, ws.cursor.y);
+        // A drag along a playing video's bar moves where it says the video
+        // is; the release opens it there.
+        if drag.scrub {
+            let fraction = self
+                .preview_lane_geometry_of(ws, drag.pane)
+                .and_then(|geometry| geometry.scrub_at(at.0 as f32));
+            if let (Some(fraction), Some(playback)) =
+                (fraction, ws.lane_playbacks.get_mut(&drag.pane))
+            {
+                playback.scrub(fraction, std::time::Instant::now());
+                self.lanes_changed(ws, false);
+            }
+            ws.lane_drag = Some(drag);
+            return true;
+        }
         let scale = ws
             .window
             .as_ref()
@@ -12257,6 +12689,14 @@ impl App {
         }
         ws.lane_drag = Some(drag);
         true
+    }
+
+    /// The release of a press a lane took for a drag: a drag along a playing
+    /// video's bar opens the video where it ended; a pan is already done.
+    fn end_lane_drag(&mut self, ws: &mut WindowState, drag: crate::window_state::LaneDrag) {
+        if drag.scrub {
+            self.seek_lane_playback(ws, drag.pane);
+        }
     }
 
     /// Follow the pointer for a press on a lane's edge: the lane takes the
@@ -12457,8 +12897,28 @@ impl App {
             .is_some_and(|(item, panel)| {
                 lane_mode(item, panel) == kettle_render::MediaLaneMode::Source
             });
+        // A video playing in the lane, paused in place, or stopped where it
+        // stood shows its frame, which never pans: left and right step it.
+        let playing = preview_item(ws, pane).is_some_and(|item| {
+            ws.lane_playbacks
+                .get(&pane)
+                .is_some_and(|playback| playback.serves(item.id, item.generation))
+        });
         match action {
             K::Exit => self.exit_preview_focus(ws),
+            K::Move(right, 0) if playing && !source => {
+                let step = LANE_SEEK_STEP.as_millis() as u64;
+                if let Some(playback) = ws.lane_playbacks.get_mut(&pane) {
+                    let at = playback.position_ms();
+                    let target = if right < 0 {
+                        at.saturating_sub(step)
+                    } else {
+                        at.saturating_add(step)
+                    };
+                    let (at_ms, play) = playback.seek_target(target);
+                    self.open_lane_playback(ws, pane, at_ms, play);
+                }
+            }
             K::Move(right, down) if source => {
                 if let Some(total) = preview_item(ws, pane).map(|item| item.source.text_rows())
                     && let Some(panel) = ws.preview_panels.get_mut(&pane)
@@ -12489,7 +12949,7 @@ impl App {
             K::Fit => self.fit_preview(ws, pane),
             K::Page(step) => self.page_preview(ws, pane, step),
             K::Copy => self.copy_preview(ws, pane),
-            K::Play => self.toggle_lane_preview(ws, pane),
+            K::Play => self.toggle_lane_play(ws, pane),
             K::Swallow => {}
         }
         if let Some(window) = &ws.window {
@@ -12844,6 +13304,7 @@ impl App {
         for pane in gone {
             self.end_lane_preview(ws, pane);
         }
+        ws.lane_playbacks.retain(|pane, _| live.contains(pane));
         let resized = ws.mux.retain_lanes(|pane| live.contains(&pane));
         if resized || ws.preview_panels.len() != before {
             self.lanes_changed(ws, resized);
@@ -12883,6 +13344,7 @@ impl App {
         let mut lane = kettle_render::MediaLanePanel {
             play: None,
             frame: None,
+            scrubber: None,
             pane,
             rect,
             collapsed,
@@ -12975,6 +13437,60 @@ impl App {
                         );
                     }
                 }
+            }
+        }
+        // A video playing in its lane, paused in place, or stopped where it
+        // stood, while no silent preview plays: its frame in the poster's
+        // place, its bar, and what it does in the footer.
+        let previewing = ws
+            .lane_previews
+            .get(&pane)
+            .is_some_and(|preview| preview.serves(item.id, item.generation) && preview.active());
+        if lane_previews_item(item, panel).is_some()
+            && !previewing
+            && let Some(playback) = ws
+                .lane_playbacks
+                .get(&pane)
+                .filter(|playback| playback.serves(item.id, item.generation))
+        {
+            lane.play = Some(match playback.button() {
+                crate::media::PlaybackButton::Pause => kettle_render::MediaLanePlay::Pause,
+                crate::media::PlaybackButton::Play => kettle_render::MediaLanePlay::Play,
+            });
+            if let Some(frame) = playback.frame() {
+                lane.frame = Some(kettle_render::MediaLaneFrame {
+                    sheet: frame.clone(),
+                    source: (0, 0, frame.width, frame.height),
+                    size: item.size,
+                });
+            }
+            let (at, length) = (playback.position_ms(), playback.duration_ms());
+            lane.scrubber = Some(kettle_render::MediaLaneScrubber {
+                position_ms: at,
+                duration_ms: length,
+                label: tr.media_lane_video_time(
+                    &kettle_render::duration_label(at),
+                    &kettle_render::duration_label(length),
+                ),
+            });
+            match playback.notice() {
+                Some(crate::media::PlaybackNotice::Opening) => {
+                    lane.notice = Some(
+                        tr.text(kettle_i18n::Text::MediaLaneNoticeVideoLoading)
+                            .to_string(),
+                    );
+                }
+                Some(crate::media::PlaybackNotice::Playing) => {
+                    lane.notice = Some(
+                        tr.text(kettle_i18n::Text::MediaLaneNoticeVideoPlaying)
+                            .to_string(),
+                    );
+                }
+                Some(crate::media::PlaybackNotice::Failed(failure)) => {
+                    lane.notice =
+                        Some(lane_notice_text(playback_failure_notice(failure), tr).to_string());
+                }
+                None => {}
             }
         }
         // The source rows in view, for the room the lane has: only those are
@@ -13120,6 +13636,24 @@ impl App {
         let hit = geometry
             .as_ref()
             .and_then(|geometry| geometry.hit_test(x, y));
+        // A press on a playing video's bar moves it there, and a drag
+        // along the bar after it, until the release opens the video there.
+        if hit == Some(kettle_render::MediaLaneHit::Scrub)
+            && let Some(fraction) = geometry.as_ref().and_then(|geometry| geometry.scrub_at(x))
+            && let Some(playback) = ws.lane_playbacks.get_mut(&pane)
+        {
+            playback.scrub(fraction, std::time::Instant::now());
+            let at = (f64::from(x), f64::from(y));
+            ws.lane_drag = Some(crate::window_state::LaneDrag {
+                pane,
+                from: at,
+                last: at,
+                panning: false,
+                scrub: true,
+            });
+            self.lanes_changed(ws, false);
+            return true;
+        }
         // A press on the lane's edge drags it.
         if hit == Some(kettle_render::MediaLaneHit::Resize) {
             ws.lane_resize = Some(crate::window_state::LaneResize {
@@ -13142,6 +13676,7 @@ impl App {
                 from: at,
                 last: at,
                 panning: false,
+                scrub: false,
             });
         }
         if let Some(hit) = hit {
@@ -13170,12 +13705,13 @@ impl App {
             Hit::Canvas => self.next_preview_canvas(ws, pane),
             Hit::Copy => self.copy_preview(ws, pane),
             Hit::Reload => self.reload_preview(ws, pane),
-            Hit::Play => self.toggle_lane_preview(ws, pane),
+            Hit::Play => self.toggle_lane_play(ws, pane),
             Hit::ZoomOut => self.zoom_preview(ws, pane, 1.0 / kettle_render::MEDIA_ZOOM_STEP),
             Hit::ZoomIn => self.zoom_preview(ws, pane, kettle_render::MEDIA_ZOOM_STEP),
             Hit::Fit => self.fit_preview(ws, pane),
-            // The edge moves with a drag, not a click.
-            Hit::Resize | Hit::Inside => {}
+            // The edge moves with a drag, and the bar with a press or a
+            // drag, not a click.
+            Hit::Resize | Hit::Scrub | Hit::Inside => {}
         }
     }
 
@@ -22023,6 +22559,14 @@ impl App {
             Action::OpenMediaShelf => self.open_media_shelf(ws),
             Action::PreviewClipboardPath => self.preview_copied_file(ws),
             Action::FocusPreview => self.focus_preview(ws),
+            // The silent preview, labelled as such, never the video itself.
+            Action::PreviewPlay => {
+                if let Some(pane) = ws.mux.active_focus()
+                    && ws.preview_panels.contains_key(&pane)
+                {
+                    self.toggle_lane_preview(ws, pane);
+                }
+            }
             Action::RenderClipboardAsDiagram => self.preview_copied_diagram(ws, false),
             Action::RenderSelectionAsDiagram => self.preview_copied_diagram(ws, true),
             Action::CopyAgentSetup => self.copy_agent_setup(),
@@ -22035,7 +22579,7 @@ impl App {
             | Action::PreviewCanvas
             | Action::PreviewCopy
             | Action::PreviewReload
-            | Action::PreviewPlay
+            | Action::VideoPlay
             | Action::PreviewZoomIn
             | Action::PreviewZoomOut
             | Action::PreviewFit => {
@@ -26019,14 +26563,41 @@ impl App {
                                 "terminal"
                             }
                             .into();
-                        let controls: serde_json::Map<String, serde_json::Value> =
+                        let mut controls: serde_json::Map<String, serde_json::Value> =
                             lane_controls(&geometry)
                                 .into_iter()
                                 .filter_map(|(_, rect, hit)| {
                                     Some((lane_control_name(hit).to_string(), rect_json(rect?)))
                                 })
                                 .collect();
+                        if let Some(bar) = geometry.scrubber {
+                            controls.insert(
+                                lane_control_name(kettle_render::MediaLaneHit::Scrub).to_string(),
+                                rect_json(bar),
+                            );
+                        }
                         lane["controls"] = controls.into();
+                    }
+                    // A video playing in the lane, paused in place, or
+                    // stopped where it stood: where it is, never a frame.
+                    if let Some(bar) = &panel.scrubber {
+                        let state = match (
+                            panel.play,
+                            target
+                                .lane_playbacks
+                                .get(id)
+                                .is_some_and(crate::media::LanePlayback::has_session),
+                        ) {
+                            (Some(kettle_render::MediaLanePlay::Pause), _) => "playing",
+                            (_, true) => "paused",
+                            (_, false) => "stopped",
+                        };
+                        lane["playback"] = serde_json::json!({
+                            "state": state,
+                            "position_ms": bar.position_ms,
+                            "duration_ms": bar.duration_ms,
+                            "frame": panel.frame.is_some(),
+                        });
                     }
                 }
                 Some(lane)
@@ -27397,7 +27968,10 @@ impl App {
             self.end_lane_resize(ws);
             return true;
         }
-        if bcode == 0 && ws.lane_drag.take().is_some() {
+        if bcode == 0
+            && let Some(drag) = ws.lane_drag.take()
+        {
+            self.end_lane_drag(ws, drag);
             return true;
         }
         if bcode == 0
@@ -32712,6 +33286,22 @@ impl ApplicationHandler<UserEvent> for App {
                 self.config_reload_deadline
                     .get_or_insert_with(|| std::time::Instant::now() + CONFIG_RELOAD_DEBOUNCE);
             }
+            UserEvent::LanePlayback => {
+                // Each window whose lanes play takes what its sessions have.
+                let seqs: Vec<u64> = self
+                    .windows
+                    .iter()
+                    .filter(|(_, window)| !window.lane_playbacks.is_empty())
+                    .map(|(&seq, _)| seq)
+                    .collect();
+                for seq in seqs {
+                    let Some(mut ws) = self.windows.remove(&seq) else {
+                        continue;
+                    };
+                    self.poll_lane_playbacks(&mut ws);
+                    self.finish_window_dispatch(el, seq, ws);
+                }
+            }
             UserEvent::MediaRendered => {
                 let seq = if self.windows.contains_key(&self.focused_seq) {
                     self.focused_seq
@@ -33721,9 +34311,15 @@ impl App {
                             self.ui_text
                                 .text(kettle_i18n::Text::MediaLaneA11yStopPreview)
                         }
-                        kettle_render::MediaLaneHit::Play => self
-                            .ui_text
-                            .text(kettle_i18n::Text::MediaLaneA11yPlayPreview),
+                        kettle_render::MediaLaneHit::Play
+                            if lane.play == Some(kettle_render::MediaLanePlay::Pause) =>
+                        {
+                            self.ui_text
+                                .text(kettle_i18n::Text::MediaLaneA11yPauseVideo)
+                        }
+                        kettle_render::MediaLaneHit::Play => {
+                            self.ui_text.text(kettle_i18n::Text::MediaLaneA11yPlayVideo)
+                        }
                         kettle_render::MediaLaneHit::ZoomOut => {
                             self.ui_text.text(kettle_i18n::Text::MediaLaneA11yZoomOut)
                         }
@@ -33734,6 +34330,7 @@ impl App {
                             self.ui_text.text(kettle_i18n::Text::MediaLaneA11yFit)
                         }
                         kettle_render::MediaLaneHit::Resize
+                        | kettle_render::MediaLaneHit::Scrub
                         | kettle_render::MediaLaneHit::Inside => continue,
                     };
                     let mut button = Node::new(Role::Button);
@@ -33752,6 +34349,33 @@ impl App {
                     }
                     controls.push(id);
                     nodes.push((id, button));
+                }
+                // A playing video's bar: a slider in seconds, its value said
+                // as a time of the video's length.
+                if let (Some(rect), Some(bar), Some(id)) = (
+                    geometry.scrubber,
+                    lane.scrubber.as_ref(),
+                    accessibility_lane_id(lane.pane, LANE_SCRUBBER_PART),
+                ) {
+                    let mut slider = Node::new(Role::Slider);
+                    slider.set_label(
+                        self.ui_text
+                            .text(kettle_i18n::Text::MediaLaneA11yVideoPosition),
+                    );
+                    slider.set_value(self.ui_text.media_lane_a11y_video_time(
+                        &kettle_render::duration_label(bar.position_ms),
+                        &kettle_render::duration_label(bar.duration_ms),
+                    ));
+                    slider.set_numeric_value(bar.position_ms as f64 / 1000.0);
+                    slider.set_min_numeric_value(0.0);
+                    slider.set_max_numeric_value(bar.duration_ms as f64 / 1000.0);
+                    slider.set_numeric_value_step(LANE_SEEK_STEP.as_secs_f64());
+                    slider.add_action(AccessibilityAction::SetValue);
+                    slider.add_action(AccessibilityAction::Increment);
+                    slider.add_action(AccessibilityAction::Decrement);
+                    slider.set_bounds(ax_rect(rect));
+                    controls.push(id);
+                    nodes.push((id, slider));
                 }
             }
             node.set_children(controls);
@@ -36096,6 +36720,13 @@ impl App {
             return;
         }
         if let Some((pane, part)) = accessibility_lane_part(request.target_node) {
+            // A playing video's bar moves it: to the value set, or a step.
+            if part == LANE_SCRUBBER_PART {
+                if !self.pointer_modal_open(ws) {
+                    self.seek_lane_by_accessibility(ws, pane, &request);
+                }
+                return;
+            }
             // Only a control the lane shows now, with nothing over it,
             // answers: a stale part names nothing.
             if request.action != AccessibilityAction::Click || self.pointer_modal_open(ws) {
@@ -36226,7 +36857,10 @@ impl App {
         match ev {
             // Consumed by the outer window-less dispatch before a WindowState
             // is checked out.
-            UserEvent::Activation | UserEvent::RemoteScanReady | UserEvent::MediaRendered => {}
+            UserEvent::Activation
+            | UserEvent::RemoteScanReady
+            | UserEvent::MediaRendered
+            | UserEvent::LanePlayback => {}
             UserEvent::AccessibilityAction { request, .. } => {
                 self.handle_accessibility_action(ws, request, _el);
             }
@@ -37532,7 +38166,10 @@ impl App {
                     self.sync_cursor_icon(ws);
                     return;
                 }
-                if bcode == 0 && ws.lane_drag.take().is_some() {
+                if bcode == 0
+                    && let Some(drag) = ws.lane_drag.take()
+                {
+                    self.end_lane_drag(ws, drag);
                     self.sync_cursor_icon(ws);
                     return;
                 }
@@ -38807,6 +39444,8 @@ impl App {
         let lane_resize_wait = self.flush_lane_resize(ws, now);
         // Lane previews step their frames, time out, or start on a rest.
         let lane_preview_wait = self.tick_lane_previews(ws, now);
+        // Lane playbacks keep their sessions, and pause while hidden.
+        let lane_playback_wait = self.tick_lane_playbacks(ws, now);
         // A menu or dialog opened from the keyboard ends a lane's drag now,
         // not at the pointer's next motion.
         if (ws.lane_drag.is_some() || ws.lane_resize.is_some())
@@ -39078,6 +39717,9 @@ impl App {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         if let Some(next) = lane_preview_wait {
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
+        if let Some(next) = lane_playback_wait {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         if let Some(next) = pending_video_receipt_wait {
@@ -45062,6 +45704,7 @@ mod tests {
         let mut lane = kettle_render::MediaLanePanel {
             play: None,
             frame: None,
+            scrubber: None,
             pane: 7,
             rect: (0.0, 360.0, 800.0, 240.0),
             collapsed: false,
@@ -45117,17 +45760,27 @@ mod tests {
 
         // Lane node ids round-trip, keep clear of every other kind of node,
         // and a pane id too large for the space has no lane nodes.
-        for (pane, part) in [(1, 0), (7, 5), (super::MAX_LANE_ACCESSIBILITY_PANE - 1, 15)] {
+        for (pane, part) in [
+            (1, 0),
+            (7, 5),
+            (7, super::LANE_SCRUBBER_PART),
+            (super::MAX_LANE_ACCESSIBILITY_PANE - 1, 31),
+        ] {
             let id = super::accessibility_lane_id(pane, part).unwrap();
             assert_eq!(super::accessibility_lane_part(id), Some((pane, part)));
             assert_eq!(super::accessibility_card_instance(id), None);
             assert_ne!(id, super::accessibility_pane_id(pane));
         }
+        // The next lane's parts start past the last of this one's.
+        assert_ne!(
+            super::accessibility_lane_id(7, 31),
+            super::accessibility_lane_id(8, 0)
+        );
         assert_eq!(
             super::accessibility_lane_id(super::MAX_LANE_ACCESSIBILITY_PANE, 0),
             None
         );
-        assert_eq!(super::accessibility_lane_id(1, 16), None);
+        assert_eq!(super::accessibility_lane_id(1, 32), None);
         assert_eq!(
             super::accessibility_lane_part(super::accessibility_pane_id(3)),
             None
@@ -58307,6 +58960,121 @@ mod lane_control_tests {
         assert_eq!(lane_control_name(kettle_render::MediaLaneHit::Play), "play");
     }
 
+    /// A video that cannot play says which decoder to install, that there is
+    /// no sandbox, that the file changed, that it took too long, or that it
+    /// stopped; never a preview's words.
+    #[test]
+    fn a_failed_playback_says_why() {
+        use crate::window_state::LaneNotice as N;
+        use kettle_media::FailureCode as F;
+        for (failure, notice) in [
+            (F::BackendUnavailable, N::VideoNeedsDecoder),
+            (F::CodecUnavailable, N::VideoNeedsDecoder),
+            (F::UnsupportedContainer, N::VideoNeedsDecoder),
+            (F::SandboxUnavailable, N::VideoNeedsSandbox),
+            (F::Changed, N::Changed),
+            (F::RenderTimeout, N::VideoTimedOut),
+            (F::RenderResource, N::VideoFailed),
+            (F::WorkerUnavailable, N::VideoFailed),
+            (F::RenderParse, N::VideoFailed),
+        ] {
+            assert_eq!(
+                super::playback_failure_notice(failure),
+                notice,
+                "{failure:?}"
+            );
+        }
+    }
+
+    /// A video plays in its lane only on the user's own gesture and not for
+    /// a changed file, with one decoder a lane and at most two sessions at
+    /// once; its session is kept while the event loop runs and paused while
+    /// the lane is hidden; a drag along its bar opens it on release, and one
+    /// cancelled leaves it; and it ends with its lane, item and pane. The
+    /// play button plays the video; the palette's preview_play stays the
+    /// silent preview.
+    #[test]
+    fn video_playback_is_wired() {
+        let source = kettle_test_support::production_source(include_str!("app.rs"));
+        let code = kettle_test_support::code_only(&source);
+        let flat = code.split_whitespace().collect::<Vec<_>>().join(" ");
+        let body = |name: &str| {
+            flat.split(&format!("fn {name}("))
+                .nth(1)
+                .and_then(|rest| rest.split(" fn ").next())
+                .unwrap_or_else(|| panic!("{name}"))
+                .to_owned()
+        };
+        let open = body("open_lane_playback");
+        assert!(
+            open.split_once(") {").is_some_and(|(_, rest)| rest
+                .trim_start()
+                .starts_with("use crate::window_state::LaneNotice; if self.ctl_driving || self.lua_driving { return; }")),
+            "a video opens only on the user's own gesture"
+        );
+        assert!(open.contains("item.source.changed"));
+        // Resuming a session reads the file as opening one does: a control
+        // client or Lua script may only pause, and a changed file is
+        // refused, both before the session is told.
+        let toggle = body("toggle_lane_play");
+        let told = toggle.find("playback.toggle(now)").unwrap();
+        let driving = toggle
+            .find("if !pauses && (self.ctl_driving || self.lua_driving) { return; }")
+            .unwrap();
+        let changed = toggle
+            .find("if !pauses && changed { if let Some(panel) = ws.preview_panels.get_mut(&pane) { panel.notice = Some(crate::window_state::LaneNotice::Changed); } return self.lanes_changed(ws, false); }")
+            .unwrap();
+        assert!(driving < told && changed < told);
+        assert!(toggle.contains(
+            "let changed = preview_item(ws, pane).is_some_and(|item| item.source.changed);"
+        ));
+        // A session that fails Changed marks its own item changed.
+        assert!(body("poll_lane_playbacks").contains(
+            "if failure == kettle_media::FailureCode::Changed && let Some(playback) = ws.lane_playbacks.get(&pane) && let Some(item) = ws .mux .panes .get_mut(&pane) .and_then(|pane| pane.media_shelf.get_mut(playback.item)) .filter(|item| item.generation == playback.generation) { item.source.changed = true; }"
+        ));
+        let ended = open.find("self.end_lane_preview(ws, pane);").unwrap();
+        let roomed = open.find("self.make_room_for_playback(ws);").unwrap();
+        let played = open.find("client.play(&open, wake)").unwrap();
+        assert!(ended < roomed && roomed < played);
+        assert!(body("start_lane_preview").contains(
+            "if let Some(playback) = ws.lane_playbacks.get_mut(&pane) { playback.park(); }"
+        ));
+        assert!(
+            body("make_room_for_playback")
+                .contains("if live < crate::media::MAX_PLAYING { return; }")
+        );
+        let tick = body("tick_lane_playbacks");
+        assert!(tick.contains("playback.set_hidden(!visible.contains(pane)); playback.keep();"));
+        assert!(tick.contains("if scrubbing != Some(*pane) { playback.cancel_scrub(); }"));
+        assert!(tick.contains("live.then_some(LANE_PLAYBACK_KEEP)"));
+        let wait = body("about_to_wait_inner");
+        assert!(wait.contains("let lane_playback_wait = self.tick_lane_playbacks(ws, now);"));
+        assert!(wait.contains(
+            "if let Some(next) = lane_playback_wait { wait = Some(wait.map_or(next, |current| current.min(next))); }"
+        ));
+        assert!(
+            body("end_lane_drag")
+                .contains("if drag.scrub { self.seek_lane_playback(ws, drag.pane); }")
+        );
+        assert!(body("close_preview").contains("ws.lane_playbacks.remove(&pane);"));
+        assert!(
+            body("prune_previews")
+                .contains("ws.lane_playbacks.retain(|pane, _| live.contains(pane));")
+        );
+        assert!(body("act_on_preview").contains("Hit::Play => self.toggle_lane_play(ws, pane),"));
+        assert!(flat.contains("Action::VideoPlay => Some(Hit::Play),"));
+        assert!(flat.contains(
+            "Action::PreviewPlay => { if let Some(pane) = ws.mux.active_focus() && ws.preview_panels.contains_key(&pane) { self.toggle_lane_preview(ws, pane); } }"
+        ));
+        assert!(
+            body("tick_lane_previews").contains("&& !ws.lane_playbacks.contains_key(&hover.pane)")
+        );
+        assert_eq!(
+            lane_control_name(kettle_render::MediaLaneHit::Scrub),
+            "scrubber"
+        );
+    }
+
     /// The wheel up scrolls a source back and the wheel down on. A swipe
     /// whose content moves right shows the columns to its left, as winit
     /// counts it; the wheel with Shift held moves sideways, as does the
@@ -58959,8 +59727,8 @@ mod lane_control_tests {
             "WindowEvent::PinchGesture { delta, .. } => { ws.resume_native_pointer(); if self.lane_takes_wheel(ws) { self.pinch_over_lane(ws, delta); } }",
             "ws.selection_autoscroll_edge = 0; // A press the lane took owns the pointer's motion until its // release: it resizes the lane or pans its item, and nothing // else sees it. if self.resize_preview_lane(ws) || self.drag_preview_lane(ws) { self.sync_cursor_icon(ws); return; }",
             "ws.selection_autoscroll_edge = 0; if self.resize_preview_lane(ws) || self.drag_preview_lane(ws) { return; }",
-            "// The release of a press a lane took is the lane's. if bcode == 0 && ws.lane_resize.is_some() { self.end_lane_resize(ws); self.sync_cursor_icon(ws); return; } if bcode == 0 && ws.lane_drag.take().is_some() { self.sync_cursor_icon(ws); return; } // The release of a press a card took is the card's too.",
-            "ws.held_buttons.end_own(bcode); if bcode == 0 && ws.lane_resize.is_some() { self.end_lane_resize(ws); return true; } if bcode == 0 && ws.lane_drag.take().is_some() { return true; }",
+            "// The release of a press a lane took is the lane's. if bcode == 0 && ws.lane_resize.is_some() { self.end_lane_resize(ws); self.sync_cursor_icon(ws); return; } if bcode == 0 && let Some(drag) = ws.lane_drag.take() { self.end_lane_drag(ws, drag); self.sync_cursor_icon(ws); return; } // The release of a press a card took is the card's too.",
+            "ws.held_buttons.end_own(bcode); if bcode == 0 && ws.lane_resize.is_some() { self.end_lane_resize(ws); return true; } if bcode == 0 && let Some(drag) = ws.lane_drag.take() { self.end_lane_drag(ws, drag); return true; }",
             "Self::hide_cursor_layer(ws); // Its release may never come here. ws.lane_drag = None; self.end_lane_resize(ws);",
             // Any press ends a drag whose release went elsewhere, natively
             // and from a control client, as does a menu opening; a menu or

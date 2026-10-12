@@ -13,6 +13,13 @@
 //! cancelled. Each frame is drawn at exactly the plan's size in sRGB, then
 //! un-premultiplied to straight RGBA.
 //!
+//! A playback session reads the video track with an asset reader from its
+//! start to the end, each frame decoded to BGRA at the session's size as
+//! coded, which Apple's decoder service scales: nothing is drawn or
+//! composited in the worker, so it needs no GPU. Each frame is turned
+//! upright as it is copied out, and one sooner than a frame length of the
+//! rate asked after the last one kept is skipped.
+//!
 //! Containers AVFoundation does not read (WebM, Matroska, AVI and the rest)
 //! are `UnsupportedContainer`, and a codec it cannot decode is
 //! `CodecUnavailable`, which [`Decoders`](crate::Decoders) answers with the external decoder
@@ -24,25 +31,36 @@ use std::time::Instant;
 
 use block2::RcBlock;
 use kettle_media::video::{
-    DecodedFrame, DecodedStills, StillsPlan, VideoContainer, VideoDecoder, VideoInput,
+    DecodedFrame, DecodedStills, FrameSlots, FrameSource, PlayGate, PlayRequest, Playback,
+    StillsPlan, VideoContainer, VideoDecoder, VideoInput, VideoPlayer,
 };
 use kettle_media::{
-    FailureCode, MAX_VIDEO_FPS_MILLI, MAX_VIDEO_SIDE, StillSample, VideoCodec, VideoInfo,
+    FailureCode, MAX_VIDEO_FPS_MILLI, MAX_VIDEO_SIDE, Opened, StillSample, VideoCodec, VideoInfo,
+    play_size,
 };
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2_av_foundation::{
-    AVAssetImageGenerator, AVAssetImageGeneratorResult, AVAssetReferenceRestrictions, AVAssetTrack,
+    AVAssetImageGenerator, AVAssetImageGeneratorResult, AVAssetReader, AVAssetReaderStatus,
+    AVAssetReaderTrackOutput, AVAssetReferenceRestrictions, AVAssetTrack,
     AVAsynchronousKeyValueLoading, AVMediaTypeAudio, AVMediaTypeVideo, AVURLAsset,
     AVURLAssetOverrideMIMETypeKey, AVURLAssetPreferPreciseDurationAndTimingKey,
     AVURLAssetReferenceRestrictionsKey, NSValueAVFoundationExtensions as _,
 };
-use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use objc2_core_foundation::CFString;
+use objc2_core_foundation::{CGAffineTransform, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
     CGBitmapContextCreate, CGColorSpace, CGContext, CGImage, CGImageAlphaInfo,
     CGInterpolationQuality, kCGColorSpaceSRGB,
 };
-use objc2_core_media::{CMFormatDescription, CMTime};
+use objc2_core_media::{CMFormatDescription, CMTime, CMTimeRange};
+use objc2_core_video::{
+    CVPixelBuffer, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow,
+    CVPixelBufferGetHeight, CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth,
+    CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+    kCVPixelBufferHeightKey, kCVPixelBufferPixelFormatTypeKey, kCVPixelBufferWidthKey,
+    kCVPixelFormatType_32BGRA, kCVReturnSuccess,
+};
 use objc2_foundation::{NSArray, NSDictionary, NSError, NSNumber, NSString, NSURL, NSValue};
 
 use crate::reopen::reopen;
@@ -138,6 +156,16 @@ fn codec(fourcc: u32) -> VideoCodec {
 
 /// A time as whole ms, rounded to nearest; `None` when it is no number.
 fn ms(time: CMTime) -> Option<i64> {
+    in_units(time, 1000)
+}
+
+/// `time` in whole µs, rounded; `None` when it is not a number.
+fn us(time: CMTime) -> Option<i64> {
+    in_units(time, 1_000_000)
+}
+
+/// `time` in whole `per_second`ths of a second, rounded.
+fn in_units(time: CMTime, per_second: i128) -> Option<i64> {
     if time.flags.0 & TIME_VALID == 0
         || time.flags.0 & TIME_NOT_A_NUMBER != 0
         || time.timescale <= 0
@@ -145,14 +173,29 @@ fn ms(time: CMTime) -> Option<i64> {
         return None;
     }
     let scale = i128::from(time.timescale);
-    let ms = (i128::from(time.value) * 1000 + scale / 2).div_euclid(scale);
-    i64::try_from(ms).ok()
+    let units = (i128::from(time.value) * per_second + scale / 2).div_euclid(scale);
+    i64::try_from(units).ok()
 }
 
 /// A time of whole ms.
 fn time(ms: u64) -> CMTime {
     // SAFETY: CMTimeMake only builds a value from its two numbers.
     unsafe { CMTime::new(i64::try_from(ms).unwrap_or(i64::MAX), 1000) }
+}
+
+/// How a display transform shows the coded picture: degrees clockwise, to
+/// the nearest quarter turn, and whether it is mirrored first. A transform
+/// that reflects (its determinant below zero) is the coded picture flipped
+/// left to right, then turned.
+fn orientation(transform: CGAffineTransform) -> (u16, bool) {
+    let (a, b, c, d) = (transform.a, transform.b, transform.c, transform.d);
+    if a * d - b * c < 0.0 {
+        // The transform is the flip, then the turn: the turn is the
+        // transform with the flip undone, its first row negated.
+        (rotation(-a, -b), true)
+    } else {
+        (rotation(a, b), false)
+    }
 }
 
 /// Degrees clockwise a display transform turns the picture, to the nearest
@@ -166,7 +209,7 @@ fn rotation(a: f64, b: f64) -> u16 {
 /// The picture as shown: the bounding box of the track's size under its
 /// display transform, each term's size taken on its own so a turn that is
 /// not a quarter still covers what it shows.
-fn shown_size(size: CGSize, transform: objc2_core_foundation::CGAffineTransform) -> (f64, f64) {
+fn shown_size(size: CGSize, transform: CGAffineTransform) -> (f64, f64) {
     let width = (transform.a * size.width).abs() + (transform.c * size.height).abs();
     let height = (transform.b * size.width).abs() + (transform.d * size.height).abs();
     (width.round(), height.round())
@@ -290,6 +333,140 @@ fn failure(error: Option<&NSError>) -> FailureCode {
     }
 }
 
+/// A video opened for AVFoundation: the descriptor it reads the file
+/// through, the asset and its first video track, and what the video is.
+struct Asset {
+    file: std::fs::File,
+    asset: Retained<AVURLAsset>,
+    video: Retained<AVAssetTrack>,
+    info: VideoInfo,
+    /// Where the video track ends, within the asset's length: its other
+    /// tracks can run on past it.
+    video_end_ms: u64,
+    /// Whether the picture shows mirrored, before its turn.
+    mirrored: bool,
+}
+
+/// Open `input` and describe it, within `deadline`.
+fn open(input: &VideoInput<'_>, deadline: Instant) -> Result<Asset, FailureCode> {
+    let mime = mime(input.container).ok_or(FailureCode::UnsupportedContainer)?;
+    static VP9: Once = Once::new();
+    // SAFETY: the call takes a codec code and registers Apple's own
+    // decoder for it, if the system has one.
+    VP9.call_once(|| unsafe {
+        VTRegisterSupplementalVideoDecoderIfAvailable(u32::from_be_bytes(*b"vp09"));
+    });
+    // AVFoundation reads its own description of the file, opened by
+    // descriptor: no path is resolved, and nothing else shares its offset.
+    let file = reopen(input.file, input.identity)?;
+    let url = NSURL::URLWithString(&NSString::from_str(&format!(
+        "file:///dev/fd/{}",
+        file.as_raw_fd()
+    )))
+    .ok_or(FailureCode::BackendUnavailable)?;
+    let mime = NSString::from_str(mime);
+    let forbid = NSNumber::numberWithUnsignedInteger(AVAssetReferenceRestrictions::ForbidAll.0);
+    let precise = NSNumber::numberWithBool(true);
+    // SAFETY: the keys are AVFoundation's own option constants.
+    let keys = unsafe {
+        [
+            AVURLAssetOverrideMIMETypeKey,
+            AVURLAssetReferenceRestrictionsKey,
+            AVURLAssetPreferPreciseDurationAndTimingKey,
+        ]
+    };
+    let values: [&AnyObject; 3] = [&mime, &forbid, &precise];
+    let options = NSDictionary::<NSString, AnyObject>::from_slices(&keys, &values);
+    // SAFETY: each option holds the type AVFoundation documents for it:
+    // a MIME string, a restriction mask and a boolean.
+    let asset = unsafe { AVURLAsset::URLAssetWithURL_options(&url, Some(&options)) };
+    load(&*asset, &["duration", "tracks"], deadline)?;
+    // SAFETY: both keys are loaded, so neither read blocks.
+    let (duration, tracks) = unsafe { (asset.duration(), asset.tracks()) };
+    // SAFETY: the media type constants are AVFoundation's own.
+    let (video_type, audio_type) = unsafe { (AVMediaTypeVideo, AVMediaTypeAudio) };
+    let of_type = |track: &AVAssetTrack, kind: Option<&NSString>| {
+        // SAFETY: a loaded track's media type is a plain property.
+        kind.is_some_and(|kind| unsafe { track.mediaType() }.isEqualToString(kind))
+    };
+    let video = tracks
+        .iter()
+        .find(|track| of_type(track, video_type))
+        .ok_or_else(|| {
+            if tracks.count() == 0 {
+                // No tracks at all: AVFoundation could not read it.
+                FailureCode::UnsupportedContainer
+            } else {
+                FailureCode::UnsupportedMedia
+            }
+        })?;
+    let has_audio = tracks.iter().any(|track| of_type(&track, audio_type));
+    load(
+        &*video,
+        &[
+            "naturalSize",
+            "preferredTransform",
+            "nominalFrameRate",
+            "formatDescriptions",
+            "timeRange",
+        ],
+        deadline,
+    )?;
+    // SAFETY: these keys are loaded, so none of these reads blocks.
+    let (size, transform, rate, descriptions, range) = unsafe {
+        (
+            video.naturalSize(),
+            video.preferredTransform(),
+            video.nominalFrameRate(),
+            video.formatDescriptions(),
+            video.timeRange(),
+        )
+    };
+    let fourcc = descriptions.iter().next().map_or(0, |description| {
+        let description: *const AnyObject = &*description;
+        // SAFETY: a track's format descriptions are CMFormatDescription
+        // objects, bridged into the array as objects.
+        unsafe { (*description.cast::<CMFormatDescription>()).media_sub_type() }
+    });
+    let duration_ms = ms(duration)
+        .and_then(|duration| u64::try_from(duration).ok())
+        .ok_or(FailureCode::RenderParse)?;
+    let (width, height) = shown_size(size, transform);
+    let side = f64::from(MAX_VIDEO_SIDE);
+    if !(1.0..=side).contains(&width) || !(1.0..=side).contains(&height) {
+        return Err(if width > side || height > side {
+            FailureCode::RenderResource
+        } else {
+            FailureCode::RenderParse
+        });
+    }
+    let fps = (f64::from(rate) * 1000.0).round();
+    let (rotation, mirrored) = orientation(transform);
+    let info = VideoInfo {
+        duration_ms,
+        width: width as u32,
+        height: height as u32,
+        rotation,
+        codec: codec(fourcc),
+        fps_milli: (fps >= 1.0 && fps <= f64::from(MAX_VIDEO_FPS_MILLI)).then_some(fps as u32),
+        has_audio,
+        container: Some(input.container),
+    };
+    info.validate().map_err(|_| FailureCode::RenderParse)?;
+    let video_end_ms = ms(range.start)
+        .zip(ms(range.duration))
+        .and_then(|(start, length)| u64::try_from(start.checked_add(length)?).ok())
+        .map_or(duration_ms, |end| end.min(duration_ms));
+    Ok(Asset {
+        file,
+        asset,
+        video,
+        info,
+        video_end_ms,
+        mirrored,
+    })
+}
+
 impl VideoDecoder for AvFoundation {
     fn stills(
         &self,
@@ -297,107 +474,10 @@ impl VideoDecoder for AvFoundation {
         plan: &mut dyn FnMut(&VideoInfo) -> Result<StillsPlan, FailureCode>,
         deadline: Instant,
     ) -> Result<DecodedStills, FailureCode> {
-        let mime = mime(input.container).ok_or(FailureCode::UnsupportedContainer)?;
-        static VP9: Once = Once::new();
-        // SAFETY: the call takes a codec code and registers Apple's own
-        // decoder for it, if the system has one.
-        VP9.call_once(|| unsafe {
-            VTRegisterSupplementalVideoDecoderIfAvailable(u32::from_be_bytes(*b"vp09"));
-        });
-        // AVFoundation reads its own description of the file, opened by
-        // descriptor: no path is resolved, and nothing else shares its offset.
-        let file = reopen(input.file, input.identity)?;
-        let url = NSURL::URLWithString(&NSString::from_str(&format!(
-            "file:///dev/fd/{}",
-            file.as_raw_fd()
-        )))
-        .ok_or(FailureCode::BackendUnavailable)?;
-        let mime = NSString::from_str(mime);
-        let forbid = NSNumber::numberWithUnsignedInteger(AVAssetReferenceRestrictions::ForbidAll.0);
-        let precise = NSNumber::numberWithBool(true);
-        // SAFETY: the keys are AVFoundation's own option constants.
-        let keys = unsafe {
-            [
-                AVURLAssetOverrideMIMETypeKey,
-                AVURLAssetReferenceRestrictionsKey,
-                AVURLAssetPreferPreciseDurationAndTimingKey,
-            ]
-        };
-        let values: [&AnyObject; 3] = [&mime, &forbid, &precise];
-        let options = NSDictionary::<NSString, AnyObject>::from_slices(&keys, &values);
-        // SAFETY: each option holds the type AVFoundation documents for it:
-        // a MIME string, a restriction mask and a boolean.
-        let asset = unsafe { AVURLAsset::URLAssetWithURL_options(&url, Some(&options)) };
-        load(&*asset, &["duration", "tracks"], deadline)?;
-        // SAFETY: both keys are loaded, so neither read blocks.
-        let (duration, tracks) = unsafe { (asset.duration(), asset.tracks()) };
-        // SAFETY: the media type constants are AVFoundation's own.
-        let (video_type, audio_type) = unsafe { (AVMediaTypeVideo, AVMediaTypeAudio) };
-        let of_type = |track: &AVAssetTrack, kind: Option<&NSString>| {
-            // SAFETY: a loaded track's media type is a plain property.
-            kind.is_some_and(|kind| unsafe { track.mediaType() }.isEqualToString(kind))
-        };
-        let video = tracks
-            .iter()
-            .find(|track| of_type(track, video_type))
-            .ok_or_else(|| {
-                if tracks.count() == 0 {
-                    // No tracks at all: AVFoundation could not read it.
-                    FailureCode::UnsupportedContainer
-                } else {
-                    FailureCode::UnsupportedMedia
-                }
-            })?;
-        let has_audio = tracks.iter().any(|track| of_type(&track, audio_type));
-        load(
-            &*video,
-            &[
-                "naturalSize",
-                "preferredTransform",
-                "nominalFrameRate",
-                "formatDescriptions",
-            ],
-            deadline,
-        )?;
-        // SAFETY: these keys are loaded, so none of these reads blocks.
-        let (size, transform, rate, descriptions) = unsafe {
-            (
-                video.naturalSize(),
-                video.preferredTransform(),
-                video.nominalFrameRate(),
-                video.formatDescriptions(),
-            )
-        };
-        let fourcc = descriptions.iter().next().map_or(0, |description| {
-            let description: *const AnyObject = &*description;
-            // SAFETY: a track's format descriptions are CMFormatDescription
-            // objects, bridged into the array as objects.
-            unsafe { (*description.cast::<CMFormatDescription>()).media_sub_type() }
-        });
-        let duration_ms = ms(duration)
-            .and_then(|duration| u64::try_from(duration).ok())
-            .ok_or(FailureCode::RenderParse)?;
-        let (width, height) = shown_size(size, transform);
-        let side = f64::from(MAX_VIDEO_SIDE);
-        if !(1.0..=side).contains(&width) || !(1.0..=side).contains(&height) {
-            return Err(if width > side || height > side {
-                FailureCode::RenderResource
-            } else {
-                FailureCode::RenderParse
-            });
-        }
-        let fps = (f64::from(rate) * 1000.0).round();
-        let info = VideoInfo {
-            duration_ms,
-            width: width as u32,
-            height: height as u32,
-            rotation: rotation(transform.a, transform.b),
-            codec: codec(fourcc),
-            fps_milli: (fps >= 1.0 && fps <= f64::from(MAX_VIDEO_FPS_MILLI)).then_some(fps as u32),
-            has_audio,
-            container: Some(input.container),
-        };
-        info.validate().map_err(|_| FailureCode::RenderParse)?;
+        let Asset {
+            file, asset, info, ..
+        } = open(&input, deadline)?;
+        let duration_ms = info.duration_ms;
         let wanted = plan(&info)?;
         if wanted.times_ms.is_empty() || wanted.width == 0 || wanted.height == 0 {
             return Err(FailureCode::BadParams);
@@ -514,9 +594,332 @@ impl VideoDecoder for AvFoundation {
     }
 }
 
+/// The output a session reads: the video track decoded to BGRA at `width`
+/// by `height` as coded, the picture's own orientation, scaled by Apple's
+/// decoder service. Nothing here draws or composites, so no GPU is needed
+/// in the worker; the worker turns each frame upright as it copies it.
+fn track_output(asset: &Asset, width: u32, height: u32) -> Retained<AVAssetReaderTrackOutput> {
+    // The keys are CFStrings, bridged toll-free to NSStrings.
+    let bridge = |key: &'static CFString| -> &'static NSString {
+        // SAFETY: CFString and NSString are toll-free bridged.
+        unsafe { &*std::ptr::from_ref(key).cast::<NSString>() }
+    };
+    // SAFETY: the keys are CoreVideo's own constants.
+    let keys = unsafe {
+        [
+            bridge(kCVPixelBufferPixelFormatTypeKey),
+            bridge(kCVPixelBufferWidthKey),
+            bridge(kCVPixelBufferHeightKey),
+        ]
+    };
+    let (format, width, height) = (
+        NSNumber::numberWithUnsignedInt(kCVPixelFormatType_32BGRA),
+        NSNumber::numberWithUnsignedInt(width),
+        NSNumber::numberWithUnsignedInt(height),
+    );
+    let values: [&AnyObject; 3] = [&format, &width, &height];
+    let settings = NSDictionary::<NSString, AnyObject>::from_slices(&keys, &values);
+    // SAFETY: the output is made for the loaded track, with uncompressed
+    // video settings, before any reader reads through it.
+    unsafe {
+        let output = AVAssetReaderTrackOutput::assetReaderTrackOutputWithTrack_outputSettings(
+            &asset.video,
+            Some(&settings),
+        );
+        output.setAlwaysCopiesSampleData(false);
+        output
+    }
+}
+
+impl VideoPlayer for AvFoundation {
+    /// One reader from the start asked for to the end. A start past the
+    /// video's last frame shows that frame, though the asset's sound runs
+    /// on. AVFoundation times each frame, and gives every one: those kept
+    /// stay within the rate asked ([`FrameSlots`]).
+    fn play(
+        &self,
+        input: VideoInput<'_>,
+        request: PlayRequest,
+        deadline: Instant,
+    ) -> Result<Playback, FailureCode> {
+        let asset = open(&input, deadline)?;
+        let (info, mirrored) = (asset.info, asset.mirrored);
+        let (width, height) = play_size(
+            info.width,
+            info.height,
+            request.max_width,
+            request.max_height,
+        )
+        .ok_or(FailureCode::RenderResource)?;
+        let fps_milli = info
+            .fps_milli
+            .map_or(request.max_fps_milli, |fps| fps.min(request.max_fps_milli));
+        // The video's own frame length, not the rate asked: a slower rate
+        // would start a frame early, and keep that frame for the last.
+        let frame_ms = 1_000_000u64.div_ceil(u64::from(info.fps_milli.unwrap_or(fps_milli)));
+        let start_ms = request
+            .start_ms
+            .min(asset.video_end_ms.saturating_sub(frame_ms));
+        let opened = Opened {
+            info,
+            width,
+            height,
+            fps_milli,
+            start_ms,
+        };
+        opened.validate().map_err(|_| FailureCode::RenderParse)?;
+        let coded = if info.rotation % 180 == 90 {
+            (height, width)
+        } else {
+            (width, height)
+        };
+        let output = track_output(&asset, coded.0, coded.1);
+        // SAFETY: the reader is made for the loaded asset, and its time
+        // range and output are set before it starts.
+        let reader = unsafe { AVAssetReader::assetReaderWithAsset_error(&asset.asset) }
+            .map_err(|_| FailureCode::BackendUnavailable)?;
+        // SAFETY: as above.
+        unsafe {
+            reader.setTimeRange(CMTimeRange {
+                start: time(start_ms),
+                duration: time(info.duration_ms - start_ms),
+            });
+            if !reader.canAddOutput(&output) {
+                return Err(FailureCode::BackendUnavailable);
+            }
+            reader.addOutput(&output);
+            if !reader.startReading() {
+                return Err(failure(reader.error().as_deref()));
+            }
+        }
+        Ok(Playback {
+            opened,
+            frames: Box::new(Frames {
+                reader,
+                output,
+                _asset: asset,
+                coded,
+                rotation: info.rotation,
+                mirrored,
+                duration_ms: info.duration_ms,
+                slots: FrameSlots::new(fps_milli),
+            }),
+        })
+    }
+}
+
+/// A session's frames from one reader.
+struct Frames {
+    reader: Retained<AVAssetReader>,
+    output: Retained<AVAssetReaderTrackOutput>,
+    /// Held while the reader reads through its descriptor.
+    _asset: Asset,
+    /// Each frame as decoded, and the quarter turns clockwise that show it.
+    coded: (u32, u32),
+    rotation: u16,
+    mirrored: bool,
+    duration_ms: u64,
+    /// Which frames are kept, for the rate asked.
+    slots: FrameSlots,
+}
+
+// SAFETY: a session's frames are taken by one thread at a time (the one the
+// reader moves to once open), and AVFoundation's reader and its output are
+// not tied to the thread that made them; nothing else holds them.
+unsafe impl Send for Frames {}
+
+/// One sample's outcome: a frame kept, one skipped, or the end.
+enum Taken {
+    Frame(u64),
+    Skipped,
+    End,
+}
+
+impl FrameSource for Frames {
+    fn next_frame(
+        &mut self,
+        rgba: &mut [u8],
+        _gate: &PlayGate,
+    ) -> Result<Option<u64>, FailureCode> {
+        if rgba.len() != self.coded.0 as usize * self.coded.1 as usize * 4 {
+            return Err(FailureCode::BadParams);
+        }
+        loop {
+            let taken = objc2::rc::autoreleasepool(|_| self.take(rgba))?;
+            match taken {
+                Taken::Frame(pts) => return Ok(Some(pts)),
+                Taken::Skipped => {}
+                Taken::End => return Ok(None),
+            }
+        }
+    }
+}
+
+impl Frames {
+    fn take(&mut self, rgba: &mut [u8]) -> Result<Taken, FailureCode> {
+        // SAFETY: the output belongs to the started reader, which only this
+        // thread reads.
+        let Some(sample) = (unsafe { self.output.copyNextSampleBuffer() }) else {
+            // SAFETY: plain properties of the reader.
+            // Named in full: the crate's source check reads a method call
+            // spelled `.status(` as a process being started.
+            return match unsafe { AVAssetReader::status(&self.reader) } {
+                AVAssetReaderStatus::Completed => Ok(Taken::End),
+                AVAssetReaderStatus::Failed => {
+                    Err(failure(unsafe { self.reader.error() }.as_deref()))
+                }
+                _ => Err(FailureCode::RenderParse),
+            };
+        };
+        // SAFETY: a video output's sample carries its image and time.
+        let (image, time) = unsafe { (sample.image_buffer(), sample.presentation_time_stamp()) };
+        let pts_us = us(time)
+            .and_then(|pts| u64::try_from(pts).ok())
+            .unwrap_or(0);
+        if !self.slots.keep(pts_us) {
+            return Ok(Taken::Skipped);
+        }
+        let pts = ms(time)
+            .and_then(|pts| u64::try_from(pts).ok())
+            .unwrap_or(0)
+            .min(self.duration_ms);
+        let image = image.ok_or(FailureCode::RenderParse)?;
+        copy_upright(&image, self.coded, self.rotation, self.mirrored, rgba)?;
+        Ok(Taken::Frame(pts))
+    }
+}
+
+/// Copy `image`, which must be exactly `coded` BGRA, into `rgba` as opaque
+/// straight RGBA, turned `rotation` degrees clockwise to show it.
+fn copy_upright(
+    image: &CVPixelBuffer,
+    coded: (u32, u32),
+    rotation: u16,
+    mirrored: bool,
+    rgba: &mut [u8],
+) -> Result<(), FailureCode> {
+    if CVPixelBufferGetWidth(image) != coded.0 as usize
+        || CVPixelBufferGetHeight(image) != coded.1 as usize
+        || CVPixelBufferGetPixelFormatType(image) != kCVPixelFormatType_32BGRA
+    {
+        return Err(FailureCode::RenderParse);
+    }
+    // SAFETY: locking a pixel buffer for reading has no precondition; it is
+    // unlocked below on every path.
+    if unsafe { CVPixelBufferLockBaseAddress(image, CVPixelBufferLockFlags::ReadOnly) }
+        != kCVReturnSuccess
+    {
+        return Err(FailureCode::RenderResource);
+    }
+    let (width, height) = (coded.0 as usize, coded.1 as usize);
+    let stride = CVPixelBufferGetBytesPerRow(image);
+    let base = CVPixelBufferGetBaseAddress(image).cast::<u8>().cast_const();
+    let copied = if base.is_null() || stride < width * 4 {
+        Err(FailureCode::RenderParse)
+    } else {
+        // SAFETY: the locked buffer holds `height` rows `stride` bytes apart,
+        // each at least `width * 4` bytes long.
+        let source = unsafe { std::slice::from_raw_parts(base, stride * (height - 1) + width * 4) };
+        turn(source, stride, coded, rotation, mirrored, rgba);
+        Ok(())
+    };
+    // SAFETY: unlocking the lock taken above.
+    unsafe { CVPixelBufferUnlockBaseAddress(image, CVPixelBufferLockFlags::ReadOnly) };
+    copied
+}
+
+/// Write `source`, `coded` BGRA pixels in rows `stride` bytes apart, into
+/// `rgba` as opaque RGBA turned `rotation` degrees clockwise (0, 90, 180 or
+/// 270): what shows at (x, y) is the coded pixel that turn takes there.
+fn turn(
+    source: &[u8],
+    stride: usize,
+    coded: (u32, u32),
+    rotation: u16,
+    mirrored: bool,
+    rgba: &mut [u8],
+) {
+    let (width, height) = (coded.0 as usize, coded.1 as usize);
+    let shown_width = if rotation % 180 == 90 { height } else { width };
+    for (at, out) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        let (x, y) = (at % shown_width, at / shown_width);
+        let (from_x, from_y) = match rotation {
+            90 => (y, height - 1 - x),
+            180 => (width - 1 - x, height - 1 - y),
+            270 => (width - 1 - y, x),
+            _ => (x, y),
+        };
+        // The turn reads the mirrored picture: undo the mirror too.
+        let from_x = if mirrored { width - 1 - from_x } else { from_x };
+        let from = from_y * stride + from_x * 4;
+        *out = [source[from + 2], source[from + 1], source[from], 255];
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A 3x2 coded picture, its pixels numbered 0 to 5 in reading order,
+    /// shows turned each quarter clockwise as a person would draw it; rows
+    /// past the picture's width in a longer stride are never read.
+    #[test]
+    fn frames_turn_upright_as_they_are_copied() {
+        // BGRA: blue carries the number, padding rows carry 99.
+        let stride = 3 * 4 + 4;
+        let mut source = vec![99u8; stride * 2];
+        for number in 0..6usize {
+            let at = (number / 3) * stride + (number % 3) * 4;
+            source[at..at + 4].copy_from_slice(&[number as u8, 0, 0, 200]);
+        }
+        let shown_as = |rotation, mirrored| {
+            let mut rgba = vec![0; 6 * 4];
+            turn(&source, stride, (3, 2), rotation, mirrored, &mut rgba);
+            assert!(rgba.as_chunks::<4>().0.iter().all(|pixel| pixel[3] == 255));
+            rgba.as_chunks::<4>()
+                .0
+                .iter()
+                .map(|pixel| pixel[2])
+                .collect::<Vec<_>>()
+        };
+        let shown = |rotation| shown_as(rotation, false);
+        // 0 1 2      3 0      5 4 3      2 5
+        // 3 4 5      4 1      2 1 0      1 4
+        //            5 2                 0 3
+        assert_eq!(shown(0), [0, 1, 2, 3, 4, 5]);
+        assert_eq!(shown(90), [3, 0, 4, 1, 5, 2]);
+        assert_eq!(shown(180), [5, 4, 3, 2, 1, 0]);
+        assert_eq!(shown(270), [2, 5, 1, 4, 0, 3]);
+        // Mirrored first, then turned:
+        // 2 1 0      5 2      3 4 5      0 3
+        // 5 4 3      4 1      0 1 2      1 4
+        //            3 0                 2 5
+        assert_eq!(shown_as(0, true), [2, 1, 0, 5, 4, 3]);
+        assert_eq!(shown_as(90, true), [5, 2, 4, 1, 3, 0]);
+        assert_eq!(shown_as(180, true), [3, 4, 5, 0, 1, 2]);
+        assert_eq!(shown_as(270, true), [0, 3, 1, 4, 2, 5]);
+    }
+
+    /// A transform that reflects shows the picture mirrored, then turned:
+    /// left to right alone is mirrored upright, top to bottom is mirrored
+    /// and turned half way, and a reflection across the diagonal is
+    /// mirrored and turned a quarter.
+    #[test]
+    fn display_transforms_that_reflect_mirror_the_picture() {
+        let transform = |a: f64, b: f64, c: f64, d: f64| CGAffineTransform {
+            a,
+            b,
+            c,
+            d,
+            tx: 0.0,
+            ty: 0.0,
+        };
+        assert_eq!(orientation(transform(1.0, 0.0, 0.0, 1.0)), (0, false));
+        assert_eq!(orientation(transform(0.0, 1.0, -1.0, 0.0)), (90, false));
+        assert_eq!(orientation(transform(-1.0, 0.0, 0.0, 1.0)), (0, true));
+        assert_eq!(orientation(transform(1.0, 0.0, 0.0, -1.0)), (180, true));
+        assert_eq!(orientation(transform(0.0, 1.0, 1.0, 0.0)), (270, true));
+    }
 
     #[test]
     fn display_transforms_turn_clockwise_by_quarters() {

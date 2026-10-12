@@ -72,7 +72,7 @@ enum Event {
 }
 
 /// Why waiting for the reader brought no event.
-enum Wait {
+pub(crate) enum Wait {
     /// Cancellation or the admission deadline; never a cold-start retry.
     Interrupted,
     /// The deadline passed, or the worker exited and the reader had nothing
@@ -87,7 +87,7 @@ enum Wait {
 }
 
 /// How a stopped worker ended.
-enum Stopped {
+pub(crate) enum Stopped {
     /// It exited by itself, before any kill.
     Exited(WorkerExit),
     /// It was killed, and reaped.
@@ -164,18 +164,7 @@ pub(crate) fn attempt(
             }
         }
         Ok(Event::First(Ok(Some(Frame::Failure(failure))), true)) => {
-            // Before a job, only a handshake refusal means anything, and only
-            // from a worker that then exits rather than crashes.
-            let code = match failure.code {
-                FailureCode::RestartRequired | FailureCode::UnknownMethod => failure.code,
-                _ => FailureCode::WorkerUnavailable,
-            };
-            return Ok(Err(match worker.stop() {
-                Stopped::Exited(WorkerExit::Code(_)) => code,
-                Stopped::Exited(exit) => exit_failure(exit),
-                Stopped::OverFootprint => FailureCode::RenderResource,
-                Stopped::Killed | Stopped::Stuck => FailureCode::WorkerUnavailable,
-            }));
+            return Ok(Err(startup_refusal_end(failure.code, worker.stop())));
         }
         Err(Wait::OverFootprint) => {
             worker.kill();
@@ -222,12 +211,9 @@ pub(crate) fn attempt(
             let accepted = job.kind == JobKind::Auto || MediaKind::for_job(job.kind) == Some(kind);
             stop_rendered(&mut worker, accepted.then_some(kind), rendered)
         }
-        Ok(Event::Reply(Ok(Some(Frame::Failure(failure))), true)) => match worker.stop() {
-            Stopped::Exited(WorkerExit::Code(0)) => Err(refusal(failure.code)),
-            Stopped::Exited(exit) => Err(exit_failure(exit)),
-            Stopped::OverFootprint => Err(FailureCode::RenderResource),
-            Stopped::Killed | Stopped::Stuck => Err(FailureCode::WorkerUnavailable),
-        },
+        Ok(Event::Reply(Ok(Some(Frame::Failure(failure))), true)) => {
+            Err(refusal_end(failure.code, worker.stop()))
+        }
         Err(Wait::OverFootprint) => {
             worker.kill();
             Err(FailureCode::RenderResource)
@@ -280,7 +266,7 @@ enum SpawnSlot {
 /// blocks (an executable on a stalled network filesystem) cannot hold the
 /// caller past `until`. A worker that starts after that is killed by the
 /// helper.
-fn spawn_within(
+pub(crate) fn spawn_within(
     shared: &Arc<Shared>,
     until: Instant,
     budgets: Budgets,
@@ -375,16 +361,58 @@ fn spawn_within(
 }
 
 /// A worker's own failure code, kept only when a worker can mean it: one
-/// that names GUI or agent state is not the worker's to report.
-fn refusal(code: FailureCode) -> FailureCode {
+/// that names GUI or agent state is not the worker's to report. A video's
+/// container, codec, decoder and sandbox are the worker's: the lane tells
+/// the user which one is missing.
+pub(crate) fn refusal(code: FailureCode) -> FailureCode {
     use FailureCode::*;
     match code {
         BadParams | TooLarge | FileNotFound | FilePermission | FileNotRegular | FileTooLarge
         | Changed | IndexOutOfRange | UnsupportedMedia | UnsupportedPlatform | RenderTimeout
-        | RenderResource | RenderParse | RestartRequired | UnknownMethod | WorkerUnavailable => {
-            code
-        }
-        _ => WorkerUnavailable,
+        | RenderResource | RenderParse | RestartRequired | UnknownMethod | WorkerUnavailable
+        | UnsupportedContainer | CodecUnavailable | BackendUnavailable | SandboxUnavailable => code,
+        Busy
+        | ExternalOpenUnavailable
+        | DisplayDisabled
+        | NotInKettle
+        | NotInKettlePane
+        | DisplayOnly
+        | ReadOnly
+        | OverBudget => WorkerUnavailable,
+    }
+}
+
+/// What a refusal before Ready leaves, its worker then stopped as
+/// `stopped`: a handshake refusal, from a worker that then exits rather
+/// than crashes; otherwise what its end says. A render's and a playback
+/// session's alike.
+pub(crate) fn startup_refusal_end(code: FailureCode, stopped: Stopped) -> FailureCode {
+    match stopped {
+        Stopped::Exited(WorkerExit::Code(_)) => startup_refusal(code),
+        Stopped::Exited(exit) => exit_failure(exit),
+        Stopped::OverFootprint => FailureCode::RenderResource,
+        Stopped::Killed | Stopped::Stuck => FailureCode::WorkerUnavailable,
+    }
+}
+
+/// What a refusal after Ready leaves, its worker then stopped as
+/// `stopped`: the refusal, from a worker that then exits 0; otherwise what
+/// its end says. A render's and a playback session's alike.
+pub(crate) fn refusal_end(code: FailureCode, stopped: Stopped) -> FailureCode {
+    match stopped {
+        Stopped::Exited(WorkerExit::Code(0)) => refusal(code),
+        Stopped::Exited(exit) => exit_failure(exit),
+        Stopped::OverFootprint => FailureCode::RenderResource,
+        Stopped::Killed | Stopped::Stuck => FailureCode::WorkerUnavailable,
+    }
+}
+
+/// A worker's refusal before Ready: before a job or a playback session,
+/// only a handshake refusal means anything.
+pub(crate) fn startup_refusal(code: FailureCode) -> FailureCode {
+    match code {
+        FailureCode::RestartRequired | FailureCode::UnknownMethod => code,
+        _ => FailureCode::WorkerUnavailable,
     }
 }
 
@@ -401,7 +429,7 @@ pub(crate) fn exit_failure(exit: WorkerExit) -> FailureCode {
     }
 }
 
-struct Running<'a> {
+pub(crate) struct Running<'a> {
     process: Option<Box<dyn WorkerProcess>>,
     /// The worker's own exit, seen before any kill, and when.
     exited: Option<(WorkerExit, Instant)>,
@@ -415,7 +443,11 @@ struct Running<'a> {
 }
 
 impl<'a> Running<'a> {
-    fn new(process: Box<dyn WorkerProcess>, shared: &'a Arc<Shared>, budgets: Budgets) -> Self {
+    pub(crate) fn new(
+        process: Box<dyn WorkerProcess>,
+        shared: &'a Arc<Shared>,
+        budgets: Budgets,
+    ) -> Self {
         Self {
             process: Some(process),
             exited: None,
@@ -431,19 +463,19 @@ impl<'a> Running<'a> {
         self
     }
 
-    fn own_exit(&self) -> Option<WorkerExit> {
+    pub(crate) fn own_exit(&self) -> Option<WorkerExit> {
         self.exited.map(|(exit, _)| exit)
     }
 
     /// The next thing the reader says before `until`, looking at the worker
     /// and measuring its memory meanwhile. Once it has exited, the reader
     /// gets the cleanup budget to pass on what the pipe still held.
-    fn next(
+    pub(crate) fn next<E>(
         &mut self,
-        received: &Receiver<Event>,
+        received: &Receiver<E>,
         until: Instant,
         control: Option<&RenderControl>,
-    ) -> Result<Event, Wait> {
+    ) -> Result<E, Wait> {
         loop {
             if control.is_some_and(|control| control.interrupted(Instant::now())) {
                 return Err(Wait::Interrupted);
@@ -515,7 +547,7 @@ impl<'a> Running<'a> {
     /// Let the worker exit by itself within the cleanup budget, as it does
     /// after a reply or a refusal, and kill it if it does not, or at once
     /// when its job is cancelled or out of time meanwhile.
-    fn stop(&mut self) -> Stopped {
+    pub(crate) fn stop(&mut self) -> Stopped {
         if let Some(exit) = self.own_exit() {
             return Stopped::Exited(exit);
         }
@@ -568,7 +600,7 @@ impl<'a> Running<'a> {
 
     /// [`Self::stop`] after something went wrong: the failure its exit names,
     /// or `WorkerUnavailable` when it had to be killed.
-    fn stop_failure(&mut self) -> FailureCode {
+    pub(crate) fn stop_failure(&mut self) -> FailureCode {
         match self.stop() {
             Stopped::Exited(exit) => exit_failure(exit),
             Stopped::OverFootprint => FailureCode::RenderResource,
@@ -579,7 +611,7 @@ impl<'a> Running<'a> {
     /// Kill the worker's process group now and reap it. One that will not
     /// exit within the cleanup budget is kept for later reaping and counted;
     /// enough of those turn media off.
-    fn kill(&mut self) -> Stopped {
+    pub(crate) fn kill(&mut self) -> Stopped {
         let Some(mut process) = self.process.take() else {
             // Already reaped: by its own exit, if one was seen.
             return self.own_exit().map_or(Stopped::Killed, Stopped::Exited);
@@ -671,7 +703,7 @@ fn spawn_reader(
 }
 
 /// Whether `reader` is at end of file, with nothing more to read.
-fn at_end(reader: &mut dyn Read) -> bool {
+pub(crate) fn at_end(reader: &mut dyn Read) -> bool {
     let mut byte = [0];
     loop {
         match reader.read(&mut byte) {
@@ -1269,6 +1301,38 @@ mod tests {
             ),
             (
                 FailureCode::DisplayDisabled,
+                FailureCode::WorkerUnavailable,
+                FailureCode::WorkerUnavailable,
+            ),
+            // A video's container, codec, decoder and sandbox are the
+            // worker's to report, in a reply.
+            (
+                FailureCode::UnsupportedContainer,
+                FailureCode::UnsupportedContainer,
+                FailureCode::WorkerUnavailable,
+            ),
+            (
+                FailureCode::CodecUnavailable,
+                FailureCode::CodecUnavailable,
+                FailureCode::WorkerUnavailable,
+            ),
+            (
+                FailureCode::BackendUnavailable,
+                FailureCode::BackendUnavailable,
+                FailureCode::WorkerUnavailable,
+            ),
+            (
+                FailureCode::SandboxUnavailable,
+                FailureCode::SandboxUnavailable,
+                FailureCode::WorkerUnavailable,
+            ),
+            (
+                FailureCode::Busy,
+                FailureCode::WorkerUnavailable,
+                FailureCode::WorkerUnavailable,
+            ),
+            (
+                FailureCode::OverBudget,
                 FailureCode::WorkerUnavailable,
                 FailureCode::WorkerUnavailable,
             ),

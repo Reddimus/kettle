@@ -18,3 +18,14 @@ pub fn frame_index(rgba: &[u8], width: u32, height: u32, turned: bool) -> u32 {
         if red > 128 { index | 1 << bit } else { index }
     })
 }
+
+/// [`frame_index`] for a tile shown mirrored left to right, as
+/// `mirrored.mp4` is: a coded point (x, y) shows at (1 - x, y).
+pub fn frame_index_mirrored(rgba: &[u8], width: u32, height: u32) -> u32 {
+    let mut flipped = rgba.to_vec();
+    for row in flipped.chunks_exact_mut(width as usize * 4) {
+        let pixels: Vec<[u8; 4]> = row.as_chunks::<4>().0.iter().rev().copied().collect();
+        row.copy_from_slice(pixels.as_flattened());
+    }
+    frame_index(&flipped, width, height, false)
+}

@@ -1,6 +1,8 @@
 //! Kettle's media worker. The GUI starts one per job from beside its own
 //! executable and talks to it in `kettle-media`'s frames over stdin and
 //! stdout: Hello in, Ready out, one Job in, one Rendered or Failure out, exit.
+//! Or, for a video the user plays, one PlayOpen in and a playback session
+//! until it ends (see `play`).
 //!
 //! Nothing runs before the early setup at the top of `main`: on Linux and
 //! macOS it closes every descriptor inherited above stderr and turns off core
@@ -15,6 +17,8 @@
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod early_unix;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod play;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod worker;
 
@@ -31,11 +35,7 @@ fn main() {
         std::process::exit(worker::EXIT_SETUP);
     };
     let mut output = std::io::stdout().lock();
-    std::process::exit(worker::serve(
-        &mut std::io::stdin().lock(),
-        &mut output,
-        &watchdog,
-    ));
+    std::process::exit(worker::serve(std::io::stdin(), &mut output, &watchdog));
 }
 
 /// There is no media worker on this platform, and Kettle never starts one
@@ -88,6 +88,12 @@ mod tests {
                 .expect("the worker's code"),
         ));
         let early = code_only(&production_source(include_str!("early_unix.rs")));
+        let play = code_only(&production_source(
+            include_str!("play.rs")
+                .split("#[cfg(feature = \"test-faults\")]\nmod faults")
+                .next()
+                .expect("the session's code"),
+        ));
 
         let unix_main = body(&main, "main()");
         let order = [
@@ -128,6 +134,7 @@ mod tests {
         for (name, code) in [
             ("main", main.as_str()),
             ("worker", worker.as_str()),
+            ("play", play.as_str()),
             ("early_unix", early_without_listing.as_str()),
         ] {
             for forbidden in [
@@ -169,12 +176,29 @@ mod tests {
                     .find("kettle_media_render::render_with_decoder(")
                     .unwrap()
         );
+        // A job pins its processor time before its input is read; a
+        // session confines the worker before reading or decoding its file,
+        // and refuses to go on unconfined.
+        let serve = body(&worker, "serve(");
+        assert!(
+            serve.find("crate::early_unix::limit_job_cpu()").unwrap()
+                < serve.find("answer(&job").unwrap()
+        );
+        let session = body(&play, "serve(");
+        let confined = session
+            .find("if confine(open, &decoders).is_err() || !watchdog.confined()")
+            .unwrap();
+        assert!(confined < session.find("source::hold(").unwrap());
+        assert!(confined < session.find("player.play(").unwrap());
         // One writer owns stdout; stderr carries only the panic line.
         assert_eq!(main.matches("stdout()").count(), 1);
         assert_eq!(
-            worker.matches("stdout()").count() + early.matches("stdout()").count(),
+            worker.matches("stdout()").count()
+                + early.matches("stdout()").count()
+                + play.matches("stdout()").count(),
             0
         );
+        assert_eq!(play.matches("stderr()").count(), 0);
         assert_eq!(main.matches("stderr()").count(), 0);
         assert_eq!(worker.matches("stderr()").count(), 1);
         assert!(!early.contains("io::stderr()"));

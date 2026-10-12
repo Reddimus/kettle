@@ -39,9 +39,66 @@ pub(crate) fn sweep_fds_and_disable_dumping() -> io::Result<()> {
 pub(crate) fn install_limits() -> io::Result<()> {
     #[cfg(target_os = "linux")]
     set_limit(libc::RLIMIT_AS, 1 << 30)?;
-    set_limit(libc::RLIMIT_CPU, 5)?;
+    set_limits(libc::RLIMIT_CPU, JOB_CPU_SECONDS, SESSION_CPU_CEILING)?;
     set_limit(libc::RLIMIT_FSIZE, 0)?;
     set_limit(libc::RLIMIT_NOFILE, 32)?;
+    Ok(())
+}
+
+/// Processor time: a job's, soft from the start and hard once it arrives;
+/// a playback session's most, which it lowers to what its video needs once
+/// open: half a minute and a second for each second left to play.
+const JOB_CPU_SECONDS: libc::rlim_t = 5;
+const SESSION_CPU_CEILING: libc::rlim_t = 12 * 60 * 60;
+const SESSION_CPU_SECONDS: u64 = 30;
+
+/// Pin a job's processor time, soft and hard, before its input is read.
+pub(crate) fn limit_job_cpu() -> io::Result<()> {
+    set_limit(libc::RLIMIT_CPU, JOB_CPU_SECONDS)
+}
+
+/// Pin a session's processor time to what `left_ms` of video needs, soft
+/// and hard, within the hard limit the start left (never more than the
+/// soft limit inherited).
+pub(crate) fn limit_session_cpu(left_ms: u64) -> io::Result<()> {
+    let seconds = SESSION_CPU_SECONDS.saturating_add(left_ms.div_ceil(1000));
+    let seconds = libc::rlim_t::try_from(seconds).unwrap_or(libc::rlim_t::MAX);
+    let current = limit_of(libc::RLIMIT_CPU)?;
+    set(
+        libc::RLIMIT_CPU,
+        seconds.min(current.rlim_max),
+        seconds.min(current.rlim_max),
+    )
+}
+
+/// Set `resource` to `soft` under `hard`, neither above the soft or hard
+/// limit inherited: so a soft limit the worker raises later, up to its
+/// hard one, still never passes what it was given.
+fn set_limits(resource: Resource, soft: libc::rlim_t, hard: libc::rlim_t) -> io::Result<()> {
+    let inherited = limit_of(resource)?;
+    let hard = hard.min(inherited.rlim_cur).min(inherited.rlim_max);
+    set(resource, soft.min(hard), hard)
+}
+
+fn limit_of(resource: Resource) -> io::Result<libc::rlimit> {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    if unsafe { libc::getrlimit(resource, &mut limit) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(limit)
+}
+
+fn set(resource: Resource, soft: libc::rlim_t, hard: libc::rlim_t) -> io::Result<()> {
+    let limit = libc::rlimit {
+        rlim_cur: soft,
+        rlim_max: hard,
+    };
+    if unsafe { libc::setrlimit(resource, &limit) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
     Ok(())
 }
 
@@ -264,6 +321,36 @@ mod tests {
         }
     }
 
+    /// With room to spare, a job's processor time is 5 s and a session's
+    /// half a minute and a second for each second of video left.
+    #[test]
+    fn processor_time_follows_what_the_worker_is_for() {
+        if !in_child("early_unix::tests::processor_time_follows_what_the_worker_is_for") {
+            return;
+        }
+        install_limits().unwrap();
+        let cpu = |at: &str| {
+            let limit = limit(libc::RLIMIT_CPU);
+            assert!(limit.rlim_max >= 3600, "{at}: the test needs room");
+            (limit.rlim_cur, limit.rlim_max)
+        };
+        assert_eq!(cpu("installed").0, 5);
+        limit_session_cpu(90_500).unwrap();
+        let limit = limit(libc::RLIMIT_CPU);
+        assert_eq!((limit.rlim_cur, limit.rlim_max), (121, 121));
+    }
+
+    #[test]
+    fn job_processor_time_is_pinned_at_five_seconds() {
+        if !in_child("early_unix::tests::job_processor_time_is_pinned_at_five_seconds") {
+            return;
+        }
+        install_limits().unwrap();
+        limit_job_cpu().unwrap();
+        let limit = limit(libc::RLIMIT_CPU);
+        assert_eq!((limit.rlim_cur, limit.rlim_max), (5, 5));
+    }
+
     #[test]
     fn limits_are_lowered_never_raised() {
         if !in_child("early_unix::tests::limits_are_lowered_never_raised") {
@@ -285,6 +372,9 @@ mod tests {
             assert_eq!((limit.rlim_cur, limit.rlim_max), (value, value));
         };
         expect(libc::RLIMIT_NOFILE, 20);
+        expect(libc::RLIMIT_CPU, 2);
+        // A session's limit, set later, does not pass it either.
+        limit_session_cpu(100_000).unwrap();
         expect(libc::RLIMIT_CPU, 2);
         expect(libc::RLIMIT_FSIZE, 0);
         #[cfg(target_os = "linux")]
