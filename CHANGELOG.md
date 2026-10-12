@@ -24,6 +24,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Accept absolute cache directories in the macOS release update smoke.
 - Create missing private data directories with owner-only modes, so agent
   plugins can install under a group-writable default umask.
+- Stop video-session test heartbeats after the final frame, avoiding a write
+  racing the worker's normal exit.
 
 ## [5.0.0] — 2026-10-11
 

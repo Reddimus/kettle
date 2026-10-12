@@ -1057,6 +1057,11 @@ an Auto raster job's classification end it too, while one alone does not, so
 learning the kind does not restart the clock. The workspace commands do not
 enable that feature, so `just media-protocol-test` and ci.yml run it.
 
+The Apple and FFmpeg session fixtures keep the parent lease until their known
+last frame, then wait for clean exit before reading Ended. Both fail at runtime
+if a heartbeat is written after that wait, making the former terminal-write
+race deterministic. Frame order, timestamps and completion assertions remain.
+
 Playback sessions cross the same binary. With `test-faults`, a file whose
 MP4 box is followed by `kettle-media-worker-test-video` and a frame count,
 rate and size plays through a stand-in decoder that fills frame N with N:

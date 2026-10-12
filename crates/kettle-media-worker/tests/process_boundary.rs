@@ -1207,6 +1207,16 @@ fn command(child: &mut Child, command: PlayCommand) {
     send(child, &Frame::PlayCommand(command));
 }
 
+/// Keep the lease until this fixture's last frame, then wait for clean exit.
+/// Waiting makes a heartbeat written after completion fail deterministically.
+fn heartbeat_before_last_frame(child: &mut Child, pts_ms: u64, last_pts_ms: u64) {
+    if pts_ms == last_pts_ms {
+        assert_eq!(exit_code(child, 5 * SECOND), 0);
+    } else {
+        command(child, PlayCommand::Heartbeat);
+    }
+}
+
 /// The worker's frames as they come, read on a thread of their own so a
 /// test can wait for one with a deadline.
 struct Frames(std::sync::mpsc::Receiver<Option<Frame>>);
@@ -1988,13 +1998,13 @@ fn real_ffmpeg_plays_a_session_to_its_end() {
     let mut times = vec![first.pts_ms];
     loop {
         match frames.next(5 * SECOND) {
-            Some(Frame::VideoFrame(frame)) => times.push(frame.pts_ms),
+            Some(Frame::VideoFrame(frame)) => {
+                heartbeat_before_last_frame(&mut child, frame.pts_ms, 3_900);
+                times.push(frame.pts_ms);
+            }
             Some(Frame::PlayState(PlayState::Ended)) => break,
             other => panic!("unexpected {other:?}"),
         }
-        // The parent keeps the lease as it would: a busy machine can
-        // stretch the clip past the 5 s a silent parent is given.
-        command(&mut child, PlayCommand::Heartbeat);
     }
     // Paced at ten a second, none dropped on an idle machine is not
     // promised: every one sent is in order and on the clip's frames.
@@ -2301,13 +2311,13 @@ fn apples_decoder_plays_a_session_in_the_worker() {
     let mut shown = vec![first];
     loop {
         match frames.next(5 * SECOND) {
-            Some(Frame::VideoFrame(frame)) => shown.push(frame),
+            Some(Frame::VideoFrame(frame)) => {
+                heartbeat_before_last_frame(&mut child, frame.pts_ms, 3_900);
+                shown.push(frame);
+            }
             Some(Frame::PlayState(PlayState::Ended)) => break,
             other => panic!("unexpected {other:?}"),
         }
-        // The parent keeps the lease as it would: a busy machine can
-        // stretch the clip past the 5 s a silent parent is given.
-        command(&mut child, PlayCommand::Heartbeat);
     }
     assert_eq!(
         shown.iter().map(|frame| frame.pts_ms).collect::<Vec<_>>(),
