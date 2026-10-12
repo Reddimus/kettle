@@ -4,6 +4,7 @@
 //! caller supplies.
 //! External requests cannot express GUI-only path authorization. See [`GuiActionWitness`].
 
+pub mod audio;
 pub mod client;
 mod digest;
 #[cfg(any(test, feature = "fuzzing"))]
@@ -87,7 +88,7 @@ pub const MAX_VERSION_BYTES: usize = 64;
 /// Hex digest of the source a binary was built from, up to 256 bits.
 pub const MAX_SOURCE_HASH_BYTES: usize = 64;
 /// No version negotiation. A header skew requires restart.
-pub const PROTOCOL_VERSION: u16 = 6;
+pub const PROTOCOL_VERSION: u16 = 7;
 /// Longest textual source a reply returns as it was read: the SVG input
 /// cap, the largest textual kind's.
 pub const MAX_EXACT_SOURCE_BYTES: usize = MAX_SVG_BYTES;
@@ -521,8 +522,8 @@ pub(crate) fn play_frame_size(width: u32, height: u32) -> Result<(), ValidationE
 
 /// What opens a playback session: the video file, named as a worker job
 /// names its source; the room its picture has, at most 1920 on a side, which
-/// frames fit within as [`play_size`] fits them; where to start; and the
-/// most frames a second.
+/// frames fit within as [`play_size`] fits them; where to start; the most
+/// frames a second; and the sound asked for.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlayOpen {
     pub source: Source,
@@ -530,6 +531,45 @@ pub struct PlayOpen {
     pub max_height: u32,
     pub start_ms: u64,
     pub max_fps_milli: u32,
+    pub audio: AudioRequest,
+}
+
+/// The sound a session is asked for: none, or the video's own, heard or
+/// muted. Asking starts nothing: only Play makes a sound.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioRequest {
+    Off,
+    On,
+    Muted,
+}
+
+/// What a session's sound will be once it plays. Only `Ready` is heard
+/// (unless muted); every other says why there is none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioStatus {
+    /// The video's own sound plays with it.
+    Ready,
+    /// The video has no sound.
+    NoTrack,
+    /// Its decoder plays no sound: ffmpeg's playback is silent.
+    DecoderSilent,
+    /// Its sound is in a form that cannot be played here.
+    Unsupported,
+    /// Sound could not be played on this machine's output.
+    Unavailable,
+    /// None was asked for.
+    Off,
+}
+impl AudioStatus {
+    /// What a player that makes no sound says: none asked, none in the
+    /// video, or none from this decoder.
+    pub fn silent(request: AudioRequest, has_audio: bool) -> Self {
+        match (request, has_audio) {
+            (AudioRequest::Off, _) => Self::Off,
+            (_, false) => Self::NoTrack,
+            (_, true) => Self::DecoderSilent,
+        }
+    }
 }
 impl PlayOpen {
     pub fn validate(&self) -> Result<(), ValidationError> {
@@ -567,10 +607,14 @@ pub enum PlayCommand {
     /// Still here: a session that hears nothing for a few seconds ends.
     Heartbeat,
     Close,
+    /// Silence its sound, or let it be heard again; neither plays nor
+    /// pauses.
+    Mute,
+    Unmute,
 }
 
-/// A session that opened: the video, and the size and rate of the frames
-/// to come, from `start_ms`.
+/// A session that opened: the video, the size and rate of the frames to
+/// come, from `start_ms`, and what its sound will be.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Opened {
     pub info: VideoInfo,
@@ -578,6 +622,7 @@ pub struct Opened {
     pub height: u32,
     pub fps_milli: u32,
     pub start_ms: u64,
+    pub audio: AudioStatus,
 }
 impl Opened {
     pub fn validate(&self) -> Result<(), ValidationError> {
@@ -586,6 +631,8 @@ impl Opened {
         if self.fps_milli == 0
             || self.fps_milli > MAX_PLAY_FPS_MILLI
             || self.start_ms > self.info.duration_ms
+            // Sound plays only from a video that has some.
+            || (self.audio == AudioStatus::Ready && !self.info.has_audio)
         {
             return Err(ValidationError::BadParams);
         }

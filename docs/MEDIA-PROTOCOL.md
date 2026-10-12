@@ -28,9 +28,9 @@ turns it into an `ExternalRequest` with an `ExternalAttested` path or inline
 bytes, and Mermaid text or `kind: "mermaid"` selects the Mermaid job kind
 rather than Auto.
 
-## Wire version 6
+## Wire version 7
 
-The header is 11 bytes: `KMED`, u16 LE protocol version 6, a frame kind, then u32 LE payload
+The header is 11 bytes: `KMED`, u16 LE protocol version 7, a frame kind, then u32 LE payload
 length. No padding or compression is permitted. Binary data and UTF-8 strings have u32 LE
 byte lengths. Lists have u32 LE counts. Integers and f64 bit patterns use LE. Boolean and
 optional-value discriminants are exactly 0 or 1. Floats must satisfy the field validators.
@@ -46,11 +46,12 @@ platform refuses the other encoding.
 | 5 Rendered | Worker to parent | Width, height, RGBA blob, 32 digest bytes, optional path identity, display lines, fence count, optional index, fence sources, script names, warning codes, layout, optional exact source, optional video result |
 | 6 Failure | Worker to parent | One fixed error-code byte |
 | 7 DetectedRendered | Worker to parent | One media-kind byte, then exactly the Rendered payload |
-| 8 PlayOpen | Parent to worker | Worker source, max width u32, max height u32, start ms u64, max frame rate u32 |
-| 9 PlayCommand | Parent to worker | One command byte: 0 play, 1 pause, 2 heartbeat, 3 close |
-| 10 Opened | Worker to parent | Video result's fixed fields, width u32, height u32, frame rate u32, start ms u64 |
+| 8 PlayOpen | Parent to worker | Worker source, max width u32, max height u32, start ms u64, max frame rate u32, sound byte: 0 off, 1 on, 2 muted |
+| 9 PlayCommand | Parent to worker | One command byte: 0 play, 1 pause, 2 heartbeat, 3 close, 4 mute, 5 unmute |
+| 10 Opened | Worker to parent | Video result's fixed fields, width u32, height u32, frame rate u32, start ms u64, sound status byte |
 | 11 VideoFrame | Worker to parent | Sequence u64, presentation ms u64, width u32, height u32, RGBA blob |
 | 12 PlayState | Worker to parent | One state byte: 0 playing, 1 paused, 2 ended |
+| 13 AudioState | Worker to parent | One sound status byte: the session's sound changed from what Opened said |
 
 Job-kind tags 0 through 7 are Mermaid, Svg, Raster, MarkdownDiagrams, VideoProbe,
 VideoStills, Auto and CachedThumbnail. An Auto job asks the worker to classify the source by
@@ -65,6 +66,13 @@ a labels boolean. Single-frame time requires count 1, start 0 and no end time. I
 times must be finite, nonnegative and ordered. The still-count cap is 16. A worker job's
 edge cap is 4096, room for a lane's poster or sheet; the video-frame contract holds a
 model's own requests to 2560 before they become jobs.
+
+Sound status tags 0 through 5 are Ready (the video's own sound plays with it,
+unless muted), NoTrack (the video has none), DecoderSilent (the decoder plays
+no sound: ffmpeg's playback is silent), Unsupported (its sound cannot be
+played here), Unavailable (this machine's output could not play it) and Off
+(none was asked for). An Opened that says Ready for a video without sound is
+refused. A sound byte asks for sound and starts none: only Play makes a sound.
 
 A video reply, and only a video reply, ends with a video result (its flag 1; every other
 reply writes 0): duration ms u64, width and height u32 as shown, rotation u16 (0, 90, 180
@@ -386,8 +394,12 @@ sessions are open at once (a third is `WorkerUnavailable`); one being closed
 no longer counts. The reader takes each frame straight into a buffer of the
 size the session opened at, keeps only the newest one the caller has not
 taken (with two spare buffers for those to come), and wakes the caller once
-until it looks. Play and Pause replace any command not yet sent, so only the
-latest wish goes out. The writer sends a heartbeat each second while the
+until it looks. The latest Play or Pause, and apart from it the latest Mute
+or Unmute, replace any command of their kind not yet sent, so only the
+latest of each wish goes out and a Mute never takes a Pause's place. The
+session keeps its sound as Opened says it, and as an AudioState says it
+went; an AudioState that gives sound to a session without it, or says Ready
+at all, breaks the stream. The writer sends a heartbeat each second while the
 caller has kept the session within 3 s: a caller whose event loop stalls lets
 the worker's 5 s lease lapse, and the worker ends the session. Dropping the
 session sends Close and lets the worker exit within the cleanup budget, or
@@ -471,17 +483,55 @@ scaled and passes on the frame left at the end, and AVFoundation, which gives ev
 slot of the rate's frame length counted from the first, a frame counting from
 an eighth of a frame early as container times are rounded
 (`video::FrameSlots`), so a video faster than the rate plays at it and one no
-faster keeps every frame. A session that cannot open answers with the
+faster keeps every frame. A player decodes the sound too when it can and the
+session asked for it (`audio::AudioSource`): AVFoundation reads the first
+audio track through a reader of its own over the same asset, from the same
+start, as interleaved stereo 32-bit floats at 48 kHz, each block placed on
+the video's timeline and none before the last one ended, a buffer of more
+than a quarter of a second or with a sample that is not a number refused;
+ffmpeg plays no sound. The worker plays it on macOS, confined with the sound
+grant when sound was asked for and with Apple's decoder alone, so no
+external decoder ever runs with that grant (a video Apple's decoder turns
+down is refused, and Kettle opens it again asking for none; it asks for none
+from the first for a container other than MP4 or QuickTime): a thread of
+its own feeds an output queue
+20 ms at a time from the decoded sound, filling the sound's gaps and all
+that follows its end with silence so the queue's clock runs as long as the
+session; it fills the queue before Play so Play starts at once, and plays,
+pauses, mutes and unmutes it as the command reader hears each command,
+whatever the session's thread is doing, so a Pause or Mute is heard at once
+even while a frame's write is held; Close or the parent leaving ends it,
+its output disposed before the worker exits. The watchdog and the lease,
+which end a worker whose session thread is stuck, end the process at once,
+and its output with it. Paused, the sound has no clock:
+frames played again wait for a fresh one. While it plays, each frame goes out
+40 ms before its sound is heard (what the parent takes to show it): what
+the queue has played less its output device's presentation latency (the
+device's latency, safety offset, I/O buffer and output stream latency, at
+most 3 s, asked again each second as the default device may change); a
+frame the sound has passed by more than a frame is dropped, only for a
+newer frame already waiting behind it, so never the video's last, which the
+lane holds; while the queue's clock is lost the frames wait for it; the end waits for
+the last of the sound as for the last frame, and past the video's last
+frame no stall is counted. A queue that refuses a piece or to play, gives no
+clock for a second while playing (from its start or once it lost it), or a
+feeding thread that stops, leaves
+the session silent: AudioState says Unavailable and the frames go out on the
+session's own clock from there. Where no output can be made, Opened
+says Unavailable; a session ffmpeg plays (on Linux, or a video only it reads)
+says DecoderSilent, NoTrack for a video without sound, and Off when none was
+asked for. A session that cannot open answers with the
 failure and exits 0; one whose first frame is not written within 5 s (a
 write the parent held past that included) answers `RenderTimeout`, and its
 watchdog ends it a second later if that answer is held up too.
 
 The parent then sends commands, one byte each and nothing larger: Play and
-Pause, answered with the state they leave the session in, Heartbeat, and Close.
-A thread of their own reads them from the moment the worker is confined, the
-decoder's opening included, and keeps the latest Play or Pause and when the
-last command came rather than queueing them behind frames, so none waits on
-a write, a full queue or the opening. Play and Pause also move the
+Pause, answered with the state they leave the session in, Heartbeat, Close,
+and Mute and Unmute, which neither play nor pause. A thread of their own
+reads them from the moment the worker is confined, the decoder's opening
+included, and keeps the latest Play or Pause, the latest Mute or Unmute, and
+when the last command came rather than queueing them behind frames, so none
+waits on a write, a full queue or the opening. Play and Pause also move the
 decoder's gate as the reader hears them, and Close or the parent leaving ends
 it, whatever the session's thread is doing: the gate follows the latest
 command, and after a Pause only a frame already begun finishes.

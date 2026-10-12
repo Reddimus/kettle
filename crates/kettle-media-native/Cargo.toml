@@ -56,10 +56,28 @@ objc2-core-media = { version = "0.3.2", optional = true, default-features = fals
     "std",
     "objc2-core-video",
     "CMBase",
+    "CMBlockBuffer",
     "CMFormatDescription",
     "CMSampleBuffer",
     "CMTime",
     "CMTimeRange",
+] }
+# A session's sound out of this machine: an AudioQueue the worker owns.
+objc2-audio-toolbox = { version = "0.3.2", optional = true, default-features = false, features = [
+    "std",
+    "AudioQueue",
+    "objc2-core-audio-types",
+    "objc2-core-foundation",
+] }
+# The output device's presentation latency, which a session's frames allow
+# for.
+objc2-core-audio = { version = "0.3.2", optional = true, default-features = false, features = [
+    "std",
+    "AudioHardware",
+] }
+objc2-core-audio-types = { version = "0.3.2", optional = true, default-features = false, features = [
+    "std",
+    "CoreAudioBaseTypes",
 ] }
 # A session's frames, read from the pixel buffers AVFoundation decodes into.
 objc2-core-video = { version = "0.3.2", optional = true, default-features = false, features = [
@@ -88,7 +106,10 @@ objc2-foundation = { version = "0.3.2", optional = true, default-features = fals
 avfoundation = [
     "dep:block2",
     "dep:objc2",
+    "dep:objc2-audio-toolbox",
     "dep:objc2-av-foundation",
+    "dep:objc2-core-audio",
+    "dep:objc2-core-audio-types",
     "dep:objc2-core-foundation",
     "dep:objc2-core-graphics",
     "dep:objc2-core-media",

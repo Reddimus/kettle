@@ -39,6 +39,11 @@ pub struct Policy<'a> {
     /// only, by canonical path. The platform's own system library trees are
     /// added for any program.
     pub trees: Vec<PathBuf>,
+    /// Whether it may play sound out of this machine: on macOS, reaching
+    /// the audio server and its component registry, and nothing else of
+    /// audio's (no input, no device files). Linux plays no session's sound,
+    /// and grants nothing for it.
+    pub audio_output: bool,
 }
 
 /// Why a job could not be confined. It then does not run.

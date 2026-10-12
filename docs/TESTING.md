@@ -1051,7 +1051,8 @@ the watchdog; the worker waits for that kill rather than exiting first,
 which under load could beat it (four of these test binaries run at once
 failed nine runs of twelve before, none after). Play and Pause move the
 decoder's gate as the command reader hears them, in order, with no session
-thread coming round (`the_decoder_s_gate_follows_the_latest_command`), and
+thread coming round, and Play, Pause, Mute and Unmute reach the sound the
+same way (`the_gate_and_the_sound_follow_the_latest_command`), and
 a session closed while its decoder opened takes not even its first frame
 (`a_closed_session_s_decoder_takes_no_frame`). The session's loop also
 runs inside the worker's own test binary, with its
@@ -1071,8 +1072,39 @@ after it stay a tenth of a second apart; a session whose file is appended
 to, paused, before its first frame or while its last frame's write is held
 up, ends as `Changed`, not `Ended`; a decoder that fails just after the file
 changes fails the session as `Changed`; and a decoder handed a buffer after a
-Pause decodes nothing until Play. What the parent asked keeps its latest
-Play or Pause, taken once, and the moment of its last command.
+Pause decodes nothing until Play. With a stand-in speaker whose clock the
+test moves, a session with sound holds each frame until its sound comes due
+(40 ms early), drops one the sound passed, sends Play and Mute on to the
+speaker and ends only once all of its sound was heard; a speaker that fails
+is said (`AudioState` Unavailable) and the session plays on silent to its
+end; a frame the sound passed is dropped only for a newer one waiting, so a
+late last frame whose End comes after it still goes out
+(`a_late_last_frame_is_never_dropped`), and lateness counts from when the
+sound is heard, not from the lead before it (`frames_follow_the_sound_s_clock`,
+at ten and thirty a second). The sound's own thread fills the speaker before Play and nothing
+plays until it, queues the sound in place with its gap and all after its
+end silent, keeps the speaker's clock from where the sound starts, and
+gives the sound up when the speaker refuses a piece, gives no clock a
+second after starting, or its thread stops; a clock lost while playing is
+none, so frames wait, and a second without it gives the sound up
+(`a_clock_lost_while_playing_is_none`), time paused without one counting
+for nothing (`a_pause_without_a_clock_counts_for_nothing`); paused, the sound
+has no clock, so frames played again wait for a fresh one
+(`a_paused_sound_has_no_clock`); Close ends the sound and lets its speaker
+go while the session still holds it, and the parent leaving closes it,
+both before the reader's grace runs out
+(`close_ends_the_sound_and_lets_its_speaker_go`,
+`leaving_ends_the_sound_before_the_process_exits`). With a trusted ffmpeg at hand, a
+session asking for sound is refused for the WebM clip, which Apple's decoder
+turns down, rather than handed to ffmpeg
+(`a_session_asking_for_sound_runs_no_external_decoder`). On macOS the confined worker
+plays `ticks.mp4` muted with its sound: Opened says Ready, its frames come
+in order, each on the clip's own times, at least thirty of its forty (one
+the sound passed may be dropped on a busy machine) and the last among them, and the session ends about four seconds after
+Play (skipped without an audio output unless `KETTLE_REQUIRE_AUDIO`). What
+the parent asked keeps its latest
+Play or Pause, taken once, apart from it its latest Mute or Unmute, and the
+moment of its last command.
 
 Red checks: no sweep, a sweep after the hook or not first in its function,
 a call moved with a comment left in its place, a sweep that closes nothing,
@@ -4342,7 +4374,13 @@ against an in-process stand-in worker speaking the session's frames:
 opened paused on its first frame, played to Ended and reaped without a kill;
 only the newest frame waiting and one wake until the caller looks; dropping
 it sends Close and stops it counting at once; a third session refused and
-one made after a drop; only the latest Play or Pause sent; a refusal kept or
+one made after a drop; only the latest Play or Pause sent, and apart from
+it only the latest Mute or Unmute, neither taking the other's place
+(`only_the_latest_of_each_wish_is_sent`, each run of wishes taken under one
+lock); its sound Opened's until the worker says it went, and none before it
+opened (`a_session_s_sound_is_what_the_worker_says`); a worker that gives a
+silent session sound or says Ready again breaking the stream
+(`a_session_that_cannot_go_on_says_why`); a refusal kept or
 flattened as a render's is, before Ready only a handshake's, and none with a
 byte after it, and kept only when the worker then exits as a render's must
 (after Ready exit 0, else the exit says why: 4 `RenderTimeout`, 9
@@ -4371,7 +4409,12 @@ AVFoundation plays MP4 every frame in order, upright when rotated, mirrored
 when its display matrix mirrors it (as its stills show it), at half the
 rate, from past its end on its last frame, the video's own last frame in
 `long-audio.mp4`, at the video's rate or a slower one, and leaves WebM to
-ffmpeg;
+ffmpeg; it decodes `ticks.mp4`'s sound to four seconds of 48 kHz stereo
+floats, each block placed on the video's timeline and none overlapping the
+last, every tick within 10 ms of its second and quiet between, from a second
+and a half in starting exactly there with its first tick at two seconds, and
+gives no source, saying why, for no sound asked or none in the video
+(`audio::trim` drops what plays before the start or the block before);
 `frame_slots_keep_a_video_within_its_rate` keeps ten seconds of video at 24
 to 60 frames a second, from two starts, within rates of one to thirty, never
 above them, a video no faster keeping every frame;
@@ -4391,7 +4434,31 @@ frame shown and the one it replaced given back, paused, ended keeping its
 frame and replayed from the start, parked or failed and reopened where it
 stood, a hidden lane pausing what plays and staying paused once shown, a
 drag along the bar moving it on release, a frame without room given back), `a_failed_playback_says_why`
-the footer for each failure, and `video_playback_is_wired` the wiring. All
+the footer for each failure, and `video_playback_is_wired` the wiring.
+`a_session_apple_turns_down_opens_again_silent` (macOS) opens a sound
+session Apple's decoder refused again, once, silent and where it was, its
+lane then saying ffmpeg plays the picture only, and fails a second refusal;
+`only_apples_containers_ask_for_sound_on_macos` keeps WebM, Matroska and AVI
+from asking for sound there.
+`a_playback_s_sound_follows_its_session_and_the_user` covers its sound: the
+session's word, kept once the session goes; the user's mute reaching the
+session and holding for the sessions after a seek; no mute without sound
+that can play; heard sound saying nothing in the footer and muted or silent
+sound saying so. `a_silent_playback_says_why` gives each reason for no
+sound its own words in English and Spanish and its own `ui_geometry` name;
+`video_playback_is_wired` also holds a control client or Lua script to
+muting, never unmuting, and a new session to the sound the user left; and
+`kettle-render`'s `a_video_lane_offers_its_sound_button_beside_play` and
+`the_play_button_shows_what_a_press_does` the button (left of play, given up
+before it as the header narrows, the title keeping its columns, and its
+glyph dim while muted). Checked live on macOS 27 on 2026-10-11 with a
+signed worker: `▶` played `ticks.mp4` with its sound, coreaudiod holding an
+audio-out assertion on the USB output from Play, and `ui_geometry` said
+`heard`; a control client's `video_mute` muted it, the lane showing `♪`
+struck through and "Playing muted", and its second `video_mute` was refused;
+a click on `♪`, and M while the lane held the keyboard, muted and unmuted
+it; the mute held for the next session, and the sound stayed said once the
+video ended. All
 were checked red by reverting what each protects. Checked live on macOS 27
 with a signed worker: `▶` played the nine-color MP4 in real time (rate
 1.001 over five seconds) with the bar, "0:05 / 0:09" and "Playing without
@@ -4877,7 +4944,22 @@ admitted: the admitted file after another takes its name, a failed file's
 failure even once its name leads to an admitted one, and no path the job
 never named. On macOS, the cancellation-free message-queue call is refused
 too. A sandbox that fails to apply fails these tests; only a system without
-one skips them. The Linux filter's answers are checked by running it
+one skips them. Unconfined a muted output AudioQueue plays and its clock
+runs; confined it cannot start, and a job granted sound plays it while
+refused everything else as before. Without either of the sound grant's two
+services an output does not start, so each is needed; the profile carries
+neither unless sound is granted; confined, the output's device still says
+its latency. `tests/audio_out.rs` plays muted silence
+through the output: its clock starts with it, runs while it plays, holds
+while paused and runs on after, each buffer comes back free once played,
+and a buffer is filled only within its size by whole frames; the default
+device says a latency above nothing and at most three seconds, and what
+has been heard is what the queue played less it
+(`what_is_heard_is_what_the_queue_played_less_its_latency`; this Mac's USB
+output said 12.75 ms). A machine
+with no audio output skips the sound tests, saying so, unless
+`KETTLE_REQUIRE_AUDIO` is set, which makes that a failure. The Linux
+filter's answers are checked by running it
 through an evaluator that accepts only the opcodes it uses: sockets, pairs
 but connected Unix ones, System V IPC, ioctls past the descriptor queries,
 signals leaving the worker (and, where Landlock scopes signals, none of

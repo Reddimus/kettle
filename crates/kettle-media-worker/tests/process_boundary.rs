@@ -1187,6 +1187,19 @@ fn play_open(path: &std::path::Path, room: (u32, u32), start_ms: u64) -> Frame {
         max_height: room.1,
         start_ms,
         max_fps_milli: 30_000,
+        audio: kettle_media::AudioRequest::On,
+    })
+}
+
+/// [`play_open`] asking for no sound, as Kettle opens a video only an
+/// external decoder plays.
+fn silent_open(path: &std::path::Path, room: (u32, u32), start_ms: u64) -> Frame {
+    let Frame::PlayOpen(open) = play_open(path, room, start_ms) else {
+        unreachable!()
+    };
+    Frame::PlayOpen(PlayOpen {
+        audio: kettle_media::AudioRequest::Off,
+        ..open
     })
 }
 
@@ -1915,9 +1928,33 @@ fn grouped_worker_with_decoder(ffmpeg: &std::path::Path) -> Child {
         .unwrap()
 }
 
-/// With a real ffmpeg, a session plays every frame of the WebM clip in
-/// order, confined to the file and its decoder, and ends; on macOS it gets
-/// there after Apple's decoder turns WebM down.
+/// A session asking for sound runs no external decoder: on macOS it is
+/// confined for sound with Apple's decoder alone, which turns WebM down, so
+/// the WebM clip is refused even with a trusted ffmpeg at hand. Asked
+/// without sound, ffmpeg plays it (`real_ffmpeg_plays_a_session_to_its_end`).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_session_asking_for_sound_runs_no_external_decoder() {
+    let Some(ffmpeg) = installed_ffmpeg() else {
+        return;
+    };
+    let directory = kettle_test_support::private_tempdir("kettle-worker-session-");
+    let clip = fixture_clip(directory.path(), "index.webm");
+    let mut child = grouped_worker_with_decoder(&ffmpeg);
+    handshake(&mut child);
+    send(&mut child, &play_open(&clip, (64, 36), 0));
+    assert_eq!(
+        receive(&mut child),
+        Some(Frame::Failure(Failure {
+            code: FailureCode::UnsupportedContainer
+        }))
+    );
+    assert_eq!(exit_code(&mut child, 3 * SECOND), 0);
+}
+
+/// With a real ffmpeg, a session asking for no sound plays every frame of
+/// the WebM clip in order, confined to the file and its decoder, and ends;
+/// on macOS it gets there after Apple's decoder turns WebM down.
 #[test]
 fn real_ffmpeg_plays_a_session_to_its_end() {
     let Some(ffmpeg) = installed_ffmpeg() else {
@@ -1927,7 +1964,7 @@ fn real_ffmpeg_plays_a_session_to_its_end() {
     let clip = fixture_clip(directory.path(), "index.webm");
     let mut child = grouped_worker_with_decoder(&ffmpeg);
     handshake(&mut child);
-    send(&mut child, &play_open(&clip, (64, 36), 2000));
+    send(&mut child, &silent_open(&clip, (64, 36), 2000));
     let frames = Frames::of(&mut child);
     let opened = match frames.next(5 * SECOND) {
         Some(Frame::Opened(opened)) => opened,
@@ -1981,7 +2018,7 @@ fn a_quiet_parent_s_session_leaves_no_decoder_behind() {
     let mut child = grouped_worker_with_decoder(&ffmpeg);
     let group = child.id() as libc::pid_t;
     handshake(&mut child);
-    send(&mut child, &play_open(&clip, (64, 36), 0));
+    send(&mut child, &silent_open(&clip, (64, 36), 0));
     let frames = Frames::of(&mut child);
     assert!(matches!(frames.next(5 * SECOND), Some(Frame::Opened(_))));
     video_frame(frames.next(5 * SECOND));
@@ -2160,6 +2197,70 @@ fn a_session_whose_first_frame_never_comes_times_out() {
         }
     }
     assert!(started.elapsed() >= 5 * SECOND - Duration::from_millis(100));
+    assert_eq!(exit_code(&mut child, 5 * SECOND), 0);
+}
+
+/// On macOS a session plays an MP4's sound with its picture, confined:
+/// Opened says Ready, every frame comes in order, and the session ends once
+/// the sound has, about four seconds after Play. Muted, so a run makes no
+/// sound. A machine with no audio output says Unavailable and plays on
+/// silent; with `KETTLE_REQUIRE_AUDIO` set that is a failure.
+#[cfg(target_os = "macos")]
+#[test]
+fn apples_decoder_plays_a_session_with_its_sound_in_the_worker() {
+    let directory = kettle_test_support::private_tempdir("kettle-worker-session-");
+    let clip = fixture_clip(directory.path(), "ticks.mp4");
+    let mut child = grouped_worker();
+    handshake(&mut child);
+    let Frame::PlayOpen(mut open) = play_open(&clip, (32, 32), 0) else {
+        unreachable!()
+    };
+    open.audio = kettle_media::AudioRequest::Muted;
+    send(&mut child, &Frame::PlayOpen(open));
+    let frames = Frames::of(&mut child);
+    let opened = match frames.next(5 * SECOND) {
+        Some(Frame::Opened(opened)) => opened,
+        other => panic!("not opened: {other:?}"),
+    };
+    match opened.audio {
+        kettle_media::AudioStatus::Ready => {}
+        kettle_media::AudioStatus::Unavailable
+            if std::env::var_os("KETTLE_REQUIRE_AUDIO").is_none() =>
+        {
+            eprintln!("skipped: no audio output on this machine");
+            return;
+        }
+        other => panic!("sound {other:?}"),
+    }
+    assert_eq!(video_frame(frames.next(5 * SECOND)).pts_ms, 0);
+    assert_eq!(
+        frames.next(SECOND),
+        Some(Frame::PlayState(PlayState::Paused))
+    );
+    let played = Instant::now();
+    command(&mut child, PlayCommand::Play);
+    let mut shown = vec![0];
+    loop {
+        match frames.next(5 * SECOND) {
+            Some(Frame::VideoFrame(frame)) => shown.push(frame.pts_ms),
+            Some(Frame::PlayState(PlayState::Playing)) => {}
+            Some(Frame::PlayState(PlayState::Ended)) => break,
+            other => panic!("unexpected {other:?}"),
+        }
+        command(&mut child, PlayCommand::Heartbeat);
+    }
+    let elapsed = played.elapsed();
+    assert!(
+        elapsed >= Duration::from_millis(3_500) && elapsed < Duration::from_secs(6),
+        "ended {elapsed:?} after Play"
+    );
+    // In order, and the last frame shown.
+    // In order, each on the clip's own frames, the last among them; one
+    // the sound passed may be dropped on a busy machine, so most, not all.
+    assert!(shown.windows(2).all(|pair| pair[0] < pair[1]), "{shown:?}");
+    assert!(shown.iter().all(|pts| pts % 100 == 0), "{shown:?}");
+    assert!(shown.len() >= 30, "{} of 40 frames: {shown:?}", shown.len());
+    assert_eq!(shown.last(), Some(&3_900));
     assert_eq!(exit_code(&mut child, 5 * SECOND), 0);
 }
 

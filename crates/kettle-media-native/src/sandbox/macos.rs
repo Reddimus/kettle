@@ -56,6 +56,12 @@ const BASE: &str = r#"(version 1)
   SYS_msgsnd_nocancel SYS_msgrcv_nocancel))
 "#;
 
+/// What a job that plays sound may do beyond the rest.
+const AUDIO_OUTPUT: &str = r#"(allow mach-lookup
+  (global-name "com.apple.audio.audiohald")
+  (global-name "com.apple.audio.AudioComponentRegistrar"))
+"#;
+
 type InitWithParameters =
     unsafe extern "C" fn(*const c_char, u64, *const *const c_char, *mut *mut c_char) -> c_int;
 type FreeError = unsafe extern "C" fn(*mut c_char);
@@ -135,6 +141,13 @@ fn profile(policy: &Policy<'_>) -> Result<(String, Parameters), SandboxError> {
     if !policy.programs.is_empty() {
         profile.push_str("(allow process-fork)\n");
     }
+    if policy.audio_output {
+        // What an output AudioQueue needs, as measured on macOS 27: the
+        // audio server, and the registry its output unit is found in.
+        // Without either it cannot start; coreaudiod's own name is not
+        // needed.
+        profile.push_str(AUDIO_OUTPUT);
+    }
     for (index, tree) in policy.trees.iter().enumerate() {
         let name = format!("TREE{index}");
         profile.push_str(&format!(
@@ -193,10 +206,20 @@ mod tests {
             files: vec![&file],
             programs: vec![hostile.clone()],
             trees: vec![dir.path().to_owned()],
+            audio_output: false,
         };
         let (profile, parameters) = profile(&policy).unwrap();
         assert!(profile.starts_with(BASE));
         assert!(!profile.contains("allow default"), "{profile}");
+        // Sound only when granted, and then only its two services.
+        assert!(!profile.contains("com.apple.audio"), "{profile}");
+        let sound = Policy {
+            audio_output: true,
+            ..Policy::default()
+        };
+        let (with_sound, _) = super::profile(&sound).unwrap();
+        assert!(with_sound.ends_with(AUDIO_OUTPUT), "{with_sound}");
+        assert_eq!(with_sound.matches("com.apple.audio").count(), 2);
         assert!(parameters.iter().any(|(name, value)| name == "PROGRAM0"
             && value.ends_with(b"(allow default) ((\"")));
         assert_eq!(

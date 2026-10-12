@@ -6,7 +6,8 @@ use std::sync::{Condvar, Mutex, PoisonError};
 use std::time::Instant;
 
 use crate::{
-    FailureCode, Opened, PathIdentity, PlayOpen, StillSample, StillsLayout, VideoInfo, VideoStills,
+    AudioRequest, FailureCode, Opened, PathIdentity, PlayOpen, StillSample, StillsLayout,
+    VideoInfo, VideoStills,
 };
 
 /// The environment variable the parent names the external decoder's ffmpeg
@@ -56,13 +57,15 @@ pub trait VideoPlayer {
 
 /// What a session asks of its decoder: frames fitted within `max_width` by
 /// `max_height` as [`crate::play_size`] fits them, from `start_ms` of the
-/// video, at most `max_fps_milli` frames per thousand seconds.
+/// video, at most `max_fps_milli` frames per thousand seconds, and the
+/// sound asked for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlayRequest {
     pub max_width: u32,
     pub max_height: u32,
     pub start_ms: u64,
     pub max_fps_milli: u32,
+    pub audio: AudioRequest,
 }
 
 impl PlayRequest {
@@ -73,6 +76,7 @@ impl PlayRequest {
             max_height: open.max_height,
             start_ms: open.start_ms,
             max_fps_milli: open.max_fps_milli,
+            audio: open.audio,
         }
     }
 }
@@ -81,6 +85,10 @@ impl PlayRequest {
 pub struct Playback {
     pub opened: Opened,
     pub frames: Box<dyn FrameSource>,
+    /// The video's sound, decoded from the start asked for, when the session
+    /// asked for sound and this player can decode it; Opened then says
+    /// Ready.
+    pub audio: Option<Box<dyn crate::audio::AudioSource>>,
 }
 
 impl std::fmt::Debug for Playback {

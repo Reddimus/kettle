@@ -1265,6 +1265,45 @@ fn lane_announced(
     notice.map(|notice| lane_notice_text(notice, tr).to_string())
 }
 
+/// Whether a container's video may go to Apple's decoder, the only one
+/// that plays sound: MP4 and QuickTime on macOS, or a container not known
+/// yet; elsewhere there is no Apple decoder to keep it from.
+fn apple_reads(container: Option<kettle_media::video::VideoContainer>) -> bool {
+    use kettle_media::video::VideoContainer as C;
+    !cfg!(target_os = "macos")
+        || container.is_none_or(|container| matches!(container, C::IsoBmff | C::QuickTime))
+}
+
+/// A playing video's sound in ctl `ui_geometry`: heard, muted, or why there
+/// is none.
+fn playback_sound_name(sound: crate::media::PlaybackSound) -> &'static str {
+    use crate::media::PlaybackSound as S;
+    use kettle_media::AudioStatus as A;
+    match sound {
+        S::Heard => "heard",
+        S::Muted => "muted",
+        S::Silent(A::NoTrack) => "no_track",
+        S::Silent(A::DecoderSilent) => "decoder_silent",
+        S::Silent(A::Unsupported) => "unsupported",
+        S::Silent(A::Unavailable) => "unavailable",
+        S::Silent(A::Off | A::Ready) => "off",
+    }
+}
+
+/// What a lane's footer says of a video playing without sound, by why.
+fn silence_text(why: kettle_media::AudioStatus) -> kettle_i18n::Text {
+    use kettle_i18n::Text as T;
+    use kettle_media::AudioStatus as A;
+    match why {
+        A::NoTrack => T::MediaLaneNoticeVideoNoSoundTrack,
+        A::DecoderSilent => T::MediaLaneNoticeVideoSilentDecoder,
+        A::Unsupported => T::MediaLaneNoticeVideoSoundUnsupported,
+        A::Unavailable => T::MediaLaneNoticeVideoSoundUnavailable,
+        // Sound that can play is heard or muted, never silent.
+        A::Off | A::Ready => T::MediaLaneNoticeVideoPlaying,
+    }
+}
+
 /// What a lane says when its video stops playing, or cannot open, with
 /// `failure`: which decoder to install, that there is no sandbox, that the
 /// file changed, that it took too long, or that it stopped.
@@ -1333,10 +1372,12 @@ fn media_lane_accessibility(
 const ACCESSIBILITY_LANE_ID_MASK: u64 = 1 << 56;
 const MAX_LANE_ACCESSIBILITY_PANE: u64 = 1 << 51;
 const LANE_ACCESSIBILITY_PARTS: u64 = 32;
+/// A lane's controls, at parts 1 and on (see [`lane_controls`]).
+const LANE_CONTROLS: usize = 16;
 /// A playing video's bar, a slider: the part after the controls', below
 /// the stride.
-const LANE_SCRUBBER_PART: u64 = 16;
-const _: () = assert!(LANE_SCRUBBER_PART > 15 && LANE_SCRUBBER_PART < LANE_ACCESSIBILITY_PARTS);
+const LANE_SCRUBBER_PART: u64 = LANE_CONTROLS as u64 + 1;
+const _: () = assert!(LANE_SCRUBBER_PART < LANE_ACCESSIBILITY_PARTS);
 
 /// How far a step along a playing video's bar moves it, from the keyboard
 /// or an assistive technology.
@@ -1369,7 +1410,7 @@ fn lane_controls(
     u64,
     Option<kettle_render::Rect4>,
     kettle_render::MediaLaneHit,
-); 15] {
+); LANE_CONTROLS] {
     use kettle_render::MediaLaneHit as Hit;
     [
         (1, geometry.previous, Hit::Previous),
@@ -1387,6 +1428,7 @@ fn lane_controls(
         (13, geometry.page_previous, Hit::PreviousPage),
         (14, geometry.page_next, Hit::NextPage),
         (15, geometry.play, Hit::Play),
+        (16, geometry.sound, Hit::Sound),
     ]
 }
 
@@ -1406,6 +1448,7 @@ fn lane_control_name(hit: kettle_render::MediaLaneHit) -> &'static str {
         Hit::Copy => "copy",
         Hit::Reload => "reload",
         Hit::Play => "play",
+        Hit::Sound => "sound",
         Hit::Scrub => "scrubber",
         Hit::ZoomOut => "zoom_out",
         Hit::ZoomIn => "zoom_in",
@@ -6245,6 +6288,7 @@ fn lane_action_hit(action: &Action) -> Option<kettle_render::MediaLaneHit> {
         Action::PreviewCopy => Some(Hit::Copy),
         Action::PreviewReload => Some(Hit::Reload),
         Action::VideoPlay => Some(Hit::Play),
+        Action::VideoMute => Some(Hit::Sound),
         Action::PreviewZoomIn => Some(Hit::ZoomIn),
         Action::PreviewZoomOut => Some(Hit::ZoomOut),
         Action::PreviewFit => Some(Hit::Fit),
@@ -11486,6 +11530,20 @@ impl App {
                 max_height: edge(room.1),
                 start_ms: start_ms.min(info.duration_ms),
                 max_fps_milli: kettle_media::MAX_PLAY_FPS_MILLI,
+                // Its sound, as the user last left it for this item; none
+                // on macOS for a container only an external decoder reads,
+                // since only Apple's decoder plays sound.
+                audio: if apple_reads(info.container) {
+                    ws.lane_playbacks
+                        .get(&pane)
+                        .filter(|playback| playback.serves(item.id, item.generation))
+                        .map_or(
+                            kettle_media::AudioRequest::On,
+                            crate::media::LanePlayback::audio_request,
+                        )
+                } else {
+                    kettle_media::AudioRequest::Off
+                },
             },
         ))
     }
@@ -11535,6 +11593,26 @@ impl App {
             None => 0,
         };
         self.open_lane_playback(ws, pane, at_ms, true);
+    }
+
+    /// The lane's sound button, M while it holds the keyboard, and
+    /// `video_mute`: mute the sound of the video playing in the lane, or let
+    /// it be heard again, the video playing on. A control client or a Lua
+    /// script may mute it, but only the user lets it be heard.
+    fn toggle_lane_sound(&mut self, ws: &mut WindowState, pane: u64) {
+        let current = preview_item(ws, pane).map(|item| (item.id, item.generation));
+        let Some(playback) = ws.lane_playbacks.get_mut(&pane).filter(|playback| {
+            current.is_some_and(|(item, generation)| playback.serves(item, generation))
+        }) else {
+            return;
+        };
+        if playback.muted() && (self.ctl_driving || self.lua_driving) {
+            return;
+        }
+        if playback.toggle_mute() {
+            ws.accessibility_pending = true;
+            self.lanes_changed(ws, false);
+        }
     }
 
     /// Open the video `pane`'s lane shows from `at_ms`, playing when
@@ -11599,6 +11677,12 @@ impl App {
                             ),
                         );
                     }
+                }
+                // Asked for no sound: only an external decoder plays it.
+                if open.audio == kettle_media::AudioRequest::Off
+                    && let Some(playback) = ws.lane_playbacks.get_mut(&pane)
+                {
+                    playback.play_silently();
                 }
                 tell(ws, None);
             }
@@ -11713,9 +11797,13 @@ impl App {
         let budget = kettle_core::GraphicsBudget::previews();
         let mut redraw = false;
         let mut failed = Vec::new();
+        let mut reopen = Vec::new();
         for (&pane, playback) in &mut ws.lane_playbacks {
             let before = (playback.button(), playback.notice());
             redraw |= playback.poll(&budget);
+            if let Some((at_ms, play)) = playback.take_reopen() {
+                reopen.push((pane, at_ms, play));
+            }
             let after = (playback.button(), playback.notice());
             if before != after {
                 ws.accessibility_pending = true;
@@ -11741,6 +11829,11 @@ impl App {
             {
                 item.source.changed = true;
             }
+        }
+        // A session Apple's decoder turned down opens again, silent, as the
+        // user had it.
+        for (pane, at_ms, play) in reopen {
+            self.open_lane_playback(ws, pane, at_ms, play);
         }
         if redraw && let Some(window) = &ws.window {
             window.request_redraw();
@@ -12049,14 +12142,23 @@ impl App {
     fn lane_announcement(&self, ws: &WindowState, pane: u64) -> Option<String> {
         // A video opening says so, as a preview being made does; one that
         // plays is said by its button's name, never frame by frame.
-        if ws.lane_playbacks.get(&pane).is_some_and(|playback| {
-            playback.notice() == Some(crate::media::PlaybackNotice::Opening)
-        }) {
-            return Some(
-                self.ui_text
-                    .text(kettle_i18n::Text::MediaLaneNoticeVideoLoading)
-                    .to_string(),
-            );
+        // A video playing without sound says why, once.
+        match ws
+            .lane_playbacks
+            .get(&pane)
+            .and_then(crate::media::LanePlayback::notice)
+        {
+            Some(crate::media::PlaybackNotice::Opening) => {
+                return Some(
+                    self.ui_text
+                        .text(kettle_i18n::Text::MediaLaneNoticeVideoLoading)
+                        .to_string(),
+                );
+            }
+            Some(crate::media::PlaybackNotice::Silent(why)) => {
+                return Some(self.ui_text.text(silence_text(why)).to_string());
+            }
+            _ => {}
         }
         lane_announced(
             ws.lane_previews.get(&pane),
@@ -12950,6 +13052,7 @@ impl App {
             K::Page(step) => self.page_preview(ws, pane, step),
             K::Copy => self.copy_preview(ws, pane),
             K::Play => self.toggle_lane_play(ws, pane),
+            K::Mute => self.toggle_lane_sound(ws, pane),
             K::Swallow => {}
         }
         if let Some(window) = &ws.window {
@@ -13343,6 +13446,7 @@ impl App {
         let mode = lane_mode(item, panel);
         let mut lane = kettle_render::MediaLanePanel {
             play: None,
+            sound: None,
             frame: None,
             scrubber: None,
             pane,
@@ -13457,6 +13561,16 @@ impl App {
                 crate::media::PlaybackButton::Pause => kettle_render::MediaLanePlay::Pause,
                 crate::media::PlaybackButton::Play => kettle_render::MediaLanePlay::Play,
             });
+            // Only sound that can play has a button.
+            lane.sound = match playback.sound() {
+                Some(crate::media::PlaybackSound::Heard) => {
+                    Some(kettle_render::MediaLaneSound::Heard)
+                }
+                Some(crate::media::PlaybackSound::Muted) => {
+                    Some(kettle_render::MediaLaneSound::Muted)
+                }
+                Some(crate::media::PlaybackSound::Silent(_)) | None => None,
+            };
             if let Some(frame) = playback.frame() {
                 lane.frame = Some(kettle_render::MediaLaneFrame {
                     sheet: frame.clone(),
@@ -13480,11 +13594,14 @@ impl App {
                             .to_string(),
                     );
                 }
-                Some(crate::media::PlaybackNotice::Playing) => {
+                Some(crate::media::PlaybackNotice::Muted) => {
                     lane.notice = Some(
-                        tr.text(kettle_i18n::Text::MediaLaneNoticeVideoPlaying)
+                        tr.text(kettle_i18n::Text::MediaLaneNoticeVideoMuted)
                             .to_string(),
                     );
+                }
+                Some(crate::media::PlaybackNotice::Silent(why)) => {
+                    lane.notice = Some(tr.text(silence_text(why)).to_string());
                 }
                 Some(crate::media::PlaybackNotice::Failed(failure)) => {
                     lane.notice =
@@ -13706,6 +13823,7 @@ impl App {
             Hit::Copy => self.copy_preview(ws, pane),
             Hit::Reload => self.reload_preview(ws, pane),
             Hit::Play => self.toggle_lane_play(ws, pane),
+            Hit::Sound => self.toggle_lane_sound(ws, pane),
             Hit::ZoomOut => self.zoom_preview(ws, pane, 1.0 / kettle_render::MEDIA_ZOOM_STEP),
             Hit::ZoomIn => self.zoom_preview(ws, pane, kettle_render::MEDIA_ZOOM_STEP),
             Hit::Fit => self.fit_preview(ws, pane),
@@ -22580,6 +22698,7 @@ impl App {
             | Action::PreviewCopy
             | Action::PreviewReload
             | Action::VideoPlay
+            | Action::VideoMute
             | Action::PreviewZoomIn
             | Action::PreviewZoomOut
             | Action::PreviewFit => {
@@ -26592,11 +26711,17 @@ impl App {
                             (_, true) => "paused",
                             (_, false) => "stopped",
                         };
+                        let sound = target
+                            .lane_playbacks
+                            .get(id)
+                            .and_then(crate::media::LanePlayback::sound)
+                            .map(playback_sound_name);
                         lane["playback"] = serde_json::json!({
                             "state": state,
                             "position_ms": bar.position_ms,
                             "duration_ms": bar.duration_ms,
                             "frame": panel.frame.is_some(),
+                            "sound": sound,
                         });
                     }
                 }
@@ -34320,6 +34445,15 @@ impl App {
                         kettle_render::MediaLaneHit::Play => {
                             self.ui_text.text(kettle_i18n::Text::MediaLaneA11yPlayVideo)
                         }
+                        kettle_render::MediaLaneHit::Sound
+                            if lane.sound == Some(kettle_render::MediaLaneSound::Muted) =>
+                        {
+                            self.ui_text
+                                .text(kettle_i18n::Text::MediaLaneA11yUnmuteVideo)
+                        }
+                        kettle_render::MediaLaneHit::Sound => {
+                            self.ui_text.text(kettle_i18n::Text::MediaLaneA11yMuteVideo)
+                        }
                         kettle_render::MediaLaneHit::ZoomOut => {
                             self.ui_text.text(kettle_i18n::Text::MediaLaneA11yZoomOut)
                         }
@@ -34777,6 +34911,9 @@ impl App {
             lane.pane.hash(&mut hasher);
             lane.collapsed.hash(&mut hasher);
             lane.open_outside.hash(&mut hasher);
+            // The play and sound buttons' names follow what they do.
+            lane.play.hash(&mut hasher);
+            lane.sound.hash(&mut hasher);
             let announced = self.lane_announcement(ws, lane.pane);
             media_lane_accessibility(lane, &self.ui_text, announced.as_deref()).hash(&mut hasher);
             let (x, y, width, height) = lane.rect;
@@ -45695,14 +45832,10 @@ mod tests {
         assert!(unsigned.program.is_some());
     }
 
-    /// A screen reader hears a lane's item, its place on the shelf and,
-    /// when its pixels were released, that too; the tree is republished when
-    /// either changes, and each lane's nodes are its pane's alone.
-    #[test]
-    fn a_preview_lane_speaks_its_place_and_republishes_on_change() {
-        let tr = kettle_i18n::Translator::new(kettle_i18n::Language::En);
-        let mut lane = kettle_render::MediaLanePanel {
+    pub(super) fn test_lane_panel() -> kettle_render::MediaLanePanel {
+        kettle_render::MediaLanePanel {
             play: None,
+            sound: None,
             frame: None,
             scrubber: None,
             pane: 7,
@@ -45732,7 +45865,16 @@ mod tests {
             view: kettle_render::MediaViewport::FIT,
             tile: None,
             edge: None,
-        };
+        }
+    }
+
+    /// A screen reader hears a lane's item, its place on the shelf and,
+    /// when its pixels were released, that too; the tree is republished when
+    /// either changes, and each lane's nodes are its pane's alone.
+    #[test]
+    fn a_preview_lane_speaks_its_place_and_republishes_on_change() {
+        let tr = kettle_i18n::Translator::new(kettle_i18n::Language::En);
+        let mut lane = test_lane_panel();
         let (label, description) = super::media_lane_accessibility(&lane, &tr, None);
         assert!(
             label.contains("2 of 3") && label.contains("Plot"),
@@ -45756,6 +45898,10 @@ mod tests {
             "media_lane_accessibility(lane, &self.ui_text, announced.as_deref()).hash(&mut hasher);"
         ));
         assert!(key.contains("let announced = self.lane_announcement(ws, lane.pane);"));
+        // A press on play or sound renames its button: the tree is
+        // published again though nothing else changed.
+        assert!(key.contains("lane.play.hash(&mut hasher);"));
+        assert!(key.contains("lane.sound.hash(&mut hasher);"));
         assert!(key.contains("lane.collapsed.hash(&mut hasher);"));
 
         // Lane node ids round-trip, keep clear of every other kind of node,
@@ -58986,6 +59132,76 @@ mod lane_control_tests {
         }
     }
 
+    /// Only MP4 and QuickTime, or a container not known yet, may go to
+    /// Apple's decoder on macOS, and so ask for sound; elsewhere every
+    /// container asks, its decoder saying it plays none.
+    #[test]
+    fn only_apples_containers_ask_for_sound_on_macos() {
+        use kettle_media::video::VideoContainer as C;
+        for container in [Some(C::IsoBmff), Some(C::QuickTime), None] {
+            assert!(super::apple_reads(container), "{container:?}");
+        }
+        for container in [C::WebM, C::Matroska, C::Avi] {
+            assert_eq!(
+                super::apple_reads(Some(container)),
+                !cfg!(target_os = "macos"),
+                "{container:?}"
+            );
+        }
+    }
+
+    /// A video playing without sound says why, each reason in its own
+    /// words, in English and Spanish; sound that can play never says it is
+    /// silent for a reason.
+    #[test]
+    fn a_silent_playback_says_why() {
+        use kettle_i18n::Text as T;
+        use kettle_media::AudioStatus as A;
+        for (why, text) in [
+            (A::NoTrack, T::MediaLaneNoticeVideoNoSoundTrack),
+            (A::DecoderSilent, T::MediaLaneNoticeVideoSilentDecoder),
+            (A::Unsupported, T::MediaLaneNoticeVideoSoundUnsupported),
+            (A::Unavailable, T::MediaLaneNoticeVideoSoundUnavailable),
+            (A::Off, T::MediaLaneNoticeVideoPlaying),
+            (A::Ready, T::MediaLaneNoticeVideoPlaying),
+        ] {
+            assert_eq!(super::silence_text(why), text, "{why:?}");
+        }
+        // ctl names each its own way.
+        let names: std::collections::HashSet<_> = [
+            crate::media::PlaybackSound::Heard,
+            crate::media::PlaybackSound::Muted,
+        ]
+        .into_iter()
+        .chain(
+            [
+                A::NoTrack,
+                A::DecoderSilent,
+                A::Unsupported,
+                A::Unavailable,
+                A::Off,
+            ]
+            .map(crate::media::PlaybackSound::Silent),
+        )
+        .map(super::playback_sound_name)
+        .collect();
+        assert_eq!(names.len(), 7);
+        for language in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
+            let tr = kettle_i18n::Translator::new(language);
+            let said: std::collections::HashSet<_> = [
+                A::NoTrack,
+                A::DecoderSilent,
+                A::Unsupported,
+                A::Unavailable,
+                A::Off,
+            ]
+            .into_iter()
+            .map(|why| tr.text(super::silence_text(why)))
+            .collect();
+            assert_eq!(said.len(), 5, "{language:?}");
+        }
+    }
+
     /// A video plays in its lane only on the user's own gesture and not for
     /// a changed file, with one decoder a lane and at most two sessions at
     /// once; its session is kept while the event loop runs and paused while
@@ -59063,6 +59279,38 @@ mod lane_control_tests {
         );
         assert!(body("act_on_preview").contains("Hit::Play => self.toggle_lane_play(ws, pane),"));
         assert!(flat.contains("Action::VideoPlay => Some(Hit::Play),"));
+        // Sound: a control client or a Lua script may mute, never unmute,
+        // and is refused before the playback is told; a new session asks
+        // for the sound as the user left it.
+        let sound = body("toggle_lane_sound");
+        let refused = sound
+            .find("if playback.muted() && (self.ctl_driving || self.lua_driving) { return; }")
+            .unwrap();
+        assert!(refused < sound.find("playback.toggle_mute()").unwrap());
+        assert!(body("act_on_preview").contains("Hit::Sound => self.toggle_lane_sound(ws, pane),"));
+        assert!(flat.contains("Action::VideoMute => Some(Hit::Sound),"));
+        assert!(flat.contains("K::Mute => self.toggle_lane_sound(ws, pane),"));
+        // A session Apple's decoder turned down opens again, silent; one
+        // opened silent says only an external decoder plays it.
+        let poll = body("poll_lane_playbacks");
+        assert!(poll.contains(
+            "if let Some((at_ms, play)) = playback.take_reopen() { reopen.push((pane, at_ms, play)); }"
+        ));
+        assert!(poll.contains(
+            "for (pane, at_ms, play) in reopen { self.open_lane_playback(ws, pane, at_ms, play); }"
+        ));
+        assert!(open.contains(
+            "if open.audio == kettle_media::AudioRequest::Off && let Some(playback) = ws.lane_playbacks.get_mut(&pane) { playback.play_silently(); }"
+        ));
+        assert!(body("lane_play_open").contains("audio: if apple_reads(info.container) {"));
+        // ui_geometry's playback carries it (keys are blanked as strings).
+        assert!(flat.contains(": panel.frame.is_some(), : sound, });"));
+        assert!(flat.contains(
+            "let sound = target .lane_playbacks .get(id) .and_then(crate::media::LanePlayback::sound) .map(playback_sound_name);"
+        ));
+        assert!(body("lane_play_open").contains(
+            "ws.lane_playbacks .get(&pane) .filter(|playback| playback.serves(item.id, item.generation)) .map_or( kettle_media::AudioRequest::On, crate::media::LanePlayback::audio_request, )"
+        ));
         assert!(flat.contains(
             "Action::PreviewPlay => { if let Some(pane) = ws.mux.active_focus() && ws.preview_panels.contains_key(&pane) { self.toggle_lane_preview(ws, pane); } }"
         ));
@@ -59591,16 +59839,36 @@ mod lane_control_tests {
             Hit::Fit,
             Hit::PreviousPage,
             Hit::NextPage,
+            Hit::Play,
+            Hit::Sound,
+            Hit::Scrub,
+            Hit::Resize,
             Hit::Inside,
         ];
         let names: std::collections::HashSet<_> =
             hits.iter().map(|hit| lane_control_name(*hit)).collect();
         assert_eq!(names.len(), hits.len());
-        let ids: std::collections::HashSet<_> = (0..=14)
+        // The lane, each control, and the bar after them.
+        use super::{LANE_CONTROLS, LANE_SCRUBBER_PART, lane_controls};
+        let parts = 0..=LANE_SCRUBBER_PART;
+        let ids: std::collections::HashSet<_> = parts
+            .clone()
             .map(|part| super::accessibility_lane_id(7, part).expect("in range"))
             .collect();
-        assert_eq!(ids.len(), 15);
-        for part in 0..=14 {
+        assert_eq!(ids.len(), LANE_CONTROLS + 2);
+        let controls: std::collections::HashSet<_> = lane_controls(
+            &kettle_render::media_lane_geometry(
+                &super::tests::test_lane_panel(),
+                (10.0, 20.0),
+                (10.0, 20.0),
+            )
+            .unwrap(),
+        )
+        .iter()
+        .map(|(part, _, _)| *part)
+        .collect();
+        assert_eq!(controls, (1..=LANE_CONTROLS as u64).collect());
+        for part in parts {
             let id = super::accessibility_lane_id(7, part).unwrap();
             assert_eq!(super::accessibility_lane_part(id), Some((7, part)));
         }

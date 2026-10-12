@@ -46,7 +46,7 @@ pub(crate) use focus::{PreviewFocus, PreviewKey, preview_key};
 pub(crate) use inline::{card_caption, card_message, card_size};
 pub(crate) use playback::{
     Button as PlaybackButton, LanePlayback, MAX_PLAYING, Notice as PlaybackNotice,
-    Session as PlaybackSession, Toggled as PlaybackToggled,
+    Session as PlaybackSession, Sound as PlaybackSound, Toggled as PlaybackToggled,
 };
 pub(crate) use preview::{
     FIRST_FRAME_WITHIN as PREVIEW_FIRST_FRAME_WITHIN, Frames as PreviewFrames,

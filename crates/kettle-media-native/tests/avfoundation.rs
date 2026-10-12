@@ -9,11 +9,12 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use kettle_media::audio::{AudioBlock, AudioSource, CHANNELS, SAMPLE_RATE};
 use kettle_media::video::{
     DecodedStills, PlayGate, PlayRequest, StillsPlan, VideoContainer, VideoDecoder, VideoInput,
     VideoPlayer, sniff_video_container,
 };
-use kettle_media::{FailureCode, PathIdentity, VideoCodec, VideoInfo};
+use kettle_media::{AudioRequest, AudioStatus, FailureCode, PathIdentity, VideoCodec, VideoInfo};
 use kettle_media_native::avfoundation::AvFoundation;
 
 mod support;
@@ -242,6 +243,7 @@ fn played(
                 max_height: room.1,
                 start_ms,
                 max_fps_milli,
+                audio: AudioRequest::On,
             },
             Instant::now() + Duration::from_secs(10),
         )
@@ -321,6 +323,7 @@ fn a_session_past_the_end_shows_the_last_frame() {
                     max_height: 36,
                     start_ms,
                     max_fps_milli,
+                    audio: AudioRequest::On,
                 },
                 Instant::now() + Duration::from_secs(10),
             )
@@ -354,8 +357,123 @@ fn a_webm_session_is_left_to_the_next_decoder() {
             max_height: 36,
             start_ms: 0,
             max_fps_milli: 30_000,
+            audio: AudioRequest::On,
         },
         Instant::now() + Duration::from_secs(10),
     );
     assert_eq!(opened.err(), Some(FailureCode::UnsupportedContainer));
+}
+
+/// Open `name` for a session from `start_ms` asking for `audio`.
+fn session(
+    name: &str,
+    start_ms: u64,
+    audio: AudioRequest,
+) -> (Clip, kettle_media::video::Playback) {
+    let clip = Clip::fixture(name);
+    let playback = AvFoundation
+        .play(
+            clip.input(),
+            PlayRequest {
+                max_width: 64,
+                max_height: 36,
+                start_ms,
+                max_fps_milli: 30_000,
+                audio,
+            },
+            Instant::now() + Duration::from_secs(10),
+        )
+        .unwrap();
+    (clip, playback)
+}
+
+/// Every frame of a session's sound, from the first block's place: the
+/// place, and the left channel.
+fn sound_of(source: &mut dyn AudioSource) -> (u64, Vec<f32>) {
+    let mut block = vec![0f32; 1024 * CHANNELS];
+    let mut left = Vec::new();
+    let mut first = None;
+    let mut next = None;
+    while let Some(AudioBlock { frames, at_frame }) = source.next_block(&mut block).unwrap() {
+        // Never before the last block ended; any gap is silence.
+        if let Some(next) = next {
+            assert!(at_frame >= next, "{at_frame} before {next}");
+            left.resize(left.len() + (at_frame - next) as usize, 0.0);
+        }
+        first.get_or_insert(at_frame);
+        left.extend(block[..frames * CHANNELS].iter().step_by(CHANNELS));
+        next = Some(at_frame + frames as u64);
+        assert!(
+            left.len() <= 10 * SAMPLE_RATE as usize,
+            "a sound that never ends"
+        );
+    }
+    (first.unwrap(), left)
+}
+
+/// Where each tick of `left` starts, in frames from `first`: the first
+/// frame louder than a tenth after a stretch of quiet.
+fn ticks(first: u64, left: &[f32]) -> Vec<u64> {
+    let mut onsets = Vec::new();
+    let mut quiet = usize::MAX / 2;
+    for (at, sample) in left.iter().enumerate() {
+        if sample.abs() > 0.1 {
+            if quiet > 4_800 {
+                onsets.push(first + at as u64);
+            }
+            quiet = 0;
+        } else {
+            quiet += 1;
+        }
+    }
+    onsets
+}
+
+/// The sound of `ticks.mp4`, whose 20 ms tick starts each whole second,
+/// decodes to 48 kHz stereo floats placed on the video's timeline: four
+/// seconds of it, each tick within 10 ms of its second and quiet between.
+#[test]
+fn a_session_decodes_its_sound_in_place() {
+    let (_clip, mut playback) = session("ticks.mp4", 0, AudioRequest::On);
+    assert_eq!(playback.opened.audio, AudioStatus::Ready);
+    let (first, left) = sound_of(playback.audio.as_deref_mut().unwrap());
+    assert!(first < 480, "starts at {first}");
+    let length = first as usize + left.len();
+    assert!(length.abs_diff(4 * 48_000) < 2_048, "{length} frames");
+    let onsets = ticks(first, &left);
+    assert_eq!(onsets.len(), 4, "{onsets:?}");
+    for (second, onset) in onsets.iter().enumerate() {
+        assert!(
+            onset.abs_diff(second as u64 * 48_000) <= 480,
+            "tick {second} at {onset}"
+        );
+    }
+    // Quiet between ticks.
+    let middle = &left[(24_000 - first as usize)..(40_000 - first as usize)];
+    assert!(middle.iter().all(|sample| sample.abs() < 0.01));
+}
+
+/// From a second and a half in, the sound starts exactly there, and its
+/// first tick is the one at two seconds.
+#[test]
+fn a_session_s_sound_starts_where_it_does() {
+    let (_clip, mut playback) = session("ticks.mp4", 1_500, AudioRequest::Muted);
+    assert_eq!(playback.opened.start_ms, 1_500);
+    assert_eq!(playback.opened.audio, AudioStatus::Ready);
+    let (first, left) = sound_of(playback.audio.as_deref_mut().unwrap());
+    assert_eq!(first, 72_000);
+    let onsets = ticks(first, &left);
+    assert!(onsets[0].abs_diff(96_000) <= 480, "{onsets:?}");
+}
+
+/// No sound asked for, or none in the video: no source, and Opened says
+/// why.
+#[test]
+fn a_session_without_sound_says_why() {
+    let (_clip, playback) = session("ticks.mp4", 0, AudioRequest::Off);
+    assert!(playback.audio.is_none());
+    assert_eq!(playback.opened.audio, AudioStatus::Off);
+    let (_clip, playback) = session("index.mp4", 0, AudioRequest::On);
+    assert!(playback.audio.is_none());
+    assert_eq!(playback.opened.audio, AudioStatus::NoTrack);
 }

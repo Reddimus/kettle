@@ -218,8 +218,11 @@ Reports that fit any of these are welcome:
   file in a worker of its own (see Video playback sessions), under the same
   rules: the user's own gesture, never a control request, a Lua action or a
   changed file; its frames are checked to be the size it opened at before a
-  byte of their pixels is read, charged to the same account and held by the
-  lane, never the item, and it plays no sound.
+    byte of their pixels is read, charged to the same account and held by the
+  lane, never the item. Its sound plays only from that worker, granted sound
+  on macOS only when asked for (see Media worker sandbox), and only once the
+  user played it; a control request or a Lua action may mute it, never
+  unmute it.
   While the user has given a lane the keyboard (`focus_preview`), no key
   pressed, chord, input-method text or control client's
   `send_keys`/`send_text` reaches a pane in that window; getting one
@@ -298,7 +301,13 @@ Reports that fit any of these are welcome:
   reads, Apple's video decoder service and its IOSurface client, `/dev/fd`
   (descriptors already held), and what dyld needs to start a granted
   program; it refuses `setsid`, `setpgid` and System V IPC, and signals to
-  anything outside its sandbox. A
+  anything outside its sandbox. A job granted sound (`audio_output`, off
+  unless asked for) may also reach two services more, measured as both
+  needed and enough for an output AudioQueue: the audio server
+  (`com.apple.audio.audiohald`) and its component registry
+  (`com.apple.audio.AudioComponentRegistrar`); no input, no device file and
+  nothing else of audio's. A job playing sound past that, or recording, is
+  in scope. A
   video is never decoded unconfined: where the sandbox cannot be applied (a
   Linux kernel without Landlock, or with it turned off; a macOS without the
   call) a video job fails with `backend_unavailable`, reason `sandbox`,
@@ -311,8 +320,11 @@ Reports that fit any of these are welcome:
 - **Video playback sessions** — a video the user plays runs in a media
   worker of its own, which confines itself to the one file and its decoder,
   exactly as a video job does, before reading a byte of it, and stays
-  confined for the whole session. It reads nothing from the parent but
-  one-byte commands, writes frames only of the size it opened at, decodes
+    confined for the whole session, granted sound (see Media worker sandbox)
+  only on macOS, only when sound was asked for, and then with Apple's
+  decoder alone: an external decoder never runs with that grant. It reads nothing from
+  the parent but one-byte commands, writes frames only of the size it
+  opened at, decodes
   only while playing into three buffers, and ends when the parent closes
   it, leaves, or sends nothing for 5 s (it then kills its own process
   group, decoder and all), when a frame goes unread for 5 s, when a playing

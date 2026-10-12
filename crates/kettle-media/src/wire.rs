@@ -71,7 +71,7 @@ impl Direction {
         match self {
             Self::ExternalToParent => kind == 3,
             Self::ParentToWorker => matches!(kind, 1 | 4 | 8 | 9),
-            Self::WorkerToParent => matches!(kind, 2 | 5 | 6 | 7 | 10 | 11 | 12),
+            Self::WorkerToParent => matches!(kind, 2 | 5 | 6 | 7 | 10 | 11 | 12 | 13),
         }
     }
 }
@@ -94,6 +94,9 @@ pub enum Frame {
     Opened(Opened),
     VideoFrame(VideoFrame),
     PlayState(PlayState),
+    /// Its sound changed from what Opened said: it stopped, or could not
+    /// start.
+    AudioState(AudioStatus),
 }
 impl Frame {
     pub fn kind(&self) -> u8 {
@@ -110,6 +113,7 @@ impl Frame {
             Self::Opened(_) => 10,
             Self::VideoFrame(_) => VIDEO_FRAME,
             Self::PlayState(_) => 12,
+            Self::AudioState(_) => 13,
         }
     }
     pub fn validate(&self) -> Result<(), ValidationError> {
@@ -118,7 +122,9 @@ impl Frame {
             Self::Ready(r) => r.build_id.validate(),
             Self::Rendered(r) => r.validate(),
             Self::DetectedRendered { kind, rendered } => rendered.validate_as(*kind),
-            Self::Failure(_) | Self::PlayCommand(_) | Self::PlayState(_) => Ok(()),
+            Self::Failure(_) | Self::PlayCommand(_) | Self::PlayState(_) | Self::AudioState(_) => {
+                Ok(())
+            }
             Self::PlayOpen(open) => open.validate(),
             Self::Opened(opened) => opened.validate(),
             Self::VideoFrame(frame) => frame.validate(),
@@ -692,20 +698,28 @@ fn put_frame(w: &mut Writer, frame: &Frame) -> Result<(), WireError> {
             w.u32(open.max_width)?;
             w.u32(open.max_height)?;
             w.u64(open.start_ms)?;
-            w.u32(open.max_fps_milli)
+            w.u32(open.max_fps_milli)?;
+            w.u8(match open.audio {
+                AudioRequest::Off => 0,
+                AudioRequest::On => 1,
+                AudioRequest::Muted => 2,
+            })
         }
         Frame::PlayCommand(command) => w.u8(match command {
             PlayCommand::Play => 0,
             PlayCommand::Pause => 1,
             PlayCommand::Heartbeat => 2,
             PlayCommand::Close => 3,
+            PlayCommand::Mute => 4,
+            PlayCommand::Unmute => 5,
         }),
         Frame::Opened(opened) => {
             w.video_info(&opened.info)?;
             w.u32(opened.width)?;
             w.u32(opened.height)?;
             w.u32(opened.fps_milli)?;
-            w.u64(opened.start_ms)
+            w.u64(opened.start_ms)?;
+            w.u8(audio_status_byte(opened.audio))
         }
         Frame::VideoFrame(frame) => {
             w.u64(frame.seq)?;
@@ -719,6 +733,7 @@ fn put_frame(w: &mut Writer, frame: &Frame) -> Result<(), WireError> {
             PlayState::Paused => 1,
             PlayState::Ended => 2,
         }),
+        Frame::AudioState(status) => w.u8(audio_status_byte(*status)),
         Frame::ExternalRequest(j) => {
             w.kind(j.kind)?;
             match &j.source {
@@ -1327,6 +1342,12 @@ fn parse_frame(r: &mut Reader<'_>, kind: u8) -> Result<Frame, WireError> {
                 max_height: r.u32()?,
                 start_ms: r.u64()?,
                 max_fps_milli: r.u32()?,
+                audio: match r.u8()? {
+                    0 => AudioRequest::Off,
+                    1 => AudioRequest::On,
+                    2 => AudioRequest::Muted,
+                    _ => return Err(WireError::UnknownEnum),
+                },
             };
             open.validate_bounds()?;
             Frame::PlayOpen(open)
@@ -1336,6 +1357,8 @@ fn parse_frame(r: &mut Reader<'_>, kind: u8) -> Result<Frame, WireError> {
             1 => PlayCommand::Pause,
             2 => PlayCommand::Heartbeat,
             3 => PlayCommand::Close,
+            4 => PlayCommand::Mute,
+            5 => PlayCommand::Unmute,
             _ => return Err(WireError::UnknownEnum),
         }),
         10 => {
@@ -1345,6 +1368,7 @@ fn parse_frame(r: &mut Reader<'_>, kind: u8) -> Result<Frame, WireError> {
                 height: r.u32()?,
                 fps_milli: r.u32()?,
                 start_ms: r.u64()?,
+                audio: audio_status(r.u8()?)?,
             };
             opened.validate()?;
             Frame::Opened(opened)
@@ -1372,6 +1396,28 @@ fn parse_frame(r: &mut Reader<'_>, kind: u8) -> Result<Frame, WireError> {
             2 => PlayState::Ended,
             _ => return Err(WireError::UnknownEnum),
         }),
+        13 => Frame::AudioState(audio_status(r.u8()?)?),
+        _ => return Err(WireError::UnknownEnum),
+    })
+}
+fn audio_status_byte(status: AudioStatus) -> u8 {
+    match status {
+        AudioStatus::Ready => 0,
+        AudioStatus::NoTrack => 1,
+        AudioStatus::DecoderSilent => 2,
+        AudioStatus::Unsupported => 3,
+        AudioStatus::Unavailable => 4,
+        AudioStatus::Off => 5,
+    }
+}
+fn audio_status(v: u8) -> Result<AudioStatus, WireError> {
+    Ok(match v {
+        0 => AudioStatus::Ready,
+        1 => AudioStatus::NoTrack,
+        2 => AudioStatus::DecoderSilent,
+        3 => AudioStatus::Unsupported,
+        4 => AudioStatus::Unavailable,
+        5 => AudioStatus::Off,
         _ => return Err(WireError::UnknownEnum),
     })
 }

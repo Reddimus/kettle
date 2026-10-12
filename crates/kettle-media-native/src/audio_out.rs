@@ -1,0 +1,364 @@
+//! A session's sound out of this machine (macOS): one AudioQueue the worker
+//! owns, fed from a fixed set of buffers. Its callback, on the queue's own
+//! thread, only marks the buffer it gives back as free: nothing there
+//! decodes, allocates, locks or blocks. The queue's timeline says how much
+//! of what was queued it has played; less the output device's presentation
+//! latency, asked of it again each second as the device may change, that
+//! is how much has been heard, the clock a session's frames follow once its
+//! sound plays.
+//!
+//! Every call into AudioToolbox here has its own SAFETY comment. The queue
+//! is disposed, immediately, before the state its callback writes is
+//! freed, so no callback can outlive it.
+
+use std::cell::Cell;
+use std::ffi::c_void;
+use std::ptr::NonNull;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+use kettle_media::audio::{CHANNELS, SAMPLE_RATE};
+use objc2_audio_toolbox::{
+    AudioQueueAllocateBuffer, AudioQueueBufferRef, AudioQueueCreateTimeline, AudioQueueDispose,
+    AudioQueueEnqueueBuffer, AudioQueueGetCurrentTime, AudioQueueNewOutput, AudioQueuePause,
+    AudioQueueRef, AudioQueueSetParameter, AudioQueueStart, AudioQueueTimelineRef,
+    kAudioQueueParam_Volume,
+};
+use objc2_core_audio::{
+    AudioObjectGetPropertyData, AudioObjectID, AudioObjectPropertyAddress,
+    kAudioDevicePropertyBufferFrameSize, kAudioDevicePropertyLatency,
+    kAudioDevicePropertyNominalSampleRate, kAudioDevicePropertySafetyOffset,
+    kAudioDevicePropertyStreams, kAudioHardwarePropertyDefaultOutputDevice,
+    kAudioObjectPropertyElementMain, kAudioObjectPropertyScopeGlobal,
+    kAudioObjectPropertyScopeOutput, kAudioObjectSystemObject, kAudioObjectUnknown,
+    kAudioStreamPropertyLatency,
+};
+use objc2_core_audio_types::{
+    AudioStreamBasicDescription, AudioTimeStamp, AudioTimeStampFlags, kAudioFormatFlagIsFloat,
+    kAudioFormatFlagIsPacked, kAudioFormatLinearPCM,
+};
+
+/// Frames in each buffer: 20 ms.
+pub const BUFFER_FRAMES: usize = 960;
+/// Buffers the queue holds at once: one playing, one next, one being
+/// filled.
+pub const BUFFERS: usize = 3;
+
+/// The longest presentation latency believed: AirPlay's is about two
+/// seconds.
+pub const MAX_LATENCY: Duration = Duration::from_secs(3);
+/// How often the output's latency is asked again: the default device, which
+/// the queue plays on, may change while it plays.
+const LATENCY_EVERY: Duration = Duration::from_secs(1);
+
+/// The output could not be made or could not play: there is no sound, and
+/// the session goes on silent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Unavailable;
+
+/// What the queue's callback writes: which buffers it has given back.
+struct Freed {
+    buffers: [AudioQueueBufferRef; BUFFERS],
+    free: [AtomicBool; BUFFERS],
+}
+
+/// One session's sound output.
+pub struct Output {
+    queue: AudioQueueRef,
+    timeline: AudioQueueTimelineRef,
+    /// Boxed so the callback's pointer to it stays put; dropped only after
+    /// the queue is disposed.
+    freed: Box<Freed>,
+    started: bool,
+    /// The device's latency as last asked, and when.
+    latency: Cell<Option<(Duration, Instant)>>,
+}
+
+// SAFETY: the queue and its timeline are AudioToolbox objects that may be
+// called from any one thread at a time; `Output` is owned and called by one
+// thread, and the callback touches only the atomics in `freed`.
+unsafe impl Send for Output {}
+
+/// The queue's callback: the buffer it gives back is free to fill again.
+unsafe extern "C-unwind" fn given_back(
+    user: *mut c_void,
+    _queue: AudioQueueRef,
+    buffer: AudioQueueBufferRef,
+) {
+    // SAFETY: `user` is the `Freed` the queue was made with, which outlives
+    // the queue; only its atomics are written.
+    let freed = unsafe { &*user.cast::<Freed>() };
+    if let Some(index) = freed.buffers.iter().position(|ours| *ours == buffer) {
+        freed.free[index].store(true, Ordering::Release);
+    }
+}
+
+impl Output {
+    /// Make a queue for interleaved stereo 32-bit floats at 48 kHz, with its
+    /// buffers and timeline, playing nothing yet; `muted` sets its volume
+    /// to nothing.
+    pub fn open(muted: bool) -> Result<Self, Unavailable> {
+        let format = AudioStreamBasicDescription {
+            mSampleRate: f64::from(SAMPLE_RATE),
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+            mBytesPerPacket: (CHANNELS * size_of::<f32>()) as u32,
+            mFramesPerPacket: 1,
+            mBytesPerFrame: (CHANNELS * size_of::<f32>()) as u32,
+            mChannelsPerFrame: CHANNELS as u32,
+            mBitsPerChannel: 32,
+            mReserved: 0,
+        };
+        let mut freed = Box::new(Freed {
+            buffers: [std::ptr::null_mut(); BUFFERS],
+            free: [const { AtomicBool::new(true) }; BUFFERS],
+        });
+        let mut queue: AudioQueueRef = std::ptr::null_mut();
+        // SAFETY: the format and the out pointer are valid for the call; the
+        // user data is the boxed `Freed`, which outlives the queue (see
+        // `Drop`); no run loop: the queue calls back on its own thread.
+        let status = unsafe {
+            AudioQueueNewOutput(
+                NonNull::from(&format),
+                Some(given_back),
+                std::ptr::from_mut::<Freed>(&mut freed).cast(),
+                None,
+                None,
+                0,
+                NonNull::from(&mut queue),
+            )
+        };
+        if status != 0 || queue.is_null() {
+            return Err(Unavailable);
+        }
+        let mut output = Self {
+            queue,
+            timeline: std::ptr::null_mut(),
+            freed,
+            started: false,
+            latency: Cell::new(None),
+        };
+        let bytes = (BUFFER_FRAMES * CHANNELS * size_of::<f32>()) as u32;
+        for index in 0..BUFFERS {
+            let mut buffer: AudioQueueBufferRef = std::ptr::null_mut();
+            // SAFETY: the queue is live and the out pointer valid.
+            let status = unsafe {
+                AudioQueueAllocateBuffer(output.queue, bytes, NonNull::from(&mut buffer))
+            };
+            if status != 0 || buffer.is_null() {
+                return Err(Unavailable);
+            }
+            output.freed.buffers[index] = buffer;
+        }
+        // SAFETY: as above.
+        let status =
+            unsafe { AudioQueueCreateTimeline(output.queue, NonNull::from(&mut output.timeline)) };
+        if status != 0 || output.timeline.is_null() {
+            return Err(Unavailable);
+        }
+        output.set_muted(muted);
+        Ok(output)
+    }
+
+    /// A buffer the queue has given back, now taken to be filled.
+    pub fn take_free(&self) -> Option<usize> {
+        self.freed.free.iter().position(|free| {
+            free.compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        })
+    }
+
+    /// Fill buffer `index`, taken with [`Self::take_free`], with `samples`
+    /// (interleaved stereo, at most `BUFFER_FRAMES` frames), and queue it
+    /// after every buffer queued before it.
+    pub fn enqueue(&mut self, index: usize, samples: &[f32]) -> Result<(), Unavailable> {
+        let buffer = *self.freed.buffers.get(index).ok_or(Unavailable)?;
+        let frames = samples.len() / CHANNELS;
+        if frames == 0 || frames > BUFFER_FRAMES || !samples.len().is_multiple_of(CHANNELS) {
+            return Err(Unavailable);
+        }
+        let bytes = size_of_val(samples);
+        // SAFETY: the buffer is the queue's own, not queued (it was given
+        // back and taken), and holds `BUFFER_FRAMES` frames, at least
+        // `bytes`.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                samples.as_ptr().cast::<u8>(),
+                (*buffer).mAudioData.as_ptr().cast::<u8>(),
+                bytes,
+            );
+            (*buffer).mAudioDataByteSize = bytes as u32;
+        }
+        // SAFETY: as above; linear PCM needs no packet descriptions.
+        let status = unsafe { AudioQueueEnqueueBuffer(self.queue, buffer, 0, std::ptr::null()) };
+        if status != 0 {
+            self.freed.free[index].store(true, Ordering::Release);
+            return Err(Unavailable);
+        }
+        Ok(())
+    }
+
+    /// Play what is queued, from the start or from where a pause left it.
+    pub fn start(&mut self) -> Result<(), Unavailable> {
+        // SAFETY: the queue is live; no start time: as soon as it can.
+        if unsafe { AudioQueueStart(self.queue, std::ptr::null()) } != 0 {
+            return Err(Unavailable);
+        }
+        self.started = true;
+        Ok(())
+    }
+
+    /// Stop playing, keeping what is queued and where it was.
+    pub fn pause(&mut self) -> Result<(), Unavailable> {
+        if !self.started {
+            return Ok(());
+        }
+        // SAFETY: the queue is live.
+        if unsafe { AudioQueuePause(self.queue) } != 0 {
+            return Err(Unavailable);
+        }
+        Ok(())
+    }
+
+    /// Silence the sound, or let it be heard: it plays on either way.
+    pub fn set_muted(&self, muted: bool) {
+        // SAFETY: the queue is live; volume is a parameter of every output
+        // queue.
+        unsafe {
+            AudioQueueSetParameter(
+                self.queue,
+                kAudioQueueParam_Volume,
+                if muted { 0.0 } else { 1.0 },
+            );
+        }
+    }
+
+    /// How many frames of what was queued have been heard, and when it was
+    /// so: what the queue played ([`Output::queued`]), less its device's
+    /// latency, so fewer than none until the first is heard.
+    pub fn played(&self) -> Option<(f64, Instant)> {
+        let (queued, at) = self.queued()?;
+        let latency = match self.latency.get() {
+            Some((latency, asked)) if asked.elapsed() < LATENCY_EVERY => latency,
+            _ => {
+                // A device that cannot say counts as none.
+                let latency = latency().unwrap_or(Duration::ZERO);
+                self.latency.set(Some((latency, Instant::now())));
+                latency
+            }
+        };
+        Some((queued - latency.as_secs_f64() * f64::from(SAMPLE_RATE), at))
+    }
+
+    /// How many frames of what was queued the queue has played, and when it
+    /// was so; `None` before it starts, or when its clock has no time to
+    /// give or broke off.
+    pub fn queued(&self) -> Option<(f64, Instant)> {
+        if !self.started {
+            return None;
+        }
+        // SAFETY: a timestamp is plain numbers, all zero a valid value.
+        let mut stamp: AudioTimeStamp = unsafe { std::mem::zeroed() };
+        let mut broke: u8 = 0;
+        let before = Instant::now();
+        // SAFETY: the queue and its timeline are live, the out pointers
+        // valid.
+        let status = unsafe {
+            AudioQueueGetCurrentTime(
+                self.queue,
+                self.timeline,
+                &mut stamp,
+                std::ptr::from_mut(&mut broke).cast(),
+            )
+        };
+        let after = Instant::now();
+        let valid = stamp.mFlags.contains(AudioTimeStampFlags::SampleTimeValid);
+        (status == 0 && valid && broke == 0 && stamp.mSampleTime.is_finite())
+            .then(|| (stamp.mSampleTime.max(0.0), before + (after - before) / 2))
+    }
+}
+
+/// How long after the queue plays a frame it is heard, on the default
+/// output device the queue plays on: the device's latency, its safety
+/// offset, its I/O buffer and its output stream's latency, at its rate, and
+/// at most [`MAX_LATENCY`]; `None` when the device cannot say.
+pub fn latency() -> Option<Duration> {
+    let device: AudioObjectID = property(
+        kAudioObjectSystemObject as AudioObjectID,
+        kAudioHardwarePropertyDefaultOutputDevice,
+        kAudioObjectPropertyScopeGlobal,
+    )?;
+    if device == kAudioObjectUnknown {
+        return None;
+    }
+    let output = |selector| property::<u32>(device, selector, kAudioObjectPropertyScopeOutput);
+    // A device of one output stream or more says the first's latency.
+    let stream = output(kAudioDevicePropertyStreams)
+        .and_then(|stream| {
+            property::<u32>(
+                stream,
+                kAudioStreamPropertyLatency,
+                kAudioObjectPropertyScopeGlobal,
+            )
+        })
+        .unwrap_or(0);
+    let frames = u64::from(output(kAudioDevicePropertyLatency)?)
+        + u64::from(output(kAudioDevicePropertySafetyOffset)?)
+        + u64::from(property::<u32>(
+            device,
+            kAudioDevicePropertyBufferFrameSize,
+            kAudioObjectPropertyScopeGlobal,
+        )?)
+        + u64::from(stream);
+    let rate: f64 = property(
+        device,
+        kAudioDevicePropertyNominalSampleRate,
+        kAudioObjectPropertyScopeGlobal,
+    )?;
+    (rate.is_finite() && rate >= 1.0)
+        .then(|| Duration::from_secs_f64(frames as f64 / rate).min(MAX_LATENCY))
+}
+
+/// A number an audio object's property is: an object, a count of frames, or
+/// a rate.
+trait Plain: Copy {}
+impl Plain for u32 {}
+impl Plain for f64 {}
+
+/// `object`'s property `selector` in `scope`, when it has one of exactly
+/// that size; the first of an array of them.
+fn property<T: Plain>(object: AudioObjectID, selector: u32, scope: u32) -> Option<T> {
+    let address = AudioObjectPropertyAddress {
+        mSelector: selector,
+        mScope: scope,
+        mElement: kAudioObjectPropertyElementMain,
+    };
+    let mut value = std::mem::MaybeUninit::<T>::zeroed();
+    let mut size = size_of::<T>() as u32;
+    // SAFETY: the address and size are valid for the call, and the out
+    // pointer is `size` writable bytes.
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            object,
+            NonNull::from(&address),
+            0,
+            std::ptr::null(),
+            NonNull::from(&mut size),
+            NonNull::from(&mut value).cast(),
+        )
+    };
+    // SAFETY: a `Plain` value is a number, valid all zero, and the call
+    // wrote all of it when it said so.
+    (status == 0 && size as usize == size_of::<T>()).then(|| unsafe { value.assume_init() })
+}
+
+impl Drop for Output {
+    fn drop(&mut self) {
+        // SAFETY: the queue is live and disposed once, immediately: no
+        // callback runs after this returns, so `freed` may then go. Its
+        // buffers and timeline go with it.
+        unsafe {
+            AudioQueueDispose(self.queue, true);
+        }
+    }
+}

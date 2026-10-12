@@ -68,6 +68,34 @@ fn report(name: &str, result: std::io::Result<impl std::fmt::Debug>) {
     }
 }
 
+/// Play a fifth of a second of muted silence through an output queue:
+/// `ok` when its clock ran and its device said its latency, else what was
+/// refused; `none` on a machine with no audio output at all.
+#[cfg(all(target_os = "macos", feature = "avfoundation"))]
+fn attempt_sound() {
+    use kettle_media_native::audio_out::{BUFFER_FRAMES, Output, latency};
+    let played = (|| -> Result<(), &'static str> {
+        let mut output = Output::open(true).map_err(|_| "open")?;
+        let silence = vec![0f32; BUFFER_FRAMES * kettle_media::audio::CHANNELS];
+        for _ in 0..10 {
+            while let Some(index) = output.take_free() {
+                output.enqueue(index, &silence).map_err(|_| "enqueue")?;
+            }
+            output.start().map_err(|_| "start")?;
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        latency().ok_or("latency")?;
+        match output.queued() {
+            Some((frames, _)) if frames > 0.0 => Ok(()),
+            _ => Err("clock"),
+        }
+    })();
+    match played {
+        Ok(()) => println!("probe:sound=ok"),
+        Err(step) => println!("probe:sound=denied {step}"),
+    }
+}
+
 /// Everything a confined job tries, in this order.
 fn attempt(dir: &Path, held: &File) {
     use std::os::fd::AsRawFd as _;
@@ -173,6 +201,8 @@ fn attempt(dir: &Path, held: &File) {
             .join()
             .unwrap(),
     );
+    #[cfg(all(target_os = "macos", feature = "avfoundation"))]
+    attempt_sound();
 }
 
 #[test]
@@ -187,6 +217,15 @@ fn probe() {
         "confined" => {
             let policy = Policy {
                 files: vec![&held],
+                ..Policy::default()
+            };
+            confined(sandbox::confine(&policy));
+            attempt(&dir, &held);
+        }
+        "sound" => {
+            let policy = Policy {
+                files: vec![&held],
+                audio_output: true,
                 ..Policy::default()
             };
             confined(sandbox::confine(&policy));
@@ -411,7 +450,8 @@ fn every_refused_operation_works_without_the_sandbox() {
 
 /// Confined, a job reads the file it holds, as the file it is, and nothing
 /// else; writes nothing; reaches no network; changes no mode; stays in its
-/// session; starts no program; and threads it starts are confined too.
+/// session; starts no program; threads it starts are confined too; and it
+/// plays no sound.
 #[test]
 fn a_confined_job_reads_only_what_it_holds() {
     if !available() {
@@ -419,6 +459,52 @@ fn a_confined_job_reads_only_what_it_holds() {
     }
     let dir = files();
     let result = run("confined", dir.path());
+    holds_only_its_file(&result);
+    #[cfg(all(target_os = "macos", feature = "avfoundation"))]
+    assert!(
+        result
+            .get("sound")
+            .is_some_and(|sound| sound.starts_with("denied")),
+        "{result:?}"
+    );
+}
+
+/// A job granted sound plays it, confined, and is refused everything else
+/// as before: sound opens nothing more.
+#[cfg(all(target_os = "macos", feature = "avfoundation"))]
+#[test]
+fn a_job_granted_sound_plays_it_and_nothing_more() {
+    if !available() || !this_machine_plays_sound() {
+        return;
+    }
+    let dir = files();
+    let result = run("sound", dir.path());
+    holds_only_its_file(&result);
+    assert_eq!(
+        result.get("sound").map(String::as_str),
+        Some("ok"),
+        "{result:?}"
+    );
+}
+
+/// Whether sound plays here unconfined: a machine with no output device
+/// skips the sound tests, saying so, unless `KETTLE_REQUIRE_AUDIO` is set.
+#[cfg(all(target_os = "macos", feature = "avfoundation"))]
+fn this_machine_plays_sound() -> bool {
+    let dir = files();
+    let result = run("control", dir.path());
+    match result.get("sound").map(String::as_str) {
+        Some("ok") => true,
+        _ if std::env::var_os("KETTLE_REQUIRE_AUDIO").is_none() => {
+            eprintln!("SKIP: no audio output on this machine: {result:?}");
+            false
+        }
+        other => panic!("no audio output, and KETTLE_REQUIRE_AUDIO is set: {other:?}"),
+    }
+}
+
+/// What every confined job, granted sound or not, may and may not do.
+fn holds_only_its_file(result: &BTreeMap<String, String>) {
     let ok = |name: &str| {
         assert_eq!(
             result.get(name).map(String::as_str),

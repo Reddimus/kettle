@@ -30,13 +30,14 @@ use std::sync::{Arc, Condvar, Mutex, Once};
 use std::time::Instant;
 
 use block2::RcBlock;
+use kettle_media::audio::{AudioBlock, AudioSource, CHANNELS, MAX_PENDING_FRAMES, SAMPLE_RATE};
 use kettle_media::video::{
     DecodedFrame, DecodedStills, FrameSlots, FrameSource, PlayGate, PlayRequest, Playback,
     StillsPlan, VideoContainer, VideoDecoder, VideoInput, VideoPlayer,
 };
 use kettle_media::{
-    FailureCode, MAX_VIDEO_FPS_MILLI, MAX_VIDEO_SIDE, Opened, StillSample, VideoCodec, VideoInfo,
-    play_size,
+    AudioRequest, AudioStatus, FailureCode, MAX_VIDEO_FPS_MILLI, MAX_VIDEO_SIDE, Opened,
+    StillSample, VideoCodec, VideoInfo, play_size,
 };
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
@@ -53,7 +54,7 @@ use objc2_core_graphics::{
     CGBitmapContextCreate, CGColorSpace, CGContext, CGImage, CGImageAlphaInfo,
     CGInterpolationQuality, kCGColorSpaceSRGB,
 };
-use objc2_core_media::{CMFormatDescription, CMTime, CMTimeRange};
+use objc2_core_media::{CMFormatDescription, CMSampleBuffer, CMTime, CMTimeRange};
 use objc2_core_video::{
     CVPixelBuffer, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow,
     CVPixelBufferGetHeight, CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth,
@@ -345,6 +346,8 @@ struct Asset {
     video_end_ms: u64,
     /// Whether the picture shows mirrored, before its turn.
     mirrored: bool,
+    /// The first audio track, when the asset has sound.
+    audio: Option<Retained<AVAssetTrack>>,
 }
 
 /// Open `input` and describe it, within `deadline`.
@@ -400,7 +403,8 @@ fn open(input: &VideoInput<'_>, deadline: Instant) -> Result<Asset, FailureCode>
                 FailureCode::UnsupportedMedia
             }
         })?;
-    let has_audio = tracks.iter().any(|track| of_type(&track, audio_type));
+    let audio = tracks.iter().find(|track| of_type(track, audio_type));
+    let has_audio = audio.is_some();
     load(
         &*video,
         &[
@@ -464,6 +468,7 @@ fn open(input: &VideoInput<'_>, deadline: Instant) -> Result<Asset, FailureCode>
         info,
         video_end_ms,
         mirrored,
+        audio,
     })
 }
 
@@ -631,18 +636,218 @@ fn track_output(asset: &Asset, width: u32, height: u32) -> Retained<AVAssetReade
     }
 }
 
+/// An opened asset, held by a session's readers so it and its descriptor
+/// outlive them. Nothing calls through it once they read: what the frames'
+/// and the sound's threads share is its lifetime, and its objects'
+/// reference counts are atomic.
+struct Keep(Asset);
+
+impl std::ops::Deref for Keep {
+    type Target = Asset;
+
+    fn deref(&self) -> &Asset {
+        &self.0
+    }
+}
+
+// SAFETY: see above; the asset is only dropped, once, by the last holder.
+unsafe impl Send for Keep {}
+// SAFETY: as above: no thread calls through a shared `Keep`.
+unsafe impl Sync for Keep {}
+
+/// An output for `track` that decodes its sound to interleaved stereo
+/// 32-bit float samples at 48 kHz, as every session's sound is.
+fn audio_output(track: &AVAssetTrack) -> Retained<AVAssetReaderTrackOutput> {
+    // AVFAudio's settings keys, whose values are their own names: this
+    // crate does not link AVFAudio for six strings.
+    let keys = [
+        "AVFormatIDKey",
+        "AVSampleRateKey",
+        "AVNumberOfChannelsKey",
+        "AVLinearPCMBitDepthKey",
+        "AVLinearPCMIsFloatKey",
+        "AVLinearPCMIsBigEndianKey",
+        "AVLinearPCMIsNonInterleaved",
+    ]
+    .map(NSString::from_str);
+    let keys: Vec<&NSString> = keys.iter().map(|key| &**key).collect();
+    let (format, rate, channels, depth, float, big, planar) = (
+        // kAudioFormatLinearPCM: 'lpcm'.
+        NSNumber::numberWithUnsignedInt(u32::from_be_bytes(*b"lpcm")),
+        NSNumber::numberWithDouble(f64::from(SAMPLE_RATE)),
+        NSNumber::numberWithUnsignedInt(CHANNELS as u32),
+        NSNumber::numberWithUnsignedInt(32),
+        NSNumber::numberWithBool(true),
+        NSNumber::numberWithBool(false),
+        NSNumber::numberWithBool(false),
+    );
+    let values: [&AnyObject; 7] = [&format, &rate, &channels, &depth, &float, &big, &planar];
+    let settings = NSDictionary::<NSString, AnyObject>::from_slices(&keys, &values);
+    // SAFETY: the output is made for the asset's own audio track, with
+    // uncompressed settings, before any reader reads through it.
+    unsafe {
+        AVAssetReaderTrackOutput::assetReaderTrackOutputWithTrack_outputSettings(
+            track,
+            Some(&settings),
+        )
+    }
+}
+
+/// A session's sound from a reader of its own over the same asset, so the
+/// video's reader and this one are taken from independently.
+struct AudioFrames {
+    reader: Retained<AVAssetReader>,
+    output: Retained<AVAssetReaderTrackOutput>,
+    /// Held while the reader reads through its descriptor.
+    _asset: Arc<Keep>,
+    /// The first frame the session plays: earlier ones are dropped.
+    from_frame: u64,
+    /// Decoded frames not yet taken, and where the first plays.
+    pending: Vec<f32>,
+    pending_at: u64,
+    /// Where the last block taken ended: none starts before it.
+    next_frame: u64,
+}
+
+// SAFETY: as for `Frames`: one thread takes the sound, and the reader and
+// its output are not tied to the thread that made them.
+unsafe impl Send for AudioFrames {}
+
+impl AudioFrames {
+    /// Read `asset`'s sound from `start_ms` to its end.
+    fn start(asset: &Arc<Keep>, track: &AVAssetTrack, start_ms: u64) -> Option<Self> {
+        let output = audio_output(track);
+        // SAFETY: the reader is made for the loaded asset, and its time
+        // range and output are set before it starts.
+        let reader = unsafe { AVAssetReader::assetReaderWithAsset_error(&asset.asset) }.ok()?;
+        // SAFETY: as above.
+        unsafe {
+            reader.setTimeRange(CMTimeRange {
+                start: time(start_ms),
+                duration: time(asset.info.duration_ms - start_ms.min(asset.info.duration_ms)),
+            });
+            if !reader.canAddOutput(&output) {
+                return None;
+            }
+            reader.addOutput(&output);
+            if !reader.startReading() {
+                return None;
+            }
+        }
+        let from_frame = kettle_media::audio::frame_of_ms(start_ms);
+        Some(Self {
+            reader,
+            output,
+            _asset: Arc::clone(asset),
+            from_frame,
+            pending: Vec::new(),
+            pending_at: from_frame,
+            next_frame: from_frame,
+        })
+    }
+
+    /// Decode the next sample buffer into `pending`; false at the end.
+    fn refill(&mut self) -> Result<bool, FailureCode> {
+        let sample = objc2::rc::autoreleasepool(|_| {
+            // SAFETY: the output belongs to the started reader, which only
+            // this thread reads.
+            unsafe { self.output.copyNextSampleBuffer() }
+        });
+        let Some(sample) = sample else {
+            // SAFETY: plain properties of the reader.
+            return match unsafe { AVAssetReader::status(&self.reader) } {
+                AVAssetReaderStatus::Completed => Ok(false),
+                AVAssetReaderStatus::Failed => {
+                    Err(failure(unsafe { self.reader.error() }.as_deref()))
+                }
+                _ => Err(FailureCode::RenderParse),
+            };
+        };
+        let (at, samples) = pcm(&sample)?;
+        // Frames before the start, or before the last block ended, are
+        // dropped: a block never starts before the one before it ended.
+        self.pending = samples;
+        self.pending_at =
+            kettle_media::audio::trim(&mut self.pending, at, self.from_frame.max(self.next_frame));
+        Ok(true)
+    }
+}
+
+/// A sample buffer's frames and where the first plays: exactly its sample
+/// count of interleaved stereo floats, refused past `MAX_PENDING_FRAMES`
+/// before any is copied, and finite.
+fn pcm(sample: &CMSampleBuffer) -> Result<(u64, Vec<f32>), FailureCode> {
+    // SAFETY: an audio output's sample carries its count, time and data.
+    let (count, time, data) = unsafe {
+        (
+            sample.num_samples(),
+            sample.presentation_time_stamp(),
+            sample.data_buffer(),
+        )
+    };
+    let frames = usize::try_from(count)
+        .ok()
+        .filter(|frames| *frames <= MAX_PENDING_FRAMES)
+        .ok_or(FailureCode::RenderResource)?;
+    let at = (time.flags.0 & TIME_VALID != 0 && time.flags.0 & TIME_NOT_A_NUMBER == 0)
+        .then(|| kettle_media::audio::frames_at(time.value, time.timescale))
+        .flatten()
+        .ok_or(FailureCode::RenderParse)?;
+    let data = data.ok_or(FailureCode::RenderParse)?;
+    let bytes = frames * CHANNELS * size_of::<f32>();
+    // SAFETY: a plain property of the block buffer.
+    if unsafe { data.data_length() } != bytes {
+        return Err(FailureCode::RenderParse);
+    }
+    let mut samples = vec![0f32; frames * CHANNELS];
+    if bytes > 0 {
+        let destination = std::ptr::NonNull::new(samples.as_mut_ptr().cast::<std::ffi::c_void>())
+            .ok_or(FailureCode::RenderResource)?;
+        // SAFETY: `samples` holds exactly `bytes` bytes, the block's length.
+        if unsafe { data.copy_data_bytes(0, bytes, destination) } != 0 {
+            return Err(FailureCode::RenderParse);
+        }
+    }
+    if samples.iter().any(|sample| !sample.is_finite()) {
+        return Err(FailureCode::RenderParse);
+    }
+    Ok((at, samples))
+}
+
+impl AudioSource for AudioFrames {
+    fn next_block(&mut self, samples: &mut [f32]) -> Result<Option<AudioBlock>, FailureCode> {
+        while self.pending.is_empty() {
+            if !self.refill()? {
+                return Ok(None);
+            }
+        }
+        let frames = (samples.len() / CHANNELS).min(self.pending.len() / CHANNELS);
+        samples[..frames * CHANNELS].copy_from_slice(&self.pending[..frames * CHANNELS]);
+        self.pending.drain(..frames * CHANNELS);
+        let block = AudioBlock {
+            frames,
+            at_frame: self.pending_at,
+        };
+        self.pending_at += frames as u64;
+        self.next_frame = self.pending_at;
+        Ok(Some(block))
+    }
+}
+
 impl VideoPlayer for AvFoundation {
     /// One reader from the start asked for to the end. A start past the
     /// video's last frame shows that frame, though the asset's sound runs
     /// on. AVFoundation times each frame, and gives every one: those kept
-    /// stay within the rate asked ([`FrameSlots`]).
+    /// stay within the rate asked ([`FrameSlots`]). Its sound, when asked
+    /// for, comes from a reader of its own over the same asset, from the
+    /// same start.
     fn play(
         &self,
         input: VideoInput<'_>,
         request: PlayRequest,
         deadline: Instant,
     ) -> Result<Playback, FailureCode> {
-        let asset = open(&input, deadline)?;
+        let asset = Arc::new(Keep(open(&input, deadline)?));
         let (info, mirrored) = (asset.info, asset.mirrored);
         let (width, height) = play_size(
             info.width,
@@ -660,12 +865,24 @@ impl VideoPlayer for AvFoundation {
         let start_ms = request
             .start_ms
             .min(asset.video_end_ms.saturating_sub(frame_ms));
+        let audio = match (request.audio, &asset.audio) {
+            (AudioRequest::Off, _) | (_, None) => None,
+            (_, Some(track)) => AudioFrames::start(&asset, track, start_ms),
+        };
         let opened = Opened {
             info,
             width,
             height,
             fps_milli,
             start_ms,
+            audio: match (&audio, request.audio) {
+                (_, AudioRequest::Off) => AudioStatus::Off,
+                (Some(_), _) => AudioStatus::Ready,
+                // A track no reader could take: its form is not one this
+                // machine plays.
+                (None, _) if info.has_audio => AudioStatus::Unsupported,
+                (None, _) => AudioStatus::NoTrack,
+            },
         };
         opened.validate().map_err(|_| FailureCode::RenderParse)?;
         let coded = if info.rotation % 180 == 90 {
@@ -704,6 +921,7 @@ impl VideoPlayer for AvFoundation {
                 duration_ms: info.duration_ms,
                 slots: FrameSlots::new(fps_milli),
             }),
+            audio: audio.map(|audio| Box::new(audio) as Box<dyn AudioSource>),
         })
     }
 }
@@ -713,7 +931,7 @@ struct Frames {
     reader: Retained<AVAssetReader>,
     output: Retained<AVAssetReaderTrackOutput>,
     /// Held while the reader reads through its descriptor.
-    _asset: Asset,
+    _asset: Arc<Keep>,
     /// Each frame as decoded, and the quarter turns clockwise that show it.
     coded: (u32, u32),
     rotation: u16,

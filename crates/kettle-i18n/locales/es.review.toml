@@ -31,6 +31,7 @@ palette_preview_copy = "draft"
 palette_preview_reload = "draft"
 palette_preview_play = "draft"
 palette_video_play = "draft"
+palette_video_mute = "draft"
 palette_preview_zoom_in = "draft"
 palette_preview_zoom_out = "draft"
 palette_preview_fit = "draft"
@@ -87,11 +88,18 @@ media_lane_notice_preview_needs_decoder = "draft"
 media_lane_notice_preview_needs_sandbox = "draft"
 media_lane_a11y_play_video = "draft"
 media_lane_a11y_pause_video = "draft"
+media_lane_a11y_mute_video = "draft"
+media_lane_a11y_unmute_video = "draft"
 media_lane_a11y_video_position = "draft"
 media_lane_a11y_video_time = "draft"
 media_lane_video_time = "draft"
 media_lane_notice_video_loading = "draft"
 media_lane_notice_video_playing = "draft"
+media_lane_notice_video_muted = "draft"
+media_lane_notice_video_no_sound_track = "draft"
+media_lane_notice_video_silent_decoder = "draft"
+media_lane_notice_video_sound_unsupported = "draft"
+media_lane_notice_video_sound_unavailable = "draft"
 media_lane_notice_video_failed = "draft"
 media_lane_notice_video_timed_out = "draft"
 media_lane_notice_video_needs_decoder = "draft"
@@ -646,6 +654,7 @@ keys = [
     "media_lane_a11y_diagram",
     "media_lane_a11y_expand",
     "media_lane_a11y_fit",
+    "media_lane_a11y_mute_video",
     "media_lane_a11y_next",
     "media_lane_a11y_next_diagram",
     "media_lane_a11y_pause_video",
@@ -657,6 +666,7 @@ keys = [
     "media_lane_a11y_rendered",
     "media_lane_a11y_source",
     "media_lane_a11y_stop_preview",
+    "media_lane_a11y_unmute_video",
     "media_lane_a11y_video_position",
     "media_lane_a11y_video_time",
     "media_lane_a11y_zoom_in",

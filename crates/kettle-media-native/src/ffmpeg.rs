@@ -34,8 +34,8 @@ use kettle_media::video::{
     StillsPlan, VideoContainer, VideoDecoder, VideoInput, VideoPlayer,
 };
 use kettle_media::{
-    FailureCode, MAX_VIDEO_FPS_MILLI, MAX_VIDEO_SIDE, Opened, StillSample, VideoCodec, VideoInfo,
-    play_size,
+    AudioStatus, FailureCode, MAX_VIDEO_FPS_MILLI, MAX_VIDEO_SIDE, Opened, StillSample, VideoCodec,
+    VideoInfo, play_size,
 };
 
 use crate::reopen::reopen;
@@ -874,6 +874,7 @@ impl VideoPlayer for Ffmpeg {
             height,
             fps_milli,
             start_ms,
+            audio: AudioStatus::silent(request.audio, info.has_audio),
         };
         opened.validate().map_err(|_| FailureCode::RenderParse)?;
         let seek = seconds(i64::try_from(start_ms * 1000).unwrap_or(i64::MAX));
@@ -894,6 +895,8 @@ impl VideoPlayer for Ffmpeg {
                 decoder: self.clone(),
                 codec: probe.stream.codec,
             }),
+            // ffmpeg's playback is silent: Opened says so.
+            audio: None,
         })
     }
 }

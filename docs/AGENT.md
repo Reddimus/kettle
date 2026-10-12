@@ -449,10 +449,13 @@ length on the poster's foot, and a caption with its own size and length
 size, codec, length and whether it has sound, and a screen reader hears the
 same. Nothing plays on its own and nothing makes a sound: a card never
 starts a video. The lane's `▶` (Space while it holds the keyboard;
-`perform_action` `video_play`) plays the video in the lane, without sound,
-in a sandboxed worker of its own: `‖` pauses it, the bar under the picture
-shows where it is and a press or drag moves it there, and the footer says
-it plays without sound or why it stopped. `perform_action` `preview_play`
+`perform_action` `video_play`) plays the video in the lane in a sandboxed
+worker of its own, with its sound where its decoder plays one (AVFoundation
+on macOS; ffmpeg plays the picture only): `‖` pauses it, the bar under the
+picture shows where it is and a press or drag moves it there, `♪` (M while
+the lane holds the keyboard; `perform_action` `video_mute`) mutes the sound
+or lets it be heard, and the footer says when it plays muted, why it plays
+without sound, or why it stopped. `perform_action` `preview_play`
 plays a silent preview instead, eight frames from across the video shown in
 turn for its eighth of the length, at most twelve a second and two at the
 least, until `■` stops it; its footer says "Silent preview" with the moment
@@ -460,10 +463,15 @@ each frame shows, and its frames come from the sandboxed worker within two
 seconds, or the poster stays and the footer says why. A control client may
 press `▶` or run either action, but no video or preview starts while Kettle
 handles a control request or a Lua script's action: either reads the file
-again. `ui_geometry` reports a lane's bar among its controls (`scrubber`)
+again. Nor does a video move for one (Left or Right while the lane holds the
+keyboard, a drag along the bar), since a move opens the video again where it
+lands: the video and its bar stay where they are. It may mute a playing
+video's sound, but never unmute it. `ui_geometry` reports a lane's bar among its controls (`scrubber`)
 and, while a video plays, is paused or stopped where it stood, its
 `playback`: `state` (`playing`, `paused` or `stopped`), `position_ms`,
-`duration_ms` and whether a frame shows, never the frame. With `video-preview-hover` on, and
+`duration_ms`, whether a frame shows (never the frame), and its `sound`:
+`heard`, `muted`, or why there is none (`no_track`, `decoder_silent`,
+`unsupported`, `unavailable`, `off`), `null` until its worker said. With `video-preview-hover` on, and
 motion allowed (`reduce-motion`, macOS's Reduce Motion), the real pointer
 resting on the lane's picture loops the frames a preview the user started
 left, for at most four seconds, reading nothing; a pointer a control client

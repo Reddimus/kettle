@@ -28,15 +28,21 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
+use kettle_media::audio::{AudioSource, SAMPLE_RATE};
 use kettle_media::video::{
     MAX_VIDEO_PREFIX_BYTES, PlayGate, PlayRequest, VideoInput, VideoPlayer, sniff_video_container,
 };
 use kettle_media::wire::{
     Direction, Frame, HEADER_BYTES, WireError, read_frame_within, write_frame, write_video_frame,
 };
-use kettle_media::{FailureCode, Opened, PlayCommand, PlayOpen, PlayState, VideoFrameRef};
+use kettle_media::{
+    AudioRequest, AudioStatus, FailureCode, Opened, PlayCommand, PlayOpen, PlayState, VideoFrameRef,
+};
 use kettle_media_render::source::{self, Held};
 
+#[cfg(target_os = "macos")]
+use crate::sound::Speaker;
+use crate::sound::{Heard, Sound, SoundWish};
 use crate::worker::{EXIT_PROTOCOL, Watchdog, refuse, reply};
 
 /// From PlayOpen until the first frame is written: the file held, the worker
@@ -89,10 +95,10 @@ enum Event {
 /// it. Kept here rather than queued behind the decoder's frames, so no
 /// command waits on a write the parent does not read, a full queue or the
 /// decoder's opening: this thread reads it on each pass.
-struct Asked(std::sync::Mutex<Heard>);
+struct Asked(std::sync::Mutex<Wishes>);
 
 #[derive(Clone, Copy)]
-struct Heard {
+struct Wishes {
     /// The latest Play (true) or Pause (false) not yet taken.
     play: Option<bool>,
     /// When the reader took that Play or Pause: the first of a run of the
@@ -110,7 +116,7 @@ struct Heard {
 
 impl Asked {
     fn new() -> Self {
-        Self(std::sync::Mutex::new(Heard {
+        Self(std::sync::Mutex::new(Wishes {
             play: None,
             play_at: Instant::now(),
             last: Instant::now(),
@@ -119,7 +125,7 @@ impl Asked {
         }))
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Heard> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Wishes> {
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -139,6 +145,8 @@ impl Asked {
                 heard.play = Some(play);
             }
             PlayCommand::Close => heard.closed = true,
+            // The sound's own: the reader passes them on as they come.
+            PlayCommand::Mute | PlayCommand::Unmute => {}
             PlayCommand::Heartbeat => {}
         }
     }
@@ -153,8 +161,9 @@ impl Asked {
         self.lock().broken.get_or_insert(error);
     }
 
-    /// What the parent asked, the Play or Pause taken.
-    fn take(&self) -> Heard {
+    /// What the parent asked, the Play or Pause and the Mute or Unmute
+    /// taken.
+    fn take(&self) -> Wishes {
         let mut heard = self.lock();
         let now = *heard;
         heard.play = None;
@@ -172,8 +181,16 @@ pub(crate) fn serve(
 ) -> i32 {
     let opened_by = Instant::now() + OPEN_DEADLINE;
     watchdog.arm(OPEN_DEADLINE + OPEN_GRACE);
-    let decoders = kettle_media_native::Decoders::configured();
-    if confine(open, &decoders).is_err() || !watchdog.confined() {
+    let configured = kettle_media_native::Decoders::configured();
+    // Only Apple's decoder plays a session's sound: a session asking for
+    // sound is confined for it with that decoder alone, so no external
+    // decoder ever runs with the grant. Without it, none is granted.
+    let sounding = (open.audio != AudioRequest::Off)
+        .then(|| configured.sounding())
+        .flatten();
+    let sound = sounding.is_some();
+    let decoders = sounding.unwrap_or(configured);
+    if confine(open, &decoders, sound).is_err() || !watchdog.confined() {
         // A video is never decoded unconfined.
         return reply(output, FailureCode::SandboxUnavailable, 0);
     }
@@ -181,11 +198,13 @@ pub(crate) fn serve(
     // included.
     let asked = Arc::new(Asked::new());
     let gate = Arc::new(PlayGate::default());
+    let sound_wish = SoundWish::new(open.audio == AudioRequest::Muted);
     let (events, received) = mpsc::sync_channel(EVENTS);
     if start_reader(
         input,
         Arc::clone(&asked),
         Arc::clone(&gate),
+        sound_wish.clone(),
         events.clone(),
         watchdog.clone(),
     )
@@ -236,7 +255,15 @@ pub(crate) fn serve(
         Ok(playback) => playback,
         Err(code) => return reply(output, code, 0),
     };
-    let opened = playback.opened;
+    let mut opened = playback.opened;
+    // The player's decoded sound plays through this machine's output, when
+    // it has one the worker may use; else Opened says it is unavailable.
+    let sound = playback
+        .audio
+        .and_then(|source| start_sound(source, &opened, sound_wish));
+    if opened.audio == AudioStatus::Ready && sound.is_none() {
+        opened.audio = AudioStatus::Unavailable;
+    }
     // The worker's own processor time, now the video's length is known.
     let left = opened.info.duration_ms.saturating_sub(opened.start_ms);
     if crate::early_unix::limit_session_cpu(left).is_err() {
@@ -257,6 +284,7 @@ pub(crate) fn serve(
         opened,
         held: &held,
         asked: &asked,
+        sound,
         free,
         output,
         watchdog,
@@ -266,11 +294,57 @@ pub(crate) fn serve(
     code
 }
 
-/// Confine the worker to `open`'s file and what the decoders need, before
-/// any byte of the file is read.
+/// Play `source`, the sound `opened` starts with, through this machine's
+/// output as `wish` says: `None` where there is none or it cannot start.
+#[cfg(target_os = "macos")]
+fn start_sound(source: Box<dyn AudioSource>, opened: &Opened, wish: SoundWish) -> Option<Sound> {
+    let output = kettle_media_native::audio_out::Output::open(wish.muted()).ok()?;
+    let start_frame = kettle_media::audio::frame_of_ms(opened.start_ms);
+    Sound::start(Box::new(OutputSpeaker(output)), source, start_frame, wish).ok()
+}
+
+/// Linux plays no session's sound: its decoder decodes none anyway.
+#[cfg(not(target_os = "macos"))]
+fn start_sound(_source: Box<dyn AudioSource>, _opened: &Opened, _wish: SoundWish) -> Option<Sound> {
+    None
+}
+
+/// This machine's output queue, as the sound's speaker.
+#[cfg(target_os = "macos")]
+struct OutputSpeaker(kettle_media_native::audio_out::Output);
+
+#[cfg(target_os = "macos")]
+const _: () = assert!(crate::sound::PIECE_FRAMES == kettle_media_native::audio_out::BUFFER_FRAMES);
+
+#[cfg(target_os = "macos")]
+impl Speaker for OutputSpeaker {
+    fn take_free(&mut self) -> Option<usize> {
+        self.0.take_free()
+    }
+    fn enqueue(&mut self, index: usize, samples: &[f32]) -> Result<(), ()> {
+        self.0.enqueue(index, samples).map_err(drop)
+    }
+    fn start(&mut self) -> Result<(), ()> {
+        self.0.start().map_err(drop)
+    }
+    fn pause(&mut self) -> Result<(), ()> {
+        self.0.pause().map_err(drop)
+    }
+    fn set_muted(&mut self, muted: bool) {
+        self.0.set_muted(muted);
+    }
+    fn played(&self) -> Option<(f64, Instant)> {
+        self.0.played()
+    }
+}
+
+/// Confine the worker to `open`'s file and what the decoders need, with
+/// this machine's sound output when `sound`, before any byte of the file is
+/// read.
 fn confine(
     open: &PlayOpen,
     decoders: &kettle_media_native::Decoders,
+    sound: bool,
 ) -> Result<(), kettle_media_native::sandbox::SandboxError> {
     let files = source::hold_source(&open.source);
     let (programs, trees) = decoders.sandbox_needs();
@@ -278,6 +352,7 @@ fn confine(
         files: files.iter().collect(),
         programs,
         trees,
+        audio_output: sound,
     })
 }
 
@@ -286,13 +361,16 @@ fn confine(
 /// and Pause move the decoder's `gate` as they come, and Close or the parent
 /// leaving ends it, whatever the session's thread is doing: the gate always
 /// follows the latest command, and after a Pause only a frame already begun
-/// finishes. Once the parent closes or leaves, the session ends with 0: on
+/// finishes. Play, Pause, Mute and Unmute reach the session's `sound` the
+/// same way, so a Pause or Mute is heard at once, and Close or the parent
+/// leaving ends it, its output disposed before the process exits. Once the parent closes or leaves, the session ends with 0: on
 /// the thread's next pass, or, should the thread be held, from here within
 /// `CLOSE_GRACE`, the watchdog moved past it first.
 fn start_reader(
     mut input: impl Read + Send + 'static,
     asked: Arc<Asked>,
     gate: Arc<PlayGate>,
+    sound: SoundWish,
     events: mpsc::SyncSender<Event>,
     watchdog: Watchdog,
 ) -> std::io::Result<()> {
@@ -307,6 +385,7 @@ fn start_reader(
                 ) {
                     Ok(Some(Frame::PlayCommand(command))) => {
                         asked.hear(command);
+                        sound.hear(command);
                         match command {
                             PlayCommand::Play => gate.play(),
                             PlayCommand::Pause => gate.pause(),
@@ -320,6 +399,7 @@ fn start_reader(
                     Ok(None) => {
                         asked.leave();
                         gate.end();
+                        sound.close();
                         break;
                     }
                     Ok(Some(_)) => {
@@ -421,9 +501,63 @@ struct Session<'a, W: Write> {
     opened: Opened,
     held: &'a Held<'a>,
     asked: &'a Asked,
+    /// The session's sound while it has some: its clock then paces frames.
+    sound: Option<Sound>,
     free: mpsc::SyncSender<Vec<u8>>,
     output: &'a mut W,
     watchdog: &'a Watchdog,
+}
+
+/// How far ahead of its sound a frame goes out: about what the parent takes
+/// to show it, so picture and sound arrive together.
+const VIDEO_LEAD: Duration = Duration::from_millis(40);
+/// How soon this thread looks again for a clock the sound does not have yet.
+const SOUND_SOON: Duration = Duration::from_millis(10);
+
+/// When a frame goes out while the session's sound plays.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Due {
+    Now,
+    At(Instant),
+    /// The sound's clock has no time yet.
+    Wait,
+    /// The sound has passed it by more than a frame: it is dropped.
+    Late,
+}
+
+/// A frame's length at `fps_milli`, to the microsecond: a third of a
+/// millisecond counts when deciding whether the sound passed a frame by.
+fn frame_length(fps_milli: u32) -> Duration {
+    Duration::from_micros((1_000_000_000 / u64::from(fps_milli.max(1))).max(1))
+}
+
+/// When the frame at `pts_ms`, a `frame` long, goes out as of `now`, with
+/// the sound heard where `heard` says: `VIDEO_LEAD` before its sound is
+/// heard, and late once the sound has passed it by more than a frame.
+fn due_by_sound(heard: Option<Heard>, pts_ms: u64, frame: Duration, now: Instant) -> Due {
+    let Some(heard) = heard else {
+        return Due::Wait;
+    };
+    let at_frame = kettle_media::audio::frame_of_ms(pts_ms) as f64;
+    let ahead = (at_frame - heard.frame) / f64::from(SAMPLE_RATE);
+    // `at` moved by `seconds`, earlier when negative, never before nothing.
+    let moved = |at: Instant, seconds: f64| {
+        if seconds >= 0.0 {
+            at + Duration::from_secs_f64(seconds)
+        } else {
+            at.checked_sub(Duration::from_secs_f64(-seconds))
+                .unwrap_or(at)
+        }
+    };
+    let sounds = moved(heard.at, ahead);
+    let goes = moved(sounds, -VIDEO_LEAD.as_secs_f64());
+    if goes > now {
+        Due::At(goes)
+    } else if now.saturating_duration_since(sounds) > frame {
+        Due::Late
+    } else {
+        Due::Now
+    }
 }
 
 /// Where the session's clock was set: the moment a frame was written after
@@ -480,6 +614,7 @@ impl<W: Write> Session<'_, W> {
         // A frame written this far past its time sets the clock again.
         let mut pacer = Pacer::new(Duration::from_millis(frame_ms.max(20)));
         let stall = STALL + Duration::from_millis(2 * frame_ms);
+        let frame_len = frame_length(self.opened.fps_milli);
         let mut pending: VecDeque<(u64, Vec<u8>)> = VecDeque::with_capacity(BUFFERS);
         let mut playing = false;
         let mut shown_first = false;
@@ -522,7 +657,23 @@ impl<W: Write> Session<'_, W> {
                 }
                 _ => {}
             }
-            // The lease is the lease thread's to hold.
+            // The lease is the lease thread's to hold, and the sound's
+            // wishes the reader's to pass on.
+            // A speaker that fails leaves the session silent, paced by its
+            // own clock from here, and the parent told.
+            if self.sound.as_ref().is_some_and(Sound::failed) {
+                self.sound = None;
+                pacer.reset();
+                if write_frame(
+                    self.output,
+                    &Frame::AudioState(AudioStatus::Unavailable),
+                    Direction::WorkerToParent,
+                )
+                .is_err()
+                {
+                    return EXIT_PROTOCOL;
+                }
+            }
             let mut now = Instant::now();
             if shown_first {
                 self.watchdog.arm(HANG);
@@ -530,9 +681,39 @@ impl<W: Write> Session<'_, W> {
             if !shown_first && now >= opened_by {
                 return self.fail(FailureCode::RenderTimeout);
             }
+            let mut sound_due = None;
             while let Some(&(pts_ms, _)) = pending.front() {
-                if shown_first && (!playing || pacer.due(pts_ms).is_some_and(|due| due > now)) {
-                    break;
+                if shown_first {
+                    if !playing {
+                        break;
+                    }
+                    match &self.sound {
+                        Some(sound) => match due_by_sound(sound.heard(), pts_ms, frame_len, now) {
+                            Due::Wait => {
+                                sound_due = Some(now + SOUND_SOON);
+                                break;
+                            }
+                            Due::At(at) => {
+                                sound_due = Some(at);
+                                break;
+                            }
+                            // Dropped for the newer frame waiting behind it,
+                            // so never the video's last, which the lane
+                            // holds.
+                            Due::Late if pending.len() > 1 => {
+                                let (_, rgba) = pending.pop_front().expect("a waiting frame");
+                                let _ = self.free.send(rgba);
+                                last_frame = now;
+                                continue;
+                            }
+                            Due::Late | Due::Now => {}
+                        },
+                        None => {
+                            if pacer.due(pts_ms).is_some_and(|due| due > now) {
+                                break;
+                            }
+                        }
+                    }
                 }
                 let (_, rgba) = pending.pop_front().expect("a waiting frame");
                 let frame = VideoFrameRef {
@@ -548,10 +729,12 @@ impl<W: Write> Session<'_, W> {
                 seq += 1;
                 now = Instant::now();
                 last_frame = now;
-                if playing {
+                if !playing {
+                    if !shown_first {
+                        first_paused = Some((pts_ms, now));
+                    }
+                } else if self.sound.is_none() {
                     pacer.written(pts_ms, now);
-                } else if !shown_first {
-                    first_paused = Some((pts_ms, now));
                 }
                 let _ = self.free.send(rgba);
                 if !shown_first {
@@ -580,23 +763,34 @@ impl<W: Write> Session<'_, W> {
             if self.held.unchanged().is_err() {
                 return reply(self.output, FailureCode::Changed, 0);
             }
-            if decoded_all && pending.is_empty() {
+            // The end is the last frame and the last of the sound, both.
+            let sounding = self.sound.as_ref().is_some_and(|sound| !sound.done());
+            if decoded_all && pending.is_empty() && !sounding {
                 return if self.state(PlayState::Ended) {
                     0
                 } else {
                     EXIT_PROTOCOL
                 };
             }
-            if shown_first && playing && now.duration_since(last_frame) > stall {
+            // Past the video's last frame only its sound plays: no stall.
+            if shown_first && playing && !decoded_all && now.duration_since(last_frame) > stall {
                 return self.fail(FailureCode::RenderTimeout);
             }
             let mut wake = now + TICK;
             if !shown_first {
                 wake = wake.min(opened_by);
             }
-            if playing && let Some(due) = pending.front().and_then(|&(pts_ms, _)| pacer.due(pts_ms))
+            if playing
+                && self.sound.is_none()
+                && let Some(due) = pending.front().and_then(|&(pts_ms, _)| pacer.due(pts_ms))
             {
                 wake = wake.min(due);
+            }
+            if let Some(due) = sound_due {
+                wake = wake.min(due);
+            }
+            if playing && decoded_all && sounding {
+                wake = wake.min(now + SOUND_SOON);
             }
             match events.recv_timeout(wake.saturating_duration_since(Instant::now())) {
                 Ok(Event::Asked) | Err(RecvTimeoutError::Timeout) => {}
@@ -690,6 +884,7 @@ mod tests {
             height,
             fps_milli,
             start_ms: 0,
+            audio: kettle_media::AudioStatus::NoTrack,
         }
     }
 
@@ -760,6 +955,9 @@ mod tests {
     /// The parent's side of a session under test, and its decoder's.
     struct Parent<'a> {
         asked: &'a Asked,
+        /// The session's sound's wishes, which the reader passes commands
+        /// on to.
+        sound: Option<SoundWish>,
         events: mpsc::SyncSender<Event>,
         written: &'a Written,
     }
@@ -778,6 +976,9 @@ mod tests {
 
         fn ask(&self, command: PlayCommand) {
             self.asked.hear(command);
+            if let Some(sound) = &self.sound {
+                sound.hear(command);
+            }
             let _ = self.events.try_send(Event::Asked);
         }
 
@@ -798,8 +999,21 @@ mod tests {
         before_read: impl Fn(usize),
         later: impl FnOnce(&Parent) + Send,
     ) -> Vec<(Instant, Frame)> {
+        run_with(opened, held, None, steps, before_read, later)
+    }
+
+    /// [`run`], with `sound` as the session's sound.
+    fn run_with(
+        opened: Opened,
+        held: &Held<'_>,
+        sound: Option<Sound>,
+        steps: Vec<Step>,
+        before_read: impl Fn(usize),
+        later: impl FnOnce(&Parent) + Send,
+    ) -> Vec<(Instant, Frame)> {
         let asked = Asked::new();
         let written = Written::default();
+        let wish = sound.as_ref().map(Sound::wish);
         let read = std::thread::scope(|scope| {
             let (send, received) = mpsc::sync_channel(EVENTS);
             let (mut reader, writer) = std::io::pipe().unwrap();
@@ -818,6 +1032,7 @@ mod tests {
                     opened,
                     held,
                     asked,
+                    sound,
                     free,
                     output: &mut output,
                     watchdog: &watchdog,
@@ -826,6 +1041,7 @@ mod tests {
             });
             let parent = Parent {
                 asked,
+                sound: wish,
                 events: send.clone(),
                 written,
             };
@@ -1288,22 +1504,25 @@ mod tests {
     }
 
     /// The decoder's gate follows each Play and Pause as the reader hears
-    /// it, with no session thread coming round at all: a Pause stops it at
-    /// once, and a Pause then a Play leaves it playing.
+    /// it, and the sound each Play, Pause, Mute and Unmute, with no session
+    /// thread coming round at all: a Pause stops both at once, a Pause then
+    /// a Play leaves them playing, and a Mute is heard at once.
     #[test]
-    fn the_decoder_s_gate_follows_the_latest_command() {
+    fn the_gate_and_the_sound_follow_the_latest_command() {
         let (input, mut parent) = std::io::pipe().unwrap();
         let gate = Arc::new(PlayGate::default());
+        let sound = SoundWish::new(false);
         let (events, _received) = mpsc::sync_channel(EVENTS);
         start_reader(
             input,
             Arc::new(Asked::new()),
             Arc::clone(&gate),
+            sound.clone(),
             events,
             Watchdog::unwatched(),
         )
         .unwrap();
-        let mut send = |commands: &[PlayCommand], playing: bool| {
+        let mut send = |commands: &[PlayCommand], playing: bool, muted: bool| {
             for &command in commands {
                 write_frame(
                     &mut parent,
@@ -1313,20 +1532,237 @@ mod tests {
                 .unwrap();
             }
             let deadline = Instant::now() + SECOND;
-            while gate.is_playing() != playing {
+            while (gate.is_playing(), sound.playing(), sound.muted()) != (playing, playing, muted) {
                 assert!(
                     Instant::now() < deadline,
-                    "after {commands:?}, playing should be {playing}"
+                    "after {commands:?}, playing should be {playing} and muted {muted}"
                 );
                 std::thread::sleep(Duration::from_millis(2));
             }
         };
-        send(&[PlayCommand::Play], true);
-        send(&[PlayCommand::Pause], false);
-        send(&[PlayCommand::Pause, PlayCommand::Play], true);
-        send(&[PlayCommand::Play, PlayCommand::Pause], false);
+        send(&[PlayCommand::Play], true, false);
+        send(&[PlayCommand::Mute], true, true);
+        send(&[PlayCommand::Pause], false, true);
+        send(&[PlayCommand::Pause, PlayCommand::Play], true, true);
+        send(
+            &[PlayCommand::Unmute, PlayCommand::Mute, PlayCommand::Unmute],
+            true,
+            false,
+        );
+        send(&[PlayCommand::Play, PlayCommand::Pause], false, false);
         // Left open: the reader ends the process once its parent leaves.
         std::mem::forget(parent);
+    }
+
+    /// Close and the parent leaving both end the sound before the reader's
+    /// grace runs out and the process exits, so its output is disposed even
+    /// while the session's thread is held: Close through the same `hear` as
+    /// every command (see `close_ends_the_sound_and_lets_its_speaker_go`),
+    /// the parent leaving by closing it.
+    #[test]
+    fn leaving_ends_the_sound_before_the_process_exits() {
+        let source = kettle_test_support::production_source(include_str!("play.rs"));
+        let reader = source
+            .split("fn start_reader(")
+            .nth(1)
+            .and_then(|rest| rest.split("\nfn ").next())
+            .expect("start_reader");
+        let heard = reader
+            .find("sound.hear(command);")
+            .expect("commands reach the sound");
+        assert!(heard < reader.find("PlayCommand::Close => {").unwrap());
+        let left = reader
+            .find("asked.leave();\n                        gate.end();\n                        sound.close();")
+            .expect("the parent leaving ends the sound");
+        assert!(left < reader.find("std::process::exit(0);").unwrap());
+    }
+
+    /// A frame goes out `VIDEO_LEAD` before its sound is heard: held while
+    /// early, out within a frame of it, dropped once the sound passed it by
+    /// more, and held while the sound has no clock.
+    #[test]
+    fn frames_follow_the_sound_s_clock() {
+        let now = Instant::now();
+        let ms = Duration::from_millis;
+        let frame = ms(100);
+        let heard = |frame: f64| Some(Heard { frame, at: now });
+        assert_eq!(due_by_sound(None, 0, frame, now), Due::Wait);
+        // Heard at 1 s: the frame at 1.5 s goes out 460 ms from now.
+        assert_eq!(
+            due_by_sound(heard(48_000.0), 1_500, frame, now),
+            Due::At(now + ms(460))
+        );
+        assert_eq!(due_by_sound(heard(48_000.0), 1_040, frame, now), Due::Now);
+        assert_eq!(due_by_sound(heard(48_000.0), 1_000, frame, now), Due::Now);
+        // Passed by a frame is still on time; by more, late.
+        assert_eq!(due_by_sound(heard(48_000.0), 900, frame, now), Due::Now);
+        assert_eq!(due_by_sound(heard(48_000.0), 850, frame, now), Due::Late);
+        // Lateness counts from the sound, not from the lead before it: at
+        // thirty a second, a frame whose sound is heard now goes out now,
+        // and one passed by less than its third-of-a-millisecond-long frame
+        // is not late either.
+        let thirtieth = frame_length(30_000);
+        assert_eq!(thirtieth, Duration::from_micros(33_333));
+        assert_eq!(frame_length(1), Duration::from_secs(1_000));
+        assert_eq!(
+            due_by_sound(heard(49_590.0), 1_000, thirtieth, now),
+            Due::Now
+        );
+        assert_eq!(
+            due_by_sound(heard(48_000.0), 1_000, thirtieth, now),
+            Due::Now
+        );
+        assert_eq!(
+            due_by_sound(heard(48_000.0), 960, thirtieth, now),
+            Due::Late
+        );
+    }
+
+    /// A session with sound waits for its sound's clock: each frame goes
+    /// out as its sound comes due, one the sound passed is dropped, Mute
+    /// and Play reach the speaker, and the end waits for the sound's own.
+    #[test]
+    fn a_sounding_session_follows_its_sound() {
+        use crate::sound::testing::{Blocks, stand};
+        use std::collections::VecDeque;
+        let (speaker, told) = stand(3);
+        // Two seconds of sound from the start.
+        let source = Box::new(Blocks(VecDeque::from([(0.5, 96_000, 0)])));
+        let sound = Sound::start(speaker, source, 0, SoundWish::new(false)).unwrap();
+        let opened = opened(10_000, 4, 2);
+        let clock = Arc::clone(&told);
+        let all_heard = Arc::new(std::sync::Mutex::new(None));
+        let heard_at = Arc::clone(&all_heard);
+        let read = run_with(
+            opened,
+            &Held::Bytes(&[]),
+            Some(sound),
+            vec![
+                Step::Ask(PlayCommand::Play),
+                Step::Ask(PlayCommand::Mute),
+                Step::Send(frame(&opened, 0)),
+                Step::Send(frame(&opened, 100)),
+                Step::Send(frame(&opened, 200)),
+                Step::Send(frame(&opened, 300)),
+                Step::Send(Event::End),
+            ],
+            |_| {},
+            move |_| {
+                // Each stage long enough that the session cannot miss it.
+                let set = |frames: f64| {
+                    std::thread::sleep(Duration::from_millis(400));
+                    clock.lock().unwrap().played = Some(frames);
+                };
+                // 62.5 ms heard: the frame at 100 ms is due.
+                set(3_000.0);
+                // 350 ms: the frame at 200 ms is passed, at 300 ms due.
+                set(16_800.0);
+                // All of the sound heard: the session ends. Timed before it
+                // is told, so the End can only come after.
+                std::thread::sleep(Duration::from_millis(400));
+                *heard_at.lock().unwrap() = Some(Instant::now());
+                clock.lock().unwrap().played = Some(96_000.0);
+            },
+        );
+        let ended = read
+            .iter()
+            .find(|(_, frame)| *frame == Frame::PlayState(PlayState::Ended))
+            .map(|(at, _)| *at)
+            .unwrap();
+        let all_heard = all_heard.lock().unwrap().unwrap();
+        assert!(
+            ended >= all_heard,
+            "ended before all of its sound was heard"
+        );
+        assert_eq!(
+            shown(&read).iter().map(|(_, pts)| *pts).collect::<Vec<_>>(),
+            [0, 100, 300]
+        );
+        assert_eq!(
+            said(&read),
+            [
+                &Frame::PlayState(PlayState::Playing),
+                &Frame::PlayState(PlayState::Ended)
+            ]
+        );
+        let told = told.lock().unwrap();
+        assert_eq!(told.started, 1);
+        assert_eq!(told.muted, [false, true]);
+    }
+
+    /// A frame the sound has passed is dropped only for a newer one waiting
+    /// behind it: a late last frame, its End not yet taken, still goes out,
+    /// so the lane holds the video's own last frame.
+    #[test]
+    fn a_late_last_frame_is_never_dropped() {
+        use crate::sound::testing::{Blocks, stand};
+        use std::collections::VecDeque;
+        let (speaker, told) = stand(3);
+        // Two seconds of sound, all of it heard at once.
+        told.lock().unwrap().played = Some(96_000.0);
+        let source = Box::new(Blocks(VecDeque::from([(0.5, 96_000, 0)])));
+        let sound = Sound::start(speaker, source, 0, SoundWish::new(false)).unwrap();
+        let opened = opened(10_000, 4, 2);
+        let read = run_with(
+            opened,
+            &Held::Bytes(&[]),
+            Some(sound),
+            vec![
+                Step::Ask(PlayCommand::Play),
+                Step::Send(frame(&opened, 0)),
+                Step::Send(frame(&opened, 100)),
+            ],
+            |_| {},
+            // The end comes once the last frame was looked at.
+            |parent| {
+                std::thread::sleep(Duration::from_millis(200));
+                parent.send(Event::End);
+            },
+        );
+        assert_eq!(
+            shown(&read).iter().map(|(_, pts)| *pts).collect::<Vec<_>>(),
+            [0, 100]
+        );
+        assert_eq!(
+            said(&read).last(),
+            Some(&&Frame::PlayState(PlayState::Ended))
+        );
+    }
+
+    /// A speaker that fails leaves the session silent: the parent is told,
+    /// and its frames go out on the session's own clock to the end.
+    #[test]
+    fn a_session_whose_speaker_fails_plays_on_silent() {
+        use crate::sound::testing::{Blocks, stand};
+        use std::collections::VecDeque;
+        let (speaker, told) = stand(3);
+        told.lock().unwrap().refuse = true;
+        let source = Box::new(Blocks(VecDeque::from([(0.5, 9_600, 0)])));
+        let sound = Sound::start(speaker, source, 0, SoundWish::new(false)).unwrap();
+        let opened = opened(10_000, 4, 2);
+        let read = run_with(
+            opened,
+            &Held::Bytes(&[]),
+            Some(sound),
+            vec![
+                Step::Ask(PlayCommand::Play),
+                Step::Send(frame(&opened, 0)),
+                Step::Send(frame(&opened, 100)),
+                Step::Send(Event::End),
+            ],
+            |_| {},
+            |_| {},
+        );
+        assert_eq!(
+            shown(&read).iter().map(|(_, pts)| *pts).collect::<Vec<_>>(),
+            [0, 100]
+        );
+        let said = said(&read);
+        assert!(
+            said.contains(&&Frame::AudioState(AudioStatus::Unavailable)),
+            "{said:?}"
+        );
+        assert_eq!(said.last(), Some(&&Frame::PlayState(PlayState::Ended)));
     }
 
     /// Counts the frames it is asked for, giving each at once.
@@ -1396,6 +1832,7 @@ mod tests {
             opened,
             held: &Held::Bytes(&[]),
             asked: &asked,
+            sound: None,
             free,
             output: &mut output,
             watchdog: &watchdog,
@@ -1553,6 +1990,7 @@ mod faults {
                 height,
                 fps_milli: self.fps_milli,
                 start_ms: next * 1_000_000 / fps_milli,
+                audio: kettle_media::AudioStatus::silent(request.audio, info.has_audio),
             };
             opened.validate().map_err(|_| FailureCode::BadParams)?;
             Ok(Playback {
@@ -1565,6 +2003,7 @@ mod faults {
                     stall: self.stall,
                     fail: self.fail,
                 }),
+                audio: None,
             })
         }
     }

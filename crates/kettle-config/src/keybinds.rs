@@ -350,6 +350,9 @@ pub enum Action {
     /// Play the video the focused pane's lane shows, in the lane, or pause
     /// it.
     VideoPlay,
+    /// Mute the sound of the video playing in the focused pane's lane, or
+    /// let it be heard again.
+    VideoMute,
     /// Zoom the focused pane's rendered preview in a step.
     PreviewZoomIn,
     /// Zoom the focused pane's rendered preview out a step.
@@ -778,6 +781,7 @@ pub fn action_names() -> Vec<&'static str> {
         "preview_reload",
         "preview_play",
         "video_play",
+        "video_mute",
         "preview_zoom_in",
         "preview_zoom_out",
         "preview_fit",
@@ -1089,6 +1093,7 @@ impl Action {
             "preview_reload" | "preview-reload" => PreviewReload,
             "preview_play" | "preview-play" => PreviewPlay,
             "video_play" | "video-play" => VideoPlay,
+            "video_mute" | "video-mute" => VideoMute,
             "preview_zoom_in" | "preview-zoom-in" => PreviewZoomIn,
             "preview_zoom_out" | "preview-zoom-out" => PreviewZoomOut,
             "preview_fit" | "preview-fit" => PreviewFit,
