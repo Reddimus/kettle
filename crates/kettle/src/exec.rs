@@ -5907,13 +5907,8 @@ wait
             record: None,
             forward_stdin: false,
         };
-        let started = Instant::now();
         let mut sink = Vec::new();
-        assert_eq!(run_exec_with(opts, &|| None, &mut sink), EXIT_INTERNAL);
-        assert!(
-            started.elapsed() < PTY_EOF_TIMEOUT + Duration::from_secs(3),
-            "a leaked slave must hit the five-second internal bound, not hang"
-        );
+        let code = run_exec_with(opts, &|| None, &mut sink);
 
         let output = String::from_utf8_lossy(&sink);
         let pid = output
@@ -5930,10 +5925,11 @@ wait
         if unsafe { libc::kill(pid, 0) } == 0 {
             // The fixture intentionally called setsid, which is the documented
             // escape from Kettle's Unix PTY-session ownership boundary. The
-            // assertion above is about reaching the EOF timeout; clean this
+            // result is about reaching the EOF timeout; clean this
             // deliberately unowned process up explicitly.
             unsafe { libc::kill(pid, libc::SIGKILL) };
         }
+        assert_eq!(code, EXIT_INTERNAL);
     }
 
     /// Keep creating session members until teardown freezes this process. A

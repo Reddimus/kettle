@@ -15,6 +15,44 @@
 
 use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
 
+#[cfg(test)]
+thread_local! {
+    static SCAN_BUDGET: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+// Test-only accounting; optimized product builds keep the original scans.
+#[inline]
+fn scanned(text: &str) -> &str {
+    #[cfg(test)]
+    SCAN_BUDGET.with(|budget| {
+        if let Some(remaining) = budget.get() {
+            budget.set(Some(
+                remaining
+                    .checked_sub(text.len().max(1))
+                    .expect("linear scan budget exceeded"),
+            ));
+        }
+    });
+    text
+}
+
+#[cfg(test)]
+struct ScanBudget(Option<usize>);
+
+#[cfg(test)]
+impl ScanBudget {
+    fn new(bytes: usize) -> Self {
+        Self(SCAN_BUDGET.with(|budget| budget.replace(Some(bytes))))
+    }
+}
+
+#[cfg(test)]
+impl Drop for ScanBudget {
+    fn drop(&mut self) {
+        SCAN_BUDGET.with(|budget| budget.set(self.0));
+    }
+}
+
 /// Most text a copy or a selection may hold.
 pub const MAX_DIAGRAM_COPY_BYTES: usize = 1024 * 1024;
 /// Most fenced diagrams one copy may hold: as many as a gallery shows
@@ -109,7 +147,7 @@ fn word_char(c: char) -> bool {
 
 /// Whether `row` starts a diagram: a header word, whole.
 fn is_header(row: &str) -> bool {
-    let row = row.trim();
+    let row = scanned(row).trim();
     HEADERS.iter().any(|header| {
         row.strip_prefix(header)
             .is_some_and(|rest| rest.chars().next().is_none_or(|c| !word_char(c)))
@@ -118,14 +156,14 @@ fn is_header(row: &str) -> bool {
 
 /// Leading spaces.
 fn indent(row: &str) -> usize {
-    row.len() - row.trim_start_matches(' ').len()
+    scanned(row).len() - row.trim_start_matches(' ').len()
 }
 
 /// The bytes and columns of `line`'s leading spaces and tabs, a tab
 /// reaching the next multiple of four columns, as CommonMark counts them.
 fn leading_columns(line: &str) -> (usize, usize) {
     let mut columns = 0;
-    for (at, c) in line.char_indices() {
+    for (at, c) in scanned(line).char_indices() {
         match c {
             ' ' => columns += 1,
             '\t' => columns += 4 - columns % 4,
@@ -403,7 +441,7 @@ impl Preludes {
         let mut directive_ends = Vec::new();
         let mut rules: std::collections::HashMap<usize, Vec<usize>> = Default::default();
         for (at, row) in rows.iter().enumerate() {
-            let text = row.trim();
+            let text = scanned(row).trim();
             if closes_directive(text) {
                 directive_ends.push(at);
             }
@@ -424,7 +462,7 @@ impl Preludes {
         let mut at = 0;
         while at < rows.len() {
             let row = &rows[at];
-            let text = row.trim();
+            let text = scanned(row).trim();
             if text.starts_with("%%{") {
                 // A directive runs to the first row that closes it, blank
                 // rows and all, as Mermaid reads it. Unclosed, it is none.
@@ -466,7 +504,7 @@ impl Preludes {
             // Front matter holds YAML: keys, nested or listed values,
             // comments and blank rows. A `---` indented further is its text.
             let yaml = rows[at + 1..end].iter().all(|row| {
-                let row = row.get(base..).unwrap_or("");
+                let row = scanned(row).get(base..).unwrap_or("");
                 row.is_empty()
                     || row.starts_with([' ', '#', '-'])
                     || row.split_once(':').is_some_and(|(key, _)| {
@@ -550,7 +588,7 @@ fn diagram_end(rows: &[String], header: usize) -> Result<usize, DiagramCopyError
 /// Whose reply the rows directly above `top` say it is: Claude's
 /// `mermaid` label, or a Codex notice, perhaps wrapped over rows.
 fn marker_above(rows: &[String], top: usize) -> Option<Harness> {
-    let above = rows[..top].iter().rev().map(|row| row.trim());
+    let above = rows[..top].iter().rev().map(|row| scanned(row).trim());
     let mut above = above.take_while(|row| !row.is_empty()).peekable();
     if above.peek() == Some(&"mermaid") {
         return Some(Harness::Claude);
@@ -622,6 +660,7 @@ struct WrapCost {
 
 impl WrapCost {
     fn of(above: &str, next: &str) -> Self {
+        let (above, next) = (scanned(above), scanned(next));
         let joins_word = ends_in_word_break(above) && starts_with_word(next);
         Self {
             joins_word,
@@ -1197,9 +1236,7 @@ mod tests {
         );
     }
 
-    /// Text at the cap built to make the search for a diagram's start, its
-    /// prelude and its end revisit rows takes about as long as text that
-    /// does not: each row is looked at a bounded number of times.
+    /// Parsing work stays proportional to input size, regardless of runner load.
     #[test]
     fn hostile_text_at_the_cap_stays_linear() {
         let fill = |unit: &str| unit.repeat((MAX_DIAGRAM_COPY_BYTES - 64) / unit.len());
@@ -1240,16 +1277,10 @@ mod tests {
             fill("\n"),
             fill("graph\n  x\n\n"),
         ] {
-            let started = std::time::Instant::now();
             for width in [None, Some(80)] {
+                let _budget = super::ScanBudget::new(64 * text.len() + 1024);
                 let _ = diagram_sources(&text, width);
             }
-            assert!(
-                started.elapsed() < std::time::Duration::from_secs(5),
-                "{:?} took {:?}",
-                &text[..20],
-                started.elapsed()
-            );
         }
     }
 
