@@ -33,7 +33,7 @@ tar = "0.4"
 tempfile = "3"
 thiserror.workspace = true
 ureq = { version = "2", default-features = false, features = ["tls"] }
-zip = { version = "8.2", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+zip = { version = "9.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
