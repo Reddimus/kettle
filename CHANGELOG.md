@@ -8,6 +8,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Keep light-themed macOS titles clear of the traffic lights while retaining
+  native blur, including on macOS 27.
+
 - Keep paths containing wide characters whole during double-click selection.
 - Avoid signaling an already reaped Unix PTY child during pane teardown.
 - Keep Command shortcuts from selecting hints, changing vi selection or
