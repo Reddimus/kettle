@@ -336,7 +336,8 @@ Reports that fit any of these are welcome:
   Reading a file other than the one opened or attested, a decode or resize
   that allocates past those caps, a decoder panic reached from hostile
   input, or rendered output that carries a transparent pixel's hidden color
-  is in scope.
+  is in scope. The renderer, the frames and the decoder's text are fuzzed
+  each night (`media-fuzz.yml`, see docs/TESTING.md).
 - **External video decoder** — a video's stills come from Apple's
   decoder on macOS or the user's own ffmpeg and ffprobe, never bundled.
   Kettle ships and loads no GStreamer, on any platform; `get_state` says so.

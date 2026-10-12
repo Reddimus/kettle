@@ -3343,6 +3343,59 @@ Two mermaid traps it catches:
   message text (`OSC 133;A`) truncates the line. Write `#59;`.
 - Quotes inside a node label must be `&quot;`, not `\"`.
 
+## Media fuzzing
+
+What the media worker parses from untrusted bytes has one entry point each,
+called both by an in-process sweep in every test run and by a cargo-fuzz
+target (`fuzz/`) each night. The renderer's and ffprobe's are built only on
+macOS and Linux, where the worker runs; Windows builds neither, and neither
+sweep runs there.
+
+| Target | Entry point | What must hold |
+| --- | --- | --- |
+| `wire` | `kettle_media::fuzzing::wire` | a frame in the direction its first byte picks decodes within that direction's allocation budget; one that decodes encodes back to its bytes and reads the same from a stream, and one read from a stream is what its own bytes decode to |
+| `session` | `kettle_media::fuzzing::session` | a session's stream, read at the size its first two bytes give: every pixel read is that size, and what the session reader takes is what those bytes decode to |
+| `sniff` | `kettle_media::fuzzing::sniff` | a video's first bytes sniff without a panic or a read past them, whatever length the file is said to have (the answer may change with it: an atom of size zero runs to the end of the file) |
+| `render` | `kettle_media_render::fuzzing::render` | a job the parent could send, of the kind its first byte picks, rendered into a 64-pixel box: no panic outside a guarded library call, and a render that passes the parent's reply checks, fits its box, is the kind asked for and encodes as the worker writes it |
+| `ffprobe` | `kettle_media_native::fuzzing::ffprobe` | ffprobe's description and packet list and ffmpeg's codec list, split at NUL bytes, parse or fail: a description's picture within bounds, turned by a quarter turn, with a frame of at most a thousand seconds; a packet list sorted, distinct and holding its keyframes, every frame it finds for a time one of its own |
+
+The sweeps (`mutated_frames_never_break_the_decoder` and the rest in each
+crate's `fuzzing` module) build their cases with
+`kettle_test_support::mutate`: seeds with one to four mutations each (a
+flipped bit, an edge byte or length word, a cut, a repeated or inserted run,
+a splice), the same cases on every machine. The frames' sweep also fixes each
+case's header length to what follows, so mutations reach the payload's
+parser. The renderer's seeds are a picture in each raster format (two larger
+than the box), two SVGs, eight Mermaid diagrams and two Markdown galleries;
+ffprobe's include descriptions at the edges of rate, rotation and size.
+Planted faults each turn a sweep red: dropping a render's source or calling
+an SVG a raster, a fit past the box, a guarded call that does not mark its
+thread; an unsorted packet list, a picture past the size limit, an
+unfiltered rate, a rotation of 360, a frame found outside the list; and,
+for the frames, trailing bytes accepted after a frame and a session frame
+whose pixel count is not checked against its size.
+
+The fuzz targets live in `fuzz/`, a workspace of its own with its own
+lockfile, so the product's builds and audits never include libFuzzer;
+`just fuzz-check`, part of `just gauntlet`, formats, compiles and lints them
+on stable on macOS and Linux, so a change to what they call shows before the
+nightly run (on Windows the recipe only says the targets are Unix-only). A
+render that panics inside a guarded library call unwinds to the guard, as it
+does in the worker; any other panic aborts. `.github/workflows/media-fuzz.yml`
+runs each target for 15 minutes a night on a pinned nightly, for a minute on
+a pull request that changes the harness, and as long as a dispatch asks, up
+to an hour. It
+seeds each corpus from the sweeps (`KETTLE_FUZZ_CORPUS` names the directory
+they write to), uses the dictionaries in `fuzz/dict`, and keeps a target's
+crash, leak, out-of-memory or hang input as an artifact; a failed night opens
+one issue, or comments on the open one. To run one locally, with that nightly
+and `cargo install cargo-fuzz --version 0.13.2 --locked`:
+
+```sh
+KETTLE_FUZZ_CORPUS=$PWD/fuzz/corpus cargo test -p kettle-media -p kettle-media-render -p kettle-media-native --lib fuzzing
+cargo +nightly-2026-09-24 fuzz run render fuzz/corpus/render -- -dict=fuzz/dict/render.dict -max_total_time=300
+```
+
 ## Supply-chain fixture gates
 
 Release and installer changes have hermetic regression suites in addition to
@@ -5155,6 +5208,8 @@ retained compile/regression checks on **windows**:
 
 - `fmt --check`, `build --all-targets`, `clippy -D warnings`,
   `cargo test --workspace` on every OS.
+- `.github/workflows/media-fuzz.yml` fuzzes the media parsers each night
+  (see Media fuzzing).
 - `cargo doc --no-deps` with `RUSTDOCFLAGS=-D warnings` (Linux only —
   catches broken intra-doc-links, malformed examples; rustdoc is
   platform-agnostic so one runner suffices).

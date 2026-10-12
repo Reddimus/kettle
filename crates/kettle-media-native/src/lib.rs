@@ -26,6 +26,8 @@ pub mod avfoundation;
 mod contain;
 #[cfg(unix)]
 pub mod ffmpeg;
+#[cfg(all(unix, any(test, feature = "fuzzing")))]
+pub mod fuzzing;
 #[cfg(unix)]
 mod reopen;
 #[cfg(unix)]

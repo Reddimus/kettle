@@ -1058,6 +1058,71 @@ impl VideoDecoder for Ffmpeg {
     }
 }
 
+/// What the fuzz target and the sweep below check of the text ffprobe and
+/// ffmpeg write, split at NUL bytes into a description, a packet list and a
+/// codec list: nothing panics; a description that parses shows a picture
+/// within bounds or fails, turns it by a quarter turn and has a frame
+/// length of at most a thousand seconds; a packet list that parses is sorted and distinct, its keyframes
+/// among its frames, and every frame it finds for a time is one of them.
+#[cfg(any(test, feature = "fuzzing"))]
+pub(crate) fn check_text(data: &[u8]) {
+    let mut parts = data
+        .splitn(3, |byte| *byte == 0)
+        .map(|part| std::str::from_utf8(part).ok());
+    let (description, packets, codecs) = (
+        parts.next().flatten(),
+        parts.next().flatten(),
+        parts.next().flatten(),
+    );
+    let probe = description.and_then(|text| parse_probe(text).ok());
+    if let Some(probe) = &probe {
+        if let Ok((width, height)) = probe.shown() {
+            let side = 1..=MAX_VIDEO_SIDE;
+            assert!(side.contains(&width) && side.contains(&height));
+        }
+        assert!(matches!(probe.rotation(), 0 | 90 | 180 | 270));
+        // A rate of one frame per thousand seconds is the slowest kept.
+        assert!((1..=1_000_000).contains(&probe.frame_ms()));
+        if let Some(fps) = probe.fps_milli() {
+            assert!((1..=MAX_VIDEO_FPS_MILLI).contains(&fps));
+        }
+        let _ = (probe.video_end_ms(), codec(&probe.stream.codec));
+    }
+    if let Some(Ok(Some(timeline))) = packets.map(parse_packets) {
+        let rising = |list: &[i64]| list.windows(2).all(|pair| pair[0] < pair[1]);
+        assert!(rising(&timeline.starts) && rising(&timeline.keys));
+        let among = |tick: i64| timeline.starts.binary_search(&tick).is_ok();
+        assert!(timeline.keys.iter().all(|&key| among(key)));
+        let (first, last) = (
+            timeline.starts[0],
+            timeline.starts[timeline.starts.len() - 1],
+        );
+        for tick in [i64::MIN, -1, 0, 1, first, last, i64::MAX] {
+            assert!(among(timeline.shown(tick)));
+            let key = timeline.keyframe(tick);
+            assert!(key == tick || (key <= tick && among(key)));
+        }
+        let clock = probe.as_ref().and_then(|probe| {
+            let (numerator, denominator) = probe.stream.time_base?;
+            Some(Clock {
+                numerator: i128::from(numerator),
+                denominator: i128::from(denominator),
+                start_us: probe.start_us,
+            })
+        });
+        if let Some(clock) = clock {
+            for &tick in timeline.starts.iter().take(64) {
+                let earliest = timeline.first_in_microsecond(tick, &clock);
+                assert!(earliest <= tick && among(earliest));
+                assert!(clock.ms(tick, 10_000) <= 10_000);
+            }
+        }
+    }
+    if let Some(list) = codecs {
+        let _ = decodes(list, "h264");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

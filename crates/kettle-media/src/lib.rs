@@ -6,6 +6,8 @@
 
 pub mod client;
 mod digest;
+#[cfg(any(test, feature = "fuzzing"))]
+pub mod fuzzing;
 mod lifecycle;
 pub mod session;
 pub mod video;
