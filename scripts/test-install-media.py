@@ -64,6 +64,58 @@ class MediaInstallTests(unittest.TestCase):
         self.assertIn("kettle-media-worker", result.stderr)
         self.assertFalse(self.prefix.exists())
 
+    def test_uninstall_removes_an_idle_update_lock_and_preserves_other_files(self):
+        self.assertEqual(self.run_installer().returncode, 0)
+        lock = self.prefix / ".kettle-update.lock"
+        lock.touch(mode=0o600)
+        unrelated = self.prefix / "unrelated.txt"
+        unrelated.write_bytes(b"keep")
+        result = self.run_installer("--uninstall")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(lock.exists())
+        self.assertEqual(unrelated.read_bytes(), b"keep")
+
+    def test_a_held_update_lock_refuses_install_and_uninstall(self):
+        import fcntl
+
+        self.assertEqual(self.run_installer().returncode, 0)
+        lock = self.prefix / ".kettle-update.lock"
+        lock.touch(mode=0o600)
+        managed = self.prefix / "share/kettle/install-files.json"
+        before = managed.read_bytes()
+        with lock.open("rb") as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            for arguments in [(), ("--uninstall",)]:
+                result = self.run_installer(*arguments)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(managed.read_bytes(), before)
+                self.assertEqual((self.prefix / "bin/kettle").read_bytes(), self.gui.read_bytes())
+
+    def test_untrusted_update_lock_leaves_the_installation_untouched(self):
+        for kind in ["contents", "mode", "symlink", "hardlink", "directory"]:
+            with self.subTest(kind=kind):
+                self.prefix = self.root / kind
+                self.assertEqual(self.run_installer().returncode, 0)
+                lock = self.prefix / ".kettle-update.lock"
+                lock.unlink(missing_ok=True)
+                unrelated = self.root / (kind + "-unrelated")
+                unrelated.write_bytes(b"keep")
+                if kind == "symlink":
+                    lock.symlink_to(unrelated)
+                elif kind == "hardlink":
+                    os.link(unrelated, lock)
+                elif kind == "directory":
+                    lock.mkdir()
+                else:
+                    lock.write_bytes(b"foreign" if kind == "contents" else b"")
+                    lock.chmod(0o600 if kind == "contents" else 0o666)
+                managed = self.prefix / "share/kettle/install-files.json"
+                before = managed.read_bytes()
+                result = self.run_installer("--uninstall")
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(managed.read_bytes(), before)
+                self.assertEqual(unrelated.read_bytes(), b"keep")
+
 
 if __name__ == "__main__":
     unittest.main()

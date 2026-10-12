@@ -154,6 +154,7 @@ assert_installed_prefix() {
 
 assert_uninstalled_prefix() {
   local prefix=$1
+  [ ! -e "${prefix}/.kettle-update.lock" ] || fail "update lock survived uninstall"
   [ ! -e "${prefix}/bin/kettle" ] || fail "binary survived uninstall"
   [ ! -e "${prefix}/share/applications/kettle.desktop" ] \
     || fail "desktop entry survived uninstall"

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import errno
 import hashlib
 import json
@@ -11,7 +12,7 @@ import os
 import secrets
 import stat
 import sys
-from typing import Any, Dict, List, NoReturn, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, NoReturn, Optional, Sequence, Tuple
 
 
 MANIFEST_RELATIVE = "share/kettle/install-files.json"
@@ -19,6 +20,7 @@ MANIFEST_SCHEMA = 1
 MAX_ENTRIES = 128
 MAX_FILE_BYTES = 512 * 1024 * 1024
 MAX_MANIFEST_BYTES = 1024 * 1024
+UPDATE_LOCK = ".kettle-update.lock"
 DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 FILE_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
 
@@ -613,6 +615,58 @@ def _destination_exists(root_fd: int, relative: str) -> bool:
         os.close(parent_fd)
 
 
+def _lock_identity(root_fd: int, handle: int) -> os.stat_result:
+    metadata = os.fstat(handle)
+    current = os.stat(UPDATE_LOCK, dir_fd=root_fd, follow_symlinks=False)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_size != 0
+        or (metadata.st_dev, metadata.st_ino) != (current.st_dev, current.st_ino)
+    ):
+        _fail("update lock is not an unchanged owned empty private file")
+    return metadata
+
+
+@contextmanager
+def _update_lock(root_fd: int) -> Iterator[int]:
+    import fcntl
+
+    flags = os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+    created = False
+    completed = False
+    held = False
+    handle = None
+    try:
+        try:
+            handle = os.open(UPDATE_LOCK, flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=root_fd)
+            created = True
+            os.fchmod(handle, 0o600)
+        except FileExistsError:
+            handle = os.open(UPDATE_LOCK, flags, dir_fd=root_fd)
+        _lock_identity(root_fd, handle)
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            _fail("another Kettle operation holds the update lock")
+        held = True
+        _lock_identity(root_fd, handle)
+        yield handle
+        completed = True
+    finally:
+        if handle is not None:
+            if created and held and not completed:
+                try:
+                    _lock_identity(root_fd, handle)
+                    os.unlink(UPDATE_LOCK, dir_fd=root_fd)
+                    os.fsync(root_fd)
+                except (InstallerError, OSError):
+                    pass
+            os.close(handle)
+
+
 def _install(arguments: argparse.Namespace) -> None:
     prefix = arguments.prefix
     _absolute_parts(prefix, "install prefix")
@@ -681,72 +735,73 @@ def _install(arguments: argparse.Namespace) -> None:
 
     root_fd = _open_absolute_directory(prefix, create=True)
     try:
-        existing = _read_manifest(root_fd, prefix)
-        if existing is None:
-            old_files: Dict[str, Dict[str, Any]] = {}
-            owned_directories: Dict[str, int] = {}
-        else:
-            _verify_manifest_tree(root_fd, existing)
-            old_files = {record["path"]: record for record in existing["files"]}
-            owned_directories = {
-                record["path"]: record["mode"] for record in existing["directories"]
-            }
-        if len(set(owned_directories).union(planned_parents)) > MAX_ENTRIES:
-            _fail("install provenance directory set exceeds its bounded limit")
-
-        for spec in specs:
-            exists = _destination_exists(root_fd, spec["path"])
-            if exists and spec["path"] not in old_files:
-                _fail(f"refusing to overwrite an unrecorded path: {spec['path']}")
-        created: Dict[str, int] = {}
-        new_records: Dict[str, Dict[str, Any]] = dict(old_files)
-        for spec in specs:
-            if "bytes" in spec:
-                _publish_bytes(
-                    root_fd,
-                    spec["path"],
-                    spec["bytes"],
-                    spec["mode"],
-                    created,
-                )
+        with _update_lock(root_fd):
+            existing = _read_manifest(root_fd, prefix)
+            if existing is None:
+                old_files: Dict[str, Dict[str, Any]] = {}
+                owned_directories: Dict[str, int] = {}
             else:
-                _publish_source(
-                    root_fd,
-                    spec["path"],
-                    spec["source"],
-                    spec["size"],
-                    spec["sha256"],
-                    spec["mode"],
-                    created,
-                )
-            new_records[spec["path"]] = {
-                "path": spec["path"],
-                "size": spec["size"],
-                "sha256": spec["sha256"],
-                "mode": spec["mode"],
+                _verify_manifest_tree(root_fd, existing)
+                old_files = {record["path"]: record for record in existing["files"]}
+                owned_directories = {
+                    record["path"]: record["mode"] for record in existing["directories"]
+                }
+            if len(set(owned_directories).union(planned_parents)) > MAX_ENTRIES:
+                _fail("install provenance directory set exceeds its bounded limit")
+
+            for spec in specs:
+                exists = _destination_exists(root_fd, spec["path"])
+                if exists and spec["path"] not in old_files:
+                    _fail(f"refusing to overwrite an unrecorded path: {spec['path']}")
+            created: Dict[str, int] = {}
+            new_records: Dict[str, Dict[str, Any]] = dict(old_files)
+            for spec in specs:
+                if "bytes" in spec:
+                    _publish_bytes(
+                        root_fd,
+                        spec["path"],
+                        spec["bytes"],
+                        spec["mode"],
+                        created,
+                    )
+                else:
+                    _publish_source(
+                        root_fd,
+                        spec["path"],
+                        spec["source"],
+                        spec["size"],
+                        spec["sha256"],
+                        spec["mode"],
+                        created,
+                    )
+                new_records[spec["path"]] = {
+                    "path": spec["path"],
+                    "size": spec["size"],
+                    "sha256": spec["sha256"],
+                    "mode": spec["mode"],
+                }
+            owned_directories.update(created)
+            provenance = {
+                "schema": MANIFEST_SCHEMA,
+                "product": "kettle",
+                "managed_by": "kettle-installer",
+                "prefix": prefix,
+                "owner_uid": os.geteuid(),
+                "files": [new_records[path] for path in sorted(new_records)],
+                "directories": [
+                    {"path": path, "mode": owned_directories[path]}
+                    for path in sorted(owned_directories)
+                ],
             }
-        owned_directories.update(created)
-        provenance = {
-            "schema": MANIFEST_SCHEMA,
-            "product": "kettle",
-            "managed_by": "kettle-installer",
-            "prefix": prefix,
-            "owner_uid": os.geteuid(),
-            "files": [new_records[path] for path in sorted(new_records)],
-            "directories": [
-                {"path": path, "mode": owned_directories[path]}
-                for path in sorted(owned_directories)
-            ],
-        }
-        encoded = (json.dumps(provenance, indent=2) + "\n").encode("utf-8")
-        if len(encoded) > MAX_MANIFEST_BYTES:
-            _fail("install provenance exceeds its bounded size")
-        _publish_bytes(root_fd, MANIFEST_RELATIVE, encoded, 0o644, created)
-        # Re-open and verify the complete committed set before reporting success.
-        committed = _read_manifest(root_fd, prefix)
-        if committed is None:
-            _fail("install provenance publication failed")
-        _verify_manifest_tree(root_fd, committed)
+            encoded = (json.dumps(provenance, indent=2) + "\n").encode("utf-8")
+            if len(encoded) > MAX_MANIFEST_BYTES:
+                _fail("install provenance exceeds its bounded size")
+            _publish_bytes(root_fd, MANIFEST_RELATIVE, encoded, 0o644, created)
+            # Re-open and verify the complete committed set before reporting success.
+            committed = _read_manifest(root_fd, prefix)
+            if committed is None:
+                _fail("install provenance publication failed")
+            _verify_manifest_tree(root_fd, committed)
     finally:
         os.close(root_fd)
 
@@ -784,19 +839,26 @@ def _uninstall(arguments: argparse.Namespace) -> None:
                 "no Kettle install provenance was found; refusing to guess which "
                 "paths belong to this installation"
             )
-        # Nothing is removed until every recorded object proves its identity.
-        _verify_manifest_tree(root_fd, manifest)
-        for record in sorted(
-            manifest["files"], key=lambda item: (item["path"].count("/"), item["path"]), reverse=True
-        ):
-            _unlink_recorded(root_fd, record["path"])
-        _unlink_recorded(root_fd, MANIFEST_RELATIVE)
-        for record in sorted(
-            manifest["directories"],
-            key=lambda item: (item["path"].count("/"), item["path"]),
-            reverse=True,
-        ):
-            _remove_recorded_directory(root_fd, record["path"])
+        with _update_lock(root_fd) as lock:
+            manifest = _read_manifest(root_fd, prefix)
+            if manifest is None:
+                _fail("installation changed before uninstall acquired its lock")
+            # Nothing is removed until every recorded object proves its identity.
+            _verify_manifest_tree(root_fd, manifest)
+            for record in sorted(
+                manifest["files"], key=lambda item: (item["path"].count("/"), item["path"]), reverse=True
+            ):
+                _unlink_recorded(root_fd, record["path"])
+            _unlink_recorded(root_fd, MANIFEST_RELATIVE)
+            for record in sorted(
+                manifest["directories"],
+                key=lambda item: (item["path"].count("/"), item["path"]),
+                reverse=True,
+            ):
+                _remove_recorded_directory(root_fd, record["path"])
+            _lock_identity(root_fd, lock)
+            os.unlink(UPDATE_LOCK, dir_fd=root_fd)
+            os.fsync(root_fd)
     finally:
         os.close(root_fd)
 
