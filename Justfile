@@ -414,7 +414,7 @@ full-native-gates: icons-check-required package-templates update-manifest-test r
     @echo "NOT APPLICABLE on Linux: macOS actool and native appearance gates."
 
 [macos]
-full-native-gates: icons-check-required package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test icns-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke split-exit-resize-smoke text-presentation-smoke line-edit-chords-smoke modal-shortcuts-smoke dock-menu-smoke macos-compare-score-self-test macos-standing-self-test macos-avsync-self-test agent-cli-smoke
+full-native-gates: icons-check-required package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test icns-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke split-exit-resize-smoke text-presentation-smoke line-edit-chords-smoke modal-shortcuts-smoke native-titlebar-smoke dock-menu-smoke macos-compare-score-self-test macos-standing-self-test macos-avsync-self-test agent-cli-smoke
     @echo "NOT APPLICABLE on macOS: Linux installer and Xvfb gates."
 
 # === End-to-end smoke ==============================================
@@ -789,6 +789,11 @@ agent-tui-smoke:
 [unix]
 agent-cli-smoke: release
     KETTLE_BIN="${KETTLE_BIN:-./target/release/kettle}" ./scripts/check-agent-cli-smoke.sh
+
+# Native light captions must remain separate from their traffic lights.
+[macos]
+native-titlebar-smoke: release
+    launchctl asuser $(id -u) python3 scripts/check-native-titlebar.py --kettle ./target/release/kettle --out-dir target/diagnostics/native-titlebar-$(date +%Y%m%d-%H%M%S)
 
 # Command chords must not act as ordinary hint, vi or menu letters.
 [macos]

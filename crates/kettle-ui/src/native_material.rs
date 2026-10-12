@@ -80,9 +80,9 @@ fn macos_material_policy(
 fn macos_backdrop_status(
     window_blur: bool,
     policy: MacosMaterialPolicy,
-    effect_installed: bool,
+    blur_allowed: bool,
 ) -> BackdropStatus {
-    if window_blur && policy.effect_visible && effect_installed {
+    if window_blur && policy.effect_visible && blur_allowed {
         BackdropStatus::Active
     } else {
         // Reduce Transparency deliberately replaces material with an opaque
@@ -93,10 +93,8 @@ fn macos_backdrop_status(
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn macos_native_effect_supported(borderless: bool) -> bool {
-    // A sibling NSVisualEffectView works with AppKit's decorated frame view.
-    // In a borderless NSWindow it composites over Winit's CAMetalLayer and
-    // hides the terminal, so preserve visible sharp alpha instead of blur.
+fn macos_native_blur_allowed(borderless: bool) -> bool {
+    // Preserve the documented sharp-alpha fallback for borderless windows.
     !borderless
 }
 
@@ -110,7 +108,7 @@ pub(crate) struct NativeMaterial {
     #[cfg(not(target_os = "macos"))]
     reported_unavailable: std::cell::Cell<bool>,
     #[cfg(target_os = "macos")]
-    effect: Option<objc2::rc::Retained<objc2_app_kit::NSVisualEffectView>>,
+    native_blur_allowed: bool,
     #[cfg(target_os = "macos")]
     last_reduce_transparency: std::cell::Cell<Option<bool>>,
     #[cfg(target_os = "macos")]
@@ -144,11 +142,7 @@ impl NativeMaterial {
             let material = Self {
                 last_blur: std::cell::Cell::new(None),
                 status: std::cell::Cell::new(BackdropStatus::Disabled),
-                effect: if macos_native_effect_supported(config.borderless) {
-                    install_macos_effect(window)
-                } else {
-                    None
-                },
+                native_blur_allowed: macos_native_blur_allowed(config.borderless),
                 last_reduce_transparency: std::cell::Cell::new(None),
                 last_background: std::cell::Cell::new(None),
                 alpha_surface_required,
@@ -280,9 +274,9 @@ impl NativeMaterial {
         self.last_background.set(Some(config.theme.background));
         self.last_reduce_transparency.set(Some(reduce));
         let policy = macos_material_policy(config.window_blur, self.alpha_surface_required, reduce);
-        if let Some(effect) = &self.effect {
-            effect.setHidden(!policy.effect_visible);
-        }
+        // Frame subviews can remove AppKit's light caption on macOS 27.
+        // Winit applies blur to the window without changing that hierarchy.
+        window.set_blur(policy.effect_visible && self.native_blur_allowed);
         sync_macos_window_background(
             window,
             config.theme.background,
@@ -292,7 +286,7 @@ impl NativeMaterial {
         self.status.set(macos_backdrop_status(
             config.window_blur,
             policy,
-            self.effect.is_some(),
+            self.native_blur_allowed,
         ));
         window.request_redraw();
     }
@@ -350,73 +344,6 @@ fn observe_macos_accessibility_display(
         )
     };
     (Some(center), Some(observer), dirty)
-}
-
-#[cfg(target_os = "macos")]
-fn install_macos_effect(
-    window: &Window,
-) -> Option<objc2::rc::Retained<objc2_app_kit::NSVisualEffectView>> {
-    use objc2_app_kit::{
-        NSAutoresizingMaskOptions, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial,
-        NSVisualEffectState, NSVisualEffectView, NSWindowOrderingMode,
-    };
-    use winit::raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
-
-    let handle = window.window_handle().ok()?;
-    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
-        return None;
-    };
-    let main_thread = objc2_foundation::MainThreadMarker::new()?;
-    let content: &NSView = unsafe { &*appkit.ns_view.as_ptr().cast::<NSView>() };
-    content.window()?;
-    // SAFETY: winit's live content view is attached to AppKit's frame view
-    // while the window exists, and this runs on the main thread during setup.
-    let frame_view = unsafe { content.superview()? };
-    // Material belongs to terminal content, not the caption. The initial frame
-    // prevents a one-frame flash; constraints below track Winit's content rect
-    // through resize, titlebar auto-hide, and fullscreen transitions.
-    let frame = content.frame();
-    let effect = unsafe {
-        NSVisualEffectView::initWithFrame(main_thread.alloc::<NSVisualEffectView>(), frame)
-    };
-    unsafe {
-        effect.setMaterial(NSVisualEffectMaterial::UnderWindowBackground);
-        effect.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
-        effect.setState(NSVisualEffectState::FollowsWindowActiveState);
-        effect.setTranslatesAutoresizingMaskIntoConstraints(false);
-        content.setAutoresizingMask(
-            NSAutoresizingMaskOptions::NSViewWidthSizable
-                | NSAutoresizingMaskOptions::NSViewHeightSizable,
-        );
-        // Keep winit's private WinitView as the NSWindow content view. Winit
-        // retrieves that view later and casts it back to its declared class;
-        // replacing it makes ordinary calls such as `set_cursor` abort. The
-        // effect also cannot be a child of WinitView: AppKit composites child
-        // views above the parent's Metal layer. Put it in the native frame
-        // view as a sibling immediately behind WinitView instead.
-        frame_view.addSubview_positioned_relativeTo(
-            &effect,
-            NSWindowOrderingMode::NSWindowBelow,
-            Some(content),
-        );
-        for constraint in [
-            effect
-                .leadingAnchor()
-                .constraintEqualToAnchor(&content.leadingAnchor()),
-            effect
-                .trailingAnchor()
-                .constraintEqualToAnchor(&content.trailingAnchor()),
-            effect
-                .topAnchor()
-                .constraintEqualToAnchor(&content.topAnchor()),
-            effect
-                .bottomAnchor()
-                .constraintEqualToAnchor(&content.bottomAnchor()),
-        ] {
-            constraint.setActive(true);
-        }
-    }
-    Some(effect)
 }
 
 #[cfg(target_os = "macos")]
@@ -578,93 +505,20 @@ mod tests {
     use super::{
         BackdropStatus, MacosMaterialPolicy, caption_colors, colorref, contrast_ratio,
         linux_blur_policy, live_opacity_floor_for_status, macos_backdrop_status,
-        macos_material_policy, macos_native_effect_supported,
+        macos_material_policy, macos_native_blur_allowed,
     };
     use kettle_config::{BackgroundType, Config};
 
     #[test]
-    fn macos_material_stops_at_the_native_titlebar() {
-        let source = kettle_test_support::production_source(include_str!("native_material.rs"));
-        let install = source
-            .split("fn install_macos_effect(")
-            .nth(1)
-            .and_then(|body| body.split("fn macos_reduce_transparency").next())
-            .expect("install_macos_effect body");
-        let normalized = install.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(
-            install.contains("let frame = content.frame();"),
-            "the effect must use content geometry so AppKit can paint the titlebar"
-        );
-        assert!(
-            !install.contains("let frame = frame_view.bounds();"),
-            "frame bounds expose the desktop through the complete native caption"
-        );
-        assert!(
-            normalized.contains(
-                "NSVisualEffectView::initWithFrame(main_thread.alloc::<NSVisualEffectView>(), frame)"
-            ),
-            "the frame-view bounds must be the rectangle passed to the material view"
-        );
-        assert!(
-            normalized.contains("effect.setTranslatesAutoresizingMaskIntoConstraints(false);"),
-            "the material must use explicit content-relative constraints"
-        );
-        assert!(
-            normalized.contains(
-                "frame_view.addSubview_positioned_relativeTo( &effect, NSWindowOrderingMode::NSWindowBelow, Some(content),"
-            ),
-            "the material must stay below the Metal content and native controls"
-        );
-        for edge in ["leading", "trailing", "top", "bottom"] {
-            assert!(
-                normalized.contains(&format!(
-                    "effect .{edge}Anchor() .constraintEqualToAnchor(&content.{edge}Anchor())"
-                )),
-                "the material's {edge} edge must follow the content view"
-            );
-        }
-        for setter in [
-            "effect.setFrame(",
-            "effect.setFrameSize(",
-            "effect.setFrameOrigin(",
-            "effect.setBounds(",
-            "effect.setBoundsSize(",
-            "effect.setBoundsOrigin(",
-        ] {
-            assert!(
-                !source.contains(setter),
-                "a later {setter} call could silently expand material back into the caption"
-            );
-        }
-        assert!(
-            source.contains("ns_window.setTitlebarAppearsTransparent(false);"),
-            "AppKit must draw an opaque native caption instead of exposing the desktop"
-        );
-        let sync = source
-            .split("fn sync_macos(")
-            .nth(1)
-            .and_then(|body| body.split("fn observe_macos_accessibility_display").next())
-            .expect("sync_macos body");
-        assert!(
-            sync.contains("config.theme.background"),
-            "the exact terminal background must back live resize"
-        );
-        assert!(
-            !sync.contains("caption_colors(&config.theme)"),
-            "AppKit owns native caption color; its backing surface must not invent a raised strip"
-        );
-    }
-
-    #[test]
     fn borderless_macos_windows_keep_visible_alpha_instead_of_covering_metal() {
-        assert!(macos_native_effect_supported(false));
+        assert!(macos_native_blur_allowed(false));
         assert!(
-            !macos_native_effect_supported(true),
-            "borderless AppKit composition must fall back instead of hiding Winit's Metal view"
+            !macos_native_blur_allowed(true),
+            "existing borderless windows keep the sharp-alpha fallback"
         );
         let source = kettle_test_support::production_source(include_str!("native_material.rs"));
         assert!(
-            source.contains("if macos_native_effect_supported(config.borderless)"),
+            source.contains("native_blur_allowed: macos_native_blur_allowed(config.borderless)"),
             "NativeMaterial::install must apply the borderless safety policy"
         );
     }

@@ -118,12 +118,13 @@ Use only matching-commit assets for local bundle checks when Xcode 26 is absent;
 this does not count as a local icon-compilation pass.
 
 The macOS material policy has portable tests for opaque, plain-alpha, blurred,
-and Reduce Transparency states. A source guard pins the AppKit-only seam: the
-effect is initialized from the content frame, constrains all four edges to the
-Winit content view, stays below its Metal layer, stops below an opaque native
-titlebar, and has no competing geometry setter. Portable policy tests keep the effect out of
-borderless windows, where it would cover the Metal view, and out of an otherwise
-opaque window, where it would create a titlebar-only seam. Windows tests pin DWM
+and Reduce Transparency states, including the borderless sharp-alpha fallback.
+`just native-titlebar-smoke` captures a light-themed native macOS window at
+startup, after resize, and with the pointer over the caption. It rejects text
+outside the native buttons over the traffic-light cluster and
+missing caption text. macOS CI runs the same check and retains failure captures.
+The check caught intermittent overlap in the published 5.0.0 bundle on macOS 27;
+the corrected window-blur path passes. Windows tests pin DWM
 color byte order and minimum caption-text contrast. Linux tests require both a
 Wayland handle and the KWin blur global, cache that registry probe per process,
 and prove the 99% fallback is Linux-only; renderer tests prove the fallback

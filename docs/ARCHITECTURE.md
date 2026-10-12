@@ -1245,15 +1245,12 @@ silently shortened.
 ## In-process multi-window
 
 On macOS, decorated windows keep AppKit's title, traffic lights, drag region,
-shadow, and rounded window mask. Native blur is a sibling behind Winit's Metal
-view and is constrained to the content rect below the caption. AppKit owns the
+shadow, and rounded window mask. Winit applies native blur to the window without
+adding frame subviews, which can disrupt AppKit's light caption. AppKit owns the
 opaque titlebar and follows Kettle's selected light or dark appearance. Kettle's
-background color backs the content during resize. The effect is shown only when
+background color backs the content during resize. Blur is enabled only when
 the renderer's creation-time surface is translucent. Reduce Transparency makes
-the window opaque again. Borderless macOS
-windows do not install the effect: without AppKit's decorated frame, the
-sibling material composites over Winit's Metal layer. They keep ordinary alpha
-transparency so terminal content remains visible.
+the window opaque again. Borderless windows retain their sharp-alpha fallback.
 
 Windows applies the same raised surface and a contrast-checked text color
 through DWM while requesting its system backdrop. Linux probes the live

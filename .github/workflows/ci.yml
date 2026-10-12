@@ -342,6 +342,12 @@ jobs:
         run: |
           launchctl asuser "$(id -u)" python3 scripts/check-modal-shortcuts.py \
             --kettle ./target/release/kettle --out-dir "$RUNNER_TEMP/modal-shortcuts"
+      - name: Native light titlebar regression (macOS)
+        if: runner.os == 'macOS'
+        timeout-minutes: 3
+        run: |
+          launchctl asuser "$(id -u)" python3 scripts/check-native-titlebar.py \
+            --kettle ./target/release/kettle --out-dir "$RUNNER_TEMP/native-titlebar"
       - name: Image paste environment
         if: runner.os != 'Windows' && always()
         shell: bash
@@ -363,6 +369,9 @@ jobs:
             ${{ runner.temp }}/modal-shortcuts/*.json
             ${{ runner.temp }}/modal-shortcuts/*.log
             ${{ runner.temp }}/modal-shortcuts/*.png
+            ${{ runner.temp }}/native-titlebar/*.json
+            ${{ runner.temp }}/native-titlebar/*.log
+            ${{ runner.temp }}/native-titlebar/*.png
           if-no-files-found: ignore
           retention-days: 7
       - name: Agent CLI non-interactive smoke (macOS)
