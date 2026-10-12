@@ -29591,37 +29591,22 @@ impl TextModal {
     }
 }
 
-/// Which control-plane-supported modal currently owns the keyboard, if any.
-///
-/// The order mirrors the supported branches of the `KeyboardInput` arm
-/// exactly. If those two ever disagree, `dispatch_ui_key` would drive a
-/// different surface than a real keystroke would.
+/// The supported text surface owned by the same modal as a real key event.
 fn open_text_modal(ws: &WindowState) -> Option<TextModal> {
-    if ws.confirm_dialog.is_some() {
-        Some(TextModal::Confirm)
-    } else if ws.hint_state.is_some() {
-        Some(TextModal::Hint)
-    } else if ws.palette_input.is_some() {
-        Some(TextModal::Palette)
-    } else if ws.theme_picker_input.is_some() {
-        Some(TextModal::ThemePicker)
-    } else if ws.settings_nav.is_some() && ws.settings_text_edit.is_some() {
-        Some(TextModal::SettingsText)
-    } else if ws.settings_nav.is_some() {
-        Some(TextModal::Settings)
-    } else if ws.layout_picker_input.is_some() {
-        Some(TextModal::LayoutPicker)
-    } else if ws.ssh_input.is_some() {
-        Some(TextModal::Ssh)
-    } else if ws.editing_title.is_some() {
-        Some(TextModal::TitleEdit)
-    } else if ws.search.open {
-        Some(TextModal::Search)
-    } else if ws.preview_focus.is_some() {
-        Some(TextModal::Preview)
-    } else {
-        None
-    }
+    Some(match top_modal(ws)? {
+        KeyModal::ConfirmDialog => TextModal::Confirm,
+        KeyModal::ContextMenu | KeyModal::ViMode => return None,
+        KeyModal::Hint => TextModal::Hint,
+        KeyModal::Palette => TextModal::Palette,
+        KeyModal::ThemePicker => TextModal::ThemePicker,
+        KeyModal::SettingsText => TextModal::SettingsText,
+        KeyModal::SettingsCapture | KeyModal::Settings => TextModal::Settings,
+        KeyModal::LayoutPicker => TextModal::LayoutPicker,
+        KeyModal::Ssh => TextModal::Ssh,
+        KeyModal::TitleEdit => TextModal::TitleEdit,
+        KeyModal::Search => TextModal::Search,
+        KeyModal::Preview => TextModal::Preview,
+    })
 }
 
 impl App {
@@ -30524,7 +30509,9 @@ impl App {
             return;
         }
 
-        let ch = text.and_then(|s| s.chars().next()).unwrap_or('\0');
+        let ch = crate::modal_input::accept_text(text, ws.mods)
+            .and_then(|s| s.chars().next())
+            .unwrap_or('\0');
         let motion = match (ch, key) {
             ('h', _) | ('\0', Key::Named(NamedKey::ArrowLeft)) => Some(kettle_core::ViMotion::Left),
             ('l', _) | ('\0', Key::Named(NamedKey::ArrowRight)) => {
@@ -30633,7 +30620,7 @@ impl App {
                 }
             }
             _ => {
-                let Some(ch) = text
+                let Some(ch) = crate::modal_input::accept_text(text, ws.mods)
                     .and_then(|t| t.chars().next())
                     .filter(|c| c.is_ascii_alphabetic())
                     .map(|c| c.to_ascii_lowercase())
@@ -31621,7 +31608,9 @@ impl App {
                 // keystroke dispatches a row whose mnemonic char matches;
                 // multi-char accumulates into `typeahead_buf` for
                 // prefix-match. Buffer clears after 750ms of inactivity.
-                let Some(t) = text else { return };
+                let Some(t) = crate::modal_input::accept_text(text, ws.mods) else {
+                    return;
+                };
                 let mut chars = t.chars();
                 let Some(c) = chars.next() else { return };
                 if chars.next().is_some() || !c.is_ascii_alphabetic() {
@@ -48100,22 +48089,62 @@ mod tests {
         }
     }
 
-    /// `open_text_modal` decides which modal `dispatch_ui_key` drives. If it
-    /// ever disagrees with the precedence the real `KeyboardInput` arm applies,
-    /// an agent's keystroke lands somewhere a user's would not — and the tests
-    /// built on it would be certifying the wrong field. Pin the two orders
-    /// against each other at the source.
+    #[test]
+    fn non_text_modals_block_control_plane_typing_into_search() {
+        use super::{ContextMenuState, TextModal, ViState, open_text_modal};
+
+        let mut ws = WindowState::new(1, false, Mux::new());
+        ws.search.open = true;
+        assert_eq!(open_text_modal(&ws), Some(TextModal::Search));
+        ws.vi_mode = Some(ViState {
+            pane_id: 1,
+            visual: false,
+        });
+        assert_eq!(
+            open_text_modal(&ws),
+            None,
+            "vi owns the keyboard above search"
+        );
+        ws.context_menu = Some(ContextMenuState {
+            anchor: (0.0, 0.0),
+            anchor_scale: 1.0,
+            items: Vec::new(),
+            highlight: 0,
+            drill_stack: Vec::new(),
+            scroll_offset: 0,
+            scroll_stack: Vec::new(),
+            typeahead_buf: String::new(),
+            typeahead_until: None,
+        });
+        assert_eq!(
+            open_text_modal(&ws),
+            None,
+            "the menu owns the keyboard above vi"
+        );
+        ws.vi_mode = None;
+        assert_eq!(
+            open_text_modal(&ws),
+            None,
+            "the menu also blocks search alone"
+        );
+        ws.context_menu = None;
+        assert_eq!(open_text_modal(&ws), Some(TextModal::Search));
+    }
+
+    /// Keep the shared owner resolver aligned with native keyboard dispatch.
     #[test]
     fn the_control_plane_modal_order_matches_the_real_key_handler() {
         let src = production_source();
 
         let resolver = src
-            .split("fn open_text_modal(")
+            .split("fn top_modal(")
             .nth(1)
             .and_then(|rest| rest.split("\n}").next())
-            .expect("open_text_modal present");
+            .expect("top_modal present");
         let resolver_order: Vec<&str> = [
             ("ws.confirm_dialog.is_some()", "confirm"),
+            ("ws.context_menu.is_some()", "context_menu"),
+            ("ws.vi_mode.is_some()", "vi_mode"),
             ("ws.hint_state.is_some()", "hint"),
             ("ws.palette_input.is_some()", "palette"),
             ("ws.theme_picker_input.is_some()", "theme_picker"),
@@ -48134,10 +48163,7 @@ mod tests {
         ]
         .iter()
         .map(|(probe, name)| {
-            assert!(
-                resolver.contains(probe),
-                "open_text_modal must test {probe}"
-            );
+            assert!(resolver.contains(probe), "top_modal must test {probe}");
             (resolver.find(probe).expect("probe present"), *name)
         })
         .collect::<std::collections::BTreeMap<_, _>>()
@@ -48153,6 +48179,8 @@ mod tests {
             .expect("KeyboardInput arm present");
         let handler_order: Vec<&str> = [
             ("if ws.confirm_dialog.is_some() {", "confirm"),
+            ("if ws.context_menu.is_some() {", "context_menu"),
+            ("if ws.vi_mode.is_some() {", "vi_mode"),
             ("if ws.hint_state.is_some() {", "hint"),
             ("if ws.palette_input.is_some() {", "palette"),
             ("if ws.theme_picker_input.is_some() {", "theme_picker"),
@@ -60041,7 +60069,7 @@ mod lane_control_tests {
         assert!(preview < keybinds, "before the application's shortcuts");
         for needle in [
             "} else if ws.preview_focus.is_some() { KeyModal::Preview } else { return None; })",
-            "} else if ws.preview_focus.is_some() { Some(TextModal::Preview) } else { None }",
+            "KeyModal::Preview => TextModal::Preview,",
             "TextModal::Preview => self.preview_focus_key(ws, key, false),",
             "if self.preview_holds_keyboard(ws, pane) { return Response::err(req.id, ec::BUSY, PREVIEW_HOLDS_KEYBOARD); } let Some(p) = Self::ctl_pane_ref(ws, &self.windows, pane) else {",
             "if ws.preview_focus.is_some() && matches!( ime, winit::event::Ime::Preedit(..) | winit::event::Ime::Commit(_) ) { return; }",
