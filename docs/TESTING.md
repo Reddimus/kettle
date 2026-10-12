@@ -17,6 +17,9 @@ cargo fmt --all --check
 just gauntlet
 ```
 
+Use a non-root user and `docker run --init` for Linux container runs. Root
+bypasses mode-bit tests, and a bare PID 1 may leave killed fixtures as zombies.
+
 ### Strict and full gates
 
 Before a release or supply-chain change, also run:
@@ -4917,7 +4920,9 @@ install hint only for a missing decoder; and the output written whole,
 private, never over the video and never left half-written, a folder others
 can change (0777, 0775) refused while a sticky or private one is not, and a
 failed write removing nothing it did not make, a look-alike temporary file
-included. A single frame is a labeled one-column sheet; `at_s` with any
+included. The private-output fixture uses `private_tempdir`; it failed with
+the former ambient-umask directory under `002`, then passed with explicit
+owner-only permissions. A single frame is a labeled one-column sheet; `at_s` with any
 count, and a supplied path past 4 KiB however it normalizes, are refused;
 the encoder tries the 320-pixel minimum itself; the index rounds a tolerance
 up. MCP takes integer arguments written as 9.0, and the launcher names

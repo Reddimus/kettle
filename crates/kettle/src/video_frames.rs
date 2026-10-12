@@ -727,7 +727,7 @@ mod tests {
     /// unless it is sticky; a failure removes nothing this call did not make.
     #[test]
     fn output_is_written_whole_and_never_over_the_input() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = kettle_test_support::private_tempdir("kettle-video-output-");
         let input = directory.path().join("clip.webm");
         std::fs::write(&input, b"video").unwrap();
         let out = directory.path().join("frames.jpg");

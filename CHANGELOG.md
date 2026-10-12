@@ -19,8 +19,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   strip those escape prefixes correctly in session logs and `exec --strip-ansi`.
 - Coordinate Linux installation and removal with the updater, and remove its
   idle lock during uninstall without allowing stale lock holders to proceed.
-- Make copied-diagram complexity, macOS missing-process and Linux leaked-PTY
-  tests independent of runner scheduling while retaining the production bounds.
+- Make complexity, deadline and private video-output fixtures independent of
+  runner scheduling and umask while retaining the production bounds.
 - Accept absolute cache directories in the macOS release update smoke.
 
 ## [5.0.0] — 2026-10-11
