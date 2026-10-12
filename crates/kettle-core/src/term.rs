@@ -10494,6 +10494,9 @@ impl AnsiStripper {
                     }
                 }
                 StripState::EscSeen => {
+                    if matches!(b, 0x00..=0x17 | 0x19 | 0x1c..=0x1f) {
+                        out.push(b);
+                    }
                     self.state = Self::escape_follower(b);
                 }
                 StripState::EscapeIntermediate => {
@@ -10552,7 +10555,7 @@ impl AnsiStripper {
             b']' => StripState::Osc,
             b'P' | b'X' | b'^' | b'_' => StripState::String,
             0x20..=0x2f => StripState::EscapeIntermediate,
-            0x1b => StripState::EscSeen,
+            0x00..=0x17 | 0x19 | 0x1b..=0x1f | 0x7f => StripState::EscSeen,
             _ => StripState::Plain,
         }
     }
@@ -12220,6 +12223,32 @@ mod home_dir_tests {
                 want,
                 "{label}: the stripper must end the sequence where the terminal does"
             );
+        }
+    }
+
+    #[test]
+    fn log_stripping_keeps_osc_state_across_escape_controls() {
+        for control in [0, b'\n', b'\r', b'\t', 0x07, 0x1f, 0x7f] {
+            for prefix in [
+                b"before\x1b".as_slice(),
+                b"before\x1b]old\x1b",
+                b"before\x1bPold\x1b",
+            ] {
+                let mut wire = prefix.to_vec();
+                wire.push(control);
+                wire.extend_from_slice(b"]0;hidden\x07after");
+                let mut expected = b"before".to_vec();
+                if control != 0x7f {
+                    expected.push(control);
+                }
+                expected.extend_from_slice(b"after");
+                for split in 0..=wire.len() {
+                    let mut stripper = super::AnsiStripper::new();
+                    let mut output = stripper.strip(&wire[..split]);
+                    output.extend(stripper.strip(&wire[split..]));
+                    assert_eq!(output, expected, "control={control}, split={split}");
+                }
+            }
         }
     }
 

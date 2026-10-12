@@ -457,7 +457,12 @@ impl AnsiStripper {
                         StripState::Ground
                     }
                 },
-                StripState::Escape => Self::after_escape(b),
+                StripState::Escape => {
+                    if matches!(b, 0x00..=0x17 | 0x19 | 0x1c..=0x1f) {
+                        out.push(b);
+                    }
+                    Self::after_escape(b)
+                }
                 StripState::EscapeIntermediate { remaining } => {
                     if matches!(b, 0x18 | 0x1a) {
                         StripState::Ground
@@ -489,18 +494,14 @@ impl AnsiStripper {
                     escaped,
                     remaining,
                 } => {
-                    if matches!(b, 0x18 | 0x1a)
-                        || b == 0x9c
-                        || (bel_terminated && b == 0x07)
-                        || (escaped && b == b'\\')
+                    if escaped {
+                        if matches!(b, 0x00..=0x17 | 0x19 | 0x1c..=0x1f) {
+                            out.push(b);
+                        }
+                        Self::after_escape(b)
+                    } else if matches!(b, 0x18 | 0x1a) || b == 0x9c || (bel_terminated && b == 0x07)
                     {
                         StripState::Ground
-                    } else if escaped {
-                        // ESC starts a fresh escape sequence from every control
-                        // string, OSC included, so `ESC ] title ESC c`
-                        // dispatches `c` instead of swallowing all later text.
-                        // The terminators above still win for ESC \\ and BEL.
-                        Self::after_escape(b)
                     } else if remaining <= 1 {
                         // Forced resynchronization: an unterminated control
                         // string cannot hold the stream hostage, so it ends
@@ -535,7 +536,7 @@ impl AnsiStripper {
             0x20..=0x2f => StripState::EscapeIntermediate {
                 remaining: MAX_CONTROL_SEQUENCE_BYTES,
             },
-            0x1b => StripState::Escape,
+            0x00..=0x17 | 0x19 | 0x1b..=0x1f | 0x7f => StripState::Escape,
             _ => StripState::Ground,
         }
     }
@@ -4921,6 +4922,33 @@ mod tests {
         }
     }
 
+    #[test]
+    fn stripping_keeps_osc_state_across_escape_controls() {
+        for control in [0, b'\n', b'\r', b'\t', 0x07, 0x1f, 0x7f] {
+            for prefix in [
+                b"before\x1b".as_slice(),
+                b"before\x1b]old\x1b",
+                b"before\x1bPold\x1b",
+            ] {
+                let mut wire = prefix.to_vec();
+                wire.push(control);
+                wire.extend_from_slice(b"]0;hidden\x07after");
+                let mut expected = b"before".to_vec();
+                if control != 0x7f {
+                    expected.push(control);
+                }
+                expected.extend_from_slice(b"after");
+                for split in 0..=wire.len() {
+                    let mut stripper = AnsiStripper::default();
+                    let mut output = Vec::new();
+                    stripper.push(&wire[..split], &mut output);
+                    stripper.push(&wire[split..], &mut output);
+                    assert_eq!(output, expected, "control={control}, split={split}");
+                }
+            }
+        }
+    }
+
     /// Every parser-state sibling crossed with every cancellation/termination
     /// event. Some pairs deliberately do not terminate: BEL is data in a
     /// DCS/APC-style string, while BEL and raw ST are parameter/intermediate
@@ -5014,7 +5042,7 @@ mod tests {
                 (
                     StateCase::EscapeIntermediate | StateCase::Csi,
                     Event::Bel | Event::RawSt
-                ) | (StateCase::DcsApcString, Event::Bel)
+                ) | (StateCase::Escape | StateCase::DcsApcString, Event::Bel)
             )
         }
 
@@ -5070,7 +5098,7 @@ mod tests {
                     let control_prefix: &[u8] = match (state, event) {
                         (StateCase::Ground, Event::Can) => b"\x18",
                         (StateCase::Ground, Event::Sub) => b"\x1a",
-                        (StateCase::Ground, Event::Bel) => b"\x07",
+                        (StateCase::Ground | StateCase::Escape, Event::Bel) => b"\x07",
                         _ => b"",
                     };
                     let mut expected = control_prefix.to_vec();
