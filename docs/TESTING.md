@@ -1040,7 +1040,9 @@ Video reply, its poster the 40x30 picture fitted into a 20x20 box and its
 middle frame's time; without decoders for Auto jobs it fails. So do a
 video's: with stand-in ffmpeg and ffprobe named in `KETTLE_MEDIA_DECODER`,
 shell built-ins only, a held MP4 comes back as a Video reply with the
-stand-in's description and the time of each frame shown, and its digest
+stand-in's description and each requested timestamp, accepting only the shown
+frame or its preceding keyframe when the deadline requires it. The reported
+tolerance must equal the greatest actual timestamp difference. Its digest
 carries the file's identity (on macOS after AVFoundation turns the stand-in
 file down); without an external decoder, or with one anyone can write, it is
 `BackendUnavailable` on Linux and AVFoundation's `UnsupportedContainer` on
@@ -1060,7 +1062,10 @@ enable that feature, so `just media-protocol-test` and ci.yml run it.
 The Apple and FFmpeg session fixtures keep the parent lease until their known
 last frame, then wait for clean exit before reading Ended. Both fail at runtime
 if a heartbeat is written after that wait, making the former terminal-write
-race deterministic. Frame order, timestamps and completion assertions remain.
+race deterministic. The fault-session fixture also waits for clean exit before
+reading its queued RenderParse failure; a failed heartbeat stops writes but
+still requires the exact terminal reply and exit. Reinstating the unchecked
+heartbeat fails at runtime. Frame order and completion assertions remain.
 
 Playback sessions cross the same binary. With `test-faults`, a file whose
 MP4 box is followed by `kettle-media-worker-test-video` and a frame count,
