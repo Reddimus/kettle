@@ -6,7 +6,7 @@
 #![cfg(unix)]
 
 use std::fs::File;
-use std::os::unix::fs::PermissionsExt as _;
+use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -57,7 +57,7 @@ fn quoted(lines: &[&str]) -> String {
 /// A directory holding stand-in `ffprobe` and `ffmpeg` scripts that log
 /// their arguments beside themselves.
 struct Fake {
-    directory: tempfile::TempDir,
+    directory: kettle_test_support::PrivateTempDir,
 }
 
 /// How the stand-in ffmpeg answers.
@@ -96,7 +96,7 @@ const GOOD: Answer = Answer {
 
 impl Fake {
     fn new(description: &[&str], packets: &[&str], answer: Answer) -> Self {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = kettle_test_support::private_tempdir("kettle-ffmpeg-fixture-");
         let log = |name: &str| format!("printf '%s\\n' \"$@\" '--' >> \"${{0%/*}}/{name}.log\"");
         let ffprobe = format!(
             "{}\ncase \"$*\" in\n*packet=*) printf '%s\\n' {} ;;\n*) printf '%s\\n' {} ;;\nesac\n",
@@ -154,7 +154,7 @@ impl Fake {
 
 /// A held file whose first bytes say MP4, as the renderer holds one.
 struct Clip {
-    _directory: tempfile::TempDir,
+    _directory: kettle_test_support::PrivateTempDir,
     path: PathBuf,
     file: File,
     identity: PathIdentity,
@@ -170,13 +170,13 @@ impl Clip {
     }
 
     fn of(bytes: &[u8]) -> Self {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = kettle_test_support::private_tempdir("kettle-ffmpeg-fixture-");
         let path = directory.path().join("clip");
         std::fs::write(&path, bytes).unwrap();
         Self::open(directory, path)
     }
 
-    fn open(directory: tempfile::TempDir, path: PathBuf) -> Self {
+    fn open(directory: kettle_test_support::PrivateTempDir, path: PathBuf) -> Self {
         let file = File::open(&path).unwrap();
         let identity = PathIdentity::of(&file.metadata().unwrap()).unwrap();
         let prefix = std::fs::read(&path).unwrap();
@@ -553,7 +553,7 @@ fn real_ffmpeg_takes_the_frames_showing() {
         ("rotated.mp4", (36, 64), (18, 32)),
         ("unsized.webm", (64, 36), (32, 18)),
     ] {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = kettle_test_support::private_tempdir("kettle-ffmpeg-fixture-");
         let path = directory.path().join(name);
         std::fs::copy(fixture(name), &path).unwrap();
         let clip = Clip::open(directory, path);
@@ -621,14 +621,24 @@ fn each_program_brings_its_own_library_tree() {
     let root = std::fs::canonicalize(root.path()).unwrap();
     for (package, program) in [("a", "ffmpeg"), ("b", "ffprobe")] {
         let bin = root.join(package).join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        std::fs::create_dir_all(root.join(package).join("lib")).unwrap();
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o755)
+            .create(&bin)
+            .unwrap();
+        std::fs::DirBuilder::new()
+            .mode(0o755)
+            .create(root.join(package).join("lib"))
+            .unwrap();
         let path = bin.join(program);
         std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
     let named = root.join("named");
-    std::fs::create_dir_all(&named).unwrap();
+    std::fs::DirBuilder::new()
+        .mode(0o755)
+        .create(&named)
+        .unwrap();
     std::os::unix::fs::symlink(root.join("a/bin/ffmpeg"), named.join("ffmpeg")).unwrap();
     std::os::unix::fs::symlink(root.join("b/bin/ffprobe"), named.join("ffprobe")).unwrap();
     let ffmpeg = Ffmpeg::trust(&named.join("ffmpeg")).expect("trusted");
@@ -840,7 +850,7 @@ fn real_ffmpeg_shows_the_last_frame_of_a_video_its_sound_outlasts() {
         return;
     };
     for max_fps_milli in [10_000, 1_000] {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = kettle_test_support::private_tempdir("kettle-ffmpeg-fixture-");
         let path = directory.path().join("long-audio.mp4");
         std::fs::copy(fixture("long-audio.mp4"), &path).unwrap();
         let clip = Clip::open(directory, path);
@@ -874,7 +884,7 @@ fn real_ffmpeg_plays_each_frame_in_order() {
         ("mirrored.mp4", (64, 64), 0, 10_000, (64, 36), 0, 1),
         ("unsized.webm", (64, 36), 0, 10_000, (64, 36), 0, 1),
     ] {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = kettle_test_support::private_tempdir("kettle-ffmpeg-fixture-");
         let path = directory.path().join(name);
         std::fs::copy(fixture(name), &path).unwrap();
         let clip = Clip::open(directory, path);
