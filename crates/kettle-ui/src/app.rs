@@ -6097,25 +6097,6 @@ fn substitute_trigger_groups(argv: &[String], caps: &regex::Captures) -> Vec<Str
         .collect()
 }
 
-/// Smart selection (iTerm2 parity). When a double-click
-/// lands inside a `kettle_core::hints::detect` match (URL, file path,
-/// IPv4, git SHA), return the match's `[start_col, end_col]` inclusive
-/// range so the caller can build a `Simple` selection spanning the
-/// whole match instead of the alacritty_terminal `Semantic` word that
-/// usually under- or over-shoots a structured token.
-///
-/// Pure helper: takes the single line of text the click landed on
-/// plus the click's column, returns `Some((start, end))` if any hint
-/// match contains the cursor, or `None` to fall through to the
-/// existing word-boundary semantic selection.
-fn smart_selection_at(line: &str, col: usize) -> Option<(usize, usize)> {
-    let spans = kettle_core::hints::detect(&[line]);
-    spans
-        .into_iter()
-        .find(|s| s.start <= col && col <= s.end)
-        .map(|s| (s.start, s.end))
-}
-
 /// One on-screen quick-select target: where its label sits and what it is.
 #[derive(Clone)]
 pub(crate) struct HintTarget {
@@ -15155,30 +15136,23 @@ impl App {
         )
     }
 
-    fn line_text_for_smart_select(&mut self, ws: &mut WindowState, row: usize) -> Option<String> {
+    fn smart_selection_for_cell(
+        &self,
+        ws: &WindowState,
+        row: usize,
+        col: usize,
+    ) -> Option<(usize, usize)> {
         use kettle_core::Dimensions;
-        let pane = ws.mux.focused()?;
-        let t = pane.term.term.lock().ok()?;
-        let cols = t.columns();
-        let rows = t.screen_lines();
-        if row >= rows {
+        let pane = ws.mux.panes.get(&ws.mux.active_focus()?)?;
+        let term = pane.term.term.lock().ok()?;
+        if row >= term.screen_lines() {
             return None;
         }
-        // `row` is viewport-relative; index the grid-absolute line so the
-        // smart-select regex runs on the row the user double-clicked even when
-        // scrolled back into history.
-        let base = viewport_point_to_grid(
-            kettle_core::Point::new(kettle_core::Line(row as i32), kettle_core::Column(0)),
-            t.grid().display_offset(),
+        let point = viewport_point_to_grid(
+            kettle_core::Point::new(kettle_core::Line(row as i32), kettle_core::Column(col)),
+            term.grid().display_offset(),
         );
-        let mut out = String::with_capacity(cols);
-        for c in 0..cols {
-            let p = kettle_core::Point::new(base.line, kettle_core::Column(c));
-            out.push(t.grid()[p].c);
-        }
-        // Trim trailing spaces so the regex doesn't try to match across
-        // padding.
-        Some(out.trim_end().to_string())
+        kettle_core::hints::selection_at(term.grid(), point.line.0, col)
     }
 
     /// Install a `Simple` selection from `(row, start)` to
@@ -16036,10 +16010,7 @@ impl App {
         if clicks == 2
             && !ws.mods.alt_key()
             && let Some((row, col)) = cell
-            && let Some((start, end)) = self
-                .line_text_for_smart_select(ws, row)
-                .as_deref()
-                .and_then(|line| smart_selection_at(line, col))
+            && let Some((start, end)) = self.smart_selection_for_cell(ws, row, col)
             && self.apply_smart_selection(ws, area, row, start, end)
         {
             smart_selected = true;
@@ -54608,47 +54579,6 @@ mod tests {
             match_triggers("a panic b", &compile_triggers(&urgency)),
             Some(TriggerAction::Urgency)
         ));
-    }
-
-    #[test]
-    fn smart_selection_at_returns_full_token_range() {
-        use super::smart_selection_at;
-        // Drift guard. The function should pick up every hint
-        // kettle-core::hints::detect knows about (URL / path / IPv4 /
-        // git SHA), return the inclusive `[start, end]` of the match
-        // when the cursor lands inside it, and None otherwise.
-        let url_line = "see https://example.com/path?x=1 for more";
-        // cursor anywhere inside the URL gets the whole URL.
-        let (s, e) = smart_selection_at(url_line, 10).unwrap();
-        assert_eq!(&url_line[s..=e], "https://example.com/path?x=1");
-        let (s, e) = smart_selection_at(url_line, 31).unwrap();
-        assert_eq!(&url_line[s..=e], "https://example.com/path?x=1");
-        // Cursor outside the URL returns None — the caller falls back to
-        // the alacritty Semantic word.
-        assert!(smart_selection_at(url_line, 0).is_none());
-        assert!(smart_selection_at(url_line, 39).is_none());
-
-        // IPv4 — dots aren't word chars so the alacritty Semantic word
-        // would under-select; smart selection grabs the whole thing.
-        let ip_line = "connect to 192.168.1.100 now";
-        let (s, e) = smart_selection_at(ip_line, 15).unwrap();
-        assert_eq!(&ip_line[s..=e], "192.168.1.100");
-
-        // git SHA.
-        let sha_line = "commit a1b2c3d4e5f6 landed";
-        let (s, e) = smart_selection_at(sha_line, 10).unwrap();
-        assert_eq!(&sha_line[s..=e], "a1b2c3d4e5f6");
-
-        // A relative path, from its first segment: double-clicking `out`
-        // selects the whole path, as does double-clicking the file name.
-        let path_line = "wrote out/diagram.png ok";
-        for col in [7, 15] {
-            let (s, e) = smart_selection_at(path_line, col).unwrap();
-            assert_eq!(&path_line[s..=e], "out/diagram.png");
-        }
-
-        // No hint at all — None.
-        assert!(smart_selection_at("plain prose with nothing structured", 5).is_none());
     }
 
     /// Drift guard on the pane count behind every close prompt: it decides
