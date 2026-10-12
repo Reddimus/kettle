@@ -23659,11 +23659,6 @@ impl App {
     /// or `None` without a schedule.
     fn theme_schedule_is_dark(&self) -> Option<bool> {
         let schedule = self.cfg.theme_schedule?;
-        let secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let day_secs = secs % 86_400;
         Some(match schedule {
             // Clock times are local wall-clock times.
             kettle_config::ThemeSchedule::Clock { .. } => {
@@ -23671,15 +23666,7 @@ impl App {
                 kettle_config::schedule_decision_clock((h, m), schedule)
             }
             kettle_config::ThemeSchedule::SunriseSunset { lat, long } => {
-                // Day-of-year approximation: days since unix
-                // epoch mod 365. Good enough — sunrise/sunset
-                // varies very slowly day-to-day, and we re-poll
-                // every redraw tick anyway. A follow-up could
-                // refine with a real Gregorian-calendar
-                // conversion if needed.
-                let days_since_epoch = (secs / 86_400) as u32;
-                let approx_doy = ((days_since_epoch % 365) + 1) as u16;
-                kettle_config::schedule_decision_sunrise(day_secs as u32, approx_doy, lat, long)
+                crate::wall_clock::solar_is_dark(lat, long)
             }
         })
     }

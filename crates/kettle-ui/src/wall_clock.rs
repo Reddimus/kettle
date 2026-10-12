@@ -9,10 +9,44 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The local `(hour, minute, second)` right now.
 pub(crate) fn now_local() -> (u8, u8, u8) {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+    let secs = unix_seconds();
     time_of_day(secs, local_utc_offset(secs))
+}
+
+fn unix_seconds() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
+
+pub(crate) fn solar_is_dark(lat: f64, long: f64) -> bool {
+    solar_at(unix_seconds(), lat, long)
+}
+
+fn solar_at(secs: i64, lat: f64, long: f64) -> bool {
+    kettle_config::schedule_decision_sunrise(
+        secs.rem_euclid(86_400) as u32,
+        utc_day_of_year(secs),
+        lat,
+        long,
+    )
+}
+
+fn utc_day_of_year(secs: i64) -> u16 {
+    // March-based Gregorian eras: https://howardhinnant.github.io/date_algorithms.html
+    let days = secs.div_euclid(86_400) + 719_468;
+    let era = days.div_euclid(146_097);
+    let day_in_era = days.rem_euclid(146_097);
+    let year_in_era =
+        (day_in_era - day_in_era / 1460 + day_in_era / 36_524 - day_in_era / 146_096) / 365;
+    let march_day = day_in_era - (365 * year_in_era + year_in_era / 4 - year_in_era / 100);
+    if march_day >= 306 {
+        (march_day - 305) as u16
+    } else {
+        let year = era * 400 + year_in_era;
+        let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+        (march_day + 60 + i64::from(leap)) as u16
+    }
 }
 
 /// The wall-clock `(hour, minute, second)` of `unix_secs` in a zone
@@ -60,6 +94,53 @@ mod tests {
 
     // 2026-09-27 01:00:00 UTC.
     const ONE_AM_UTC: i64 = 1_790_470_800;
+
+    #[test]
+    fn utc_day_of_year_handles_gregorian_boundaries() {
+        for (secs, expected) in [
+            (0, 1),
+            (-1, 365),
+            (1_767_225_600, 1),
+            (951_782_400, 60),
+            (978_220_800, 366),
+            (4_107_542_400, 60),
+            (13_574_563_200, 60),
+        ] {
+            assert_eq!(super::utc_day_of_year(secs), expected, "timestamp={secs}");
+        }
+    }
+
+    #[test]
+    fn utc_day_of_year_covers_a_complete_gregorian_cycle() {
+        let mut days = 0_i64;
+        for year in 1970..2370 {
+            let length = if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) {
+                366
+            } else {
+                365
+            };
+            for ordinal in 1..=length {
+                assert_eq!(
+                    super::utc_day_of_year(days * 86_400),
+                    ordinal,
+                    "year={year}, day={ordinal}"
+                );
+                days += 1;
+            }
+        }
+    }
+
+    #[test]
+    fn solar_schedule_uses_the_actual_utc_calendar_day() {
+        let day = 1_767_225_600; // 2026-01-01 UTC.
+        for seconds in (0..86_400).step_by(60) {
+            assert_eq!(
+                super::solar_at(day + seconds, 37.7749, -122.4194),
+                kettle_config::schedule_decision_sunrise(seconds as u32, 1, 37.7749, -122.4194),
+                "second={seconds}"
+            );
+        }
+    }
 
     #[test]
     fn west_of_utc_is_the_previous_evening() {
