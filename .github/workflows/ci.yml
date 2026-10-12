@@ -340,7 +340,7 @@ jobs:
         if: runner.os == 'macOS'
         timeout-minutes: 3
         run: |
-          launchctl asuser $(id -u) python3 scripts/check-modal-shortcuts.py \
+          launchctl asuser "$(id -u)" python3 scripts/check-modal-shortcuts.py \
             --kettle ./target/release/kettle --out-dir "$RUNNER_TEMP/modal-shortcuts"
       - name: Image paste environment
         if: runner.os != 'Windows' && always()
