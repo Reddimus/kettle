@@ -777,6 +777,8 @@ pub(crate) enum LaneNotice {
     CopyBusy,
     /// Rendering the item again on the canvas chosen.
     Rendering,
+    /// Rendering the gallery page asked for.
+    RenderingPage,
     /// That render failed; the item shows as it was.
     RenderFailed,
     /// The file changed since the item was rendered.

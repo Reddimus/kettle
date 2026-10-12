@@ -1887,6 +1887,9 @@ context = "crates/kettle-ui/src/app.rs lane_notice_text: no decoder Kettle may u
 [messages.media_lane_notice_video_needs_sandbox]
 context = "crates/kettle-ui/src/app.rs lane_notice_text: Kettle decodes video only in its sandbox, and this system cannot provide one, so the video cannot play."
 
+[messages.media_lane_notice_rendering_page]
+context = "crates/kettle-ui/src/app.rs lane_notice_text: shown in a preview lane's footer while the next or previous diagram of a gallery (several diagrams from one Markdown file or copy) is drawn; the diagram shown stays until then."
+
 [messages.media_lane_notice_render_failed]
 context = "crates/kettle-ui/src/app.rs lane_notice_text: shown in a preview lane's footer when rendering the item again (for another background) failed; the old picture stays."
 
