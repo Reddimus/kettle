@@ -9603,6 +9603,14 @@ fn close_pty_while_reader_is_live(stop: &AtomicBool, close_pty: impl FnOnce()) {
     stop.store(true, Ordering::Relaxed);
 }
 
+#[cfg(unix)]
+fn terminate_unreaped_child(child: &mut dyn portable_pty::Child) -> std::io::Result<()> {
+    if child.try_wait()?.is_none() {
+        child.kill()?;
+    }
+    Ok(())
+}
+
 impl Drop for Terminal {
     /// Tear down the PTY WITHOUT ever blocking the calling thread.
     ///
@@ -9672,7 +9680,13 @@ impl Drop for Terminal {
                     return;
                 };
                 if let Ok(mut child) = child.lock() {
-                    let _ = child.kill();
+                    #[cfg(unix)]
+                    let result = terminate_unreaped_child(child.as_mut());
+                    #[cfg(not(unix))]
+                    let result = child.kill();
+                    if let Err(error) = result {
+                        log::warn!("could not terminate PTY child: {error}");
+                    }
                 }
                 if close_owns_reader_stop {
                     debug_assert!(master.is_none());
@@ -16163,6 +16177,46 @@ mod teardown_tests {
 
         fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
             Box::new(self.clone())
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn teardown_does_not_signal_a_reaped_child() {
+        #[derive(Debug)]
+        struct Child {
+            exited: bool,
+            killer: RecordingKiller,
+        }
+        impl portable_pty::ChildKiller for Child {
+            fn kill(&mut self) -> std::io::Result<()> {
+                self.killer.kill()
+            }
+            fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+                self.killer.clone_killer()
+            }
+        }
+        impl portable_pty::Child for Child {
+            fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+                Ok(self
+                    .exited
+                    .then(|| portable_pty::ExitStatus::with_exit_code(0)))
+            }
+            fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
+                Ok(portable_pty::ExitStatus::with_exit_code(0))
+            }
+            fn process_id(&self) -> Option<u32> {
+                Some(42)
+            }
+        }
+        for exited in [true, false] {
+            let killed = std::sync::Arc::new(AtomicBool::new(false));
+            let mut child = Child {
+                exited,
+                killer: RecordingKiller(killed.clone()),
+            };
+            super::terminate_unreaped_child(&mut child).unwrap();
+            assert_eq!(killed.load(Ordering::SeqCst), !exited);
         }
     }
 
