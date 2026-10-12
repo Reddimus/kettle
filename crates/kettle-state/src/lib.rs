@@ -711,8 +711,7 @@ impl ExclusiveFileLock {
     /// Prefer [`Self::acquire_timeout`] where a stuck lock must surface as an
     /// error.
     pub fn acquire(path: &Path) -> io::Result<Self> {
-        let file = open_lock_file(path)?;
-        fs4::FileExt::lock(&file)?;
+        let file = acquire_file_lock(path, fs4::FileExt::lock)?;
         Ok(Self { file })
     }
 
@@ -727,7 +726,9 @@ impl ExclusiveFileLock {
     pub fn try_acquire(path: &Path) -> io::Result<Option<Self>> {
         let file = open_lock_file(path)?;
         match fs4::FileExt::try_lock(&file) {
-            Ok(()) => Ok(Some(Self { file })),
+            Ok(()) => Ok(Some(Self {
+                file: verify_locked_file(file, path)?,
+            })),
             Err(fs4::TryLockError::WouldBlock) => Ok(None),
             Err(fs4::TryLockError::Error(error)) => Err(error),
         }
@@ -753,8 +754,7 @@ impl SharedFileLock {
     /// [`Self::acquire_timeout`] is preferable at call sites that must not
     /// hang forever behind a stuck exclusive holder.
     pub fn acquire(path: &Path) -> io::Result<Self> {
-        let file = open_lock_file(path)?;
-        fs4::FileExt::lock_shared(&file)?;
+        let file = acquire_file_lock(path, fs4::FileExt::lock_shared)?;
         Ok(Self { file })
     }
 
@@ -769,7 +769,9 @@ impl SharedFileLock {
     pub fn try_acquire(path: &Path) -> io::Result<Option<Self>> {
         let file = open_lock_file(path)?;
         match fs4::FileExt::try_lock_shared(&file) {
-            Ok(()) => Ok(Some(Self { file })),
+            Ok(()) => Ok(Some(Self {
+                file: verify_locked_file(file, path)?,
+            })),
             Err(fs4::TryLockError::WouldBlock) => Ok(None),
             Err(fs4::TryLockError::Error(error)) => Err(error),
         }
@@ -817,6 +819,26 @@ fn open_lock_file(path: &Path) -> io::Result<File> {
     open_private_file(path)
 }
 
+fn acquire_file_lock(
+    path: &Path,
+    acquire: impl FnOnce(&File) -> io::Result<()>,
+) -> io::Result<File> {
+    let file = open_lock_file(path)?;
+    acquire(&file)?;
+    verify_locked_file(file, path)
+}
+
+fn verify_locked_file(file: File, path: &Path) -> io::Result<File> {
+    // Uninstall may retire an idle lock while another caller holds its old fd.
+    if !private::same_file_identity(&file, path)? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "lock path no longer identifies the acquired file",
+        ));
+    }
+    Ok(file)
+}
+
 #[cfg(unix)]
 fn set_unix_mode(file: &File, mode: u32) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt as _;
@@ -831,6 +853,32 @@ fn set_unix_mode(_file: &File, _mode: u32) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_waiter_cannot_acquire_a_retired_lock_inode() {
+        for shared in [false, true] {
+            for replace in [false, true] {
+                let root = test_tempdir();
+                let path = root.path().join("lock");
+                let result = acquire_file_lock(&path, |file| {
+                    if shared {
+                        fs4::FileExt::lock_shared(file)?;
+                    } else {
+                        fs4::FileExt::lock(file)?;
+                    }
+                    fs::remove_file(&path)?;
+                    if replace {
+                        drop(open_private_file(&path)?);
+                    }
+                    Ok(())
+                });
+                assert!(
+                    matches!(result, Err(error) if error.kind() == io::ErrorKind::PermissionDenied)
+                );
+            }
+        }
+    }
 
     #[test]
     fn remote_command_lock_path_is_a_deterministic_sibling() {
