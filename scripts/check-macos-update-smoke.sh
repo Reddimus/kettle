@@ -64,7 +64,8 @@ if ! command -v gh >/dev/null 2>&1; then
     exit 1
 fi
 
-mkdir -p "$CACHE"
+mkdir -p -- "$CACHE"
+CACHE=$(cd -- "$CACHE" && pwd)
 if [ -z "$TAG" ]; then
     TAG=$(gh release view --repo "$REPO" --json tagName --jq .tagName)
 fi
@@ -84,4 +85,4 @@ fi
 check_sidecar "$archive" "$sidecar"
 
 echo "running the live bundle update check against $TAG"
-run_check "$PWD/$archive"
+run_check "$archive"

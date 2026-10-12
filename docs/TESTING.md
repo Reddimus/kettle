@@ -3510,16 +3510,18 @@ python3 scripts/test-package-manifest.py
 python3 scripts/test-install-online.py
 ```
 
-The current suites cover fourteen signed-update-manifest cases, six exact
-draft-release cases, two release-preparation cases, one macOS package-command
-case, seventeen package-manifest cases (with platform-dependent skips), and
-seventeen POSIX online-installer
-cases. They pin the checked-in Ed25519 trust root, canonical manifest bytes and
+The suites cover signed update manifests, exact draft releases, release
+preparation and macOS command wiring, package manifests, and POSIX online
+installation. They pin the checked-in Ed25519 trust root, canonical manifest bytes and
 sidecars, no-follow same-handle artifact hashing, exact local-to-GitHub
 name/size/SHA-256 binding, bounded release-document updates, immutable archive
 references, bounded archive structure and extraction, modern no-downgrade
 behavior, compatible legacy sidecars, and hostile archive/network/parser
 fixtures.
+The update-smoke case checks relative and absolute cache paths, including
+spaces, using a synthetic archive and verifier. It failed with the original
+absolute-path prefix. This covers wiring; `macos-update-smoke` separately checks
+a real notarized archive with `codesign` and `spctl`.
 The package-command case executes the checked-in workflow's nested-binary loop
 and final bundle command under the system Bash with mock commands. It requires
 the helper and libraries to precede the bundle, with the main executable signed

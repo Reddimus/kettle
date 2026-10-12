@@ -3,11 +3,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -417,6 +419,61 @@ with calls.open('a', encoding='utf-8') as output:
                     )
                 else:
                     self.assertNotIn("--identifier", args)
+
+
+@unittest.skipIf(os.name == "nt", "macOS update smoke requires a Unix shell")
+class MacOSUpdateSmokeTests(unittest.TestCase):
+    def test_cached_archive_paths_reach_native_verifier(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            cache = root / "release cache"
+            cache.mkdir()
+            archive = cache / "v5.0.0-kettle-macos-universal.zip"
+            data = b"archive fixture"
+            archive.write_bytes(data)
+            archive.with_suffix(".zip.sha256").write_text(
+                hashlib.sha256(data).hexdigest() + "  kettle-macos-universal.zip\n"
+            )
+            programs = {
+                "uname": "#!/bin/sh\nprintf '%s\\n' Darwin\n",
+                "gh": "#!/bin/sh\nexit 97\n",
+                "shasum": f"#!{sys.executable}\n"
+                "import hashlib,pathlib,sys\n"
+                "assert sys.argv[1:3] == ['-a', '256']\n"
+                "print(hashlib.sha256(pathlib.Path(sys.argv[3]).read_bytes()).hexdigest())\n",
+                "cargo": f"#!{sys.executable}\n"
+                "import os,pathlib,sys\n"
+                "assert sys.argv[1:] == ['test', '-p', 'kettle-update', '--lib', "
+                "'a_published_archive', '--', '--nocapture']\n"
+                "actual = pathlib.Path(os.environ['KETTLE_MACOS_ARCHIVE'])\n"
+                "assert actual.resolve() == pathlib.Path(os.environ['EXPECTED_ARCHIVE']).resolve(), str(actual)\n"
+                "assert actual.is_file()\n"
+                "assert os.environ['KETTLE_MACOS_ARCHIVE_REQUIRED'] == '1'\n",
+            }
+            for name, text in programs.items():
+                executable = fake_bin / name
+                executable.write_text(text)
+                executable.chmod(0o700)
+            for absolute in (False, True):
+                with self.subTest(absolute=absolute):
+                    environment = os.environ.copy()
+                    environment.update(
+                        PATH=f"{fake_bin}{os.pathsep}{environment['PATH']}",
+                        KETTLE_MACOS_ARCHIVE_CACHE=str(cache if absolute else cache.name),
+                        EXPECTED_ARCHIVE=str(archive),
+                    )
+                    result = subprocess.run(
+                        ["bash", str(ROOT / "scripts/check-macos-update-smoke.sh"), "v5.0.0"],
+                        cwd=root,
+                        env=environment,
+                        capture_output=True,
+                        text=True,
+                        timeout=15,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

@@ -21,6 +21,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   idle lock during uninstall without allowing stale lock holders to proceed.
 - Make copied-diagram complexity, macOS missing-process and Linux leaked-PTY
   tests independent of runner scheduling while retaining the production bounds.
+- Accept absolute cache directories in the macOS release update smoke.
 
 ## [5.0.0] — 2026-10-11
 
