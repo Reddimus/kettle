@@ -154,7 +154,15 @@ assert_installed_prefix() {
 
 assert_uninstalled_prefix() {
   local prefix=$1
-  [ ! -e "${prefix}/.kettle-update.lock" ] || fail "update lock survived uninstall"
+  local lock="${prefix}/.kettle-update.lock"
+  case "${2:-removed}" in
+    removed)
+      [ ! -e "$lock" ] && [ ! -L "$lock" ] || fail "update lock survived uninstall" ;;
+    legacy-5.0.0)
+      [ -f "$lock" ] && [ ! -L "$lock" ] && [ ! -s "$lock" ] \
+        || fail "published 5.0.0 did not retain its empty regular update lock" ;;
+    *) fail "unknown uninstall lock policy" ;;
+  esac
   [ ! -e "${prefix}/bin/kettle" ] || fail "binary survived uninstall"
   [ ! -e "${prefix}/share/applications/kettle.desktop" ] \
     || fail "desktop entry survived uninstall"
@@ -348,5 +356,11 @@ assert_installed_prefix "$online_prefix" "stable"
 [ ! -e "${online_prefix}/share/kettle/install-real.sh" ] \
   || fail "online installer rewrote the provenance-managed helper"
 "${online_prefix}/share/kettle/install.sh" --uninstall > "${tmp_root}/online-uninstall.out"
-assert_uninstalled_prefix "$online_prefix"
+if [ "$tag" = v5.0.0 ]; then
+  # This archive contains the helper from before idle-lock removal.
+  assert_uninstalled_prefix "$online_prefix" legacy-5.0.0
+  echo "linux-installer check: published 5.0.0 legacy lock retained as expected"
+else
+  assert_uninstalled_prefix "$online_prefix"
+fi
 echo "linux-installer check: online published-release install/uninstall OK"

@@ -43,17 +43,26 @@ def focus(live):
     ], timeout=10)
     result.check_returncode()
     deadline = time.monotonic() + 5
-    while frontmost_pid() != live.pid:
+    while not (
+        frontmost_pid() == live.pid
+        and live.json_ctl("ui_geometry").get("window_focused") is True
+    ):
         if time.monotonic() >= deadline:
             raise RuntimeError("fixture Kettle did not become frontmost")
         time.sleep(0.05)
 
 
 def key(live, code, flags):
+    focus(live)
     if frontmost_pid() != live.pid:
         raise RuntimeError("fixture Kettle lost focus before native input")
     live_ui.macos_chord(code, flags, "modal-shortcuts smoke")
     time.sleep(0.2)
+
+
+def screenshot(live, path):
+    focus(live)
+    live.screenshot(path)
 
 
 def check(kettle, out):
@@ -90,14 +99,20 @@ def check(kettle, out):
 
             focus(live)
             live.json_ctl("perform_action", {"action": "toggle_vi_mode"})
-            live.screenshot(out / "vi-before.png")
+            screenshot(live, out / "vi-before.png")
+            hidden = live_ui.run([
+                "osascript", "-e",
+                'tell application "System Events" to set visible of '
+                f'(first process whose unix id is {live.pid}) to false',
+            ], timeout=10)
+            hidden.check_returncode()
             key(live, 9, command)  # V
-            live.screenshot(out / "vi-command.png")
+            screenshot(live, out / "vi-command.png")
             results["vi_command_keeps_pixels"] = (
                 (out / "vi-before.png").read_bytes() == (out / "vi-command.png").read_bytes()
             )
             key(live, 9, 0)
-            live.screenshot(out / "vi-ordinary.png")
+            screenshot(live, out / "vi-ordinary.png")
             results["ordinary_vi_still_selects"] = (
                 (out / "vi-command.png").read_bytes() != (out / "vi-ordinary.png").read_bytes()
             )

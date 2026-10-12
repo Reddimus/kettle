@@ -57,6 +57,36 @@ class MediaInstallTests(unittest.TestCase):
         self.assertFalse((self.prefix / "bin/kettle").exists())
         self.assertFalse((self.prefix / "bin/kettle-media-worker").exists())
 
+    def test_uninstall_smoke_distinguishes_legacy_and_current_locks(self):
+        source = (ROOT / "scripts/check-linux-installers.sh").read_text()
+        function = "assert_uninstalled_prefix() {" + source.split(
+            "assert_uninstalled_prefix() {", 1
+        )[1].split("\n}\n", 1)[0] + "\n}\n"
+        program = "set -euo pipefail\nfail() { echo \"$*\" >&2; exit 1; }\n" + function
+        program += 'assert_uninstalled_prefix "$1" "$2"\n'
+        self.prefix.mkdir()
+        lock = self.prefix / ".kettle-update.lock"
+
+        def check(policy):
+            return subprocess.run(
+                ["bash", "-c", program, "lock-smoke", str(self.prefix), policy],
+                capture_output=True, text=True, timeout=10,
+            )
+
+        self.assertEqual(check("removed").returncode, 0)
+        lock.touch(mode=0o600)
+        self.assertEqual(check("legacy-5.0.0").returncode, 0)
+        self.assertNotEqual(check("removed").returncode, 0)
+        lock.write_bytes(b"unexpected")
+        self.assertNotEqual(check("legacy-5.0.0").returncode, 0)
+        lock.unlink()
+        target = self.root / "other"
+        target.touch()
+        lock.symlink_to(target)
+        self.assertNotEqual(check("legacy-5.0.0").returncode, 0)
+        target.unlink()
+        self.assertNotEqual(check("removed").returncode, 0)
+
     def test_missing_worker_leaves_prefix_untouched(self):
         self.worker.unlink()
         result = self.run_installer()
