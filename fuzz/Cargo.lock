@@ -669,14 +669,14 @@ dependencies = [
 
 [[package]]
 name = "kettle-media"
-version = "5.0.0"
+version = "5.0.1"
 dependencies = [
  "sha2",
 ]
 
 [[package]]
 name = "kettle-media-native"
-version = "5.0.0"
+version = "5.0.1"
 dependencies = [
  "kettle-media",
  "libc",
@@ -684,7 +684,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-media-render"
-version = "5.0.0"
+version = "5.0.1"
 dependencies = [
  "dugong",
  "dugong-graphlib",
