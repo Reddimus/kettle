@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [5.0.1] — 2026-10-12
+
 ### Fixed
 
 - Keep light-themed macOS titles clear of the traffic lights while retaining
