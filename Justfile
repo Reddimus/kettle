@@ -364,7 +364,7 @@ macos-compare-score-self-test:
 # This is the fast pre-commit loop; run it before every commit. It does NOT
 # cover the packaging/installer/update-manifest/GPU-render checks ci.yml
 # also runs; see `gauntlet-full` below for those.
-gauntlet: live-ui-helper-selftest shell-integration-check vm-launcher-test fuzz-check
+gauntlet: live-ui-helper-selftest native-titlebar-self-test shell-integration-check vm-launcher-test fuzz-check
     cargo fmt --all --check
     cargo clippy --locked --workspace --all-targets -- -D warnings
     # Feature unification hides a crate that leans on an optional dependency,
@@ -794,6 +794,10 @@ agent-cli-smoke: release
 [macos]
 native-titlebar-smoke: release
     launchctl asuser $(id -u) python3 scripts/check-native-titlebar.py --kettle ./target/release/kettle --out-dir target/diagnostics/native-titlebar-$(date +%Y%m%d-%H%M%S)
+
+# Native checker semantics can be tested without a desktop.
+native-titlebar-self-test:
+    python3 scripts/test-native-titlebar.py
 
 # Command chords must not act as ordinary hint, vi or menu letters.
 [macos]

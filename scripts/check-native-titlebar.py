@@ -44,15 +44,10 @@ def caption_ink(path, bounds, scale):
 
 def capture(live, out, label, hover_caption=False):
     modal.focus(live)
-    code = (
-        'import AppKit; import Foundation; '
-        'let rows=CGWindowListCopyWindowInfo([.optionOnScreenOnly],kCGNullWindowID)! as! [[String:Any]]; '
-        'let row=rows.first { ($0[kCGWindowOwnerPID as String] as? Int)==' + str(live.pid) +
-        ' && ($0[kCGWindowName as String] as? String)=="Kettle caption fixture" }!; '
-        'let data=try! JSONSerialization.data(withJSONObject:row); '
-        'print(String(data:data,encoding:.utf8)!)'
-    )
-    result = modal.live_ui.run(["swift", "-e", code], timeout=15)
+    query = out / "native-window-info"
+    result = modal.live_ui.run([
+        str(query), str(live.pid), "Kettle caption fixture"
+    ], timeout=15)
     result.check_returncode()
     row = json.loads(result.stdout)
     bounds = row["kCGWindowBounds"]
@@ -80,8 +75,108 @@ def interrupted(_signum, _frame):
     raise InterruptedError("owned titlebar check interrupted")
 
 
+def stable_surface(live, ready, message):
+    deadline = time.monotonic() + 10
+    previous = None
+    since = None
+    observed = []
+    while time.monotonic() < deadline:
+        surface = live.json_ctl("ui_geometry")["surface"]
+        now = time.monotonic()
+        if surface != previous:
+            observed.append(surface)
+        if ready(surface):
+            if surface != previous:
+                since = now
+            elif since is not None and now - since >= 0.75:
+                return surface
+        else:
+            since = None
+        previous = surface
+        time.sleep(0.1)
+    raise AssertionError(f"{message}; observed surfaces: {observed}")
+
+
+def native_fullscreen(live):
+    value = live.json_ctl("ui_geometry")["fullscreen"]
+    assert isinstance(value, bool), f"invalid native fullscreen state: {value!r}"
+    return value
+
+
+def wait_fullscreen(live, expected):
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if native_fullscreen(live) == expected:
+            return
+        time.sleep(0.1)
+    raise AssertionError(f"native fullscreen did not become {expected}")
+
+
+def fullscreen_restore(live, wanted):
+    live.json_ctl("perform_action", {"action": "toggle_fullscreen"})
+    wait_fullscreen(live, False)
+    return stable_surface(
+        live, lambda surface: surface == wanted,
+        f"left native fullscreen but did not restore {wanted}",
+    )
+
+
+def native_fullscreen_roundtrip(live, out):
+    wanted = live.json_ctl("ui_geometry")["surface"]
+    modal.focus(live)
+    result = modal.live_ui.run(["osascript", "-e",
+        'tell application "System Events" to tell (first process whose unix id is '
+        + str(live.pid)
+        + ') to tell window "Kettle caption fixture" to perform action "AXPress" '
+          'of (first button whose subrole is "AXFullScreenButton")'
+    ], timeout=10)
+    result.check_returncode()
+    trace = {"before": wanted}
+    try:
+        wait_fullscreen(live, True)
+        trace["entered"] = stable_surface(
+            live, lambda surface: surface != wanted, "native fullscreen did not settle",
+        )
+        fullscreen_restore(live, wanted)
+    finally:
+        for key, read in (("after", lambda: live.json_ctl("ui_geometry")),
+                          ("native_fullscreen_after", lambda: native_fullscreen(live))):
+            try:
+                trace[key] = read()
+            except Exception as error:
+                trace[key + "_error"] = str(error)
+        (out / "fullscreen-state.json").write_text(json.dumps(trace, indent=2) + "\n")
+    return {"restored_surface": wanted, "toggle_count": 1}
+
+
+def programmatic_fullscreen_roundtrip(live, out):
+    wanted = stable_surface(live, lambda surface: surface["width"] > 0 and surface["height"] > 0,
+                            "borderless window did not settle")
+    assert not native_fullscreen(live), "borderless fixture must start windowed"
+    trace = {"before": wanted}
+    try:
+        live.json_ctl("perform_action", {"action": "toggle_fullscreen"})
+        wait_fullscreen(live, True)
+        trace["entered"] = stable_surface(live, lambda surface: surface != wanted,
+                                         "borderless fullscreen did not settle")
+        fullscreen_restore(live, wanted)
+    finally:
+        try:
+            trace["after"] = live.json_ctl("ui_geometry")
+        except Exception as error:
+            trace["after_error"] = str(error)
+        (out / "borderless-fullscreen-state.json").write_text(json.dumps(trace, indent=2) + "\n")
+    return {"restored_surface": wanted, "toggle_count": 2}
+
+
 def check(kettle, out):
     out.mkdir(mode=0o700, parents=True, exist_ok=False)
+    query = out / "native-window-info"
+    result = modal.live_ui.run([
+        "swiftc", str(Path(__file__).with_name("native-window-info.swift")),
+        "-o", str(query),
+    ], timeout=90)
+    result.check_returncode()
     config = out / "config"
     config.write_text(
         "agent-server = full\nrestore-session = false\nupdate-policy = off\n"
@@ -103,7 +198,33 @@ def check(kettle, out):
             time.sleep(0.05)
         resized = capture(live, out, "resized")
         hovered = capture(live, out, "hovered", hover_caption=True)
-    (out / "results.json").write_text(json.dumps({"startup": start, "resized": resized, "hovered": hovered}, indent=2) + "\n")
+        fullscreen = native_fullscreen_roundtrip(live, out)
+        restored = capture(live, out, "fullscreen-restored")
+    with config.open("a") as stream:
+        stream.write("window-state = fullscreen\n")
+    with modal.RecordedLive(kettle, config, out / "startup-fullscreen.log") as live:
+        modal.focus(live)
+        wait_fullscreen(live, True)
+        surface = stable_surface(
+            live, lambda surface: surface["width"] > 0 and surface["height"] > 0,
+            "startup fullscreen did not settle",
+        )
+        live.json_ctl("perform_action", {"action": "toggle_fullscreen"})
+        wait_fullscreen(live, False)
+        stable_surface(live, lambda current: current != surface,
+                       "first toggle did not leave startup fullscreen")
+        startup_fullscreen = capture(live, out, "startup-fullscreen-restored")
+    borderless_config = out / "borderless-config"
+    borderless_config.write_text(config.read_text().replace("window-state = fullscreen\n", "")
+                                 + "borderless = true\n")
+    with modal.RecordedLive(kettle, borderless_config, out / "borderless.log") as live:
+        scale = live.json_ctl("ui_geometry")["scale_factor"]
+        wanted = {"width": round(740 * scale), "height": round(480 * scale)}
+        live.json_ctl("resize_window", wanted)
+        stable_surface(live, lambda surface: surface == wanted, "borderless resize did not settle")
+        borderless = programmatic_fullscreen_roundtrip(live, out)
+        live.screenshot(out / "borderless-restored.png")
+    (out / "results.json").write_text(json.dumps({"startup": start, "resized": resized, "hovered": hovered, "fullscreen": fullscreen, "restored": restored, "startup_fullscreen": startup_fullscreen, "borderless": borderless}, indent=2) + "\n")
     print("native-titlebar smoke: caption clear of traffic lights", flush=True)
 
 

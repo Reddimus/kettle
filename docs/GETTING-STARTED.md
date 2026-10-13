@@ -1,8 +1,6 @@
 # Getting started with kettle
 
-A friendly, no-jargon walkthrough for your first few minutes with kettle. If
-you've never edited a config file in your life, that's fine — kettle has a
-built-in **Settings** panel for the common things.
+Set up Kettle, learn the common keys, and change preferences in **Settings**.
 
 ## 1. Install
 
@@ -15,7 +13,8 @@ built-in **Settings** panel for the common things.
   cannot run.
   Then press **Super** and type **kettle**.
 - **macOS** — download `kettle-macos-universal.zip`, unzip, drag `kettle.app`
-  to Applications. It is notarized, so it opens normally the first time.
+  to `~/Applications` (create it if needed), or `/Applications` when writable.
+  The official app is notarized and opens normally.
 
 See [INSTALL.md](INSTALL.md) for Nix, the generated-but-not-yet-published
 Homebrew/AUR metadata, and SHA-256 verification.
@@ -23,7 +22,9 @@ Homebrew/AUR metadata, and SHA-256 verification.
 ## 2. Your first window
 
 kettle opens a normal terminal with your usual shell. Type commands like you
-would anywhere.
+would anywhere. Run `kettle` commands here; from another macOS terminal,
+use `~/Applications/kettle.app/Contents/MacOS/kettle` if `kettle` is not on
+your `PATH`.
 
 ## 3. Change settings — no file editing required
 
@@ -33,8 +34,7 @@ panel. Use the keyboard:
 - **↑ / ↓** — move between options
 - **← / →** — change the highlighted option (font size, theme opacity,
   scrollbar, bell, cursor, …)
-- **Tab** — cycle category (Appearance → Background → Behavior → Search → Tabs
-  → Graphics → Keybinds). The **Keybinds** category is an interactive rebinder:
+- **Tab** — cycle categories, including Agents and Keybinds. In **Keybinds**,
   pick an action, press a chord (with a modifier) to bind it live, and it's
   written to your config.
 - **Esc** — close

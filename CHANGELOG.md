@@ -6,12 +6,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
-## [5.0.1] — 2026-10-12
+## [5.0.1] — 2026-10-13
 
 ### Fixed
 
 - Keep light-themed macOS titles clear of the traffic lights while retaining
   native blur, including on macOS 27.
+- Leave native fullscreen on the first toggle, including after using the
+  macOS green window button, and restore the last windowed size and position.
 
 - Keep paths containing wide characters whole during double-click selection.
 - Avoid signaling an already reaped Unix PTY child during pane teardown.
@@ -34,6 +36,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   and check still timestamps against the decoder's bounded keyframe fallback.
 - Copy a path in the native hint fixture, keeping browser activation from
   interfering with modal shortcut checks.
+- Publish FFmpeg test scripts after their writers exit, avoiding Linux
+  `Text file busy` errors during parallel tests.
 
 ## [5.0.0] — 2026-10-11
 

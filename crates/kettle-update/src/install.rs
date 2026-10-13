@@ -2419,7 +2419,9 @@ fn load_windows_package(
         let mut entry = zip.by_index(index)?;
         let enclosed = entry
             .enclosed_name()
-            .ok_or_else(|| UpdateError::UnsafeArchive(entry.name().to_string()))?
+            .ok_or_else(|| {
+                UpdateError::UnsafeArchive(String::from_utf8_lossy(entry.name_raw()).into_owned())
+            })?
             .to_path_buf();
         validate_archive_path(&enclosed)?;
         if entry.encrypted() {

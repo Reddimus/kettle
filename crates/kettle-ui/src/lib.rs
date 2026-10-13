@@ -64,6 +64,7 @@ mod media;
 mod modal_input;
 mod mux;
 mod native_drag;
+mod native_fullscreen;
 mod native_material;
 mod notifications;
 mod owned_dir;

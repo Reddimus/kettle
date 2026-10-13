@@ -109,7 +109,7 @@ The macOS AppIcon gate runs twice on pull requests. The normal `macos-latest`
 leg covers the current host, while `macOS 26 release icon toolchain` runs the
 exact release host. `scripts/compile-macos-app-icon.sh` selects the newest
 installed Xcode 26.x toolchain before invoking `actool`. The major pin keeps a
-future Xcode preview from silently changing release assets. Both CI and the
+different Xcode major from silently changing release assets. Both CI and the
 release workflow use the same helper so a runner/toolchain mismatch cannot
 first appear after a tag.
 
@@ -119,10 +119,16 @@ this does not count as a local icon-compilation pass.
 
 The macOS material policy has portable tests for opaque, plain-alpha, blurred,
 and Reduce Transparency states, including the borderless sharp-alpha fallback.
-`just native-titlebar-smoke` captures a light-themed native macOS window at
+`just native-titlebar-self-test` checks native-state admission and restore
+diagnostics without a desktop. `just native-titlebar-smoke` captures a light-themed native macOS window at
 startup, after resize, and with the pointer over the caption. It rejects text
 outside the native buttons over the traffic-light cluster and
-missing caption text. macOS CI runs the same check and retains failure captures.
+missing caption text. It also enters fullscreen through the native green button
+and requires one Kettle toggle to restore the original surface. macOS CI runs
+the same check, verifies a borderless roundtrip, and retains failure captures. Portable geometry tests cover
+resized and maximized frames, startup fullscreen, rejected transitions, queued
+reentry, duplicate exits and invalid sizes. Mutations that remove the transition freeze, exit
+preparation or original exit generation fail their regressions.
 The check caught intermittent overlap in the published 5.0.0 bundle on macOS 27;
 the corrected window-blur path passes. Windows tests pin DWM
 color byte order and minimum caption-text contrast. Linux tests require both a
@@ -4646,6 +4652,11 @@ finished stays cancelled and publishes nothing, and a lane thread that ends,
 by a return or a panic, closes its result channel before it wakes the App.
 The shelf counts unseen items, and a replaced item is unseen again unless it
 is the one on screen.
+
+Executable shell fixtures are written by a child and published by rename after
+it exits, so parallel decoder forks cannot inherit a writable script descriptor
+(`ETXTBSY`). The Linux replacement test holds an old writer open; reverting
+`write_script` to in-place writes fails at execution with `Text file busy`.
 
 Pane geometry and preview lanes. `kettle-ui`'s `pane_partition` tests check
 that a pane's titlebar, terminal and lane tile its leaf exactly, with no

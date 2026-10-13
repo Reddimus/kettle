@@ -835,6 +835,7 @@ pub(crate) struct WindowState {
     /// the first hand-off. Declared before `window`, so it leaves the view's
     /// layer tree before the view goes.
     pub(crate) cursor_layer: Option<crate::macos_cursor_layer::CursorLayer>,
+    pub(crate) native_fullscreen: Option<crate::native_fullscreen::NativeFullscreen>,
     pub(crate) native_caption_drag: Option<crate::native_drag::NativeCaptionDrag>,
     pub(crate) window: Option<Arc<Window>>,
     pub(crate) native_material: Option<crate::native_material::NativeMaterial>,
@@ -904,7 +905,6 @@ pub(crate) struct WindowState {
     /// Incremented whenever keyboard focus moves between Kettle-owned input surfaces. A delayed
     /// IME Commit is accepted only by the exact generation that received its Preedit.
     pub(crate) ime_focus_generation: u64,
-    pub(crate) fullscreen: bool,
     pub(crate) cursor: PhysicalPosition<f64>,
     /// Sub-detent wheel residue for this window. Precision touchpads and
     /// high-resolution wheels report a fraction of a detent per event; without
@@ -1449,7 +1449,7 @@ impl WindowState {
     /// (`resumed` / `open_window` fill those in). The `Mux` is built by the
     /// caller because its construction flags (`lua_output_subscribed`,
     /// `record_lossless`) are process-global decisions made in `run_with`.
-    pub(crate) fn new(seq: u64, fullscreen: bool, mux: Mux) -> Self {
+    pub(crate) fn new(seq: u64, mux: Mux) -> Self {
         Self {
             seq,
             renderer: None,
@@ -1459,6 +1459,7 @@ impl WindowState {
             pre_launch: None,
             cursor_layer: None,
             window: None,
+            native_fullscreen: None,
             native_caption_drag: None,
             native_material: None,
             accessibility: None,
@@ -1485,7 +1486,6 @@ impl WindowState {
             ime_preedit: None,
             ime_preedit_owner: None,
             ime_focus_generation: 0,
-            fullscreen,
             cursor: PhysicalPosition::new(0.0, 0.0),
             wheel: crate::input::WheelAccum::default(),
             lane_wheel: crate::input::WheelAccum::default(),
@@ -1603,7 +1603,7 @@ mod tests {
     /// where it was.
     #[test]
     fn native_input_resumes_at_the_physical_pointer() {
-        let mut ws = WindowState::new(1, false, Mux::new());
+        let mut ws = WindowState::new(1, Mux::new());
         let control = PhysicalPosition::new(300.0, 40.0);
         ws.cursor = control;
         ws.resume_native_pointer();
@@ -1661,8 +1661,8 @@ mod tests {
     #[test]
     fn moved_tab_keeps_preview_pixels_and_original_lifetime() {
         let now = std::time::Instant::now();
-        let mut donor = WindowState::new(1, false, Mux::new());
-        let mut target = WindowState::new(2, false, Mux::new());
+        let mut donor = WindowState::new(1, Mux::new());
+        let mut target = WindowState::new(2, Mux::new());
         donor.media_paste_receipt = Some(moving_image_receipt(7, now));
         let pixels = donor
             .media_paste_receipt
@@ -1695,8 +1695,8 @@ mod tests {
     fn pending_video_follows_tear_and_dock_with_its_exact_generation() {
         let now = std::time::Instant::now();
         let tab = moving_tab(7);
-        let mut donor = WindowState::new(1, false, Mux::new());
-        let mut torn = WindowState::new(2, false, Mux::new());
+        let mut donor = WindowState::new(1, Mux::new());
+        let mut torn = WindowState::new(2, Mux::new());
         donor.pending_video_paste_receipt = Some(moving_pending_video(7, now));
         let deadline = donor
             .pending_video_paste_receipt
@@ -1724,7 +1724,7 @@ mod tests {
     #[test]
     fn failed_transfer_restores_pending_without_discarding_another_tabs_receipt() {
         let now = std::time::Instant::now();
-        let mut donor = WindowState::new(1, false, Mux::new());
+        let mut donor = WindowState::new(1, Mux::new());
         donor.media_paste_receipt = Some(moving_image_receipt(8, now));
         donor.pending_video_paste_receipt = Some(moving_pending_video(7, now));
         let state = donor.take_moved_paste_state(&moving_tab(7), now);
@@ -1733,7 +1733,7 @@ mod tests {
         donor.restore_moved_paste_state(state);
         assert_eq!(donor.media_paste_receipt.as_ref().unwrap().pane_id, 8);
         assert!(donor.expects_video_preview(7, 41));
-        let mut target = WindowState::new(2, false, Mux::new());
+        let mut target = WindowState::new(2, Mux::new());
         target.media_paste_receipt = Some(moving_image_receipt(9, now));
         target.adopt_moved_paste_state(donor.take_moved_paste_state(&moving_tab(99), now));
         assert_eq!(
@@ -1749,18 +1749,18 @@ mod tests {
     fn adopting_one_part_keeps_the_other_tabs_part() {
         let now = std::time::Instant::now();
         // A pending preview arrives where another tab's receipt shows.
-        let mut donor = WindowState::new(1, false, Mux::new());
+        let mut donor = WindowState::new(1, Mux::new());
         donor.pending_video_paste_receipt = Some(moving_pending_video(7, now));
-        let mut target = WindowState::new(2, false, Mux::new());
+        let mut target = WindowState::new(2, Mux::new());
         target.media_paste_receipt = Some(moving_image_receipt(9, now));
         target.adopt_moved_paste_state(donor.take_moved_paste_state(&moving_tab(7), now));
         assert_eq!(target.media_paste_receipt.as_ref().unwrap().pane_id, 9);
         assert!(target.expects_video_preview(7, 41));
 
         // A receipt arrives where another tab waits for its preview.
-        let mut donor = WindowState::new(3, false, Mux::new());
+        let mut donor = WindowState::new(3, Mux::new());
         donor.media_paste_receipt = Some(moving_image_receipt(8, now));
-        let mut target = WindowState::new(4, false, Mux::new());
+        let mut target = WindowState::new(4, Mux::new());
         target.pending_video_paste_receipt = Some(moving_pending_video(7, now));
         target.adopt_moved_paste_state(donor.take_moved_paste_state(&moving_tab(8), now));
         assert_eq!(target.media_paste_receipt.as_ref().unwrap().pane_id, 8);
@@ -1776,7 +1776,7 @@ mod tests {
     #[test]
     fn a_failed_preview_keeps_another_tabs_receipt() {
         let now = std::time::Instant::now();
-        let mut window = WindowState::new(1, false, Mux::new());
+        let mut window = WindowState::new(1, Mux::new());
         window.media_paste_receipt = Some(moving_image_receipt(9, now));
         window.pending_video_paste_receipt = Some(moving_pending_video(7, now));
         assert_eq!(
@@ -1795,7 +1795,7 @@ mod tests {
             "another tab's receipt survives this tab's failed preview"
         );
 
-        let mut window = WindowState::new(2, false, Mux::new());
+        let mut window = WindowState::new(2, Mux::new());
         window.pending_video_paste_receipt = Some(moving_pending_video(7, now));
         let late = now + crate::video_preview::PENDING_RECEIPT_TIMEOUT;
         assert_eq!(
@@ -1809,7 +1809,7 @@ mod tests {
     #[test]
     fn moving_receipt_releases_hover_pause_without_resetting_hard_expiry() {
         let now = std::time::Instant::now();
-        let mut donor = WindowState::new(1, false, Mux::new());
+        let mut donor = WindowState::new(1, Mux::new());
         let mut receipt = moving_image_receipt(7, now);
         let hard_expiry = receipt.hard_expires_at;
         receipt.set_hover(true, now);

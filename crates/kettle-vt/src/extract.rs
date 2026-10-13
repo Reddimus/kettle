@@ -242,8 +242,9 @@ enum OutputFilterMode {
     },
 }
 
-/// Byte-exact PTY output for logs, recordings, and output hooks, with only
-/// Kettle's private completion OSC removed.
+/// PTY output for logs, recordings, and output hooks, with Kettle's private
+/// completion OSC removed. Other bytes are preserved except no-op bytes in
+/// escape prefixes exceeding 64 KiB; executed controls and parser state survive.
 ///
 /// This is intentionally independent of [`Extractor`]'s semantic chunks. A
 /// single PTY read can contain hundreds of OSC hyperlinks; publishing each

@@ -2950,6 +2950,12 @@ platforms on their exact existing four-strip path. The UI supplies only the
 native decoration/fullscreen policy; the renderer owns pane geometry and is
 therefore responsible for selecting which pane corners touch the surface.
 
+On macOS, window-scoped AppKit observers retain the last logical client rectangle across
+fullscreen. A generation-tagged event restores it after the native delegate
+finishes, converting through the restored style so a temporary caption adds no
+height. Observers are removed
+before their window drops; fullscreen startup leaves AppKit's first restore alone.
+
 ## Terminator-parity subsystems
 
 Four major subsystems modeled after GNOME Terminator. Each has its own

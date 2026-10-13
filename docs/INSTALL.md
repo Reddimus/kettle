@@ -58,7 +58,7 @@ Pin a specific version (recommended for reproducible installs):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/install-online.sh \
-  | KETTLE_VERSION=v5.0.0 sh
+  | KETTLE_VERSION=v5.0.1 sh
 ```
 
 System-wide install (writes to a custom prefix; needs the
@@ -186,10 +186,15 @@ GitHub runners for every supported platform:
   `nix profile install` + dev-shell + home-manager usage.
 - **macOS** — `kettle-macos-universal.zip` containing `kettle.app`. Official
   release apps are Developer ID signed, notarized, stapled, and assessed by
-  Gatekeeper before publication. Unzip and drag `kettle.app` to `/Applications`;
-  it should open normally on first launch. Locally built and pull-request preview
-  apps are intentionally unsigned and are for development use rather than the
+  Gatekeeper before publication. Unzip and move `kettle.app` to
+  `~/Applications` (create the folder if needed), or `/Applications` when
+  writable. It should open normally on first launch. Locally built and
+  pull-request preview apps are intentionally unsigned and are for development use rather than the
   recommended installation path.
+
+  Run `kettle` commands in a Kettle pane. From another terminal, use the
+  installed app's `Contents/MacOS/kettle`, for example
+  `~/Applications/kettle.app/Contents/MacOS/kettle --version`.
 
   From 3.2.0 the app updates itself: `kettle update`, or the in-app prompt,
   replaces the whole bundle and verifies the replacement with `codesign` and
@@ -471,14 +476,14 @@ one-shot, the `kettle ctl` control client, `kettle mcp`) and its threat model.
 
 ### Verifying a download (SHA-256)
 
-Every release from **v1.3.4** onward ships a `.sha256` sidecar (current latest: v5.0.0)
+Every release from **v1.3.4** onward ships a `.sha256` sidecar (current latest: v5.0.1)
 generated on the same CI runner as the artifact. Verify a tarball
 before extracting it:
 
 ```sh
 # Linux / WSL
-curl -fLO https://github.com/Reddimus/kettle/releases/download/v5.0.0/kettle-linux-x86_64.tar.gz
-curl -fLO https://github.com/Reddimus/kettle/releases/download/v5.0.0/kettle-linux-x86_64.tar.gz.sha256
+curl -fLO https://github.com/Reddimus/kettle/releases/download/v5.0.1/kettle-linux-x86_64.tar.gz
+curl -fLO https://github.com/Reddimus/kettle/releases/download/v5.0.1/kettle-linux-x86_64.tar.gz.sha256
 sha256sum -c kettle-linux-x86_64.tar.gz.sha256
 # → kettle-linux-x86_64.tar.gz: OK
 ```
