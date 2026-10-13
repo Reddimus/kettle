@@ -835,6 +835,7 @@ pub(crate) struct WindowState {
     /// the first hand-off. Declared before `window`, so it leaves the view's
     /// layer tree before the view goes.
     pub(crate) cursor_layer: Option<crate::macos_cursor_layer::CursorLayer>,
+    pub(crate) native_fullscreen: Option<crate::native_fullscreen::NativeFullscreen>,
     pub(crate) native_caption_drag: Option<crate::native_drag::NativeCaptionDrag>,
     pub(crate) window: Option<Arc<Window>>,
     pub(crate) native_material: Option<crate::native_material::NativeMaterial>,
@@ -1458,6 +1459,7 @@ impl WindowState {
             pre_launch: None,
             cursor_layer: None,
             window: None,
+            native_fullscreen: None,
             native_caption_drag: None,
             native_material: None,
             accessibility: None,

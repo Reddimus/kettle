@@ -149,6 +149,26 @@ def native_fullscreen_roundtrip(live, out):
     return {"restored_surface": wanted, "toggle_count": 1}
 
 
+def programmatic_fullscreen_roundtrip(live, out):
+    wanted = stable_surface(live, lambda surface: surface["width"] > 0 and surface["height"] > 0,
+                            "borderless window did not settle")
+    assert not native_fullscreen(live), "borderless fixture must start windowed"
+    trace = {"before": wanted}
+    try:
+        live.json_ctl("perform_action", {"action": "toggle_fullscreen"})
+        wait_fullscreen(live, True)
+        trace["entered"] = stable_surface(live, lambda surface: surface != wanted,
+                                         "borderless fullscreen did not settle")
+        fullscreen_restore(live, wanted)
+    finally:
+        try:
+            trace["after"] = live.json_ctl("ui_geometry")
+        except Exception as error:
+            trace["after_error"] = str(error)
+        (out / "borderless-fullscreen-state.json").write_text(json.dumps(trace, indent=2) + "\n")
+    return {"restored_surface": wanted, "toggle_count": 2}
+
+
 def check(kettle, out):
     out.mkdir(mode=0o700, parents=True, exist_ok=False)
     query = out / "native-window-info"
@@ -194,7 +214,17 @@ def check(kettle, out):
         stable_surface(live, lambda current: current != surface,
                        "first toggle did not leave startup fullscreen")
         startup_fullscreen = capture(live, out, "startup-fullscreen-restored")
-    (out / "results.json").write_text(json.dumps({"startup": start, "resized": resized, "hovered": hovered, "fullscreen": fullscreen, "restored": restored, "startup_fullscreen": startup_fullscreen}, indent=2) + "\n")
+    borderless_config = out / "borderless-config"
+    borderless_config.write_text(config.read_text().replace("window-state = fullscreen\n", "")
+                                 + "borderless = true\n")
+    with modal.RecordedLive(kettle, borderless_config, out / "borderless.log") as live:
+        scale = live.json_ctl("ui_geometry")["scale_factor"]
+        wanted = {"width": round(740 * scale), "height": round(480 * scale)}
+        live.json_ctl("resize_window", wanted)
+        stable_surface(live, lambda surface: surface == wanted, "borderless resize did not settle")
+        borderless = programmatic_fullscreen_roundtrip(live, out)
+        live.screenshot(out / "borderless-restored.png")
+    (out / "results.json").write_text(json.dumps({"startup": start, "resized": resized, "hovered": hovered, "fullscreen": fullscreen, "restored": restored, "startup_fullscreen": startup_fullscreen, "borderless": borderless}, indent=2) + "\n")
     print("native-titlebar smoke: caption clear of traffic lights", flush=True)
 
 

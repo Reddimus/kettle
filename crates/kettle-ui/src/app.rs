@@ -2539,6 +2539,10 @@ pub enum UserEvent {
         candidate: Option<crate::video_preview::VideoPasteCandidate>,
         preview: Option<kettle_core::ImageData>,
     },
+    NativeFullscreenExited {
+        window_seq: u64,
+        generation: u64,
+    },
     /// An assistive-technology action addressed to a specific OS window.
     /// AccessKit can invoke this callback off the winit dispatch path, so it is
     /// re-serialized through the event-loop proxy before touching UI state.
@@ -33424,6 +33428,27 @@ impl ApplicationHandler<UserEvent> for App {
                     self.finish_window_dispatch(el, seq, ws);
                 }
             }
+            UserEvent::NativeFullscreenExited {
+                window_seq,
+                generation,
+            } => {
+                let Some(mut ws) = self.windows.remove(&window_seq) else {
+                    return;
+                };
+                if ws.native_fullscreen.as_ref().is_some_and(|native| {
+                    let fullscreen = ws
+                        .window
+                        .as_ref()
+                        .is_some_and(|window| window.fullscreen().is_some());
+                    native.finish(generation, fullscreen)
+                        || (ws.dpi_resize_surface_suspended && !native.pending())
+                }) && let Some(window) = &ws.window
+                {
+                    let size = window.inner_size();
+                    self.window_event_inner(&mut ws, el, WindowEvent::Resized(size));
+                }
+                self.finish_window_dispatch(el, window_seq, ws);
+            }
             UserEvent::AccessibilityAction {
                 window_seq,
                 request,
@@ -35073,6 +35098,9 @@ impl App {
             .window
             .as_deref()
             .map(crate::native_drag::NativeCaptionDrag::install);
+        ws.native_fullscreen = ws.window.as_deref().map(|window| {
+            crate::native_fullscreen::NativeFullscreen::install(window, seq, self.proxy.clone())
+        });
         ws.native_material = Some(native_material);
         self.sync_output_frame_budget(&mut ws, true);
         let area = self.area(&ws);
@@ -36353,6 +36381,11 @@ impl App {
             }
         };
         self.apply_post_create(&window);
+        ws.native_fullscreen = Some(crate::native_fullscreen::NativeFullscreen::install(
+            &window,
+            ws.seq,
+            self.proxy.clone(),
+        ));
         ws.native_caption_drag = Some(crate::native_drag::NativeCaptionDrag::install(&window));
         ws.native_material = Some(crate::native_material::NativeMaterial::install(
             &window, &self.cfg,
@@ -36944,6 +36977,7 @@ impl App {
             // Consumed by the outer window-less dispatch before a WindowState
             // is checked out.
             UserEvent::Activation
+            | UserEvent::NativeFullscreenExited { .. }
             | UserEvent::RemoteScanReady
             | UserEvent::MediaRendered
             | UserEvent::LanePlayback => {}
@@ -37195,6 +37229,16 @@ impl App {
                 // hold their real dimensions; the genuine restore carries the
                 // true non-zero size and reflows once.
                 if size.width == 0 || size.height == 0 {
+                    ws.dpi_resize_surface_suspended = true;
+                    return;
+                }
+                // AppKit can briefly restore its stale standard frame. Wait
+                // for the window-local restore before reflowing terminal grids.
+                if ws
+                    .native_fullscreen
+                    .as_ref()
+                    .is_some_and(|native| native.pending())
+                {
                     ws.dpi_resize_surface_suspended = true;
                     return;
                 }

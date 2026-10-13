@@ -2,6 +2,7 @@
 """Check native fullscreen admission and failure diagnostics without a desktop."""
 
 import importlib.util
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -38,6 +39,23 @@ class Window:
             return {}
         assert method == "ui_geometry"
         return {"surface": self.surface}
+
+
+class BorderlessWindow(Window):
+    def __init__(self, restored_height=480):
+        super().__init__({"width": 740, "height": 480})
+        self.fullscreen = False
+        self.restored_height = restored_height
+
+    def json_ctl(self, method, params=None):
+        if method == "perform_action":
+            self.actions.append(params["action"])
+            self.fullscreen = not self.fullscreen
+            self.surface = ({"width": 1024, "height": 768} if self.fullscreen else
+                            {"width": 740, "height": self.restored_height})
+            return {}
+        assert method == "ui_geometry"
+        return {"surface": self.surface, "fullscreen": self.fullscreen}
 
 
 class FullscreenTests(unittest.TestCase):
@@ -94,6 +112,22 @@ class FullscreenTests(unittest.TestCase):
         with patch.object(checker, "native_fullscreen", return_value=False):
             self.assertEqual(checker.fullscreen_restore(window, wanted), wanted)
         self.assertEqual(window.actions, ["toggle_fullscreen"])
+
+    def test_borderless_restore_rejects_pixels_from_a_temporary_caption(self):
+        window = BorderlessWindow(restored_height=512)
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(AssertionError, "did not restore.*740.*480"):
+                checker.programmatic_fullscreen_roundtrip(window, Path(directory))
+            trace = json.loads((Path(directory) / "borderless-fullscreen-state.json").read_text())
+            self.assertEqual(trace["after"]["surface"]["height"], 512)
+        self.assertEqual(window.actions, ["toggle_fullscreen", "toggle_fullscreen"])
+
+    def test_borderless_restore_uses_one_action_per_transition(self):
+        window = BorderlessWindow()
+        with tempfile.TemporaryDirectory() as directory:
+            result = checker.programmatic_fullscreen_roundtrip(window, Path(directory))
+        self.assertEqual(result["restored_surface"], {"width": 740, "height": 480})
+        self.assertEqual(window.actions, ["toggle_fullscreen", "toggle_fullscreen"])
 
 
 if __name__ == "__main__":
