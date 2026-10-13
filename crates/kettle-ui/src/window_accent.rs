@@ -145,7 +145,7 @@ mod tests {
         cfg: &kettle_config::Config,
         seed: u64,
     ) -> crate::window_state::WindowState {
-        let mut ws = crate::window_state::WindowState::new(1, false, crate::mux::Mux::new());
+        let mut ws = crate::window_state::WindowState::new(1, crate::mux::Mux::new());
         let pool = kettle_config::peacock_pool(&cfg.theme);
         let (slot, local_claim) = registry.claim(&pool, seed, &[], None).unwrap();
         ws.accent = Some(crate::window_state::WindowAccent {

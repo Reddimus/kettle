@@ -122,7 +122,9 @@ and Reduce Transparency states, including the borderless sharp-alpha fallback.
 `just native-titlebar-smoke` captures a light-themed native macOS window at
 startup, after resize, and with the pointer over the caption. It rejects text
 outside the native buttons over the traffic-light cluster and
-missing caption text. macOS CI runs the same check and retains failure captures.
+missing caption text. It also enters fullscreen through the native green button
+and requires one Kettle toggle to restore the original surface. macOS CI runs
+the same check and retains failure captures.
 The check caught intermittent overlap in the published 5.0.0 bundle on macOS 27;
 the corrected window-blur path passes. Windows tests pin DWM
 color byte order and minimum caption-text contrast. Linux tests require both a

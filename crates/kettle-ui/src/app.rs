@@ -10105,15 +10105,6 @@ impl App {
         initial_cfg.accent_seed = accent_seed_from_cwd(startup.cwd.as_deref());
         crate::startup_trace::mark(crate::startup_trace::Phase::ConfigLoaded);
         font_preload.request_family(&initial_cfg.font_family);
-        // Seed the ToggleFullscreen tracking flag from the
-        // effective window-state (config `window-state = fullscreen` or `-f`).
-        // Starting it `false` would make a fullscreen launch need TWO
-        // ToggleFullscreen presses to exit (the first would "enter" the state
-        // kettle is already in).
-        let start_fullscreen = matches!(
-            initial_cfg.window_state,
-            kettle_config::WindowState::Fullscreen
-        );
         let initial_triggers = compile_triggers(&initial_cfg.triggers);
         // Dropdown-parity: capture before `startup` moves into the App.
         let startup_version = startup
@@ -10279,7 +10270,7 @@ impl App {
             m
         };
         let mut windows = std::collections::BTreeMap::new();
-        let mut initial_window = WindowState::new(1, start_fullscreen, mux);
+        let mut initial_window = WindowState::new(1, mux);
         initial_window.cursor_exit_log = crate::cursor_exit_log::CursorExitLog::from_env(1);
         windows.insert(1, initial_window);
         let remote_proxy = proxy.clone();
@@ -19358,11 +19349,8 @@ impl App {
         // strips at those two outer corners with one concentric antialiased
         // outline. Borderless/fullscreen windows have square content surfaces;
         // every non-macOS platform deliberately stays on the existing path.
-        // Both inputs come from winit's live native state. `ws.fullscreen`
-        // misses AppKit's green-button transition, while `cfg.borderless` may
-        // change during a live reload even though winit cannot retrofit the
-        // existing window's decorations. Reading the window itself keeps the
-        // renderer aligned with the surface AppKit is actually clipping.
+        // Use live native state: AppKit's green button bypasses our actions,
+        // and a config reload cannot retrofit an existing window's decorations.
         let live_fullscreen = window
             .as_ref()
             .is_some_and(|window| window.fullscreen().is_some());
@@ -22465,12 +22453,11 @@ impl App {
                 self.toggle_zoom_with_scale(ws, Some(1.5));
             }
             Action::ToggleFullscreen => {
-                ws.fullscreen = !ws.fullscreen;
                 if let Some(w) = &ws.window {
-                    w.set_fullscreen(if ws.fullscreen {
-                        Some(Fullscreen::Borderless(None))
-                    } else {
+                    w.set_fullscreen(if w.fullscreen().is_some() {
                         None
+                    } else {
+                        Some(Fullscreen::Borderless(None))
                     });
                 }
             }
@@ -35000,7 +34987,7 @@ impl App {
             && pos.is_none()
             && size.is_none()
         {
-            let mut probe = WindowState::new(0, false, Mux::new());
+            let mut probe = WindowState::new(0, Mux::new());
             probe.startup_cell = Some(fonts.cell);
             if let Some((width, height)) = self.startup_surface(&probe, monitor) {
                 attrs = attrs.with_inner_size(winit::dpi::PhysicalSize::new(width, height));
@@ -35068,7 +35055,7 @@ impl App {
             mux.lua_output_subscribed |= self.recorder.is_some();
             mux.record_lossless = self.recorder.is_some();
         }
-        let mut ws = WindowState::new(seq, false, mux);
+        let mut ws = WindowState::new(seq, mux);
         ws.window_shown = !should_reveal_after_renderer_init(state);
         ws.renderer = Some(renderer);
         ws.accessibility = Some(accessibility);
@@ -43111,7 +43098,7 @@ mod tests {
 
     #[test]
     fn context_menu_snapshot_reuse_rejects_live_pointer_gestures() {
-        let mut ws = WindowState::new(1, false, Mux::new());
+        let mut ws = WindowState::new(1, Mux::new());
         assert!(context_menu_snapshot_reuse_safe(&ws));
 
         ws.selecting = true;
@@ -47768,8 +47755,8 @@ mod tests {
             previous_receipt: None,
         };
         let mut windows = std::collections::BTreeMap::new();
-        windows.insert(1, WindowState::new(1, false, crate::mux::Mux::new()));
-        let mut torn = WindowState::new(2, false, crate::mux::Mux::new());
+        windows.insert(1, WindowState::new(1, crate::mux::Mux::new()));
+        let mut torn = WindowState::new(2, crate::mux::Mux::new());
         torn.pending_video_paste_receipt = Some(pending(7));
         windows.insert(2, torn);
         assert_eq!(video_preview_target_window(&windows, 1, 7, 41), Some(2));
@@ -48076,7 +48063,7 @@ mod tests {
     fn non_text_modals_block_control_plane_typing_into_search() {
         use super::{ContextMenuState, TextModal, ViState, open_text_modal};
 
-        let mut ws = WindowState::new(1, false, Mux::new());
+        let mut ws = WindowState::new(1, Mux::new());
         ws.search.open = true;
         assert_eq!(open_text_modal(&ws), Some(TextModal::Search));
         ws.vi_mode = Some(ViState {
@@ -48889,7 +48876,7 @@ mod tests {
             eprintln!("skipping: no PTY ({e})");
             return;
         }
-        let mut ws = WindowState::new(1, false, mux);
+        let mut ws = WindowState::new(1, mux);
         let pane = ws.mux.active_focus().expect("a focused pane");
         let spans = |links: &[kettle_core::Link]| -> Vec<(usize, usize, usize, String)> {
             links
@@ -48965,7 +48952,7 @@ mod tests {
         use winit::keyboard::{KeyCode, PhysicalKey};
 
         let enter = PhysicalKey::Code(KeyCode::Enter);
-        let mut ws = WindowState::new(0, false, Mux::new());
+        let mut ws = WindowState::new(0, Mux::new());
         ws.palette_input = Some((String::new(), 0));
         let owner = top_modal(&ws);
         assert_eq!(owner, Some(KeyModal::Palette));
@@ -49053,7 +49040,7 @@ mod tests {
 
         let enter = PhysicalKey::Code(KeyCode::Enter);
         let escape = PhysicalKey::Code(KeyCode::Escape);
-        let mut ws = WindowState::new(0, false, Mux::new());
+        let mut ws = WindowState::new(0, Mux::new());
         ws.palette_input = Some((String::new(), 0));
         let owner = top_modal(&ws);
         ws.palette_input = None;
@@ -51919,7 +51906,7 @@ mod tests {
         use super::{Mux, WindowState, arm_selection_gesture};
         use crate::search_input::SearchEditor;
 
-        let mut ws = WindowState::new(1, false, Mux::new());
+        let mut ws = WindowState::new(1, Mux::new());
         ws.search.open = true;
         ws.search.editor = SearchEditor::from_text("query".into(), 100);
         for button in [0, 2] {
@@ -51939,7 +51926,7 @@ mod tests {
         };
         use winit::dpi::PhysicalPosition;
 
-        let mut ws = WindowState::new(1, false, Mux::new());
+        let mut ws = WindowState::new(1, Mux::new());
         let origin = PhysicalPosition::new(100.0, 200.0);
         ws.cursor = origin;
         arm_selection_gesture(&mut ws, 42, 2);
@@ -56505,7 +56492,7 @@ mod theme_picker_tests {
     #[test]
     fn the_preview_restores_the_theme_the_picker_opened_on() {
         let opened = "TokyoNight Night";
-        let mut ws = WindowState::new(0, false, Mux::new());
+        let mut ws = WindowState::new(0, Mux::new());
         assert!(begin_theme_picker(&mut ws, live(opened)).is_none());
         let mut wearing = settle(&mut ws, opened);
         assert_eq!(wearing, opened, "it opens on the current theme");
@@ -56548,7 +56535,7 @@ mod theme_picker_tests {
     /// Enter keeps the previewed theme: nothing puts the opening one back.
     #[test]
     fn a_kept_theme_stays() {
-        let mut ws = WindowState::new(0, false, Mux::new());
+        let mut ws = WindowState::new(0, Mux::new());
         begin_theme_picker(&mut ws, live("TokyoNight Night"));
         ws.theme_picker_input.as_mut().unwrap().selected += 1;
         let kept = settle(&mut ws, "TokyoNight Night");
@@ -56562,7 +56549,7 @@ mod theme_picker_tests {
     /// into what it covered; the owner marker stays to recognise it.
     #[test]
     fn closing_a_modal_ends_its_composition() {
-        let mut ws = WindowState::new(0, false, Mux::new());
+        let mut ws = WindowState::new(0, Mux::new());
         ws.ime_preedit = Some(("ka".into(), None));
         ws.ime_preedit_owner = Some(ImePreeditSession {
             owner: ImePreeditOwner::Other,

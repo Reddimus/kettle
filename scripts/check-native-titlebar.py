@@ -80,6 +80,48 @@ def interrupted(_signum, _frame):
     raise InterruptedError("owned titlebar check interrupted")
 
 
+def stable_surface(live, ready, message):
+    deadline = time.monotonic() + 10
+    previous = None
+    since = None
+    while time.monotonic() < deadline:
+        surface = live.json_ctl("ui_geometry")["surface"]
+        now = time.monotonic()
+        if ready(surface):
+            if surface != previous:
+                since = now
+            elif since is not None and now - since >= 0.75:
+                return surface
+        else:
+            since = None
+        previous = surface
+        time.sleep(0.1)
+    raise AssertionError(message)
+
+
+def fullscreen_restore(live, wanted):
+    live.json_ctl("perform_action", {"action": "toggle_fullscreen"})
+    return stable_surface(
+        live, lambda surface: surface == wanted,
+        "first toggle did not leave native fullscreen",
+    )
+
+
+def native_fullscreen_roundtrip(live):
+    wanted = live.json_ctl("ui_geometry")["surface"]
+    modal.focus(live)
+    result = modal.live_ui.run(["osascript", "-e",
+        'tell application "System Events" to tell (first process whose unix id is '
+        + str(live.pid)
+        + ') to tell window "Kettle caption fixture" to perform action "AXPress" '
+          'of (first button whose subrole is "AXFullScreenButton")'
+    ], timeout=10)
+    result.check_returncode()
+    stable_surface(live, lambda surface: surface != wanted, "native fullscreen did not settle")
+    fullscreen_restore(live, wanted)
+    return {"restored_surface": wanted, "toggle_count": 1}
+
+
 def check(kettle, out):
     out.mkdir(mode=0o700, parents=True, exist_ok=False)
     config = out / "config"
@@ -103,7 +145,21 @@ def check(kettle, out):
             time.sleep(0.05)
         resized = capture(live, out, "resized")
         hovered = capture(live, out, "hovered", hover_caption=True)
-    (out / "results.json").write_text(json.dumps({"startup": start, "resized": resized, "hovered": hovered}, indent=2) + "\n")
+        fullscreen = native_fullscreen_roundtrip(live)
+        restored = capture(live, out, "fullscreen-restored")
+    with config.open("a") as stream:
+        stream.write("window-state = fullscreen\n")
+    with modal.RecordedLive(kettle, config, out / "startup-fullscreen.log") as live:
+        modal.focus(live)
+        surface = stable_surface(
+            live, lambda surface: surface["width"] > 0 and surface["height"] > 0,
+            "startup fullscreen did not settle",
+        )
+        live.json_ctl("perform_action", {"action": "toggle_fullscreen"})
+        stable_surface(live, lambda current: current != surface,
+                       "first toggle did not leave startup fullscreen")
+        startup_fullscreen = capture(live, out, "startup-fullscreen-restored")
+    (out / "results.json").write_text(json.dumps({"startup": start, "resized": resized, "hovered": hovered, "fullscreen": fullscreen, "restored": restored, "startup_fullscreen": startup_fullscreen}, indent=2) + "\n")
     print("native-titlebar smoke: caption clear of traffic lights", flush=True)
 
 

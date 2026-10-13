@@ -5,6 +5,36 @@ before the release-cut pull request merges. Unit and image tests can prove the
 material policy; they cannot prove what AppKit actually draws. This file records
 each run, including what did not run and why.
 
+## 5.0.1 cut - 2026-10-13
+
+macOS 27.0.1, M5 Max, 1920x1080 at 1x. Universal ad-hoc bundle built from
+`46ca35208efc` plus the fullscreen correction; source hash
+`dcef2f2e6a4ee190`. Both architectures load (Intel through Rosetta). The icon
+resources come from the cut's passing macOS 26 CI job. Signing and notarization
+are checked on the official release candidate separately.
+
+Native window inspection and control geometry checks passed:
+
+- Default blur, blur off, opaque with/without blur, borderless, and light startup
+  show readable captions and corners, with terminal content visible.
+- All six fullscreen round trips restore the preceding surface and content
+  rectangles exactly. Decorated resize used native zoom; borderless resize used
+  the control API, since bound pointer drags did not resize the fixture.
+- After the native green button enters fullscreen, one F11 restores the window.
+  The earlier candidate required two toggles; this regression drove the fix.
+- Startup fullscreen exits on one F11. AppKit chooses the restored size for this
+  case; it need not equal a separately launched window's configured size.
+- Live dark/light/dark configuration reloads retain a clear native caption.
+- Detached windows have different accent colors. Current tearoff setup used the
+  control API; it does not establish physical single-tab reattachment.
+
+Native captures were inspected through Computer Use; renderer PNGs and geometry
+receipts were retained separately. This run does not establish checkerboard blur
+composition, physical reattachment, Dock/Finder/app-switcher appearance, HiDPI or
+physical Intel behavior. Reduce Transparency, system appearance and Dock settings
+were left unchanged. The macOS 26 CI suite checks native caption placement and
+the native-button fullscreen regression.
+
 ## 4.5.0 cut - 2026-09-21
 
 macOS 26.6.2, M5 Max, 1920x1080 at 1x. Universal bundle built from clean

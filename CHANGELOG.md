@@ -12,6 +12,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 - Keep light-themed macOS titles clear of the traffic lights while retaining
   native blur, including on macOS 27.
+- Leave native fullscreen on the first toggle, including after using the
+  macOS green window button.
 
 - Keep paths containing wide characters whole during double-click selection.
 - Avoid signaling an already reaped Unix PTY child during pane teardown.
