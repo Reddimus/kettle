@@ -84,9 +84,12 @@ def stable_surface(live, ready, message):
     deadline = time.monotonic() + 10
     previous = None
     since = None
+    observed = []
     while time.monotonic() < deadline:
         surface = live.json_ctl("ui_geometry")["surface"]
         now = time.monotonic()
+        if surface != previous:
+            observed.append(surface)
         if ready(surface):
             if surface != previous:
                 since = now
@@ -96,18 +99,40 @@ def stable_surface(live, ready, message):
             since = None
         previous = surface
         time.sleep(0.1)
-    raise AssertionError(message)
+    raise AssertionError(f"{message}; observed surfaces: {observed}")
+
+
+def native_fullscreen(live):
+    result = modal.live_ui.run(["osascript", "-e",
+        'tell application "System Events" to tell (first process whose unix id is '
+        + str(live.pid)
+        + ') to get value of attribute "AXFullScreen" of window "Kettle caption fixture"'
+    ], timeout=10)
+    result.check_returncode()
+    value = result.stdout.strip().lower()
+    assert value in ("true", "false"), f"invalid native fullscreen state: {value!r}"
+    return value == "true"
+
+
+def wait_fullscreen(live, expected):
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if native_fullscreen(live) == expected:
+            return
+        time.sleep(0.1)
+    raise AssertionError(f"native fullscreen did not become {expected}")
 
 
 def fullscreen_restore(live, wanted):
     live.json_ctl("perform_action", {"action": "toggle_fullscreen"})
+    wait_fullscreen(live, False)
     return stable_surface(
         live, lambda surface: surface == wanted,
-        "first toggle did not leave native fullscreen",
+        f"left native fullscreen but did not restore {wanted}",
     )
 
 
-def native_fullscreen_roundtrip(live):
+def native_fullscreen_roundtrip(live, out):
     wanted = live.json_ctl("ui_geometry")["surface"]
     modal.focus(live)
     result = modal.live_ui.run(["osascript", "-e",
@@ -117,8 +142,21 @@ def native_fullscreen_roundtrip(live):
           'of (first button whose subrole is "AXFullScreenButton")'
     ], timeout=10)
     result.check_returncode()
-    stable_surface(live, lambda surface: surface != wanted, "native fullscreen did not settle")
-    fullscreen_restore(live, wanted)
+    wait_fullscreen(live, True)
+    entered = stable_surface(
+        live, lambda surface: surface != wanted, "native fullscreen did not settle",
+    )
+    trace = {"before": wanted, "entered": entered}
+    try:
+        fullscreen_restore(live, wanted)
+    finally:
+        for key, read in (("after", lambda: live.json_ctl("ui_geometry")),
+                          ("native_fullscreen_after", lambda: native_fullscreen(live))):
+            try:
+                trace[key] = read()
+            except Exception as error:
+                trace[key + "_error"] = str(error)
+        (out / "fullscreen-state.json").write_text(json.dumps(trace, indent=2) + "\n")
     return {"restored_surface": wanted, "toggle_count": 1}
 
 
@@ -145,17 +183,19 @@ def check(kettle, out):
             time.sleep(0.05)
         resized = capture(live, out, "resized")
         hovered = capture(live, out, "hovered", hover_caption=True)
-        fullscreen = native_fullscreen_roundtrip(live)
+        fullscreen = native_fullscreen_roundtrip(live, out)
         restored = capture(live, out, "fullscreen-restored")
     with config.open("a") as stream:
         stream.write("window-state = fullscreen\n")
     with modal.RecordedLive(kettle, config, out / "startup-fullscreen.log") as live:
         modal.focus(live)
+        wait_fullscreen(live, True)
         surface = stable_surface(
             live, lambda surface: surface["width"] > 0 and surface["height"] > 0,
             "startup fullscreen did not settle",
         )
         live.json_ctl("perform_action", {"action": "toggle_fullscreen"})
+        wait_fullscreen(live, False)
         stable_surface(live, lambda current: current != surface,
                        "first toggle did not leave startup fullscreen")
         startup_fullscreen = capture(live, out, "startup-fullscreen-restored")

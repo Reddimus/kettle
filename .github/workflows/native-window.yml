@@ -1,0 +1,56 @@
+name: Native window regression
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "crates/kettle-ui/**"
+      - "scripts/check-native-titlebar.py"
+      - "scripts/test-native-titlebar.py"
+      - "scripts/check-modal-shortcuts.py"
+      - "scripts/check-live-ui-smoke.py"
+      - ".github/workflows/native-window.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-window-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  titlebar:
+    name: macOS native fullscreen and caption
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: "8"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          shared-key: native-window
+      - name: Checker unit tests
+        run: python3 scripts/test-native-titlebar.py
+      - name: Build the native fixture
+        run: nice -n 10 cargo build --locked -p kettle
+      - name: Native caption and fullscreen
+        run: |
+          launchctl asuser "$(id -u)" python3 scripts/check-native-titlebar.py \
+            --kettle ./target/debug/kettle --out-dir "$RUNNER_TEMP/native-window"
+      - name: Preserve native evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: native-window-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/native-window/*.json
+            ${{ runner.temp }}/native-window/*.log
+            ${{ runner.temp }}/native-window/*.png
+          retention-days: 7

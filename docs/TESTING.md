@@ -119,7 +119,8 @@ this does not count as a local icon-compilation pass.
 
 The macOS material policy has portable tests for opaque, plain-alpha, blurred,
 and Reduce Transparency states, including the borderless sharp-alpha fallback.
-`just native-titlebar-smoke` captures a light-themed native macOS window at
+`just native-titlebar-self-test` checks native-state admission and restore
+diagnostics without a desktop. `just native-titlebar-smoke` captures a light-themed native macOS window at
 startup, after resize, and with the pointer over the caption. It rejects text
 outside the native buttons over the traffic-light cluster and
 missing caption text. It also enters fullscreen through the native green button
