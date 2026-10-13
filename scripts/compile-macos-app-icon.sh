@@ -10,10 +10,8 @@ repo_root=$(cd "$(dirname "$0")/.." && pwd)
 output_dir=$1
 required_major=26
 
-# Pin the release compiler to Xcode 26. Selecting "newest" without a major cap
-# would silently move release assets to an Xcode 27 preview as soon as one
-# appears on a hosted image. The current developer directory is included for
-# developer machines whose Xcode app has a nonstandard name or location.
+# Keep release assets on Xcode 26 when other majors are installed.
+# Include the active developer directory for nonstandard app locations.
 candidate_file=$(mktemp "${TMPDIR:-/tmp}/kettle-xcode-candidates.XXXXXX")
 trap 'rm -f "$candidate_file"' EXIT
 

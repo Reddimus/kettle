@@ -186,10 +186,15 @@ GitHub runners for every supported platform:
   `nix profile install` + dev-shell + home-manager usage.
 - **macOS** — `kettle-macos-universal.zip` containing `kettle.app`. Official
   release apps are Developer ID signed, notarized, stapled, and assessed by
-  Gatekeeper before publication. Unzip and drag `kettle.app` to `/Applications`;
-  it should open normally on first launch. Locally built and pull-request preview
-  apps are intentionally unsigned and are for development use rather than the
+  Gatekeeper before publication. Unzip and move `kettle.app` to
+  `~/Applications` (create the folder if needed), or `/Applications` when
+  writable. It should open normally on first launch. Locally built and
+  pull-request preview apps are intentionally unsigned and are for development use rather than the
   recommended installation path.
+
+  Run `kettle` commands in a Kettle pane. From another terminal, use the
+  installed app's `Contents/MacOS/kettle`, for example
+  `~/Applications/kettle.app/Contents/MacOS/kettle --version`.
 
   From 3.2.0 the app updates itself: `kettle update`, or the in-app prompt,
   replaces the whole bundle and verifies the replacement with `codesign` and

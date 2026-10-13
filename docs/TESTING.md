@@ -109,7 +109,7 @@ The macOS AppIcon gate runs twice on pull requests. The normal `macos-latest`
 leg covers the current host, while `macOS 26 release icon toolchain` runs the
 exact release host. `scripts/compile-macos-app-icon.sh` selects the newest
 installed Xcode 26.x toolchain before invoking `actool`. The major pin keeps a
-future Xcode preview from silently changing release assets. Both CI and the
+different Xcode major from silently changing release assets. Both CI and the
 release workflow use the same helper so a runner/toolchain mismatch cannot
 first appear after a tag.
 

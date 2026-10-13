@@ -94,7 +94,7 @@ default Xcode 16.4 emits no Icon Composer artifacts, while its installed Xcode
 26.3 Asset Catalog agent crashes against the older host frameworks. A focused
 pull-request job runs the exact `macos-26` release-host path in addition to the
 normal current-macOS CI leg. The major-version pin also prevents a future Xcode
-27 preview from silently changing release assets.
+major version from silently changing release assets.
 
 ### macOS update gate
 

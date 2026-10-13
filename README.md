@@ -19,24 +19,27 @@ Download a package from the
 | Platform | Package | Setup |
 | --- | --- | --- |
 | Linux, glibc 2.35+ | `kettle-linux-*.tar.gz` | Run the installer below |
-| macOS 11+ | `kettle-macos-universal.zip` | Move `kettle.app` to Applications |
+| macOS 11+ | `kettle-macos-universal.zip` | Move `kettle.app` to `~/Applications` |
 
-Neither package needs administrator access. The Linux installer puts Kettle
-under `~/.local` for the current user and verifies the signed release before
-changing files.
+Neither package needs administrator access. On macOS, create `~/Applications`
+if needed; `/Applications` also works when it is writable. The Linux installer
+puts Kettle under `~/.local` for the current user and verifies the signed
+release before changing files.
 
 ```sh
 KETTLE_RAW_URL=https://raw.githubusercontent.com/Reddimus/kettle/main
 curl -fsSL "$KETTLE_RAW_URL/scripts/install-online.sh" | sh
 ```
 
-Windows distribution ended with 3.3.0. Archived Windows packages remain
-attached to their historical releases, but 4.0 and later do not ship or update
-Windows. CI still compiles and tests retained Windows code. That coverage does
-not restore distribution or supported-platform status.
+Windows packages ended with 3.3.0. See the
+[older-release index](docs/VERSION-HISTORY.md) for archived versions.
 
 Read [Installation](docs/INSTALL.md) for Nix, older Linux systems, source
 builds, and uninstall steps.
+
+Run CLI commands inside a Kettle pane. From another macOS terminal, use
+`~/Applications/kettle.app/Contents/MacOS/kettle` in place of `kettle` if it
+is not on your `PATH`.
 
 Check for a release and install it with:
 
