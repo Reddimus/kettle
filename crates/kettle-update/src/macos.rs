@@ -730,9 +730,9 @@ fn extract_bundle_into(staging: &Staging, archive: &[u8]) -> Result<(), UpdateEr
                 "encrypted archive entry".to_string(),
             ));
         }
-        let path = entry
-            .enclosed_name()
-            .ok_or_else(|| UpdateError::UnsafeArchive(entry.name().to_string()))?;
+        let path = entry.enclosed_name().ok_or_else(|| {
+            UpdateError::UnsafeArchive(String::from_utf8_lossy(entry.name_raw()).into_owned())
+        })?;
         validate_archive_path(&path)?;
 
         let is_dir = entry.is_dir();
