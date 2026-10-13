@@ -75,13 +75,15 @@ impl Geometry {
     }
 
     fn will_exit(&mut self) {
-        self.exit_pending = true;
-        self.exit_generation = Some(self.generation);
+        if self.suspended {
+            self.exit_pending = true;
+            self.exit_generation = Some(self.generation);
+        }
     }
 
     fn exited(&mut self) -> u64 {
         let generation = self.exit_generation.take().unwrap_or(self.generation);
-        if generation == self.generation {
+        if self.suspended && generation == self.generation {
             self.exit_pending = true;
         }
         generation
@@ -334,6 +336,7 @@ mod tests {
             Restore::Ignore,
             "restore is consumed once"
         );
+        assert!(!geometry.holds_resize(false));
     }
 
     #[test]
@@ -439,6 +442,33 @@ mod tests {
         assert_eq!(
             geometry.finish(new_exit, false),
             Restore::Resume(Some(wanted))
+        );
+    }
+
+    #[test]
+    fn duplicate_exit_notifications_cannot_hold_future_windowed_resizes() {
+        let wanted = frame(740.0, 480.0);
+        let mut geometry = Geometry::new(wanted, false);
+        geometry.enter(None);
+        geometry.will_exit();
+        let generation = geometry.exited();
+        assert_eq!(
+            geometry.finish(generation, false),
+            Restore::Resume(Some(wanted))
+        );
+        geometry.will_exit();
+        assert!(!geometry.holds_resize(false));
+        let duplicate = geometry.exited();
+        assert_eq!(geometry.finish(duplicate, false), Restore::Ignore);
+        assert!(!geometry.holds_resize(false));
+        let resized = frame(820.0, 530.0);
+        geometry.observe(resized, false);
+        geometry.enter(None);
+        geometry.will_exit();
+        let generation = geometry.exited();
+        assert_eq!(
+            geometry.finish(generation, false),
+            Restore::Resume(Some(resized))
         );
     }
 

@@ -127,7 +127,7 @@ missing caption text. It also enters fullscreen through the native green button
 and requires one Kettle toggle to restore the original surface. macOS CI runs
 the same check, verifies a borderless roundtrip, and retains failure captures. Portable geometry tests cover
 resized and maximized frames, startup fullscreen, rejected transitions, queued
-reentry and invalid sizes. Mutations that remove the transition freeze, exit
+reentry, duplicate exits and invalid sizes. Mutations that remove the transition freeze, exit
 preparation or original exit generation fail their regressions.
 The check caught intermittent overlap in the published 5.0.0 bundle on macOS 27;
 the corrected window-blur path passes. Windows tests pin DWM
