@@ -48,6 +48,15 @@ class FullscreenTests(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
+    def test_native_state_requires_a_boolean(self):
+        window = Window({"width": 740, "height": 480})
+        for value in (True, False):
+            with patch.object(window, "json_ctl", return_value={"fullscreen": value}):
+                self.assertEqual(checker.native_fullscreen(window), value)
+        with patch.object(window, "json_ctl", return_value={"fullscreen": "false"}):
+            with self.assertRaises(AssertionError):
+                checker.native_fullscreen(window)
+
     def test_zoom_is_not_fullscreen_entry(self):
         window = Window({"width": 740, "height": 480})
         with tempfile.TemporaryDirectory() as directory, \

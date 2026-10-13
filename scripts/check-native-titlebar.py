@@ -44,15 +44,10 @@ def caption_ink(path, bounds, scale):
 
 def capture(live, out, label, hover_caption=False):
     modal.focus(live)
-    code = (
-        'import AppKit; import Foundation; '
-        'let rows=CGWindowListCopyWindowInfo([.optionOnScreenOnly],kCGNullWindowID)! as! [[String:Any]]; '
-        'let row=rows.first { ($0[kCGWindowOwnerPID as String] as? Int)==' + str(live.pid) +
-        ' && ($0[kCGWindowName as String] as? String)=="Kettle caption fixture" }!; '
-        'let data=try! JSONSerialization.data(withJSONObject:row); '
-        'print(String(data:data,encoding:.utf8)!)'
-    )
-    result = modal.live_ui.run(["swift", "-e", code], timeout=15)
+    query = out / "native-window-info"
+    result = modal.live_ui.run([
+        str(query), str(live.pid), "Kettle caption fixture"
+    ], timeout=15)
     result.check_returncode()
     row = json.loads(result.stdout)
     bounds = row["kCGWindowBounds"]
@@ -103,15 +98,9 @@ def stable_surface(live, ready, message):
 
 
 def native_fullscreen(live):
-    result = modal.live_ui.run(["osascript", "-e",
-        'tell application "System Events" to tell (first process whose unix id is '
-        + str(live.pid)
-        + ') to get value of attribute "AXFullScreen" of window "Kettle caption fixture"'
-    ], timeout=10)
-    result.check_returncode()
-    value = result.stdout.strip().lower()
-    assert value in ("true", "false"), f"invalid native fullscreen state: {value!r}"
-    return value == "true"
+    value = live.json_ctl("ui_geometry")["fullscreen"]
+    assert isinstance(value, bool), f"invalid native fullscreen state: {value!r}"
+    return value
 
 
 def wait_fullscreen(live, expected):
@@ -142,12 +131,12 @@ def native_fullscreen_roundtrip(live, out):
           'of (first button whose subrole is "AXFullScreenButton")'
     ], timeout=10)
     result.check_returncode()
-    wait_fullscreen(live, True)
-    entered = stable_surface(
-        live, lambda surface: surface != wanted, "native fullscreen did not settle",
-    )
-    trace = {"before": wanted, "entered": entered}
+    trace = {"before": wanted}
     try:
+        wait_fullscreen(live, True)
+        trace["entered"] = stable_surface(
+            live, lambda surface: surface != wanted, "native fullscreen did not settle",
+        )
         fullscreen_restore(live, wanted)
     finally:
         for key, read in (("after", lambda: live.json_ctl("ui_geometry")),
@@ -162,6 +151,12 @@ def native_fullscreen_roundtrip(live, out):
 
 def check(kettle, out):
     out.mkdir(mode=0o700, parents=True, exist_ok=False)
+    query = out / "native-window-info"
+    result = modal.live_ui.run([
+        "swiftc", str(Path(__file__).with_name("native-window-info.swift")),
+        "-o", str(query),
+    ], timeout=90)
+    result.check_returncode()
     config = out / "config"
     config.write_text(
         "agent-server = full\nrestore-session = false\nupdate-policy = off\n"

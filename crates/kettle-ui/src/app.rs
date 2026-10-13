@@ -27110,6 +27110,15 @@ impl App {
         });
         if let serde_json::Value::Object(fields) = &mut geometry {
             fields.insert(
+                "fullscreen".into(),
+                serde_json::Value::Bool(
+                    target
+                        .window
+                        .as_ref()
+                        .is_some_and(|window| window.fullscreen().is_some()),
+                ),
+            );
+            fields.insert(
                 "inline_cards".into(),
                 serde_json::Value::Array(inline_cards),
             );

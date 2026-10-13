@@ -7,6 +7,7 @@ on:
       - "crates/kettle-ui/**"
       - "scripts/check-native-titlebar.py"
       - "scripts/test-native-titlebar.py"
+      - "scripts/native-window-info.swift"
       - "scripts/check-modal-shortcuts.py"
       - "scripts/check-live-ui-smoke.py"
       - ".github/workflows/native-window.yml"
