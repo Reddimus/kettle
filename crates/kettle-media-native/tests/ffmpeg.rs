@@ -6,8 +6,10 @@
 #![cfg(unix)]
 
 use std::fs::File;
+use std::io::Write as _;
 use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use kettle_media::video::{
@@ -94,6 +96,47 @@ const GOOD: Answer = Answer {
     codecs_hang: false,
 };
 
+fn write_script(path: &Path, contents: &[u8]) {
+    // Decoder forks must not inherit a writable script descriptor (ETXTBSY).
+    // Publish a fresh inode only after its separate writer has exited.
+    let staging = tempfile::Builder::new()
+        .prefix(".kettle-script-")
+        .tempdir_in(path.parent().unwrap())
+        .unwrap();
+    let script = staging.path().join("script");
+    let mut writer = Command::new("/bin/sh")
+        .args(["-c", "/bin/cat > \"$1\"", "fixture-writer"])
+        .arg(&script)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let written = writer.stdin.take().unwrap().write_all(contents);
+    let output = writer.wait_with_output().unwrap();
+    written.unwrap();
+    assert!(output.status.success(), "script writer failed: {output:?}");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::rename(script, path).unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn executable_replacement_is_not_held_by_an_old_writer() {
+    let directory = kettle_test_support::private_tempdir("kettle-script-replace-");
+    let path = directory.path().join("script");
+    write_script(&path, b"#!/bin/sh\nexit 1\n");
+    let old_writer = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    write_script(&path, b"#!/bin/sh\nexit 0\n");
+    assert!(
+        std::process::Command::new(&path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    drop(old_writer);
+}
+
 impl Fake {
     fn new(description: &[&str], packets: &[&str], answer: Answer) -> Self {
         let directory = kettle_test_support::private_tempdir("kettle-ffmpeg-fixture-");
@@ -131,8 +174,7 @@ impl Fake {
         };
         for (name, body) in [("ffprobe", ffprobe), ("ffmpeg", ffmpeg)] {
             let path = directory.path().join(name);
-            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            write_script(&path, format!("#!/bin/sh\n{body}\n").as_bytes());
         }
         Self { directory }
     }
@@ -467,7 +509,10 @@ fn descriptions_without_a_duration_or_video() {
     assert_eq!(result.unwrap_err(), FailureCode::UnsupportedMedia);
 
     let fake = Fake::new(DESCRIPTION, PACKETS, GOOD);
-    std::fs::write(fake.directory.path().join("ffprobe"), "#!/bin/sh\nexit 1\n").unwrap();
+    write_script(
+        &fake.directory.path().join("ffprobe"),
+        b"#!/bin/sh\nexit 1\n",
+    );
     let decoder = Ffmpeg::trust(&fake.directory.path().join("ffmpeg"));
     let (result, _) = take(&decoder.unwrap(), &clip, &[500], (8, 6), later());
     assert_eq!(result.unwrap_err(), FailureCode::RenderParse);
@@ -631,8 +676,7 @@ fn each_program_brings_its_own_library_tree() {
             .create(root.join(package).join("lib"))
             .unwrap();
         let path = bin.join(program);
-        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_script(&path, b"#!/bin/sh\nexit 0\n");
     }
     let named = root.join("named");
     std::fs::DirBuilder::new()

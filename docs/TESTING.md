@@ -4647,6 +4647,11 @@ by a return or a panic, closes its result channel before it wakes the App.
 The shelf counts unseen items, and a replaced item is unseen again unless it
 is the one on screen.
 
+Executable shell fixtures are written by a child and published by rename after
+it exits, so parallel decoder forks cannot inherit a writable script descriptor
+(`ETXTBSY`). The Linux replacement test holds an old writer open; reverting
+`write_script` to in-place writes fails at execution with `Text file busy`.
+
 Pane geometry and preview lanes. `kettle-ui`'s `pane_partition` tests check
 that a pane's titlebar, terminal and lane tile its leaf exactly, with no
 overlap and nothing left over, across fractional origins and cells, both

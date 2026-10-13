@@ -34,6 +34,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   and check still timestamps against the decoder's bounded keyframe fallback.
 - Copy a path in the native hint fixture, keeping browser activation from
   interfering with modal shortcut checks.
+- Publish FFmpeg test scripts after their writers exit, avoiding Linux
+  `Text file busy` errors during parallel tests.
 
 ## [5.0.0] — 2026-10-11
 
