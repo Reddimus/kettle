@@ -1120,7 +1120,7 @@ draining; relocated binaries can name the same fixture
 directory with `KETTLE_TEST_VIDEO_FIXTURES`.
 
 The [native audio workflow](../.github/workflows/linux-audio.yml) builds the
-worker independently, then runs mandatory decoder, playback and broker tests
+worker independently, then runs mandatory output, decoder, playback and broker tests
 through `scripts/check-linux-audio.py`. It rejects skips, retains raw logs and
 results, and closes only an audio service it started. Native playback failures
 print bounded protocol summaries with receipt times before deleting their
