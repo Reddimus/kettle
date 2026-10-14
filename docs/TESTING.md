@@ -1132,6 +1132,9 @@ runtime library and search path. `check-lane-media-smoke.py --require-audio` che
 play/pause and seek through the UI; `--mode overlay` exercises the centered
 viewer with the same assertions. Both retain screenshots and failure logs.
 
+Native macOS clock fixtures share a bounded poll for observed timestamps
+instead of taking one sample after a fixed sleep. The polling regression fails
+when the first unavailable timestamp is treated as final.
 The empty and partial PCM startup regressions failed before priming the first
 output piece. Pending startup keeps the one-second failure bound, and Pause
 resets that wait without starting the device.
