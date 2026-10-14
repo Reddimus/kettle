@@ -8,6 +8,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- Open image copies in Ubuntu's Loupe image viewer, with Eye of GNOME as a
+  fallback.
+
 - Move a live tab to another window from the command palette, including on
   Wayland; keep its running programs, splits and scrollback.
 
