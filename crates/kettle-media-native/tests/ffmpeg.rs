@@ -969,6 +969,71 @@ fn real_ffmpeg_plays_each_frame_in_order() {
     }
 }
 
+/// A paced consumer cannot drain future pictures to make its sound arrive.
+#[test]
+fn real_ffmpeg_paces_video_from_pcm_without_stalling() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    };
+    let Some(decoder) = installed() else { return };
+    let directory = kettle_test_support::private_tempdir("kettle-paced-pcm-");
+    let path = directory.path().join("ticks.mp4");
+    std::fs::copy(fixture("ticks.mp4"), &path).unwrap();
+    let clip = Clip::open(directory, path);
+    let mut playback = play(&decoder, &clip, (64, 36), 0, 30_000).unwrap();
+    let mut audio = playback.audio.take().expect("decoded PCM");
+    let cancel = audio.cancellation().unwrap();
+    let heard = Arc::new(AtomicU64::new(0));
+    let stopped = Arc::new(AtomicBool::new(false));
+    let (clock, stop) = (Arc::clone(&heard), Arc::clone(&stopped));
+    let sound = std::thread::spawn(move || {
+        let mut samples = [0.0; 1920];
+        while !stop.load(Ordering::Acquire) {
+            match audio.next_block(&mut samples) {
+                Ok(Some(block)) => {
+                    clock.store(block.at_frame, Ordering::Release);
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Ok(None) => return Ok(()),
+                Err(_) if stop.load(Ordering::Acquire) => return Ok(()),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    });
+    let gate = PlayGate::default();
+    let mut rgba = vec![0; playback.opened.width as usize * playback.opened.height as usize * 4];
+    let mut times = Vec::new();
+    let result = (|| -> Result<(), String> {
+        while let Some(pts) = playback
+            .frames
+            .next_frame(&mut rgba, &gate)
+            .map_err(|error| format!("video: {error:?}"))?
+        {
+            let until = Instant::now() + Duration::from_secs(2);
+            while heard.load(Ordering::Acquire) < pts * 48 {
+                if Instant::now() >= until {
+                    return Err(format!(
+                        "picture {pts} waits for PCM at {}",
+                        heard.load(Ordering::Acquire)
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            times.push(pts);
+        }
+        Ok(())
+    })();
+    stopped.store(true, Ordering::Release);
+    cancel();
+    drop(playback);
+    let audio_result = sound.join().unwrap();
+    result.unwrap();
+    audio_result.unwrap();
+    assert_eq!(times, (0..4000).step_by(100).collect::<Vec<_>>());
+}
+
 /// Audio may precede the first picture. A paused session must still open
 /// without buffering that whole lead or independently shifting either clock.
 #[test]
