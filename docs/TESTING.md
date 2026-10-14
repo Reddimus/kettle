@@ -5462,6 +5462,8 @@ launches, MCP receipt privacy, rendered chart pixels, agent exit and unscoped
 shelf fallback. CI runs it under Xvfb; Ubuntu GNOME Wayland acceptance is
 recorded separately. The fixture makes no model calls and is not official CLI
 acceptance. It requires existing Rust, Python and Node; it installs nothing.
+The npm fixture copies Node into its private directory with mode 0700 so hosted
+toolcache ownership and permissions do not weaken production admission.
 Guard reversals cover pane identity, peer-file stamp, late process validation,
 relative PATH selection, descriptor closure, receipt privacy and CLI option
 exclusion. Each produced an assertion failure, followed by source restoration.

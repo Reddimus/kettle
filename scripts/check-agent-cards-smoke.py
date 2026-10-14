@@ -64,7 +64,11 @@ def npm_fixture(root, agent, node):
     binary = root / "npm/bin"
     binary.mkdir()
     (binary / "codex").symlink_to(wrapper)
-    (binary / "node").symlink_to(node)
+    # Hosted toolcache runtimes may belong to the image builder or be group
+    # writable. Test the accepted private-install route without changing them.
+    private_node = binary / "node"
+    shutil.copyfile(node, private_node)
+    private_node.chmod(0o700)
     return binary
 
 
@@ -93,11 +97,11 @@ def check_case(app, binary, root, out, name, target, scoped, path, asset):
         model = json.loads((case / "model.json").read_text())
         hook = json.loads((case / "hook.json").read_text())
         delivery = model["result"]["structuredContent"]["delivery"]
-        assert delivery == ("card" if scoped else "shelf"), model
         assert "permit" not in json.dumps(model) and "systemMessage" not in json.dumps(model)
         destination = out / name
         destination.mkdir()
         (destination / "model.json").write_text(json.dumps(model, indent=2) + "\n")
+        assert delivery == ("card" if scoped else "shelf"), model
         if scoped:
             wait_for(lambda: app.json_ctl("ui_geometry")["inline_cards"])
             wait_for(lambda: all(card["settled"] for card in app.json_ctl("ui_geometry")["inline_cards"]))
@@ -125,7 +129,7 @@ def check_case(app, binary, root, out, name, target, scoped, path, asset):
 
 def check(kettle, worker, node, out):
     out.mkdir(mode=0o700, parents=True, exist_ok=False)
-    result = {"pass": False, "scope": "simulated native agents; no official CLI or model acceptance", "cases": []}
+    result = {"node_source_mode": oct(node.stat().st_mode & 0o7777), "node_source_uid": node.stat().st_uid, "pass": False, "scope": "simulated native agents; no official CLI or model acceptance", "cases": []}
     try:
         with tempfile.TemporaryDirectory(prefix="kettle-agent-cards-") as scratch:
             root = Path(scratch)
