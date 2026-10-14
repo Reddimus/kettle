@@ -33,6 +33,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Preserve Wayland window dimensions at startup and when tearing off tabs.
+
 - Open pasted screenshots in Kettle without changing the pasted command line.
 
 - Keep Linux desktop notifications visible after sending them on GNOME.

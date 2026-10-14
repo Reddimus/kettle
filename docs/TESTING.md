@@ -2779,6 +2779,22 @@ reject a delayed drop after another paste while preserving focus reports.
 `just vendor-clipboard-check` covers Nautilus CRLF decoding and encoded CR
 filenames without touching the desktop clipboard. Its regression fails with
 the upstream decoder correction removed.
+Normal decorated Wayland windows must also retain their configured grid at
+startup and their content dimensions after a tear. In an isolated test profile,
+capture `WAYLAND_DEBUG=client` while opening those windows, then run:
+
+```sh
+python3 scripts/check-wayland-first-frame.py wayland.log --minimum-windows 2
+```
+
+The checker requires decoration buffers to commit before each window's first
+client buffer; an earlier client commit clips the decoration geometry. Its
+portable fixtures cover the old ordering, uncommitted buffers, missing evidence,
+reused object IDs and bounded file reads. Logs must be regular files of at most
+16 MiB. `just wayland-first-frame-self-test` runs them in the gate.
+The native regression lost 35 pixels at startup and again on tear-off with inline
+first paint; queued Wayland first paint must preserve both grids instead.
+
 Portable tests cover action parsing and shared menu
 dispatch; the pre-change native fixture rejects the unknown action.
 

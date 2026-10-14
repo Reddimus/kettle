@@ -150,6 +150,12 @@ jobs:
       - name: Live UI helper self-test (Unix)
         if: runner.os != 'Windows'
         run: python3 scripts/check-live-ui-smoke.py self-test
+      - name: Wayland first-frame trace fixtures (Windows)
+        if: runner.os == 'Windows'
+        run: python scripts/check-wayland-first-frame.py self-test
+      - name: Wayland first-frame trace fixtures (Unix)
+        if: runner.os != 'Windows'
+        run: python3 scripts/check-wayland-first-frame.py self-test
       # The session recorder is now a runtime toggle (config `record = on` /
       # `--record`) compiled into every build, so the default build/clippy/test
       # above exercise it directly — no separate feature leg is needed.

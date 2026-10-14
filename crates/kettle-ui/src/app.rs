@@ -35541,6 +35541,18 @@ impl App {
         }
     }
 
+    fn start_window_frames(&mut self, ws: &mut WindowState) {
+        let Some(window) = ws.window.clone() else {
+            return;
+        };
+        // Winit draws Wayland CSD before RedrawRequested. An earlier client
+        // buffer clips the unmapped decorations out of the window geometry.
+        if !window_is_wayland(&window) {
+            self.redraw(ws);
+        }
+        window.request_redraw();
+    }
+
     /// Open another OS window in this process (the multi-window core).
     /// Returns the new window's seq on success; returns the `WindowOpen`
     /// back on failure so an `AdoptTab` caller can re-attach the tab to its
@@ -35733,19 +35745,14 @@ impl App {
             }
             ws.window_shown = true;
         }
-        // First frame painted directly. A successful presentation reveals the
-        // native window from `redraw`, so neither an empty renderer nor an
-        // un-restored default-size surface can flash on screen. macOS is
-        // revealed immediately above because Metal cannot acquire that first
-        // surface frame from a hidden NSWindow.
+        // A successful presentation reveals the restored surface. Wayland
+        // waits for Winit's CSD paint; macOS is revealed above so Metal can
+        // acquire a drawable from its visible NSWindow.
         #[cfg(target_os = "linux")]
         if let (Some(bridge), Some(window)) = (self.wayland.as_mut(), ws.window.clone()) {
             bridge.attach_drag_carrier(ws.seq, window);
         }
-        self.redraw(&mut ws);
-        if let Some(w) = &ws.window {
-            w.request_redraw();
-        }
+        self.start_window_frames(&mut ws);
         self.windows.insert(seq, ws);
         Ok(seq)
     }
@@ -37678,10 +37685,6 @@ impl App {
         // FIFO. Run one bounded slice before the first paint; a stalled child
         // retains the exact head message and about_to_wait drives retries.
         let _ = self.poll_pending_lua_commands(ws, event_loop, std::time::Instant::now());
-        // Paint the first frame *directly* here — not only via
-        // `request_redraw` — so visible startup windows receive terminal
-        // content immediately after renderer + pane setup. The follow-up
-        // `request_redraw` schedules the next normal frame.
         // Start the session recorder now that the grid exists (when requested
         // via `--record` / `KETTLE_RECORD` or the `record = on` config key;
         // resolved above). Start it BEFORE the first `redraw()` below, which
@@ -37732,17 +37735,14 @@ impl App {
                 process_working_set_mb()
             );
         }
-        self.redraw(ws);
+        self.start_window_frames(ws);
         // A window that starts hidden presents nothing until it is shown, so
         // its startup trace ends here, without a first frame. Any other
         // window's trace is printed by the first frame it presents.
         if !should_reveal_after_renderer_init(self.cfg.window_state) {
             crate::startup_trace::flush();
         }
-        if let Some(w) = &ws.window {
-            w.request_redraw();
-        }
-        // Check only after first paint. The signed-feed worker skips the first
+        // The first frame is scheduled. The signed-feed worker skips the first
         // launch, applies the shared per-interval throttle, and honors
         // off/notify/auto. A recurring timer re-checks a long-lived window.
         crate::update_check::maybe_spawn_check(

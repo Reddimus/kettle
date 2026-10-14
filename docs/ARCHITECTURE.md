@@ -1340,6 +1340,12 @@ planner's fallback surface for a saved window without geometry is the same rule
 in physical pixels. Restored geometry and explicit new-window geometry are
 applied after these attributes and still win.
 
+Wayland constructors request the first redraw instead of presenting inline.
+Winit paints its decoration subsurfaces before `RedrawRequested`; committing
+the main buffer earlier lets the compositor clip those decorations out of the
+initial geometry, shrinking the grid at startup and on each tear-off. Other
+backends retain their immediate first paint and visibility policy.
+
 The first window's fonts load while the event loop starts. `run_with` starts
 the `kettle-font-preload` thread (`font_preload.rs`) before it builds the event
 loop. The thread enumerates the system fonts, loads the bundled face and
