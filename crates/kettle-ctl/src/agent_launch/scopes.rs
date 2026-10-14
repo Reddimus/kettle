@@ -304,6 +304,20 @@ mod tests {
         println!("owned native identity fixture child pid={}", child.id());
         let owner = process::identity(child.id()).unwrap();
         let mut child = Child(Some(child));
+        // Wait for the observed child image before testing its launch scope.
+        let ready_by = Instant::now() + std::time::Duration::from_secs(2);
+        while !native.matches(owner) || !launcher.matches(root) {
+            assert!(
+                Instant::now() < ready_by,
+                "native fixture image did not settle: {:?}",
+                process::inspect(owner.pid())
+            );
+            assert!(
+                child.0.as_mut().unwrap().try_wait().unwrap().is_none(),
+                "native fixture exited before admission"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
         let now = Instant::now();
         let mut scopes = LaunchScopes::default();
         assert!(scopes.register(

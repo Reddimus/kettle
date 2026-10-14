@@ -5464,6 +5464,9 @@ recorded separately. The fixture makes no model calls and is not official CLI
 acceptance. It requires existing Rust, Python and Node; it installs nothing.
 The npm fixture copies Node into its private directory with mode 0700 so hosted
 toolcache ownership and permissions do not weaken production admission.
+Native identity fixtures wait for the final `/proc` image before admission.
+Audio device fixtures allow transient missing timestamps across pause/resume,
+within the same two-second clock budget; they still require real clock samples.
 Guard reversals cover pane identity, peer-file stamp, late process validation,
 relative PATH selection, descriptor closure, receipt privacy and CLI option
 exclusion. Each produced an assertion failure, followed by source restoration.
