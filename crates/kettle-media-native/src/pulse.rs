@@ -264,12 +264,13 @@ impl Output {
                     .cast_mut()
                     .cast(),
             );
-            // START_CORKED | INTERPOLATE_TIMING | AUTO_TIMING_UPDATE.
+            // START_CORKED | INTERPOLATE_TIMING | AUTO_TIMING_UPDATE |
+            // ADJUST_LATENCY: bound device plus stream buffering, not just the stream.
             if (output.api.pa_stream_connect_playback)(
                 output.stream,
                 ptr::null(),
                 &attr,
-                1 | 2 | 8,
+                1 | 2 | 8 | 0x2000,
                 ptr::null_mut(),
                 ptr::null_mut(),
             ) < 0
