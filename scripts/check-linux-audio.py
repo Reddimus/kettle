@@ -75,7 +75,7 @@ def main():
         else:
             result['reused_audio_service'] = True
         stages = [
-            ('decoder', executable(args.decoder_tests_json, 'ffmpeg'), [], 19),
+            ('decoder', executable(args.decoder_tests_json, 'ffmpeg'), [], 20),
             ('playback', executable(args.worker_tests_json, 'native_audio'), ['--ignored'], 4),
             ('broker', executable(args.worker_tests_json, 'process_boundary'),
              ['--ignored', '--exact', 'linux_pcm_only_broker_plays_pauses_and_closes'], 1),

@@ -94,19 +94,99 @@ impl Drop for Group {
         }
     }
 }
-struct Logs(kettle_test_support::PrivateTempDir);
+struct Transcript {
+    start: Instant,
+    bytes: Vec<u8>,
+    chunks: Vec<(usize, Duration)>,
+}
+impl Transcript {
+    fn record(&mut self, bytes: &[u8]) {
+        let take = bytes
+            .len()
+            .min((4 * 1024 * 1024usize).saturating_sub(self.bytes.len()));
+        if take > 0 && self.chunks.len() < 16_384 {
+            self.bytes.extend_from_slice(&bytes[..take]);
+            self.chunks.push((self.bytes.len(), self.start.elapsed()));
+        }
+    }
+}
+struct Trace {
+    label: String,
+    direction: kettle_media::wire::Direction,
+    data: Arc<Mutex<Transcript>>,
+}
+type Traces = Arc<Mutex<Vec<Trace>>>;
+struct Traced<T> {
+    pipe: T,
+    data: Arc<Mutex<Transcript>>,
+}
+impl<T: std::io::Read> std::io::Read for Traced<T> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.pipe.read(bytes)?;
+        self.data.lock().unwrap().record(&bytes[..n]);
+        Ok(n)
+    }
+}
+impl<T: std::io::Write> std::io::Write for Traced<T> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let n = self.pipe.write(bytes)?;
+        self.data.lock().unwrap().record(&bytes[..n]);
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.pipe.flush()
+    }
+}
+struct Logs {
+    directory: kettle_test_support::PrivateTempDir,
+    traces: Traces,
+}
 impl Logs {
     fn new(prefix: &str) -> Self {
-        Self(kettle_test_support::private_tempdir(prefix))
+        Self {
+            directory: kettle_test_support::private_tempdir(prefix),
+            traces: Arc::default(),
+        }
     }
     fn path(&self) -> &Path {
-        self.0.path()
+        self.directory.path()
     }
 }
 impl Drop for Logs {
     fn drop(&mut self) {
         if !std::thread::panicking() {
             return;
+        }
+        use kettle_media::wire::{Frame, read_frame_within};
+        for trace in self.traces.lock().unwrap().iter() {
+            let data = trace.data.lock().unwrap();
+            let mut input = std::io::Cursor::new(&data.bytes);
+            for _ in 0..120 {
+                let Ok(Some(frame)) =
+                    read_frame_within(&mut input, trace.direction, 4 * 1024 * 1024)
+                else {
+                    break;
+                };
+                let at = data
+                    .chunks
+                    .iter()
+                    .find(|(end, _)| *end >= input.position() as usize)
+                    .map(|(_, at)| at.as_millis())
+                    .unwrap_or(0);
+                let summary = match frame {
+                    Frame::Pcm(kettle_media::pcm::Message::Block(block)) => {
+                        format!("PCM block {} at {}", block.sequence, block.at_frame)
+                    }
+                    Frame::Pcm(message) => format!("PCM {message:?}"),
+                    Frame::VideoFrame(frame) => format!("picture {}", frame.pts_ms),
+                    Frame::PlayCommand(command) => format!("command {command:?}"),
+                    Frame::AudioState(state) => format!("audio {state:?}"),
+                    Frame::PlayState(state) => format!("state {state:?}"),
+                    Frame::Failure(failure) => format!("failure {:?}", failure.code),
+                    frame => format!("kind {}", frame.kind()),
+                };
+                eprintln!("{} {at}ms {summary}", trace.label);
+            }
         }
         if let Ok(entries) = std::fs::read_dir(self.path()) {
             for entry in entries.flatten().take(8) {
@@ -133,6 +213,27 @@ struct Platform {
     path: PathBuf,
     children: Arc<Mutex<Vec<u32>>>,
     logs: PathBuf,
+    traces: Traces,
+}
+impl Platform {
+    fn trace<T>(
+        &self,
+        pipe: T,
+        index: usize,
+        direction: kettle_media::wire::Direction,
+    ) -> Traced<T> {
+        let data = Arc::new(Mutex::new(Transcript {
+            start: Instant::now(),
+            bytes: Vec::new(),
+            chunks: Vec::new(),
+        }));
+        self.traces.lock().unwrap().push(Trace {
+            label: format!("worker-{index} {direction:?}"),
+            direction,
+            data: Arc::clone(&data),
+        });
+        Traced { pipe, data }
+    }
 }
 impl WorkerPlatform for Platform {
     fn worker_path(&self) -> Result<&Path, UnavailableCause> {
@@ -167,7 +268,8 @@ impl WorkerPlatform for Platform {
             ));
         }
         let mut children = self.children.lock().unwrap();
-        let log = std::fs::File::create(self.logs.join(format!("worker-{}.log", children.len())))?;
+        let index = children.len();
+        let log = std::fs::File::create(self.logs.join(format!("worker-{index}.log")))?;
         let mut child = worker_command(path)
             .env(kettle_media::video::DECODER_ENV, "/usr/bin/ffmpeg")
             .stderr(log)
@@ -181,8 +283,16 @@ impl WorkerPlatform for Platform {
                 child,
                 reaped: false,
             }),
-            stdin: Box::new(stdin),
-            stdout: Box::new(stdout),
+            stdin: Box::new(self.trace(
+                stdin,
+                index,
+                kettle_media::wire::Direction::ParentToWorker,
+            )),
+            stdout: Box::new(self.trace(
+                stdout,
+                index,
+                kettle_media::wire::Direction::WorkerToParent,
+            )),
         })
     }
 }
@@ -241,6 +351,7 @@ fn linux_client_decodes_audio_pauses_seeks_and_closes_both_workers() {
             path,
             children: Arc::clone(&children),
             logs: logs.path().to_path_buf(),
+            traces: Arc::clone(&logs.traces),
         }),
     );
     let request = PlayOpen {
@@ -395,6 +506,7 @@ fn linux_client_keeps_video_when_the_pcm_broker_cannot_start() {
             path,
             children: Arc::clone(&children),
             logs: logs.path().to_path_buf(),
+            traces: Arc::clone(&logs.traces),
         }),
     );
     let request = PlayOpen {
@@ -479,6 +591,7 @@ fn linux_client_keeps_the_last_picture_while_longer_audio_finishes() {
             path,
             children: Arc::clone(&children),
             logs: logs.path().to_path_buf(),
+            traces: Arc::clone(&logs.traces),
         }),
     );
     let request = PlayOpen {
@@ -596,6 +709,7 @@ fn linux_client_seeks_pcm_between_frame_boundaries() {
             path,
             children: Arc::clone(&children),
             logs: logs.path().to_path_buf(),
+            traces: Arc::clone(&logs.traces),
         }),
     );
     for start_ms in [2100, 2133, 2166, 2233, 2366] {

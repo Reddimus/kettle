@@ -1114,13 +1114,16 @@ opening, seeks between frame/sample boundaries, audio outlasting video,
 owned worker closure, and
 video continuing when the broker cannot start. The PCM-only boundary fixture
 checks the confined broker. The native FFmpeg suite checks shared timestamps,
-leading audio and codec padding; relocated binaries can name the same fixture
+leading audio, codec padding and video paced by PCM instead of unbounded
+draining; relocated binaries can name the same fixture
 directory with `KETTLE_TEST_VIDEO_FIXTURES`.
 
 The [native audio workflow](../.github/workflows/linux-audio.yml) builds the
 worker independently, then runs mandatory decoder, playback and broker tests
 through `scripts/check-linux-audio.py`. It rejects skips, retains raw logs and
-results, and closes only an audio service it started. An existing service is
+results, and closes only an audio service it started. Native playback failures
+print bounded protocol summaries with receipt times before deleting their
+private test logs; samples, pixels and paths are omitted. An existing service is
 preserved. The Ubuntu 26.04 ARM check also exercised a Matroska audio tail with
 and without its track-end tag. These checks verify service playback, not
 physical speakers. Nix package-content checks require the helper's Pulse
