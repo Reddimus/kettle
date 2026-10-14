@@ -190,7 +190,10 @@ The confined FFmpeg worker reads encoded media and sends timestamped, fixed-size
 PCM through a four-credit parent relay. The broker alone connects to the local
 PulseAudio-compatible service before confinement; it never accepts a media file.
 Both workers share the session's 768 MiB footprint budget and caller-driven lease.
-Their queues, commands and clock feedback stay off the GUI thread. Pause corks
+Their queues, commands and clock feedback stay off the GUI thread. Stream writes
+use PulseAudio credit, not the later hardware presentation clock. They request
+60 ms of buffering and cap negotiated storage and recovery credit at 160 ms;
+invalid credit retires the output. The hardware clock remains the A/V clock. Pause corks
 output, per-stream mute preserves time, and every seek retires the old generation.
 Missing sound output leaves video usable with its existing Unavailable notice.
 

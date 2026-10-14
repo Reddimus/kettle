@@ -26,6 +26,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Keep Linux video sound continuous when the audio device buffers playback.
+
 - Update Rustls to 0.23.46 for upstream TLS fixes.
 
 ## [5.0.1] — 2026-10-13

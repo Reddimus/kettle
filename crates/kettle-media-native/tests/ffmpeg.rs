@@ -1107,14 +1107,29 @@ fn real_ffmpeg_keeps_audio_before_video_without_opening_deadlock() {
         let mut samples = [0.0; 1920];
         let mut next = start_ms * 48;
         let mut loudest = 0.0f32;
+        let (mut energy, mut real, mut imaginary, mut measured) = (0.0, 0.0, 0.0, 0usize);
         while let Some(block) = audio.next_block(&mut samples).unwrap() {
             assert_eq!((block.at_frame, block.frames), (next, 960));
             assert!(samples.iter().all(|v| v.is_finite()));
             loudest = samples.iter().fold(loudest, |max, v| max.max(v.abs()));
+            for (offset, frame) in samples.as_chunks::<2>().0.iter().enumerate() {
+                let at = block.at_frame + offset as u64;
+                if (48_000..96_000).contains(&at) {
+                    let value = f64::from(frame[0]);
+                    let phase = at as f64 * 440.0 * std::f64::consts::TAU / 48_000.0;
+                    energy += value * value;
+                    real += value * phase.cos();
+                    imaginary += value * phase.sin();
+                    measured += 1;
+                }
+            }
             next += 960;
         }
         assert!(next >= 4 * 48_000);
         assert!(loudest > 0.05, "PCM lost the tone");
+        assert_eq!(measured, 48_000);
+        let tone = 2.0 * (real * real + imaginary * imaginary) / (measured as f64 * energy);
+        assert!(tone > 0.99, "decoded PCM broke tone continuity: {tone}");
         let frames = frames.join().unwrap();
         assert_eq!(
             frames.first().unwrap().0,

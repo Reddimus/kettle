@@ -1112,13 +1112,13 @@ cargo test --locked -p kettle-media-worker --test native_audio -- \
 These require trusted `/usr/bin/ffmpeg` and a live PulseAudio-compatible service.
 They cover two simultaneous sessions, pause/resume/mute, commands sent during
 opening, seeks between frame/sample boundaries, audio outlasting video,
-owned worker closure, and
-video continuing when the broker cannot start. The PCM-only boundary fixture
-checks the confined broker with Play arriving before its first PCM packet.
+owned worker closure, and video continuing when the broker cannot start. The
+PCM-only boundary fixture checks the confined broker with Play arriving before
+its first PCM packet.
 The native FFmpeg suite checks shared timestamps,
-leading audio, codec padding and video paced by PCM instead of unbounded
-draining; relocated binaries can name the same fixture
-directory with `KETTLE_TEST_VIDEO_FIXTURES`.
+leading audio, continuous tone samples, codec padding and video paced by PCM
+instead of unbounded draining. Relocated binaries can name the fixture directory
+with `KETTLE_TEST_VIDEO_FIXTURES`.
 
 The [native audio workflow](../.github/workflows/linux-audio.yml) builds the
 worker independently, then runs mandatory output, decoder, playback and broker tests
@@ -1132,7 +1132,10 @@ playback with its `norewinds=1` 50 ms mode. The one-second stalled-clock bound
 stays unchanged. The cold-sink case is reported unrun when reusing a service.
 The Ubuntu 26.04 ARM check also exercised a Matroska audio tail with
 and without its track-end tag. These checks verify service playback, not
-physical speakers. Nix package-content checks require the helper's Pulse
+physical speakers. The native output test also feeds continuous PCM for 600 ms
+and rejects withheld writable credit. Portable tests bound negotiated storage
+and write credit. Hardware presentation time includes device latency and must
+not throttle stream writes. Nix package-content checks require the helper's Pulse
 runtime library and search path. `check-lane-media-smoke.py --require-audio` checks native
 play/pause and seek through the UI; `--mode overlay` exercises the centered
 viewer with the same assertions. Both retain screenshots and failure logs.
