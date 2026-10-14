@@ -55,8 +55,9 @@ def main():
                 raise RuntimeError('audio fixture needs an owned /run/user/UID directory')
             (runtime / 'pulse').mkdir(mode=0o700, exist_ok=True)
             service_log = (args.out_dir / 'pulse.log').open('xb')
+            # -n prevents default.pa from loading another server and sink.
             service = subprocess.Popen([
-                'pulseaudio', '--daemonize=no', '--use-pid-file=no', '--exit-idle-time=-1',
+                'pulseaudio', '-n', '--fail=yes', '--daemonize=no', '--use-pid-file=no', '--exit-idle-time=-1',
                 '--disable-shm=yes', '--file=/dev/null', '--log-target=stderr',
                 '--load=module-null-sink sink_name=kettle_ci',
                 f'--load=module-native-protocol-unix auth-anonymous=1 socket={socket}',
@@ -69,6 +70,8 @@ def main():
                 if service.poll() is not None or time.monotonic() >= until:
                     raise RuntimeError('owned audio service did not become ready')
                 time.sleep(0.02)
+            if service.poll() is not None:
+                raise RuntimeError('owned audio service exited during startup')
         else:
             result['reused_audio_service'] = True
         stages = [
@@ -78,6 +81,8 @@ def main():
              ['--ignored', '--exact', 'linux_pcm_only_broker_plays_pauses_and_closes'], 1),
         ]
         for name, binary, options, count in stages:
+            if service is not None and service.poll() is not None:
+                raise RuntimeError('owned audio service exited before native tests')
             command = [binary, *options, '--nocapture', '--test-threads=1']
             process = subprocess.Popen(command, stdin=subprocess.DEVNULL,
                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
