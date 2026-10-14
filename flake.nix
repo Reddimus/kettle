@@ -246,7 +246,8 @@
         # release uses. Useful for contributors who already have nix
         # but not Rust, or want a hermetic build env.
         devShells.default = pkgs.mkShell {
-          buildInputs = runtimeLibs ++ [ rustToolchain pkgs.pkg-config ];
+          buildInputs = runtimeLibs ++ [ rustToolchain pkgs.pkg-config ]
+            ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.dbus ];
           # Plumb the runtime libs onto LD_LIBRARY_PATH so `cargo run`
           # inside the dev shell works the same as `nix run` does on
           # the built package.

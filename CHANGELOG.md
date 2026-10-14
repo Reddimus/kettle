@@ -8,6 +8,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- Follow the desktop's reduced-motion preference on Linux, with live portal
+  updates and explicit `reduce-motion` overrides.
+
 - Center manual media previews within their split without resizing the
   terminal. Pin the same preview beside the terminal, with keyboard navigation
   and focus return; `media-open-mode = lane` keeps the previous layout.

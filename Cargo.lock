@@ -2353,9 +2353,12 @@ dependencies = [
  "accesskit_winit",
  "anyhow",
  "arboard",
+ "async-channel",
+ "async-io",
  "block2 0.5.1",
  "crossbeam-channel",
  "errno",
+ "futures-lite",
  "getrandom 0.4.3",
  "image",
  "kettle-config",
@@ -2396,6 +2399,7 @@ dependencies = [
  "windows",
  "winit",
  "x11rb",
+ "zbus",
 ]
 
 [[package]]

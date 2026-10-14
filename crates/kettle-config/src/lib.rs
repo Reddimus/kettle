@@ -1081,8 +1081,8 @@ pub enum PreviewLaneSide {
 /// lane; a preview the user starts plays either way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReduceMotion {
-    /// Follow the system: macOS's Reduce Motion setting. Where the system
-    /// does not say (Linux), motion is avoided.
+    /// Follow macOS Reduce Motion or the Linux Settings portal. If the
+    /// system preference is unavailable, motion is avoided.
     #[default]
     Auto,
     /// Always avoid it.

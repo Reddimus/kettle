@@ -62,6 +62,7 @@ mod macos_dock;
 mod macos_menu;
 mod media;
 mod modal_input;
+mod motion;
 mod mux;
 mod native_drag;
 mod native_fullscreen;

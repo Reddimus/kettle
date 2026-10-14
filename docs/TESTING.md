@@ -4505,8 +4505,26 @@ nine-color MP4's frames in turn (green at 0:01, yellow at 0:03, cyan at
 poster back still, a control client's `preview_play` started nothing, the
 real pointer resting on the picture with `video-preview-hover` on looped it
 for four seconds and again after leaving and coming back, and with
-`reduce-motion = on` resting did nothing. The plan's S-K latency, CPU and
-memory measurement was skipped for this release (no quiet machine); the
+`reduce-motion = on` resting did nothing.
+Linux motion tests use a private `dbus-daemon`, never the desktop's settings.
+They exercise initial reads, live signals, concurrent-read reconciliation,
+owner replacement, invalid values, payload bounds and cancellation during a
+stalled method. The portable policy tests cover portal values, unavailable
+preferences and explicit overrides. On Ubuntu 26.04 ARM, the ten default
+motion tests passed. The separate ignored desktop test also passed against
+GNOME's actual `ReadOne` value, without changing system preferences:
+
+```sh
+cargo test -p kettle-ui motion::
+KETTLE_MOTION_EXPECT=<ReadOne value> cargo test -p kettle-ui \
+  desktop_portal_initial_preference_matches_the_native_probe -- --ignored
+```
+
+Each new test was checked red by reversing its behavior: portal mapping,
+conservative defaults, lazy overrides, initial publication, live updates,
+initial-read reconciliation, owner-loss and malformed-value fallback,
+payload bounds, cancellation, and reconnect-delay reset. The plan's S-K latency, CPU and memory
+measurement was skipped for this release (no quiet machine); the
 bounds in PERFORMANCE are policy, not measurements.
 
 A video playing in its lane: `kettle_media::session`'s tests run a session
