@@ -635,7 +635,14 @@ mod tests {
                 codex,
                 claude: true,
             });
-            if let Some(zsh) = installed("zsh") {
+            if let Some(zsh) = installed("zsh").filter(|zsh| {
+                if scratch.additions(zsh, None).env.is_empty() {
+                    eprintln!("system zshenv prevents startup injection; zsh case unrun");
+                    false
+                } else {
+                    true
+                }
+            }) {
                 let out = scratch.run(
                     &zsh,
                     None,
