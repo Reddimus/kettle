@@ -490,6 +490,20 @@ fn linux_client_decodes_audio_pauses_seeks_and_closes_both_workers() {
 #[test]
 #[ignore = "requires trusted FFmpeg and a production worker; deliberately refuses the PCM worker"]
 fn linux_client_keeps_video_when_the_pcm_broker_cannot_start() {
+    video_survives_sound_failure(true);
+}
+
+#[test]
+#[ignore = "requires an owned cold Pulse null sink with its default two-second buffer"]
+fn linux_client_keeps_video_when_the_audio_clock_stalls() {
+    assert_eq!(
+        std::env::var("KETTLE_TEST_STALLED_AUDIO").as_deref(),
+        Ok("1")
+    );
+    video_survives_sound_failure(false);
+}
+
+fn video_survives_sound_failure(missing_broker: bool) {
     let path = PathBuf::from(
         std::env::var_os("KETTLE_TEST_PCM_WORKER").expect("explicit production worker"),
     );
@@ -501,7 +515,7 @@ fn linux_client_keeps_video_when_the_pcm_broker_cannot_start() {
     let client = WorkerClient::new(
         BuildId::from_embedded(env!("CARGO_PKG_VERSION"), env!("KETTLE_SOURCE_HASH")).unwrap(),
         Box::new(Platform {
-            unavailable_broker: true,
+            unavailable_broker: missing_broker,
             attempts: std::sync::atomic::AtomicUsize::new(0),
             path,
             children: Arc::clone(&children),
@@ -530,8 +544,23 @@ fn linux_client_keeps_video_when_the_pcm_broker_cannot_start() {
             }
         )
     });
-    assert_eq!(session.audio(), Some(AudioStatus::Unavailable));
+    assert_eq!(
+        session.audio(),
+        Some(if missing_broker {
+            AudioStatus::Unavailable
+        } else {
+            AudioStatus::Ready
+        })
+    );
     session.play();
+    if !missing_broker {
+        let until = Instant::now() + Duration::from_secs(2);
+        while session.audio() == Some(AudioStatus::Ready) {
+            session.keep();
+            assert!(Instant::now() < until, "stalled clock did not fall back");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
     let until = Instant::now() + Duration::from_secs(8);
     let mut last = None;
     loop {
@@ -569,7 +598,10 @@ fn linux_client_keeps_video_when_the_pcm_broker_cannot_start() {
         );
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert_eq!(children.lock().unwrap().len(), 1);
+    assert_eq!(
+        children.lock().unwrap().len(),
+        if missing_broker { 1 } else { 2 }
+    );
 }
 
 #[test]
