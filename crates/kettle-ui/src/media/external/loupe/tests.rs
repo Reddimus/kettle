@@ -43,12 +43,30 @@ async fn server(bus: &Bus, seen: Arc<Seen>) -> Connection {
 }
 
 fn this_binary() -> HeldExecutable {
-    HeldExecutable::open(&std::env::current_exe().unwrap()).unwrap()
+    use std::os::unix::fs::MetadataExt;
+    let path = std::env::current_exe().unwrap();
+    let metadata = std::fs::metadata(&path).unwrap();
+    HeldExecutable::open(&path).unwrap_or_else(|error| {
+        panic!(
+            "native fixture rejected: {error}; bytes={} mode={:o}",
+            metadata.len(),
+            metadata.mode()
+        )
+    })
 }
 
-// Cargo inherits umask, so its test executable may be group-writable. Run
-// identity-sensitive cases from our own protected copy, without changing it.
+#[test]
+fn the_private_fixture_is_a_live_acceptable_native_executable() {
+    if in_private_binary("the_private_fixture_is_a_live_acceptable_native_executable") {
+        return;
+    }
+    assert!(this_binary().matches(process::current().unwrap().identity));
+}
+
+// Cargo's artifact can be group-writable or exceed the viewer's size limit
+// with debug information. Prepare a protected copy without changing it.
 fn in_private_binary(test: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
     use std::os::unix::process::CommandExt;
     const CHILD: &str = "KETTLE_LOUPE_TEST_CASE";
     if std::env::var(CHILD).as_deref() == Ok(test) {
@@ -56,11 +74,27 @@ fn in_private_binary(test: &str) -> bool {
     }
     let root = crate::test_tempdir();
     let executable = root.path().join("viewer-fixture");
-    kettle_test_support::copy_executable_fixture(&std::env::current_exe().unwrap(), &executable)
-        .unwrap();
+    let prepare_path = root.path().join("prepare.log");
+    let prepare = std::fs::File::create(&prepare_path).unwrap();
+    let child = std::process::Command::new("objcopy")
+        .arg("--strip-debug")
+        .arg(std::env::current_exe().unwrap())
+        .arg(&executable)
+        .stdin(std::process::Stdio::null())
+        .stdout(prepare.try_clone().unwrap())
+        .stderr(prepare)
+        .process_group(0)
+        .spawn()
+        .expect("Linux viewer tests require binutils objcopy");
+    assert!(
+        wait_private_child(child, "strip fixture").success(),
+        "{}",
+        std::fs::read_to_string(prepare_path).unwrap()
+    );
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
     let log_path = root.path().join("result.log");
     let log = std::fs::File::create(&log_path).unwrap();
-    let mut child = std::process::Command::new(executable)
+    let child = std::process::Command::new(executable)
         .args(["--exact", &format!("media::external::loupe::tests::{test}")])
         .env(CHILD, test)
         .stdin(std::process::Stdio::null())
@@ -69,20 +103,7 @@ fn in_private_binary(test: &str) -> bool {
         .process_group(0)
         .spawn()
         .unwrap();
-    let deadline = std::time::Instant::now() + Duration::from_secs(15);
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        if std::time::Instant::now() >= deadline {
-            // SAFETY: this is our unreaped child's private process group;
-            // its private bus inherits that group and no foreign work does.
-            unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
-            let _ = child.wait();
-            panic!("private viewer test timed out: {test}");
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    };
+    let status = wait_private_child(child, test);
     let log = std::fs::read_to_string(log_path).unwrap();
     assert!(status.success(), "{test}: {log}");
     assert!(
@@ -90,6 +111,23 @@ fn in_private_binary(test: &str) -> bool {
         "private case did not run: {test}: {log}"
     );
     true
+}
+
+fn wait_private_child(mut child: Child, label: &str) -> std::process::ExitStatus {
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            return status;
+        }
+        if std::time::Instant::now() >= deadline {
+            // SAFETY: this is our unreaped child's private process group;
+            // its private bus inherits that group and no foreign work does.
+            unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+            let _ = child.wait();
+            panic!("private viewer test timed out: {label}");
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 #[test]

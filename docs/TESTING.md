@@ -4527,8 +4527,10 @@ the generation the menu named, and that its Open row is `open_card`.
 On Linux, `media::external::loupe` tests use private session buses to check
 receiver identity, exact URI delivery, alias replacement, closed receivers,
 process reuse, oversized replies and stalled calls. Identity-sensitive cases
-run from protected executable copies; Cargo's original artifact is unchanged
-even under a group-writable umask. The portal tests share the private bus fixture.
+run from protected copies stripped with binutils `objcopy`; Cargo's original
+artifact is unchanged even under a group-writable umask or with large debug
+sections. Install binutils and `dbus-daemon` to run these Linux tests.
+The portal tests share the private bus fixture.
 Reversals of selection, filename-free launch, unique recipient, held program,
 process instance, reply cap and call timeout each failed their regression test.
 For native acceptance, open a shown image through its menu on GNOME Wayland,

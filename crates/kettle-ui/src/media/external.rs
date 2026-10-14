@@ -125,7 +125,7 @@ impl Viewer {
     }
 }
 
-#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 fn linux_viewer(loupe: bool, eog: bool) -> Option<Viewer> {
     if loupe {
         Some(Viewer::Loupe)
