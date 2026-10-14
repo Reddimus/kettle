@@ -58,7 +58,7 @@ def main():
             # -n prevents default.pa from loading another server and sink.
             service = subprocess.Popen([
                 'pulseaudio', '-n', '--fail=yes', '--daemonize=no', '--use-pid-file=no', '--exit-idle-time=-1',
-                '--disable-shm=yes', '--file=/dev/null', '--log-target=stderr',
+                '--disable-shm=yes', '--file=/dev/null', '--log-target=stderr', '--log-level=debug',
                 '--load=module-null-sink sink_name=kettle_ci',
                 f'--load=module-native-protocol-unix auth-anonymous=1 socket={socket}',
             ], stdin=subprocess.DEVNULL, stdout=service_log, stderr=subprocess.STDOUT,
@@ -102,9 +102,9 @@ def main():
             result['stages'].append({'name': name, 'exit': process.returncode, 'pass': bool(passed)})
             save()
             print(f'{name}: {"PASS" if passed else "FAIL"}', flush=True)
-            if not passed:
-                raise RuntimeError(f'{name} did not run all {count} mandatory native tests')
-        result['pass'] = True
+        result['pass'] = all(stage['pass'] for stage in result['stages'])
+        if not result['pass']:
+            raise RuntimeError('native stages did not run every mandatory test successfully')
     finally:
         if service is not None:
             if service.poll() is None:
