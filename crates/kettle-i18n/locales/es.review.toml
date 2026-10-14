@@ -15,7 +15,10 @@
 # Wayland UI; dialog and Pin names received a second pass through AT-SPI.
 # 2026-10-14: the move-tab chooser and its empty state were reviewed
 # in rendered Spanish UI; native keyboard and pointer selection passed.
+# The drop-error notification was checked in the GNOME notification list,
+# expanded and readable, after a rejected 33-file batch left input unchanged.
 [status]
+notify_body_drop_unreadable = "accepted"
 inline_card_pending = "accepted"
 inline_card_unavailable = "accepted"
 inline_card_tip = "accepted"

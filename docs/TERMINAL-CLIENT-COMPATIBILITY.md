@@ -1,6 +1,6 @@
 # Terminal Client Compatibility
 
-Kettle 4.0 supports Linux and macOS. Windows and WSL paragraphs on this page
+Kettle supports Linux and macOS. Windows and WSL paragraphs on this page
 record the final Windows-supported 3.3.0 behavior and retained compatibility
 logic; they do not describe a current package or support commitment.
 

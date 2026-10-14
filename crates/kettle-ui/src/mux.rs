@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -772,6 +772,7 @@ pub struct Pane {
     pub caller_root: Option<kettle_ctl::process::ProcessIdentity>,
     pub rx: Receiver<TermEvent>,
     pty_input: PtyInputQueue,
+    user_input_generation: AtomicU64,
     /// Terminator plugin parity: optional output sidechannel, `Some` when a
     /// LuaEngine or the recorder needs PTY output. The App drains it each
     /// tick, feeds any recorder, and fires LuaEvent::Output(pane_id, bytes).
@@ -865,6 +866,11 @@ pub struct Pane {
 }
 
 impl Pane {
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn input_generation(&self) -> u64 {
+        self.user_input_generation.load(Ordering::Relaxed)
+    }
+
     /// Live terminal mode adjusted by Kettle's pre-negotiation modified-Enter
     /// policy for this pane. Protocol bits selected by the application remain
     /// untouched and therefore retain precedence in the encoder.
@@ -961,6 +967,7 @@ impl Pane {
         self.term
             .with_completion_input_admission(&[bytes.as_ref()], || {
                 let result = self.pty_input.enqueue_mouse_release(bytes.clone());
+                self.record_user_input(result, !bytes.is_empty());
                 (result, result.is_queued())
             })
     }
@@ -972,6 +979,7 @@ impl Pane {
         let input = bytes.as_ref();
         self.term.with_completion_input_admission(&[input], || {
             let result = self.pty_input.enqueue_user(bytes.clone());
+            self.record_user_input(result, !bytes.is_empty());
             (result, result.is_queued())
         })
     }
@@ -997,9 +1005,17 @@ impl Pane {
         }
         let boundaries: Vec<&[u8]> = inputs.iter().map(Vec::as_slice).collect();
         self.term.with_completion_input_admission(&boundaries, || {
+            let nonempty = !joined.is_empty();
             let result = self.pty_input.enqueue_user(Arc::from(joined));
+            self.record_user_input(result, nonempty);
             (result, result.is_queued())
         })
+    }
+
+    fn record_user_input(&self, result: PaneInputResult, nonempty: bool) {
+        if result.is_queued() && nonempty {
+            self.user_input_generation.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// Queue DEC focus reporting in the chronological user-input lane without
@@ -2075,6 +2091,7 @@ impl Mux {
                 caller_root,
                 rx,
                 pty_input,
+                user_input_generation: AtomicU64::new(0),
                 output_rx,
                 title: initial_title,
                 title_is_placeholder,
@@ -4900,6 +4917,43 @@ mod node_tests {
             Some(Failed),
             "sticky transport failure must dominate read-only policy"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn user_pastes_and_key_batches_advance_input_but_focus_reports_do_not() {
+        let cfg = Config {
+            shell_integration: false,
+            login_shell: false,
+            ..Config::default()
+        };
+        let mut mux = Mux::new();
+        let argv = vec!["/bin/cat".to_owned()];
+        mux.new_tab_with_geometry(
+            &cfg,
+            PtyGeometry::from_cell_size(80, 24, 8, 16),
+            Arc::new(|| {}),
+            &argv,
+            None,
+        )
+        .expect("PTY fixture");
+        let pane = mux.panes.values_mut().next().unwrap();
+        let initial = pane.input_generation();
+        assert_eq!(pane.feed_focus_report(true), PaneInputResult::Queued);
+        assert_eq!(pane.input_generation(), initial);
+        assert_eq!(pane.feed_input(b"a pasted path "), PaneInputResult::Queued);
+        assert_ne!(pane.input_generation(), initial);
+        let after_paste = pane.input_generation();
+        assert_eq!(
+            pane.feed_key_inputs(&[b"a".to_vec(), b"b".to_vec()]),
+            PaneInputResult::Queued
+        );
+        assert_ne!(pane.input_generation(), after_paste);
+        let after_keys = pane.input_generation();
+        pane.read_only = true;
+        assert_eq!(pane.feed_input(b"refused"), PaneInputResult::ReadOnly);
+        assert_eq!(pane.input_generation(), after_keys);
+        mux.kill_children();
     }
 
     #[test]

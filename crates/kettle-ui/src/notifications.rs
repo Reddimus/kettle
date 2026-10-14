@@ -3,6 +3,9 @@
 //! Platform notification services are external IPC. They may block, fail, or
 //! panic, so no winit event-loop path calls them directly.
 
+#[cfg(target_os = "linux")]
+mod linux;
+
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
@@ -67,6 +70,7 @@ fn claim_application() {
     });
 }
 
+#[cfg(not(target_os = "linux"))]
 fn show(notification: DesktopNotification) {
     #[cfg(target_os = "macos")]
     claim_application();
@@ -83,7 +87,7 @@ fn show(notification: DesktopNotification) {
 
 fn spawn_dispatcher(
     capacity: usize,
-    backend: impl Fn(DesktopNotification) + Send + 'static,
+    mut backend: impl FnMut(DesktopNotification) + Send + 'static,
 ) -> std::io::Result<Dispatcher> {
     let (sender, receiver) = mpsc::sync_channel(capacity);
     let worker = std::thread::Builder::new()
@@ -117,11 +121,20 @@ fn spawn_dispatcher(
 
 fn dispatcher() -> Option<&'static Dispatcher> {
     DISPATCHER
-        .get_or_init(|| match spawn_dispatcher(QUEUE_CAPACITY, show) {
-            Ok(dispatcher) => Some(dispatcher),
-            Err(error) => {
-                log::warn!("kettle.notify: notification worker could not start: {error}");
-                None
+        .get_or_init(|| {
+            #[cfg(target_os = "linux")]
+            let backend = {
+                let mut backend = linux::Backend::default();
+                move |notification| backend.show(notification)
+            };
+            #[cfg(not(target_os = "linux"))]
+            let backend = show;
+            match spawn_dispatcher(QUEUE_CAPACITY, backend) {
+                Ok(dispatcher) => Some(dispatcher),
+                Err(error) => {
+                    log::warn!("kettle.notify: notification worker could not start: {error}");
+                    None
+                }
             }
         })
         .as_ref()

@@ -240,6 +240,7 @@ notify_body_config_no_path = "No se pudo determinar la ruta del archivo de confi
 notify_body_config_open_failed = "El sistema operativo no pudo abrir el archivo de configuración."
 notify_body_config_reload_refused = "Sigue activa la última configuración válida.\n{path}: {error}"
 notify_body_config_values_ignored = "Estas líneas tienen valores no válidos y se omitieron:\n{lines}"
+notify_body_drop_unreadable = "No se pudieron leer los archivos soltados. Suelta hasta 32 archivos locales e inténtalo de nuevo."
 notify_body_image_gone = "El archivo de imagen pegado ya no está disponible."
 notify_body_input_backpressured = "No se pudo entregar la entrada porque un proceso hijo no la acepta con suficiente rapidez. Si está activo el envío de la entrada a varios paneles, es posible que algunos ya la hayan recibido; comprobarlo antes de reintentar."
 notify_body_input_failed = "Falló el canal de entrada del panel. Kettle cerrará el panel afectado."

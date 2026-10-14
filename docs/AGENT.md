@@ -13,7 +13,7 @@ This doc covers the programmatic surface: `kettle exec`, the control server +
 `kettle ctl`, and the `kettle mcp` MCP server. It is OFF by default — the
 control server only starts when you opt in.
 
-Kettle 4.0 supports Linux and macOS. Windows and WSL details below describe the
+Kettle supports Linux and macOS. Windows and WSL details below describe the
 final Windows-supported 3.3.0 line and retained conditional code; they are not a
 current package or support commitment.
 
@@ -394,7 +394,7 @@ SVG and a checkerboard for raster, with its title, kind, size and sender,
 and `‹ ›` to browse, `▾` to collapse the lane to a one-row strip and `×` to
 close it. Where this platform permits an image viewer and the item still
 holds its pixels, the header also has `↗`, which opens it there (Preview on
-macOS, Eye of GNOME on Linux), the same hand-off as a card menu's row. A
+macOS, Loupe or Eye of GNOME on Linux), the same hand-off as a card menu's row. A
 video's `↗` opens a private copy of its file in the permitted video player
 instead (QuickTime Player on macOS, mpv on Linux), its poster's pixels held
 or not. The
@@ -504,8 +504,9 @@ never shows again, and of two Kettles running at once only one shows it. It
 waits for a card whose image is on screen with no dialog or menu over it.
 A right-press on a settled card opens the card's menu instead of the
 terminal's: Open, as a click does, and, where this platform permits one
-viewer, Open in Preview (macOS) or Open in Image Viewer (Linux, Eye of
-GNOME at `/usr/bin/eog`). That row hands the viewer a fresh PNG of the pixels
+viewer, Open in Preview (macOS) or Open in Image Viewer (Linux, Loupe at
+`/usr/bin/loupe`, with `/usr/bin/eog` as a fallback). That row hands the viewer
+a fresh PNG of the pixels
 Kettle shows, from a private store that keeps the newest 32 copies and
 128 MiB and is deleted on exit; a row acts only while the card still shows
 the item, at the generation, the menu named. A video's row is Open in

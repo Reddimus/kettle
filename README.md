@@ -99,6 +99,8 @@ covers pane movement, tabs, search, and first-run troubleshooting.
 ## Features
 
 - Tabs, splits, multiple windows, pane movement, and broadcast input
+- Drag tabs between windows on supported Wayland desktops, or choose
+  **Move tab to window** from the command palette
 - A macOS Dock menu for new tabs, new windows, and open windows
 - GPU rendering, bounded scrollback, search, and inline image protocols
 - Shell-driven completion cards

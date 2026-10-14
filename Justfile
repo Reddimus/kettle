@@ -164,8 +164,12 @@ vendor-pty-check:
     cargo test --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p portable-pty --features serde_support
     cargo clippy --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p portable-pty --all-targets --features serde_support -- -D warnings
 
+# The clipboard backport has display-free Linux tests; other hosts check format.
+vendor-clipboard-check:
+    python3 scripts/check-arboard-uri-list.py
+
 # Complete direct validation for all patched crates on the current OS.
-vendor-check: vendor-parser-check vendor-pty-check
+vendor-check: vendor-parser-check vendor-pty-check vendor-clipboard-check
 
 # Audit every Git-tracked path: index/worktree object identity, path/case
 # uniqueness, UTF-8/LF hygiene, manifests, Markdown links, and binary font/image

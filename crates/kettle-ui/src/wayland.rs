@@ -16,6 +16,31 @@ struct Gesture {
 #[derive(Default)]
 struct Gestures(BTreeMap<u32, Gesture>);
 
+#[derive(Default)]
+struct PrimaryPresses(BTreeMap<u32, (u64, u32)>);
+
+impl PrimaryPresses {
+    fn button(&mut self, seat: u32, window: Option<u64>, button: u32, pressed: bool, serial: u32) {
+        if button != 0x110 {
+            return;
+        }
+        self.0.remove(&seat);
+        if pressed
+            && let Some(window) = window
+            && self.0.len() < MAX_SEATS
+        {
+            self.0.insert(seat, (window, serial));
+        }
+    }
+
+    fn take(&mut self, seat: u32, window: u64) -> Option<u32> {
+        if self.0.get(&seat)?.0 != window {
+            return None;
+        }
+        self.0.remove(&seat).map(|(_, serial)| serial)
+    }
+}
+
 impl Gestures {
     fn press(&mut self, seat: u32, window: u64, serial: u32, at: Instant) {
         if self.0.contains_key(&seat) || self.0.len() < MAX_SEATS {
@@ -39,11 +64,41 @@ impl Gestures {
 #[cfg(target_os = "linux")]
 mod native;
 #[cfg(target_os = "linux")]
-pub(crate) use native::Bridge;
+pub(crate) use native::{Bridge, FileUpdate, Point, Update};
+
+#[cfg(any(target_os = "linux", all(test, unix)))]
+mod uri_list;
+#[cfg(any(target_os = "linux", all(test, unix)))]
+mod uri_reader;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_drag_uses_only_its_held_primary_press_on_that_seat_and_window() {
+        let mut presses = PrimaryPresses::default();
+        presses.button(1, Some(7), 0x111, true, 40);
+        assert_eq!(presses.take(1, 7), None, "secondary button");
+        presses.button(1, Some(7), 0x110, true, 41);
+        assert_eq!(presses.take(2, 7), None, "another seat");
+        assert_eq!(presses.take(1, 8), None, "another window");
+        assert_eq!(presses.take(1, 7), Some(41));
+        assert_eq!(presses.take(1, 7), None, "press consumed once");
+    }
+
+    #[test]
+    fn release_and_unknown_origin_end_the_grab_but_serial_wrap_does_not() {
+        let mut presses = PrimaryPresses::default();
+        presses.button(1, Some(7), 0x110, true, u32::MAX);
+        presses.button(1, None, 0x110, false, 0);
+        assert_eq!(presses.take(1, 7), None, "released grab");
+        presses.button(1, Some(7), 0x110, true, 0);
+        assert_eq!(presses.take(1, 7), Some(0));
+        presses.button(1, Some(7), 0x110, true, 1);
+        presses.button(1, None, 0x110, true, 2);
+        assert_eq!(presses.take(1, 7), None, "new press on an unknown surface");
+    }
 
     #[test]
     fn activation_uses_a_recent_press_from_its_source_once() {

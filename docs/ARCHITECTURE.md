@@ -530,7 +530,7 @@ once the store has closed. `release` gives back a reservation whose copy
 failed, and `remove` deletes a kept copy that never reached the player.
 `media::external::video` owns the rest: `Player` (QuickTime Player,
 verified by Apple's signature requirement, or `/usr/bin/mpv`, trusted as
-Eye of GNOME is), what each `plays`, and `start`, which gives mpv the
+the image viewers are), what each `plays`, and `start`, which gives mpv the
 copy's own file read-only as descriptor 3 (`pin`) so it plays what was
 checked; `VideoSource`, built from the shelf item's path, digest, title and
 the worker's `VideoInfo`; and `Held`, which reopens the file as the worker
@@ -2662,7 +2662,10 @@ no context reads, clock queries, formatting or writes.
   disconnect the dispatcher. The worker handle remains process-owned, and a
   normal GUI exit gives admitted messages a bounded 250 ms flush. If the OS
   service remains hung, Kettle favors a prompt exit over guaranteed desktop
-  notification delivery.
+  notification delivery. Linux retains one D-Bus sender connection across
+  notifications: GNOME removes an app's notifications when that sender exits.
+  Each call has a one-second reply timeout; a failed connection is replaced
+  on the next message. macOS and Windows keep their native backends.
 - **Monitor-DPI transitions are one layout transaction per window.** winit
   delivers Windows `WM_DPICHANGED` as `ScaleFactorChanged` before the
   `SetWindowPos`-driven physical `Resized`. The renderer adopts the new glyph
@@ -3256,11 +3259,13 @@ drag walkthrough in addition to portable geometry and ownership tests:
   Drag coordinates use one logical desktop on macOS, then convert into each
   target's physical client coordinates for the existing band hit-test.
   Windows and X11 keep their physical desktop coordinates.
-- **Wayland** can't position windows client-side and validates move
-  serials, so it keeps the tear-at-release path (the FSM's
-  `DraggingOutside` + release). `xdg_toplevel_drag_v1` — the proper
-  Wayland tab-drag protocol (KWin 6+/Mutter 48+) — is not exposed by
-  winit 0.30; tracked as a follow-up.
+- **Wayland** uses advertised data-device and toplevel-drag protocols on
+  Winit's existing connection. A private per-drag MIME capability identifies
+  same-process tabs; no tab data or filenames cross the drag source. New
+  carriers attach before mapping; mapped lone windows attach after start and
+  temporarily hide CSD to prevent its subsurfaces intercepting a rejoin.
+  Cancel restores the original tab index, or keeps the carrier if its source
+  closed. Unsupported compositors retain tear-at-release and the chooser.
 
 The keyboard `move_tab_to_new_window` action (alias `detach_tab`)
 performs the same live in-process move. `move_tab_to_window` opens the shared
@@ -3276,6 +3281,18 @@ for `xdg_activation_v1`. Requests retain both windows until completion, expire
 after two seconds, and revalidate the destination before activation. Transfer
 reveals the destination; only native focus events update focus while the source
 remains open. Live-window checks take O(n log n) time and O(n) space.
+A completed owned drag gives a two-second, one-use activation permit for its
+recipient surface. A held primary press remains eligible until release;
+multiple pointer seats use the chooser rather than guessing the press's seat.
+
+External `text/uri-list` drops negotiate Copy only. At most two owned pipe
+readers accept 1 MiB, 32 local paths and 16 KiB per URI within two seconds.
+Parsing is linear in bounded input bytes and preserves Unix filename bytes.
+Delivery rechecks the original pane, broadcast scope, input generation, modal
+and preview focus, then uses the shared quoted/bracketed paste and video
+receipt paths. Workers wake the event loop and are canceled and joined at
+shutdown; an idle window has no drop polling timer.
+
 
 Kettle no longer sends cross-process
 handoffs (Unix SCM_RIGHTS socketpair + the JSON-file fallback), which

@@ -9241,6 +9241,10 @@ use crate::window_accent::pick_accent_slot;
 pub struct App {
     #[cfg(target_os = "linux")]
     wayland: Option<crate::wayland::Bridge>,
+    #[cfg(target_os = "linux")]
+    wayland_tab_drag: Option<WaylandTabDrag>,
+    #[cfg(target_os = "linux")]
+    wayland_file_drops: std::collections::BTreeMap<u64, (u64, WaylandDropTarget)>,
     cfg: Config,
     /// The file this launch's session was read from, if any.
     ///
@@ -9602,6 +9606,42 @@ fn tear_native_handoff_disabled() -> bool {
 /// never did; the floor keeps a stationary hover from demoting a
 /// healthy-but-quiet grab.
 const DEMOTION_TRAVEL_PX: f64 = 24.0;
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(PartialEq, Eq)]
+struct WaylandDropTarget {
+    pane: Option<u64>,
+    broadcast: crate::mux::BroadcastScope,
+    input_generation: u64,
+    preview: Option<crate::media::PreviewFocus>,
+    pane_input: Option<u64>,
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl WaylandDropTarget {
+    fn capture(ws: &WindowState) -> Self {
+        Self {
+            pane: ws.mux.active_focus(),
+            broadcast: ws.mux.broadcast.clone(),
+            input_generation: ws.ime_focus_generation,
+            preview: ws.preview_focus,
+            pane_input: ws
+                .mux
+                .active_focus()
+                .and_then(|id| ws.mux.panes.get(&id))
+                .map(|pane| pane.input_generation()),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct WaylandTabDrag {
+    source: u64,
+    source_index: usize,
+    panes: Vec<u64>,
+    carrier: u64,
+    preview: Option<u64>,
+}
 
 struct TornDrag {
     /// Seq of the torn-off window being dragged.
@@ -10353,6 +10393,10 @@ impl App {
         let mut app = App {
             #[cfg(target_os = "linux")]
             wayland: None,
+            #[cfg(target_os = "linux")]
+            wayland_tab_drag: None,
+            #[cfg(target_os = "linux")]
+            wayland_file_drops: std::collections::BTreeMap::new(),
             restore_source: None,
             cfg: initial_cfg,
             // Assume writable; `resumed` clears it when a launch override
@@ -11252,7 +11296,7 @@ impl App {
     /// content hidden behind the card.
     /// Shared by native and ctl mouse input so automation cannot click through.
     fn activate_media_paste_receipt_at(
-        &self,
+        &mut self,
         ws: &mut WindowState,
         x: f32,
         y: f32,
@@ -14180,11 +14224,9 @@ impl App {
         }
     }
 
-    /// Open Kettle's retained private image after rechecking its pane and file
-    /// identity. Video cards are informational: platform launch APIs accept a
-    /// path rather than the validated handle, so they deliberately have no
-    /// open action.
-    fn open_media_paste_receipt(&self, ws: &mut WindowState) {
+    /// Preview the retained bitmap in its pane without changing the command line.
+    /// Video receipts remain informational.
+    fn open_media_paste_receipt(&mut self, ws: &mut WindowState) {
         let Some(active) = ws.media_paste_receipt.as_ref().filter(|receipt| {
             ws.mux.active_focus() == Some(receipt.pane_id)
                 && matches!(
@@ -14194,6 +14236,7 @@ impl App {
         }) else {
             return;
         };
+        let pane = active.pane_id;
         let path = active.path.clone();
         if !self.pasted_images.path_still_matches(&path) {
             ws.media_paste_receipt = None;
@@ -14208,9 +14251,7 @@ impl App {
             }
             return;
         }
-        if let Err(error) = open::that_detached(&path) {
-            log::warn!("could not open a pasted-image preview: {error}");
-        }
+        self.pull_preview(ws, pane, &path, None);
     }
 
     /// Clear the focused pane's selection (called when the user types —
@@ -33824,7 +33865,7 @@ impl ApplicationHandler<UserEvent> for App {
                     }),
                 );
             }
-            self.poll_wayland();
+            self.poll_wayland(event_loop);
         }
         runtime_tracker.set_window_count(self.windows.len());
     }
@@ -33834,7 +33875,7 @@ impl ApplicationHandler<UserEvent> for App {
         let _phase = runtime_tracker.enter("user_event");
         match ev {
             #[cfg(target_os = "linux")]
-            UserEvent::Wayland => self.poll_wayland(),
+            UserEvent::Wayland => self.poll_wayland(el),
             UserEvent::Activation => self.drain_activation_requests(el),
             // A watcher event starts a short non-blocking settle window. The
             // pending latch stays closed until about_to_wait clears it just
@@ -34017,7 +34058,7 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         #[cfg(target_os = "linux")]
-        self.poll_wayland();
+        self.poll_wayland(event_loop);
         let phase_name = if matches!(&event, WindowEvent::RedrawRequested) {
             "redraw"
         } else {
@@ -34045,7 +34086,7 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         #[cfg(target_os = "linux")]
-        self.poll_wayland();
+        self.poll_wayland(event_loop);
         let runtime_tracker = self.runtime_tracker.clone();
         let _phase = runtime_tracker.enter("about_to_wait");
         // Opt-in cursor_exit_v1: a key that could have ended the layer blink
@@ -35697,6 +35738,10 @@ impl App {
         // un-restored default-size surface can flash on screen. macOS is
         // revealed immediately above because Metal cannot acquire that first
         // surface frame from a hidden NSWindow.
+        #[cfg(target_os = "linux")]
+        if let (Some(bridge), Some(window)) = (self.wayland.as_mut(), ws.window.clone()) {
+            bridge.attach_drag_carrier(ws.seq, window);
+        }
         self.redraw(&mut ws);
         if let Some(w) = &ws.window {
             w.request_redraw();
@@ -35727,14 +35772,6 @@ impl App {
         let Some(src) = ws.window.clone() else {
             return false;
         };
-        // Wayland can neither position the torn window nor (reliably) start a
-        // compositor move for a surface that never saw the press, so tearing
-        // mid-drag would drop the window at a compositor-chosen spot while the
-        // user is still dragging. Wayland tears at release instead (see the
-        // Released arm).
-        if window_is_wayland(&src) {
-            return false;
-        }
         let (cx, cy) = (ws.cursor.x as f32, ws.cursor.y as f32);
         let Some(band) = self.dock_band(ws) else {
             return false;
@@ -35744,6 +35781,12 @@ impl App {
         // past the slop = tear. ~36px at the default font.
         let threshold = 1.5 * self.tab_bar_h(ws);
         if !tear_threshold_crossed(cx, cy, band, threshold) {
+            return false;
+        }
+        if window_is_wayland(&src) {
+            #[cfg(target_os = "linux")]
+            return self.begin_wayland_tab_drag(ws, event_loop, src);
+            #[cfg(not(target_os = "linux"))]
             return false;
         }
         // Lone tab: the tab IS the window — drag the whole window instead
@@ -36087,17 +36130,15 @@ impl App {
             cursor,
             drag_coordinate_scale(win),
         );
+        self.dock_index_in_client(w, client)
+    }
+
+    fn dock_index_in_client(&self, w: &WindowState, client: (f64, f64)) -> Option<usize> {
+        if !client.0.is_finite() || !client.1.is_finite() {
+            return None;
+        }
         let (cx, cy) = (client.0 as f32, client.1 as f32);
         let band = self.dock_band(w)?;
-        log::debug!(
-            "dock_index_at: seq={} cursor=({:.0},{:.0}) ip=({},{}) rel=({cx:.0},{cy:.0}) band={band:?} dist={:.0}",
-            w.seq,
-            cursor.0,
-            cursor.1,
-            ip.x,
-            ip.y,
-            dist_to_rect(cx, cy, band),
-        );
         if dist_to_rect(cx, cy, band) > 0.0 {
             return None;
         }
@@ -36587,8 +36628,8 @@ impl App {
     }
 
     #[cfg(target_os = "linux")]
-    fn poll_wayland(&mut self) {
-        if let Some(bridge) = self.wayland.as_mut() {
+    fn poll_wayland(&mut self, event_loop: &ActiveEventLoop) {
+        let (files, update) = if let Some(bridge) = self.wayland.as_mut() {
             let live: std::collections::BTreeMap<_, _> = self
                 .windows
                 .iter()
@@ -36598,45 +36639,334 @@ impl App {
                 .filter_map(|(&seq, window)| Some((seq, window.window.clone()?)))
                 .collect();
             bridge.poll(&live);
+            (bridge.file_updates(), bridge.drag_update())
+        } else {
+            (Vec::new(), None)
+        };
+        for file in files {
+            self.deliver_wayland_files(event_loop, file);
+        }
+        let Some(update) = update else { return };
+        let Some(drag) = self.wayland_tab_drag.as_ref() else {
+            return;
+        };
+        let carrier = drag.carrier;
+        let (point, ended, activation) = match update {
+            crate::wayland::Update::Hover(point) => (point, None, None),
+            crate::wayland::Update::End {
+                performed,
+                drop,
+                activation,
+            } => (drop, Some(performed), activation),
+        };
+        let target = point.and_then(|point| self.wayland_dock_target(point, carrier));
+        let previous = self.wayland_tab_drag.as_mut().unwrap().preview.take();
+        if let Some(previous) = previous
+            && target.map(|(seq, _)| seq) != Some(previous)
+        {
+            self.apply_dock_preview(previous, None);
+        }
+        if ended.is_none() {
+            if let Some((seq, insertion)) = target {
+                self.apply_dock_preview(seq, Some(insertion));
+                self.wayland_tab_drag.as_mut().unwrap().preview = Some(seq);
+            }
+            return;
+        }
+        if let Some(previous) = previous {
+            self.apply_dock_preview(previous, None);
+        }
+        let drag = self.wayland_tab_drag.take().unwrap();
+        let destination = if ended == Some(false) && drag.source != drag.carrier {
+            Some((drag.source, drag.source_index))
+        } else if ended == Some(true) {
+            target
+        } else {
+            None
+        };
+        if let Some((seq, insertion)) = destination
+            && let Some(mut carrier) = self.windows.remove(&drag.carrier)
+        {
+            if self.transfer_tab_to_window(&mut carrier, seq, &drag.panes, Some(insertion))
+                && let (Some(bridge), Some(permit), Some(target)) = (
+                    self.wayland.as_mut(),
+                    activation,
+                    self.windows
+                        .get(&seq)
+                        .and_then(|window| window.window.clone()),
+                )
+            {
+                bridge.activate_drag(permit, seq, target);
+            }
+            self.finish_window_dispatch(event_loop, carrier.seq, carrier);
         }
     }
 
-    fn move_tab_to_window(&mut self, source: &mut WindowState, window: u64, panes: &[u64]) {
-        if !self.cfg.detachable_tabs
+    #[cfg(target_os = "linux")]
+    fn deliver_wayland_files(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        update: crate::wayland::FileUpdate,
+    ) {
+        match update {
+            crate::wayland::FileUpdate::Start { id, window } => {
+                if !self.quit_requested
+                    && !self.window_close_pending(window)
+                    && let Some(ws) = self.windows.get(&window)
+                    && !self.any_modal_open(ws)
+                    && ws.mux.active_focus().is_some()
+                {
+                    self.wayland_file_drops
+                        .insert(id, (window, WaylandDropTarget::capture(ws)));
+                }
+                log::debug!(
+                    "Wayland file drop context captured: {}",
+                    self.wayland_file_drops.contains_key(&id)
+                );
+            }
+            crate::wayland::FileUpdate::Ready { id, paths } => {
+                let context = self.wayland_file_drops.remove(&id);
+                let valid = context.as_ref().is_some_and(|(seq, target)| {
+                    !self.quit_requested
+                        && !self.window_close_pending(*seq)
+                        && self.windows.get(seq).is_some_and(|ws| {
+                            !self.any_modal_open(ws) && *target == WaylandDropTarget::capture(ws)
+                        })
+                });
+                log::debug!(
+                    "Wayland file drop ready: parsed={}, context_current={valid}",
+                    paths.is_ok()
+                );
+                let accepted = valid && paths.is_ok();
+                if let Some(bridge) = self.wayland.as_mut() {
+                    bridge.finish_files(id, accepted);
+                }
+                if !valid {
+                    return;
+                }
+                let (seq, _) = context.unwrap();
+                let Ok(paths) = paths else {
+                    fire_notify(
+                        self.ui_text
+                            .text(kettle_i18n::Text::NotifyTitleInputNotDelivered),
+                        self.ui_text
+                            .text(kettle_i18n::Text::NotifyBodyDropUnreadable),
+                    );
+                    return;
+                };
+                if let Some(mut ws) = self.windows.remove(&seq) {
+                    self.exit_preview_focus(&mut ws);
+                    let video = self.cfg.paste_video_preview.then(|| {
+                        crate::video_preview::VideoPasteRequest::from_user_paths(
+                            &paths,
+                            crate::video_preview::VideoPasteSource::Drop,
+                        )
+                    });
+                    self.paste_paths(&mut ws, paths, true, video.flatten());
+                    if let Some(window) = &ws.window {
+                        window.request_redraw();
+                    }
+                    self.finish_window_dispatch(event_loop, seq, ws);
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn wayland_dock_target(
+        &self,
+        point: crate::wayland::Point,
+        carrier: u64,
+    ) -> Option<(u64, usize)> {
+        if point.window == carrier
+            || self.window_close_pending(point.window)
             || self.quit_requested
+            || !self.cfg.detachable_tabs
+        {
+            return None;
+        }
+        let target = self.windows.get(&point.window)?;
+        if self.any_modal_open(target) {
+            return None;
+        }
+        let scale = target.window.as_ref()?.scale_factor();
+        self.dock_index_in_client(target, (point.x * scale, point.y * scale))
+            .map(|index| (point.window, index))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn begin_wayland_tab_drag(
+        &mut self,
+        ws: &mut WindowState,
+        event_loop: &ActiveEventLoop,
+        window: Arc<winit::window::Window>,
+    ) -> bool {
+        if self.wayland_tab_drag.is_some()
+            || self.window_close_pending(ws.seq)
+            || self.quit_requested
+            || self.any_modal_open(ws)
+        {
+            return false;
+        }
+        let index = ws.mux.active;
+        let panes = ws.mux.tab_anchor_panes(index);
+        if panes.is_empty() {
+            return false;
+        }
+        let lone = ws.mux.tabs.len() == 1;
+        let press = ws
+            .drag_press
+            .map(|(x, y)| (f64::from(x), f64::from(y)))
+            .unwrap_or((ws.cursor.x, ws.cursor.y));
+        let bar = self.tab_bar(ws);
+        let grab = if lone {
+            press
+        } else {
+            let segment = bar
+                .segments
+                .iter()
+                .find(|segment| segment.active)
+                .map(|segment| segment.rect);
+            let (x, y, width, height) = segment.unwrap_or((0.0, 0.0, 80.0, 24.0));
+            let along_x = (press.0 - f64::from(x)).clamp(8.0, f64::from(width.max(16.0)) - 8.0);
+            let along_y = (press.1 - f64::from(y)).clamp(4.0, f64::from(height.max(8.0)) - 4.0);
+            match self.cfg.tab_bar_pos {
+                TabBarPos::Top => (along_x, along_y),
+                TabBarPos::Bottom => (
+                    along_x,
+                    f64::from(window.inner_size().height) - f64::from(height) + along_y,
+                ),
+                TabBarPos::Left => (along_x, along_y),
+                TabBarPos::Right => (
+                    f64::from(window.inner_size().width) - f64::from(width) + along_x,
+                    along_y,
+                ),
+            }
+        };
+        if !self.wayland.as_mut().is_some_and(|bridge| {
+            bridge.begin_drag(
+                ws.seq,
+                window.clone(),
+                (!lone).then_some(self.next_window_seq),
+                grab,
+            )
+        }) {
+            return false;
+        }
+        self.wayland_tab_drag = Some(WaylandTabDrag {
+            source: ws.seq,
+            source_index: index,
+            panes,
+            carrier: ws.seq,
+            preview: None,
+        });
+        ws.tab_drag_active = false;
+        ws.tab_drag_press = None;
+        ws.tab_pressed_idx = None;
+        ws.detach_drag = crate::detach::DragState::default();
+        ws.drag_press = None;
+        if lone {
+            return true;
+        }
+        self.release_held_buttons_in_tab(ws, index);
+        let Some(dt) = ws.mux.detach_tab(index) else {
+            if let Some(bridge) = self.wayland.as_mut() {
+                bridge.abandon_drag_carrier();
+            }
+            return true;
+        };
+        self.release_focus_report_to(ws, &dt);
+        let paste = ws.take_moved_paste_state(&dt.tab, std::time::Instant::now());
+        let color = self.tear_off_source_color(ws);
+        match self
+            .open_window(
+                event_loop,
+                WindowOpen::AdoptTab {
+                    tab: dt,
+                    source_color: color,
+                    paste: Box::new(paste),
+                },
+                None,
+                Some(window.inner_size()),
+            )
+            .map_err(|open| *open)
+        {
+            Ok(seq) => {
+                self.wayland_tab_drag.as_mut().unwrap().carrier = seq;
+                self.fire_tab_close_event(ws, index);
+                self.ctl_broadcast(
+                    "tab_moved",
+                    None,
+                    serde_json::json!({"from_window":ws.seq,"to_window":seq,"tab":index}),
+                );
+                self.resize_all(ws);
+            }
+            Err(WindowOpen::AdoptTab { tab: dt, paste, .. }) => {
+                if let Some(bridge) = self.wayland.as_mut() {
+                    bridge.abandon_drag_carrier();
+                }
+                ws.mux.attach_tab(dt, Some(index));
+                ws.restore_moved_paste_state(*paste);
+                self.resize_all(ws);
+            }
+            Err(_) => unreachable!("only an adopted tab was opened"),
+        }
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+        true
+    }
+
+    fn move_tab_to_window(&mut self, source: &mut WindowState, window: u64, panes: &[u64]) {
+        if self.cfg.detachable_tabs && self.transfer_tab_to_window(source, window, panes, None) {
+            #[cfg(target_os = "linux")]
+            if let (Some(bridge), Some(origin), Some(target)) = (
+                self.wayland.as_mut(),
+                source.window.clone(),
+                self.windows
+                    .get(&window)
+                    .and_then(|target| target.window.clone()),
+            ) {
+                bridge.activate(source.seq, origin, window, target);
+            }
+        }
+    }
+
+    fn transfer_tab_to_window(
+        &mut self,
+        source: &mut WindowState,
+        window: u64,
+        panes: &[u64],
+        insertion: Option<usize>,
+    ) -> bool {
+        if self.quit_requested
             || source.seq == window
             || self.window_close_pending(source.seq)
             || self.window_close_pending(window)
         {
-            return;
+            return false;
         }
         let Some(index) = source.mux.tab_index_of_any_pane(panes) else {
-            return;
+            return false;
         };
         let Some(mut target) = self.windows.remove(&window) else {
-            return;
+            return false;
         };
         if target.window.is_none() {
             self.windows.insert(window, target);
-            return;
+            return false;
         }
         self.release_held_buttons_in_tab(source, index);
         let Some(dt) = source.mux.detach_tab(index) else {
             self.windows.insert(window, target);
-            return;
+            return false;
         };
         self.release_focus_report_to(source, &dt);
         let paste = source.take_moved_paste_state(&dt.tab, std::time::Instant::now());
-        let insertion = target.mux.tabs.len();
+        let insertion = insertion
+            .unwrap_or(target.mux.tabs.len())
+            .min(target.mux.tabs.len());
         self.dock_tab_into(&mut target, dt, paste, insertion, source.seq);
-        #[cfg(target_os = "linux")]
-        if let (Some(bridge), Some(origin), Some(destination)) = (
-            self.wayland.as_mut(),
-            source.window.clone(),
-            target.window.clone(),
-        ) {
-            bridge.activate(source.seq, origin, target.seq, destination);
-        }
         self.sync_pane_focus_reports(&mut target);
         self.windows.insert(window, target);
         if source.mux.tabs.is_empty() {
@@ -36648,6 +36978,7 @@ impl App {
                 window.request_redraw();
             }
         }
+        true
     }
 
     /// Receive a docked tab: attach at the insertion
@@ -49666,6 +49997,49 @@ mod tests {
         let narrow = spans(&detected_now(&ws));
         assert_ne!(narrow, wide, "the reflow moved the links");
         assert_eq!(spans(&ws.links), narrow, "the scan followed the reflow");
+    }
+
+    #[test]
+    fn a_pending_wayland_drop_cannot_follow_changed_focus_or_broadcast() {
+        let mut ws = WindowState::new(1, Mux::new());
+        let target = super::WaylandDropTarget::capture(&ws);
+        assert!(target == super::WaylandDropTarget::capture(&ws));
+        ws.ime_focus_generation += 1;
+        assert!(
+            target != super::WaylandDropTarget::capture(&ws),
+            "modal opened and closed"
+        );
+        ws.ime_focus_generation -= 1;
+        ws.mux.broadcast = crate::mux::BroadcastScope::All;
+        assert!(target != super::WaylandDropTarget::capture(&ws));
+        ws.mux.broadcast = crate::mux::BroadcastScope::Off;
+        ws.preview_focus = Some(crate::media::PreviewFocus { pane: 7, item: 8 });
+        assert!(target != super::WaylandDropTarget::capture(&ws));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pending_wayland_drop_does_not_cross_another_paste() {
+        let mut mux = Mux::new();
+        mux.new_tab_with(
+            &title_test_config(),
+            80,
+            24,
+            8,
+            16,
+            Arc::new(|| {}),
+            &["/bin/cat".to_owned()],
+            None,
+        )
+        .expect("PTY fixture");
+        let ws = WindowState::new(1, mux);
+        let target = super::WaylandDropTarget::capture(&ws);
+        let pane = &ws.mux.panes[&ws.mux.active_focus().unwrap()];
+        assert_eq!(pane.feed_focus_report(true), PaneInputResult::Queued);
+        assert!(target == super::WaylandDropTarget::capture(&ws));
+        assert_eq!(pane.feed_input(b"new paste "), PaneInputResult::Queued);
+        assert!(target != super::WaylandDropTarget::capture(&ws));
+        ws.mux.kill_children();
     }
 
     /// The key whose press closed or replaced a modal is remembered, so its

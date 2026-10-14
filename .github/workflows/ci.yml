@@ -133,6 +133,9 @@ jobs:
           cargo clippy --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p vte --all-targets --features ansi -- -D warnings
           cargo test --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p alacritty_terminal
           cargo clippy --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p alacritty_terminal --all-targets -- -D warnings
+      - name: Vendored Linux clipboard URI patch
+        if: runner.os == 'Linux'
+        run: python3 scripts/check-arboard-uri-list.py
       - name: Vendored portable-pty patch — native unit and doctest
         # Each OS compiles its own descriptor and pipe code. Linux uses
         # close_range, macOS lists open descriptors through proc_pidinfo, and
