@@ -6,8 +6,8 @@
 
 Kettle runs only a worker file it trusts, so both binaries are staged into a
 private directory first. Under the X server, it launches Kettle with an
-isolated configuration and home, and checks, through ctl and native X input
-(xdotool), what media lanes do on Linux:
+isolated configuration and XDG directories, and checks, through ctl and native X input
+(X11/XTest), what media lanes do on Linux:
 
 - the media worker is available, and which decoders it reports;
 - an image, an SVG, a Mermaid diagram and a video each land on the shelf
@@ -21,7 +21,7 @@ isolated configuration and home, and checks, through ctl and native X input
 
 Results go to OUT/result.json, the screenshots beside it (default
 target/diagnostics/lane-media-smoke/<UTC time>). `just lane-media-smoke`
-builds both binaries and runs it under xvfb-run. Needs ffmpeg and xdotool.
+builds both binaries and runs it under xvfb-run. Needs ffmpeg, X11/XTest and x11-utils.
 """
 import argparse
 import datetime
@@ -35,6 +35,8 @@ import tempfile
 import time
 import zlib
 from pathlib import Path
+
+from native_x11 import X11Input
 
 REPO = Path(__file__).resolve().parents[1]
 # Set by main(): the staged kettle and where results go.
@@ -115,13 +117,17 @@ def launch(home, language):
     config.write_text("\n".join([
         "restore-session = false", "update-check = false", "record = off",
         "window-width = 110", "window-height = 40", "agent-server = full", "agent-display = true",
+        "media-open-mode = lane", "shell = /bin/sh", "login-shell = false",
+        "shell-integration = false",
         f"language = {language}", ""]))
-    env = dict(os.environ, LIBGL_ALWAYS_SOFTWARE="1", HOME=str(home), XDG_CONFIG_HOME=str(home / ".config"),
-               XDG_STATE_HOME=str(home / ".state"), XDG_RUNTIME_DIR=str(home / "run"))
-    (home / "run").mkdir(mode=0o700, exist_ok=True)
-    # A home of its own: no first-run shell setup to answer.
-    (home / ".zshrc").write_text("# kettle smoke\n")
-    (home / ".bashrc").write_text("# kettle smoke\n")
+    env = dict(os.environ, LIBGL_ALWAYS_SOFTWARE="1", SHELL="/bin/sh",
+               XDG_CONFIG_HOME=str(home / ".config"), XDG_STATE_HOME=str(home / ".state"),
+               XDG_DATA_HOME=str(home / ".data"), XDG_CACHE_HOME=str(home / ".cache"),
+               XDG_RUNTIME_DIR=str(home / "run"))
+    for name in (".config", ".state", ".data", ".cache", "run"):
+        (home / name).mkdir(mode=0o700, exist_ok=True)
+    for name in ("ENV", "BASH_ENV"):
+        env.pop(name, None)
     ENV.clear()
     ENV.update(env)
     log = open(home / "kettle.log", "wb")
@@ -152,16 +158,25 @@ def show(pid, path):
         raise
 
 
-def screen_point(pid, rect):
-    geometry = ctl(pid, "ui_geometry")
-    origin = geometry["desktop"]["client_origin"]
-    scale = geometry.get("scale_factor") or 1.0
-    return (round(origin["x"] / scale + rect["x"] + rect["width"] / 2),
-            round(origin["y"] / scale + rect["y"] + rect["height"] / 2))
+def native_click(pid, rect):
+    with X11Input() as native:
+        windows = native.windows(pid)
+        if len(windows) != 1:
+            raise RuntimeError(f"expected one owned native window, got {windows}")
+        native.focus(windows[0])
+        native.move(windows[0], round(rect["x"] + rect["width"] / 2),
+                    round(rect["y"] + rect["height"] / 2))
+        native.button(1, True)
+        native.button(1, False)
 
 
-def xdotool(*args):
-    subprocess.run(["xdotool", *args], check=True, timeout=10)
+def native_key(pid, name):
+    with X11Input() as native:
+        windows = native.windows(pid)
+        if len(windows) != 1:
+            raise RuntimeError(f"expected one owned native window, got {windows}")
+        native.focus(windows[0])
+        native.keys(name)
 
 
 def worker_pids(parent):
@@ -220,7 +235,7 @@ def main():
     args = parser.parse_args()
     if sys.platform != "linux" or not os.environ.get("DISPLAY"):
         sys.exit("lane-media-smoke: Linux with an X server only (run it under xvfb-run)")
-    for tool in ("ffmpeg", "xdotool"):
+    for tool in ("ffmpeg", "xwininfo", "xprop"):
         if not shutil.which(tool):
             sys.exit(f"lane-media-smoke: needs {tool}")
     # Kettle keeps its control registry only under private directories.
@@ -258,14 +273,7 @@ def run_checks(private):
         ctl(pid, "perform_action", "--text", "open_media_shelf", raw=False)
         poster = wait_for("the poster", lambda: (lambda l: l if l and l.get("image") and "play" in (l.get("controls") or {}) else None)(lane(pid)))
         check("video shows its poster with a play control", True, poster.get("image"))
-        x, y = screen_point(pid, poster["controls"]["play"])
-        window = subprocess.run(["xdotool", "search", "--onlyvisible", "--pid", str(pid)],
-                                capture_output=True, text=True, timeout=10).stdout.split()
-        # Xvfb runs no window manager: focus the window directly.
-        if window:
-            xdotool("windowfocus", "--sync", window[-1])
-        xdotool("mousemove", str(x), str(y))
-        xdotool("click", "1")
+        native_click(pid, poster["controls"]["play"])
         playing = wait_for("playback", lambda: (lambda p: p if p.get("state") == "playing" else None)((lane(pid) or {}).get("playback") or {}), timeout=15)
         first = playing["position_ms"]
         time.sleep(3)
@@ -284,7 +292,7 @@ def run_checks(private):
         # Far enough in that five seconds back is not clamped at the start.
         before = wait_for("seven seconds in", lambda: (lambda p: p.get("position_ms", 0) if p.get("position_ms", 0) >= 7000 else None)((lane(pid) or {}).get("playback") or {}))
         stepped = time.monotonic()
-        xdotool("key", "Left")
+        native_key(pid, "Left")
         time.sleep(1.5)
         after = ((lane(pid) or {}).get("playback") or {}).get("position_ms", 0)
         played = (time.monotonic() - stepped) * 1000

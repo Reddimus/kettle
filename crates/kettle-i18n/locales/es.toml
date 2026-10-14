@@ -254,7 +254,7 @@ notify_body_recording_overloaded = "La cola de escritura acotada se llenó. La c
 notify_body_recording_start_failed = "No se pudo iniciar la grabación de sesión solicitada: {error}"
 notify_body_recording_write_failed = "La grabación de la sesión se detuvo porque no se pudo escribir el archivo de grabación."
 notify_body_remote_file_not_opened = "{name} apareció en un panel conectado a otra máquina, así que nombra un archivo de esa máquina, no de esta computadora."
-notify_body_preview_no_room = "Este panel es demasiado pequeño para mostrar una vista previa junto a su terminal. Agrándalo y vuelve a abrir el estante."
+notify_body_preview_no_room = "Este panel es demasiado pequeño para una vista previa. Agrándalo y vuelve a abrir el estante."
 notify_body_remote_not_delivered = "El panel de destino ({pane}) de un envío de archivo remoto en cola se cerró antes de la entrega. El comando se descartó y no se redirigió."
 notify_body_screenshot_wait = "Esperar a que termine la captura actual y volver a intentarlo."
 notify_body_session_log_io = "El registro del panel {pane} se detuvo porque no se pudo escribir en su archivo o vaciar el búfer de escritura."
@@ -616,6 +616,11 @@ update_a11y_available = "Actualización disponible: {tag}"
 update_a11y_open = "Abrir la página de la versión"
 update_banner = "kettle {tag} disponible — {url}    (clic: abrir · clic derecho: descartar)"
 window_title_gpu_lost = "kettle - se perdió el dispositivo GPU - recuperando"
+
+media_viewer_a11y_pin = "Fijar junto al terminal"
+media_viewer_pin_short = "Fijar"
+media_viewer_overlay_hint = "Tab selecciona controles · Esc cierra · P fija"
+media_viewer_a11y = "Visor multimedia, {index} de {count}: {title}, {detail}"
 
 [completion_matches]
 one = "{count} coincidencia"

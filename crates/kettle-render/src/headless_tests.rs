@@ -2036,6 +2036,8 @@ fn a_lane_draws_its_open_outside_button_only_when_offered() {
     };
     let snap = snapshot_of(80, 30, b"");
     let viewer = |open_outside| MediaLanePanel {
+        focused_control: None,
+        pin_label: None,
         play: None,
         sound: None,
         frame: None,
@@ -2117,6 +2119,8 @@ fn a_lane_draws_a_gallerys_page_controls() {
     };
     let snap = snapshot_of(80, 30, b"");
     let viewer = |page| MediaLanePanel {
+        focused_control: None,
+        pin_label: None,
         play: None,
         sound: None,
         frame: None,
@@ -2266,6 +2270,8 @@ fn a_lane_in_source_mode_shows_rows_instead_of_the_image() {
     };
     let red = [255, 0, 0, 255];
     let lane = |mode| MediaLanePanel {
+        focused_control: None,
+        pin_label: None,
         play: None,
         sound: None,
         frame: None,
@@ -2357,6 +2363,8 @@ fn a_zoomed_lane_covers_its_content_and_stays_inside_it() {
     };
     let red = [255, 0, 0, 255];
     let lane = |view| MediaLanePanel {
+        focused_control: None,
+        pin_label: None,
         play: None,
         sound: None,
         frame: None,
@@ -2439,6 +2447,8 @@ fn a_tile_that_covers_the_view_is_drawn_instead_of_the_image() {
     };
     let (red, blue) = ([255, 0, 0, 255], [0, 0, 255, 255]);
     let lane = |view, tile| MediaLanePanel {
+        focused_control: None,
+        pin_label: None,
         play: None,
         sound: None,
         frame: None,
@@ -2525,6 +2535,8 @@ fn a_preview_lane_paints_its_panel_and_leaves_the_terminal() {
         ..pane(&snap, 480, 320)
     };
     let lane = MediaLanePanel {
+        focused_control: None,
+        pin_label: None,
         play: None,
         sound: None,
         frame: None,
@@ -2606,6 +2618,8 @@ fn a_playing_lane_draws_its_frame_and_bar() {
         ..pane(&snap, 480, 320)
     };
     let lane = MediaLanePanel {
+        focused_control: None,
+        pin_label: None,
         play: Some(crate::MediaLanePlay::Pause),
         sound: None,
         frame: Some(crate::MediaLaneFrame {

@@ -145,6 +145,7 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `add-kettle-to-path` (alias `add_kettle_to_path`) | `auto`\|`off` | `auto` | macOS and Linux: a new pane whose `PATH`, after the configured `env`, has no executable `kettle` gets the running Kettle's folder appended, after every entry, so `kettle show`, `kettle mcp` and `kettle agent-setup` work there; it is never put in front of your commands, and never a translocated copy's folder (run Kettle from `/Applications` first). Only absolute entries are looked in, and an empty `PATH` (which means the working directory) is left as it is. `off` leaves the `PATH` as configured. Panes already open keep theirs. |
 | `video-preview-hover` (alias `video_preview_hover`) | bool | `off` | Loop a video's silent preview while the pointer rests on its lane, for at most four seconds, from frames the lane already holds; it never starts decoding. Held back by `reduce-motion`. Applies live. |
 | `reduce-motion` (alias `reduce_motion`) | `auto`\|`on`\|`off` | `auto` | Whether Kettle avoids motion it would start on its own; today that is the video hover preview. `auto` follows macOS's Reduce Motion setting and counts as on where the system does not say (Linux); `on` always avoids it; `off` never. A preview the user starts plays either way. Applies live. |
+| `media-open-mode` (alias `media_open_mode`) | `overlay`\|`lane` | `overlay` | How manual previews open. `overlay` centers within 90% of the owning split without resizing its terminal. Esc or a backdrop click closes it; Pin moves the same preview into a lane. Applies to newly opened previews. |
 | `preview-lane-side` (alias `preview_lane_side`) | `bottom`\|`right` | `bottom` | Where a pane's preview lane opens: `bottom` keeps the terminal's columns, `right` keeps its rows. A lane takes about 40% of the pane and leaves the terminal at least 20 columns and 5 rows. Applies to lanes opened after it changes. See **Media** under keybind actions. |
 | `agent-display-claude-code` (alias `agent_display_claude_code`) | bool | `false` | Claude Code previews: Claude Code started in a new pane gets Kettle's own plugin (the display server and the hook that prints inline cards) through `CLAUDE_CODE_PLUGIN_DIRS`. Needs `agent-display`. Kettle writes the plugin into its own data directory, checks it before every new pane, and offers nothing while Claude Code's managed policy forbids plugins from the environment; it changes none of Claude Code's settings. Panes already open keep what they started with. See [docs/AGENT.md](AGENT.md#kettles-claude-code-plugin) |
 | `agent-badge` | string | `"[agent] "` | The per-pane titlebar prefix shown while an agent connection has the pane attached. Set to any glyph you like (`agent-badge = 🤖 `); empty disables it |
@@ -609,14 +610,19 @@ menu as "Theme…", and Enter or a click on the Settings Theme row opens it.
 **Titles**: `edit_window_title`, `edit_tab_title`, `edit_pane_title` (open the
 inline rename overlay for the OS window / active tab / focused pane).
 
-**Media**: `open_media_shelf` opens the focused pane's preview lane on its
-media shelf (images, SVGs and diagrams an agent or `kettle show` sent there),
-on the item published last (a replacement by key counts as new), or closes
-the pane's lane if it has one, whatever key it is bound to. The lane takes
-about 40% of the pane along its bottom (`preview-lane-side`), and the
-terminal shrinks to make room, never below 20 columns and 5 rows: with less
-room the lane is a one-row strip along the pane's bottom (a right lane
-too), and a pane too small even for that gets a notice instead.
+**Media**: `open_media_shelf` opens the focused pane's newest shelf item,
+or closes its open preview. Clicking an inline card opens that item. By
+default, the viewer is centered within 90% of its split, with visible padding,
+and leaves terminal rows, columns and scroll position unchanged. It owns
+window input: Tab selects controls, Enter activates, arrows move the picture
+or seek video, and Esc closes. A primary backdrop click closes without
+reaching the terminal. Video waits for Play.
+
+Choose **Pin** (or P) to keep the same item, zoom and playback in a lane.
+Only then does the terminal resize. `media-open-mode = lane` opens directly
+in that layout. A lane takes about 40% of the pane on `preview-lane-side`,
+leaving at least 20 terminal columns and 5 rows. With less room it becomes
+a one-row strip; a pane too small even for that gets a notice.
 Keys still go to the terminal while a lane shows. Drag the lane's edge
 beside the terminal, marked by a short grip, to give it more or less of the
 pane: the terminal keeps its 20 columns and 5 rows and the lane its least,
@@ -706,7 +712,7 @@ notification says it was copied, or why not: another shell, a translocated
 copy whose path would not last, or a clipboard Kettle could not reach. `preview_next`,
 `preview_previous` and `close_preview` browse and close the focused pane's
 lane as its `›`, `‹` and `×` do ("Next preview", "Previous preview" and
-"Close preview lane" in the palette), `preview_next_diagram` and
+"Close media preview" in the palette), `preview_next_diagram` and
 `preview_previous_diagram` show a gallery's next or previous diagram (a
 Markdown file's Mermaid diagrams, or several copied together) as the `›` and
 `‹` on its detail line do ("Next diagram in preview" and "Previous diagram

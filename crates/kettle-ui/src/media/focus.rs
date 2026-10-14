@@ -14,6 +14,27 @@ pub(crate) struct PreviewFocus {
     pub item: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ViewerKey {
+    Focus(bool),
+    Activate,
+    Pin,
+}
+
+pub(crate) fn viewer_key(key: &Key, mods: ModifiersState) -> Option<ViewerKey> {
+    if mods.control_key() || mods.alt_key() || mods.super_key() {
+        return None;
+    }
+    match key {
+        Key::Named(NamedKey::Tab) => Some(ViewerKey::Focus(!mods.shift_key())),
+        Key::Named(NamedKey::Enter | NamedKey::Space) if !mods.shift_key() => {
+            Some(ViewerKey::Activate)
+        }
+        Key::Character(text) if text == "p" && !mods.shift_key() => Some(ViewerKey::Pin),
+        _ => None,
+    }
+}
+
 /// What a key does while a lane holds the keyboard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PreviewKey {
@@ -85,6 +106,25 @@ mod tests {
 
     fn character(text: &str) -> Key {
         Key::Character(text.into())
+    }
+
+    #[test]
+    fn centered_viewer_uses_standard_focus_and_activation_keys() {
+        let none = ModifiersState::empty();
+        assert_eq!(
+            viewer_key(&Key::Named(NamedKey::Tab), none),
+            Some(ViewerKey::Focus(true))
+        );
+        assert_eq!(
+            viewer_key(&Key::Named(NamedKey::Tab), ModifiersState::SHIFT),
+            Some(ViewerKey::Focus(false))
+        );
+        assert_eq!(
+            viewer_key(&Key::Named(NamedKey::Enter), none),
+            Some(ViewerKey::Activate)
+        );
+        assert_eq!(viewer_key(&character("p"), none), Some(ViewerKey::Pin));
+        assert_eq!(viewer_key(&character("p"), ModifiersState::CONTROL), None);
     }
 
     /// Esc, the arrows, Page Up and Page Down, `+`, `-`, `0`, `c` and Space

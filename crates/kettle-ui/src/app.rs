@@ -1358,7 +1358,11 @@ fn media_lane_accessibility(
         ),
         None => format!("{} · {}", lane.detail, lane.sender.text),
     };
-    let label = tr.media_lane_a11y(index as u64, count as u64, &lane.title, &detail);
+    let label = if lane.pin_label.is_some() {
+        tr.media_viewer_a11y(index as u64, count as u64, &lane.title, &detail)
+    } else {
+        tr.media_lane_a11y(index as u64, count as u64, &lane.title, &detail)
+    };
     let description = match announced {
         Some(announced) => announced.to_owned(),
         None if lane.image.is_some() || lane.frame.is_some() => lane.hint.clone(),
@@ -1378,7 +1382,8 @@ const LANE_CONTROLS: usize = 16;
 /// A playing video's bar, a slider: the part after the controls', below
 /// the stride.
 const LANE_SCRUBBER_PART: u64 = LANE_CONTROLS as u64 + 1;
-const _: () = assert!(LANE_SCRUBBER_PART < LANE_ACCESSIBILITY_PARTS);
+const LANE_PIN_PART: u64 = LANE_SCRUBBER_PART + 1;
+const _: () = assert!(LANE_PIN_PART < LANE_ACCESSIBILITY_PARTS);
 
 /// How far a step along a playing video's bar moves it, from the keyboard
 /// or an assistive technology.
@@ -1417,7 +1422,15 @@ fn lane_controls(
         (1, geometry.previous, Hit::Previous),
         (2, geometry.next, Hit::Next),
         (3, geometry.open_outside, Hit::OpenOutside),
-        (4, Some(geometry.toggle), Hit::Toggle),
+        (
+            if geometry.pinning { LANE_PIN_PART } else { 4 },
+            Some(geometry.toggle),
+            if geometry.pinning {
+                Hit::Pin
+            } else {
+                Hit::Toggle
+            },
+        ),
         (5, Some(geometry.close), Hit::Close),
         (6, geometry.mode, Hit::Mode),
         (7, geometry.canvas, Hit::Canvas),
@@ -1433,6 +1446,38 @@ fn lane_controls(
     ]
 }
 
+fn lane_interactive_controls(
+    lane: &kettle_render::MediaLanePanel,
+    geometry: &kettle_render::MediaLaneGeometry,
+) -> Vec<(u64, Rect, kettle_render::MediaLaneHit)> {
+    lane_controls(geometry)
+        .into_iter()
+        .chain(geometry.scrubber.map(|rect| {
+            (
+                LANE_SCRUBBER_PART,
+                Some(rect),
+                kettle_render::MediaLaneHit::Scrub,
+            )
+        }))
+        .filter_map(|(part, rect, hit)| Some((part, rect?, hit)))
+        .filter(|(_, _, hit)| lane_control_enabled(lane, *hit))
+        .collect()
+}
+
+fn lane_control_enabled(
+    lane: &kettle_render::MediaLanePanel,
+    hit: kettle_render::MediaLaneHit,
+) -> bool {
+    use kettle_render::MediaLaneHit as Hit;
+    match hit {
+        Hit::Previous => lane.position.0 > 1,
+        Hit::Next => lane.position.0 < lane.position.1,
+        Hit::PreviousPage => lane.page.is_some_and(|(page, _)| page > 1),
+        Hit::NextPage => lane.page.is_some_and(|(page, count)| page < count),
+        _ => true,
+    }
+}
+
 /// A lane control's name in ctl `ui_geometry`.
 fn lane_control_name(hit: kettle_render::MediaLaneHit) -> &'static str {
     use kettle_render::MediaLaneHit as Hit;
@@ -1443,6 +1488,7 @@ fn lane_control_name(hit: kettle_render::MediaLaneHit) -> &'static str {
         Hit::NextPage => "next_page",
         Hit::OpenOutside => "open_outside",
         Hit::Toggle => "toggle",
+        Hit::Pin => "pin",
         Hit::Close => "close",
         Hit::Mode => "mode",
         Hit::Canvas => "canvas",
@@ -11173,6 +11219,11 @@ impl App {
                     CursorIcon::Text
                 }
             });
+        let want = if ws.preview_overlay.is_some() && !self.non_search_modal_open(ws) {
+            self.lane_cursor_icon(ws).unwrap_or(CursorIcon::Default)
+        } else {
+            want
+        };
         if ws.last_cursor_icon != Some(want)
             && let Some(w) = &ws.window
         {
@@ -11258,9 +11309,24 @@ impl App {
         self.show_media_item(ws, pane, item);
     }
 
-    /// Show `item` of `pane`'s shelf in the pane's preview lane, opening or
-    /// expanding the lane, and note the item was viewed.
+    /// Open a manual preview in its chosen presentation and mark it viewed.
     fn show_media_item(&mut self, ws: &mut WindowState, pane: u64, item: u64) {
+        let overlay = ws.preview_overlay.is_some_and(|open| open.pane == pane)
+            || (!ws.preview_panels.contains_key(&pane)
+                && self.cfg.media_open_mode == kettle_config::MediaOpenMode::Overlay);
+        if overlay {
+            // An asynchronous render must not interrupt another tab or dialog.
+            let visible = self
+                .pane_layout(ws, self.area(ws))
+                .iter()
+                .any(|(id, _)| *id == pane);
+            if !visible || self.non_search_modal_open(ws) || ws.search.open {
+                return;
+            }
+            if let Some(open) = ws.preview_overlay.filter(|open| open.pane != pane) {
+                self.close_preview(ws, open.pane);
+            }
+        }
         // The item already showing keeps its mode, canvas and place, and
         // what was last said about it goes: it may just have been read again.
         let panel = match ws.preview_panels.get(&pane) {
@@ -11280,18 +11346,37 @@ impl App {
             kettle_config::PreviewLaneSide::Bottom => crate::pane_partition::LaneSide::Bottom,
             kettle_config::PreviewLaneSide::Right => crate::pane_partition::LaneSide::Right,
         };
-        let resized = ws.mux.open_lane(pane, side);
+        let resized = if overlay {
+            if ws.preview_overlay.is_none() {
+                ws.preview_overlay = Some(crate::media::Overlay {
+                    pane,
+                    origin: ws.mux.active_focus(),
+                    control: None,
+                });
+            }
+            self.release_held_buttons(ws, |_| true);
+            self.finish_selection_gesture(ws);
+            ws.mux.focus_pane(pane);
+            ws.mux.close_lane(pane)
+        } else {
+            ws.mux.open_lane(pane, side)
+        };
         // A pane too small for even the strip shows no lane: say so rather
         // than keep one nobody can see, and leave the item unseen. Measured
         // where the pane is, or will be: a preview the user asked for may
         // finish after they switched tabs or zoomed another pane.
-        let shown = ws
-            .mux
-            .partition_of(pane, self.area(ws), self.layout_style(ws))
-            .and_then(|partition| partition.lane)
-            .is_some_and(|lane| lane.rect().is_some());
+        let shown = if overlay {
+            self.preview_lane_geometry_of(ws, pane)
+                .is_some_and(|geometry| geometry.full)
+        } else {
+            ws.mux
+                .partition_of(pane, self.area(ws), self.layout_style(ws))
+                .and_then(|partition| partition.lane)
+                .is_some_and(|lane| lane.rect().is_some())
+        };
         if !shown && !had_panel {
             ws.preview_panels.remove(&pane);
+            self.restore_overlay_origin(ws, pane);
             let resized = ws.mux.close_lane(pane) || resized;
             self.lanes_changed(ws, resized);
             let tr = self.ui_text;
@@ -11304,6 +11389,41 @@ impl App {
         if let Some(state) = ws.mux.panes.get_mut(&pane) {
             state.media_shelf.viewed(item);
         }
+        if overlay {
+            self.focus_preview(ws);
+        }
+        self.lanes_changed(ws, resized);
+    }
+
+    fn restore_overlay_origin(&mut self, ws: &mut WindowState, pane: u64) {
+        if let Some(open) = ws.preview_overlay.filter(|open| open.pane == pane) {
+            ws.preview_overlay = None;
+            if ws.preview_focus.is_some_and(|focus| focus.pane == pane) {
+                self.exit_preview_focus(ws);
+            }
+            if ws.mux.active_focus() == Some(pane)
+                && let Some(origin) = open.origin
+                && ws.mux.panes.get(&origin).is_some_and(|pane| !pane.closed)
+                && self
+                    .pane_layout(ws, self.area(ws))
+                    .iter()
+                    .any(|(pane, _)| *pane == origin)
+            {
+                ws.mux.focus_pane(origin);
+            }
+        }
+    }
+
+    fn pin_preview(&mut self, ws: &mut WindowState, pane: u64) {
+        if !ws.preview_overlay.is_some_and(|open| open.pane == pane) {
+            return;
+        }
+        self.restore_overlay_origin(ws, pane);
+        let side = match self.cfg.preview_lane_side {
+            kettle_config::PreviewLaneSide::Bottom => crate::pane_partition::LaneSide::Bottom,
+            kettle_config::PreviewLaneSide::Right => crate::pane_partition::LaneSide::Right,
+        };
+        let resized = ws.mux.open_lane(pane, side);
         self.lanes_changed(ws, resized);
     }
 
@@ -11320,8 +11440,9 @@ impl App {
         }
     }
 
-    /// Close `pane`'s preview lane; its terminal gets the room back.
+    /// Close the preview, restoring terminal room only for a pinned lane.
     fn close_preview(&mut self, ws: &mut WindowState, pane: u64) {
+        self.restore_overlay_origin(ws, pane);
         // Motion banked toward a scroll of the lane goes with it, as do its
         // sharper pixels. A press on it still owns the pointer until its
         // release, which is the lane's.
@@ -12738,7 +12859,7 @@ impl App {
             return false;
         };
         // A menu or dialog that opened since owns the pointer.
-        if ws.context_menu.is_some() || self.pointer_modal_open(ws) {
+        if ws.context_menu.is_some() || self.non_search_modal_open(ws) {
             ws.lane_drag = None;
             return false;
         }
@@ -12795,7 +12916,7 @@ impl App {
             return false;
         };
         // A menu or dialog that opened since owns the pointer.
-        if ws.context_menu.is_some() || self.pointer_modal_open(ws) {
+        if ws.context_menu.is_some() || self.non_search_modal_open(ws) {
             self.end_lane_resize(ws);
             return false;
         }
@@ -12905,9 +13026,12 @@ impl App {
         self.lanes_changed(ws, false);
     }
 
-    /// Give the keyboard back to the terminal, if a lane holds it. What an
-    /// input method composed meanwhile stays behind, and it comes back on.
+    /// Release a pinned lane's keyboard. A viewer remains modal until closed,
+    /// including across focus loss or a refused file drop.
     fn exit_preview_focus(&mut self, ws: &mut WindowState) {
+        if ws.preview_overlay.is_some() {
+            return;
+        }
         if ws.preview_focus.take().is_none() {
             return;
         }
@@ -12921,6 +13045,9 @@ impl App {
     /// A press anywhere but on the lane holding the keyboard gives the
     /// keyboard back first, then goes where it would.
     fn leave_preview_focus_for_press(&mut self, ws: &mut WindowState) {
+        if ws.preview_overlay.is_some() {
+            return;
+        }
         let Some(focus) = ws.preview_focus else {
             return;
         };
@@ -12958,7 +13085,14 @@ impl App {
                 .preview_lane_geometry_of(ws, focus.pane)
                 .is_some_and(|geometry| geometry.full);
         if !usable {
-            self.exit_preview_focus(ws);
+            if ws
+                .preview_overlay
+                .is_some_and(|open| open.pane == focus.pane)
+            {
+                self.close_preview(ws, focus.pane);
+            } else {
+                self.exit_preview_focus(ws);
+            }
         }
     }
 
@@ -12967,7 +13101,55 @@ impl App {
     /// diagram before or after, `+`, `-` and `0` zoom and fit, and `c`
     /// copies; every other key does nothing. A held key that acts once a
     /// press does not repeat.
+    fn handle_viewer_key(&mut self, ws: &mut WindowState, key: &Key, repeat: bool) -> bool {
+        use crate::media::ViewerKey;
+        let Some(open) = ws.preview_overlay else {
+            return false;
+        };
+        let Some(action) = crate::media::viewer_key(key, held_modifiers(ws)) else {
+            return false;
+        };
+        if repeat && !matches!(action, ViewerKey::Focus(_)) {
+            return true;
+        }
+        match action {
+            ViewerKey::Focus(forward) => {
+                let shown: Vec<u64> = self
+                    .shown_preview_controls(ws, open.pane)
+                    .into_iter()
+                    .map(|(part, _, _)| part)
+                    .collect();
+                if let Some(open) = &mut ws.preview_overlay {
+                    open.step_control(&shown, forward);
+                }
+                self.lanes_changed(ws, false);
+            }
+            ViewerKey::Pin => self.pin_preview(ws, open.pane),
+            ViewerKey::Activate => {
+                let hit = open.control.and_then(|part| {
+                    self.shown_preview_controls(ws, open.pane)
+                        .into_iter()
+                        .find(|(at, _, _)| *at == part)
+                        .map(|(_, _, hit)| hit)
+                });
+                if hit == Some(kettle_render::MediaLaneHit::Scrub)
+                    && key == &Key::Named(NamedKey::Space)
+                {
+                    self.toggle_lane_play(ws, open.pane);
+                } else if let Some(hit) = hit {
+                    self.act_on_preview(ws, open.pane, hit);
+                } else if open.control.is_none() && key == &Key::Named(NamedKey::Space) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     fn preview_focus_key(&mut self, ws: &mut WindowState, key: &Key, repeat: bool) {
+        if self.handle_viewer_key(ws, key, repeat) {
+            return;
+        }
         use crate::media::PreviewKey as K;
         let Some(focus) = ws.preview_focus else {
             return;
@@ -12990,6 +13172,7 @@ impl App {
                 .is_some_and(|playback| playback.serves(item.id, item.generation))
         });
         match action {
+            K::Exit if ws.preview_overlay.is_some() => self.close_preview(ws, pane),
             K::Exit => self.exit_preview_focus(ws),
             K::Move(right, 0) if playing && !source => {
                 let step = LANE_SEEK_STEP.as_millis() as u64;
@@ -13374,12 +13557,16 @@ impl App {
             .keys()
             .copied()
             .filter(|pane| {
-                ws.mux.lane(*pane).is_some()
+                (ws.mux.lane(*pane).is_some()
+                    || ws.preview_overlay.is_some_and(|open| open.pane == *pane))
                     && ws.mux.panes.get(pane).is_some_and(|state| !state.closed)
                     && self.preview_item(ws, *pane).is_some()
             })
             .collect();
         ws.preview_panels.retain(|pane, _| live.contains(pane));
+        if let Some(open) = ws.preview_overlay.filter(|open| !live.contains(&open.pane)) {
+            self.restore_overlay_origin(ws, open.pane);
+        }
         ws.lane_crops.retain(|pane, _| live.contains(pane));
         let gone: Vec<u64> = ws
             .lane_previews
@@ -13403,12 +13590,30 @@ impl App {
         self.pane_layout(ws, self.area(ws))
             .into_iter()
             .filter_map(|(pane, partition)| {
-                let share = partition.lane?;
-                let rect = share.rect()?;
-                let collapsed = matches!(share, crate::pane_partition::LaneShare::Strip(_));
+                let (rect, collapsed) = self.preview_placement(ws, pane, partition)?;
                 self.preview_lane_panel(ws, pane, rect, collapsed)
             })
             .collect()
+    }
+
+    fn preview_placement(
+        &self,
+        ws: &WindowState,
+        pane: u64,
+        partition: crate::pane_partition::PanePartition,
+    ) -> Option<(Rect, bool)> {
+        if ws
+            .preview_overlay
+            .is_some_and(|overlay| overlay.pane == pane)
+        {
+            return crate::media::centered_preview_rect(partition.terminal)
+                .map(|rect| (rect, false));
+        }
+        let share = partition.lane?;
+        Some((
+            share.rect()?,
+            matches!(share, crate::pane_partition::LaneShare::Strip(_)),
+        ))
     }
 
     /// `pane`'s lane in `rect`, projected for painting.
@@ -13428,6 +13633,11 @@ impl App {
         let text = item.source.text();
         let mode = lane_mode(item, panel);
         let mut lane = kettle_render::MediaLanePanel {
+            focused_control: None,
+            pin_label: ws
+                .preview_overlay
+                .filter(|open| open.pane == pane)
+                .map(|_| tr.text(kettle_i18n::Text::MediaViewerPinShort).to_string()),
             play: None,
             sound: None,
             frame: None,
@@ -13442,7 +13652,9 @@ impl App {
             // keyboard.
             hint: tr
                 .text(
-                    if ws.preview_focus.is_some_and(|focus| focus.pane == pane) {
+                    if ws.preview_overlay.is_some_and(|open| open.pane == pane) {
+                        kettle_i18n::Text::MediaViewerOverlayHint
+                    } else if ws.preview_focus.is_some_and(|focus| focus.pane == pane) {
                         kettle_i18n::Text::MediaLaneHintFocused
                     } else {
                         kettle_i18n::Text::MediaLaneHint
@@ -13609,6 +13821,17 @@ impl App {
                 columns,
             ));
         }
+        if let Some(control) = ws
+            .preview_overlay
+            .filter(|open| open.pane == pane)
+            .and_then(|open| open.control)
+            && let Some(geometry) = self.preview_lane_geometry(ws, &lane)
+        {
+            lane.focused_control = lane_interactive_controls(&lane, &geometry)
+                .into_iter()
+                .find(|(part, _, _)| *part == control)
+                .map(|(_, rect, _)| rect);
+        }
         Some(lane)
     }
 
@@ -13675,20 +13898,132 @@ impl App {
 
     /// `pane`'s lane geometry as it shows in the active tab, when it has
     /// room to draw.
+    fn preview_diagnostics(
+        &self,
+        ws: &WindowState,
+        pane: u64,
+        rect: Option<Rect>,
+        collapsed: bool,
+        state: &str,
+    ) -> serde_json::Value {
+        let mut lane = serde_json::json!({
+            "pane": pane,
+            "rect": rect.map(rect_json),
+            "state": state,
+        });
+        // What the lane shows and where its controls are: names and
+        // rectangles only, never a title, a source or pixels.
+        if let Some(panel) =
+            rect.and_then(|rect| self.preview_lane_panel(ws, pane, rect, collapsed))
+        {
+            lane["mode"] = match panel.mode {
+                kettle_render::MediaLaneMode::Rendered => "rendered",
+                kettle_render::MediaLaneMode::Source => "source",
+            }
+            .into();
+            lane["canvas"] = match panel.canvas {
+                kettle_render::MediaCanvas::Theme => "theme",
+                kettle_render::MediaCanvas::White => "white",
+                kettle_render::MediaCanvas::Checker => "checker",
+            }
+            .into();
+            lane["zoom"] = panel.view.zoom().into();
+            if let Some(geometry) = self.preview_lane_geometry(ws, &panel) {
+                // Where the content is and the item is drawn in it:
+                // rectangles, never pixels.
+                lane["content"] = rect_json(geometry.content);
+                lane["image"] = geometry.image.map(rect_json).into();
+                lane["sharp"] = geometry.tile.map(rect_json).into();
+                lane["edge"] = geometry.resize.map(rect_json).into();
+                lane["keyboard"] = if ws.preview_focus.is_some_and(|focus| focus.pane == pane) {
+                    "preview"
+                } else {
+                    "terminal"
+                }
+                .into();
+                let mut controls: serde_json::Map<String, serde_json::Value> =
+                    lane_controls(&geometry)
+                        .into_iter()
+                        .filter_map(|(_, rect, hit)| {
+                            Some((lane_control_name(hit).to_string(), rect_json(rect?)))
+                        })
+                        .collect();
+                if let Some(bar) = geometry.scrubber {
+                    controls.insert(
+                        lane_control_name(kettle_render::MediaLaneHit::Scrub).to_string(),
+                        rect_json(bar),
+                    );
+                }
+                lane["controls"] = controls.into();
+            }
+            // A video playing in the lane, paused in place, or
+            // stopped where it stood: where it is, never a frame.
+            if let Some(bar) = &panel.scrubber {
+                let state = match (
+                    panel.play,
+                    ws.lane_playbacks
+                        .get(&pane)
+                        .is_some_and(crate::media::LanePlayback::has_session),
+                ) {
+                    (Some(kettle_render::MediaLanePlay::Pause), _) => "playing",
+                    (_, true) => "paused",
+                    (_, false) => "stopped",
+                };
+                let sound = ws
+                    .lane_playbacks
+                    .get(&pane)
+                    .and_then(crate::media::LanePlayback::sound)
+                    .map(playback_sound_name);
+                lane["playback"] = serde_json::json!({
+                    "state": state,
+                    "position_ms": bar.position_ms,
+                    "duration_ms": bar.duration_ms,
+                    "frame": panel.frame.is_some(),
+                    "sound": sound,
+                });
+            }
+        }
+        lane
+    }
+
+    fn preview_panel_of(
+        &self,
+        ws: &WindowState,
+        pane: u64,
+    ) -> Option<kettle_render::MediaLanePanel> {
+        let partition = self
+            .pane_layout(ws, self.area(ws))
+            .into_iter()
+            .find(|(id, _)| *id == pane)?
+            .1;
+        let (rect, collapsed) = self.preview_placement(ws, pane, partition)?;
+        self.preview_lane_panel(ws, pane, rect, collapsed)
+    }
+
     fn preview_lane_geometry_of(
         &self,
         ws: &WindowState,
         pane: u64,
     ) -> Option<kettle_render::MediaLaneGeometry> {
-        let share = self
-            .pane_layout(ws, self.area(ws))
-            .into_iter()
-            .find(|(id, _)| *id == pane)?
-            .1
-            .lane?;
-        let strip = matches!(share, crate::pane_partition::LaneShare::Strip(_));
-        let lane = self.preview_lane_panel(ws, pane, share.rect()?, strip)?;
+        let lane = self.preview_panel_of(ws, pane)?;
         self.preview_lane_geometry(ws, &lane)
+    }
+
+    fn shown_preview_controls(
+        &self,
+        ws: &WindowState,
+        pane: u64,
+    ) -> Vec<(u64, Rect, kettle_render::MediaLaneHit)> {
+        let Some(lane) = self.preview_panel_of(ws, pane) else {
+            return Vec::new();
+        };
+        self.preview_lane_geometry(ws, &lane)
+            .map(|geometry| lane_interactive_controls(&lane, &geometry))
+            .unwrap_or_default()
+    }
+
+    fn preview_is_reachable(&self, ws: &WindowState, pane: u64) -> bool {
+        !self.non_search_modal_open(ws) && ws.preview_overlay.is_none_or(|open| open.pane == pane)
     }
 
     /// The lane under `(x, y)` in the active tab, with its pane and whether
@@ -13698,9 +14033,13 @@ impl App {
         self.pane_layout(ws, self.area(ws))
             .into_iter()
             .find_map(|(pane, partition)| {
-                let share = partition.lane?;
-                let rect = share.rect()?;
-                let strip = matches!(share, crate::pane_partition::LaneShare::Strip(_));
+                if ws
+                    .preview_overlay
+                    .is_some_and(|overlay| overlay.pane != pane)
+                {
+                    return None;
+                }
+                let (rect, strip) = self.preview_placement(ws, pane, partition)?;
                 (x >= rect.0 && x < rect.0 + rect.2 && y >= rect.1 && y < rect.1 + rect.3)
                     .then_some((pane, rect, strip))
             })
@@ -13711,8 +14050,8 @@ impl App {
     /// over the lane. A menu or dialog open over it takes the wheel instead.
     fn lane_takes_wheel(&self, ws: &WindowState) -> bool {
         ws.context_menu.is_none()
-            && !self.pointer_modal_open(ws)
-            && self.preview_lane_under_pointer(ws)
+            && !self.non_search_modal_open(ws)
+            && (ws.preview_overlay.is_some() || self.preview_lane_under_pointer(ws))
     }
 
     fn preview_lane_under_pointer(&self, ws: &WindowState) -> bool {
@@ -13725,8 +14064,17 @@ impl App {
     /// control under it. Shared by native and ctl mouse input.
     fn press_preview_lane(&mut self, ws: &mut WindowState, x: f32, y: f32, bcode: u8) -> bool {
         let Some((pane, rect, collapsed)) = self.preview_lane_at(ws, x, y) else {
-            return false;
+            if bcode == 0
+                && let Some(open) = ws.preview_overlay
+            {
+                self.close_preview(ws, open.pane);
+                return true;
+            }
+            return ws.preview_overlay.is_some();
         };
+        if let Some(open) = &mut ws.preview_overlay {
+            open.control = None;
+        }
         if bcode != 0 {
             return true;
         }
@@ -13796,6 +14144,7 @@ impl App {
         match hit {
             Hit::Close => self.close_preview(ws, pane),
             Hit::Toggle => self.toggle_preview(ws, pane),
+            Hit::Pin => self.pin_preview(ws, pane),
             Hit::Previous => self.step_preview(ws, pane, -1),
             Hit::Next => self.step_preview(ws, pane, 1),
             Hit::PreviousPage => self.page_preview(ws, pane, -1),
@@ -18652,6 +19001,12 @@ impl App {
         // Lanes stay drawn under every modal, which paints over them; their
         // room in the pane stays carved either way.
         let media_lanes = self.preview_lane_projections(ws);
+        let media_viewer_rect = ws.preview_overlay.and_then(|open| {
+            self.pane_layout(ws, self.area(ws))
+                .into_iter()
+                .find(|(pane, _)| *pane == open.pane)
+                .and_then(|(_, partition)| crate::media::centered_preview_rect(partition.terminal))
+        });
         let ime_preedit = preedit.filter(|_| terminal_surface).and_then(|text| {
             let (row, col) = self.terminal_cursor_cell(ws)?;
             Some(ImePreedit {
@@ -18785,6 +19140,7 @@ impl App {
                 completion,
                 media_paste_receipt,
                 media_lanes,
+                media_viewer_rect,
                 card_hover,
                 window_focused,
                 scrollbar_active,
@@ -18904,6 +19260,7 @@ impl App {
             completion: None,
             media_paste_receipt: None,
             media_lanes: Vec::new(),
+            media_viewer_rect: None,
             card_hover,
             window_focused,
             scrollbar_active,
@@ -19712,6 +20069,9 @@ impl App {
     /// stacking two visible modals. A palette opened over the SSH launcher
     /// would render both, with only the palette capturing keys.
     fn close_all_modals(&mut self, ws: &mut WindowState) {
+        if let Some(open) = ws.preview_overlay {
+            self.close_preview(ws, open.pane);
+        }
         // Opening or switching a modal takes pointer ownership. End a terminal
         // selection drag here so later motion cannot keep extending or
         // autoscrolling behind Command Palette, Settings, SSH, or title edit.
@@ -19987,7 +20347,7 @@ impl App {
     /// routing, focus-follows-mouse, and file drops keep using
     /// `any_modal_open`, because search does own the keyboard.
     fn pointer_modal_open(&self, ws: &WindowState) -> bool {
-        self.non_search_modal_open(ws)
+        self.non_search_modal_open(ws) || ws.preview_overlay.is_some()
     }
 
     /// Track the search control under the pointer for the hover fill, and
@@ -20017,7 +20377,7 @@ impl App {
     /// keyboard is not one: the pointer, the wheel and file drops still work
     /// everywhere else.
     fn any_modal_open(&self, ws: &WindowState) -> bool {
-        ws.search.open || self.non_search_modal_open(ws)
+        ws.search.open || self.pointer_modal_open(ws)
     }
 
     /// Whether the focused Settings row is a number, which Left/Right step.
@@ -26596,90 +26956,19 @@ impl App {
                     crate::pane_partition::LaneShare::Strip(_) => "strip",
                     crate::pane_partition::LaneShare::Badge => "badge",
                 };
-                let mut lane = serde_json::json!({
-                    "pane": id,
-                    "rect": share.rect().map(rect_json),
-                    "state": state,
-                });
-                // What the lane shows and where its controls are: names and
-                // rectangles only, never a title, a source or pixels.
                 let collapsed = matches!(share, crate::pane_partition::LaneShare::Strip(_));
-                if let Some(panel) = share
-                    .rect()
-                    .and_then(|rect| self.preview_lane_panel(target, *id, rect, collapsed))
-                {
-                    lane["mode"] = match panel.mode {
-                        kettle_render::MediaLaneMode::Rendered => "rendered",
-                        kettle_render::MediaLaneMode::Source => "source",
-                    }
-                    .into();
-                    lane["canvas"] = match panel.canvas {
-                        kettle_render::MediaCanvas::Theme => "theme",
-                        kettle_render::MediaCanvas::White => "white",
-                        kettle_render::MediaCanvas::Checker => "checker",
-                    }
-                    .into();
-                    lane["zoom"] = panel.view.zoom().into();
-                    if let Some(geometry) = self.preview_lane_geometry(target, &panel) {
-                        // Where the content is and the item is drawn in it:
-                        // rectangles, never pixels.
-                        lane["content"] = rect_json(geometry.content);
-                        lane["image"] = geometry.image.map(rect_json).into();
-                        lane["sharp"] = geometry.tile.map(rect_json).into();
-                        lane["edge"] = geometry.resize.map(rect_json).into();
-                        lane["keyboard"] =
-                            if target.preview_focus.is_some_and(|focus| focus.pane == *id) {
-                                "preview"
-                            } else {
-                                "terminal"
-                            }
-                            .into();
-                        let mut controls: serde_json::Map<String, serde_json::Value> =
-                            lane_controls(&geometry)
-                                .into_iter()
-                                .filter_map(|(_, rect, hit)| {
-                                    Some((lane_control_name(hit).to_string(), rect_json(rect?)))
-                                })
-                                .collect();
-                        if let Some(bar) = geometry.scrubber {
-                            controls.insert(
-                                lane_control_name(kettle_render::MediaLaneHit::Scrub).to_string(),
-                                rect_json(bar),
-                            );
-                        }
-                        lane["controls"] = controls.into();
-                    }
-                    // A video playing in the lane, paused in place, or
-                    // stopped where it stood: where it is, never a frame.
-                    if let Some(bar) = &panel.scrubber {
-                        let state = match (
-                            panel.play,
-                            target
-                                .lane_playbacks
-                                .get(id)
-                                .is_some_and(crate::media::LanePlayback::has_session),
-                        ) {
-                            (Some(kettle_render::MediaLanePlay::Pause), _) => "playing",
-                            (_, true) => "paused",
-                            (_, false) => "stopped",
-                        };
-                        let sound = target
-                            .lane_playbacks
-                            .get(id)
-                            .and_then(crate::media::LanePlayback::sound)
-                            .map(playback_sound_name);
-                        lane["playback"] = serde_json::json!({
-                            "state": state,
-                            "position_ms": bar.position_ms,
-                            "duration_ms": bar.duration_ms,
-                            "frame": panel.frame.is_some(),
-                            "sound": sound,
-                        });
-                    }
-                }
-                Some(lane)
+                Some(self.preview_diagnostics(target, *id, share.rect(), collapsed, state))
             })
             .collect();
+        let preview_overlay = target.preview_overlay.and_then(|open| {
+            let partition = pane_layout.iter().find(|(pane, _)| *pane == open.pane)?.1;
+            let (rect, collapsed) = self.preview_placement(target, open.pane, partition)?;
+            let mut report =
+                self.preview_diagnostics(target, open.pane, Some(rect), collapsed, "overlay");
+            report["focused_control"] = open.control.into();
+            report["modal"] = true.into();
+            Some(report)
+        });
         let home = crate::mux::home_dir_string();
         let focus = target.mux.active_focus();
         let pane_titlebars: Vec<serde_json::Value> = if pane_layout
@@ -27130,6 +27419,7 @@ impl App {
                 "preview_lanes".into(),
                 serde_json::Value::Array(preview_lanes),
             );
+            fields.insert("preview_overlay".into(), preview_overlay.into());
             fields.insert(
                 "desktop".into(),
                 serde_json::json!({
@@ -33269,6 +33559,7 @@ fn terminal_surface_available(ws: &WindowState) -> bool {
         && ws.confirm_dialog.is_none()
         && ws.editing_title.is_none()
         && !ws.search.open
+        && ws.preview_overlay.is_none()
 }
 
 /// Where a pointer event goes while the search bar is open.
@@ -34269,6 +34560,9 @@ impl App {
         // A pane's terminal node covers its terminal, clear of its titlebar
         // and lane.
         for (pane_id, partition) in layout {
+            if ws.preview_overlay.is_some() {
+                continue;
+            }
             let (x, y, width, height) = partition.terminal;
             let Some(pane) = ws.mux.panes.get(&pane_id) else {
                 continue;
@@ -34339,13 +34633,25 @@ impl App {
             )
         };
         // Under a dialog or menu a lane is out of reach, as its pointer is.
-        let lanes_reachable = !self.pointer_modal_open(ws);
-        for lane in overlay.media_lanes.iter().filter(|_| lanes_reachable) {
+        let lanes_reachable = !self.non_search_modal_open(ws);
+        for lane in overlay
+            .media_lanes
+            .iter()
+            .filter(|_| lanes_reachable)
+            .filter(|lane| ws.preview_overlay.is_none_or(|open| open.pane == lane.pane))
+        {
             let Some(lane_id) = accessibility_lane_id(lane.pane, 0) else {
                 continue;
             };
             children.push(lane_id);
-            let mut node = Node::new(Role::Group);
+            let mut node = Node::new(if lane.pin_label.is_some() {
+                Role::Dialog
+            } else {
+                Role::Group
+            });
+            if lane.pin_label.is_some() {
+                node.set_modal();
+            }
             let announced = self.lane_announcement(ws, lane.pane);
             let (label, description) =
                 media_lane_accessibility(lane, &self.ui_text, announced.as_deref());
@@ -34372,6 +34678,9 @@ impl App {
                         kettle_render::MediaLaneHit::NextPage => self
                             .ui_text
                             .text(kettle_i18n::Text::MediaLaneA11yNextDiagram),
+                        kettle_render::MediaLaneHit::Pin => {
+                            self.ui_text.text(kettle_i18n::Text::MediaViewerA11yPin)
+                        }
                         kettle_render::MediaLaneHit::Toggle if lane.collapsed => {
                             self.ui_text.text(kettle_i18n::Text::MediaLaneA11yExpand)
                         }
@@ -34444,15 +34753,11 @@ impl App {
                     let mut button = Node::new(Role::Button);
                     button.set_label(text);
                     button.add_action(AccessibilityAction::Click);
+                    if lane.pin_label.is_some() {
+                        button.add_action(AccessibilityAction::Focus);
+                    }
                     button.set_bounds(ax_rect(rect));
-                    // A gallery has no page before its first or after its
-                    // last.
-                    let (first, last) = lane
-                        .page
-                        .map_or((true, true), |(shown, count)| (shown <= 1, shown >= count));
-                    if (hit == kettle_render::MediaLaneHit::PreviousPage && first)
-                        || (hit == kettle_render::MediaLaneHit::NextPage && last)
-                    {
+                    if !lane_control_enabled(lane, hit) {
                         button.set_disabled();
                     }
                     controls.push(id);
@@ -34466,6 +34771,9 @@ impl App {
                     accessibility_lane_id(lane.pane, LANE_SCRUBBER_PART),
                 ) {
                     let mut slider = Node::new(Role::Slider);
+                    if lane.pin_label.is_some() {
+                        slider.add_action(AccessibilityAction::Focus);
+                    }
                     slider.set_label(
                         self.ui_text
                             .text(kettle_i18n::Text::MediaLaneA11yVideoPosition),
@@ -34708,6 +35016,16 @@ impl App {
         let focus = modal_focus.unwrap_or_else(|| {
             if ws.search.open {
                 accessibility_search_control_id(ws.search.focused_control)
+            } else if let Some(open) = ws.preview_overlay {
+                open.control
+                    .and_then(|control| accessibility_lane_id(open.pane, control))
+                    .filter(|id| {
+                        nodes
+                            .iter()
+                            .any(|(at, node)| at == id && !node.is_disabled())
+                    })
+                    .or_else(|| accessibility_lane_id(open.pane, 0))
+                    .unwrap_or(ACCESSIBILITY_ROOT_ID)
             } else {
                 ws.card_focus
                     .map(accessibility_card_id)
@@ -34730,6 +35048,9 @@ impl App {
 
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         ws.mux.active_focus().hash(&mut hasher);
+        ws.preview_overlay
+            .map(|open| (open.pane, open.control))
+            .hash(&mut hasher);
         ws.card_focus.hash(&mut hasher);
         for (instance, card, item) in self.accessible_cards(ws) {
             instance.hash(&mut hasher);
@@ -36839,31 +37160,31 @@ impl App {
             return;
         }
         if let Some((pane, part)) = accessibility_lane_part(request.target_node) {
-            // A playing video's bar moves it: to the value set, or a step.
-            if part == LANE_SCRUBBER_PART {
-                if !self.pointer_modal_open(ws) {
-                    self.seek_lane_by_accessibility(ws, pane, &request);
-                }
+            if !self.preview_is_reachable(ws, pane) {
                 return;
             }
-            // Only a control the lane shows now, with nothing over it,
-            // answers: a stale part names nothing.
-            if request.action != AccessibilityAction::Click || self.pointer_modal_open(ws) {
+            if part == LANE_SCRUBBER_PART && request.action != AccessibilityAction::Focus {
+                self.seek_lane_by_accessibility(ws, pane, &request);
                 return;
             }
             let hit = self
-                .preview_lane_projections(ws)
+                .shown_preview_controls(ws, pane)
                 .into_iter()
-                .find(|lane| lane.pane == pane)
-                .and_then(|lane| self.preview_lane_geometry(ws, &lane))
-                .and_then(|geometry| {
-                    lane_controls(&geometry)
-                        .into_iter()
-                        .find(|(at, rect, _)| *at == part && rect.is_some())
-                        .map(|(_, _, hit)| hit)
-                });
+                .find(|(at, _, _)| *at == part)
+                .map(|(_, _, hit)| hit);
             if let Some(hit) = hit {
-                self.act_on_preview(ws, pane, hit);
+                match request.action {
+                    AccessibilityAction::Focus => {
+                        if let Some(open) =
+                            ws.preview_overlay.as_mut().filter(|open| open.pane == pane)
+                        {
+                            open.control = Some(part);
+                        }
+                        self.lanes_changed(ws, false);
+                    }
+                    AccessibilityAction::Click => self.act_on_preview(ws, pane, hit),
+                    _ => {}
+                }
             }
             return;
         }
@@ -37918,6 +38239,10 @@ impl App {
                 // excluded (handled + returned above; a right-click below
                 // relocates it), and so is the search bar, whose lane was
                 // routed above and whose grid stays live.
+                if ws.preview_overlay.is_some() && !self.non_search_modal_open(ws) {
+                    self.press_preview_lane(ws, ws.cursor.x as f32, ws.cursor.y as f32, bcode);
+                    return;
+                }
                 if modal_swallows_pointer(self.pointer_modal_open(ws), ws.context_menu.is_some()) {
                     return;
                 }
@@ -39579,7 +39904,7 @@ impl App {
         // A menu or dialog opened from the keyboard ends a lane's drag now,
         // not at the pointer's next motion.
         if (ws.lane_drag.is_some() || ws.lane_resize.is_some())
-            && (ws.context_menu.is_some() || self.pointer_modal_open(ws))
+            && (ws.context_menu.is_some() || self.non_search_modal_open(ws))
         {
             ws.lane_drag = None;
             self.end_lane_resize(ws);
@@ -40015,7 +40340,7 @@ mod modal_discipline_guard {
              through to the terminal behind it"
         );
         assert!(
-            body("any_modal_open").contains("self.non_search_modal_open(ws)")
+            body("any_modal_open").contains("self.pointer_modal_open(ws)")
                 && body("pointer_modal_open").contains("self.non_search_modal_open(ws)"),
             "both modal predicates must derive from the shared non-search list"
         );
@@ -45086,11 +45411,13 @@ mod tests {
         assert!(held < motion && motion < pointer);
         assert!(body("overlay").contains("let media_lanes = self.preview_lane_projections(ws);"));
         let tree = body("accessibility_tree");
-        assert!(tree.contains("let lanes_reachable = !self.pointer_modal_open(ws);"));
+        assert!(tree.contains("let lanes_reachable = !self.non_search_modal_open(ws);"));
         assert!(tree.contains(".filter(|_| lanes_reachable)"));
-        assert!(body("handle_accessibility_action").contains(
-            "if request.action != AccessibilityAction::Click || self.pointer_modal_open(ws) {"
-        ));
+        assert!(
+            body("handle_accessibility_action").contains("if !self.preview_is_reachable(ws, pane)")
+        );
+        assert!(body("preview_is_reachable").contains("!self.non_search_modal_open(ws)"));
+        assert!(body("preview_is_reachable").contains("ws.preview_overlay.is_none_or"));
         let show = body("show_media_item");
         let refused = show
             .find("if !shown && !had_panel {")
@@ -45154,9 +45481,18 @@ mod tests {
         ] {
             let modal = body(name);
             assert!(
-                !modal.contains("preview_panels") && !modal.contains("close_preview"),
-                "{name} leaves the lanes alone"
+                !modal.contains("preview_panels"),
+                "{name} keeps pinned panels"
             );
+            if name == "close_all_modals" {
+                assert!(modal.contains("if let Some(open) = ws.preview_overlay"));
+                assert!(modal.contains("self.close_preview(ws, open.pane)"));
+            } else {
+                assert!(
+                    !modal.contains("close_preview"),
+                    "{name} keeps pinned lanes"
+                );
+            }
         }
         assert!(body("about_to_wait_inner").contains("self.prune_previews(ws);"));
         let prune = body("prune_previews");
@@ -45827,6 +46163,8 @@ mod tests {
 
     pub(super) fn test_lane_panel() -> kettle_render::MediaLanePanel {
         kettle_render::MediaLanePanel {
+            focused_control: None,
+            pin_label: None,
             play: None,
             sound: None,
             frame: None,
@@ -59311,7 +59649,7 @@ mod lane_control_tests {
         // ui_geometry's playback carries it (keys are blanked as strings).
         assert!(flat.contains(": panel.frame.is_some(), : sound, });"));
         assert!(flat.contains(
-            "let sound = target .lane_playbacks .get(id) .and_then(crate::media::LanePlayback::sound) .map(playback_sound_name);"
+            "let sound = ws .lane_playbacks .get(&pane) .and_then(crate::media::LanePlayback::sound) .map(playback_sound_name);"
         ));
         assert!(body("lane_play_open").contains(
             "ws.lane_playbacks .get(&pane) .filter(|playback| playback.serves(item.id, item.generation)) .map_or( kettle_media::AudioRequest::On, crate::media::LanePlayback::audio_request, )"
@@ -60018,10 +60356,10 @@ mod lane_control_tests {
             "let lane_resize_wait = self.flush_lane_resize(ws, now);",
             // A menu or dialog opened from the keyboard ends a drag at
             // once, and so does a side button's press.
-            "if (ws.lane_drag.is_some() || ws.lane_resize.is_some()) && (ws.context_menu.is_some() || self.pointer_modal_open(ws)) { ws.lane_drag = None; self.end_lane_resize(ws); }",
+            "if (ws.lane_drag.is_some() || ws.lane_resize.is_some()) && (ws.context_menu.is_some() || self.non_search_modal_open(ws)) { ws.lane_drag = None; self.end_lane_resize(ws); }",
             "if let Some(sgr) = extra_mouse_sgr(button) { // Any press ends a lane's drag or edge drag, as below. self.end_lane_resize(ws); ws.lane_drag = None;",
             "if let Some(next) = lane_resize_wait { wait = Some(wait.map_or(next, |current| current.min(next))); }",
-            "if ws.context_menu.is_some() || self.pointer_modal_open(ws) { ws.lane_drag = None; return false; }",
+            "if ws.context_menu.is_some() || self.non_search_modal_open(ws) { ws.lane_drag = None; return false; }",
             "if hit == Some(kettle_render::MediaLaneHit::Inside) && let Some(geometry) = geometry && geometry.fit.is_some() && rect_contains(geometry.content, x, y)",
         ] {
             assert!(flat.contains(needle), "{needle}");
@@ -60073,6 +60411,79 @@ mod lane_control_tests {
         }
     }
 
+    #[test]
+    fn viewer_retains_keyboard_ownership_until_it_closes() {
+        let source = super::production_source();
+        let release = source
+            .split("fn exit_preview_focus(")
+            .nth(1)
+            .unwrap()
+            .split("\n    fn ")
+            .next()
+            .unwrap();
+        let flat = release.split_whitespace().collect::<Vec<_>>().join(" ");
+        let modal = flat
+            .find("if ws.preview_overlay.is_some() { return; }")
+            .expect("a background viewer must still own the keyboard");
+        assert!(modal < flat.find("ws.preview_focus.take()").unwrap());
+        let close = source
+            .split("fn restore_overlay_origin(")
+            .nth(1)
+            .unwrap()
+            .split("\n    fn ")
+            .next()
+            .unwrap();
+        assert!(
+            close.find("ws.preview_overlay = None;").unwrap()
+                < close.find("self.exit_preview_focus(ws);").unwrap()
+        );
+    }
+
+    #[test]
+    fn viewer_drag_is_not_cancelled_by_its_own_modal() {
+        let source = super::production_source();
+        let tick = source.split("fn about_to_wait_inner(").nth(1).unwrap();
+        let flat = tick.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(flat.contains("if (ws.lane_drag.is_some() || ws.lane_resize.is_some()) && (ws.context_menu.is_some() || self.non_search_modal_open(ws))"));
+    }
+
+    #[test]
+    fn viewer_pin_node_cannot_be_reused_as_a_lane_collapse() {
+        let mut lane = super::tests::test_lane_panel();
+        lane.pin_label = Some("Pin".into());
+        let geometry = kettle_render::media_lane_geometry(&lane, (8.0, 16.0), (8.0, 16.0)).unwrap();
+        let pin = super::lane_controls(&geometry)
+            .into_iter()
+            .find(|(_, _, hit)| *hit == kettle_render::MediaLaneHit::Pin)
+            .unwrap()
+            .0;
+        lane.pin_label = None;
+        let geometry = kettle_render::media_lane_geometry(&lane, (8.0, 16.0), (8.0, 16.0)).unwrap();
+        assert!(
+            !super::lane_controls(&geometry)
+                .iter()
+                .any(|(part, _, _)| *part == pin)
+        );
+    }
+
+    #[test]
+    fn viewer_keyboard_controls_include_the_video_seek_slider() {
+        let mut lane = super::tests::test_lane_panel();
+        lane.scrubber = Some(kettle_render::MediaLaneScrubber {
+            position_ms: 0,
+            duration_ms: 1000,
+            label: "0:00".into(),
+        });
+        let geometry = kettle_render::media_lane_geometry(&lane, (8.0, 16.0), (8.0, 16.0)).unwrap();
+        let controls = super::lane_interactive_controls(&lane, &geometry);
+        assert!(
+            controls
+                .iter()
+                .any(|(part, _, hit)| *part == super::LANE_SCRUBBER_PART
+                    && *hit == kettle_render::MediaLaneHit::Scrub)
+        );
+    }
+
     /// A lane given the keyboard owns every key ahead of the application's
     /// shortcuts and the terminal, natively and through `dispatch_ui_key`;
     /// a control client's keys and text are refused before anything is
@@ -60101,7 +60512,7 @@ mod lane_control_tests {
             "// A lane that can no longer use the keyboard gives it back. self.check_preview_focus(ws);",
             // The pointer, the wheel and drops still work: a lane holding
             // the keyboard is no pointer modal, and a drop gives it back.
-            "fn any_modal_open(&self, ws: &WindowState) -> bool { ws.search.open || self.non_search_modal_open(ws) }",
+            "fn any_modal_open(&self, ws: &WindowState) -> bool { ws.search.open || self.pointer_modal_open(ws) }",
             "// goes back to the terminal first. self.exit_preview_focus(ws);",
             // Option counts on macOS, and any modal opening takes the
             // keyboard, a confirmation too.
@@ -60429,6 +60840,6 @@ mod lane_control_tests {
         // A menu or dialog over a lane takes the wheel.
         let gate = body("lane_takes_wheel");
         assert!(gate.contains("ws.context_menu.is_none()"));
-        assert!(gate.contains("!self.pointer_modal_open(ws)"));
+        assert!(gate.contains("!self.non_search_modal_open(ws)"));
     }
 }

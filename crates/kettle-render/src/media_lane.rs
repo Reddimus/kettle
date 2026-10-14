@@ -16,6 +16,34 @@ use glyphon::{
 
 use crate::Rect4;
 
+/// Cover the window outside its viewer, after terminal and lane images.
+pub(crate) fn viewer_backdrop(viewer: Rect4, surface: (f32, f32)) -> Option<[Rect4; 4]> {
+    let (x, y, width, height) = viewer;
+    let (sw, sh) = surface;
+    let right = x + width;
+    let bottom = y + height;
+    if ![x, y, width, height, sw, sh, right, bottom]
+        .into_iter()
+        .all(f32::is_finite)
+        || x < 0.0
+        || y < 0.0
+        || width <= 0.0
+        || height <= 0.0
+        || sw <= 0.0
+        || sh <= 0.0
+        || right > sw
+        || bottom > sh
+    {
+        return None;
+    }
+    Some([
+        (0.0, 0.0, sw, y),
+        (0.0, y, x, height),
+        (right, y, sw - right, height),
+        (0.0, bottom, sw, sh - bottom),
+    ])
+}
+
 /// What shows behind the image's transparent pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MediaCanvas {
@@ -126,6 +154,9 @@ impl std::fmt::Debug for MediaLaneTile {
 /// One pane's lane, projected for painting.
 #[derive(Clone, Debug)]
 pub struct MediaLanePanel {
+    /// A centered viewer's header action, localized; lanes use collapse.
+    pub pin_label: Option<String>,
+    pub focused_control: Option<Rect4>,
     /// The pane the lane belongs to, which keys its retained text.
     pub pane: u64,
     /// The lane, in physical pixels: its whole share of the pane.
@@ -260,6 +291,7 @@ impl MediaLaneSender {
 /// Exact paint and input geometry of a lane.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MediaLaneGeometry {
+    pub pinning: bool,
     /// The lane.
     pub rect: Rect4,
     pub title: Rect4,
@@ -337,6 +369,8 @@ pub enum MediaLaneHit {
     OpenOutside,
     /// Collapse or expand.
     Toggle,
+    /// Move the existing viewer into a lane.
+    Pin,
     /// Rendered or source.
     Mode,
     /// The next canvas.
@@ -409,7 +443,11 @@ impl MediaLaneGeometry {
         } else if self.resize.is_some_and(|rect| contains(rect, x, y)) {
             Some(MediaLaneHit::Resize)
         } else if contains(self.toggle, x, y) {
-            Some(MediaLaneHit::Toggle)
+            Some(if self.pinning {
+                MediaLaneHit::Pin
+            } else {
+                MediaLaneHit::Toggle
+            })
         } else if self.play.is_some_and(|rect| contains(rect, x, y)) {
             Some(MediaLaneHit::Play)
         } else if self.sound.is_some_and(|rect| contains(rect, x, y)) {
@@ -485,8 +523,10 @@ pub fn media_lane_geometry(
     let rect = lane.rect;
     let pad = (tw * 0.75).round().max(4.0);
     let button = 3.0 * tw;
-    // Close and collapse, a little title, and the padding around them.
-    if rect.2 < 2.0 * button + MIN_TITLE_COLUMNS * tw + 2.0 * pad || rect.3 < lh {
+    let toggle_width = lane.pin_label.as_ref().map_or(button, |label| {
+        (crate::display_width(label).min(16) as f32 + 2.0).max(3.0) * tw
+    });
+    if rect.2 < button + toggle_width + MIN_TITLE_COLUMNS * tw + 2.0 * pad || rect.3 < lh {
         return None;
     }
     // Header, detail, sender, a line of image and the hint, with padding
@@ -513,7 +553,7 @@ pub fn media_lane_geometry(
         })
     };
     let close = take(button, true).unwrap_or_default();
-    let toggle = take(button, true).unwrap_or_default();
+    let toggle = take(toggle_width, true).unwrap_or_default();
     let play = if lane.play.is_some() {
         take(button, false)
     } else {
@@ -571,6 +611,7 @@ pub fn media_lane_geometry(
     let empty = (left, header_y, 0.0, 0.0);
     if !full {
         return Some(MediaLaneGeometry {
+            pinning: lane.pin_label.is_some(),
             rect,
             title,
             counter,
@@ -668,6 +709,7 @@ pub fn media_lane_geometry(
         None => fit.and_then(|fit| lane.view.place(fit, content)),
     };
     let mut geometry = MediaLaneGeometry {
+        pinning: lane.pin_label.is_some(),
         rect,
         title,
         counter,
@@ -816,6 +858,7 @@ pub(crate) struct LaneText {
     /// gallery's page before and after, and a video's play, stop, pause and
     /// sound.
     controls: [TextBuffer; 20],
+    pin_label: Option<String>,
     /// What each line buffer was last shaped with; `None` until it is, or
     /// once a font change means it must be again.
     shaped: [Option<String>; 8],
@@ -872,6 +915,7 @@ impl LaneText {
                 control(font_system, "‖"),
                 control(font_system, "♪"),
             ],
+            pin_label: None,
             shaped: Default::default(),
             rows: Vec::new(),
             rows_shaped: Vec::new(),
@@ -881,14 +925,15 @@ impl LaneText {
     /// What each line and source row was last shaped with, for the
     /// renderer's text damage key: buffers keep their addresses when the
     /// lane changes item.
-    pub(crate) fn shaped(&self) -> (&[Option<String>; 8], &[String]) {
-        (&self.shaped, &self.rows_shaped)
+    pub(crate) fn shaped(&self) -> (&[Option<String>; 8], &[String], Option<&str>) {
+        (&self.shaped, &self.rows_shaped, self.pin_label.as_deref())
     }
 
     /// Reshape every line on the next fill, after the font family or the
     /// loaded faces change: the text alone would not say so.
     pub(crate) fn invalidate(&mut self) {
         self.shaped = Default::default();
+        self.pin_label = None;
         self.rows.clear();
         self.rows_shaped.clear();
     }
@@ -990,6 +1035,18 @@ impl LaneText {
                 text.clone_into(shaped.get_or_insert_default());
             }
             buffer.shape_until_scroll(font_system, false);
+        }
+        let pin_label = lane.pin_label.as_deref().unwrap_or("▾");
+        if self.pin_label.as_deref() != Some(pin_label) {
+            self.controls[3].set_text(
+                pin_label,
+                &Attrs::new()
+                    .family(Family::Name(family))
+                    .weight(Weight::BOLD),
+                Shaping::Advanced,
+                None,
+            );
+            self.pin_label = Some(pin_label.to_owned());
         }
         for buffer in &mut self.controls {
             buffer.set_metrics(metrics);
@@ -1097,7 +1154,12 @@ impl LaneText {
                     || (at == 15 && last)
                     || (at == 19 && sound == Some(MediaLaneSound::Muted));
                 let mut glyph = area(buffer, rect, if idle { description } else { emphasis });
-                glyph.left = rect.0 + ((rect.2 - glyph_width) / 2.0).max(0.0);
+                let control_width = if at == 3 && geometry.pinning {
+                    self.pin_label.as_deref().map_or(1, crate::display_width) as f32 * glyph_width
+                } else {
+                    glyph_width
+                };
+                glyph.left = rect.0 + ((rect.2 - control_width) / 2.0).max(0.0);
                 glyph.top = rect.1 + ((rect.3 - line_height) / 2.0).max(0.0);
                 areas.push(glyph);
             }
@@ -1141,6 +1203,8 @@ mod tests {
 
     fn viewer(position: (usize, usize), image: Option<(u32, u32)>) -> MediaLanePanel {
         MediaLanePanel {
+            focused_control: None,
+            pin_label: None,
             play: None,
             sound: None,
             frame: None,
@@ -1174,6 +1238,49 @@ mod tests {
             view: crate::MediaViewport::FIT,
             tile: None,
             edge: None,
+        }
+    }
+
+    #[test]
+    fn viewer_backdrop_covers_the_window_without_dimming_the_viewer() {
+        let shade = viewer_backdrop((10.0, 20.0, 60.0, 40.0), (100.0, 80.0)).unwrap();
+        assert_eq!(
+            shade,
+            [
+                (0.0, 0.0, 100.0, 20.0),
+                (0.0, 20.0, 10.0, 40.0),
+                (70.0, 20.0, 30.0, 40.0),
+                (0.0, 60.0, 100.0, 20.0)
+            ]
+        );
+        assert_eq!(
+            shade.iter().map(|r| r.2 * r.3).sum::<f32>(),
+            100.0 * 80.0 - 60.0 * 40.0
+        );
+        assert!(viewer_backdrop((f32::NAN, 0.0, 1.0, 1.0), (100.0, 80.0)).is_none());
+    }
+
+    #[test]
+    fn overlay_header_action_pins_and_keeps_close_available() {
+        let mut lane = viewer((1, 1), Some((64, 48)));
+        lane.pin_label = Some("Pin".into());
+        let geometry = media_lane_geometry(&lane, CELL, CELL).unwrap();
+        let center = |r: Rect4| (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
+        let (x, y) = center(geometry.toggle);
+        assert_eq!(geometry.hit_test(x, y), Some(MediaLaneHit::Pin));
+        let (x, y) = center(geometry.close);
+        assert_eq!(geometry.hit_test(x, y), Some(MediaLaneHit::Close));
+    }
+
+    #[test]
+    fn localized_pin_labels_fit_without_overlapping_close_or_title() {
+        for label in ["Pin", "Fijar"] {
+            let mut lane = viewer((1, 1), None);
+            lane.pin_label = Some(label.into());
+            let geometry = media_lane_geometry(&lane, CELL, CELL).unwrap();
+            assert!(geometry.toggle.2 >= label.len() as f32 * CELL.0);
+            assert!(geometry.toggle.0 + geometry.toggle.2 <= geometry.close.0);
+            assert!(geometry.title.0 + geometry.title.2 <= geometry.toggle.0);
         }
     }
 
@@ -1804,6 +1911,8 @@ mod tests {
         assert_eq!(zoomed.shown(), Some(zoomed.content));
         for offered in [
             MediaLanePanel {
+                focused_control: None,
+                pin_label: None,
                 play: None,
                 frame: None,
                 mode: MediaLaneMode::Source,
@@ -1811,12 +1920,16 @@ mod tests {
                 ..lane.clone()
             },
             MediaLanePanel {
+                focused_control: None,
+                pin_label: None,
                 play: None,
                 frame: None,
                 image: None,
                 ..lane.clone()
             },
             MediaLanePanel {
+                focused_control: None,
+                pin_label: None,
                 play: None,
                 frame: None,
                 collapsed: true,

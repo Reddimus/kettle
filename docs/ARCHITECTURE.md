@@ -823,6 +823,16 @@ can read (through `kettle_state::open_trusted_file_read`: a regular file
 only, no link followed, no blocking open) marks the tip done. It ends when
 `open_card` runs or `TIP_TIME` passes, a deadline `about_to_wait` folds in.
 
+Manual previews share one `PreviewPanel`, render queue and `LanePlayback`
+across two presentations. `media::presentation` computes the centered frame
+inside the owning terminal rectangle; it changes no `Mux` lane or PTY size.
+`WindowState::preview_overlay` holds its pane, return focus and active control.
+Projection, pointer routing, keyboard navigation and accessibility use the
+same panel geometry. Four quads dim the window outside the frame after lane
+images, before higher modal chrome; no media textures or decoders are copied.
+Pinning clears modal ownership and opens a `Mux` lane around that same state.
+Closing restores a live, visible origin and consumes the closing gesture.
+
 A pane's geometry comes from one place: `kettle-ui`'s `pane_partition`
 divides each split leaf `Mux::layout` hands out into a `PanePartition`, its
 titlebar (on a tab showing more than one pane), its terminal with the

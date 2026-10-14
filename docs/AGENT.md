@@ -381,9 +381,14 @@ recently viewed item not on screen go, and its details stay. A push never
 opens anything on screen: a pane titlebar marks unopened items as `▣N`, and
 the window title starts with `[new media: N]` while the focused pane has
 some. The user opens them with `open_media_shelf` (the palette's "Open media
-shelf"): the pane's preview lane opens along its bottom, about 40% of the
-pane, and the terminal shrinks to make room, so the program in it sees a
-smaller window and nothing of its screen is covered; keys still go to it.
+shelf"). The default viewer centers within 90% of the owning split, without
+resizing its terminal. It owns window input: Tab selects controls, Enter
+activates, and Esc or a primary backdrop click closes it. The click is
+consumed. Video waits for Play. **Pin** (or P) moves the same item, view and
+playback into a lane; `media-open-mode = lane` opens there directly.
+
+The pinned lane takes about 40% of its pane and resizes the terminal; keys
+still go to the terminal unless the user focuses the lane.
 The lane shows one item fitted, never enlarged past its pixels, on white for
 SVG and a checkerboard for raster, with its title, kind, size and sender,
 and `‹ ›` to browse, `▾` to collapse the lane to a one-row strip and `×` to
@@ -397,7 +402,9 @@ terminal keeps at least 20 columns and 5 rows: with less room the lane is
 the strip, along the pane's bottom whichever side it opened on; opening one
 in a pane too small even for that shows a notice and leaves the item unseen,
 and a lane that loses its room later waits as the titlebar's shelf badge. Each pane
-has its own lane; `ui_geometry` reports them as `preview_lanes` (pane,
+has its own lane; `ui_geometry` reports the centered viewer as
+`preview_overlay` (or null), with the same panel metadata below plus its
+focused control and modal state. Pinned previews remain `preview_lanes` (pane,
 rectangle and `expanded`, `strip` or `badge`, and for a lane with an item
 its `mode` (`rendered` or `source`), `canvas` (`theme`, `white` or
 `checker`), `zoom` (relative to the item's fit), `content` and `image` (the

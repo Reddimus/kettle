@@ -685,7 +685,7 @@ macos-perf:
 # Live smoke of media lanes under Xvfb: an image, an SVG, a Mermaid diagram
 # and a video shown and rendered in lanes, the video played and stepped with
 # native X input (a control client may do neither), the worker's sandbox
-# flags, and a Spanish lane for review. Needs xvfb-run, ffmpeg and xdotool;
+# flags, and a Spanish lane for review. Needs xvfb-run, ffmpeg and X11/XTest;
 # results go under target/diagnostics/lane-media-smoke/.
 [linux]
 lane-media-smoke: release media-worker

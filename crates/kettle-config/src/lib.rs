@@ -1056,6 +1056,16 @@ pub enum AddKettleToPath {
     Off,
 }
 
+/// How a manually opened media item is presented.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MediaOpenMode {
+    /// Center over the owning split without resizing its terminal.
+    #[default]
+    Overlay,
+    /// Open in the configured preview lane.
+    Lane,
+}
+
 /// The side of its pane a preview lane opens on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PreviewLaneSide {
@@ -1441,6 +1451,8 @@ pub struct Config {
     /// (default), which keeps the terminal's columns, or `right`, which keeps
     /// its rows. Applies to lanes opened after it changes.
     pub preview_lane_side: PreviewLaneSide,
+    /// `media-open-mode`: `overlay` (default) or `lane` for manual previews.
+    pub media_open_mode: MediaOpenMode,
     /// Terminator parity (terminatorlib/config.py:79
     /// `ask_before_closing`): when to show the close-confirmation
     /// dialog on window close.
@@ -2804,6 +2816,7 @@ impl Default for Config {
             agent_display_codex: false,
             add_kettle_to_path: AddKettleToPath::Auto,
             preview_lane_side: PreviewLaneSide::Bottom,
+            media_open_mode: MediaOpenMode::Overlay,
             ask_before_closing: AskBeforeClosing::MultipleTerminals,
             close_button_on_tab: true,
             new_tab_after_current_tab: false,
@@ -3940,6 +3953,10 @@ impl Config {
                 "scrollbar" => matches!(
                     v.to_ascii_lowercase().as_str(),
                     "never" | "off" | "false" | "auto" | "always"
+                ),
+                "media-open-mode" | "media_open_mode" => matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "overlay" | "lane"
                 ),
                 "preview-lane-side" | "preview_lane_side" => matches!(
                     v.trim().to_ascii_lowercase().as_str(),
@@ -5355,6 +5372,13 @@ impl Config {
                 "agent-display-claude-code" | "agent_display_claude_code" => {
                     if let Some(b) = parse_bool(&e.value) {
                         cfg.agent_display_claude_code = b;
+                    }
+                }
+                "media-open-mode" | "media_open_mode" => {
+                    match e.value.trim().to_ascii_lowercase().as_str() {
+                        "overlay" => cfg.media_open_mode = MediaOpenMode::Overlay,
+                        "lane" => cfg.media_open_mode = MediaOpenMode::Lane,
+                        _ => {}
                     }
                 }
                 "preview-lane-side" | "preview_lane_side" => {
@@ -8202,6 +8226,30 @@ cell-height = 1.2\n";
         assert!(Config::detect_malformed_values("add-kettle-to-path = off").is_empty());
         let (_, unknown) = Config::parse_collect("add-kettle-to-path = off");
         assert!(unknown.is_empty(), "{unknown:?}");
+    }
+
+    #[test]
+    fn media_open_mode_defaults_to_overlay_and_accepts_explicit_lane() {
+        assert_eq!(Config::default().media_open_mode, MediaOpenMode::Overlay);
+        for (text, expected) in [
+            ("media-open-mode = lane", MediaOpenMode::Lane),
+            ("media_open_mode = Overlay", MediaOpenMode::Overlay),
+        ] {
+            let (cfg, unknown) = Config::parse_collect(text);
+            assert_eq!(cfg.media_open_mode, expected, "{text}");
+            assert!(unknown.is_empty(), "{unknown:?}");
+            assert!(Config::detect_malformed_values(text).is_empty());
+        }
+    }
+
+    #[test]
+    fn media_open_mode_reports_typos_and_keeps_the_default() {
+        let text = "media-open-mode = full-screen";
+        assert!(!Config::detect_malformed_values(text).is_empty());
+        assert_eq!(
+            Config::parse_text(text).media_open_mode,
+            MediaOpenMode::Overlay
+        );
     }
 
     #[test]

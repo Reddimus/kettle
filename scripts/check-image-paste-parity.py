@@ -86,87 +86,20 @@ def native_keys(live, names, *, middle=False):
                 finally:
                     cf.CFRelease(event)
         return
-    x = ctypes.CDLL("libX11.so.6")
-    xt = ctypes.CDLL("libXtst.so.6")
-    x.XOpenDisplay.argtypes = [ctypes.c_char_p]
-    x.XOpenDisplay.restype = ctypes.c_void_p
-    x.XStringToKeysym.argtypes = [ctypes.c_char_p]
-    x.XStringToKeysym.restype = ctypes.c_ulong
-    x.XKeysymToKeycode.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
-    x.XKeysymToKeycode.restype = ctypes.c_ubyte
-    x.XSetInputFocus.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_ulong,
-        ctypes.c_int,
-        ctypes.c_ulong,
-    ]
-    x.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
-    x.XCloseDisplay.argtypes = [ctypes.c_void_p]
-    xt.XTestFakeKeyEvent.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_uint,
-        ctypes.c_int,
-        ctypes.c_ulong,
-    ]
-    display = x.XOpenDisplay(None)
-    if not display:
-        raise RuntimeError("native Linux keys require an X11 display")
-    try:
-        # Match the PID, not a title that another application could duplicate.
-        tree = subprocess.check_output(
-            ["xwininfo", "-root", "-tree"], text=True, timeout=3
-        )
-        windows = re.findall(r"^\s+(0x[0-9a-fA-F]+)", tree, re.MULTILINE)
-        owned = []
-        for window in windows:
-            prop = subprocess.run(
-                ["xprop", "-id", window, "_NET_WM_PID"],
-                capture_output=True,
-                check=False,
-                text=True,
-                timeout=3,
-            )
-            if re.search(rf"= {live.pid}\s*$", prop.stdout):
-                owned.append(int(window, 16))
+    from native_x11 import X11Input
+
+    with X11Input() as native:
+        owned = native.windows(live.pid)
         if len(owned) != 1:
             raise RuntimeError(f"expected one owned native window, got {owned}")
-        x.XSetInputFocus(display, owned[0], 1, 0)
+        native.focus(owned[0])
         if middle:
-            x.XWarpPointer.argtypes = [
-                ctypes.c_void_p,
-                ctypes.c_ulong,
-                ctypes.c_ulong,
-                ctypes.c_int,
-                ctypes.c_int,
-                ctypes.c_uint,
-                ctypes.c_uint,
-                ctypes.c_int,
-                ctypes.c_int,
-            ]
-            xt.XTestFakeButtonEvent.argtypes = [
-                ctypes.c_void_p,
-                ctypes.c_uint,
-                ctypes.c_int,
-                ctypes.c_ulong,
-            ]
-            x.XWarpPointer(display, 0, owned[0], 0, 0, 0, 0, 100, 100)
-            xt.XTestFakeButtonEvent(display, 2, 1, 0)
-            xt.XTestFakeButtonEvent(display, 2, 0, 0)
-            x.XSync(display, 0)
-            return
-        symbols = {"control": "Control_L", "shift": "Shift_L", "v": "v"}
-        codes = [
-            x.XKeysymToKeycode(display, x.XStringToKeysym(symbols[name].encode()))
-            for name in names
-        ]
-        for down, sequence in ((1, codes), (0, list(reversed(codes)))):
-            for code in sequence:
-                if not code:
-                    raise RuntimeError("native key has no X11 keycode")
-                xt.XTestFakeKeyEvent(display, code, down, 0)
-        x.XSync(display, 0)
-    finally:
-        x.XCloseDisplay(display)
+            native.move(owned[0], 100, 100)
+            native.button(2, True)
+            native.button(2, False)
+        else:
+            symbols = {"control": "Control_L", "shift": "Shift_L", "v": "v"}
+            native.keys(*(symbols[name] for name in names))
 
 
 CODEX_MODEL = "gpt-6-astra"

@@ -1165,6 +1165,8 @@ pub struct Overlay {
     /// The preview lanes the user opened, one per pane at most, each in the
     /// share of its pane the layout carved for it.
     pub media_lanes: Vec<MediaLanePanel>,
+    /// The centered viewer excluded from the window-modal backdrop.
+    pub media_viewer_rect: Option<Rect4>,
     /// The inline card a click at the pointer would open, as a frame drew
     /// it; its visible part is outlined in the accent.
     pub card_hover: Option<PaintedCard>,
@@ -6450,6 +6452,14 @@ impl Renderer {
         let mut media_receipt_items: Vec<imgpipe::ImageItem> = Vec::with_capacity(1);
         let mut lane_items: Vec<imgpipe::ImageItem> = Vec::with_capacity(overlay.media_lanes.len());
         let mut lane_q: Vec<QuadInstance> = Vec::new();
+        if let Some(shades) = overlay
+            .media_viewer_rect
+            .and_then(|viewer| media_lane::viewer_backdrop(viewer, (sw, sh)))
+        {
+            for (x, y, width, height) in shades {
+                over.push(rect(x, y, width, height, Rgb::new(0, 0, 0), 0.35));
+            }
+        }
         // The wallpaper is always one retained item in its own back-most pass;
         // tile mode repeats UVs in the sampler instead of rebuilding a quad per
         // tile on every frame.
@@ -8805,12 +8815,16 @@ impl Renderer {
         for lane in &overlay.media_lanes {
             let palette = completion_palette(theme, self.ui_accent(cfg, theme));
             let (x, y, width, height) = lane.rect;
-            let inner = (
-                x + lane_border,
-                y + lane_border,
-                (width - 2.0 * lane_border).max(0.0),
-                (height - 2.0 * lane_border).max(0.0),
-            );
+            let inner = if lane.pin_label.is_some() {
+                lane.rect
+            } else {
+                (
+                    x + lane_border,
+                    y + lane_border,
+                    (width - 2.0 * lane_border).max(0.0),
+                    (height - 2.0 * lane_border).max(0.0),
+                )
+            };
             lane_q.push(rect(
                 inner.0,
                 inner.1,
@@ -8854,6 +8868,17 @@ impl Renderer {
                     palette.divider,
                     1.0,
                 ));
+            }
+            if let Some((fx, fy, fw, fh)) = lane.focused_control {
+                let line = (2.0 * self.scale).max(1.0).min(fw / 2.0).min(fh / 2.0);
+                for (x, y, w, h) in [
+                    (fx, fy, fw, line),
+                    (fx, fy + fh - line, fw, line),
+                    (fx, fy, line, fh),
+                    (fx + fw - line, fy, line, fh),
+                ] {
+                    lane_q.push(rect(x, y, w, h, palette.emphasis, 1.0));
+                }
             }
             // A short grip in the middle of the edge that resizes the lane
             // says it can be dragged.
