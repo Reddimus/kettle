@@ -24,6 +24,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   terminal. Pin the same preview beside the terminal, with keyboard navigation
   and focus return; `media-open-mode = lane` keeps the previous layout.
 
+### Fixed
+
+- Update Rustls to 0.23.46 for upstream TLS fixes.
+
 ## [5.0.1] — 2026-10-13
 
 ### Fixed
