@@ -329,6 +329,23 @@ jobs:
           env -u WAYLAND_DISPLAY xvfb-run -a python3 scripts/check-image-paste-parity.py \
             --kettle ./target/release/kettle --out-dir "$RUNNER_TEMP/image-paste" \
             --codex "$CODEX_PASTE_TEST_BIN"
+      - name: Centered media viewer (Linux)
+        if: runner.os == 'Linux'
+        timeout-minutes: 3
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: |
+          env -u WAYLAND_DISPLAY xvfb-run -a python3 scripts/check-media-viewer-smoke.py \
+            --kettle ./target/release/kettle --worker ./target/media-worker/kettle-media-worker \
+            --out "$RUNNER_TEMP/media-viewer"
+      - name: Upload centered viewer evidence
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: media-viewer-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/media-viewer
+          if-no-files-found: warn
+          retention-days: 7
       - name: Native image paste routes (macOS)
         if: runner.os == 'macOS'
         timeout-minutes: 3

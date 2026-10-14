@@ -86,6 +86,7 @@ window-width = 120
 window-height = 44
 agent-server = full
 agent-display = true
+media-open-mode = lane
 """
 
 

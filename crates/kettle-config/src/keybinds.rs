@@ -315,13 +315,12 @@ pub enum Action {
     /// them by look with the arrows (each previews live), Enter keeps one and
     /// Esc restores the theme it opened on.
     OpenThemePicker,
-    /// Open the focused pane's media shelf in its preview lane, on its newest
-    /// item, or close the lane when it is already open there.
+    /// Open the focused pane's newest media item, or close its open preview.
     OpenMediaShelf,
     /// Quick select for previews: label the image, SVG and Mermaid files the
-    /// focused pane names, and preview the one picked in its lane.
+    /// focused pane names, and preview the one picked.
     PreviewLink,
-    /// Preview, in the focused pane's lane, the file the clipboard names: a
+    /// Preview the file the clipboard names: a
     /// file copied in a file manager, or a copied path or `file://` link.
     PreviewClipboardPath,
     /// Show the next item on the shelf in the focused pane's lane.
@@ -333,7 +332,7 @@ pub enum Action {
     /// Show the previous diagram of the gallery the focused pane's lane
     /// shows.
     PreviewPreviousDiagram,
-    /// Close the focused pane's preview lane.
+    /// Close the focused pane's media preview.
     ClosePreview,
     /// Show the source of the focused pane's preview, or the rendered item
     /// again.

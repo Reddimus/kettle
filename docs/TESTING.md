@@ -337,16 +337,33 @@ Vulkan through Mesa llvmpipe and reported `Adapter type: Cpu`. This proves the
 software-rendered Vulkan and Wayland paths. It does not prove accelerated
 virtio GPU rendering.
 
-On Linux, `just lane-media-smoke` checks media lanes live under Xvfb. It
+Centered-viewer tests cover split-relative padding, backdrop coverage,
+localized pin controls, control identity and keyboard traversal. Reverting
+placement, pin identity or focus navigation fails their regressions. For a
+native check, compare `ui_geometry` and the PTY dimensions before opening and
+after closing: both must stay unchanged. Verify consumed backdrop clicks,
+focus return, source/diagram navigation and pinning without restarting video.
+`preview_overlay` reports the same geometry and playback metadata as a lane.
+
+The Linux CI viewer smoke uses an isolated X server and native input to check
+focus loss, blocked terminal input, panning, centered placement, and pinning.
+`check-media-viewer-smoke.py --case focus|pan` isolates either regression. Its
+Xvfb result does not establish GNOME Wayland acceptance.
+The native Wayland checklist also covers source/gallery navigation, video
+poster and playback, timeline focus, pause/seek, pinning, window resizing, and
+no-room recovery. Record silent output separately from working audio.
+
+On Linux, `just lane-media-smoke` explicitly selects `media-open-mode = lane`
+and checks pinned previews live under Xvfb. It
 shows an image, an SVG, a Mermaid diagram and a video with `kettle show`,
 and checks that each renders in a lane, the video as its poster. It then
 plays the video and steps it back five seconds with native X input
-(xdotool), since a control client may do neither, and checks that a control
+(the shared X11 input helper), since a control client may do neither, and checks that a control
 client's step moves nothing and its pause pauses. It also reads the
 worker's `NoNewPrivs` and `Seccomp` flags and captures a Spanish lane for
 review. Kettle runs only a worker file no one else can write, so the script
 stages both binaries in a private directory first. It needs xvfb-run,
-ffmpeg and xdotool, and writes results under
+ffmpeg, X11/XTest libraries and x11-utils, and writes results under
 `target/diagnostics/lane-media-smoke/`. `--self-test` covers its fixture
 writer and staging without a display. On 2026-10-11 it passed on the guest
 against the 5.0.0 release candidate (`1fec1dd4`), all twelve checks, under

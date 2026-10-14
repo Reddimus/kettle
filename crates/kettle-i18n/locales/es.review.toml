@@ -11,6 +11,8 @@
 # the rendered Spanish build, the confirmations and screen-reader names given
 # the second pass, the changes confirmed, and all of it accepted.
 
+# 2026-10-13: the four new viewer messages were reviewed in native Spanish
+# Wayland UI; dialog and Pin names received a second pass through AT-SPI.
 [status]
 inline_card_pending = "accepted"
 inline_card_unavailable = "accepted"
@@ -110,7 +112,7 @@ media_lane_notice_video_needs_decoder = "accepted"
 media_lane_notice_video_needs_sandbox = "accepted"
 window_title_new_media = "accepted"
 card_a11y = "accepted"
-card_a11y_open = "accepted"
+card_a11y_open = "draft"
 a11y_pane = "accepted"
 a11y_window = "accepted"
 about_copy_version = "accepted"
@@ -270,7 +272,7 @@ notify_body_recording_overloaded = "accepted"
 notify_body_recording_start_failed = "accepted"
 notify_body_recording_write_failed = "accepted"
 notify_body_remote_file_not_opened = "accepted"
-notify_body_preview_no_room = "accepted"
+notify_body_preview_no_room = "draft"
 notify_body_remote_not_delivered = "accepted"
 notify_body_screenshot_wait = "accepted"
 notify_body_session_log_io = "accepted"
@@ -635,8 +637,15 @@ window_title_gpu_lost = "accepted"
 
 # Messages whose review needs the second pass: destructive confirmations and
 # screen-reader names and descriptions.
+media_viewer_a11y_pin = "accepted"
+media_viewer_pin_short = "accepted"
+media_viewer_overlay_hint = "accepted"
+media_viewer_a11y = "accepted"
+
 [second-pass]
 keys = [
+    "media_viewer_a11y",
+    "media_viewer_a11y_pin",
     "a11y_pane",
     "a11y_window",
     "card_a11y",

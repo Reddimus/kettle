@@ -1643,7 +1643,7 @@ context = "crates/kettle-config/src/palette.rs: command palette entry that shows
 context = "crates/kettle-config/src/palette.rs: command palette entry that shows the previous diagram of the gallery in the focused pane's preview lane: the Mermaid diagrams of one Markdown file, or several copied together."
 
 [messages.palette_close_preview]
-context = "crates/kettle-config/src/palette.rs: command palette entry that closes the focused pane's preview lane, giving its terminal the room back."
+context = "crates/kettle-config/src/palette.rs: command palette entry that closes the focused pane's media preview."
 
 [messages.palette_preview_source]
 context = "crates/kettle-config/src/palette.rs: command palette entry for preview_source, which switches the focused pane's preview lane between the rendered item and its source text."
@@ -1924,3 +1924,16 @@ context = "crates/kettle-ui/src/app.rs card_accessibility_node: screen-reader de
 [messages.window_title_new_media]
 context = "crates/kettle-ui/src/app.rs desired_window_title: prefix of the OS window title while the focused pane's media shelf holds items the user has not opened. ASCII only: Linux window-manager title fonts may lack symbols. count is how many."
 args = [{ name = "count", type = "u64" }]
+
+[messages.media_viewer_a11y_pin]
+context = "Accessible action: move the open viewer beside its terminal without restarting playback."
+
+[messages.media_viewer_pin_short]
+context = "Viewer header action; keep short. Pins the viewer beside its terminal."
+
+[messages.media_viewer_overlay_hint]
+context = "Centered viewer keyboard hint. Esc closes; P pins beside the terminal."
+
+[messages.media_viewer_a11y]
+context = "Centered viewer accessible name. index/count locate the shelf item; title/detail are display text."
+args = [{ name = "index", type = "u64" }, { name = "count", type = "u64" }, { name = "title", type = "str" }, { name = "detail", type = "str" }]

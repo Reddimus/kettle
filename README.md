@@ -126,10 +126,13 @@ previews (`agent-display`), then:
   `kettle video-frames clip.webm -o sheet.jpg`, returns a contact sheet of its
   frames, each labeled with its time, and an index of what each shows.
 
-Choose **Open media shelf** in the command palette to preview items in a
-lane inside the pane. Zoom images, browse diagram galleries, or play a video
-with sound when its decoder supports it. Nothing plays automatically. The
-lane also offers an external viewer or video player.
+Click a card or choose **Open media shelf** to open a centered viewer inside
+its split, with padding around it. The terminal keeps its size. Press Esc
+or click outside to close; choose **Pin** to keep the preview beside the
+terminal. Zoom pictures, browse diagrams, or press Play for video. Nothing
+plays automatically. Set `media-open-mode = lane` for the previous layout.
+
+![An SVG chart in Kettle's centered viewer on Ubuntu](docs/images/media-viewer.png)
 
 Without an agent, `/copy` a diagram and use `render_clipboard_as_diagram`,
 or select one and use `render_selection_as_diagram`. `kettle agent-setup

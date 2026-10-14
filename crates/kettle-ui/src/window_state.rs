@@ -698,9 +698,7 @@ pub(crate) struct ThemePickerState {
     pub(crate) opened_on: String,
 }
 
-/// What a pane's preview lane shows: one item of the pane's shelf. Where the
-/// lane sits is its tab's [`crate::mux::Tab::lanes`] entry; the two come and
-/// go together.
+/// One shelf item, with shared view state for the overlay and pinned lane.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct PreviewPanel {
     pub(crate) item: u64,
@@ -920,6 +918,7 @@ pub(crate) struct WindowState {
     pub(crate) lane_resize: Option<LaneResize>,
     /// The preview lane holding the keyboard (`focus_preview`), if one is.
     pub(crate) preview_focus: Option<crate::media::PreviewFocus>,
+    pub(crate) preview_overlay: Option<crate::media::Overlay>,
     /// Each lane's sharper pixels for its zoomed view, by pane.
     pub(crate) lane_crops: std::collections::HashMap<u64, crate::media::LaneCrop>,
     /// Each lane's silent video preview, by pane: being made, playing, or
@@ -1492,6 +1491,7 @@ impl WindowState {
             lane_drag: None,
             lane_resize: None,
             preview_focus: None,
+            preview_overlay: None,
             lane_crops: std::collections::HashMap::new(),
             lane_previews: std::collections::HashMap::new(),
             lane_playbacks: std::collections::HashMap::new(),

@@ -6,6 +6,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Added
+
+- Center manual media previews within their split without resizing the
+  terminal. Pin the same preview beside the terminal, with keyboard navigation
+  and focus return; `media-open-mode = lane` keeps the previous layout.
+
 ## [5.0.1] — 2026-10-13
 
 ### Fixed

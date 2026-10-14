@@ -14,6 +14,7 @@ mod external;
 mod focus;
 mod inline;
 mod playback;
+mod presentation;
 mod preview;
 mod queue;
 mod route;
@@ -42,12 +43,13 @@ pub(crate) use external::Viewer;
 pub(crate) use external::{
     OpenFailure, Outside, VideoCopies, VideoSource, open as open_externally, open_video,
 };
-pub(crate) use focus::{PreviewFocus, PreviewKey, preview_key};
+pub(crate) use focus::{PreviewFocus, PreviewKey, ViewerKey, preview_key, viewer_key};
 pub(crate) use inline::{card_caption, card_message, card_size};
 pub(crate) use playback::{
     Button as PlaybackButton, LanePlayback, MAX_PLAYING, Notice as PlaybackNotice,
     Session as PlaybackSession, Sound as PlaybackSound, Toggled as PlaybackToggled,
 };
+pub(crate) use presentation::{Overlay, centered_rect as centered_preview_rect};
 pub(crate) use preview::{
     FIRST_FRAME_WITHIN as PREVIEW_FIRST_FRAME_WITHIN, Frames as PreviewFrames,
     HOVER_DWELL as PREVIEW_HOVER_DWELL, LanePreview, Layout as PreviewLayout, Seen as PreviewSeen,

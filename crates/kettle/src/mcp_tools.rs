@@ -75,7 +75,7 @@ fn show_tool_spec() -> Value {
             to the user's Kettle display, or render inline Mermaid source. A video shows as its \
             poster, with its length. Interactive supported harnesses get a card under \
             the call and a shelf entry; other modes use the shelf. Clicking opens it in the \
-            viewer or preview lane. Tested diagram families: flowchart, sequence, state, class, \
+            media viewer. Tested diagram families: flowchart, sequence, state, class, \
             ER, gantt, pie, mindmap, gitGraph, timeline, journey and quadrant. Returns delivery \
             status and metadata, not the image contents.",
         "inputSchema": {
