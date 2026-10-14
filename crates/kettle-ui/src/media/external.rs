@@ -535,10 +535,13 @@ mod tests {
                 vec!["--new-instance".into(), file.as_os_str().into()]
             )
         );
-        // A system program is trusted: a regular file on every Unix, where
-        // `/bin/sh` may be a link.
-        assert!(trusted_program(Path::new("/usr/bin/env")));
+        // Ubuntu's coreutils command can itself be a symlink.
+        let system_program = std::fs::canonicalize("/usr/bin/env").unwrap();
+        assert!(trusted_program(&system_program));
         let dir = kettle_test_support::private_tempdir("kettle-open-trust-");
+        let link = dir.path().join("system-viewer");
+        std::os::unix::fs::symlink(&system_program, &link).unwrap();
+        assert!(!trusted_program(&link), "a symlink is never a viewer");
         let mine = dir.path().join("viewer");
         std::fs::write(&mine, b"#!/bin/sh\n").unwrap();
         std::fs::set_permissions(&mine, std::fs::Permissions::from_mode(0o755)).unwrap();
