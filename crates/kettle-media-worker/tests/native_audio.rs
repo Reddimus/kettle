@@ -94,6 +94,39 @@ impl Drop for Group {
         }
     }
 }
+struct Logs(kettle_test_support::PrivateTempDir);
+impl Logs {
+    fn new(prefix: &str) -> Self {
+        Self(kettle_test_support::private_tempdir(prefix))
+    }
+    fn path(&self) -> &Path {
+        self.0.path()
+    }
+}
+impl Drop for Logs {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            return;
+        }
+        if let Ok(entries) = std::fs::read_dir(self.path()) {
+            for entry in entries.flatten().take(8) {
+                if entry.file_name().to_string_lossy().starts_with("worker-") {
+                    use std::io::Read as _;
+                    if let Ok(file) = std::fs::File::open(entry.path()) {
+                        let mut bytes = Vec::new();
+                        let _ = file.take(65_536).read_to_end(&mut bytes);
+                        eprintln!(
+                            "{}: {}",
+                            entry.file_name().to_string_lossy(),
+                            String::from_utf8_lossy(&bytes)
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
 struct Platform {
     unavailable_broker: bool,
     attempts: std::sync::atomic::AtomicUsize,
@@ -198,7 +231,7 @@ fn linux_client_decodes_audio_pauses_seeks_and_closes_both_workers() {
     let clip = PathBuf::from(
         std::env::var_os("KETTLE_TEST_PCM_CLIP").expect("explicit ticks.mp4 fixture"),
     );
-    let logs = kettle_test_support::private_tempdir("kettle-native-audio-");
+    let logs = Logs::new("kettle-native-audio-");
     let children = Arc::new(Mutex::new(Vec::new()));
     let client = WorkerClient::new(
         BuildId::from_embedded(env!("CARGO_PKG_VERSION"), env!("KETTLE_SOURCE_HASH")).unwrap(),
@@ -352,7 +385,7 @@ fn linux_client_keeps_video_when_the_pcm_broker_cannot_start() {
     let clip = PathBuf::from(
         std::env::var_os("KETTLE_TEST_PCM_CLIP").expect("explicit ticks.mp4 fixture"),
     );
-    let logs = kettle_test_support::private_tempdir("kettle-native-no-audio-");
+    let logs = Logs::new("kettle-native-no-audio-");
     let children = Arc::new(Mutex::new(Vec::new()));
     let client = WorkerClient::new(
         BuildId::from_embedded(env!("CARGO_PKG_VERSION"), env!("KETTLE_SOURCE_HASH")).unwrap(),
@@ -436,7 +469,7 @@ fn linux_client_keeps_the_last_picture_while_longer_audio_finishes() {
     let clip = PathBuf::from(
         std::env::var_os("KETTLE_TEST_PCM_LONG_CLIP").expect("explicit long-audio.mp4 fixture"),
     );
-    let logs = kettle_test_support::private_tempdir("kettle-native-audio-tail-");
+    let logs = Logs::new("kettle-native-audio-tail-");
     let children = Arc::new(Mutex::new(Vec::new()));
     let client = WorkerClient::new(
         BuildId::from_embedded(env!("CARGO_PKG_VERSION"), env!("KETTLE_SOURCE_HASH")).unwrap(),
@@ -523,7 +556,7 @@ fn linux_client_seeks_pcm_between_frame_boundaries() {
     let path = PathBuf::from(
         std::env::var_os("KETTLE_TEST_PCM_WORKER").expect("explicit production worker"),
     );
-    let logs = kettle_test_support::private_tempdir("kettle-native-pcm-seeks-");
+    let logs = Logs::new("kettle-native-pcm-seeks-");
     let clip = logs.path().join("seek.mov");
     let generated = std::process::Command::new("/usr/bin/ffmpeg")
         .args([
