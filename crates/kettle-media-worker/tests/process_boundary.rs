@@ -2427,6 +2427,9 @@ fn linux_pcm_only_broker_plays_pauses_and_closes() {
         }
     };
     feedback(&|_| true);
+    send(child, &Frame::PlayCommand(PlayCommand::Play));
+    // The real client can request Play before its first decoded packet arrives.
+    std::thread::sleep(Duration::from_millis(150));
     for sequence in 0..4 {
         send(
             child,
@@ -2438,7 +2441,6 @@ fn linux_pcm_only_broker_plays_pauses_and_closes() {
             })),
         );
     }
-    send(child, &Frame::PlayCommand(PlayCommand::Play));
     let playing = feedback(&|f| f.played_frame.is_some_and(|frame| frame > 48_000));
     feedback(&|f| f.consumed == 4);
     send(child, &Frame::PlayCommand(PlayCommand::Pause));

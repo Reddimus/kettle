@@ -530,8 +530,9 @@ from the first for a container other than MP4 or QuickTime): a thread of
 its own feeds an output queue
 20 ms at a time from the decoded sound, filling the sound's gaps and all
 that follows its end with silence so the queue's clock runs as long as the
-session; it fills the queue before Play so Play starts at once, and plays,
-pauses, mutes and unmutes it as the command reader hears each command,
+session. It queues a complete piece before the first start; an early Play
+waits for decoded PCM without uncorking an empty output. It plays, pauses,
+mutes and unmutes as the command reader hears each command,
 whatever the session's thread is doing, so a Pause or Mute is heard at once
 even while a frame's write is held; Close or the parent leaving ends it,
 its output disposed before the worker exits. The watchdog and the lease,
@@ -543,8 +544,9 @@ the queue has played less, on macOS, its output device's presentation latency (t
 device's latency, safety offset, I/O buffer and output stream latency, at
 most 3 s, asked again each second as the default device may change). Linux
 uses Pulse's hardware presentation time directly, without subtracting latency
-again. Pulse is asked for 60 ms of total device and stream buffering. Hardware timestamps older than 250 ms are withheld, including time spent
-in the parent's feedback slot; a
+again. Pulse is asked for 60 ms of total device and stream buffering. Hardware
+timestamps older than 250 ms are withheld, including time spent in the
+parent's feedback slot; a
 frame the sound has passed by more than a frame is dropped, only for a
 newer frame already waiting behind it, so never the video's last, which the
 lane holds; while the queue's clock is lost the frames wait for it; the end waits for
