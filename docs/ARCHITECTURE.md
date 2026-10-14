@@ -2199,9 +2199,8 @@ graph LR
 
 ## Registered inline media cards
 
-The inline-card renderer is a foundation for later display callers. Registration
-is currently available only to tests; ordinary tool output cannot create a
-registration. A pane owns its `InlineCards` registry, so moving a tab preserves
+The GUI registers cards only after an admitted display render completes;
+ordinary terminal output cannot create a registration. A pane owns its `InlineCards` registry, so moving a tab preserves
 its terminal, registrations and poster pixels together. No media worker starts
 while opening an ordinary terminal window.
 
@@ -2246,6 +2245,22 @@ including a one-row intersection. Their rectangles are recomputed from the
 current grid snapshot and clipped to the pane. Terminal selection and scrolling
 remain terminal operations; card interaction and production registration are
 later slices.
+
+### Linux agent card scopes
+
+`kettle-ctl::agent_launch` owns bounded launch evidence and one-use pickup
+permits. The checked Kettle launcher passes held ELF descriptors over the
+private display connection before exec. The GUI duplicates only that peer's
+descriptors and binds the launch PID/start, executable identity and original
+pane child. The npm route additionally checks Node and its immediate native
+child. This is owner-enabled local provenance, not vendor authentication.
+
+Rendering retains a launch witness and rechecks it before registering a card.
+Hook pickup consumes its permit before checking the current native parent and
+pane generation. Permits expire after five seconds; storage is capped at 64
+launches and 128 pickups. No permit reaches model content or geometry/state
+responses. Background registration and pickup do not draw a frame. Existing
+macOS signature admission remains separate.
 
 ## Render pass order
 

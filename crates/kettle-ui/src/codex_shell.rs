@@ -1,8 +1,5 @@
-//! Kettle's Codex shell integration: the `codex` function that starts Codex
-//! through Kettle, as `kettle agent-setup --print` prints it for a user to
-//! add to their shell, and as Kettle defines it in the shell a new pane
-//! starts when `agent-display-codex` is on. Panes get the startup files on
-//! Unix only, where Kettle can check them.
+//! Per-pane agent functions. Checked private startup files preserve the user's
+//! configuration and existing functions. Linux additionally wraps Claude Code.
 #![cfg_attr(not(unix), allow(dead_code))]
 
 use std::path::Path;
@@ -63,18 +60,51 @@ pub fn kettle_path(kettle: &Path) -> Result<&str, FunctionError> {
 /// Kettle at `kettle` to start Codex with: no `eval`, and the path quoted so
 /// nothing in it is read as code.
 pub fn codex_function(kettle: &Path, shell: CodexShell) -> Result<String, FunctionError> {
+    agent_function(kettle, shell, "codex")
+}
+
+pub fn claude_function(kettle: &Path, shell: CodexShell) -> Result<String, FunctionError> {
+    agent_function(kettle, shell, "claude")
+}
+
+fn agent_function(kettle: &Path, shell: CodexShell, name: &str) -> Result<String, FunctionError> {
     let path = kettle_path(kettle)?;
     Ok(match shell {
         CodexShell::Bash | CodexShell::Zsh => {
             let path = path.replace('\'', "'\\''");
-            format!("codex() {{\n  command '{path}' agent-setup --launch-codex -- \"$@\"\n}}\n")
+            format!("{name}() {{\n  command '{path}' agent-setup --launch-{name} -- \"$@\"\n}}\n")
         }
         CodexShell::Fish => {
             let path = path.replace('\\', "\\\\").replace('\'', "\\'");
-            format!("function codex\n  command '{path}' agent-setup --launch-codex -- $argv\nend\n")
+            format!(
+                "function {name}\n  command '{path}' agent-setup --launch-{name} -- $argv\nend\n"
+            )
         }
     })
 }
+
+#[derive(Clone, Copy)]
+pub(crate) struct Agents {
+    pub codex: bool,
+    pub claude: bool,
+}
+
+impl Agents {
+    fn names(self) -> impl Iterator<Item = &'static str> {
+        [
+            self.codex.then_some("codex"),
+            self.claude.then_some("claude"),
+        ]
+        .into_iter()
+        .flatten()
+    }
+}
+
+#[cfg(test)]
+const CODEX: Agents = Agents {
+    codex: true,
+    claude: false,
+};
 
 /// The startup files, by their path inside Kettle's directory for them.
 const MANIFEST_FILE: &str = "kettle.json";
@@ -86,9 +116,16 @@ const ZSH_FILE: &str = "zsh/.zshenv";
 pub(crate) fn startup_files(
     executable: &Path,
     version: &str,
+    agents: Agents,
 ) -> Result<crate::owned_dir::OwnedFiles, FunctionError> {
     let command = kettle_path(executable)?.to_owned();
-    let zsh = codex_function(executable, CodexShell::Zsh)?;
+    let mut zsh = String::new();
+    for name in agents.names() {
+        zsh.push_str(&zsh_definition(
+            &agent_function(executable, CodexShell::Zsh, name)?,
+            name,
+        ));
+    }
     let manifest = serde_json::json!({"command": command, "version": version});
     Ok(crate::owned_dir::OwnedFiles::new(
         "codex-shell",
@@ -96,10 +133,7 @@ pub(crate) fn startup_files(
         version.to_owned(),
         vec![
             (MANIFEST_FILE, format!("{manifest}\n")),
-            (
-                ZSH_FILE,
-                kettle_core::shell_startup::zshenv(&zsh_definition(&zsh)),
-            ),
+            (ZSH_FILE, kettle_core::shell_startup::zshenv(&zsh)),
         ],
     ))
 }
@@ -112,21 +146,31 @@ pub(crate) fn startup_files(
 ///
 /// The function goes in as it is, never re-indented: a newline inside the
 /// quoted path is part of the path.
-fn zsh_definition(function: &str) -> String {
+fn zsh_definition(function: &str, name: &str) -> String {
+    let title = if name == "codex" {
+        "Codex"
+    } else {
+        "Claude Code"
+    };
+    let setting = if name == "codex" {
+        "codex"
+    } else {
+        "claude-code"
+    };
     format!(
-        "# Kettle's Codex integration (agent-display-codex): before your first\n\
-         # prompt, after all your startup files, define codex unless you have one.\n\
+        "# Kettle's {title} integration (agent-display-{setting}): before your first\n\
+         # prompt, after all your startup files, define {name} unless you have one.\n\
          if [[ -o interactive ]]; then\n\
-         \x20 _kettle_codex() {{\n\
+         \x20 _kettle_{name}() {{\n\
          \x20   'builtin' 'emulate' -L zsh\n\
-         \x20   precmd_functions=(${{precmd_functions:#_kettle_codex}})\n\
-         \x20   'builtin' 'unfunction' '_kettle_codex'\n\
-         \x20   if (( ! ${{+functions[codex]}} )); then\n\
+         \x20   precmd_functions=(${{precmd_functions:#_kettle_{name}}})\n\
+         \x20   'builtin' 'unfunction' '_kettle_{name}'\n\
+         \x20   if (( ! ${{+functions[{name}]}} )); then\n\
          {function}\
          \x20   fi\n\
          \x20 }}\n\
          \x20 'builtin' 'typeset' -ga precmd_functions\n\
-         \x20 precmd_functions+=(_kettle_codex)\n\
+         \x20 precmd_functions+=(_kettle_{name})\n\
          fi\n"
     )
 }
@@ -137,11 +181,15 @@ fn zsh_definition(function: &str) -> String {
 ///
 /// The function goes in as it is, never re-indented: a newline inside the
 /// quoted path is part of the path.
-pub(crate) fn fish_code(executable: &Path) -> Result<String, FunctionError> {
-    let function = codex_function(executable, CodexShell::Fish)?;
-    Ok(format!(
-        "if status is-interactive; and not functions -q codex\n{function}end\n"
-    ))
+pub(crate) fn fish_code(executable: &Path, agents: Agents) -> Result<String, FunctionError> {
+    let mut code = String::new();
+    for name in agents.names() {
+        let function = agent_function(executable, CodexShell::Fish, name)?;
+        code.push_str(&format!(
+            "if status is-interactive; and not functions -q {name}\n{function}end\n"
+        ));
+    }
+    Ok(code)
 }
 
 /// Where Kettle keeps the startup files: beside its agent plugins.
@@ -184,9 +232,10 @@ pub(crate) fn prepare(
     root: &Path,
     executable: &Path,
     version: &str,
+    agents: Agents,
 ) -> Result<Offered, ShellRefusal> {
-    let files = startup_files(executable, version)?;
-    let fish = fish_code(executable)?;
+    let files = startup_files(executable, version, agents)?;
+    let fish = fish_code(executable, agents)?;
     let directory = install(root, &files).map_err(|()| ShellRefusal::Unavailable)?;
     Ok(Offered {
         directory,
@@ -297,7 +346,7 @@ mod tests {
     #[test]
     fn the_startup_matches_the_checked_fixtures() {
         let kettle = Path::new("/kettle-stand-in/bin/kettle");
-        let files = startup_files(kettle, "0").unwrap();
+        let files = startup_files(kettle, "0", CODEX).unwrap();
         let zsh = files
             .files
             .iter()
@@ -310,7 +359,7 @@ mod tests {
             ))
         );
         assert_eq!(
-            fish_code(kettle).unwrap(),
+            fish_code(kettle, CODEX).unwrap(),
             include_str!("../../../scripts/fixtures/shell-integration/codex-init.fish")
         );
     }
@@ -323,16 +372,16 @@ mod tests {
         let base = kettle_test_support::private_tempdir("kettle-codex-shell-");
         let kettle = Path::new("/kettle-stand-in/bin/kettle");
         let root = base.path().join("agent-shell");
-        let offered = prepare(&root, kettle, "5.0.0").unwrap();
+        let offered = prepare(&root, kettle, "5.0.0", CODEX).unwrap();
         assert!(offered.directory.starts_with(&root));
         assert!(offered.directory.join(ZSH_FILE).is_file());
-        assert_eq!(offered.fish, fish_code(kettle).unwrap());
+        assert_eq!(offered.fish, fish_code(kettle, CODEX).unwrap());
         assert_eq!(
             crate::owned_dir::verify(&offered.directory, &offered.files),
             Ok(())
         );
         assert_eq!(
-            prepare(&root, Path::new("relative/kettle"), "5.0.0").err(),
+            prepare(&root, Path::new("relative/kettle"), "5.0.0", CODEX).err(),
             Some(ShellRefusal::Unavailable)
         );
     }
@@ -347,9 +396,9 @@ mod tests {
         #[cfg(windows)]
         let kettle = Path::new("C:\\Kettle\nApp\\kettle.exe");
         let zsh = codex_function(kettle, CodexShell::Zsh).unwrap();
-        assert!(zsh_definition(&zsh).contains(&zsh));
+        assert!(zsh_definition(&zsh, "codex").contains(&zsh));
         let fish = codex_function(kettle, CodexShell::Fish).unwrap();
-        assert!(fish_code(kettle).unwrap().contains(&fish));
+        assert!(fish_code(kettle, CODEX).unwrap().contains(&fish));
     }
 
     /// Startup files installed for a stand-in Kettle, with a scratch home.
@@ -363,6 +412,10 @@ mod tests {
     #[cfg(unix)]
     impl Scratch {
         fn new() -> Self {
+            Self::agents(CODEX)
+        }
+
+        fn agents(agents: Agents) -> Self {
             let base = kettle_test_support::private_tempdir("kettle-codex-shell-");
             let kettle = base.path().join("bin/kettle");
             std::fs::create_dir_all(kettle.parent().unwrap()).unwrap();
@@ -371,8 +424,13 @@ mod tests {
             // Copied so that no child another test forks meanwhile holds it
             // open for writing, which fails running it (ETXTBSY) on Linux.
             kettle_test_support::copy_executable_fixture(&source, &kettle).unwrap();
-            let offered =
-                prepare(&base.path().join("kettle/agent-shell"), &kettle, "5.0.0").unwrap();
+            let offered = prepare(
+                &base.path().join("kettle/agent-shell"),
+                &kettle,
+                "5.0.0",
+                agents,
+            )
+            .unwrap();
             let home = base.path().join("home");
             std::fs::create_dir_all(home.join(".config/fish/functions")).unwrap();
             Self {
@@ -567,6 +625,67 @@ mod tests {
             "{out}"
         );
         drop(scratch.base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn selected_agents_get_functions_without_replacing_user_functions() {
+        for codex in [false, true] {
+            let scratch = Scratch::agents(Agents {
+                codex,
+                claude: true,
+            });
+            if let Some(zsh) = installed("zsh") {
+                let out = scratch.run(
+                    &zsh,
+                    None,
+                    &["-i"],
+                    "whence -w codex claude\nclaude 'a b' '*' ''\nexit\n",
+                );
+                assert!(
+                    out.contains("<agent-setup><--launch-claude><--><a b><*><>"),
+                    "{out}"
+                );
+                assert_eq!(out.contains("codex: function"), codex, "{out}");
+                scratch.write(".zshrc", "claude() { print -r -- user-claude; }\n");
+                let out = scratch.run(&zsh, None, &["-i"], "claude\nexit\n");
+                assert!(
+                    out.contains("user-claude") && !out.contains("<agent-setup>"),
+                    "{out}"
+                );
+                scratch.write(".zshrc", "");
+                let out = scratch.run(&zsh, None, &["-c", "whence -w claude"], "");
+                assert!(out.contains("claude: none"), "{out}");
+            }
+            if let Some(fish) = installed("fish") {
+                let out = scratch.run(
+                    &fish,
+                    None,
+                    &["-i", "-c", "type -t claude; claude 'a b' '*' ''"],
+                    "",
+                );
+                assert!(
+                    out.contains("<agent-setup><--launch-claude><--><a b><*><>"),
+                    "{out}"
+                );
+                let out = scratch.run(
+                    &fish,
+                    None,
+                    &["-i", "-c", "functions -q codex; and echo codex-present"],
+                    "",
+                );
+                assert_eq!(out.contains("codex-present"), codex, "{out}");
+                scratch.write(
+                    ".config/fish/functions/claude.fish",
+                    "function claude\n echo user-claude\nend\n",
+                );
+                let out = scratch.run(&fish, None, &["-i", "-c", "claude"], "");
+                assert!(
+                    out.contains("user-claude") && !out.contains("<agent-setup>"),
+                    "{out}"
+                );
+            }
+        }
     }
 
     /// zsh passes over a `.zshenv` it cannot read without a word, and so

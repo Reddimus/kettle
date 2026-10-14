@@ -581,7 +581,12 @@ enum CtlStart {
 }
 
 fn ctl_method_is_pure_read(method: kettle_ctl::protocol::Method) -> bool {
-    method == kettle_ctl::protocol::Method::UiGeometry
+    matches!(
+        method,
+        kettle_ctl::protocol::Method::UiGeometry
+            | kettle_ctl::protocol::Method::AgentLaunch
+            | kettle_ctl::protocol::Method::CardPickup
+    )
 }
 
 fn window_is_render_hidden(ws: &WindowState) -> bool {
@@ -2443,6 +2448,7 @@ fn register_card(
         room,
     );
     let delivery = kettle_ctl::show::InlineDelivery {
+        permit: None,
         message: crate::media::card_message(nonce, size, &caption)?,
     };
     if !delivery.fits() {
@@ -9289,6 +9295,8 @@ pub struct App {
     /// one explicit notice, not a desktop-toast storm.
     last_input_rejection_notice: Option<(PaneInputResult, std::time::Instant)>,
     system_motion: std::sync::OnceLock<crate::motion::SystemMotion>,
+    #[cfg(target_os = "linux")]
+    agent_launches: kettle_ctl::agent_launch::LaunchScopes,
     proxy: EventLoopProxy<UserEvent>,
     /// Private, bounded bare-launch activation inbox. The IPC thread waits for
     /// this event-loop thread to confirm window creation before telling the
@@ -10347,6 +10355,8 @@ impl App {
             recording_error_reported: false,
             last_input_rejection_notice: None,
             system_motion: std::sync::OnceLock::new(),
+            #[cfg(target_os = "linux")]
+            agent_launches: kettle_ctl::agent_launch::LaunchScopes::default(),
             proxy,
             activation,
             runtime_tracker,
@@ -24779,12 +24789,14 @@ impl App {
         }
     }
 
-    /// Offer new panes' shells the startup that defines `codex` while
-    /// `agent-display-codex` and agent previews are on, writing its files
-    /// first if they are not there intact; otherwise offer none. Panes
-    /// already open keep what they started with.
+    /// Prepare enabled agent functions for new panes. Existing panes keep
+    /// their startup, and user-defined functions always win.
     fn reconcile_codex_shell(&mut self) {
-        if !(self.agent_previews_live() && self.cfg.agent_display_codex) {
+        let agents = crate::codex_shell::Agents {
+            codex: self.cfg.agent_display_codex,
+            claude: cfg!(target_os = "linux") && self.cfg.agent_display_claude_code,
+        };
+        if !self.agent_previews_live() || !(agents.codex || agents.claude) {
             crate::codex_shell::offer(None, None);
             return;
         }
@@ -24798,14 +24810,12 @@ impl App {
             .and_then(|executable| {
                 let root = crate::codex_shell::startup_root()
                     .ok_or(crate::codex_shell::ShellRefusal::Unavailable)?;
-                crate::codex_shell::prepare(&root, &executable, env!("CARGO_PKG_VERSION"))
+                crate::codex_shell::prepare(&root, &executable, env!("CARGO_PKG_VERSION"), agents)
             });
         match prepared {
             Ok(offered) => crate::codex_shell::offer(Some(offered), None),
             Err(refusal) => {
-                log::warn!(
-                    "agent previews: Codex's shell integration is unavailable ({refusal:?})"
-                );
+                log::warn!("agent previews: shell integration is unavailable ({refusal:?})");
                 crate::codex_shell::offer(None, Some(refusal));
             }
         }
@@ -25008,6 +25018,7 @@ impl App {
             Method::WaitFor => {
                 Response::err(req.id, ec::INTERNAL, "wait_for was routed to the UI thread")
             }
+            Method::AgentLaunch | Method::CardPickup => self.ctl_agent_request(ws, &mut request),
             Method::Show => {
                 // Deferred: answered once the item is on its shelf.
                 self.ctl_show(ws, conn_id, &mut request, reply);
@@ -25015,6 +25026,103 @@ impl App {
             }
         };
         let _ = reply.send(resp);
+    }
+
+    fn ctl_agent_request(
+        &mut self,
+        ws: &WindowState,
+        request: &mut crate::ctl_server::AdmittedRequest,
+    ) -> kettle_ctl::protocol::Response {
+        use kettle_ctl::protocol::{Response, error_codes as ec};
+        let id = request.request().id;
+        let refused =
+            || Response::err(id, ec::BAD_PARAMS, "launch-scoped card request was refused");
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = ws;
+            refused()
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use crate::ctl_server::AgentAdmission;
+            let Some(admission) = request.take_agent() else {
+                return refused();
+            };
+            match admission {
+                AgentAdmission::Launch { root, files } => {
+                    let Some(chain) = request.caller().chain().and_then(Result::ok) else {
+                        return refused();
+                    };
+                    if chain.first() != Some(&root) {
+                        return refused();
+                    }
+                    let (roots, _) = self.caller_roots(ws);
+                    let Some((pane, _)) = crate::media::nearest_pane(chain, &roots) else {
+                        return refused();
+                    };
+                    let Some(pane_root) = roots
+                        .iter()
+                        .find(|entry| entry.pane == pane)
+                        .map(|entry| entry.root)
+                    else {
+                        return refused();
+                    };
+                    if !self.agent_launches.register(
+                        root,
+                        pane,
+                        pane_root,
+                        files,
+                        std::time::Instant::now(),
+                    ) {
+                        return refused();
+                    }
+                    Response::ok(id, serde_json::json!({"enabled": true}))
+                }
+                AgentAdmission::Pickup {
+                    sender,
+                    request: pickup,
+                } => {
+                    let live = self
+                        .scoped_card_caller(ws, request.caller(), &sender, pickup.target)
+                        .is_some_and(|caller| {
+                            self.agent_launches.redeem(
+                                pickup.permit,
+                                caller,
+                                std::time::Instant::now(),
+                            )
+                        });
+                    Response::ok(id, serde_json::json!({"live": live}))
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn scoped_card_caller<'a>(
+        &self,
+        ws: &WindowState,
+        evidence: &'a crate::ctl_server::CallerEvidence,
+        sender: &crate::ctl_server::SenderIdentity,
+        target: kettle_ctl::show::InlineTarget,
+    ) -> Option<kettle_ctl::agent_launch::CardCaller<'a>> {
+        let chain = evidence.chain()?.ok()?;
+        let owner = sender.asker.process;
+        if owner == sender.process
+            || chain.first() != Some(&sender.process)
+            || chain.get(1) != Some(&owner)
+        {
+            return None;
+        }
+        let (roots, _) = self.caller_roots(ws);
+        let (pane, _) = crate::media::nearest_pane(chain, &roots)?;
+        let pane_root = roots.iter().find(|entry| entry.pane == pane)?.root;
+        Some(kettle_ctl::agent_launch::CardCaller {
+            target,
+            owner,
+            chain,
+            pane,
+            pane_root,
+        })
     }
 
     /// `show`: route the push to its caller's pane, queue its render, and
@@ -25074,6 +25182,18 @@ impl App {
                 return;
             }
         };
+        #[cfg(target_os = "linux")]
+        let _ = harness;
+        #[cfg(target_os = "linux")]
+        let native_grant = show
+            .inline
+            .zip(sender.as_ref())
+            .and_then(|(target, sender)| {
+                let caller = self.scoped_card_caller(ws, request.caller(), sender, target)?;
+                self.agent_launches.grant(caller, std::time::Instant::now())
+            });
+        #[cfg(target_os = "linux")]
+        let harness = native_grant.as_ref().map(|grant| grant.owner());
         // An unverified push counts against its sending process; one whose
         // sender the kernel could not name has no one to count against or
         // to show as its sender.
@@ -25162,6 +25282,8 @@ impl App {
         // pane; everyone else's push goes to the shelf alone.
         let inline = match (inline, harness) {
             (Some(target), Some(owner)) if route.verified => Some(crate::media::InlineDraft {
+                #[cfg(target_os = "linux")]
+                launch: native_grant,
                 owner,
                 harness: match target {
                     kettle_ctl::show::InlineTarget::ClaudeHook => {
@@ -25829,8 +25951,22 @@ impl App {
             .cards
             .owners()
             .into_iter()
-            .filter(|owner| kettle_ctl::process::identity(owner.pid()) != Ok(*owner))
+            .filter(|owner| {
+                let gone = kettle_ctl::process::identity(owner.pid()) != Ok(*owner);
+                #[cfg(target_os = "linux")]
+                {
+                    gone || !self.agent_launches.owner_live(*owner)
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    gone
+                }
+            })
             .collect();
+        #[cfg(target_os = "linux")]
+        if !gone.is_empty() {
+            self.agent_launches.prune(std::time::Instant::now());
+        }
         // Each live pane's items, by id and generation.
         let shelves: std::collections::HashMap<u64, Vec<(u64, u64)>> = self
             .all_windows(ws)
@@ -26231,6 +26367,19 @@ impl App {
             let _ = origin.refuse(FailureCode::NotInKettlePane);
             return;
         };
+        #[cfg(target_os = "linux")]
+        let inline = inline.filter(|draft| {
+            draft
+                .launch
+                .as_ref()
+                .zip(pane.caller_root)
+                .is_some_and(|(grant, root)| grant.valid(route.pane, root))
+        });
+        #[cfg(target_os = "linux")]
+        let native_pickup = inline
+            .as_ref()
+            .and_then(|draft| draft.launch.clone())
+            .zip(pane.caller_root);
         let shown = window
             .preview_panels
             .get(&route.pane)
@@ -26279,6 +26428,17 @@ impl App {
             }
             _ => None,
         };
+        #[cfg(target_os = "linux")]
+        let delivery = delivery.and_then(|mut delivery| {
+            let (grant, root) = native_pickup?;
+            delivery.permit = Some(self.agent_launches.issue(
+                grant,
+                root,
+                std::time::Instant::now(),
+                |bytes| getrandom::fill(bytes).is_ok(),
+            )?);
+            Some(delivery)
+        });
         let seq = window.seq;
         if let Some(handle) = &window.window {
             handle.request_redraw();
@@ -45245,7 +45405,10 @@ mod tests {
         for method in Method::ALL {
             assert_eq!(
                 super::ctl_method_is_pure_read(method),
-                method == Method::UiGeometry,
+                matches!(
+                    method,
+                    Method::UiGeometry | Method::AgentLaunch | Method::CardPickup
+                ),
                 "{method:?}"
             );
         }
@@ -45972,6 +46135,8 @@ mod tests {
                 (kettle_media::MediaKind::Mermaid, None),
                 &image,
                 crate::media::InlineDraft {
+                    #[cfg(target_os = "linux")]
+                    launch: None,
                     owner,
                     harness: kettle_render::CardHarness::ClaudeHook,
                     name: name.map(Into::into),
@@ -45993,6 +46158,8 @@ mod tests {
         let owner = kettle_ctl::process::ProcessIdentity::new_for_tests(40, 400);
         let image = kettle_core::ImageData::new(64, 48, vec![9; 64 * 48 * 4]).unwrap();
         let draft = || crate::media::InlineDraft {
+            #[cfg(target_os = "linux")]
+            launch: None,
             owner,
             harness: kettle_render::CardHarness::ClaudeHook,
             name: Some("plot.png".into()),
@@ -58852,13 +59019,13 @@ mod settings_footer_text_tests {
             .expect("end of reconcile_codex_shell")
             .0;
         let gate = reconcile
-            .find("if !(self.agent_previews_live() && self.cfg.agent_display_codex) {")
+            .find("if !self.agent_previews_live() || !(agents.codex || agents.claude) {")
             .expect("gated on both settings");
         let withdrawn = reconcile
             .find("crate::codex_shell::offer(None, None);")
             .expect("off withdraws the startup files");
         let installed = reconcile
-            .find("crate::codex_shell::prepare(&root, &executable, env!(\"CARGO_PKG_VERSION\"))")
+            .find("crate::codex_shell::prepare(")
             .expect("on installs them");
         assert!(gate < withdrawn && withdrawn < installed);
     }

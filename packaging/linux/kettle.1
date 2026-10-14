@@ -612,7 +612,7 @@ written, 1 otherwise. Showing media to the user is
 .BR "kettle show" .
 .TP
 .B kettle agent\-setup \fR(\fB\-\-print\fR [\fB\-\-shell \fISHELL\fR] | \fB\-\-status\fR | \fB\-\-uninstall\fR)
-Set up Codex to start with kettle's display server.
+Print per-launch agent setup without editing agent or shell settings.
 .B \-\-print
 prints a
 .B codex
@@ -631,7 +631,7 @@ and
 and enabling
 .B kettle_show
 alone, without approving it; every other Codex command runs unchanged. On
-macOS with Codex CLI 0.162 it also adds a hook that prints a card for each
+macOS or a checked Linux launch with Codex CLI 0.162 it also adds a hook that prints a card for each
 .B kettle_show
 under the call, once you trust that hook in Codex's own hook review.
 With
@@ -640,6 +640,16 @@ on, the zsh or fish a new kettle pane starts defines the same function
 itself; a
 .B codex
 you define still wins.
+.B \-\-agent claude
+selects the Claude Code function for
+.B \-\-print
+or
+.BR \-\-uninstall .
+On Linux, enabled Claude Code previews also define this function in new zsh
+and fish panes. It keeps arguments unchanged, respects managed plugin policy,
+and admits cards only for a supported native executable and hook version.
+Unknown launches keep the media shelf. Linux card provenance is local launch
+identity, not vendor authentication.
 .B \-\-status
 reports whether this shell reaches the kettle it runs in with agent previews
 on, whether Codex launched from it would get the server, whether kettle

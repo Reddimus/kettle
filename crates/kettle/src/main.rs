@@ -2635,6 +2635,29 @@ mod activation_cli_tests {
     }
 
     #[test]
+    fn agent_setup_keeps_launch_and_print_options_separate() {
+        for args in [
+            vec!["--print", "--agent", "claude", "--shell", "zsh"],
+            vec!["--uninstall", "--agent", "claude"],
+            vec!["--launch-claude", "--", "--model", "opus", "hello"],
+            vec!["--launch-codex", "--", "resume"],
+        ] {
+            assert!(Cli::try_parse_from(["kettle", "agent-setup"].into_iter().chain(args)).is_ok());
+        }
+        for args in [
+            vec!["--launch-claude", "--launch-codex"],
+            vec!["--launch-claude", "--status"],
+            vec!["--launch-claude", "--agent", "claude"],
+            vec!["--status", "--agent", "claude"],
+            vec!["--print", "--", "hello"],
+        ] {
+            assert!(
+                Cli::try_parse_from(["kettle", "agent-setup"].into_iter().chain(args)).is_err()
+            );
+        }
+    }
+
+    #[test]
     fn new_process_escape_hatch_parses() {
         let cli = Cli::try_parse_from(["kettle", "--new-process"]).unwrap();
         assert!(cli.new_process);
@@ -3782,6 +3805,7 @@ mod tests {
             "claude-card-hook",
             "codex-card-hook",
             "launch-codex",
+            "launch-claude",
         ];
         fn collect_missing_flags(
             cmd: &clap::Command,

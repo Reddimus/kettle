@@ -162,6 +162,8 @@ pub(crate) struct Draft {
 /// An inline card a verified harness may have: who owns it and, when the
 /// media came from a file, the name its caption shows.
 pub(crate) struct InlineDraft {
+    #[cfg(target_os = "linux")]
+    pub launch: Option<kettle_ctl::agent_launch::LaunchGrant>,
     pub owner: kettle_ctl::process::ProcessIdentity,
     /// The harness that prints the card, which sets its place and size.
     pub harness: kettle_render::CardHarness,
