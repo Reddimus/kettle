@@ -4340,8 +4340,8 @@ launch setting its own hooks gets none, and only Codex 0.162 gets cards.
 `kettle-render` recognizes a Codex card under `↳ Hook ·` with rows and
 caption four columns in, and refuses Claude Code's label, the wrong column,
 or text after the label; its tab names Codex. `kettle-ui` sizes a Codex card
-from its own column and label, and gives a card only to a sender signed as
-the harness it asked as. Checked live with Codex CLI 0.162.0 (hooks bypassed
+from its own column and label. macOS admits only a sender signed as the
+harness it asked as; Linux launch checks are described below. Checked live with Codex CLI 0.162.0 (hooks bypassed
 for that one run, so no trust was saved): the function's launch printed the
 card under `↳ Hook ·` and Kettle painted the chart there, tabbed Codex.
 Clicking cards: `kettle-render` records each drawn card with the part of it
@@ -5438,6 +5438,33 @@ exercise the same pane under tmux, clean Neovim, configured AstroNvim, Codex
 CLI, and Claude Code CLI where installed. Never infer one supported platform's
 result from another platform's unit test or offscreen renderer pass. Record
 missing tools and unrun platforms as explicit skips in the release audit.
+
+### Linux launch-scoped cards
+
+Portable tests cover hook profiles, direct/npm ancestry, pane generation,
+one-use pickup, expiry/capacity and redacted permit serialization. Native
+Linux tests exercise held ELF metadata, descriptor transfer, executable
+changes and agent exit. Launcher fixtures check native and npm layouts,
+relative PATH preservation and close-on-exec descriptors. zsh/fish fixtures
+verify each enabled agent independently, unchanged argument forwarding,
+noninteractive shells and user-defined functions. MCP tests keep card text
+and pickup permits out of model receipts and remove pending cards before
+performing blocking validation.
+
+Run `cargo test -p kettle-ctl agent_launch`, `cargo test -p kettle agent_setup`
+and `cargo test -p kettle-ui codex_shell`. Container tests exercise Linux kernel
+behavior, not GNOME or official CLI acceptance. Native card, hook and live
+Ubuntu acceptance must be recorded separately before release.
+
+`check-agent-cards-smoke.py` drives native and npm-style Codex routes plus
+Claude's native route with a compiled simulated harness. It checks real TTY
+launches, MCP receipt privacy, rendered chart pixels, agent exit and unscoped
+shelf fallback. CI runs it under Xvfb; Ubuntu GNOME Wayland acceptance is
+recorded separately. The fixture makes no model calls and is not official CLI
+acceptance. It requires existing Rust, Python and Node; it installs nothing.
+Guard reversals cover pane identity, peer-file stamp, late process validation,
+relative PATH selection, descriptor closure, receipt privacy and CLI option
+exclusion. Each produced an assertion failure, followed by source restoration.
 
 ## Pattern: audit-driven hardening
 

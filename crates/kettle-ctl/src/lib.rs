@@ -12,6 +12,7 @@
 //! no client changes.
 
 pub mod activation;
+pub mod agent_launch;
 pub mod client;
 pub mod discovery;
 pub mod identity;

@@ -115,7 +115,8 @@ reading your screen or typing. Turn on Settings, Agents, Agent
 previews (`agent-display`), then:
 
 - Claude Code: turn on Claude Code previews; new panes offer Claude Code
-  Kettle's plugin, and what it shows lands as a card under the call.
+  Kettle's plugin. Supported launches show cards under the call; other
+  versions keep the media shelf. Linux uses a checked per-launch function.
 - Codex: turn on Codex previews, or add the function `kettle agent-setup
   --print` prints (the palette's "Copy agent setup commands" copies it).
   Codex shows media when asked: say "show it in Kettle".

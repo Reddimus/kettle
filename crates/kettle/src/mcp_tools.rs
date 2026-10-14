@@ -699,7 +699,7 @@ fn tool_kettle_show(
         Ok(Ok(result)) => {
             let stored = match (card, &result.inline) {
                 (Some(id), Some(delivery)) if delivery.fits() => {
-                    session.store(id, delivery.message.clone(), std::time::Instant::now())
+                    session.store_delivery(id, delivery.clone(), std::time::Instant::now())
                 }
                 _ => false,
             };
@@ -773,13 +773,49 @@ fn tool_kettle_card(
     params: &Value,
     session: &crate::mcp_display::DisplaySession,
 ) -> Value {
+    tool_kettle_card_with(args, params, session, |permit| {
+        #[cfg(not(target_os = "linux"))]
+        {
+            permit.is_none()
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let Some(permit) = permit else {
+                return false;
+            };
+            let Some(target) = session.hook().map(crate::mcp_display::CardHook::target) else {
+                return false;
+            };
+            let Ok(params) =
+                serde_json::to_value(kettle_ctl::agent_launch::PickupRequest { target, permit })
+            else {
+                return false;
+            };
+            let Ok(mut client) = Client::discover_display(None) else {
+                return false;
+            };
+            client
+                .call_with_timeout("card_pickup", params, std::time::Duration::from_millis(500))
+                .ok()
+                .and_then(|reply| reply.get("live").and_then(Value::as_bool))
+                .unwrap_or(false)
+        }
+    })
+}
+
+fn tool_kettle_card_with(
+    args: &Value,
+    params: &Value,
+    session: &crate::mcp_display::DisplaySession,
+    check: impl FnOnce(Option<kettle_ctl::agent_launch::PickupPermit>) -> bool,
+) -> Value {
     if crate::mcp_display::from_model(params) {
         return error_result("kettle_card is for Kettle's hook; the model does not call it.");
     }
     let Some(id) = args.get("tool_use_id").and_then(Value::as_str) else {
         return error_result("kettle_card requires a 'tool_use_id' string");
     };
-    let message = session.take(id, std::time::Instant::now());
+    let message = session.take_checked(id, std::time::Instant::now(), check);
     let output = match message {
         Some(message) => json!({ "systemMessage": message }),
         None => json!({}),
@@ -1421,6 +1457,13 @@ mod tests {
     /// listed, refused to a model's own call, and answered once.
     #[test]
     fn kettle_card_is_the_hooks_alone_and_answers_once() {
+        fn tool_kettle_card(
+            args: &Value,
+            params: &Value,
+            session: &crate::mcp_display::DisplaySession,
+        ) -> Value {
+            super::tool_kettle_card_with(args, params, session, |_| true)
+        }
         use crate::mcp_display::{DisplaySession, TOOL_USE_ID_META};
         let listed = tool_specs(ToolSelection::Display);
         assert!(listed.iter().all(|spec| spec["name"] != "kettle_card"));
@@ -1467,11 +1510,13 @@ mod tests {
             &[],
         );
         result.inline = Some(kettle_ctl::show::InlineDelivery {
+            permit: Some(kettle_ctl::agent_launch::PickupPermit::new([0xab; 16])),
             message: "\n\u{10eeee}SECRET-ROWS\nplot.png - raster 640x480".into(),
         });
         let sent = show_sent_card(&result, "plot.png");
         let encoded = sent.to_string();
         assert!(!encoded.contains("SECRET-ROWS") && !encoded.contains('\u{10eeee}'));
+        assert!(!encoded.contains("abababababababababababababababab"));
         let text = sent["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("below this call") && text.contains("plot.png"));
         assert!(text.contains("not seen"));
