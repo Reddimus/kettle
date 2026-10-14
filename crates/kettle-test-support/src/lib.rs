@@ -826,8 +826,46 @@ mod sweep_tests {
     }
 }
 
+/// Poll for an observed result within a finite bound, attempting once even at zero.
+pub fn poll_until<T>(
+    within: std::time::Duration,
+    mut probe: impl FnMut() -> Option<T>,
+) -> Option<T> {
+    let start = std::time::Instant::now();
+    loop {
+        if let Some(value) = probe() {
+            return Some(value);
+        }
+        let left = within.checked_sub(start.elapsed())?;
+        if left.is_zero() {
+            return None;
+        }
+        std::thread::sleep(left.min(std::time::Duration::from_millis(5)));
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn polling_observes_delayed_results_and_stops_at_its_bound() {
+        let mut values = [None, None, Some(17)].into_iter();
+        assert_eq!(
+            super::poll_until(std::time::Duration::from_secs(1), || values
+                .next()
+                .flatten()),
+            Some(17)
+        );
+        let mut calls = 0;
+        assert_eq!(
+            super::poll_until(std::time::Duration::ZERO, || {
+                calls += 1;
+                None::<()>
+            }),
+            None
+        );
+        assert_eq!(calls, 1);
+    }
+
     use super::{code_only, production_source};
 
     #[test]

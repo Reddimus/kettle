@@ -65,8 +65,8 @@ fn report(name: &str, result: std::io::Result<impl std::fmt::Debug>) {
     }
 }
 
-/// Play a fifth of a second of muted silence through an output queue:
-/// `ok` when its clock ran and its device said its latency, else what was
+/// Play muted silence until the output clock advances, within two seconds:
+/// `ok` when its device also reports latency, else what was
 /// refused; `none` on a machine with no audio output at all.
 #[cfg(all(target_os = "macos", feature = "avfoundation"))]
 fn attempt_sound() {
@@ -74,18 +74,23 @@ fn attempt_sound() {
     let played = (|| -> Result<(), &'static str> {
         let mut output = Output::open(true).map_err(|_| "open")?;
         let silence = vec![0f32; BUFFER_FRAMES * kettle_media::audio::CHANNELS];
-        for _ in 0..10 {
+        kettle_test_support::poll_until(std::time::Duration::from_secs(2), || {
             while let Some(index) = output.take_free() {
-                output.enqueue(index, &silence).map_err(|_| "enqueue")?;
+                if output.enqueue(index, &silence).is_err() {
+                    return Some(Err("enqueue"));
+                }
             }
-            output.start().map_err(|_| "start")?;
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
+            if output.start().is_err() {
+                return Some(Err("start"));
+            }
+            output
+                .queued()
+                .filter(|(frames, _)| *frames > 0.0)
+                .map(|_| Ok(()))
+        })
+        .ok_or("clock")??;
         latency().ok_or("latency")?;
-        match output.queued() {
-            Some((frames, _)) if frames > 0.0 => Ok(()),
-            _ => Err("clock"),
-        }
+        Ok(())
     })();
     match played {
         Ok(()) => println!("probe:sound=ok"),
