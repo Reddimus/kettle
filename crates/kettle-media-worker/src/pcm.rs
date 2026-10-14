@@ -213,7 +213,6 @@ fn reader(
                     }
                     _ => false,
                 };
-                state.last = Instant::now();
                 state.broken |= !accepted;
                 let stop = state.broken || state.closed;
                 queue.1.notify_all();
@@ -348,6 +347,73 @@ impl Speaker for PulseSpeaker {
 #[cfg(test)]
 mod clock_tests {
     use super::*;
+    #[test]
+    fn pcm_data_never_renews_the_command_lease() {
+        let open = pcm::Open {
+            generation: 7,
+            start_frame: 0,
+            end_frame: 48_000,
+            muted: true,
+        };
+        let old = Instant::now() - Duration::from_secs(30);
+        let queue = Arc::new((
+            Mutex::new(State {
+                flow: Flow::new(open).unwrap(),
+                blocks: VecDeque::new(),
+                ended: false,
+                closed: false,
+                broken: false,
+                last: old,
+            }),
+            Condvar::new(),
+        ));
+        let (input, mut sent) = std::io::pipe().unwrap();
+        reader(input, Arc::clone(&queue), SoundWish::new(true)).unwrap();
+        let send = |sent: &mut std::io::PipeWriter, frame: Frame| {
+            write_frame(sent, &frame, Direction::ParentToWorker).unwrap();
+        };
+        let wait_for = |condition: &dyn Fn(&State) -> bool| {
+            let state = queue.0.lock().unwrap();
+            let (state, timeout) = queue
+                .1
+                .wait_timeout_while(state, Duration::from_secs(5), |state| !condition(state))
+                .unwrap();
+            assert!(!timeout.timed_out(), "PCM reader did not accept its frame");
+            assert!(!state.broken);
+            state.last
+        };
+        send(
+            &mut sent,
+            Frame::Pcm(Message::Block(pcm::Block {
+                generation: 7,
+                sequence: 0,
+                at_frame: 0,
+                samples: vec![0; pcm::BYTES],
+            })),
+        );
+        assert_eq!(
+            wait_for(&|state| state.blocks.len() == 1),
+            old,
+            "PCM samples are not playback commands"
+        );
+        send(
+            &mut sent,
+            Frame::Pcm(Message::End {
+                generation: 7,
+                sequence: 1,
+            }),
+        );
+        assert_eq!(
+            wait_for(&|state| state.ended),
+            old,
+            "PCM EOF is not a heartbeat"
+        );
+        send(&mut sent, Frame::PlayCommand(PlayCommand::Heartbeat));
+        assert!(wait_for(&|state| state.last != old) > old);
+        send(&mut sent, Frame::PlayCommand(PlayCommand::Close));
+        wait_for(&|state| state.closed);
+    }
+
     #[test]
     fn feedback_carries_only_a_fresh_bounded_hardware_clock() {
         let open = pcm::Open {
