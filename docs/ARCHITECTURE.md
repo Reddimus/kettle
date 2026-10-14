@@ -177,8 +177,13 @@ control request or a Lua script's action is handled. A hover loop
 (`video-preview-hover`, held back by `reduce-motion`) only replays frames a
 user-started preview left: the real pointer (`native_pointer`) resting still
 on the picture, out from under any menu or dialog, plays them for at most
-four seconds, once a rest. Screen readers hear the lane's notices and that a
-preview is being made, but not each frame's time.
+four seconds, once a rest. Linux reads the standardized Settings
+portal preference lazily, off the UI thread. One cancellable watcher shares
+an atomic value across windows and uses the existing coalesced waker. Signals
+that overlap the initial read trigger bounded reconciliation; owner loss or
+invalid data restores the conservative no-motion fallback. Screen readers
+hear the lane's notices and that a preview is being made, but not each
+frame's time.
 
 The lane plays the video itself on the user's gesture (`media::playback`),
 in a worker of its own: `WorkerClient::play` opens a playback session

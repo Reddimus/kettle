@@ -128,6 +128,10 @@ x11rb = "0.13"
 # protocol. Probe the compositor registry once so GNOME/Mutter can use Kettle's
 # near-opaque fallback instead of silently showing sharp, washed-out alpha.
 [target.'cfg(target_os = "linux")'.dependencies]
+async-channel = "2.5"
+async-io = "2.6"
+futures-lite = "2.6"
+zbus = "5.19"
 md-5 = "0.11"
 url = "2.5"
 wayland-client = "0.31"

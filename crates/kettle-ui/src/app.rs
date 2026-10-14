@@ -846,28 +846,6 @@ fn earliest(
     }
 }
 
-/// Whether the system lets apps start motion on their own: macOS's Reduce
-/// Motion setting. Elsewhere there is no setting Kettle reads, so motion is
-/// held back.
-fn system_allows_motion() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        use objc2_app_kit::NSWorkspace;
-        if objc2_foundation::MainThreadMarker::new().is_some() {
-            // SAFETY: a property read on the shared workspace, on the main
-            // thread.
-            return !unsafe {
-                NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
-            };
-        }
-        false
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        false
-    }
-}
-
 /// Whether `item` can be read again: it came from a file, or its gallery
 /// did, not from bytes a request carried or text copied.
 fn preview_reloads(item: &crate::media::ShelfItem) -> bool {
@@ -9310,6 +9288,7 @@ pub struct App {
     /// stopped reading can reject a burst of key-repeat events; the user needs
     /// one explicit notice, not a desktop-toast storm.
     last_input_rejection_notice: Option<(PaneInputResult, std::time::Instant)>,
+    system_motion: std::sync::OnceLock<crate::motion::SystemMotion>,
     proxy: EventLoopProxy<UserEvent>,
     /// Private, bounded bare-launch activation inbox. The IPC thread waits for
     /// this event-loop thread to confirm window creation before telling the
@@ -10367,6 +10346,7 @@ impl App {
             recording_start_failed: false,
             recording_error_reported: false,
             last_input_rejection_notice: None,
+            system_motion: std::sync::OnceLock::new(),
             proxy,
             activation,
             runtime_tracker,
@@ -12269,11 +12249,11 @@ impl App {
     /// `auto` the system's Reduce Motion where it has one; where it has
     /// none, motion is held back.
     fn motion_allowed(&self) -> bool {
-        match self.cfg.reduce_motion {
-            kettle_config::ReduceMotion::On => false,
-            kettle_config::ReduceMotion::Off => true,
-            kettle_config::ReduceMotion::Auto => system_allows_motion(),
-        }
+        crate::motion::allowed(self.cfg.reduce_motion, || {
+            self.system_motion
+                .get_or_init(|| crate::motion::SystemMotion::new(self.waker()))
+                .allows()
+        })
     }
 
     /// Show `pane`'s item as its source, or rendered again; only an item
