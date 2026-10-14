@@ -28,9 +28,9 @@ turns it into an `ExternalRequest` with an `ExternalAttested` path or inline
 bytes, and Mermaid text or `kind: "mermaid"` selects the Mermaid job kind
 rather than Auto.
 
-## Wire version 7
+## Wire version 8
 
-The header is 11 bytes: `KMED`, u16 LE protocol version 7, a frame kind, then u32 LE payload
+The header is 11 bytes: `KMED`, u16 LE protocol version 8, a frame kind, then u32 LE payload
 length. No padding or compression is permitted. Binary data and UTF-8 strings have u32 LE
 byte lengths. Lists have u32 LE counts. Integers and f64 bit patterns use LE. Boolean and
 optional-value discriminants are exactly 0 or 1. Floats must satisfy the field validators.
@@ -52,6 +52,17 @@ platform refuses the other encoding.
 | 11 VideoFrame | Worker to parent | Sequence u64, presentation ms u64, width u32, height u32, RGBA blob |
 | 12 PlayState | Worker to parent | One state byte: 0 playing, 1 paused, 2 ended |
 | 13 AudioState | Worker to parent | One sound status byte: the session's sound changed from what Opened said |
+| 14 PCM | Parent/worker only | Subtype, generation and the fixed fields below |
+
+PCM subtypes are Open (0: generation/start/end frames u64, muted boolean),
+Block (1: generation/sequence/start frame u64, 7680-byte stereo f32le/48 kHz
+blob), End (2: generation/next sequence u64), and Feedback (3: generation/consumed
+count u64, optional played frame u64, clock age u32 microseconds, done/failed
+booleans). Each block is 20 ms; samples must be finite. Clock age is at most
+250 ms. Four cumulative credits bound queued blocks. Generations, sequence,
+nonoverlapping times and phase are checked again by the receiving role.
+External tools cannot send PCM frames. A PCM broker accepts no media path or
+encoded format.
 
 Job-kind tags 0 through 7 are Mermaid, Svg, Raster, MarkdownDiagrams, VideoProbe,
 VideoStills, Auto and CachedThumbnail. An Auto job asks the worker to classify the source by
@@ -69,7 +80,7 @@ model's own requests to 2560 before they become jobs.
 
 Sound status tags 0 through 5 are Ready (the video's own sound plays with it,
 unless muted), NoTrack (the video has none), DecoderSilent (the decoder plays
-no sound: ffmpeg's playback is silent), Unsupported (its sound cannot be
+no playable sound), Unsupported (its sound cannot be
 played here), Unavailable (this machine's output could not play it) and Off
 (none was asked for). An Opened that says Ready for a video without sound is
 refused. A sound byte asks for sound and starts none: only Play makes a sound.
@@ -88,8 +99,8 @@ to the tolerance away from the time asked: every sample is within the tolerance,
 tolerance is within the duration. Both checks run in the borrowed pass, before any pixel is
 copied.
 
-Kinds 8 through 12 are a playback session, the only frames a worker started for
-playback reads or writes after Hello and Ready. PlayOpen names the video file as a job
+Kinds 8 through 14 serve playback after Hello and Ready. Linux PCM traffic is
+private to the decoder, parent relay and PCM broker. PlayOpen names the video file as a job
 names its source (inline bytes are refused: a decoder reads a file); frames fit within its max width and height,
 a room of at most 1920 on a side, and are at most 1920 on a side and 1920 * 1080 pixels; it starts within any video's length and
 asks for 1 to 30,000 frames per thousand seconds. Opened carries the video result's fixed
@@ -389,7 +400,8 @@ fresh worker of its own and returns at once: three threads of the session's,
 never the caller's, and never the render slot, start the worker within the
 same startup deadline, send Hello, then PlayOpen once Ready matches, and wait
 6 s for Opened. For the rest of the session the worker's process group is
-measured every 25 ms and killed above 768 MiB, as a render's is. At most two
+measured every 25 ms and killed above 768 MiB, as a render's is. On Linux the
+PCM broker and decoder share this limit; the broker occupies no extra session slot. At most two
 sessions are open at once (a third is `WorkerUnavailable`); one being closed
 no longer counts. The reader takes each frame straight into a buffer of the
 size the session opened at, keeps only the newest one the caller has not
@@ -489,7 +501,28 @@ audio track through a reader of its own over the same asset, from the same
 start, as interleaved stereo 32-bit floats at 48 kHz, each block placed on
 the video's timeline and none before the last one ended, a buffer of more
 than a quarter of a second or with a sample that is not a number refused;
-ffmpeg plays no sound. The worker plays it on macOS, confined with the sound
+FFmpeg produces timestamped RGBA and stereo f32le/48 kHz PCM through three
+anonymous pipes: bounded framecrc metadata, pixels and fixed 20 ms PCM blocks.
+Concurrent readers keep any one pipe from blocking the others. Both streams
+retain the same origin across seeks; codec padding is trimmed to the declared
+presentation end, and a leading-audio gap starts with a black video frame.
+Track-end fields or a bounded packet lookup distinguish a valid audio tail
+from a stalled video decoder. A seek starts fresh workers and a new PCM generation.
+
+On Linux the parent relays PCM on background threads to a second copy of the
+same verified worker. This permanent PCM-only role accepts no encoded media or
+paths. Four cumulative credits bound outstanding blocks; sequence, generation,
+range and finite samples are checked at each hop. Only caller-kept commands
+renew either worker's lease; PCM and clock feedback are not heartbeats. Commands
+sent during decoder opening are retained for the later broker, then forwarded
+once, without replay on clock feedback. The
+broker loads `libpulse.so.0` (PulseAudio 15 or newer), connects only to the local
+UID's Pulse socket, disables shared-memory pools, then confines itself before
+reading PCM. It never changes user audio configuration. Pause corks its stream;
+mute affects only that stream. Close retires the queue and closes both workers.
+Missing output or broker failure leaves video playing with an Unavailable notice.
+
+The worker plays sound on macOS, confined with the sound
 grant when sound was asked for and with Apple's decoder alone, so no
 external decoder ever runs with that grant (a video Apple's decoder turns
 down is refused, and Kettle opens it again asking for none; it asks for none
@@ -506,9 +539,12 @@ which end a worker whose session thread is stuck, end the process at once,
 and its output with it. Paused, the sound has no clock:
 frames played again wait for a fresh one. While it plays, each frame goes out
 40 ms before its sound is heard (what the parent takes to show it): what
-the queue has played less its output device's presentation latency (the
+the queue has played less, on macOS, its output device's presentation latency (the
 device's latency, safety offset, I/O buffer and output stream latency, at
-most 3 s, asked again each second as the default device may change); a
+most 3 s, asked again each second as the default device may change). Linux
+uses Pulse's hardware presentation time directly, without subtracting latency
+again. Hardware timestamps older than 250 ms are withheld, including time spent
+in the parent's feedback slot; a
 frame the sound has passed by more than a frame is dropped, only for a
 newer frame already waiting behind it, so never the video's last, which the
 lane holds; while the queue's clock is lost the frames wait for it; the end waits for
@@ -518,9 +554,8 @@ clock for a second while playing (from its start or once it lost it), or a
 feeding thread that stops, leaves
 the session silent: AudioState says Unavailable and the frames go out on the
 session's own clock from there. Where no output can be made, Opened
-says Unavailable; a session ffmpeg plays (on Linux, or a video only it reads)
-says DecoderSilent, NoTrack for a video without sound, and Off when none was
-asked for. A session that cannot open answers with the
+says Unavailable, NoTrack for a video without sound, and Off when none was
+asked for. DecoderSilent remains a wire status for a decoder with no playable sound. A session that cannot open answers with the
 failure and exits 0; one whose first frame is not written within 5 s (a
 write the parent held past that included) answers `RenderTimeout`, and its
 watchdog ends it a second later if that answer is held up too.

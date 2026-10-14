@@ -10,6 +10,9 @@ mod digest;
 #[cfg(any(test, feature = "fuzzing"))]
 pub mod fuzzing;
 mod lifecycle;
+pub mod pcm;
+#[cfg(target_os = "linux")]
+mod pcm_client;
 pub mod session;
 pub mod video;
 pub mod wire;
@@ -88,7 +91,7 @@ pub const MAX_VERSION_BYTES: usize = 64;
 /// Hex digest of the source a binary was built from, up to 256 bits.
 pub const MAX_SOURCE_HASH_BYTES: usize = 64;
 /// No version negotiation. A header skew requires restart.
-pub const PROTOCOL_VERSION: u16 = 7;
+pub const PROTOCOL_VERSION: u16 = 8;
 /// Longest textual source a reply returns as it was read: the SVG input
 /// cap, the largest textual kind's.
 pub const MAX_EXACT_SOURCE_BYTES: usize = MAX_SVG_BYTES;
@@ -551,7 +554,7 @@ pub enum AudioStatus {
     Ready,
     /// The video has no sound.
     NoTrack,
-    /// Its decoder plays no sound: ffmpeg's playback is silent.
+    /// Its decoder provides no playable sound.
     DecoderSilent,
     /// Its sound is in a form that cannot be played here.
     Unsupported,

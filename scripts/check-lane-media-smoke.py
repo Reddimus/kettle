@@ -13,7 +13,7 @@ isolated configuration and XDG directories, and checks, through ctl and native X
 - an image, an SVG, a Mermaid diagram and a video each land on the shelf
   with `kettle show` and render in a lane (the video as its poster);
 - the video's play control, pressed natively, plays it (a control client
-  may not), silently (ffmpeg plays the picture only), its position moving;
+  may not), its position moving, with audio or a visible output fallback;
 - the worker runs with no_new_privs and a seccomp filter;
 - a native Left with the lane holding the keyboard steps it back;
 - a control client's pause pauses it;
@@ -41,6 +41,7 @@ from native_x11 import X11Input
 REPO = Path(__file__).resolve().parents[1]
 # Set by main(): the staged kettle and where results go.
 KETTLE = ""
+MODE = "lane"
 OUT = Path()
 RESULT = {"checks": [], "pass": False}
 
@@ -117,7 +118,7 @@ def launch(home, language):
     config.write_text("\n".join([
         "restore-session = false", "update-check = false", "record = off",
         "window-width = 110", "window-height = 40", "agent-server = full", "agent-display = true",
-        "media-open-mode = lane", "shell = /bin/sh", "login-shell = false",
+        f"media-open-mode = {MODE}", "shell = /bin/sh", "login-shell = false",
         "shell-integration = false",
         f"language = {language}", ""]))
     env = dict(os.environ, LIBGL_ALWAYS_SOFTWARE="1", SHELL="/bin/sh",
@@ -139,8 +140,9 @@ def launch(home, language):
 
 
 def lane(pid):
-    lanes = ctl(pid, "ui_geometry").get("preview_lanes") or []
-    return lanes[0] if lanes else None
+    geometry = ctl(pid, "ui_geometry")
+    lanes = geometry.get("preview_lanes") or []
+    return lanes[0] if lanes else geometry.get("preview_overlay")
 
 
 def screen_text(pid):
@@ -225,14 +227,17 @@ def self_test():
 
 
 def main():
-    global KETTLE, OUT
+    global KETTLE, MODE, OUT
     if sys.argv[1:] == ["--self-test"]:
         return self_test()
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--kettle", required=True)
+    parser.add_argument("--require-audio", action="store_true", help="fail unless video sound is available")
+    parser.add_argument("--mode", choices=("lane", "overlay"), default="lane")
     parser.add_argument("--worker", required=True)
     parser.add_argument("--out")
     args = parser.parse_args()
+    MODE = args.mode
     if sys.platform != "linux" or not os.environ.get("DISPLAY"):
         sys.exit("lane-media-smoke: Linux with an X server only (run it under xvfb-run)")
     for tool in ("ffmpeg", "xwininfo", "xprop"):
@@ -246,10 +251,13 @@ def main():
     OUT.mkdir(mode=0o700, parents=True, exist_ok=False)
     with tempfile.TemporaryDirectory(prefix="kettle-lane-smoke-") as private:
         KETTLE = stage(Path(args.kettle), Path(args.worker), Path(private) / "bin")
-        return run_checks(Path(private))
+        try:
+            return run_checks(Path(private), args.require_audio)
+        finally:
+            (OUT / "result.json").write_text(json.dumps(RESULT, indent=2) + "\n")
 
 
-def run_checks(private):
+def run_checks(private, require_audio=False):
     work = private / "work"
     work.mkdir()
     files = fixtures(work)
@@ -281,7 +289,9 @@ def run_checks(private):
         check("a native press plays the video, its position moving",
               later.get("state") == "playing" and later.get("position_ms", 0) - first >= 2000,
               {"first": first, "later": later})
-        check("ffmpeg plays it silent, and says so", later.get("sound") == "decoder_silent", later.get("sound"))
+        sound = later.get("sound")
+        check("video reports working audio or its output fallback",
+              sound == "heard" if require_audio else sound in ("heard", "unavailable"), sound)
         workers = worker_pids(pid)
         check("the worker runs with no_new_privs and a seccomp filter",
               bool(workers) and all(f.get("NoNewPrivs", "").strip() == "1" and f.get("Seccomp", "").strip() == "2"
@@ -305,11 +315,19 @@ def run_checks(private):
         still = ((lane(pid) or {}).get("playback") or {})
         check("a control client's Left moves nothing", still.get("position_ms", 0) >= mid,
               {"before": mid, "after": still.get("position_ms")})
-        ctl(pid, "dispatch_ui_key", "--keys", "escape", raw=False)
         ctl(pid, "perform_action", "--text", "video_play", raw=False)
         paused = wait_for("the pause", lambda: (lambda p: p if p.get("state") == "paused" else None)((lane(pid) or {}).get("playback") or {}))
         check("a control client's pause pauses it", True, paused)
+        check("audio remains available after seeking",
+              paused.get("sound") == "heard" if require_audio else True, paused.get("sound"))
+        ctl(pid, "dispatch_ui_key", "--keys", "escape", raw=False)
     finally:
+        try:
+            (OUT / f"final-{pid}.json").write_text(json.dumps(ctl(pid, "ui_geometry"), indent=2) + "\n")
+            shutil.copyfile(home / "kettle.log", OUT / f"kettle-{pid}.log")
+            ctl(pid, "screenshot", "--json", json.dumps({"full_window": True, "path": str(OUT / f"final-{pid}.png")}))
+        except (OSError, RuntimeError, subprocess.TimeoutExpired):
+            pass
         try:
             ctl(pid, "perform_action", "--text", "close_window", raw=False)
             process.wait(timeout=15)
@@ -329,6 +347,12 @@ def run_checks(private):
         ctl(pid, "screenshot", "--json", json.dumps({"full_window": True, "path": str(OUT / "video-es.png")}))
         check("Spanish lane captured for review", (OUT / "video-es.png").exists())
     finally:
+        try:
+            (OUT / f"final-{pid}.json").write_text(json.dumps(ctl(pid, "ui_geometry"), indent=2) + "\n")
+            shutil.copyfile(home / "kettle.log", OUT / f"kettle-{pid}.log")
+            ctl(pid, "screenshot", "--json", json.dumps({"full_window": True, "path": str(OUT / f"final-{pid}.png")}))
+        except (OSError, RuntimeError, subprocess.TimeoutExpired):
+            pass
         try:
             ctl(pid, "perform_action", "--text", "close_window", raw=False)
             process.wait(timeout=15)

@@ -81,6 +81,8 @@ impl std::fmt::Debug for PlaySession {
 }
 
 struct Inner {
+    #[cfg(target_os = "linux")]
+    memory: [Arc<std::sync::atomic::AtomicU64>; 2],
     state: Mutex<State>,
     /// The writer waits on it for commands, closing and heartbeats.
     changed: Condvar,
@@ -93,6 +95,10 @@ struct Inner {
 }
 
 struct State {
+    #[cfg(target_os = "linux")]
+    pcm: Option<(crate::pcm::Feedback, Instant)>,
+    #[cfg(target_os = "linux")]
+    broker: Option<crate::pcm_client::Control>,
     status: SessionStatus,
     /// The session's sound: Opened's, until the worker says it went.
     audio: Option<AudioStatus>,
@@ -203,7 +209,13 @@ impl PlaySession {
             return Err(FailureCode::WorkerUnavailable);
         }
         let inner = Arc::new(Inner {
+            #[cfg(target_os = "linux")]
+            memory: [Arc::default(), Arc::default()],
             state: Mutex::new(State {
+                #[cfg(target_os = "linux")]
+                pcm: None,
+                #[cfg(target_os = "linux")]
+                broker: None,
                 status: SessionStatus::Opening,
                 audio: None,
                 frame: None,
@@ -337,9 +349,13 @@ fn supervise(
         Err(code) => return inner.fail(code),
     };
     let mut worker = Running::new(process, &shared, budgets);
+    #[cfg(target_os = "linux")]
+    {
+        worker = worker.with_memory(inner.memory.clone());
+    }
     let (said, heard) = mpsc::channel();
     let (go, opening) = mpsc::channel();
-    if start_reader(stdout, said, Arc::clone(inner)).is_err()
+    if start_reader(stdout, said, Arc::clone(inner), hello.clone(), budgets).is_err()
         || start_writer(Arc::clone(inner), stdin, hello_bytes, open_bytes, opening).is_err()
     {
         worker.kill();
@@ -416,11 +432,22 @@ fn end(inner: &Inner, worker: &mut Running<'_>, event: Result<Said, Wait>) {
     }
 }
 
+fn opening_frame(stdout: &mut Box<dyn Read + Send>) -> Result<Frame, Said> {
+    match wire::read_frame_within(stdout, Direction::WorkerToParent, MAX_OTHER_FRAME_BYTES) {
+        Ok(Some(Frame::Failure(failure))) => Err(refusal(stdout, failure.code)),
+        Ok(Some(frame)) => Ok(frame),
+        Ok(None) => Err(Said::Closed),
+        Err(_) => Err(Said::Broken),
+    }
+}
+
 /// Read Ready, then Opened, then the session's frames.
 fn start_reader(
     mut stdout: Box<dyn Read + Send>,
     said: Sender<Said>,
     inner: Arc<Inner>,
+    _hello: Hello,
+    _budgets: Budgets,
 ) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("kettle-media-play-read".into())
@@ -439,22 +466,51 @@ fn start_reader(
             if said.send(first).is_err() || !ready {
                 return;
             }
-            let opened = match wire::read_frame_within(
-                &mut stdout,
-                Direction::WorkerToParent,
-                MAX_OTHER_FRAME_BYTES,
-            ) {
-                Ok(Some(Frame::Opened(opened))) => opened,
-                Ok(Some(Frame::Failure(failure))) => {
-                    let _ = said.send(refusal(&mut stdout, failure.code));
-                    return;
+            #[cfg(target_os = "linux")]
+            let mut broker = None;
+            #[cfg(target_os = "linux")]
+            let opening = loop {
+                match opening_frame(&mut stdout) {
+                    Ok(Frame::Opened(opened)) => break Ok(opened),
+                    #[cfg(target_os = "linux")]
+                    Ok(Frame::Pcm(crate::pcm::Message::Open(open))) if broker.is_none() => {
+                        let target = Arc::downgrade(&inner);
+                        let feedback = Box::new(move |feedback| {
+                            if let Some(inner) = target.upgrade() {
+                                inner.lock().pcm = Some((feedback, Instant::now()));
+                                inner.changed.notify_all();
+                            }
+                        });
+                        match crate::pcm_client::Broker::start(
+                            Arc::clone(&inner.shared),
+                            _hello.clone(),
+                            _budgets,
+                            open,
+                            [Arc::clone(&inner.memory[1]), Arc::clone(&inner.memory[0])],
+                            feedback,
+                        ) {
+                            Ok(started) => {
+                                inner.lock().broker = Some(started.0.clone());
+                                broker = Some(started);
+                                continue;
+                            }
+                            Err(_) => break Err(Said::Broken),
+                        }
+                    }
+                    Err(error) => break Err(error),
+                    _ => break Err(Said::Broken),
                 }
-                Ok(None) => {
-                    let _ = said.send(Said::Closed);
-                    return;
-                }
-                _ => {
-                    let _ = said.send(Said::Broken);
+            };
+            #[cfg(not(target_os = "linux"))]
+            let opening = match opening_frame(&mut stdout) {
+                Ok(Frame::Opened(opened)) => Ok(opened),
+                Err(error) => Err(error),
+                _ => Err(Said::Broken),
+            };
+            let opened = match opening {
+                Ok(opened) => opened,
+                Err(error) => {
+                    let _ = said.send(error);
                     return;
                 }
             };
@@ -479,7 +535,11 @@ fn start_reader(
                     opened.width,
                     opened.height,
                     &mut rgba,
-                    MAX_OTHER_FRAME_BYTES,
+                    if cfg!(target_os = "linux") {
+                        session_frame_limit()
+                    } else {
+                        MAX_OTHER_FRAME_BYTES
+                    },
                 );
                 let next = match read {
                     Ok(Some(SessionRead::Pixels { seq, pts_ms })) => {
@@ -500,6 +560,16 @@ fn start_reader(
                         continue;
                     }
                     Ok(Some(SessionRead::Frame(frame))) => match *frame {
+                        #[cfg(target_os = "linux")]
+                        Frame::Pcm(message) => {
+                            if broker
+                                .as_ref()
+                                .is_some_and(|broker| broker.0.offer(message))
+                            {
+                                continue;
+                            }
+                            Said::Broken
+                        }
                         Frame::PlayState(now) => {
                             inner.publish(|state| {
                                 if let SessionStatus::Open { state: was, .. } = &mut state.status {
@@ -543,6 +613,29 @@ fn refusal(stdout: &mut dyn Read, code: FailureCode) -> Said {
     }
 }
 
+fn session_frame_limit() -> usize {
+    #[cfg(target_os = "linux")]
+    {
+        crate::pcm_client::FRAME_LIMIT
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        MAX_OTHER_FRAME_BYTES
+    }
+}
+
+fn pcm_waiting(state: &State) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        state.pcm.is_some()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = state;
+        false
+    }
+}
+
 /// Write Hello, PlayOpen once Ready has matched, then the caller's commands
 /// and heartbeats, and Close when the session is closed. The platform first
 /// guards this thread's pipe writes.
@@ -568,10 +661,16 @@ fn start_writer(
                     .unwrap_or_default()
             };
             let mut beat = Instant::now() + HEARTBEAT;
+            #[cfg(target_os = "linux")]
+            let mut pcm_commands = crate::pcm_client::Commands::default();
             loop {
                 let (wishes, closing, kept) = {
                     let mut state = inner.lock();
-                    while state.wishes.is_empty() && !state.closing && Instant::now() < beat {
+                    while state.wishes.is_empty()
+                        && !state.closing
+                        && !pcm_waiting(&state)
+                        && Instant::now() < beat
+                    {
                         let left = beat.saturating_duration_since(Instant::now());
                         state = inner
                             .changed
@@ -581,6 +680,32 @@ fn start_writer(
                     }
                     (std::mem::take(&mut state.wishes), state.closing, state.kept)
                 };
+                #[cfg(target_os = "linux")]
+                {
+                    let (feedback, broker) = {
+                        let mut state = inner.lock();
+                        (state.pcm.take(), state.broker.clone())
+                    };
+                    if let Some((feedback, received)) = feedback {
+                        let frame = Frame::Pcm(crate::pcm_client::aged_feedback(
+                            feedback,
+                            received.elapsed(),
+                        ));
+                        if !wire::encode(&frame, Direction::ParentToWorker)
+                            .is_ok_and(|bytes| send(&bytes).is_ok())
+                        {
+                            return;
+                        }
+                    }
+                    let now = Instant::now();
+                    pcm_commands.forward(
+                        broker.as_ref(),
+                        wishes.play,
+                        wishes.mute,
+                        now >= beat && now.duration_since(kept) < KEPT_FOR,
+                        closing,
+                    );
+                }
                 if closing {
                     let _ = send(&encode(PlayCommand::Close));
                     return;

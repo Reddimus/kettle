@@ -192,6 +192,10 @@
               --add-rpath "${pkgs.lib.makeLibraryPath runtimeLibs}" \
               $out/bin/kettle
 
+            # The PCM broker loads Pulse at runtime; only its helper needs it.
+            patchelf --add-rpath "${pkgs.lib.makeLibraryPath [ pkgs.libpulseaudio ]}" \
+              "$out/bin/kettle-media-worker"
+
             final_rpath="$(patchelf --print-rpath $out/bin/kettle)"
             for required in \
               "${pkgs.stdenv.cc.libc}/lib" \
@@ -268,9 +272,18 @@
               pkgs.diffutils
               pkgs.findutils
               pkgs.gzip
+              pkgs.patchelf
             ];
           } ''
             package="${self.packages.${system}.default}"
+            pulse_lib="${pkgs.lib.getLib pkgs.libpulseaudio}/lib"
+            test -r "$pulse_lib/libpulse.so.0"
+            worker_rpath="$(patchelf --print-rpath "$package/bin/kettle-media-worker")"
+            case ":$worker_rpath:" in
+              *":$pulse_lib:"*) ;;
+              *) echo "worker cannot find its runtime audio library" >&2; exit 1 ;;
+            esac
+
 
             assert_packaged_file() {
               source_file="$1"

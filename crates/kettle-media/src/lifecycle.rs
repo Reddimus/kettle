@@ -7,7 +7,7 @@
 
 use std::io::{Read, Write};
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -430,6 +430,7 @@ pub(crate) fn exit_failure(exit: WorkerExit) -> FailureCode {
 }
 
 pub(crate) struct Running<'a> {
+    memory: Option<[Arc<AtomicU64>; 2]>,
     process: Option<Box<dyn WorkerProcess>>,
     /// The worker's own exit, seen before any kill, and when.
     exited: Option<(WorkerExit, Instant)>,
@@ -449,6 +450,7 @@ impl<'a> Running<'a> {
         budgets: Budgets,
     ) -> Self {
         Self {
+            memory: None,
             process: Some(process),
             exited: None,
             next_sample: Instant::now() + TICK,
@@ -456,6 +458,13 @@ impl<'a> Running<'a> {
             budgets,
             control: None,
         }
+    }
+
+    /// Paired workers share one footprint budget, sampled on each worker's schedule.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn with_memory(mut self, memory: [Arc<AtomicU64>; 2]) -> Self {
+        self.memory = Some(memory);
+        self
     }
 
     fn interruptible(mut self, control: Option<&RenderControl>) -> Self {
@@ -530,8 +539,17 @@ impl<'a> Running<'a> {
             return Ok(());
         };
         match process.footprint() {
-            Ok(bytes) if bytes > self.budgets.footprint_limit => Err(Wait::OverFootprint),
-            Ok(_) => Ok(()),
+            Ok(bytes) => {
+                let peer = self.memory.as_ref().map_or(0, |[own, peer]| {
+                    own.store(bytes, Ordering::Release);
+                    peer.load(Ordering::Acquire)
+                });
+                if bytes.saturating_add(peer) > self.budgets.footprint_limit {
+                    Err(Wait::OverFootprint)
+                } else {
+                    Ok(())
+                }
+            }
             // A worker that exited as it was measured is not unmeasurable.
             Err(_) => {
                 self.look();
@@ -642,6 +660,9 @@ impl Drop for Running<'_> {
     fn drop(&mut self) {
         if self.process.is_some() {
             self.kill();
+        }
+        if let Some([own, _]) = &self.memory {
+            own.store(0, Ordering::Release);
         }
     }
 }
@@ -1539,6 +1560,25 @@ mod tests {
             Some(FailureCode::WorkerUnavailable)
         );
         assert_eq!(fake.spawn_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn paired_workers_share_the_footprint_limit_and_retire_accounting() {
+        let fake = Fake::new(vec![Script::silent()]);
+        let client = client(&fake);
+        let spawned = fake.spawn(std::path::Path::new("/worker")).unwrap();
+        let own = Arc::new(AtomicU64::new(0));
+        let peer = Arc::new(AtomicU64::new(FAST.footprint_limit));
+        let mut worker = Running::new(spawned.process, &client.shared, FAST)
+            .with_memory([Arc::clone(&own), Arc::clone(&peer)]);
+        assert!(matches!(worker.measure(), Err(Wait::OverFootprint)));
+        assert_eq!(own.load(Ordering::Acquire), 1024 * 1024);
+        peer.store(FAST.footprint_limit - 1024 * 1024, Ordering::Release);
+        assert!(worker.measure().is_ok(), "exact aggregate limit is allowed");
+        drop(worker);
+        assert_eq!(own.load(Ordering::Acquire), 0);
+        assert_eq!(fake.kills.load(Ordering::SeqCst), 1);
     }
 
     #[test]

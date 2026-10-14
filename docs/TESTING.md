@@ -1091,6 +1091,48 @@ reading its queued RenderParse failure; a failed heartbeat stops writes but
 still requires the exact terminal reply and exit. Reinstating the unchecked
 heartbeat fails at runtime. Frame order and completion assertions remain.
 
+Linux PCM coverage checks bounded metadata and queues, common stream timestamps,
+credit and generation validation, stale-clock withholding, partial PCM reads,
+and the combined worker footprint. `read_play_control` keeps ordinary commands
+at their one-byte cap while admitting fixed-size feedback.
+
+Build the worker and native tests from one frozen checkout: even a test-source
+change updates their shared build hash. For a direct Linux playback check:
+
+```sh
+cargo build --locked --profile media-worker -p kettle-media-worker
+KETTLE_TEST_PCM_WORKER="$PWD/target/media-worker/kettle-media-worker" \
+KETTLE_TEST_PCM_CLIP="$PWD/crates/kettle-media-native/tests/fixtures/video/ticks.mp4" \
+KETTLE_TEST_PCM_LONG_CLIP="$PWD/crates/kettle-media-native/tests/fixtures/video/long-audio.mp4" \
+cargo test --locked -p kettle-media-worker --test native_audio -- --ignored --test-threads=1
+```
+
+These require trusted `/usr/bin/ffmpeg` and a live PulseAudio-compatible service.
+They cover two simultaneous sessions, pause/resume/mute, commands sent during
+opening, seeks between frame/sample boundaries, audio outlasting video,
+owned worker closure, and
+video continuing when the broker cannot start. The PCM-only boundary fixture
+checks the confined broker. The native FFmpeg suite checks shared timestamps,
+leading audio and codec padding; relocated binaries can name the same fixture
+directory with `KETTLE_TEST_VIDEO_FIXTURES`.
+
+The [native audio workflow](../.github/workflows/linux-audio.yml) builds the
+worker independently, then runs mandatory decoder, playback and broker tests
+through `scripts/check-linux-audio.py`. It rejects skips, retains raw logs and
+results, and closes only an audio service it started. An existing service is
+preserved. The Ubuntu 26.04 ARM check also exercised a Matroska audio tail with
+and without its track-end tag. These checks verify service playback, not
+physical speakers. Nix package-content checks require the helper's Pulse
+runtime library and search path. `check-lane-media-smoke.py --require-audio` checks native
+play/pause and seek through the UI; `--mode overlay` exercises the centered
+viewer with the same assertions. Both retain screenshots and failure logs.
+
+The PCM regressions were red-checked by removing the window, generation,
+clock freshness/progress/ordering, parent timestamp aging, partial-piece,
+combined footprint, command-size, heartbeat, retired-window and opening-command
+fixes. The PCM movie seek regression failed on an overlapping packet before
+replacing floating-point timestamp subtraction with integer output samples. Ordinary commands still fail from their header alone when oversized.
+
 Playback sessions cross the same binary. With `test-faults`, a file whose
 MP4 box is followed by `kettle-media-worker-test-video` and a frame count,
 rate and size plays through a stand-in decoder that fills frame N with N:
