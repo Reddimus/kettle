@@ -543,7 +543,7 @@ the queue has played less, on macOS, its output device's presentation latency (t
 device's latency, safety offset, I/O buffer and output stream latency, at
 most 3 s, asked again each second as the default device may change). Linux
 uses Pulse's hardware presentation time directly, without subtracting latency
-again. Hardware timestamps older than 250 ms are withheld, including time spent
+again. Pulse is asked for 60 ms of total device and stream buffering. Hardware timestamps older than 250 ms are withheld, including time spent
 in the parent's feedback slot; a
 frame the sound has passed by more than a frame is dropped, only for a
 newer frame already waiting behind it, so never the video's last, which the
