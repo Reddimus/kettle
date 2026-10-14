@@ -8,6 +8,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- Move a live tab to another window from the command palette, including on
+  Wayland; keep its running programs, splits and scrollback.
+
 - Play Linux video sound through a PulseAudio-compatible service, with pause,
   per-video mute, synchronized frames, and a visible video-only fallback.
 

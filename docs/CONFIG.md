@@ -388,7 +388,7 @@ table. For example, `show-titlebar` and `show_titlebar` are equivalent.
 | `putty-paste-style-source-clipboard` | bool | `false` | When `putty-paste-style = true`, source right-click paste from the regular system clipboard instead of X11 PRIMARY |
 | `close-button-on-tab` | bool | `true` | Show `✕` on tab segments |
 | `new-tab-after-current-tab` | bool | `false` | Insert vs append behavior when creating a new tab |
-| `detachable-tabs` | bool | `true` | Allow cross-window tab tear-off / re-dock and the `move_tab_to_new_window` action. `false` keeps in-window tab switching and reordering but disables detach |
+| `detachable-tabs` | bool | `true` | Allow cross-window tab tear-off / re-dock and the `move_tab_to_new_window` / `move_tab_to_window` actions. `false` keeps in-window tab switching and reordering but disables detach |
 | `ask-before-closing` | enum | `multiple-terminals` | Close-confirmation policy: `always`, `multiple-terminals`, or `never`. Applies to the close-window, close-tab, and close-pane **actions** (`Ctrl+Shift+W`, `Ctrl+Shift+Q`, the tab-bar `✕`, middle-clicking a tab); panes sitting idle at an integrated-shell prompt do not count as work to lose. The **titlebar `✕` and `Alt+F4` are exempt** and close immediately: those are OS window-destroy requests rather than Kettle commands, and a terminal has no unsaved-document state to veto them with. Set `always` if you want them to ask too. Also on the right-click **Preferences ▸** menu as a radio group |
 | `lua-sandbox` | enum | `safe` | Lua plugin trust level. `restricted` blocks `kettle.send_text` and `kettle.exec_action`. `safe` also removes command and file APIs from the Lua standard library, but a plugin can still run a command by typing it into the pane. `trusted` restores the command and file APIs (`os.execute`, `io.open`, `io.popen`, `loadfile`, `dofile`); the `debug` library and native C-module loading stay unavailable at every level because the VM is always mlua's safe state. Read any plugin before enabling it. See [`docs/examples/init.lua`](examples/init.lua) |
 
@@ -551,7 +551,9 @@ tabs can move live between windows), `close_window`,
 into its own window LIVE — running programs keep running; dragging a tab
 past the tab bar does the same with the mouse, Chromium-style: the live
 window rides the pointer, and dropping it on another
-kettle window's tab bar merges it there), `open_settings`
+kettle window's tab bar merges it there), `move_tab_to_window` (choose another
+window in this process without restarting the tab; also available in the
+command palette, including on Wayland), `open_settings`
 (`settings` — the Ctrl+, overlay), `layout_picker`, `about` (also
 `show_about` — version, update status, GitHub link), `screenshot`
 (`take_screenshot` / `terminalshot`).

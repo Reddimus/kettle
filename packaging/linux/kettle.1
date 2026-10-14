@@ -730,7 +730,11 @@ cannot position windows, the tear happens at release instead. The
 .B move_tab_to_new_window
 action (alias
 .BR detach_tab )
-performs the same live move from the keyboard.
+performs the same live move from the keyboard. The
+.B move_tab_to_window
+action opens a keyboard-accessible chooser of other windows in this process,
+including on Wayland. Both actions are in the command palette and preserve
+the tab's running programs.
 .SS Splits / panes
 .TP
 .B Ctrl+Shift+O

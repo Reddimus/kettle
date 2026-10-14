@@ -31,6 +31,8 @@ pub use agent_plugin::{ClaudeStatus, claude_status};
 mod app;
 pub mod codex_shell;
 mod held_buttons;
+#[cfg(any(target_os = "linux", test))]
+mod wayland;
 // Startup phase stamps, printed with RUST_LOG=kettle::startup=info. Public so
 // the binary can mark the first statement of `main`.
 pub mod startup_trace;

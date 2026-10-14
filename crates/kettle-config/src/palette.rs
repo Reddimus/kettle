@@ -128,6 +128,7 @@ pub fn commands() -> Vec<(Text, Action)> {
         (T::PaletteScrollPageDownHalf, ScrollPageDownHalf),
         (T::PalettePastePrimary, PastePrimary),
         (T::PaletteToggleWindowVisibility, ToggleWindowVisibility),
+        (T::PaletteMoveTabToWindow, MoveTabToWindow),
         (T::PaletteMoveTabToNewWindow, MoveTabToNewWindow),
         (T::PaletteEditPaneGroup, EditPaneGroup),
         (T::PaletteNextTheme, NextTheme),
@@ -384,6 +385,7 @@ mod tests {
             ScrollPageDownHalf,
             PastePrimary,
             ToggleWindowVisibility,
+            MoveTabToWindow,
             MoveTabToNewWindow,
             EditPaneGroup,
             OpenSettings,
@@ -543,6 +545,7 @@ mod tests {
                 | ScrollPageDownHalf
                 | PastePrimary
                 | ToggleWindowVisibility
+                | MoveTabToWindow
                 | MoveTabToNewWindow
                 | EditPaneGroup
                 | OpenSettings

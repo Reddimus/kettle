@@ -13,6 +13,8 @@
 
 # 2026-10-13: the four new viewer messages were reviewed in native Spanish
 # Wayland UI; dialog and Pin names received a second pass through AT-SPI.
+# 2026-10-14: the move-tab chooser and its empty state were reviewed
+# in rendered Spanish UI; native keyboard and pointer selection passed.
 [status]
 inline_card_pending = "accepted"
 inline_card_unavailable = "accepted"
@@ -342,6 +344,8 @@ palette_move_pane_right = "accepted"
 palette_move_pane_up = "accepted"
 palette_move_tab_left = "accepted"
 palette_move_tab_right = "accepted"
+palette_move_tab_to_window = "accepted"
+window_transfer_no_targets = "accepted"
 palette_move_tab_to_new_window = "accepted"
 palette_new_tab = "accepted"
 palette_new_window = "accepted"

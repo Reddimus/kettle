@@ -134,7 +134,8 @@ futures-lite = "2.6"
 zbus = "5.19"
 md-5 = "0.11"
 url = "2.5"
-wayland-client = "0.31"
+wayland-client = { version = "0.31", features = ["system"] }
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 
 # ITaskbarList3 for OSC 9;4 taskbar progress. `Write-Progress` and `winget`
 # drive the taskbar button. The `windows` crate gives safe COM wrappers and is
