@@ -910,6 +910,7 @@ impl VideoPlayer for AvFoundation {
             }
         }
         Ok(Playback {
+            video_end_ms: Some(asset.video_end_ms),
             opened,
             frames: Box::new(Frames {
                 reader,

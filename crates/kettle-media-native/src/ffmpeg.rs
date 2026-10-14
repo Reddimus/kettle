@@ -4,7 +4,7 @@
 //! Kettle computed and the demuxer the content was sniffed as are put; its
 //! input is a fresh descriptor of the held file (Linux reads it through
 //! `/proc/self/fd/0`, macOS through `/dev/fd/0`), only the `file` protocol is
-//! allowed, audio, subtitles and data are dropped, and stderr is discarded.
+//! allowed, subtitles and data are dropped, and stderr is discarded.
 //!
 //! A stills job takes three steps. ffprobe describes the streams, and only
 //! the fields asked for are read from its output, each bounded. ffprobe then
@@ -19,11 +19,14 @@
 //! times. A stream without timestamps is sought by time, each frame then
 //! standing for its instant within one frame's length.
 //!
-//! A playback session takes the same description, then one ffmpeg run from
-//! its start to the end of the video at the rate and size it asked for,
-//! read a frame at a time as the session takes them; a session that stops
-//! taking them blocks it on its pipe. Its frames are timed from the start
-//! at that rate, since rawvideo carries no timestamps.
+//! Playback uses bounded raw-video and, when requested, PCM pipes. A
+//! metadata-first framecrc tee preserves their common timestamps; concurrent
+//! readers prevent per-slave interleaving from blocking large raw packets.
+//! Audio is resampled before fixed 20 ms packets are formed. The decoder
+//! never connects to an audio service.
+
+mod packets;
+mod playback;
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -202,6 +205,38 @@ fn micros(value: &str) -> Option<i64> {
     Some(if negative { -value } else { value })
 }
 
+/// Matroska's DURATION tag is the track's final timestamp, not its span.
+fn tagged_end(value: &str) -> Option<i64> {
+    if value.len() > 24 {
+        return None;
+    }
+    let mut parts = value.split(':');
+    let hours = parts.next()?;
+    let minutes = parts.next()?;
+    let seconds = parts.next()?;
+    if parts.next().is_some()
+        || hours.is_empty()
+        || minutes.len() != 2
+        || !hours
+            .bytes()
+            .chain(minutes.bytes())
+            .all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    let hours: i64 = hours.parse().ok()?;
+    let minutes: i64 = minutes.parse().ok()?;
+    let seconds = micros(seconds)?;
+    if minutes >= 60 || !(0..60_000_000).contains(&seconds) {
+        return None;
+    }
+    let end = hours
+        .checked_mul(3_600_000_000)?
+        .checked_add(minutes * 60_000_000)?
+        .checked_add(seconds)?;
+    (end <= kettle_media::MAX_VIDEO_DURATION_MS as i64 * 1000).then_some(end)
+}
+
 /// Whole microseconds as seconds for an argument: `[-]S.UUUUUU`.
 fn seconds(micros: i64) -> String {
     let sign = if micros < 0 { "-" } else { "" };
@@ -229,6 +264,7 @@ struct Stream {
     time_base: Option<(u64, u64)>,
     start_us: Option<i64>,
     duration_us: Option<i64>,
+    tagged_end_us: Option<i64>,
     /// Degrees counterclockwise, as the display matrix says.
     rotation: Option<i64>,
 }
@@ -300,6 +336,7 @@ fn parse_probe(text: &str) -> Result<Probe, FailureCode> {
             "time_base" => stream.time_base = ratio(value),
             "start_time" => stream.start_us = micros(value),
             "duration" => stream.duration_us = micros(value),
+            "tags.DURATION" => stream.tagged_end_us = tagged_end(value),
             "disposition.attached_pic" => stream.cover = value == "1",
             _ if field.starts_with("side_data_list.side_data.") && field.ends_with(".rotation") => {
                 let degrees = micros(value).map(|micros| micros / 1_000_000);
@@ -374,14 +411,16 @@ impl Probe {
     /// Where the video stream ends, in ms from the file's start, when it
     /// says how long it is: the file's other streams can run on past it.
     fn video_end_ms(&self) -> Option<u64> {
-        let duration = self.stream.duration_us.filter(|duration| *duration >= 0)?;
-        let start = self.stream.start_us.unwrap_or(self.start_us);
-        // A stream may start before the file's start: it then ends sooner.
-        let end = start
-            .saturating_sub(self.start_us)
-            .saturating_add(duration)
-            .max(0);
-        u64::try_from(end / 1000).ok()
+        let end = if let Some(duration) = self.stream.duration_us.filter(|duration| *duration >= 0)
+        {
+            self.stream
+                .start_us
+                .unwrap_or(self.start_us)
+                .saturating_add(duration)
+        } else {
+            self.stream.tagged_end_us?
+        };
+        u64::try_from(end.saturating_sub(self.start_us).max(0) / 1000).ok()
     }
 }
 
@@ -596,6 +635,63 @@ fn play_args(
     .collect()
 }
 
+/// The metadata slave comes first and flushes before either raw pipe.
+fn sounding_args(
+    mut args: Vec<OsString>,
+    pipes: [i32; 2],
+    initial_gap: bool,
+    start_ms: u64,
+    end_ms: u64,
+) -> Vec<OsString> {
+    let seek_index = args
+        .iter()
+        .position(|arg| arg == "-ss")
+        .expect("fixed seek argument");
+    let seek = args[seek_index + 1].to_string_lossy().into_owned();
+    args.splice(
+        0..0,
+        [OsString::from("-copyts"), OsString::from("-start_at_zero")],
+    );
+    let seek_index = args
+        .iter()
+        .position(|arg| arg == "-ss")
+        .expect("fixed seek argument");
+    if seek == "0.000000" || initial_gap {
+        // Seeking to a demuxer's first video keyframe can lose earlier sound.
+        args.drain(seek_index..seek_index + 2);
+    }
+    // Shift PCM in integer output samples. Floating-point seconds can put
+    // adjacent packets one sample apart in the wrong direction.
+    let start_frame = start_ms * 48;
+    let end_frame = end_ms * 48;
+    if seek != "0.000000" {
+        let vf = args
+            .iter()
+            .position(|arg| arg == "-vf")
+            .expect("fixed video filter")
+            + 1;
+        // Both streams lose the same requested origin, never STARTPTS.
+        args[vf] = format!(
+            "trim=start={seek},setpts=PTS-{seek}/TB,{}",
+            args[vf].to_string_lossy()
+        )
+        .into();
+    }
+    let an = args
+        .iter()
+        .position(|arg| arg == "-an")
+        .expect("fixed play arguments");
+    args.splice(an..=an, [OsString::from("-map"), OsString::from("0:a:0")]);
+    args.truncate(args.len() - 3);
+    args.extend([
+        "-c:v".into(), "rawvideo".into(), "-threads:v".into(), "1".into(), "-c:a".into(), "pcm_f32le".into(),
+        "-ar".into(), "48000".into(), "-ac".into(), "2".into(),
+        "-af".into(), format!("aresample=48000,aformat=sample_fmts=flt:channel_layouts=stereo,atrim=start_pts={start_frame}:end_pts={end_frame},asetpts=PTS-{start_frame},asetnsamples=n=960:p=1").into(), "-f".into(), "tee".into(),
+        format!("[f=framecrc:flush_packets=1:max_interleave_delta=1]pipe:1|[select=v:f=rawvideo:flush_packets=1]pipe:{}|[select=a:f=f32le:flush_packets=1]pipe:{}", pipes[0], pipes[1]).into(),
+    ]);
+    args
+}
+
 /// The description ffprobe is asked for.
 fn probe_args(container: VideoContainer) -> Vec<String> {
     [
@@ -609,7 +705,7 @@ fn probe_args(container: VideoContainer) -> Vec<String> {
         "-show_entries",
         "stream=index,codec_type,codec_name,width,height,sample_aspect_ratio,\
          avg_frame_rate,r_frame_rate,time_base,start_time,duration:stream_disposition=attached_pic:\
-         stream_side_data=rotation:format=start_time,duration",
+         stream_side_data=rotation:stream_tags=DURATION:format=start_time,duration",
         "-of",
         "flat",
         INPUT,
@@ -850,8 +946,18 @@ impl VideoPlayer for Ffmpeg {
         deadline: Instant,
     ) -> Result<Playback, FailureCode> {
         let Described {
-            probe, index, info, ..
+            probe,
+            index,
+            info,
+            clock,
+            mut scanned,
         } = self.describe(&input, deadline)?;
+        // Unusual files omit both track-end fields. Reuse the bounded packet
+        // scan and this opening's deadline, rather than treating audio as video.
+        if probe.video_end_ms().is_none() && info.has_audio && scanned.is_none() && clock.is_some()
+        {
+            scanned = self.packets(&input, index, &[], deadline)?;
+        }
         let (width, height) = play_size(
             info.width,
             info.height,
@@ -864,7 +970,16 @@ impl VideoPlayer for Ffmpeg {
             .map_or(request.max_fps_milli, |fps| fps.min(request.max_fps_milli));
         let video_end_ms = probe
             .video_end_ms()
-            .map_or(info.duration_ms, |end| end.min(info.duration_ms));
+            .or_else(|| {
+                let last = *scanned.as_ref()?.starts.last()?;
+                Some(
+                    clock?
+                        .ms(last, info.duration_ms)
+                        .saturating_add(probe.frame_ms()),
+                )
+            })
+            .unwrap_or(info.duration_ms)
+            .min(info.duration_ms);
         let start_ms = request
             .start_ms
             .min(video_end_ms.saturating_sub(probe.frame_ms()));
@@ -882,8 +997,40 @@ impl VideoPlayer for Ffmpeg {
         let left = (info.duration_ms - start_ms).div_ceil(1000);
         let cpu = PLAY_CPU_SECONDS.saturating_add(left.saturating_mul(PLAY_CPU_PER_SECOND));
         let file = reopen(input.file, input.identity)?;
+        let initial_gap = probe
+            .stream
+            .start_us
+            .is_some_and(|video| video > probe.start_us.saturating_add((start_ms * 1000) as i64));
+        if request.audio != kettle_media::AudioRequest::Off && info.has_audio {
+            let pipes = crate::run::triple(
+                &self.ffmpeg,
+                |pipes| sounding_args(args, pipes, initial_gap, start_ms, info.duration_ms),
+                file,
+                cpu,
+            )
+            .map_err(failure)?;
+            let (frames, audio) = playback::split(
+                pipes,
+                width as usize * height as usize * 4,
+                start_ms,
+                info.duration_ms,
+                probe.stream.start_us.is_some_and(|video| {
+                    video > probe.start_us.saturating_add((start_ms * 1000) as i64)
+                }),
+            )?;
+            return Ok(Playback {
+                video_end_ms: Some(video_end_ms),
+                opened: Opened {
+                    audio: AudioStatus::Ready,
+                    ..opened
+                },
+                frames: Box::new(frames),
+                audio: Some(Box::new(audio)),
+            });
+        }
         let streaming = stream(&self.ffmpeg, &args, file, cpu).map_err(failure)?;
         Ok(Playback {
+            video_end_ms: Some(video_end_ms),
             opened,
             frames: Box::new(Frames {
                 streaming,
@@ -895,7 +1042,7 @@ impl VideoPlayer for Ffmpeg {
                 decoder: self.clone(),
                 codec: probe.stream.codec,
             }),
-            // ffmpeg's playback is silent: Opened says so.
+            // No decoded audio was requested, or the file has no track.
             audio: None,
         })
     }
@@ -1180,6 +1327,32 @@ format.duration="10.000000"
     /// A description gives the video stream's codec, size as shown (a
     /// display matrix of 90 degrees counterclockwise turns a landscape
     /// picture upright), rate, clock and audio.
+    #[test]
+    fn matroska_track_end_tags_do_not_shift_a_delayed_video_twice() {
+        let description = ROTATED.replace(
+            "streams.stream.0.duration=\"10.000000\"",
+            "streams.stream.0.duration=\"N/A\"",
+        );
+        let tagged = format!(
+            "{description}\nstreams.stream.0.start_time=\"1.000000\"\nstreams.stream.0.tags.DURATION=\"00:00:04.000000000\"\n"
+        );
+        assert_eq!(parse_probe(&tagged).unwrap().video_end_ms(), Some(4000));
+        for value in [
+            "00:60:00",
+            "00:00:60",
+            "-1:00:00",
+            "999999999999:00:00",
+            "00:00:NaN",
+        ] {
+            let invalid = format!("{description}\nstreams.stream.0.tags.DURATION=\"{value}\"\n");
+            assert_eq!(
+                parse_probe(&invalid).unwrap().video_end_ms(),
+                None,
+                "{value}"
+            );
+        }
+    }
+
     #[test]
     fn a_description_reads_as_shown() {
         let probe = parse_probe(ROTATED).unwrap();

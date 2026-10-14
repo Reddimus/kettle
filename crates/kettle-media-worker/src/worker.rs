@@ -154,6 +154,10 @@ pub(crate) fn serve(
     watchdog.arm(JOB_ARRIVAL_DEADLINE);
     let job = match read_frame(&mut input, Direction::ParentToWorker) {
         Ok(Some(Frame::Job(job))) => job,
+        #[cfg(target_os = "linux")]
+        Ok(Some(Frame::Pcm(kettle_media::pcm::Message::Open(open)))) => {
+            return crate::pcm::serve(open, input, output, watchdog);
+        }
         Ok(Some(Frame::PlayOpen(open))) => {
             return crate::play::serve(&open, input, output, watchdog);
         }

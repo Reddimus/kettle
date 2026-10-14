@@ -30,6 +30,8 @@ mod contain;
 pub mod ffmpeg;
 #[cfg(all(unix, any(test, feature = "fuzzing")))]
 pub mod fuzzing;
+#[cfg(target_os = "linux")]
+pub mod pulse;
 #[cfg(unix)]
 mod reopen;
 #[cfg(unix)]
@@ -105,9 +107,8 @@ mod decoders {
                 })
         }
 
-        /// Apple's decoder alone, the one that plays a session's sound,
-        /// when this build has it: a session confined for sound runs no
-        /// external decoder. `None` without it.
+        /// The native decoder that needs audio-service access. External
+        /// decoders always remain outside that grant.
         pub fn sounding(&self) -> Option<Self> {
             #[cfg(all(target_os = "macos", feature = "avfoundation"))]
             if let Some(native) = self.native {

@@ -5,12 +5,8 @@
 //! plays, pauses and mutes it as the session asks; and keeps the clock the
 //! session's frames follow: where the sound being heard is in the video.
 //! Before the first Play it fills the speaker, so Play starts at once.
-//! Only macOS plays a session's sound; elsewhere a session never has one,
-//! and this is here for the session's own code and its tests.
-#![cfg_attr(
-    not(target_os = "macos"),
-    allow(dead_code, reason = "only macOS plays a session's sound")
-)]
+//! macOS owns its device queue directly; Linux uses this feeder only in
+//! the PCM broker, which never accepts encoded media.
 
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -18,7 +14,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use kettle_media::PlayCommand;
-use kettle_media::audio::{AudioBlock, AudioSource, CHANNELS};
+use kettle_media::audio::{AudioBlock, AudioRead, AudioSource, CHANNELS};
 
 /// Frames in each piece the speaker is given: 20 ms.
 pub(crate) const PIECE_FRAMES: usize = 960;
@@ -116,7 +112,7 @@ impl SoundWish {
     }
 
     /// Whether the sound is to play.
-    #[cfg(test)]
+    #[cfg(any(test, target_os = "linux"))]
     pub(crate) fn playing(&self) -> bool {
         self.get().playing
     }
@@ -128,10 +124,21 @@ struct Shared {
     state: AtomicU8,
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) trait RemoteClock: Send + Sync {
+    fn heard(&self) -> Option<Heard>;
+    fn failed(&self) -> bool;
+    fn done(&self) -> bool;
+    fn close(&self);
+}
+
 /// A session's sound, played on a thread of its own until dropped.
 pub(crate) struct Sound {
     shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
+    cancel_source: Option<Arc<dyn Fn() + Send + Sync>>,
+    #[cfg(target_os = "linux")]
+    remote: Option<Arc<dyn RemoteClock>>,
 }
 
 impl Sound {
@@ -143,6 +150,7 @@ impl Sound {
         start_frame: u64,
         wish: SoundWish,
     ) -> std::io::Result<Self> {
+        let cancel_source = source.cancellation();
         let muted = wish.muted();
         let shared = Arc::new(Shared {
             wish,
@@ -156,7 +164,29 @@ impl Sound {
         Ok(Self {
             shared,
             thread: Some(thread),
+            cancel_source,
+            #[cfg(target_os = "linux")]
+            remote: None,
         })
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn remote(
+        wish: SoundWish,
+        remote: Arc<dyn RemoteClock>,
+        thread: JoinHandle<()>,
+        cancel: Arc<dyn Fn() + Send + Sync>,
+    ) -> Self {
+        Self {
+            shared: Arc::new(Shared {
+                wish,
+                heard: Mutex::new(None),
+                state: AtomicU8::new(RUNNING),
+            }),
+            thread: Some(thread),
+            cancel_source: Some(cancel),
+            remote: Some(remote),
+        }
     }
 
     /// What it follows: for a test, the parent's commands as the reader
@@ -168,6 +198,10 @@ impl Sound {
 
     /// Where the sound being heard is, once the speaker has a clock.
     pub(crate) fn heard(&self) -> Option<Heard> {
+        #[cfg(target_os = "linux")]
+        if let Some(remote) = &self.remote {
+            return remote.heard();
+        }
         *self
             .shared
             .heard
@@ -178,12 +212,20 @@ impl Sound {
     /// The speaker failed, or the feeding thread stopped on its own: there
     /// is no sound from here on.
     pub(crate) fn failed(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        if let Some(remote) = &self.remote {
+            return remote.failed();
+        }
         self.shared.state.load(Ordering::Acquire) == FAILED
             || self.thread.as_ref().is_some_and(JoinHandle::is_finished)
     }
 
     /// Every frame of the sound has been heard.
     pub(crate) fn done(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        if let Some(remote) = &self.remote {
+            return remote.done();
+        }
         self.shared.state.load(Ordering::Acquire) == DONE
     }
 }
@@ -191,6 +233,13 @@ impl Sound {
 impl Drop for Sound {
     fn drop(&mut self) {
         self.shared.wish.close();
+        #[cfg(target_os = "linux")]
+        if let Some(remote) = &self.remote {
+            remote.close();
+        }
+        if let Some(cancel) = &self.cancel_source {
+            cancel();
+        }
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -212,6 +261,8 @@ struct Feeder {
     end_frame: u64,
     scratch: Vec<f32>,
     piece: Vec<f32>,
+    piece_filled: usize,
+    pending_index: Option<usize>,
     applied: Wish,
     /// When the speaker was first started, until it had a clock.
     awaiting_clock: Option<Instant>,
@@ -235,6 +286,8 @@ impl Feeder {
             end_frame: start_frame,
             scratch: vec![0.0; 2048 * CHANNELS],
             piece: vec![0.0; PIECE_FRAMES * CHANNELS],
+            piece_filled: 0,
+            pending_index: None,
             applied: Wish {
                 playing: false,
                 muted,
@@ -266,19 +319,23 @@ impl Feeder {
         if wish.muted != self.applied.muted {
             self.speaker.set_muted(wish.muted);
         }
-        while let Some(index) = self.speaker.take_free() {
-            self.fill_piece()?;
+        if !wish.playing && self.applied.playing {
+            self.speaker.pause()?;
+            self.awaiting_clock = None;
+        }
+        while let Some(index) = self
+            .pending_index
+            .take()
+            .or_else(|| self.speaker.take_free())
+        {
+            if !self.fill_piece()? {
+                self.pending_index = Some(index);
+                break;
+            }
             self.speaker.enqueue(index, &self.piece)?;
         }
-        if wish.playing != self.applied.playing {
-            if wish.playing {
-                self.speaker.start()?;
-            } else {
-                self.speaker.pause()?;
-                // Paused, it waits for no clock: only time spent playing
-                // without one counts toward giving the sound up.
-                self.awaiting_clock = None;
-            }
+        if wish.playing && !self.applied.playing {
+            self.speaker.start()?;
         }
         self.applied = wish;
         let played = self.speaker.played();
@@ -314,12 +371,12 @@ impl Feeder {
 
     /// Fill `piece` with the next `PIECE_FRAMES` frames: the sound where
     /// there is some, silence in its gaps and after its end.
-    fn fill_piece(&mut self) -> Result<(), ()> {
-        let mut filled = 0;
+    fn fill_piece(&mut self) -> Result<bool, ()> {
+        let mut filled = self.piece_filled;
         while filled < PIECE_FRAMES {
             if self.carry.is_empty() && !self.source_ended {
-                match self.source.next_block(&mut self.scratch) {
-                    Ok(Some(AudioBlock { frames, at_frame })) => {
+                match self.source.poll_block(&mut self.scratch) {
+                    Ok(AudioRead::Block(AudioBlock { frames, at_frame })) => {
                         self.carry.clear();
                         self.carry
                             .extend_from_slice(&self.scratch[..frames * CHANNELS]);
@@ -328,7 +385,11 @@ impl Feeder {
                             kettle_media::audio::trim(&mut self.carry, at_frame, self.next_frame);
                         self.end_frame = self.end_frame.max(self.carry_at + frames as u64);
                     }
-                    Ok(None) => self.source_ended = true,
+                    Ok(AudioRead::Pending) => {
+                        self.piece_filled = filled;
+                        return Ok(false);
+                    }
+                    Ok(AudioRead::End) => self.source_ended = true,
                     // A sound that fails to decode leaves silence.
                     Err(_) => self.source_ended = true,
                 }
@@ -357,7 +418,8 @@ impl Feeder {
                 self.next_frame += gap as u64;
             }
         }
-        Ok(())
+        self.piece_filled = 0;
+        Ok(true)
     }
 }
 
@@ -595,6 +657,179 @@ mod tests {
     /// Close, as the reader passes it on, ends the sound however the
     /// session's thread is held: its thread stops and lets its speaker go,
     /// the output disposed, while the Sound itself is still held.
+    #[test]
+    fn pending_pcm_does_not_hold_pause_or_consume_silence() {
+        use kettle_media::audio::AudioRead;
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
+        struct Pending {
+            polls: Arc<AtomicUsize>,
+            available: Arc<AtomicBool>,
+        }
+        impl AudioSource for Pending {
+            fn next_block(
+                &mut self,
+                _: &mut [f32],
+            ) -> Result<Option<AudioBlock>, kettle_media::FailureCode> {
+                panic!("blocking source read used instead of PCM polling")
+            }
+            fn poll_block(
+                &mut self,
+                samples: &mut [f32],
+            ) -> Result<AudioRead, kettle_media::FailureCode> {
+                self.polls.fetch_add(1, Ordering::Release);
+                if self.available.swap(false, Ordering::AcqRel) {
+                    samples[..PIECE_FRAMES * CHANNELS].fill(0.25);
+                    Ok(AudioRead::Block(AudioBlock {
+                        frames: PIECE_FRAMES,
+                        at_frame: 0,
+                    }))
+                } else {
+                    Ok(AudioRead::Pending)
+                }
+            }
+        }
+        let polls = Arc::new(AtomicUsize::new(0));
+        let available = Arc::new(AtomicBool::new(false));
+        let (speaker, told) = stand(1);
+        let sound = Sound::start(
+            speaker,
+            Box::new(Pending {
+                polls: polls.clone(),
+                available: available.clone(),
+            }),
+            0,
+            SoundWish::new(false),
+        )
+        .unwrap();
+        until("nonblocking PCM poll", || polls.load(Ordering::Acquire) > 0);
+        sound.wish().hear(PlayCommand::Play);
+        until("play while PCM pending", || {
+            told.lock().unwrap().started == 1
+        });
+        sound.wish().hear(PlayCommand::Pause);
+        until("pause while PCM pending", || {
+            told.lock().unwrap().paused == 1
+        });
+        assert!(
+            told.lock().unwrap().queued.is_empty(),
+            "missing PCM became silence"
+        );
+        available.store(true, Ordering::Release);
+        sound.wish().hear(PlayCommand::Play);
+        until("real PCM queued", || {
+            told.lock().unwrap().queued.len() == PIECE_FRAMES * CHANNELS
+        });
+        assert!(
+            told.lock()
+                .unwrap()
+                .queued
+                .iter()
+                .all(|sample| *sample == 0.25)
+        );
+        assert!(!sound.failed());
+    }
+
+    #[test]
+    fn a_partial_piece_survives_pending_pcm() {
+        struct Partial(u8);
+        impl AudioSource for Partial {
+            fn next_block(
+                &mut self,
+                _: &mut [f32],
+            ) -> Result<Option<AudioBlock>, kettle_media::FailureCode> {
+                panic!("must poll asynchronous PCM")
+            }
+            fn poll_block(
+                &mut self,
+                samples: &mut [f32],
+            ) -> Result<AudioRead, kettle_media::FailureCode> {
+                self.0 += 1;
+                match self.0 {
+                    1 | 3 => {
+                        samples[..PIECE_FRAMES / 2 * CHANNELS].fill(f32::from(self.0));
+                        Ok(AudioRead::Block(AudioBlock {
+                            frames: PIECE_FRAMES / 2,
+                            at_frame: if self.0 == 1 {
+                                0
+                            } else {
+                                PIECE_FRAMES as u64 / 2
+                            },
+                        }))
+                    }
+                    2 => Ok(AudioRead::Pending),
+                    _ => Ok(AudioRead::End),
+                }
+            }
+        }
+        let (speaker, _) = stand(1);
+        let mut feeder = Feeder::new(speaker, Box::new(Partial(0)), 0, false);
+        assert!(!feeder.fill_piece().unwrap());
+        assert_eq!(feeder.piece_filled, PIECE_FRAMES / 2);
+        assert!(feeder.fill_piece().unwrap());
+        assert!(
+            feeder.piece[..PIECE_FRAMES / 2 * CHANNELS]
+                .iter()
+                .all(|n| *n == 1.0)
+        );
+        assert!(
+            feeder.piece[PIECE_FRAMES / 2 * CHANNELS..]
+                .iter()
+                .all(|n| *n == 3.0)
+        );
+        assert_eq!(feeder.next_frame, PIECE_FRAMES as u64);
+    }
+
+    #[test]
+    fn closing_interrupts_a_source_waiting_for_another_process() {
+        use std::sync::atomic::AtomicBool;
+        struct Waiting {
+            entered: Arc<AtomicBool>,
+            stopped: Arc<(Mutex<bool>, std::sync::Condvar)>,
+        }
+        impl AudioSource for Waiting {
+            fn cancellation(&self) -> Option<Arc<dyn Fn() + Send + Sync>> {
+                let stopped = Arc::clone(&self.stopped);
+                Some(Arc::new(move || {
+                    *stopped.0.lock().unwrap() = true;
+                    stopped.1.notify_all();
+                }))
+            }
+            fn next_block(
+                &mut self,
+                _: &mut [f32],
+            ) -> Result<Option<AudioBlock>, kettle_media::FailureCode> {
+                self.entered.store(true, Ordering::Release);
+                let guard = self.stopped.0.lock().unwrap();
+                let _ = self
+                    .stopped
+                    .1
+                    .wait_timeout_while(guard, Duration::from_secs(1), |done| !*done)
+                    .unwrap();
+                Ok(None)
+            }
+        }
+        let entered = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let (speaker, _) = stand(1);
+        let sound = Sound::start(
+            speaker,
+            Box::new(Waiting {
+                entered: Arc::clone(&entered),
+                stopped,
+            }),
+            0,
+            SoundWish::new(false),
+        )
+        .unwrap();
+        until("source waiting", || entered.load(Ordering::Acquire));
+        let before = Instant::now();
+        drop(sound);
+        assert!(
+            before.elapsed() < Duration::from_millis(250),
+            "closing waited for decoded audio"
+        );
+    }
+
     #[test]
     fn close_ends_the_sound_and_lets_its_speaker_go() {
         let (speaker, told) = stand(3);

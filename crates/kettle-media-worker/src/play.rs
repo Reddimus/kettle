@@ -28,12 +28,14 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use kettle_media::audio::{AudioSource, SAMPLE_RATE};
+#[cfg(target_os = "macos")]
+use kettle_media::audio::AudioSource;
+use kettle_media::audio::SAMPLE_RATE;
 use kettle_media::video::{
     MAX_VIDEO_PREFIX_BYTES, PlayGate, PlayRequest, VideoInput, VideoPlayer, sniff_video_container,
 };
 use kettle_media::wire::{
-    Direction, Frame, HEADER_BYTES, WireError, read_frame_within, write_frame, write_video_frame,
+    Direction, Frame, WireError, read_play_control, write_frame, write_video_frame,
 };
 use kettle_media::{
     AudioRequest, AudioStatus, FailureCode, Opened, PlayCommand, PlayOpen, PlayState, VideoFrameRef,
@@ -65,8 +67,6 @@ const TICK: Duration = Duration::from_millis(250);
 /// The frames a session holds at once: one being decoded, one waiting for
 /// its time, one being written.
 const BUFFERS: usize = 3;
-/// A command is one byte: nothing larger is read from the parent.
-const MAX_COMMAND_FRAME_BYTES: usize = HEADER_BYTES + 1;
 /// Most events waiting for this thread: commands queue behind it, and the
 /// decoder holds at most its buffers.
 const EVENTS: usize = 16;
@@ -79,9 +79,11 @@ const CLOSE_GRACE: Duration = Duration::from_millis(500);
 /// What the reader and the decoder tell this thread. The parent's commands
 /// are not among them: the reader keeps what the parent asked in [`Asked`],
 /// and only wakes this thread.
-enum Event {
+pub(crate) enum Event {
     /// The parent asked something: look at [`Asked`].
     Asked,
+    #[cfg(target_os = "linux")]
+    Pcm(kettle_media::pcm::Message),
     Frame {
         pts_ms: u64,
         rgba: Vec<u8>,
@@ -182,9 +184,8 @@ pub(crate) fn serve(
     let opened_by = Instant::now() + OPEN_DEADLINE;
     watchdog.arm(OPEN_DEADLINE + OPEN_GRACE);
     let configured = kettle_media_native::Decoders::configured();
-    // Only Apple's decoder plays a session's sound: a session asking for
-    // sound is confined for it with that decoder alone, so no external
-    // decoder ever runs with the grant. Without it, none is granted.
+    // Only Apple's decoder receives audio-service access here. Linux's
+    // encoded-media decoder sends PCM to a separately confined broker.
     let sounding = (open.audio != AudioRequest::Off)
         .then(|| configured.sounding())
         .flatten();
@@ -199,12 +200,16 @@ pub(crate) fn serve(
     let asked = Arc::new(Asked::new());
     let gate = Arc::new(PlayGate::default());
     let sound_wish = SoundWish::new(open.audio == AudioRequest::Muted);
+    #[cfg(target_os = "linux")]
+    let pcm = crate::pcm_decode::State::new(sound_wish.clone());
     let (events, received) = mpsc::sync_channel(EVENTS);
     if start_reader(
         input,
         Arc::clone(&asked),
         Arc::clone(&gate),
         sound_wish.clone(),
+        #[cfg(target_os = "linux")]
+        Arc::clone(&pcm),
         events.clone(),
         watchdog.clone(),
     )
@@ -258,9 +263,22 @@ pub(crate) fn serve(
     let mut opened = playback.opened;
     // The player's decoded sound plays through this machine's output, when
     // it has one the worker may use; else Opened says it is unavailable.
+    #[cfg(target_os = "macos")]
     let sound = playback
         .audio
         .and_then(|source| start_sound(source, &opened, sound_wish));
+    #[cfg(target_os = "linux")]
+    let sound = playback.audio.and_then(|source| {
+        crate::pcm_decode::start(
+            source,
+            &opened,
+            sound_wish,
+            pcm,
+            events.clone(),
+            output,
+            opened_by,
+        )
+    });
     if opened.audio == AudioStatus::Ready && sound.is_none() {
         opened.audio = AudioStatus::Unavailable;
     }
@@ -281,6 +299,7 @@ pub(crate) fn serve(
         return reply(output, FailureCode::RenderResource, 0);
     }
     let session = Session {
+        video_end_ms: playback.video_end_ms,
         opened,
         held: &held,
         asked: &asked,
@@ -301,12 +320,6 @@ fn start_sound(source: Box<dyn AudioSource>, opened: &Opened, wish: SoundWish) -
     let output = kettle_media_native::audio_out::Output::open(wish.muted()).ok()?;
     let start_frame = kettle_media::audio::frame_of_ms(opened.start_ms);
     Sound::start(Box::new(OutputSpeaker(output)), source, start_frame, wish).ok()
-}
-
-/// Linux plays no session's sound: its decoder decodes none anyway.
-#[cfg(not(target_os = "macos"))]
-fn start_sound(_source: Box<dyn AudioSource>, _opened: &Opened, _wish: SoundWish) -> Option<Sound> {
-    None
 }
 
 /// This machine's output queue, as the sound's speaker.
@@ -371,6 +384,7 @@ fn start_reader(
     asked: Arc<Asked>,
     gate: Arc<PlayGate>,
     sound: SoundWish,
+    #[cfg(target_os = "linux")] pcm: Arc<crate::pcm_decode::State>,
     events: mpsc::SyncSender<Event>,
     watchdog: Watchdog,
 ) -> std::io::Result<()> {
@@ -378,14 +392,12 @@ fn start_reader(
         .name("kettle-media-commands".into())
         .spawn(move || {
             loop {
-                match read_frame_within(
-                    &mut input,
-                    Direction::ParentToWorker,
-                    MAX_COMMAND_FRAME_BYTES,
-                ) {
+                match read_play_control(&mut input, cfg!(target_os = "linux")) {
                     Ok(Some(Frame::PlayCommand(command))) => {
                         asked.hear(command);
                         sound.hear(command);
+                        #[cfg(target_os = "linux")]
+                        pcm.command(command);
                         match command {
                             PlayCommand::Play => gate.play(),
                             PlayCommand::Pause => gate.pause(),
@@ -396,6 +408,9 @@ fn start_reader(
                             _ => {}
                         }
                     }
+                    #[cfg(target_os = "linux")]
+                    Ok(Some(Frame::Pcm(kettle_media::pcm::Message::Feedback(feedback))))
+                        if pcm.hear(feedback) => {}
                     Ok(None) => {
                         asked.leave();
                         gate.end();
@@ -498,6 +513,7 @@ fn start_decoder(
 
 /// The pacing thread's state.
 struct Session<'a, W: Write> {
+    video_end_ms: Option<u64>,
     opened: Opened,
     held: &'a Held<'a>,
     asked: &'a Asked,
@@ -608,6 +624,13 @@ impl Pacer {
     }
 }
 
+fn audio_tail(video_end: Option<u64>, last: Option<u64>, frame_ms: u64, sound: bool) -> bool {
+    sound
+        && video_end
+            .zip(last)
+            .is_some_and(|(end, last)| last.saturating_add(frame_ms) >= end)
+}
+
 impl<W: Write> Session<'_, W> {
     fn run(mut self, events: &mpsc::Receiver<Event>, opened_by: Instant) -> i32 {
         let frame_ms = (1_000_000 / u64::from(self.opened.fps_milli)).max(1);
@@ -624,6 +647,7 @@ impl<W: Write> Session<'_, W> {
         let mut decoded_all = false;
         let mut seq = 0u64;
         let mut last_frame = Instant::now();
+        let mut last_pts = None;
         loop {
             let asked = self.asked.take();
             if asked.closed {
@@ -727,6 +751,7 @@ impl<W: Write> Session<'_, W> {
                     return EXIT_PROTOCOL;
                 }
                 seq += 1;
+                last_pts = Some(pts_ms);
                 now = Instant::now();
                 last_frame = now;
                 if !playing {
@@ -773,7 +798,12 @@ impl<W: Write> Session<'_, W> {
                 };
             }
             // Past the video's last frame only its sound plays: no stall.
-            if shown_first && playing && !decoded_all && now.duration_since(last_frame) > stall {
+            if shown_first
+                && playing
+                && !decoded_all
+                && !audio_tail(self.video_end_ms, last_pts, frame_ms, self.sound.is_some())
+                && now.duration_since(last_frame) > stall
+            {
                 return self.fail(FailureCode::RenderTimeout);
             }
             let mut wake = now + TICK;
@@ -794,6 +824,17 @@ impl<W: Write> Session<'_, W> {
             }
             match events.recv_timeout(wake.saturating_duration_since(Instant::now())) {
                 Ok(Event::Asked) | Err(RecvTimeoutError::Timeout) => {}
+                #[cfg(target_os = "linux")]
+                Ok(Event::Pcm(message)) => {
+                    if self.sound.is_none() {
+                        continue;
+                    }
+                    if write_frame(self.output, &Frame::Pcm(message), Direction::WorkerToParent)
+                        .is_err()
+                    {
+                        return EXIT_PROTOCOL;
+                    }
+                }
                 Ok(Event::Frame { pts_ms, rgba }) => pending.push_back((pts_ms, rgba)),
                 Ok(Event::End) => decoded_all = true,
                 Ok(Event::Failed(code)) => return self.fail(code),
@@ -1029,6 +1070,7 @@ mod tests {
                     total: 0,
                 };
                 let session = Session {
+                    video_end_ms: None,
                     opened,
                     held,
                     asked,
@@ -1518,6 +1560,8 @@ mod tests {
             Arc::new(Asked::new()),
             Arc::clone(&gate),
             sound.clone(),
+            #[cfg(target_os = "linux")]
+            crate::pcm_decode::State::new(sound.clone()),
             events,
             Watchdog::unwatched(),
         )
@@ -1575,6 +1619,15 @@ mod tests {
             .find("asked.leave();\n                        gate.end();\n                        sound.close();")
             .expect("the parent leaving ends the sound");
         assert!(left < reader.find("std::process::exit(0);").unwrap());
+    }
+
+    #[test]
+    fn only_completed_video_with_live_sound_can_wait_past_a_video_stall() {
+        assert!(audio_tail(Some(4000), Some(3900), 100, true));
+        assert!(!audio_tail(Some(4000), Some(3800), 100, true));
+        assert!(!audio_tail(Some(4000), Some(3900), 100, false));
+        assert!(!audio_tail(None, Some(3900), 100, true));
+        assert!(!audio_tail(Some(4000), None, 100, true));
     }
 
     /// A frame goes out `VIDEO_LEAD` before its sound is heard: held while
@@ -1829,6 +1882,7 @@ mod tests {
         events.send(Event::End).unwrap();
         let (free, _) = mpsc::sync_channel(BUFFERS);
         let session = Session {
+            video_end_ms: None,
             opened,
             held: &Held::Bytes(&[]),
             asked: &asked,
@@ -1994,6 +2048,7 @@ mod faults {
             };
             opened.validate().map_err(|_| FailureCode::BadParams)?;
             Ok(Playback {
+                video_end_ms: None,
                 opened,
                 frames: Box::new(Frames {
                     next,

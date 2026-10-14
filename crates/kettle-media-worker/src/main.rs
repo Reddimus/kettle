@@ -17,6 +17,10 @@
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod early_unix;
+#[cfg(target_os = "linux")]
+mod pcm;
+#[cfg(target_os = "linux")]
+mod pcm_decode;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod play;
 #[cfg(any(target_os = "macos", target_os = "linux"))]

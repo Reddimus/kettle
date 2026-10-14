@@ -571,8 +571,9 @@ fn untrusted_decoders_and_changed_files_are_refused() {
 }
 
 fn fixture(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/video")
+    std::env::var_os("KETTLE_TEST_VIDEO_FIXTURES")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/video"))
         .join(name)
 }
 
@@ -718,6 +719,12 @@ fn play(
 
 /// Every frame of an opened session to its end: each one's time and pixels.
 fn frames_of(playback: &mut Playback) -> Result<Vec<(u64, Vec<u8>)>, FailureCode> {
+    let audio = playback.audio.take().map(|mut source| {
+        std::thread::spawn(move || {
+            let mut samples = vec![0.0; 1920];
+            while source.next_block(&mut samples).unwrap().is_some() {}
+        })
+    });
     let size = playback.opened.width as usize * playback.opened.height as usize * 4;
     let gate = PlayGate::default();
     gate.play();
@@ -726,7 +733,12 @@ fn frames_of(playback: &mut Playback) -> Result<Vec<(u64, Vec<u8>)>, FailureCode
         let mut rgba = vec![0; size];
         match playback.frames.next_frame(&mut rgba, &gate)? {
             Some(pts) => frames.push((pts, rgba)),
-            None => return Ok(frames),
+            None => {
+                if let Some(audio) = audio {
+                    audio.join().unwrap();
+                }
+                return Ok(frames);
+            }
         }
         assert!(frames.len() <= 1000, "a session that never ends");
     }
@@ -954,5 +966,127 @@ fn real_ffmpeg_plays_each_frame_in_order() {
             .map(|&index| u64::from(index) * 100)
             .collect();
         assert_eq!(times, expected, "{name} from {start_ms}");
+    }
+}
+
+/// Audio may precede the first picture. A paused session must still open
+/// without buffering that whole lead or independently shifting either clock.
+#[test]
+fn real_ffmpeg_keeps_audio_before_video_without_opening_deadlock() {
+    let Some(decoder) = installed() else {
+        return;
+    };
+    let directory = kettle_test_support::private_tempdir("kettle-audio-lead-");
+    let path = directory.path().join("lead.mkv");
+    let generated = Command::new(decoder.path())
+        .args([
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-threads",
+            "2",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=8000:duration=4",
+            "-itsoffset",
+            "1",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=64x48:rate=10:duration=2",
+            "-map",
+            "1:v",
+            "-map",
+            "0:a",
+            "-c:v",
+            "ffv1",
+            "-threads:v",
+            "2",
+            "-c:a",
+            "pcm_s16le",
+        ])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let clip = Clip::open(directory, path);
+    for start_ms in [0, 500] {
+        let mut playback = play(&decoder, &clip, (64, 48), start_ms, 10_000).unwrap();
+        assert_eq!(playback.opened.audio, kettle_media::AudioStatus::Ready);
+        let mut audio = playback.audio.take().expect("decoded PCM");
+        let (sent, heard) = std::sync::mpsc::sync_channel(1);
+        let opening = std::thread::spawn(move || {
+            let mut first = vec![0; 64 * 48 * 4];
+            let result = playback.frames.next_frame(&mut first, &PlayGate::default());
+            let _ = sent.send((result, first, playback));
+        });
+        let (result, first, mut playback) = heard
+            .recv_timeout(Duration::from_secs(2))
+            .expect("paused first frame stalled behind leading sound");
+        opening.join().unwrap();
+        assert_eq!(result, Ok(Some(start_ms)));
+        assert!(
+            first
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| *pixel == [0, 0, 0, 255])
+        );
+        let frames = std::thread::spawn(move || frames_of(&mut playback).unwrap());
+        let mut samples = [0.0; 1920];
+        let mut next = start_ms * 48;
+        let mut loudest = 0.0f32;
+        while let Some(block) = audio.next_block(&mut samples).unwrap() {
+            assert_eq!((block.at_frame, block.frames), (next, 960));
+            assert!(samples.iter().all(|v| v.is_finite()));
+            loudest = samples.iter().fold(loudest, |max, v| max.max(v.abs()));
+            next += 960;
+        }
+        assert!(next >= 4 * 48_000);
+        assert!(loudest > 0.05, "PCM lost the tone");
+        let frames = frames.join().unwrap();
+        assert_eq!(
+            frames.first().unwrap().0,
+            1000,
+            "video origin reset independently"
+        );
+        assert_eq!(frames.last().unwrap().0, 2900);
+    }
+}
+
+#[test]
+fn real_ffmpeg_clips_codec_padding_to_the_opened_duration() {
+    let Some(decoder) = installed() else { return };
+    for start in [0, 500, 3500, 9900] {
+        let directory = kettle_test_support::private_tempdir("kettle-audio-padding-");
+        let path = directory.path().join("long-audio.mp4");
+        std::fs::copy(fixture("long-audio.mp4"), &path).unwrap();
+        let clip = Clip::open(directory, path);
+        let mut playback = play(&decoder, &clip, (64, 36), start, 10_000).unwrap();
+        let opened = playback.opened;
+        let mut audio = playback.audio.take().unwrap();
+        let sound = std::thread::spawn(move || {
+            let mut samples = vec![0.0; 1920];
+            let mut end = None;
+            while let Some(block) = audio.next_block(&mut samples).unwrap() {
+                assert_eq!(block.frames, 960);
+                end = Some(block.at_frame + block.frames as u64);
+            }
+            end.unwrap()
+        });
+        let frames = frames_of(&mut playback).unwrap();
+        assert_eq!(frames.last().unwrap().0, 3900);
+        let end = sound.join().unwrap();
+        assert!(end >= opened.info.duration_ms * 48);
+        assert!(
+            end <= opened.info.duration_ms * 48 + 960,
+            "codec padding escaped the duration: {end}"
+        );
     }
 }
