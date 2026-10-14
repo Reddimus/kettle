@@ -493,6 +493,14 @@ it downloaded through the held handle (`mark_downloaded`), checks it is still
 the file Kettle wrote (`path_still_matches`) and starts the viewer, all under
 that lock, and at most two opens are prepared at once.
 
+Linux prefers root-owned `/usr/bin/loupe`, falling back to `/usr/bin/eog`.
+`media::external::loupe` starts Loupe without a filename when necessary,
+resolves its unique session-bus name, and checks its UID, process instance and
+held executable before sending the private PNG URI to that connection's
+`org.freedesktop.Application.Open`. Alias replacement cannot redirect it.
+Startup takes at most five seconds; calls take one second, replies at most
+4 KiB and the URI at most 16 KiB. Failed startup cleans up only its own child.
+
 A third `PastedImages`, of kind `paste_image::VIDEOS` (prefix
 `kettle-video-`, 8 files and 8 GiB, oldest dropped once five minutes old),
 holds the copies of video files a card menu or the lane's `↗` hands to the
@@ -530,7 +538,7 @@ the same way and the source unchanged. The App holds the store in
 the store, which nothing holds while a copy is made or checked, so exit
 waits only on Kettle's own temporary directory; `start` asks the flag last,
 just before the spawn. `watch` waits for what was started (`open` on macOS,
-mpv or Eye of GNOME on Linux) and reports one that exits with an error. Nothing in the GUI parses video: what a video is
+mpv or a newly started image viewer on Linux) and reports one that exits with an error. Nothing in the GUI parses video: what a video is
 comes from the worker, and its bytes are only compared.
 
 Crash cleanup recognizes only

@@ -4524,6 +4524,19 @@ rows dispatch with what the menu captured and take mnemonics and typing, and
 `every_way_to_open_a_card_goes_through_one_door` guard that a right-press on a
 settled card opens it, that a row acts only while the card shows the item at
 the generation the menu named, and that its Open row is `open_card`.
+On Linux, `media::external::loupe` tests use private session buses to check
+receiver identity, exact URI delivery, alias replacement, closed receivers,
+process reuse, oversized replies and stalled calls. Identity-sensitive cases
+run from protected executable copies; Cargo's original artifact is unchanged
+even under a group-writable umask. The portal tests share the private bus fixture.
+Reversals of selection, filename-free launch, unique recipient, held program,
+process instance, reply cap and call timeout each failed their regression test.
+For native acceptance, open a shown image through its menu on GNOME Wayland,
+verify Loupe shows the copied pixels, and close only fixture-owned windows.
+This passed on Ubuntu 26 ARM/GNOME Wayland: keyboard activation opened Loupe,
+the copied gradient was visible, Ctrl+W closed it, terminal content was unchanged,
+and Kettle then exited cleanly with no viewer or reader left running.
+
 `media::external` checks the copy the viewer gets is a 0600 PNG of exactly
 the pixels shown, marked downloaded, that a third open is refused at once
 and writes nothing, that the viewer commands are fixed, that a program is

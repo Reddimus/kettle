@@ -9,6 +9,8 @@
 //! copy of its file ([`video`]), never as its poster. The work runs on a
 //! short thread, never the window thread.
 
+#[cfg(target_os = "linux")]
+mod loupe;
 mod video;
 
 use std::path::Path;
@@ -32,6 +34,7 @@ const PREVIEW_APP: &str = "/System/Applications/Preview.app";
 /// Eye of GNOME, in a fresh instance of its own, so the program Kettle
 /// checked is the one that opens the file, not a running one on the bus.
 const EOG: &str = "/usr/bin/eog";
+const LOUPE: &str = "/usr/bin/loupe";
 
 /// The image viewer this platform permits. Each is found only on its own
 /// platform.
@@ -40,9 +43,12 @@ pub(crate) enum Viewer {
     /// macOS: Preview, under Apple's own signature.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Preview,
-    /// Linux: Eye of GNOME, a root-owned program nobody else can change.
+    /// Linux: Eye of GNOME in its own instance.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     EyeOfGnome,
+    /// Linux: Loupe, reached through its verified unique bus connection.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    Loupe,
 }
 
 impl Viewer {
@@ -60,7 +66,10 @@ impl Viewer {
         }
         #[cfg(target_os = "linux")]
         {
-            trusted_program(Path::new(EOG)).then_some(Self::EyeOfGnome)
+            linux_viewer(
+                trusted_program(Path::new(LOUPE)),
+                trusted_program(Path::new(EOG)),
+            )
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
@@ -72,13 +81,12 @@ impl Viewer {
     pub(crate) fn label(self, tr: &kettle_i18n::Translator) -> &'static str {
         tr.text(match self {
             Self::Preview => kettle_i18n::Text::MenuOpenInPreview,
-            Self::EyeOfGnome => kettle_i18n::Text::MenuOpenInImageViewer,
+            Self::EyeOfGnome | Self::Loupe => kettle_i18n::Text::MenuOpenInImageViewer,
         })
     }
 
     /// Whether the viewer is still the one permitted: Preview signed by
-    /// Apple as itself, or Eye of GNOME owned by root and writable by no one
-    /// else.
+    /// Apple as itself, or a root-owned system viewer on Linux.
     fn verified(self) -> bool {
         match self {
             #[cfg(target_os = "macos")]
@@ -89,27 +97,40 @@ impl Viewer {
             .is_ok(),
             #[cfg(target_os = "linux")]
             Self::EyeOfGnome => trusted_program(Path::new(EOG)),
+            #[cfg(target_os = "linux")]
+            Self::Loupe => trusted_program(Path::new(LOUPE)),
             #[allow(unreachable_patterns)]
             _ => false,
         }
     }
 
-    /// The command that opens `file`, an absolute path, in this viewer: a
-    /// fixed program and arguments, no shell and no search path.
+    /// Fixed launcher; Loupe gets its file only through the checked bus peer.
     fn command(self, file: &Path) -> std::process::Command {
         debug_assert!(file.is_absolute(), "a leading `/` is never an option");
         let (program, args): (&str, &[&str]) = match self {
             Self::Preview => ("/usr/bin/open", &["-a", PREVIEW_APP]),
             Self::EyeOfGnome => (EOG, &["--new-instance"]),
+            Self::Loupe => (LOUPE, &["--gapplication-service"]),
         };
         let mut command = std::process::Command::new(program);
+        command.args(args);
+        if self != Self::Loupe {
+            command.arg(file);
+        }
         command
-            .args(args)
-            .arg(file)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
         command
+    }
+}
+
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+fn linux_viewer(loupe: bool, eog: bool) -> Option<Viewer> {
+    if loupe {
+        Some(Viewer::Loupe)
+    } else {
+        eog.then_some(Viewer::EyeOfGnome)
     }
 }
 
@@ -263,7 +284,9 @@ pub(crate) fn open(
                 // viewer stays up: Eye of GNOME runs until the user closes
                 // it.
                 drop(slot);
-                watch(child, failed);
+                if let Some(child) = child {
+                    watch(child, failed);
+                }
             }
             Err(why) => {
                 drop(slot);
@@ -278,7 +301,7 @@ fn hand_over(
     copies: &Mutex<PastedImages>,
     image: &ImageData,
     viewer: Viewer,
-) -> Result<std::process::Child, OpenFailure> {
+) -> Result<Option<std::process::Child>, OpenFailure> {
     if !viewer.verified() {
         return Err(OpenFailure::Viewer);
     }
@@ -302,17 +325,40 @@ fn hand_over(
     if !copies.path_still_matches(&path) {
         return Err(OpenFailure::Copy);
     }
+    #[cfg(target_os = "linux")]
+    if viewer == Viewer::Loupe {
+        return loupe::open(&path);
+    }
     // Started while the store is held, so the copy cannot be dropped for a
     // newer one before the viewer is on its way to it.
     viewer
         .command(&path)
         .spawn()
+        .map(Some)
         .map_err(|_| OpenFailure::Viewer)
 }
 
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ubuntu_default_viewer_is_preferred_with_an_older_viewer_fallback() {
+        assert_eq!(linux_viewer(true, false), Some(Viewer::Loupe));
+        assert_eq!(linux_viewer(true, true), Some(Viewer::Loupe));
+        assert_eq!(linux_viewer(false, true), Some(Viewer::EyeOfGnome));
+        assert_eq!(linux_viewer(false, false), None);
+    }
+
+    #[test]
+    fn the_loupe_launcher_never_gets_the_file() {
+        let command = Viewer::Loupe.command(Path::new("/private-copy/pixels.png"));
+        assert_eq!(command.get_program(), LOUPE);
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["--gapplication-service"]
+        );
+    }
 
     /// The copy the viewer gets is a 0600 PNG of exactly what Kettle shows,
     /// marked downloaded on macOS, and an open past the slots is refused at
@@ -436,7 +482,9 @@ mod tests {
             .flat_map(|index| [(index % 64 * 4) as u8, (index / 64 * 4) as u8, 160, 255])
             .collect();
         let image = ImageData::new(64, 64, pixels).unwrap();
-        let mut child = hand_over(&copies, &image, Viewer::Preview).expect("handed over");
+        let mut child = hand_over(&copies, &image, Viewer::Preview)
+            .expect("handed over")
+            .expect("launcher");
         assert!(child.wait().expect("open").success());
         // Preview reads the file once it is up.
         std::thread::sleep(std::time::Duration::from_secs(3));

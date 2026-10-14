@@ -74,9 +74,11 @@ Reports that fit any of these are welcome:
   (macOS) or Open in Image Viewer (Linux) handing anything but a fresh PNG
   of the pixels Kettle shows to anything but the one permitted viewer:
   Preview, checked against Apple's signature requirement for
-  `com.apple.Preview`, or `/usr/bin/eog` owned by root and writable only by
-  root, run with fixed arguments, no shell and no search path, never the
-  default association. The copy lives in a private per-process store
+  `com.apple.Preview`, or a root-owned Linux viewer: `/usr/bin/loupe` or
+  `/usr/bin/eog`, with fixed arguments, no shell or search path. Loupe receives
+  the URI only through its unique bus connection after its UID, process
+  instance and held executable are verified; its launcher gets no filename.
+  The default association is never used. The copy lives in a private per-process store
   (owner-only directory and files, 32 copies and 128 MiB counting any it
   could not delete, oldest dropped first once a minute old, closed and
   deleted on exit and by the crash sweep), is marked downloaded on
