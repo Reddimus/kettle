@@ -2760,6 +2760,23 @@ removing the theme-color update to a live claim, and omitting the client/frame
 inset from the drag anchor. Each failed its regression test at runtime. These
 pure tests do not replace the native dispatch check below.
 
+Run `scripts/check-tab-window-transfer.py --kettle <binary> --worker <worker>
+--out <new-directory>` under an isolated Linux X server; add `--language es`
+for the Spanish chooser. It uses native keyboard and pointer input to cover an
+empty destination list, lone-tab rejoin, a source with remaining tabs, and a
+destination closed while its chooser is open. Original pane/child IDs and
+scrollback must survive; automatic window accents must differ. The matching
+Ubuntu 26 ARM Xvfb fixture passed all five cases. This does not establish a
+Wayland drag gesture. Portable tests cover action parsing and shared menu
+dispatch; the pre-change native fixture rejects the unknown action.
+
+On native GNOME Wayland, also check the destination's `window_focused` state
+and type into the moved pane after keyboard and pointer selection. Repeat with
+a lone source, a minimized destination and a destination closed during selection.
+Compare pane/child IDs and verify Escape leaves terminal content unchanged.
+Check that the Wayland reader sleeps while idle and exits with the app. An Xvfb
+pass does not verify compositor activation or native drag gestures.
+
 For native macOS tear-off acceptance, use an isolated config with
 `detachable-tabs = true`, `accent-color = auto`, plain fixture shells, and
 `tab-bar = always`. Add a tab, record both pane and child IDs, tear it off,

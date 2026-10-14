@@ -2557,6 +2557,8 @@ fn ctl_page_values_with_page(
 #[derive(Debug, Clone)]
 pub enum UserEvent {
     Wakeup,
+    #[cfg(target_os = "linux")]
+    Wayland,
     /// The coalescing process-tree worker published a new remote/cwd snapshot.
     /// Kept distinct from PTY output wakeups so an idle window consumes the
     /// result even when no output generation advanced.
@@ -7139,6 +7141,10 @@ enum ContextMenuClick {
     /// Dispatch sets `App::config_path` via the profile-path
     /// resolution helper and calls `reload_config`.
     SetProfile(String),
+    MoveTabToWindow {
+        window: u64,
+        panes: Arc<[u64]>,
+    },
     /// Drill into a `Submenu` row by index. The click handler pushes
     /// the current items onto `drill_stack` + replaces them
     /// with the submenu's items.
@@ -7214,6 +7220,11 @@ enum ContextMenuItem {
         // parent items onto `drill_stack` and replaces them with
         // these.
         items: Vec<ContextMenuItem>,
+    },
+    WindowChoice {
+        label: String,
+        window: u64,
+        panes: Arc<[u64]>,
     },
     /// A profile-choice leaf row used inside a
     /// `Submenu { label: "Profile", … }`. Clicking dispatches
@@ -7825,7 +7836,8 @@ fn context_menu_item_columns(item: &ContextMenuItem, hint: &str) -> usize {
         ContextMenuItem::LuaItem { label, .. } => (label, "", false),
         ContextMenuItem::ConfigItem { label, .. } => (label, "", false),
         ContextMenuItem::Submenu { label, .. } => (label, " ▸", false),
-        ContextMenuItem::ProfileChoice { label, .. } => (label, "", false),
+        ContextMenuItem::ProfileChoice { label, .. }
+        | ContextMenuItem::WindowChoice { label, .. } => (label, "", false),
         ContextMenuItem::NewTabShell { label, .. } => (label, "", true),
         ContextMenuItem::UrlItem { label, .. } => (label, "", false),
         ContextMenuItem::Media { label, .. } => (label, "", false),
@@ -7860,7 +7872,8 @@ fn assign_mnemonics(items: &[ContextMenuItem], reserved: &[char]) -> Vec<Option<
             ContextMenuItem::LuaItem { label, .. } => label.as_str(),
             ContextMenuItem::ConfigItem { label, .. } => label.as_str(),
             ContextMenuItem::Submenu { label, .. } => label.as_str(),
-            ContextMenuItem::ProfileChoice { label, .. } => label.as_str(),
+            ContextMenuItem::ProfileChoice { label, .. }
+            | ContextMenuItem::WindowChoice { label, .. } => label.as_str(),
             ContextMenuItem::NewTabShell { label, .. } => label.as_str(),
             ContextMenuItem::UrlItem { label, .. } => *label,
             ContextMenuItem::Media { label, .. } => *label,
@@ -7932,6 +7945,7 @@ fn typeahead_match(items: &[ContextMenuItem], buf: &str) -> Option<usize> {
         ContextMenuItem::LuaItem { label, .. }
         | ContextMenuItem::ConfigItem { label, .. }
         | ContextMenuItem::Submenu { label, .. }
+        | ContextMenuItem::WindowChoice { label, .. }
         | ContextMenuItem::ProfileChoice { label, .. }
         | ContextMenuItem::NewTabShell { label, .. } => {
             label.to_ascii_lowercase().starts_with(&needle)
@@ -8601,6 +8615,7 @@ fn item_is_dispatchable(item: &ContextMenuItem) -> bool {
             // Profile choice leaves are the *contents* of a drilled-in
             // Profile ▸ submenu. Without them, keyboard nav inside that
             // submenu could not land on any row or pick a profile.
+            | ContextMenuItem::WindowChoice { .. }
             | ContextMenuItem::ProfileChoice { .. }
             // New-tab ▾ shell choices are always clickable + keyboard-
             // navigable.
@@ -8637,6 +8652,12 @@ fn item_to_click(item: &ContextMenuItem, idx: usize) -> Option<ContextMenuClick>
             Some(ContextMenuClick::ConfigCommand(command.clone()))
         }
         ContextMenuItem::Submenu { .. } => Some(ContextMenuClick::DrillIntoSubmenu(idx)),
+        ContextMenuItem::WindowChoice { window, panes, .. } => {
+            Some(ContextMenuClick::MoveTabToWindow {
+                window: *window,
+                panes: Arc::clone(panes),
+            })
+        }
         ContextMenuItem::ProfileChoice { profile, .. } => {
             Some(ContextMenuClick::SetProfile(profile.clone()))
         }
@@ -9218,6 +9239,8 @@ fn ctl_input_error(result: PaneInputResult) -> Option<(&'static str, &'static st
 use crate::window_accent::pick_accent_slot;
 
 pub struct App {
+    #[cfg(target_os = "linux")]
+    wayland: Option<crate::wayland::Bridge>,
     cfg: Config,
     /// The file this launch's session was read from, if any.
     ///
@@ -10328,6 +10351,8 @@ impl App {
         let plan = startup_plan(&startup, &initial_cfg);
         let ctl_policy = ctl_overrides(&startup).resolve(initial_cfg.ctl_policy());
         let mut app = App {
+            #[cfg(target_os = "linux")]
+            wayland: None,
             restore_source: None,
             cfg: initial_cfg,
             // Assume writable; `resumed` clears it when a launch override
@@ -21001,6 +21026,7 @@ impl App {
                 | ContextMenuItem::LuaItem { .. }
                 | ContextMenuItem::ConfigItem { .. }
                 | ContextMenuItem::Submenu { .. }
+                | ContextMenuItem::WindowChoice { .. }
                 | ContextMenuItem::ProfileChoice { .. }
                 | ContextMenuItem::NewTabShell { .. }
                 | ContextMenuItem::UrlItem { .. }
@@ -21639,6 +21665,10 @@ impl App {
                     Self::dismiss_media_paste_receipt_after_input(ws, pane_id, result);
                 }
             }
+            ContextMenuClick::MoveTabToWindow { window, panes } => {
+                ws.context_menu = None;
+                self.move_tab_to_window(ws, window, &panes);
+            }
             ContextMenuClick::SetProfile(name) => {
                 ws.context_menu = None;
                 if let Some(p) = kettle_config::Config::path_for_profile(&name) {
@@ -21837,7 +21867,8 @@ impl App {
                 // ProfileChoice rows only live inside a Submenu, so they
                 // reach menu.items (and this arm) after a drill-in swaps the
                 // submenu's items in.
-                ContextMenuItem::ProfileChoice { label, .. } => ContextMenuRow {
+                ContextMenuItem::ProfileChoice { label, .. }
+                | ContextMenuItem::WindowChoice { label, .. } => ContextMenuRow {
                     label: label.clone(),
                     separator: false,
                     enabled: true,
@@ -23683,6 +23714,7 @@ impl App {
             }
             // Terminator parity (`detachable_tabs`): move the active tab into a
             // new window.
+            Action::MoveTabToWindow => self.open_tab_window_chooser(ws),
             Action::MoveTabToNewWindow => {
                 // Move the tab LIVE, in process. Its panes (PTYs, scrollback,
                 // running programs) transfer untouched to a brand-new window
@@ -27190,7 +27222,8 @@ impl App {
                         ContextMenuItem::LuaItem { label, .. } => label.as_str(),
                         ContextMenuItem::ConfigItem { label, .. } => label.as_str(),
                         ContextMenuItem::Submenu { label, .. } => label.as_str(),
-                        ContextMenuItem::ProfileChoice { label, .. } => label.as_str(),
+                        ContextMenuItem::ProfileChoice { label, .. }
+                        | ContextMenuItem::WindowChoice { label, .. } => label.as_str(),
                         ContextMenuItem::NewTabShell { label, .. } => label.as_str(),
                         ContextMenuItem::UrlItem { label, .. } => *label,
                         ContextMenuItem::Media { label, .. } => *label,
@@ -33780,6 +33813,19 @@ impl ApplicationHandler<UserEvent> for App {
         self.sync_output_wake_gate(&ws);
         self.finish_window_dispatch(event_loop, seq, ws);
         self.drain_activation_requests(event_loop);
+        #[cfg(target_os = "linux")]
+        {
+            if self.wayland.is_none() {
+                let proxy = self.proxy.clone();
+                self.wayland = crate::wayland::Bridge::new(
+                    event_loop.owned_display_handle(),
+                    Arc::new(move || {
+                        let _ = proxy.send_event(UserEvent::Wayland);
+                    }),
+                );
+            }
+            self.poll_wayland();
+        }
         runtime_tracker.set_window_count(self.windows.len());
     }
 
@@ -33787,6 +33833,8 @@ impl ApplicationHandler<UserEvent> for App {
         let runtime_tracker = self.runtime_tracker.clone();
         let _phase = runtime_tracker.enter("user_event");
         match ev {
+            #[cfg(target_os = "linux")]
+            UserEvent::Wayland => self.poll_wayland(),
             UserEvent::Activation => self.drain_activation_requests(el),
             // A watcher event starts a short non-blocking settle window. The
             // pending latch stays closed until about_to_wait clears it just
@@ -33968,6 +34016,8 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        #[cfg(target_os = "linux")]
+        self.poll_wayland();
         let phase_name = if matches!(&event, WindowEvent::RedrawRequested) {
             "redraw"
         } else {
@@ -33994,6 +34044,8 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(target_os = "linux")]
+        self.poll_wayland();
         let runtime_tracker = self.runtime_tracker.clone();
         let _phase = runtime_tracker.enter("about_to_wait");
         // Opt-in cursor_exit_v1: a key that could have ended the layer blink
@@ -34077,6 +34129,15 @@ impl ApplicationHandler<UserEvent> for App {
         }
         if let Some(ms) = torn_tick_wait {
             let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+            earliest_deadline =
+                Some(earliest_deadline.map_or(deadline, |current| current.min(deadline)));
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(deadline) = self
+            .wayland
+            .as_ref()
+            .and_then(crate::wayland::Bridge::deadline)
+        {
             earliest_deadline =
                 Some(earliest_deadline.map_or(deadline, |current| current.min(deadline)));
         }
@@ -36465,6 +36526,130 @@ impl App {
         }
     }
 
+    fn open_tab_window_chooser(&mut self, ws: &mut WindowState) {
+        if !self.cfg.detachable_tabs {
+            return;
+        }
+        let panes: Arc<[u64]> = ws.mux.tab_anchor_panes(ws.mux.active).into();
+        if panes.is_empty() {
+            return;
+        }
+        let mut destinations: Vec<_> = self
+            .windows
+            .iter()
+            .filter(|(seq, window)| {
+                **seq != ws.seq && window.window.is_some() && !self.window_close_pending(**seq)
+            })
+            .map(|(seq, window)| (*seq, window.last_title.clone()))
+            .collect();
+        destinations.sort_unstable_by_key(|(seq, _)| *seq);
+        let mut items = vec![ContextMenuItem::Info {
+            label: self
+                .ui_text
+                .text(kettle_i18n::Text::PaletteMoveTabToWindow)
+                .to_owned(),
+        }];
+        for (window, title) in destinations {
+            let title: String = sanitize_title(&title).chars().take(200).collect();
+            items.push(ContextMenuItem::WindowChoice {
+                label: format!("{window}: {title}"),
+                window,
+                panes: Arc::clone(&panes),
+            });
+        }
+        if items.len() == 1 {
+            items.push(ContextMenuItem::Info {
+                label: self
+                    .ui_text
+                    .text(kettle_i18n::Text::WindowTransferNoTargets)
+                    .to_owned(),
+            });
+        }
+        self.close_all_modals(ws);
+        self.show_context_menu(ws, items, 0.0, 0.0);
+        if let Some((_, panel)) = self.context_menu_geometry(ws) {
+            let surface = ws
+                .renderer
+                .as_ref()
+                .map(|renderer| {
+                    let size = renderer.surface_size();
+                    (size.0 as f32, size.1 as f32)
+                })
+                .unwrap_or((800.0, 600.0));
+            if let Some(menu) = ws.context_menu.as_mut() {
+                menu.anchor = clamp_context_menu_anchor(
+                    ((surface.0 - panel.0) * 0.5, (surface.1 - panel.1) * 0.5),
+                    panel,
+                    surface,
+                );
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn poll_wayland(&mut self) {
+        if let Some(bridge) = self.wayland.as_mut() {
+            let live: std::collections::BTreeMap<_, _> = self
+                .windows
+                .iter()
+                .filter(|(seq, _)| {
+                    !self.quit_requested && !self.pending_window_closes.contains(seq)
+                })
+                .filter_map(|(&seq, window)| Some((seq, window.window.clone()?)))
+                .collect();
+            bridge.poll(&live);
+        }
+    }
+
+    fn move_tab_to_window(&mut self, source: &mut WindowState, window: u64, panes: &[u64]) {
+        if !self.cfg.detachable_tabs
+            || self.quit_requested
+            || source.seq == window
+            || self.window_close_pending(source.seq)
+            || self.window_close_pending(window)
+        {
+            return;
+        }
+        let Some(index) = source.mux.tab_index_of_any_pane(panes) else {
+            return;
+        };
+        let Some(mut target) = self.windows.remove(&window) else {
+            return;
+        };
+        if target.window.is_none() {
+            self.windows.insert(window, target);
+            return;
+        }
+        self.release_held_buttons_in_tab(source, index);
+        let Some(dt) = source.mux.detach_tab(index) else {
+            self.windows.insert(window, target);
+            return;
+        };
+        self.release_focus_report_to(source, &dt);
+        let paste = source.take_moved_paste_state(&dt.tab, std::time::Instant::now());
+        let insertion = target.mux.tabs.len();
+        self.dock_tab_into(&mut target, dt, paste, insertion, source.seq);
+        #[cfg(target_os = "linux")]
+        if let (Some(bridge), Some(origin), Some(destination)) = (
+            self.wayland.as_mut(),
+            source.window.clone(),
+            target.window.clone(),
+        ) {
+            bridge.activate(source.seq, origin, target.seq, destination);
+        }
+        self.sync_pane_focus_reports(&mut target);
+        self.windows.insert(window, target);
+        if source.mux.tabs.is_empty() {
+            self.save_session(source);
+            self.request_window_close(source.seq);
+        } else {
+            self.resize_all(source);
+            if let Some(window) = &source.window {
+                window.request_redraw();
+            }
+        }
+    }
+
     /// Receive a docked tab: attach at the insertion
     /// slot (attach_tab makes it active + seen), clear the preview, resize,
     /// take focus, notify agents.
@@ -36481,6 +36666,8 @@ impl App {
         target.dock_preview = None;
         self.resize_all(target);
         if let Some(w) = &target.window {
+            w.set_visible(true);
+            w.set_minimized(false);
             w.focus_window();
             w.request_redraw();
         }
@@ -37435,6 +37622,8 @@ impl App {
     fn user_event_inner(&mut self, ws: &mut WindowState, _el: &ActiveEventLoop, ev: UserEvent) {
         ws.reuse_pane_snapshots_once = false;
         match ev {
+            #[cfg(target_os = "linux")]
+            UserEvent::Wayland => {}
             // Consumed by the outer window-less dispatch before a WindowState
             // is checked out.
             UserEvent::Activation
@@ -53930,6 +54119,27 @@ mod tests {
         assert_eq!(tear_lift_ratio(400.0, -18.0, top, 36.0), 0.5);
         // A zero threshold can never tear, so it never lifts either.
         assert_eq!(tear_lift_ratio(400.0, 500.0, top, 0.0), 0.0);
+    }
+
+    #[test]
+    fn window_choice_keeps_the_original_tab_and_is_keyboard_reachable() {
+        let panes: Arc<[u64]> = vec![41, 42].into();
+        let row = super::ContextMenuItem::WindowChoice {
+            label: "2: project".into(),
+            window: 2,
+            panes: Arc::clone(&panes),
+        };
+        assert!(super::item_is_dispatchable(&row));
+        let Some(super::ContextMenuClick::MoveTabToWindow {
+            window,
+            panes: captured,
+        }) = super::item_to_click(&row, 0)
+        else {
+            panic!("window choices need the same mouse and keyboard dispatch");
+        };
+        assert_eq!(window, 2);
+        assert_eq!(&*captured, &[41, 42]);
+        assert!(Arc::ptr_eq(&panes, &captured));
     }
 
     /// A bottom bar sits above the search bar and a bottom status bar; the

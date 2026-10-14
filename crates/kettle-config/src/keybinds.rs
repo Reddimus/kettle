@@ -613,13 +613,11 @@ pub enum Action {
     /// via the remote-control IPC; this is the in-process keybind
     /// equivalent for users who don't want to set up a global hotkey.
     ToggleWindowVisibility,
-    /// Terminator parity, detachable-tabs: move the focused tab
-    /// to a new kettle window. This is a LIVE in-process move. The tab's
-    /// panes (PTYs, scrollback, running programs) transfer untouched to the
-    /// new window; nothing respawns. Keyboard-driven equivalent of the drag
-    /// tear-off, and the only route on Wayland (no global cursor tracking).
-    /// No-op on a 1-tab window.
+    /// Move the focused tab to a new window without respawning its panes.
+    /// No-op on a single-tab window.
     MoveTabToNewWindow,
+    /// Choose an existing window for the active live tab.
+    MoveTabToWindow,
     /// Terminator parity (titlebar): open the edit overlay
     /// for the focused pane's broadcast group name. Same shape as
     /// EditPaneTitle but writes to pane.group_name. Enter empty
@@ -916,6 +914,7 @@ pub fn action_names() -> Vec<&'static str> {
         "hide_window",
         "toggle_window",
         "toggle_window_visibility",
+        "move_tab_to_window",
         "move_tab_to_new_window",
         "detach_tab",
         "edit_pane_group",
@@ -1247,6 +1246,7 @@ impl Action {
             | "toggle_window"
             | "toggle-window"
             | "toggle_window_visibility" => ToggleWindowVisibility,
+            "move_tab_to_window" | "move-tab-to-window" => MoveTabToWindow,
             "move_tab_to_new_window" | "move-tab-to-new-window" | "detach_tab" | "detach-tab" => {
                 MoveTabToNewWindow
             }
@@ -2453,6 +2453,14 @@ mod tests {
             hint_label(&m, &Action::NewTabShell(0)).as_deref(),
             Some("Ctrl+F9")
         );
+    }
+
+    #[test]
+    fn moving_a_tab_to_an_existing_window_is_discoverable() {
+        let action = Action::from_name("move_tab_to_window");
+        assert!(action.is_some(), "existing windows need a transfer action");
+        assert_eq!(Action::from_name("move-tab-to-window"), action);
+        assert!(action_names().contains(&"move_tab_to_window"));
     }
 
     #[test]

@@ -3255,7 +3255,21 @@ drag walkthrough in addition to portable geometry and ownership tests:
   winit 0.30; tracked as a follow-up.
 
 The keyboard `move_tab_to_new_window` action (alias `detach_tab`)
-performs the same live in-process move. Kettle no longer sends cross-process
+performs the same live in-process move. `move_tab_to_window` opens the shared
+keyboard-accessible menu with live same-process destinations. Rows share a
+snapshot of the source tab's pane IDs; selection revalidates both windows and
+resolves those IDs before using the existing docking path. Closing a destination
+leaves the source intact. An emptied source closes normally.
+
+On Wayland, `wayland` shares Winit's display but owns its protocol queue.
+Its reader wakes the event loop after socket reads, including Winit-only reads;
+it sleeps when idle. Recent native presses identify the source window and seat
+for `xdg_activation_v1`. Requests retain both windows until completion, expire
+after two seconds, and revalidate the destination before activation. Transfer
+reveals the destination; only native focus events update focus while the source
+remains open. Live-window checks take O(n log n) time and O(n) space.
+
+Kettle no longer sends cross-process
 handoffs (Unix SCM_RIGHTS socketpair + the JSON-file fallback), which
 respawned shells rather than moving live PTYs. The deprecated `--tab-handoff`
 and `--tab-handoff-fd` flags remain only to receive a handoff from an older

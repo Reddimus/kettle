@@ -1937,3 +1937,9 @@ context = "Centered viewer keyboard hint. Esc closes; P pins beside the terminal
 [messages.media_viewer_a11y]
 context = "Centered viewer accessible name. index/count locate the shelf item; title/detail are display text."
 args = [{ name = "index", type = "u64" }, { name = "count", type = "u64" }, { name = "title", type = "str" }, { name = "detail", type = "str" }]
+
+[messages.palette_move_tab_to_window]
+context = "Command palette and destination chooser for moving the active tab into another existing window."
+
+[messages.window_transfer_no_targets]
+context = "Empty destination chooser when there are no other windows in this Kettle process."
