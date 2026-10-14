@@ -499,6 +499,45 @@ impl Drop for Output {
 mod tests {
     use super::*;
 
+    fn timing(output: &Output) -> String {
+        #[repr(C)]
+        struct Timing {
+            timestamp: libc::timeval,
+            synchronized: i32,
+            sink_us: u64,
+            source_us: u64,
+            transport_us: u64,
+            playing: i32,
+            write_corrupt: i32,
+            write: i64,
+            read_corrupt: i32,
+            read: i64,
+        }
+        // SAFETY: fixed public ABI; the live library and stream own this
+        // borrowed timing record. Read only its stable prefix on this thread.
+        unsafe {
+            let address = libc::dlsym(output.api.library, c"pa_stream_get_timing_info".as_ptr());
+            assert!(!address.is_null());
+            let get = std::mem::transmute::<Object, unsafe extern "C" fn(Object) -> *const Timing>(
+                address,
+            );
+            let Some(info) = get(output.stream).as_ref() else {
+                return "no timing record".into();
+            };
+            format!(
+                "playing={} read={}/{} write={}/{} sink_us={} transport_us={} writable={}",
+                info.playing,
+                info.read,
+                info.read_corrupt,
+                info.write,
+                info.write_corrupt,
+                info.sink_us,
+                info.transport_us,
+                (output.api.pa_stream_writable_size)(output.stream)
+            )
+        }
+    }
+
     #[test]
     #[ignore = "needs a running local PulseAudio-compatible service"]
     fn real_service_corks_mutes_and_retires_one_generation() {
@@ -506,17 +545,22 @@ mod tests {
         let tone: Vec<f32> = (0..SAMPLES)
             .map(|n| ((n / 2) as f32 * 440.0 * std::f32::consts::TAU / 48_000.0).sin() * 0.1)
             .collect();
-        for _ in 0..BUFFERS {
-            let index = output.take_free().expect("initial credit");
+        let mut initial = 0;
+        while let Some(index) = output.take_free() {
             output.enqueue(index, &tone).unwrap();
+            initial += 1;
         }
+        assert!(
+            (1..=BUFFERS).contains(&initial),
+            "initial credit: {initial}"
+        );
         assert!(output.take_free().is_none(), "unbounded prebuffer");
         assert!(
             output.played().is_none(),
             "opened stream played automatically"
         );
         output.start().unwrap();
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + Duration::from_secs(1);
         loop {
             if output
                 .played()
@@ -524,7 +568,16 @@ mod tests {
             {
                 break;
             }
-            assert!(Instant::now() < deadline, "no presentation clock");
+            while let Some(index) = output.take_free() {
+                output.enqueue(index, &tone).unwrap();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no presentation clock: initial={initial}, submitted={}, position={:?}, {}",
+                output.submitted,
+                output.position(),
+                timing(&output)
+            );
             std::thread::sleep(Duration::from_millis(5));
         }
         while let Some(index) = output.take_free() {

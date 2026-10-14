@@ -25,6 +25,7 @@ def main():
     parser.add_argument('--worker', required=True, type=Path)
     parser.add_argument('--worker-tests-json', required=True, type=Path)
     parser.add_argument('--decoder-tests-json', required=True, type=Path)
+    parser.add_argument('--output-tests-json', required=True, type=Path)
     parser.add_argument('--out-dir', required=True, type=Path)
     args = parser.parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
@@ -79,6 +80,8 @@ def main():
             ('playback', executable(args.worker_tests_json, 'native_audio'), ['--ignored'], 4),
             ('broker', executable(args.worker_tests_json, 'process_boundary'),
              ['--ignored', '--exact', 'linux_pcm_only_broker_plays_pauses_and_closes'], 1),
+            ('output', executable(args.output_tests_json, 'kettle_media_native'),
+             ['--ignored', '--exact', 'pulse::tests::real_service_corks_mutes_and_retires_one_generation'], 1),
         ]
         for name, binary, options, count in stages:
             if service is not None and service.poll() is not None:
