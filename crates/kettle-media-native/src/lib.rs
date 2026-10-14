@@ -30,7 +30,7 @@ mod contain;
 pub mod ffmpeg;
 #[cfg(all(unix, any(test, feature = "fuzzing")))]
 pub mod fuzzing;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 pub mod pulse;
 #[cfg(unix)]
 mod reopen;

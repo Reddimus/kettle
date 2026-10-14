@@ -9,6 +9,8 @@ const FRAMES: usize = 960;
 const SAMPLES: usize = FRAMES * 2;
 const BYTES: usize = SAMPLES * size_of::<f32>();
 const BUFFERS: usize = 3;
+// Allow device-quantum rounding and bounded recovery from a short underrun.
+const MAX_STREAM_BYTES: usize = 8 * BYTES;
 const SETUP: Duration = Duration::from_secs(3);
 const OPERATION: Duration = Duration::from_millis(250);
 const TIMING_EVERY: Duration = Duration::from_millis(250);
@@ -93,6 +95,7 @@ api! {
     pa_stream_get_state: unsafe extern "C" fn(Object) -> i32,
     pa_stream_get_index: unsafe extern "C" fn(Object) -> u32,
     pa_stream_writable_size: unsafe extern "C" fn(Object) -> usize,
+    pa_stream_get_buffer_attr: unsafe extern "C" fn(Object) -> *const BufferAttr,
     pa_stream_write: unsafe extern "C" fn(Object, *const c_void, usize, Option<unsafe extern "C" fn(Object)>, i64, i32) -> i32,
     pa_stream_cork: unsafe extern "C" fn(Object, i32, Success, Object) -> Object,
     pa_stream_flush: unsafe extern "C" fn(Object, Success, Object) -> Object,
@@ -346,14 +349,13 @@ impl Output {
         if self.retired || self.reserved {
             return None;
         }
-        let played = self.position().unwrap_or(0.0) as u64;
-        if self.submitted.saturating_sub(played) + FRAMES as u64 > (BUFFERS * FRAMES) as u64 {
-            return None;
-        }
-        // SAFETY: live stream. usize::MAX denotes an error.
-        let available = unsafe { (self.api.pa_stream_writable_size)(self.stream) };
-        if available == usize::MAX || available < BYTES {
-            return None;
+        match self.credit() {
+            Ok(true) => {}
+            Ok(false) => return None,
+            Err(_) => {
+                self.retired = true;
+                return None;
+            }
         }
         self.reserved = true;
         Some(0)
@@ -365,6 +367,7 @@ impl Output {
             || !self.reserved
             || samples.len() != SAMPLES
             || !samples.iter().all(|n| n.is_finite())
+            || self.credit() != Ok(true)
         {
             return Err(Unavailable);
         }
@@ -466,10 +469,34 @@ impl Output {
     }
 
     pub fn played(&self) -> Option<(f64, Instant)> {
-        self.playing
+        (self.playing && !self.retired)
             .then(|| self.position().map(|frames| (frames, Instant::now())))
             .flatten()
     }
+
+    fn credit(&self) -> Result<bool, Unavailable> {
+        // SAFETY: the ready stream owns this record; its mainloop and all
+        // calls stay on this thread, so it cannot change during the read.
+        let attr = unsafe { (self.api.pa_stream_get_buffer_attr)(self.stream).as_ref() }
+            .ok_or(Unavailable)?;
+        // Hardware presentation includes device latency, not just stream
+        // consumption. Using it for write credit starves the stream.
+        // SAFETY: live stream on its owning thread.
+        let available = unsafe { (self.api.pa_stream_writable_size)(self.stream) };
+        write_credit(attr.maxlength, attr.tlength, available)
+    }
+}
+
+fn write_credit(maximum: u32, target: u32, available: usize) -> Result<bool, Unavailable> {
+    let maximum = maximum as usize;
+    if !(BYTES..=MAX_STREAM_BYTES).contains(&maximum)
+        || !maximum.is_multiple_of(8)
+        || !(BYTES..=maximum).contains(&(target as usize))
+        || available > MAX_STREAM_BYTES
+    {
+        return Err(Unavailable);
+    }
+    Ok(available >= BYTES)
 }
 
 impl Drop for Output {
@@ -499,6 +526,26 @@ impl Drop for Output {
 mod tests {
     use super::*;
 
+    #[test]
+    fn write_credit_bounds_stream_storage_and_underrun_recovery() {
+        assert_eq!(write_credit(23_552, 23_552, BYTES), Ok(true));
+        assert_eq!(write_credit(23_552, 23_552, BYTES - 1), Ok(false));
+        // Pulse can request bounded catch-up beyond its stored buffer size.
+        assert_eq!(write_credit(23_552, 23_552, 46_080), Ok(true));
+        assert_eq!(write_credit(23_552, 23_552, MAX_STREAM_BYTES), Ok(true));
+        for (maximum, target, available) in [
+            (BYTES as u32 - 1, BYTES as u32, BYTES),
+            (MAX_STREAM_BYTES as u32 + 8, BYTES as u32, BYTES),
+            (23_553, 19_200, BYTES),
+            (23_552, 23_553, BYTES),
+            (23_552, 19_200, MAX_STREAM_BYTES + 1),
+            (23_552, 19_200, usize::MAX),
+        ] {
+            assert_eq!(write_credit(maximum, target, available), Err(Unavailable));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
     fn timing(output: &Output) -> String {
         #[repr(C)]
         struct Timing {
@@ -539,11 +586,12 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     #[ignore = "needs a running local PulseAudio-compatible service"]
     fn real_service_corks_mutes_and_retires_one_generation() {
         let mut output = Output::open(false).expect("local PulseAudio playback");
         let tone: Vec<f32> = (0..SAMPLES)
-            .map(|n| ((n / 2) as f32 * 440.0 * std::f32::consts::TAU / 48_000.0).sin() * 0.1)
+            .map(|n| ((n / 2) as f32 * 500.0 * std::f32::consts::TAU / 48_000.0).sin() * 0.1)
             .collect();
         let mut initial = 0;
         while let Some(index) = output.take_free() {
@@ -577,6 +625,21 @@ mod tests {
                 output.submitted,
                 output.position(),
                 timing(&output)
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let steady_until = Instant::now() + Duration::from_millis(600);
+        while Instant::now() < steady_until {
+            while let Some(index) = output.take_free() {
+                output.enqueue(index, &tone).unwrap();
+            }
+            assert!(!output.retired, "bounded stream credit was refused");
+            // SAFETY: the live stream stays on this thread; no mainloop
+            // iteration occurs between take_free and this observation.
+            let available = unsafe { (output.api.pa_stream_writable_size)(output.stream) };
+            assert!(
+                available < BYTES,
+                "ready PCM withheld despite {available} writable bytes"
             );
             std::thread::sleep(Duration::from_millis(5));
         }
