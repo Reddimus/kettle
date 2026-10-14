@@ -1091,7 +1091,8 @@ reading its queued RenderParse failure; a failed heartbeat stops writes but
 still requires the exact terminal reply and exit. Reinstating the unchecked
 heartbeat fails at runtime. Frame order and completion assertions remain.
 
-Linux PCM coverage checks bounded metadata and queues, common stream timestamps,
+Linux PCM coverage checks that sample data and EOF never renew the command
+lease, bounded metadata and queues, common stream timestamps,
 credit and generation validation, stale-clock withholding, partial PCM reads,
 and the combined worker footprint. `read_play_control` keeps ordinary commands
 at their one-byte cap while admitting fixed-size feedback.
@@ -1127,6 +1128,8 @@ runtime library and search path. `check-lane-media-smoke.py --require-audio` che
 play/pause and seek through the UI; `--mode overlay` exercises the centered
 viewer with the same assertions. Both retain screenshots and failure logs.
 
+The command-lease regression failed on a real encoded PCM block before the
+unconditional renewal was removed; heartbeat and Close remain positive controls.
 The PCM regressions were red-checked by removing the window, generation,
 clock freshness/progress/ordering, parent timestamp aging, partial-piece,
 combined footprint, command-size, heartbeat, retired-window and opening-command
