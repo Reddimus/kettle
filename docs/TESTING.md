@@ -1113,7 +1113,8 @@ They cover two simultaneous sessions, pause/resume/mute, commands sent during
 opening, seeks between frame/sample boundaries, audio outlasting video,
 owned worker closure, and
 video continuing when the broker cannot start. The PCM-only boundary fixture
-checks the confined broker. The native FFmpeg suite checks shared timestamps,
+checks the confined broker with Play arriving before its first PCM packet.
+The native FFmpeg suite checks shared timestamps,
 leading audio, codec padding and video paced by PCM instead of unbounded
 draining; relocated binaries can name the same fixture
 directory with `KETTLE_TEST_VIDEO_FIXTURES`.
@@ -1131,6 +1132,9 @@ runtime library and search path. `check-lane-media-smoke.py --require-audio` che
 play/pause and seek through the UI; `--mode overlay` exercises the centered
 viewer with the same assertions. Both retain screenshots and failure logs.
 
+The empty and partial PCM startup regressions failed before priming the first
+output piece. Pending startup keeps the one-second failure bound, and Pause
+resets that wait without starting the device.
 The command-lease regression failed on a real encoded PCM block before the
 unconditional renewal was removed; heartbeat and Close remain positive controls.
 The PCM regressions were red-checked by removing the window, generation,

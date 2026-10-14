@@ -4,7 +4,7 @@
 //! with silence so the speaker's clock runs as long as the session does;
 //! plays, pauses and mutes it as the session asks; and keeps the clock the
 //! session's frames follow: where the sound being heard is in the video.
-//! Before the first Play it fills the speaker, so Play starts at once.
+//! Prime the output with a complete piece before starting it.
 //! macOS owns its device queue directly; Linux uses this feeder only in
 //! the PCM broker, which never accepts encoded media.
 
@@ -263,6 +263,7 @@ struct Feeder {
     piece: Vec<f32>,
     piece_filled: usize,
     pending_index: Option<usize>,
+    primed: bool,
     applied: Wish,
     /// When the speaker was first started, until it had a clock.
     awaiting_clock: Option<Instant>,
@@ -288,6 +289,7 @@ impl Feeder {
             piece: vec![0.0; PIECE_FRAMES * CHANNELS],
             piece_filled: 0,
             pending_index: None,
+            primed: false,
             applied: Wish {
                 playing: false,
                 muted,
@@ -319,8 +321,10 @@ impl Feeder {
         if wish.muted != self.applied.muted {
             self.speaker.set_muted(wish.muted);
         }
-        if !wish.playing && self.applied.playing {
-            self.speaker.pause()?;
+        if !wish.playing {
+            if self.applied.playing {
+                self.speaker.pause()?;
+            }
             self.awaiting_clock = None;
         }
         while let Some(index) = self
@@ -333,12 +337,14 @@ impl Feeder {
                 break;
             }
             self.speaker.enqueue(index, &self.piece)?;
+            self.primed = true;
         }
-        if wish.playing && !self.applied.playing {
+        let playing = wish.playing && self.primed;
+        if playing && !self.applied.playing {
             self.speaker.start()?;
         }
-        self.applied = wish;
-        let played = self.speaker.played();
+        self.applied = Wish { playing, ..wish };
+        let played = playing.then(|| self.speaker.played()).flatten();
         if !wish.playing {
             // Paused, the sound has no clock to go by: frames played again
             // wait for a fresh one, never one from before the pause.
@@ -703,13 +709,25 @@ mod tests {
         .unwrap();
         until("nonblocking PCM poll", || polls.load(Ordering::Acquire) > 0);
         sound.wish().hear(PlayCommand::Play);
-        until("play while PCM pending", || {
-            told.lock().unwrap().started == 1
+        let next_poll = polls.load(Ordering::Acquire) + 2;
+        until("Play accepted while PCM pending", || {
+            polls.load(Ordering::Acquire) >= next_poll
         });
+        assert_eq!(
+            told.lock().unwrap().started,
+            0,
+            "an empty speaker must stay corked"
+        );
         sound.wish().hear(PlayCommand::Pause);
-        until("pause while PCM pending", || {
-            told.lock().unwrap().paused == 1
+        let next_poll = polls.load(Ordering::Acquire) + 2;
+        until("Pause accepted while PCM pending", || {
+            polls.load(Ordering::Acquire) >= next_poll
         });
+        assert_eq!(
+            told.lock().unwrap().paused,
+            0,
+            "an unstarted speaker needs no pause"
+        );
         assert!(
             told.lock().unwrap().queued.is_empty(),
             "missing PCM became silence"
@@ -726,7 +744,53 @@ mod tests {
                 .iter()
                 .all(|sample| *sample == 0.25)
         );
+        until("primed speaker starts", || {
+            told.lock().unwrap().started == 1
+        });
         assert!(!sound.failed());
+    }
+
+    #[test]
+    fn waiting_for_first_pcm_is_bounded_and_pause_resets_that_wait() {
+        struct Pending;
+        impl AudioSource for Pending {
+            fn next_block(
+                &mut self,
+                _: &mut [f32],
+            ) -> Result<Option<AudioBlock>, kettle_media::FailureCode> {
+                panic!("asynchronous PCM must be polled");
+            }
+            fn poll_block(
+                &mut self,
+                _: &mut [f32],
+            ) -> Result<AudioRead, kettle_media::FailureCode> {
+                Ok(AudioRead::Pending)
+            }
+        }
+        let (speaker, told) = stand(1);
+        let mut feeder = Feeder::new(speaker, Box::new(Pending), 0, false);
+        let wish = SoundWish::new(false);
+        let shared = Shared {
+            wish: wish.clone(),
+            heard: Mutex::new(None),
+            state: AtomicU8::new(RUNNING),
+        };
+        wish.hear(PlayCommand::Play);
+        feeder.round(wish.get(), &shared).unwrap();
+        assert!(feeder.awaiting_clock.is_some());
+        assert_eq!(told.lock().unwrap().started, 0);
+        feeder.awaiting_clock = Some(Instant::now() - CLOCK_WITHIN * 2);
+        assert!(
+            feeder.round(wish.get(), &shared).is_err(),
+            "pending data cannot wait forever"
+        );
+        wish.hear(PlayCommand::Pause);
+        feeder.round(wish.get(), &shared).unwrap();
+        assert!(feeder.awaiting_clock.is_none());
+        wish.hear(PlayCommand::Play);
+        feeder.round(wish.get(), &shared).unwrap();
+        assert!(feeder.awaiting_clock.unwrap().elapsed() < CLOCK_WITHIN);
+        assert_eq!(told.lock().unwrap().started, 0);
     }
 
     #[test]
@@ -761,11 +825,25 @@ mod tests {
                 }
             }
         }
-        let (speaker, _) = stand(1);
+        let (speaker, told) = stand(1);
         let mut feeder = Feeder::new(speaker, Box::new(Partial(0)), 0, false);
-        assert!(!feeder.fill_piece().unwrap());
+        let wish = SoundWish::new(false);
+        wish.hear(PlayCommand::Play);
+        let shared = Shared {
+            wish: wish.clone(),
+            heard: Mutex::new(None),
+            state: AtomicU8::new(RUNNING),
+        };
+        feeder.round(wish.get(), &shared).unwrap();
         assert_eq!(feeder.piece_filled, PIECE_FRAMES / 2);
-        assert!(feeder.fill_piece().unwrap());
+        assert_eq!(
+            told.lock().unwrap().started,
+            0,
+            "a partial piece has not been enqueued"
+        );
+        feeder.round(wish.get(), &shared).unwrap();
+        assert_eq!(told.lock().unwrap().started, 1);
+        assert_eq!(told.lock().unwrap().enqueued, 1);
         assert!(
             feeder.piece[..PIECE_FRAMES / 2 * CHANNELS]
                 .iter()
