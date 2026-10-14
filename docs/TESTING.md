@@ -1105,7 +1105,8 @@ cargo build --locked --profile media-worker -p kettle-media-worker
 KETTLE_TEST_PCM_WORKER="$PWD/target/media-worker/kettle-media-worker" \
 KETTLE_TEST_PCM_CLIP="$PWD/crates/kettle-media-native/tests/fixtures/video/ticks.mp4" \
 KETTLE_TEST_PCM_LONG_CLIP="$PWD/crates/kettle-media-native/tests/fixtures/video/long-audio.mp4" \
-cargo test --locked -p kettle-media-worker --test native_audio -- --ignored --test-threads=1
+cargo test --locked -p kettle-media-worker --test native_audio -- \
+  --ignored --skip linux_client_keeps_video_when_the_audio_clock_stalls --test-threads=1
 ```
 
 These require trusted `/usr/bin/ffmpeg` and a live PulseAudio-compatible service.
@@ -1125,7 +1126,11 @@ through `scripts/check-linux-audio.py`. It rejects skips, retains raw logs and
 results, and closes only an audio service it started. Native playback failures
 print bounded protocol summaries with receipt times before deleting their
 private test logs; samples, pixels and paths are omitted. An existing service is
-preserved. The Ubuntu 26.04 ARM check also exercised a Matroska audio tail with
+preserved. An owned Pulse fixture first checks silent-video fallback against
+the null sink's default two-second startup buffer, then checks successful
+playback with its `norewinds=1` 50 ms mode. The one-second stalled-clock bound
+stays unchanged. The cold-sink case is reported unrun when reusing a service.
+The Ubuntu 26.04 ARM check also exercised a Matroska audio tail with
 and without its track-end tag. These checks verify service playback, not
 physical speakers. Nix package-content checks require the helper's Pulse
 runtime library and search path. `check-lane-media-smoke.py --require-audio` checks native
