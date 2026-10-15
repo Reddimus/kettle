@@ -102,8 +102,9 @@ fn system_zshenvs(program: &Path) -> Vec<PathBuf> {
 /// it, and one that names the `RCS` option may stop zsh reading any
 /// `.zshenv`, Kettle's included, leaving the borrowed variable behind.
 /// Kettle leaves that zsh alone. zsh ignores case and underscores in option
-/// names, so the `RCS` check does too; a mention in a comment counts, which
-/// only costs that zsh Kettle's `codex`. A file too large to read here counts,
+/// names, so the `RCS` check does too. Whole-line comments are skipped: they
+/// change nothing, and Debian, Ubuntu and Fedora ship a `zshenv` whose header
+/// comment explains `NO_RCS`. A file too large to read here counts,
 /// and one zsh could not read either does not. Nothing here blocks: a FIFO or
 /// device is opened without waiting and passed over.
 pub fn zshenv_keeping_kettle_out(candidates: &[PathBuf]) -> Option<PathBuf> {
@@ -122,20 +123,26 @@ pub fn zshenv_keeping_kettle_out(candidates: &[PathBuf]) -> Option<PathBuf> {
     })
 }
 
-/// Whether a system `zshenv`'s text names `ZDOTDIR` or the `RCS` option.
+/// Whether a system `zshenv`'s code names `ZDOTDIR` or the `RCS` option.
+/// A line whose first non-blank byte is `#` is a comment wherever it ends up
+/// running, so it is skipped; any other line counts, trailing comment and all.
 fn keeps_kettle_out(text: &[u8]) -> bool {
-    if text
-        .windows(b"ZDOTDIR".len())
-        .any(|window| window == b"ZDOTDIR")
-    {
-        return true;
-    }
-    let folded: Vec<u8> = text
-        .iter()
-        .filter(|byte| **byte != b'_')
-        .map(u8::to_ascii_lowercase)
-        .collect();
-    folded.windows(b"rcs".len()).any(|window| window == b"rcs")
+    text.split(|byte| *byte == b'\n')
+        .filter(|line| line.iter().find(|byte| !byte.is_ascii_whitespace()) != Some(&b'#'))
+        .any(|line| {
+            if line
+                .windows(b"ZDOTDIR".len())
+                .any(|window| window == b"ZDOTDIR")
+            {
+                return true;
+            }
+            let folded: Vec<u8> = line
+                .iter()
+                .filter(|byte| **byte != b'_')
+                .map(u8::to_ascii_lowercase)
+                .collect();
+            folded.windows(b"rcs".len()).any(|window| window == b"rcs")
+        })
 }
 
 /// Open `path` to read without waiting for a writer, as opening a FIFO
@@ -467,15 +474,55 @@ mod tests {
             "setopt no_rcs",
             "setopt NORCS",
             "unsetopt r_c_s",
-            "# zsh -o norcs",
+            "  setopt norcs # a trailing comment",
+            "[[ -o interactive ]] || ZDOTDIR=/opt/zsh",
         ] {
-            let rcs = file("rcs", format!("{spelling}\n").as_bytes());
+            let rcs = file("rcs", format!("# header\n{spelling}\n").as_bytes());
             assert_eq!(
                 zshenv_keeping_kettle_out(std::slice::from_ref(&rcs)),
                 Some(rcs),
                 "{spelling}"
             );
         }
+    }
+
+    /// A whole-line comment changes nothing zsh does, so naming `NO_RCS` or
+    /// `ZDOTDIR` there does not keep Kettle out. Debian, Ubuntu and Fedora
+    /// ship a `zshenv` whose header comment explains `NO_RCS`; this is
+    /// Ubuntu 26.04's, byte for byte.
+    #[test]
+    fn a_comment_naming_rcs_or_zdotdir_does_not_keep_kettle_out() {
+        let dir = private_tempdir("kettle-shell-startup");
+        let stock = dir.path().join("zshenv");
+        std::fs::write(
+            &stock,
+            "# /etc/zsh/zshenv: system-wide .zshenv file for zsh(1).\n\
+             #\n\
+             # This file is sourced on all invocations of the shell.\n\
+             # If the -f flag is present or if the NO_RCS option is\n\
+             # set within this file, all other initialization files\n\
+             # are skipped.\n\
+             #\n\
+             # This file should contain commands to set the command\n\
+             # search path, plus other important environment variables.\n\
+             # This file should not contain commands that produce\n\
+             # output or assume the shell is attached to a tty.\n\
+             #\n\
+             # Global Order: zshenv, zprofile, zshrc, zlogin\n\
+             \n\
+             if [[ -z \"$PATH\" || \"$PATH\" == \"/bin:/usr/bin\" ]]\n\
+             then\n\
+             \texport PATH=\"/usr/local/bin:/usr/bin:/bin:/usr/games\"\n\
+             fi\n",
+        )
+        .unwrap();
+        let commented = dir.path().join("commented");
+        std::fs::write(
+            &commented,
+            "\t# ZDOTDIR is set per user.\nexport EDITOR=vi\n",
+        )
+        .unwrap();
+        assert_eq!(zshenv_keeping_kettle_out(&[stock, commented]), None);
     }
 
     /// A bare `zsh` command is found on the pane's `PATH`, as the PTY finds

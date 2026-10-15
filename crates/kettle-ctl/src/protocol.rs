@@ -215,11 +215,13 @@ pub enum Method {
     RunCommand,
     WaitFor,
     Show,
+    AgentLaunch,
+    CardPickup,
 }
 
 impl Method {
     /// Complete method table, used by tests and diagnostics.
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 20] = [
         Self::GetState,
         Self::ListTabs,
         Self::ListPanes,
@@ -238,6 +240,8 @@ impl Method {
         Self::RunCommand,
         Self::WaitFor,
         Self::Show,
+        Self::AgentLaunch,
+        Self::CardPickup,
     ];
 
     /// Parse the stable protocol-v1 method spelling.
@@ -261,6 +265,8 @@ impl Method {
             "run_command" => Self::RunCommand,
             "wait_for" => Self::WaitFor,
             "show" => Self::Show,
+            "agent_launch" => Self::AgentLaunch,
+            "card_pickup" => Self::CardPickup,
             _ => return None,
         })
     }
@@ -286,6 +292,8 @@ impl Method {
             Self::RunCommand => "run_command",
             Self::WaitFor => "wait_for",
             Self::Show => "show",
+            Self::AgentLaunch => "agent_launch",
+            Self::CardPickup => "card_pickup",
         }
     }
 
@@ -310,7 +318,7 @@ impl Method {
             | Self::UiGeometry
             | Self::Subscribe
             | Self::WaitFor => Capability::Read,
-            Self::Show => Capability::Display,
+            Self::Show | Self::AgentLaunch | Self::CardPickup => Capability::Display,
         }
     }
 
@@ -748,6 +756,8 @@ mod tests {
             ("wait_for", Read, Connection),
             // Grants no reads or mutations; answered after the render.
             ("show", Display, Ui),
+            ("agent_launch", Display, Ui),
+            ("card_pickup", Display, Ui),
         ];
         assert_eq!(table.len(), Method::ALL.len());
         let mut names = std::collections::HashSet::new();
@@ -760,14 +770,17 @@ mod tests {
         }
     }
 
-    /// `show` is the one method Display grants.
+    /// Display grants media delivery and its launch-local hook housekeeping.
     #[test]
-    fn show_is_the_only_display_method() {
+    fn display_methods_do_not_grant_terminal_reads_or_input() {
         let display: Vec<_> = Method::ALL
             .iter()
             .filter(|method| method.capability() == Capability::Display)
             .collect();
-        assert_eq!(display, [&Method::Show]);
+        assert_eq!(
+            display,
+            [&Method::Show, &Method::AgentLaunch, &Method::CardPickup]
+        );
     }
 
     #[test]

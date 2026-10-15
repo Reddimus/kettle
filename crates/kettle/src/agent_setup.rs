@@ -11,7 +11,8 @@
 //! `KETTLE_PID`, and enable `kettle_show` alone. Every other command, and any
 //! form not fully understood, runs with its arguments unchanged.
 //!
-//! It is Unix-only for now; elsewhere `agent-setup` says so.
+//! Linux also wraps native Claude launches for checked card admission.
+//! `--agent claude` selects its printed function. Setup is Unix-only.
 #![cfg_attr(not(unix), allow(dead_code))]
 
 use std::ffi::{OsStr, OsString};
@@ -452,10 +453,6 @@ fn zsh_status(shell: Option<&std::ffi::OsStr>) -> Option<String> {
 /// `--no-daemon` arrived by 0.159.0. A 1.x or later is not assumed to.
 const OLDEST_CODEX_MINOR: u64 = 159;
 
-/// The Codex CLI whose hook output Kettle's cards are placed for: `↳ Hook ·`
-/// above the message, its lines four columns in (Codex CLI 0.162).
-const CARD_CODEX_MINOR: u64 = 162;
-
 /// The minor version `codex --version` printed, for a 0.x Codex CLI.
 fn codex_minor(output: &str) -> Option<u64> {
     let version = output.trim().strip_prefix("codex-cli ")?;
@@ -472,12 +469,10 @@ fn supported_version(output: &str) -> bool {
     codex_minor(output).is_some_and(|minor| minor >= OLDEST_CODEX_MINOR)
 }
 
-/// Whether it printed one whose hook output Kettle's cards are placed for,
-/// on a system where Kettle can check that a card's asker is Codex as
-/// OpenAI signs it: macOS. Elsewhere the hook could never get a card, so it
-/// is not added.
+/// A tested hook layout on a platform with a harness admission path.
 fn card_version(output: &str) -> bool {
-    cfg!(target_os = "macos") && codex_minor(output) == Some(CARD_CODEX_MINOR)
+    cfg!(any(target_os = "macos", target_os = "linux"))
+        && kettle_ctl::agent_launch::card_version(kettle_ctl::show::InlineTarget::CodexHook, output)
 }
 
 /// The first line `codex --version` prints, if it answers within three
@@ -549,13 +544,17 @@ fn this_shell_in_kettle() -> bool {
 /// Replace this process with `codex` and `args`, or run it and pass on its
 /// exit status where a process cannot be replaced.
 fn run_codex(args: Vec<OsString>) -> i32 {
-    let mut command = std::process::Command::new("codex");
+    run_program("codex", args)
+}
+
+fn run_program(program: &str, args: Vec<OsString>) -> i32 {
+    let mut command = std::process::Command::new(program);
     command.args(args);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
         let error = command.exec();
-        eprintln!("kettle agent-setup: cannot start codex: {error}");
+        eprintln!("kettle agent-setup: cannot start {program}: {error}");
         127
     }
     #[cfg(not(unix))]
@@ -563,36 +562,150 @@ fn run_codex(args: Vec<OsString>) -> i32 {
         match command.status() {
             Ok(status) => status.code().unwrap_or(1),
             Err(error) => {
-                eprintln!("kettle agent-setup: cannot start codex: {error}");
+                eprintln!("kettle agent-setup: cannot start {program}: {error}");
                 127
             }
         }
     }
 }
 
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum SetupAgent {
+    #[default]
+    Codex,
+    Claude,
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn claude_interactive(args: &[OsString]) -> bool {
+    let takes_value = |option: &str| {
+        matches!(
+            option,
+            "--model"
+                | "--effort"
+                | "--permission-mode"
+                | "--agent"
+                | "--agents"
+                | "--name"
+                | "-n"
+                | "--session-id"
+                | "--settings"
+                | "--setting-sources"
+                | "--system-prompt"
+                | "--append-system-prompt"
+        )
+    };
+    let mut prompt = false;
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        let Some(arg) = arg.to_str() else {
+            return false;
+        };
+        if arg == "--" {
+            return args[index + 1..]
+                .iter()
+                .all(|value| value.to_str().is_some())
+                && usize::from(prompt) + args.len() - index - 1 <= 1;
+        }
+        if takes_value(arg) {
+            if !args
+                .get(index + 1)
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| !value.is_empty() && !value.starts_with('-'))
+            {
+                return false;
+            }
+            index += 2;
+            continue;
+        }
+        if let Some((option, value)) = arg.split_once('=')
+            && option.starts_with("--")
+            && takes_value(option)
+        {
+            if value.is_empty() {
+                return false;
+            }
+            index += 1;
+            continue;
+        }
+        match arg {
+            "--continue" | "-c" | "--fork-session" | "--verbose" => {}
+            "--resume" | "-r" => {
+                if args
+                    .get(index + 1)
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|value| !value.is_empty() && !value.starts_with('-'))
+                {
+                    index += 1;
+                }
+            }
+            _ if arg.starts_with('-') => return false,
+            "mcp" | "auth" | "update" | "upgrade" | "install" | "doctor" | "setup-token"
+            | "plugin" | "plugins" | "agents" | "remote-control" => return false,
+            _ if prompt => return false,
+            _ => prompt = true,
+        }
+        index += 1;
+    }
+    true
+}
+
+fn launch_claude(argv: Vec<OsString>) -> i32 {
+    #[cfg(target_os = "linux")]
+    {
+        use std::io::IsTerminal as _;
+        let plugin = kettle_ui::claude_status(|name| std::env::var_os(name));
+        if this_shell_in_kettle()
+            && std::io::stdin().is_terminal()
+            && std::io::stdout().is_terminal()
+            && plugin.in_pane
+            && !plugin.forbidden
+            && claude_interactive(&argv)
+            && let Some(version) = version_of(Path::new("claude"))
+            && let Some(native) = linux::prepare(
+                "claude",
+                kettle_ctl::show::InlineTarget::ClaudeHook,
+                &version,
+            )
+            && let Some(mut command) = native.command("claude")
+        {
+            use std::os::unix::process::CommandExt as _;
+            let error = command.args(argv).exec();
+            eprintln!("kettle agent-setup: cannot start claude: {error}");
+            return 127;
+        }
+    }
+    run_program("claude", argv)
+}
+
 #[derive(clap::Args, Debug)]
 #[command(group(clap::ArgGroup::new("action").args(["print", "status", "uninstall"])))]
+#[command(group(clap::ArgGroup::new("launch").args(["launch_codex", "launch_claude"])))]
 pub(crate) struct SetupArgs {
-    /// Print a `codex` shell function that starts Codex with Kettle's display
-    /// server. Review it, then add it to your shell's startup file; Kettle
-    /// edits no file.
+    /// Print the selected agent's shell function. Review it, then add it
+    /// to your shell's startup file; Kettle edits no file.
     #[arg(long)]
     print: bool,
     /// Report whether Codex launched from this shell would get Kettle's
     /// display server, and how it delivers media.
     #[arg(long)]
     status: bool,
-    /// Print how to remove the `codex` function.
+    /// Print how to remove the selected agent's function.
     #[arg(long)]
     uninstall: bool,
     /// Run by the printed function: start Codex with these arguments.
     #[arg(long, hide = true, conflicts_with = "action")]
     launch_codex: bool,
+    #[arg(long, hide = true, conflicts_with = "action")]
+    launch_claude: bool,
+    /// The agent function to print or remove.
+    #[arg(long, value_enum, default_value_t = SetupAgent::Codex, conflicts_with_all = ["status", "launch_codex", "launch_claude"])]
+    agent: SetupAgent,
     /// The shell to print for (default: the one `SHELL` names).
-    #[arg(long, value_enum, conflicts_with_all = ["status", "launch_codex"])]
+    #[arg(long, value_enum, conflicts_with_all = ["status", "launch_codex", "launch_claude"])]
     shell: Option<SetupShell>,
-    /// Codex's own arguments, after `--`.
-    #[arg(last = true, allow_hyphen_values = true, requires = "launch_codex")]
+    /// The agent's own arguments, after `--`.
+    #[arg(last = true, allow_hyphen_values = true, requires = "launch")]
     argv: Vec<OsString>,
 }
 
@@ -608,6 +721,9 @@ pub(crate) fn run(_: SetupArgs) -> i32 {
 pub(crate) fn run(args: SetupArgs) -> i32 {
     if args.launch_codex {
         return launch(args.argv);
+    }
+    if args.launch_claude {
+        return launch_claude(args.argv);
     }
     if args.status {
         print_status();
@@ -625,10 +741,32 @@ pub(crate) fn run(args: SetupArgs) -> i32 {
         }
     };
     if args.uninstall {
-        println!("{}", uninstall_text(shell));
+        if args.agent == SetupAgent::Claude {
+            let command = match shell {
+                SetupShell::Bash => "unset -f claude",
+                SetupShell::Zsh => "unfunction claude",
+                SetupShell::Fish => "functions -e claude",
+            };
+            println!(
+                "Remove the claude function from your shell's startup file, then run `{command}` or open a new shell. Turn off Claude Code previews in Settings to stop offering it to new panes.\n{HARNESS_WRITES}"
+            );
+        } else {
+            println!("{}", uninstall_text(shell));
+        }
         return 0;
     }
-    match this_kettle().and_then(|kettle| print_function(&kettle, shell)) {
+    match this_kettle().and_then(|kettle| match args.agent {
+        SetupAgent::Codex => print_function(&kettle, shell),
+        SetupAgent::Claude => {
+            use kettle_ui::codex_shell::CodexShell;
+            let shell = match shell {
+                SetupShell::Bash => CodexShell::Bash,
+                SetupShell::Zsh => CodexShell::Zsh,
+                SetupShell::Fish => CodexShell::Fish,
+            };
+            kettle_ui::codex_shell::claude_function(&kettle, shell).map_err(SetupError::from)
+        }
+    }) {
         Ok(function) => {
             print!("{function}");
             0
@@ -652,9 +790,32 @@ fn launch(argv: Vec<OsString>) -> i32 {
         );
         return run_codex(argv);
     };
-    let cards = card_version(&version);
+    let cards = card_version(&version) && !classify(&argv).own_hooks;
+    #[cfg(target_os = "linux")]
+    let cards = {
+        use std::io::IsTerminal as _;
+        cards && std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+    };
+    #[cfg(target_os = "linux")]
+    let native = cards
+        .then(|| linux::prepare("codex", kettle_ctl::show::InlineTarget::CodexHook, &version))
+        .flatten();
+    #[cfg(target_os = "linux")]
+    let cards = native.is_some();
     match this_kettle().and_then(|kettle| launch_args(&argv, &kettle, cards)) {
-        Ok(launch) => run_codex(launch),
+        Ok(launch) => {
+            #[cfg(target_os = "linux")]
+            if let Some(native) = native {
+                use std::os::unix::process::CommandExt as _;
+                let Some(mut command) = native.command("codex") else {
+                    return run_codex(argv);
+                };
+                let error = command.args(launch).exec();
+                eprintln!("kettle agent-setup: cannot start codex: {error}");
+                return 127;
+            }
+            run_codex(launch)
+        }
         Err(error) => {
             eprintln!(
                 "kettle agent-setup: {} Starting Codex without Kettle's display server.",
@@ -773,11 +934,11 @@ fn print_status() {
     println!(
         "Delivery: {}",
         if cards {
-            "the media shelf of the pane Codex runs in, and a card under the call once \
-             you trust Kettle's hook in Codex's hook review"
+            "a known card-hook version; interactive launches get a card under the call \
+             after platform checks and Codex's hook review, otherwise the pane's shelf"
         } else if launched {
             "the media shelf of the pane Codex runs in; cards under the call need \
-             Codex CLI 0.162 on macOS"
+             a supported Codex CLI 0.162 launch on macOS or Linux"
         } else {
             "none from this shell"
         }
@@ -806,6 +967,37 @@ fn print_status() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_interactive_claude_invocations_are_admitted() {
+        for args in [
+            vec![],
+            vec!["hello"],
+            vec!["--continue"],
+            vec!["--resume", "session", "hello"],
+            vec!["--model", "opus", "hello"],
+            vec!["--effort=high"],
+            vec!["--", "-p"],
+        ] {
+            assert!(claude_interactive(&argv(&args)), "{args:?}");
+        }
+        for args in [
+            vec!["-p", "hello"],
+            vec!["--print"],
+            vec!["mcp", "list"],
+            vec!["update"],
+            vec!["--background"],
+            vec!["--cloud", "hello"],
+            vec!["--safe-mode"],
+            vec!["--strict-mcp-config"],
+            vec!["--unknown"],
+            vec!["--model"],
+            vec!["--model", "-p"],
+            vec!["one", "two"],
+        ] {
+            assert!(!claude_interactive(&argv(&args)), "{args:?}");
+        }
+    }
 
     fn fixture(name: &str) -> PathBuf {
         #[cfg(windows)]
@@ -1091,12 +1283,15 @@ mod tests {
 
     #[test]
     fn cards_are_for_the_codex_whose_hook_output_kettle_knows() {
-        // Only macOS can check a card's asker, so only there.
+        // macOS checks signatures; Linux checks an explicit launch scope.
         assert_eq!(
             card_version("codex-cli 0.162.0\n"),
-            cfg!(target_os = "macos")
+            cfg!(any(target_os = "macos", target_os = "linux"))
         );
-        assert_eq!(card_version("codex-cli 0.162.7"), cfg!(target_os = "macos"));
+        assert_eq!(
+            card_version("codex-cli 0.162.7"),
+            cfg!(any(target_os = "macos", target_os = "linux"))
+        );
         for version in [
             "codex-cli 0.161.9",
             "codex-cli 0.163.0",
@@ -1399,3 +1594,6 @@ mod tests {
         assert_eq!(zsh_status(None), None);
     }
 }
+
+#[cfg(target_os = "linux")]
+mod linux;

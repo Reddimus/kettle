@@ -36,7 +36,8 @@ pub const MAX_INLINE_MESSAGE_UTF16: usize = 9_900;
 
 /// An inline card a harness's adapter asks for along with the shelf item.
 /// Kettle decides whether the caller may have one; asking grants nothing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum InlineTarget {
     /// Claude Code: a card printed by a synchronous hook under the call.
     ClaudeHook,
@@ -52,7 +53,7 @@ impl InlineTarget {
         }
     }
 
-    fn parse(text: &str) -> Option<Self> {
+    pub(crate) fn parse(text: &str) -> Option<Self> {
         match text {
             "claude_hook" => Some(Self::ClaudeHook),
             "codex_hook" => Some(Self::CodexHook),
@@ -66,6 +67,8 @@ impl InlineTarget {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InlineDelivery {
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permit: Option<crate::agent_launch::PickupPermit>,
 }
 
 impl InlineDelivery {
@@ -946,11 +949,13 @@ mod tests {
         let parsed: ShowResult = serde_json::from_value(plain).unwrap();
         assert_eq!(parsed.inline, None);
         let delivery = InlineDelivery {
+            permit: None,
             message: "x".repeat(MAX_INLINE_MESSAGE_UTF16),
         };
         assert!(delivery.fits());
         // A cell's placeholder is two UTF-16 units.
         let over = InlineDelivery {
+            permit: None,
             message: "\u{10eeee}".repeat(MAX_INLINE_MESSAGE_UTF16 / 2 + 1),
         };
         assert!(!over.fits());

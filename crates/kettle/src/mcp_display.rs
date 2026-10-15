@@ -18,7 +18,7 @@ pub(crate) const MAX_PENDING_CARDS: usize = 16;
 /// How long a delivery waits for its hook. The hook runs as the call
 /// completes, so a delivery older than this belongs to a hook that will not
 /// come.
-pub(crate) const PENDING_LIFETIME: Duration = Duration::from_secs(5);
+pub(crate) const PENDING_LIFETIME: Duration = kettle_ctl::agent_launch::PICKUP_LIFETIME;
 /// Longest tool-use id accepted.
 pub(crate) const MAX_TOOL_USE_ID_BYTES: usize = 128;
 /// Where Claude Code puts a model call's tool-use id in `tools/call`.
@@ -60,7 +60,7 @@ pub(crate) struct DisplaySession {
     /// The hook that prints this session's cards, if any. Headless and SDK
     /// Claude Code sessions run no hook, so they get no card.
     hook: Option<CardHook>,
-    pending: Mutex<HashMap<String, (String, Instant)>>,
+    pending: Mutex<HashMap<String, (kettle_ctl::show::InlineDelivery, Instant)>>,
 }
 
 impl DisplaySession {
@@ -96,7 +96,15 @@ impl DisplaySession {
 
     /// Keep `message` for the hook of call `id`. False when it cannot be
     /// kept: the model is then told the shelf has the media, not a card.
-    pub(crate) fn store(&self, id: String, message: String, now: Instant) -> bool {
+    pub(crate) fn store_delivery(
+        &self,
+        id: String,
+        delivery: kettle_ctl::show::InlineDelivery,
+        now: Instant,
+    ) -> bool {
+        if !delivery.fits() {
+            return false;
+        }
         let Ok(mut pending) = self.pending.lock() else {
             return false;
         };
@@ -104,19 +112,48 @@ impl DisplaySession {
         if pending.len() >= MAX_PENDING_CARDS || pending.contains_key(&id) {
             return false;
         }
-        pending.insert(id, (message, now + PENDING_LIFETIME));
+        pending.insert(id, (delivery, now + PENDING_LIFETIME));
         true
     }
 
-    /// The delivery for call `id`, once.
+    #[cfg(test)]
+    pub(crate) fn store(&self, id: String, message: String, now: Instant) -> bool {
+        self.store_delivery(
+            id,
+            kettle_ctl::show::InlineDelivery {
+                message,
+                permit: None,
+            },
+            now,
+        )
+    }
+
+    /// Consume before validation, releasing the queue lock before a bounded
+    /// GUI check. A failed or expired pickup never exposes its message.
+    pub(crate) fn take_checked(
+        &self,
+        id: &str,
+        now: Instant,
+        check: impl FnOnce(Option<kettle_ctl::agent_launch::PickupPermit>) -> bool,
+    ) -> Option<String> {
+        let delivery = {
+            let mut pending = self.pending.lock().ok()?;
+            expire(&mut pending, now);
+            pending.remove(id)?.0
+        };
+        check(delivery.permit).then_some(delivery.message)
+    }
+
+    #[cfg(test)]
     pub(crate) fn take(&self, id: &str, now: Instant) -> Option<String> {
-        let mut pending = self.pending.lock().ok()?;
-        expire(&mut pending, now);
-        pending.remove(id).map(|(message, _)| message)
+        self.take_checked(id, now, |_| true)
     }
 }
 
-fn expire(pending: &mut HashMap<String, (String, Instant)>, now: Instant) {
+fn expire(
+    pending: &mut HashMap<String, (kettle_ctl::show::InlineDelivery, Instant)>,
+    now: Instant,
+) {
     pending.retain(|_, (_, deadline)| now < *deadline);
 }
 
@@ -284,5 +321,40 @@ mod tests {
         // Expired ones make room.
         let later = now + PENDING_LIFETIME;
         assert!(session.store("toolu_x".into(), "rows".into(), later));
+    }
+    #[test]
+    fn hook_pickup_checks_its_permit_without_holding_the_pending_lock() {
+        use kettle_ctl::agent_launch::PickupPermit;
+        let session = DisplaySession::new(Some(CardHook::Codex));
+        let now = Instant::now();
+        let permit = PickupPermit::new([7; 16]);
+        let delivery = || kettle_ctl::show::InlineDelivery {
+            message: "private rows".into(),
+            permit: Some(permit),
+        };
+        assert!(session.store_delivery("call-1".into(), delivery(), now));
+        assert_eq!(
+            session.take_checked("call-1", now, |_| false),
+            None,
+            "unvalidated pickup returned text"
+        );
+        assert_eq!(
+            session.take_checked("call-1", now, |_| panic!("retried consumed pickup")),
+            None
+        );
+        assert!(session.store_delivery("call-2".into(), delivery(), now));
+        assert_eq!(
+            session
+                .take_checked("call-2", now, |found| {
+                    assert_eq!(found, Some(permit));
+                    assert!(
+                        session.pending.try_lock().is_ok(),
+                        "validation holds pending queue lock"
+                    );
+                    true
+                })
+                .as_deref(),
+            Some("private rows")
+        );
     }
 }

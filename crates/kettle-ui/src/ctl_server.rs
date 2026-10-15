@@ -126,8 +126,8 @@ const CALLER_CHECK_BUDGET: Duration = Duration::from_millis(250);
 
 /// What the connection thread learned about who sent a request: the
 /// caller's checked ancestry, nearest first, for the App to match against
-/// its panes. Only the connection thread makes one, and only `get_state` and
-/// `show` carry one.
+/// its panes. Only the connection thread makes one. State, display and private
+/// card-launch methods carry this evidence.
 #[derive(Debug, Clone, Default)]
 pub struct CallerEvidence {
     checked: Option<CheckedCaller>,
@@ -231,6 +231,21 @@ pub struct AdmittedRequest {
     /// A `show`'s params, parsed on the connection thread. Boxed: only
     /// `show` carries one, and every request crosses the App's channel.
     show: Option<Box<ShowAdmission>>,
+    #[cfg(target_os = "linux")]
+    agent: Option<Box<AgentAdmission>>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+pub(crate) enum AgentAdmission {
+    Launch {
+        root: ProcessIdentity,
+        files: kettle_ctl::agent_launch::LaunchFiles,
+    },
+    Pickup {
+        sender: SenderIdentity,
+        request: kettle_ctl::agent_launch::PickupRequest,
+    },
 }
 
 /// A `show` as its connection thread admitted it: the parsed request and the
@@ -244,10 +259,8 @@ pub struct ShowAdmission {
     pub harness: Option<ProcessIdentity>,
 }
 
-/// The harness a `show` asking for a `target` card came through: Claude
-/// Code as Anthropic signs it, or Codex as OpenAI signs it, which ran
-/// Kettle's own command line (`kettle mcp`) that carried the request. Anyone
-/// else gets no card.
+/// macOS vendor-signature admission through Kettle's own MCP executable.
+/// Linux uses the GUI's separate launch scopes.
 fn card_harness(
     target: kettle_ctl::show::InlineTarget,
     sender: &SenderIdentity,
@@ -387,6 +400,11 @@ impl AdmittedRequest {
         self.show.take().map(|show| *show)
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn take_agent(&mut self) -> Option<AgentAdmission> {
+        self.agent.take().map(|agent| *agent)
+    }
+
     /// One `read_screen` probe for an admitted `wait_for`. It carries the
     /// wait's authority, which is Read for both, and nothing more: the method
     /// is fixed and only the pane address varies.
@@ -410,6 +428,8 @@ impl AdmittedRequest {
             caller: self.caller.clone(),
             admitted_at: Instant::now(),
             show: None,
+            #[cfg(target_os = "linux")]
+            agent: None,
         }
     }
 }
@@ -450,6 +470,8 @@ fn admit(policy: CtlPolicy, req: Request) -> Result<AdmittedRequest, Box<Respons
         caller: CallerEvidence::default(),
         admitted_at: Instant::now(),
         show: None,
+        #[cfg(target_os = "linux")]
+        agent: None,
     })
 }
 
@@ -483,9 +505,70 @@ fn prepare(
                 harness,
             }));
         }
+        Method::AgentLaunch | Method::CardPickup => {
+            request.caller = CallerEvidence::check(claim, capture);
+            #[cfg(target_os = "linux")]
+            {
+                let params = std::mem::take(&mut request.req.params);
+                let agent = prepare_agent(request.method, params, &request.caller, capture)
+                    .ok_or_else(|| {
+                        Box::new(Response::err(
+                            request.req.id,
+                            kettle_ctl::protocol::error_codes::BAD_PARAMS,
+                            "launch-scoped card request was refused",
+                        ))
+                    })?;
+                request.agent = Some(Box::new(agent));
+            }
+            #[cfg(not(target_os = "linux"))]
+            return Err(Box::new(Response::err(
+                request.req.id,
+                kettle_ctl::protocol::error_codes::BAD_PARAMS,
+                "launch-scoped cards are unavailable on this system",
+            )));
+        }
         _ => {}
     }
     Ok(request)
+}
+
+#[cfg(target_os = "linux")]
+fn prepare_agent(
+    method: Method,
+    params: serde_json::Value,
+    caller: &CallerEvidence,
+    capture: &PeerCapture,
+) -> Option<AgentAdmission> {
+    let peer = capture.peer()?;
+    let chain = caller.chain()?.ok()?;
+    if chain.first() != Some(&peer) {
+        return None;
+    }
+    let sender = SenderIdentity::read(peer, Some(chain));
+    if sender.executable.is_none() || sender.executable.as_deref() != own_executable() {
+        log::debug!("agent cards: launch peer is not this executable");
+        return None;
+    }
+    match method {
+        Method::AgentLaunch => {
+            let registration: kettle_ctl::agent_launch::LaunchRegistration =
+                serde_json::from_value(params).ok()?;
+            Some(AgentAdmission::Launch {
+                root: peer,
+                files: registration
+                    .hold(peer)
+                    .inspect_err(|error| {
+                        log::debug!("agent cards: descriptor refused ({:?})", error.kind());
+                    })
+                    .ok()?,
+            })
+        }
+        Method::CardPickup if sender.asker.process != peer => {
+            let request = serde_json::from_value(params).ok()?;
+            Some(AgentAdmission::Pickup { sender, request })
+        }
+        _ => None,
+    }
 }
 
 /// The control server: owns the connection table + the inbound channel; the
@@ -1600,9 +1683,13 @@ mod tests {
             );
             refused += 1;
         }
-        assert!(
-            refused >= Method::ALL.len() - 1,
-            "every existing method was tried"
+        assert_eq!(
+            refused,
+            Method::ALL
+                .iter()
+                .filter(|method| method.capability() != Capability::Display)
+                .count(),
+            "every read and mutation was tried"
         );
         while let Ok(message) = rx.try_recv() {
             assert!(

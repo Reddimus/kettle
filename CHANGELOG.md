@@ -8,6 +8,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- Show inline agent cards on Linux for Codex 0.162 and Claude Code started
+  from a Kettle pane.
+
 - Follow the desktop's reduced-motion preference on Linux, with live portal
   updates and explicit `reduce-motion` overrides.
 
@@ -16,6 +19,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   and focus return; `media-open-mode = lane` keeps the previous layout.
 
 ### Fixed
+
+- Define Kettle's `codex` and `claude` functions in zsh on Debian, Ubuntu and
+  Fedora, whose stock `zshenv` mentions `NO_RCS` in a comment.
 
 - Keep `kettle_show` available in Claude Code, which skipped the tool because
   its schema used a top-level `oneOf`; inline cards and shelf delivery from

@@ -868,10 +868,10 @@ claude mcp add kettle-display -- kettle mcp --display
 (with the hidden `--claude-card-hook`), in an interactive session
 (`CLAUDE_CODE_ENTRYPOINT=cli`), `kettle_show` also asks for a card under the
 call, keyed by the call's `_meta["claudecode/toolUseId"]`, never by anything in
-its arguments. Kettle gives one only to Claude Code as Anthropic signs it
-(on macOS, its running code validated against Anthropic's team and
-`com.anthropic.claude-code`), running in the very pane the item lands in, and
-that ran this server; anyone else's push goes to the shelf alone. Kettle
+its arguments. The caller must run this server in the pane receiving the
+item. macOS validates Anthropic's signature and `com.anthropic.claude-code`;
+Linux requires a [checked native launch](#linux-card-launches). Other callers
+keep shelf delivery. Kettle
 builds the card: a block of placeholder cells, a quarter of the pane's lines
 (three to eight) and as wide as the image's shape allows, then a caption of
 the file's sanitized name and its kind and size (kind and size alone for media
@@ -888,14 +888,13 @@ and registers at most four a second; a card retires when its harness exits,
 its pane closes, or its item leaves the shelf or is replaced. Its pixels stay
 the shelf's: a card keeps none alive, and an item whose card is on screen is
 not released, nor dropped from a full shelf while another item can go
-instead. On other platforms, and without the plugin, the shelf has the
-item and the result says so.
+instead. Without a supported launch and plugin, the shelf has the item and
+the result says so. Windows keeps shelf delivery.
 
 **Inline cards (Codex).** Launched by Kettle's Codex launch (with the hidden
 `--codex-card-hook`), `kettle_show` asks for a card keyed by the call's
-`_meta.callId`. Kettle gives one only to Codex as OpenAI signs it (on macOS,
-its running code validated against OpenAI's team and the identifier `codex`),
-under the same rules as Claude Code's: the same pane, the same limits, the
+`_meta.callId`. macOS validates OpenAI's signature and the identifier
+`codex`; Linux requires a checked launch. Both use Claude Code's limits: the same pane, the same limits, the
 same card. Codex prints the hook's message under the call after a `↳ Hook ·`
 line, its rows four columns in. The launch's own hook collects it once
 through `kettle_card`, which the server never lists; the launch enables it
@@ -1085,8 +1084,8 @@ with its arguments unchanged:
   says.
 
 Codex then sends media to the shelf of the pane it runs in. With Codex CLI
-0.162, whose hook output Kettle's cards are placed for, the launch on macOS
-also adds:
+0.162, whose hook output Kettle's cards are placed for, supported launches
+on macOS and Linux also add:
 - `--codex-card-hook` to the server, and `kettle_card` to its enabled tools;
 - a `PostToolUse` hook (`-c hooks.PostToolUse=…`) that, after each
   `kettle_show`, calls `kettle_card` with the call's `${tool_use_id}`, so the
@@ -1117,11 +1116,36 @@ Claude Code still write their usual history and session files, and that
 Claude Code keeps data for a plugin it loads: Kettle writes none of their
 settings or startup files, which is not the same as nothing written.
 
+### Linux card launches
+
+Linux cards use an explicit Kettle launch, not a vendor signature. Kettle
+holds the native executable, checks its running process and parent, and binds
+it to the pane's original process generation. Moving the tab keeps that
+binding; closing the agent or restarting its pane invalidates it. Codex's
+native install and `npm install -g @openai/codex` are supported; files a
+user's own private group may write (Ubuntu's default umask 002) count as the
+user's. Unknown
+versions, layouts and invocation forms keep shelf delivery.
+
+On Linux, Claude Code previews also offer a `claude` function in new zsh and
+fish panes. For another shell, review `kettle agent-setup --print --agent
+claude --shell bash`. It forwards arguments unchanged and respects the
+existing plugin policy. Print, background and unknown command forms get no
+card scope. The current card profiles are Codex 0.162 and native Claude Code
+2.1.280 or a later 2.1 release; these describe hook layouts, not vendor
+authenticity.
+
+The hook retrieves each card once through its own display connection with a
+five-second permit. Neither the permit nor card text enters the model's
+receipt, terminal diagnostics or screen reads. Launch housekeeping grants no
+screen reading or input control. macOS keeps its existing signature checks.
+
 ### Kettle defines it for you
 
 With `agent-display-codex` (Settings → Agents → Codex previews; off by
 default, and it needs agent previews), the zsh or fish a new pane starts
-defines the same function itself, so there is nothing to add:
+defines the same function itself, so there is nothing to add. On Linux,
+Claude Code previews independently enable the `claude` function too:
 - zsh: Kettle writes a `.zshenv`, read-only, into its own data directory
   (`~/Library/Application Support/kettle/agent-shell/codex-shell-<hash>` on
   macOS, `$XDG_DATA_HOME/kettle/agent-shell/` or `~/.local/share/kettle/agent-shell/`
@@ -1142,9 +1166,9 @@ define, or can autoload, still wins. In zsh the definition waits in
 `precmd_functions`, so a `.zshrc` that replaces that list outright gets no
 `codex` from Kettle. A system `zshenv` (`/etc/zshenv`, `/etc/zsh/zshenv`, or
 the `etc/zshenv` of the prefix zsh is installed under) runs before Kettle's
-file. One that names `ZDOTDIR` would find Kettle's directory there, and one
-that names the `RCS` option may stop zsh reading Kettle's file at all, so
-Kettle leaves that zsh alone, and `kettle agent-setup --status` names the
+file. One whose code names `ZDOTDIR` would find Kettle's directory there, and
+one that names the `RCS` option may stop zsh reading Kettle's file at all, so
+Kettle leaves that zsh alone (comment lines don't count), and `kettle agent-setup --status` names the
 file. Only the shell a pane starts gets it: your login shell, or a `zsh` or
 `fish` command with no arguments of its own, found the way the pane finds
 the shell it runs. Bash, a shell given arguments, and a shell started from the pane's

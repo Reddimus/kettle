@@ -44,6 +44,44 @@ fn clock_started(output: &mut Output) -> bool {
     true
 }
 
+/// Device timestamps can be temporarily unavailable across a queue transition.
+fn clock_within(
+    within: Duration,
+    mut poll: impl FnMut() -> Option<(f64, Instant)>,
+) -> Option<(f64, Instant)> {
+    let until = Instant::now() + within;
+    loop {
+        if let Some(clock) = poll() {
+            return Some(clock);
+        }
+        if Instant::now() >= until {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn a_delayed_clock_is_observed_without_inventing_one() {
+    let at = Instant::now();
+    let mut replies = [None, None, Some((17.0, at))].into_iter();
+    assert_eq!(
+        clock_within(Duration::from_secs(1), || replies.next().flatten()),
+        Some((17.0, at))
+    );
+    assert_eq!(clock_within(Duration::ZERO, || None), None);
+}
+
+fn clock(output: &mut Output, playing: bool, phase: &str) -> (f64, Instant) {
+    clock_within(Duration::from_secs(2), || {
+        if playing {
+            fill(output, BUFFER_FRAMES);
+        }
+        output.queued()
+    })
+    .unwrap_or_else(|| panic!("no {phase} clock within two seconds"))
+}
+
 /// Queue every free buffer with `frames` frames of silence; how many.
 fn fill(output: &mut Output, frames: usize) -> usize {
     let silence = vec![0f32; frames * CHANNELS];
@@ -74,7 +112,7 @@ fn the_output_s_clock_runs_while_it_plays() {
     for _ in 0..10 {
         std::thread::sleep(Duration::from_millis(30));
         fill(&mut output, BUFFER_FRAMES);
-        let (played, _) = output.queued().expect("a running clock");
+        let (played, _) = clock(&mut output, true, "running");
         assert!(played >= last, "{played} after {last}");
         last = played;
     }
@@ -82,9 +120,9 @@ fn the_output_s_clock_runs_while_it_plays() {
     assert!(last > 4_800.0, "{last} frames played");
     output.pause().unwrap();
     std::thread::sleep(Duration::from_millis(50));
-    let (held, _) = output.queued().expect("a paused clock");
+    let (held, _) = clock(&mut output, false, "paused");
     std::thread::sleep(Duration::from_millis(100));
-    let (still, _) = output.queued().expect("a paused clock");
+    let (still, _) = clock(&mut output, false, "paused");
     assert!(
         (still - held).abs() < 1.0,
         "{held} then {still} while paused"
@@ -94,7 +132,7 @@ fn the_output_s_clock_runs_while_it_plays() {
         std::thread::sleep(Duration::from_millis(30));
         fill(&mut output, BUFFER_FRAMES);
     }
-    let (resumed, _) = output.queued().expect("a running clock");
+    let (resumed, _) = clock(&mut output, true, "running");
     assert!(resumed > still + 2_400.0, "{resumed} after {still}");
 }
 
@@ -124,8 +162,9 @@ fn what_is_heard_is_what_the_queue_played_less_its_latency() {
     // Paused, so its clock holds between the two.
     output.pause().unwrap();
     std::thread::sleep(Duration::from_millis(50));
-    let (queued, _) = output.queued().expect("a paused clock");
-    let (heard, _) = output.played().expect("a paused clock");
+    let (queued, _) = clock(&mut output, false, "paused");
+    let (heard, _) = clock_within(Duration::from_secs(2), || output.played())
+        .expect("a paused presentation clock");
     let late = latency.as_secs_f64() * f64::from(SAMPLE_RATE);
     assert!(
         (heard - (queued - late)).abs() < 1.0,
