@@ -1170,6 +1170,12 @@ Two roles split cleanly across the bin and the GUI:
   kettle), and `kettle mcp` (the Model Context Protocol bridge that exposes both
   as native agent tools).
 
+`kettle mcp` reads capped input lines on a dedicated thread through a
+one-slot channel. The dispatcher monitors stdout while waiting for input,
+so a write stalled for 30 seconds also ends a connection with stdin open.
+On that failure it detaches blocked transport threads; the CLI exits with
+status 1.
+
 The surface is multi-window aware: `get_state` reports
 `{windows, focused_window}`; `list_tabs` / `list_panes` enumerate every
 window and tag each entry with its `window`; `--pane N` resolves across

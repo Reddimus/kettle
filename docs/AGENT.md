@@ -1256,6 +1256,9 @@ parent; Kettle creates it owner-only and never overwrites or follows an existing
 leaf. Omitting `path` uses Kettle's private diagnostics location and its stricter
 verified-ancestor policy.
 
+`kettle_run` accepts at most 512 columns and 512 rows (defaults 80 by 24).
+Oversized dimensions return a tool error before a PTY or terminal is created.
+
 `kettle mcp --self-test` runs an in-process handshake + `tools/list` + one
 `kettle_run`, for CI.
 

@@ -19,6 +19,7 @@ use kettle_media::FailureCode;
 const MAX_TOOL_TEXT_BYTES: usize = 512 * 1024;
 const MAX_COMMAND_ARGS: usize = 256;
 const MAX_COMMAND_ARG_BYTES: usize = 64 * 1024;
+const MAX_RUN_DIMENSION: u64 = 512;
 
 #[derive(Debug, Deserialize)]
 struct ToolCallParams {
@@ -189,8 +190,8 @@ fn full_tool_specs() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "command": {"type": "array", "items": {"type": "string"}, "description": "argv, e.g. [\"ls\",\"-la\"]"},
-                    "cols": {"type": "integer", "description": "terminal width (default 80)"},
-                    "rows": {"type": "integer", "description": "terminal height (default 24)"},
+                    "cols": {"type": "integer", "maximum": MAX_RUN_DIMENSION, "description": "terminal width (default 80)"},
+                    "rows": {"type": "integer", "maximum": MAX_RUN_DIMENSION, "description": "terminal height (default 24)"},
                     "cwd": {"type": "string", "description": "working directory (default: the MCP server's current directory)"},
                     "timeout_s": {"type": "number", "description": "kill + report timeout after N seconds"},
                     "strip_ansi": {"type": "boolean", "description": "strip ANSI escapes (default true)"}
@@ -1212,6 +1213,14 @@ fn validate_tool_arguments(name: &str, args: &Value) -> Result<(), String> {
         if !valid {
             return Err(format!("{name} argument '{key}' has the wrong type"));
         }
+        if name == "kettle_run"
+            && matches!(key.as_str(), "cols" | "rows")
+            && value.as_u64().is_some_and(|size| size > MAX_RUN_DIMENSION)
+        {
+            return Err(format!(
+                "kettle_run 'cols' and 'rows' must not exceed {MAX_RUN_DIMENSION}"
+            ));
+        }
     }
     Ok(())
 }
@@ -1685,6 +1694,40 @@ mod tests {
                 .unwrap()
                 .contains("unknown tool")
         );
+    }
+
+    #[test]
+    fn kettle_run_rejects_oversized_geometry_before_execution() {
+        let expected = "kettle_run 'cols' and 'rows' must not exceed 512";
+        for (cols, rows) in [
+            (513u64, 24),
+            (80, 513),
+            (65535, 65535),
+            (u64::MAX, 24),
+            (80, u64::MAX),
+        ] {
+            let args = json!({"command": ["echo", "ok"], "cols": cols, "rows": rows});
+            assert_eq!(
+                validate_tool_arguments("kettle_run", &args),
+                Err(expected.to_owned())
+            );
+            let result = call_tool(
+                ToolSelection::Full,
+                &json!({"name": "kettle_run", "arguments": args}),
+            );
+            assert_eq!(result["isError"], true);
+            assert_eq!(result["content"][0]["text"], expected);
+        }
+        assert!(validate_tool_arguments("kettle_run", &json!({})).is_ok());
+        assert!(validate_tool_arguments("kettle_run", &json!({"cols": 512, "rows": 512})).is_ok());
+        let specs = tool_specs(ToolSelection::Full);
+        let schema = &specs
+            .iter()
+            .find(|spec| spec["name"] == "kettle_run")
+            .unwrap()["inputSchema"]["properties"];
+        for field in ["cols", "rows"] {
+            assert_eq!(schema[field]["maximum"], 512);
+        }
     }
 
     #[test]

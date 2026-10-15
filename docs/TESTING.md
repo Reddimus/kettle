@@ -5331,6 +5331,10 @@ not in Kettle, and naming this Kettle and pane through the environment from
 outside lands unverified.
 #### `kettle mcp`
 
+`a_stalled_stdout_is_detected_while_stdin_stays_open` drives the transport
+with a blocked writer and keeps input open until the server returns. It uses
+the shortened unit-test stall limit; production remains 30 seconds.
+
 `kettle mcp --self-test` (in-process handshake +
 `tools/list` + one `kettle_run`). CI also runs
 `crates/kettle/tests/mcp_stdio.rs`, which spawns the real `kettle mcp`
@@ -5339,7 +5343,8 @@ Claude Code / Codex use when the server is registered as an MCP. Protocol
 tests must cover both supported revisions, the exact initialized
 notification, initialization-time ping, notification silence, malformed or
 unknown tool envelopes, encoded-response truncation, 1 MiB/768 KiB framing
-limits, queue saturation, duplicate ids, and cancellation. `kettle-ctl`
+limits, queue saturation, duplicate ids, and cancellation. Oversized run
+geometry must be rejected before terminal allocation. `kettle-ctl`
 loopback tests separately pin response deadlines, cancellation,
 authenticated peers, strict frame/id validation, concurrent activation,
 and preservation of events that precede a response. They also pin that a
