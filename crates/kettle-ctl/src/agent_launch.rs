@@ -4,6 +4,11 @@ use crate::show::InlineTarget;
 
 pub const CODEX_CARD_MINOR: u64 = 162;
 
+/// The first Claude Code release whose plugin and hook output Kettle's cards
+/// are placed for. Later 2.1 releases keep that layout, as on macOS; 2.2 and
+/// later are untested.
+pub const CLAUDE_CARD_FIRST: (u64, u64, u64) = (2, 1, 280);
+
 /// Whether the version output names a tested card-hook layout.
 pub fn card_version(target: InlineTarget, output: &str) -> bool {
     if output.len() > 128 {
@@ -11,29 +16,32 @@ pub fn card_version(target: InlineTarget, output: &str) -> bool {
     }
     let output = output.trim();
     match target {
-        InlineTarget::ClaudeHook => output == "2.1.280 (Claude Code)",
-        InlineTarget::CodexHook => {
-            let Some(version) = output.strip_prefix("codex-cli ") else {
-                return false;
-            };
-            let mut parts = version.split('.');
-            let mut part = || {
-                parts
-                    .next()
-                    .filter(|value| {
-                        !value.is_empty()
-                            && value.bytes().all(|byte| byte.is_ascii_digit())
-                            && (value.len() == 1 || !value.starts_with('0'))
-                    })
-                    .and_then(|value| value.parse::<u64>().ok())
-            };
-            let (major, minor, patch) = (part(), part(), part());
-            major == Some(0)
-                && minor == Some(CODEX_CARD_MINOR)
-                && patch.is_some()
-                && parts.next().is_none()
-        }
+        InlineTarget::ClaudeHook => output
+            .strip_suffix(" (Claude Code)")
+            .and_then(release)
+            .is_some_and(|(major, minor, patch)| {
+                (major, minor) == (CLAUDE_CARD_FIRST.0, CLAUDE_CARD_FIRST.1)
+                    && patch >= CLAUDE_CARD_FIRST.2
+            }),
+        InlineTarget::CodexHook => output
+            .strip_prefix("codex-cli ")
+            .and_then(release)
+            .is_some_and(|(major, minor, _)| major == 0 && minor == CODEX_CARD_MINOR),
     }
+}
+
+/// `major.minor.patch` in plain decimal without leading zeros, and nothing
+/// else.
+fn release(version: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = version.split('.').map(|value| {
+        (!value.is_empty()
+            && value.bytes().all(|byte| byte.is_ascii_digit())
+            && (value.len() == 1 || !value.starts_with('0')))
+        .then(|| value.parse::<u64>().ok())
+        .flatten()
+    });
+    let version = (parts.next()??, parts.next()??, parts.next()??);
+    parts.next().is_none().then_some(version)
 }
 
 /// A launch's immutable pane and ancestry binding. Moving its tab between
@@ -156,10 +164,12 @@ mod tests {
     fn card_profiles_accept_only_tested_hook_versions() {
         assert!(card_version(InlineTarget::CodexHook, "codex-cli 0.162.0\n"));
         assert!(card_version(InlineTarget::CodexHook, "codex-cli 0.162.7"));
-        assert!(card_version(
-            InlineTarget::ClaudeHook,
-            "2.1.280 (Claude Code)\n"
-        ));
+        for output in [
+            "2.1.280 (Claude Code)\n",
+            "2.1.300 (Claude Code)",
+        ] {
+            assert!(card_version(InlineTarget::ClaudeHook, output), "{output}");
+        }
         for output in [
             "codex-cli 0.161.0",
             "codex-cli 0.163.0",
@@ -176,8 +186,12 @@ mod tests {
         }
         for output in [
             "2.1.226 (Claude Code)",
-            "2.1.281 (Claude Code)",
+            "2.1.279 (Claude Code)",
+            "2.0.300 (Claude Code)",
+            "2.2.0 (Claude Code)",
             "3.1.280 (Claude Code)",
+            "2.1.0280 (Claude Code)",
+            "2.1.280.1 (Claude Code)",
             "2.1.280",
             "2.1.280 (other)",
             "2.1.280-dev (Claude Code)",

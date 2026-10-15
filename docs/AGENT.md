@@ -1130,7 +1130,8 @@ fish panes. For another shell, review `kettle agent-setup --print --agent
 claude --shell bash`. It forwards arguments unchanged and respects the
 existing plugin policy. Print, background and unknown command forms get no
 card scope. The current card profiles are Codex 0.162 and native Claude Code
-2.1.280; these describe hook layouts, not vendor authenticity.
+2.1.280 or a later 2.1 release; these describe hook layouts, not vendor
+authenticity.
 
 The hook retrieves each card once through its own display connection with a
 five-second permit. Neither the permit nor card text enters the model's
