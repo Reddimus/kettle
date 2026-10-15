@@ -136,6 +136,10 @@ pub struct Grid<T> {
     /// Maximum number of lines in history.
     max_scroll_limit: usize,
 
+    /// A resize budget, enforced only by the next history-producing scroll.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    history_limit_on_growth: Option<usize>,
+
     /// Number of document rows irreversibly removed before the current
     /// scrollback buffer.
     ///
@@ -153,6 +157,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         Grid {
             raw: Storage::with_capacity(lines, columns),
             max_scroll_limit,
+            history_limit_on_growth: None,
             display_offset: 0,
             saved_cursor: Cursor::default(),
             cursor: Cursor::default(),
@@ -176,6 +181,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
 
     /// Update the size of the scrollback history.
     pub fn update_history(&mut self, history_size: usize) {
+        self.history_limit_on_growth = None;
         let current_history_size = self.history_size();
         if current_history_size > history_size {
             let removed = current_history_size - history_size;
@@ -184,6 +190,12 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         }
         self.display_offset = min(self.display_offset, history_size);
         self.max_scroll_limit = history_size;
+    }
+
+    /// Preserve history through resize, then apply the limit on new output.
+    pub fn update_history_on_growth(&mut self, history_size: usize) {
+        self.max_scroll_limit = max(self.max_scroll_limit, history_size);
+        self.history_limit_on_growth = Some(history_size);
     }
 
     pub fn scroll_display(&mut self, scroll: Scroll) {
@@ -291,6 +303,13 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             }
 
             return;
+        }
+
+        if region.start == 0
+            && positions != 0
+            && let Some(limit) = self.history_limit_on_growth.take()
+        {
+            self.update_history(limit);
         }
 
         // Update display offset when not pinned to active area.

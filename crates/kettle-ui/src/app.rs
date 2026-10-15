@@ -40322,6 +40322,9 @@ impl App {
                 .panes
                 .values()
                 .any(|p| p.term.has_running_animation());
+        let term_anim_finished = std::mem::replace(&mut ws.term_animation_active, term_anim)
+            && !term_anim
+            && !render_hidden;
         // An animated background (a starfield, or a GIF/APNG/WebP image) wakes
         // at its OWN frame rate, not a fixed 30 fps, at which an 8 fps GIF
         // would repaint the same frame ~22×/s (wasted present()s).
@@ -40452,6 +40455,7 @@ impl App {
         if (bell_active
             || blink_due
             || term_anim
+            || term_anim_finished
             || bg_frame_due
             || autoscroll_active
             || coalesce_due

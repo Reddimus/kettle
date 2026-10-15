@@ -269,8 +269,13 @@ impl Default for AnimationState {
 ///   never loops — it holds on the last frame waiting for more frames.
 /// - No displayable frame ⇒ hold on `current`.
 pub fn current_frame(gaps: &[i32], st: &AnimationState, elapsed_ms: u128) -> usize {
+    playback_state(gaps, st, elapsed_ms).0
+}
+
+/// Current frame index and whether a later frame transition remains.
+pub fn playback_state(gaps: &[i32], st: &AnimationState, elapsed_ms: u128) -> (usize, bool) {
     if gaps.is_empty() {
-        return 0;
+        return (0, false);
     }
     let clamp_current = || (st.current.max(1) as usize - 1).min(gaps.len() - 1);
     // Two passes over `gaps` instead of collecting the displayable frames into
@@ -281,29 +286,39 @@ pub fn current_frame(gaps: &[i32], st: &AnimationState, elapsed_ms: u128) -> usi
     // displayable when its gap is `> 0` (kitty `graphics-protocol.rst:909`).
     let mut total: u128 = 0;
     let mut last_shown: Option<usize> = None;
+    let mut shown_count = 0usize;
     for (i, &g) in gaps.iter().enumerate() {
         if g > 0 {
             total += g as u128;
             last_shown = Some(i);
+            shown_count += 1;
         }
     }
     if !st.running {
-        return clamp_current();
+        return (clamp_current(), false);
     }
     // No displayable frame ⇒ hold on `current`. Past this `let`, `last_shown` is
     // set and `total >= 1` (every counted frame contributed `g >= 1`).
     let Some(last_shown) = last_shown else {
-        return clamp_current();
+        return (clamp_current(), false);
     };
     // Finite, non-loading loop count: freeze on the last shown frame once all
     // passes have elapsed.
     if !st.loading && st.loops > 0 && elapsed_ms >= total * st.loops as u128 {
-        return last_shown;
+        return (last_shown, false);
     }
     // Loading mode never loops: hold the last shown frame at/after the end.
     if st.loading && elapsed_ms >= total {
-        return last_shown;
+        return (last_shown, false);
     }
+    let advancing = shown_count > 1
+        && if st.loading {
+            elapsed_ms < total - gaps[last_shown] as u128
+        } else if st.loops > 0 {
+            elapsed_ms < total * st.loops as u128 - gaps[last_shown] as u128
+        } else {
+            true
+        };
     let mut t = elapsed_ms % total;
     for (idx, &g) in gaps.iter().enumerate() {
         if g <= 0 {
@@ -311,11 +326,11 @@ pub fn current_frame(gaps: &[i32], st: &AnimationState, elapsed_ms: u128) -> usi
         }
         let g = g as u128;
         if t < g {
-            return idx;
+            return (idx, advancing);
         }
         t -= g;
     }
-    last_shown
+    (last_shown, advancing)
 }
 
 /// A capability-query result with fixed messages and an echoed numeric id.
@@ -2503,6 +2518,30 @@ mod tests {
             })
         ));
         assert!(k.image(3).is_none());
+    }
+
+    #[test]
+    fn playback_reports_remaining_transitions() {
+        let mut state = AnimationState {
+            running: true,
+            loops: 2,
+            ..Default::default()
+        };
+        let gaps = [100, 200, -1];
+        assert_eq!(playback_state(&gaps, &state, 399), (0, true));
+        assert_eq!(playback_state(&gaps, &state, 400), (1, false));
+        assert_eq!(playback_state(&gaps, &state, 600), (1, false));
+        state.loading = true;
+        assert_eq!(playback_state(&gaps, &state, 99), (0, true));
+        assert_eq!(playback_state(&gaps, &state, 100), (1, false));
+        state.loading = false;
+        state.loops = 0;
+        assert_eq!(playback_state(&gaps, &state, 600), (0, true));
+        assert_eq!(playback_state(&[0, 100, 0], &state, 600), (1, false));
+        assert_eq!(playback_state(&[0, -1], &state, 600), (0, false));
+        state.running = false;
+        state.current = 2;
+        assert_eq!(playback_state(&gaps, &state, 0), (1, false));
     }
 
     #[test]

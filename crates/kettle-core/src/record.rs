@@ -1494,9 +1494,43 @@ mod tests {
     /// invisible for exactly as long, defeating the visible-failure design.
     #[test]
     fn timed_flush_runs_while_a_producer_keeps_writing() {
+        use std::sync::mpsc::{Receiver, Sender, channel};
+
+        struct GatedSink {
+            sink: ControlledSink,
+            entered: Sender<()>,
+            resume: Receiver<()>,
+            gated: bool,
+        }
+
+        impl std::io::Write for GatedSink {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                let written = self.sink.write(bytes)?;
+                if self.gated {
+                    self.entered.send(()).map_err(std::io::Error::other)?;
+                    self.resume
+                        .recv_timeout(Duration::from_secs(2))
+                        .map_err(std::io::Error::other)?;
+                }
+                Ok(written)
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.gated = true;
+                self.sink.flush()
+            }
+        }
+
         let sink = ControlledSink::new();
+        let (entered_tx, entered_rx) = channel();
+        let (resume_tx, resume_rx) = channel();
         let mut recorder = Recorder::start_with_test_writer(
-            Box::new(sink.clone()),
+            Box::new(GatedSink {
+                sink: sink.clone(),
+                entered: entered_tx,
+                resume: resume_rx,
+                gated: false,
+            }),
             80,
             24,
             false,
@@ -1504,19 +1538,30 @@ mod tests {
             PersistenceLimits::default(),
         )
         .unwrap();
+        let startup_flushes = sink.flushes();
+        let wait_for_write = || {
+            entered_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("persistence worker never entered the gated write");
+        };
 
-        // Write continuously for longer than the flush interval, without ever
-        // letting the queue go idle.
-        let deadline = Instant::now() + crate::persistence::DEFAULT_FLUSH_INTERVAL * 3;
-        while Instant::now() < deadline {
-            recorder.record_output(b"sustained output");
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        recorder.record_output(b"first");
+        wait_for_write();
+        recorder.record_output(b"second");
+        resume_tx.send(()).unwrap();
+        wait_for_write();
+        recorder.record_output(b"third");
+        // The first write made the worker dirty, and the third stays queued
+        // while the second write holds the worker across its flush deadline.
+        std::thread::sleep(crate::persistence::DEFAULT_FLUSH_INTERVAL * 2);
+        resume_tx.send(()).unwrap();
+        wait_for_write();
         let flushes_while_busy = sink.flushes();
+        resume_tx.send(()).unwrap();
 
         recorder.finish();
         assert!(
-            flushes_while_busy > 0,
+            flushes_while_busy > startup_flushes,
             "the worker never flushed while output kept arriving; \
              a busy producer starves the {:?} bound",
             crate::persistence::DEFAULT_FLUSH_INTERVAL

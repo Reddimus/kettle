@@ -1300,13 +1300,16 @@ fn poll_timeout_ms_until(deadline: std::time::Instant) -> i32 {
 #[cfg(unix)]
 fn wait_for_master_until(master_fd: RawFd, deadline: std::time::Instant) -> io::Result<bool> {
     loop {
+        if std::time::Instant::now() >= deadline {
+            return Ok(false);
+        }
         let mut fd = libc::pollfd {
             fd: master_fd,
             events: libc::POLLIN,
             revents: 0,
         };
         let result = unsafe { libc::poll(&mut fd, 1, poll_timeout_ms_until(deadline)) };
-        if result == 0 {
+        if result == 0 || std::time::Instant::now() >= deadline {
             return Ok(false);
         }
         if result > 0 {
@@ -4255,8 +4258,8 @@ fn commit_local_geometry_inner(
     };
     let grid_resized = grid_options.is_some();
     if let Some(options) = grid_options {
+        term.set_options_preserving_history(options);
         term.resize(TermSize::new(desired.columns, desired.rows));
-        term.set_options(options);
     }
     {
         let mut geometry = geometry
@@ -4851,6 +4854,42 @@ mod local_output_tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         false
+    }
+
+    #[test]
+    fn virtual_and_relative_placements_use_the_selected_animation_frame() {
+        let script = concat!(
+            r"printf '\033_Ga=T,i=7,p=1,q=2,f=24,s=1,v=1,C=1;AAAA\033\\",
+            r"\033_Ga=p,i=7,p=2,q=2,U=1,c=1,r=1\033\\",
+            r"\033_Ga=p,i=7,p=3,q=2,P=7,Q=1,H=1,V=1\033\\",
+            r"\033_Ga=f,i=7,q=2,f=24,s=1,v=1;/wAA\033\\",
+            r"\033_Ga=a,i=7,q=2,c=2,s=1\033\\",
+            r"\033[38;5;7m\364\216\273\256\033[0mREADY'; exec sleep 10",
+        );
+        let argv = ["/bin/sh".to_string(), "-c".to_string(), script.to_string()];
+        let (terminal, events) = spawn_terminal(&argv).expect("test PTY");
+        assert!(wait_for(&terminal, &events, |_, text| text.contains("READY")));
+
+        let physical = terminal.placements();
+        let tiles = terminal.placeholder_tiles();
+        let relatives = terminal.relative_tiles();
+        assert_eq!(physical.len(), 1);
+        assert_eq!(tiles.len(), 1);
+        assert_eq!(relatives.len(), 1);
+        let selected = terminal.anims.lock().unwrap()[&7].imgs[1].clone();
+        for placement in [&physical[0], &tiles[0], &relatives[0]] {
+            assert_eq!(placement.img.rgba.as_slice(), &[255, 0, 0, 255]);
+            assert_eq!(placement.img.allocation_key(), selected.allocation_key());
+        }
+        assert_eq!(
+            tiles[0].source_rect,
+            Some(ImageSourceRect {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+            })
+        );
     }
 
     #[test]
@@ -6409,39 +6448,6 @@ fn effective_scrollback_lines(
     let visible_bytes = line_bytes.saturating_mul(screen_lines.max(1));
     let byte_lines = configured_bytes.saturating_sub(visible_bytes) / line_bytes;
     configured_lines.min(byte_lines)
-}
-
-/// The scrollback cap a pane should carry after a geometry change.
-///
-/// Monotonic for the life of the pane: it can rise, never fall.
-///
-/// [`effective_scrollback_lines`] turns the byte budget into a line count by
-/// dividing it by a worst-case per-row cost at the CURRENT column count, so a
-/// wider pane yields a smaller number. Feeding that straight back to the grid
-/// meant every widen handed `Grid::update_history` a lower limit, and it trims
-/// from the oldest end — immediately, and with no way to get those rows back.
-/// Four ordinary gestures reached it: dragging a window wider (each
-/// intermediate width applying its own cap), decrease-font, closing a sibling
-/// split, and un-zooming.
-///
-/// Nothing about a resize means the user wants less history, so a resize must
-/// not be how the budget is enforced. Every other terminal bounds scrollback in
-/// LINES and none of them evicts on widening; the one with a real byte budget
-/// (Ghostty) trims from the oldest end as new output arrives, which is a
-/// property of growth rather than of geometry.
-fn scrollback_cap_after_resize(
-    current: usize,
-    configured_lines: usize,
-    configured_bytes: usize,
-    columns: usize,
-    screen_lines: usize,
-) -> usize {
-    current.max(effective_scrollback_lines(
-        configured_lines,
-        configured_bytes,
-        columns,
-        screen_lines,
-    ))
 }
 
 fn reported_current_dir(osc_cwd_seen: bool, cwd: Option<String>) -> Option<String> {
@@ -8747,25 +8753,38 @@ impl Terminal {
         true
     }
 
+    fn resolve_animation_frames<'a>(
+        &self,
+        images: impl IntoIterator<Item = (Option<u32>, &'a mut crate::ImageData)>,
+    ) {
+        if let Ok(animations) = self.anims.lock()
+            && !animations.is_empty()
+        {
+            for (id, image) in images {
+                if let Some(id) = id
+                    && let Some(entry) = animations.get(&id)
+                    && let Some(frame) = entry.current()
+                {
+                    *image = frame.clone();
+                }
+            }
+        }
+    }
+
     /// Image placements for this terminal (cloned cheaply; `ImageData` is
     /// `Arc`-backed). For placements whose kitty id has a registered
     /// animation, the image is swapped for the frame the playback clock
     /// selects right now, so animations play wherever the image sits.
     pub fn placements(&self) -> Vec<Placement> {
         let mut v = self.images.lock().map(|v| v.clone()).unwrap_or_default();
-        if let Ok(am) = self.anims.lock()
-            && !am.is_empty()
-        {
-            for p in &mut v {
-                if let Some(id) = p.id
-                    && let Some(e) = am.get(&id)
-                    && let Some(frame) = e.current()
-                {
-                    p.img = frame.clone();
-                }
-            }
-        }
+        self.apply_animation_frames(&mut v);
         v
+    }
+
+    /// Swap each placement's image for the frame its animation's playback
+    /// clock selects now, wherever and however it is placed.
+    fn apply_animation_frames(&self, placements: &mut [Placement]) {
+        self.resolve_animation_frames(placements.iter_mut().map(|p| (p.id, &mut p.img)));
     }
 
     /// `true` if any registered kitty animation is currently running (so the
@@ -8773,13 +8792,15 @@ impl Terminal {
     pub fn has_running_animation(&self) -> bool {
         self.anims
             .lock()
-            // Require a DISPLAYABLE frame, not just the running flag. With
-            // all-zero gaps current_frame never advances, so a bare `running`
-            // check would schedule a ~30fps redraw forever for an animation
-            // that can never change.
-            .map(|am| {
-                am.values()
-                    .any(|e| e.state.running && e.gaps.iter().any(|&g| g > 0))
+            .map(|animations| {
+                animations.values().any(|entry| {
+                    kettle_vt::kitty::playback_state(
+                        &entry.gaps,
+                        &entry.state,
+                        entry.started.elapsed().as_millis(),
+                    )
+                    .1
+                })
             })
             .unwrap_or(false)
     }
@@ -8910,9 +8931,14 @@ impl Terminal {
         // kitty virtual placement; `placeholder_cells` walks the whole visible
         // grid under the `term` lock, so testing `virtuals` afterwards would pay
         // for a full scan of every pane on every frame to reach an empty map.
-        let Some((virtuals, smallest_for_image)) = self.virtuals_snapshot() else {
+        let Some((mut virtuals, smallest_for_image)) = self.virtuals_snapshot() else {
             return Vec::new();
         };
+        self.resolve_animation_frames(
+            virtuals
+                .iter_mut()
+                .map(|(&(id, _), entry)| (Some(id), &mut entry.img)),
+        );
 
         let cells = self.placeholder_cells();
         if cells.is_empty() {
@@ -8939,6 +8965,7 @@ impl Terminal {
                 }
             }
         }
+        self.apply_animation_frames(&mut out);
         out
     }
 
@@ -8950,7 +8977,7 @@ impl Terminal {
     pub fn relative_tiles(&self) -> Vec<Placement> {
         // Snapshot the relatives, then drop the lock before taking the
         // grid / images locks (keeps a single lock-acquisition order).
-        let entries: Vec<(u32, u32, RelEntry)> = {
+        let mut entries: Vec<(u32, u32, RelEntry)> = {
             let Ok(rel) = self.relatives.lock() else {
                 return Vec::new();
             };
@@ -8965,6 +8992,11 @@ impl Terminal {
             entries.truncate(kettle_vt::GraphicsLimits::default().placements);
             entries
         };
+        self.resolve_animation_frames(
+            entries
+                .iter_mut()
+                .map(|(id, _, entry)| (Some(*id), &mut entry.img)),
+        );
         // Snapshot visible placeholder origins and exact grid/pixel geometry
         // under the same Term -> geometry order used by resize and insertion.
         // A concurrent DPI reflow therefore cannot pair pre-resize origins
@@ -9022,6 +9054,7 @@ impl Terminal {
                 z: e.z,
             });
         }
+        self.apply_animation_frames(&mut out);
         out
     }
 
@@ -9112,12 +9145,8 @@ impl Terminal {
     /// Apply an edited `scrollback` / `scrollback-bytes` budget to a pane that
     /// is already running. Returns whether the effective cap moved.
     ///
-    /// Deliberately not the resize rule. A resize must never lower the cap —
-    /// nothing about dragging a window wider means the user wants less history,
-    /// and `Grid::update_history` enforces a lowered limit by discarding the
-    /// oldest rows immediately and irreversibly. Editing the setting is the
-    /// opposite: it is the user saying exactly that, so a decrease is honored
-    /// here and only here.
+    /// Unlike resize, an edited budget may discard old history immediately.
+    /// Resize defers a lower limit until the next history-producing scroll.
     ///
     /// A config reload calls this, whether the edit came from the config file
     /// or the Settings overlay's two scrollback rows, so running panes pick up
@@ -9166,22 +9195,6 @@ impl Terminal {
             return Ok(());
         }
 
-        let native_result = if resize_native {
-            self.master
-                .as_ref()
-                .map_or(Ok(()), |master| master.resize(native_pty_size(desired)))
-                .context("native pseudoterminal resize")
-        } else {
-            Ok(())
-        };
-        self.record_startup_resize(desired, resize_native, &native_result);
-        if native_result.is_ok() {
-            // On Windows a pixel-only update deliberately skips
-            // ResizePseudoConsole; recording the desired pixels here is safe
-            // because future native comparisons ignore them on that platform.
-            self.applied_pty_geometry = desired;
-        }
-
         // Graphics chunks take this gate before observing Term -> geometry.
         // Taking it before the local grid commit makes reflow invalidation and
         // placement insertion a single ordered operation.
@@ -9190,15 +9203,7 @@ impl Terminal {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let grid_options = if grid_changed {
-            // The cap only ever RISES for the life of a pane. A wider pane
-            // yields a smaller byte-derived cap, and `Grid::update_history`
-            // enforces a lower limit by trimming the oldest rows, immediately
-            // and irreversibly. `scrollback_cap_after_resize` lists the gestures
-            // that widen a pane and why a resize never enforces the budget.
-            // The worst case is the budget measured at the width the history
-            // accumulated at. It is bounded, and only a user who widened pays it.
-            self.term_config.scrolling_history = scrollback_cap_after_resize(
-                self.term_config.scrolling_history,
+            self.term_config.scrolling_history = effective_scrollback_lines(
                 self.scrollback_line_limit,
                 self.scrollback_byte_limit,
                 desired.columns,
@@ -9244,6 +9249,24 @@ impl Terminal {
         }
         self.cols = desired.columns;
         self.rows = desired.rows;
+        drop(_graphics_guard);
+
+        let native_result = if resize_native {
+            self.master
+                .as_ref()
+                .map_or(Ok(()), |master| master.resize(native_pty_size(desired)))
+                .context("native pseudoterminal resize")
+        } else {
+            Ok(())
+        };
+        self.record_startup_resize(desired, resize_native, &native_result);
+        if native_result.is_ok() {
+            // On Windows a pixel-only update deliberately skips
+            // ResizePseudoConsole; recording the desired pixels here is safe
+            // because future native comparisons ignore them on that platform.
+            self.applied_pty_geometry = desired;
+        }
+
         native_result
     }
 
@@ -10469,6 +10492,12 @@ impl AnsiStripper {
             if self.utf8_continuation > 0 {
                 if matches!(b, 0x80..=0xbf) {
                     self.utf8_continuation -= 1;
+                    if !matches!(self.state, StripState::Plain) {
+                        self.control_bytes += 1;
+                        if self.control_bytes > MAX_LOGGED_CONTROL_SEQUENCE_BYTES {
+                            self.state = StripState::Plain;
+                        }
+                    }
                     if self.utf8_emitted {
                         out.push(b);
                     }
@@ -10486,7 +10515,9 @@ impl AnsiStripper {
                 _ => 0,
             };
             self.utf8_emitted = matches!(self.state, StripState::Plain);
-            if !matches!(self.state, StripState::Plain) {
+            if b == 0x1b {
+                self.control_bytes = 0;
+            } else if !matches!(self.state, StripState::Plain) {
                 self.control_bytes += 1;
                 if self.control_bytes > MAX_LOGGED_CONTROL_SEQUENCE_BYTES {
                     // Give up on the terminator and resume logging. The byte
@@ -12450,6 +12481,27 @@ mod home_dir_tests {
         }
     }
 
+    #[test]
+    fn utf8_continuations_count_toward_log_recovery_bound() {
+        let limit = super::MAX_LOGGED_CONTROL_SEQUENCE_BYTES;
+        for remaining in 0..4 {
+            let mut input = b"\x1b]0;".to_vec();
+            input.extend(std::iter::repeat_n(b'x', limit - 3 - remaining));
+            let scalar_start = input.len();
+            input.extend_from_slice(b"\xf0\x9c\x80\x80visible");
+            for split in scalar_start..=scalar_start + 4 {
+                let mut filter = super::SessionLogFilter::default();
+                let mut out = filter.filter(&input[..split], 1, true);
+                out.extend(filter.filter(&input[split..], 1, true));
+                assert_eq!(
+                    std::str::from_utf8(&out),
+                    Ok("visible"),
+                    "remaining={remaining}, split={split}"
+                );
+            }
+        }
+    }
+
     /// The bound is per sequence, not per stream.
     ///
     /// Two long-but-well-formed sequences must both be stripped whole. If the
@@ -12471,6 +12523,23 @@ mod home_dir_tests {
             "betweenend",
             "the second sequence must get its own budget"
         );
+    }
+
+    #[test]
+    fn restarted_osc_gets_a_fresh_log_stripping_budget() {
+        let limit = super::MAX_LOGGED_CONTROL_SEQUENCE_BYTES;
+        for payload_len in [limit - 6, limit - 3] {
+            let mut input = b"\x1b]0;".to_vec();
+            input.extend(std::iter::repeat_n(b'x', payload_len));
+            let restart = input.len();
+            input.extend_from_slice(b"\x1b]0;secret\x07visible");
+            for split in [0, restart, restart + 1, restart + 2, input.len()] {
+                let mut filter = super::SessionLogFilter::default();
+                let mut out = filter.filter(&input[..split], 1, true);
+                out.extend(filter.filter(&input[split..], 1, true));
+                assert_eq!(out, b"visible", "payload_len={payload_len}, split={split}");
+            }
+        }
     }
 
     /// A CSI/OSC sequence whose terminator lands in the next PTY-read chunk
@@ -14482,6 +14551,88 @@ mod conformance {
 mod teardown_tests {
 
     #[cfg(unix)]
+    #[test]
+    fn native_resize_observes_committed_geometry_and_failure_is_retryable() {
+        struct ResizeProbe {
+            master: Box<dyn portable_pty::MasterPty + Send>,
+            term: SharedTerm,
+            geometry: Arc<Mutex<VersionedPtyGeometry>>,
+            reflow: Arc<AtomicU64>,
+            fail: AtomicBool,
+        }
+
+        impl portable_pty::MasterPty for ResizeProbe {
+            fn resize(&self, size: PtySize) -> Result<()> {
+                let (cols, rows, geometry, _) = local_geometry_snapshot(&self.term, &self.geometry);
+                assert_eq!((cols, rows), (size.cols as usize, size.rows as usize));
+                assert_eq!(native_pty_size(geometry), size);
+                assert_eq!(self.reflow.load(Ordering::Acquire), 1);
+                if self.fail.swap(false, Ordering::AcqRel) {
+                    return Err(anyhow::anyhow!("injected resize failure"));
+                }
+                self.master.resize(size)
+            }
+
+            fn get_size(&self) -> Result<PtySize> {
+                self.master.get_size()
+            }
+
+            fn try_clone_reader(&self) -> Result<Box<dyn Read + Send>> {
+                self.master.try_clone_reader()
+            }
+
+            fn take_writer(&self) -> Result<Box<dyn Write + Send>> {
+                self.master.take_writer()
+            }
+
+            fn process_group_leader(&self) -> Option<libc::pid_t> {
+                self.master.process_group_leader()
+            }
+
+            fn as_raw_fd(&self) -> Option<RawFd> {
+                self.master.as_raw_fd()
+            }
+
+            fn tty_name(&self) -> Option<std::path::PathBuf> {
+                self.master.tty_name()
+            }
+        }
+
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut terminal = Terminal::new(
+            &["/bin/sh".into(), "-c".into(), "read ready".into()],
+            None,
+            100,
+            80,
+            24,
+            8,
+            16,
+            false,
+            CursorShape::Block,
+            None,
+            tx,
+            Arc::new(|| {}),
+        )
+        .expect("resize fixture");
+        let applied = terminal.applied_pty_geometry;
+        let desired = PtyGeometry::new(120, 24, 960, 384);
+        terminal.master = Some(Box::new(ResizeProbe {
+            master: terminal.master.take().unwrap(),
+            term: terminal.term.clone(),
+            geometry: terminal.geometry.clone(),
+            reflow: terminal.graphics_reflow_generation.clone(),
+            fail: AtomicBool::new(true),
+        }));
+
+        assert!(terminal.try_resize_geometry(desired).is_err());
+        assert_eq!(terminal.applied_pty_geometry, applied);
+        assert_eq!(terminal.geometry.lock().unwrap().geometry, desired);
+        assert_eq!((terminal.cols, terminal.rows), (120, 24));
+        terminal.try_resize_geometry(desired).unwrap();
+        assert_eq!(terminal.applied_pty_geometry, desired);
+    }
+
+    #[cfg(unix)]
     fn animation_graphics_ack_roundtrip(synchronized: bool) {
         use super::{CursorShape, TermEvent, Terminal};
         use std::sync::Arc;
@@ -14576,6 +14727,60 @@ mod teardown_tests {
 
     use super::*;
     use std::time::Duration;
+
+    #[cfg(unix)]
+    #[test]
+    fn completed_and_loading_animations_stop_requesting_redraws() {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let terminal = Terminal::new(
+            &["/bin/sh".into(), "-c".into(), "read ready".into()],
+            None,
+            100,
+            80,
+            24,
+            8,
+            16,
+            false,
+            CursorShape::Block,
+            None,
+            tx,
+            Arc::new(|| {}),
+        )
+        .expect("animation clock fixture");
+        let root = crate::ImageData::new(1, 1, vec![1, 0, 0, 255]).unwrap();
+        let last = crate::ImageData::new(1, 1, vec![2, 0, 0, 255]).unwrap();
+        for (loading, loops, elapsed, gaps, expected) in [
+            (false, 1, 0, vec![1000, 1000], true),
+            (false, 1, 10, vec![1000, 1000], false),
+            (true, 0, 0, vec![1000, 1000], true),
+            (true, 0, 10, vec![1000, 1000], false),
+            (false, 0, 10, vec![1000, 1000], true),
+            (false, 0, 0, vec![0, 1000], false),
+            (false, 0, 0, vec![0, 0], false),
+        ] {
+            terminal.anims.lock().unwrap().insert(
+                1,
+                AnimEntry {
+                    imgs: vec![root.clone(), last.clone()],
+                    gaps,
+                    state: kettle_vt::kitty::AnimationState {
+                        running: true,
+                        loading,
+                        loops,
+                        ..Default::default()
+                    },
+                    started: std::time::Instant::now() - Duration::from_secs(elapsed),
+                },
+            );
+            assert_eq!(terminal.has_running_animation(), expected);
+            if elapsed == 10 && (loading || loops > 0) {
+                assert_eq!(
+                    terminal.anims.lock().unwrap()[&1].current().unwrap().rgba[0],
+                    2
+                );
+            }
+        }
+    }
 
     /// The OSC 133 prompt-mark ring must (a) dedup against
     /// the most-recent mark, (b) preserve insertion order, and (c) cap at
@@ -14706,116 +14911,50 @@ mod teardown_tests {
         assert!(ring.is_empty());
     }
 
-    /// Resizing a pane must never lower its scrollback cap.
-    ///
-    /// The cap is derived by dividing the byte budget by a worst-case per-row
-    /// cost at the current width, so it falls as a pane widens — and the grid
-    /// enforces a lowered cap by discarding the oldest rows, permanently.
+    #[cfg(unix)]
     #[test]
-    fn widening_a_pane_never_lowers_its_scrollback_cap() {
-        const LINES: usize = 10_000;
-        const BYTES: usize = 10_000_000;
-        const ROWS: usize = 28;
-        let widths = [77usize, 126, 190, 241, 126, 77];
-
-        // Precondition: the underlying computation really does shrink across
-        // this walk. Without it the monotonic wrapper would have nothing to
-        // do and this test would pass on a machine where `Cell` was small
-        // enough that the budget never binds.
-        let raw: Vec<usize> = widths
-            .iter()
-            .map(|&columns| effective_scrollback_lines(LINES, BYTES, columns, ROWS))
-            .collect();
-        assert!(
-            raw[0] > raw[3],
-            "fixture must exercise a shrinking cap: {raw:?}"
-        );
-        assert!(
-            raw[3] < raw[5],
-            "and it must recover on narrowing, or the round-trip proves nothing"
-        );
-
-        let mut cap = raw[0];
-        let start = cap;
-        let mut seen = vec![cap];
-        for &columns in &widths[1..] {
-            let next = scrollback_cap_after_resize(cap, LINES, BYTES, columns, ROWS);
-            assert!(
-                next >= cap,
-                "cap fell from {cap} to {next} at {columns} columns — a resize \
-                 must never discard history"
+    fn output_after_widening_reapplies_the_scrollback_byte_budget() {
+        for retained in [0, 20] {
+            let (tx, _rx) = crossbeam_channel::unbounded();
+            let mut terminal = Terminal::new(
+                &["/bin/sh".into(), "-c".into(), "read ready".into()],
+                None,
+                1000,
+                20,
+                24,
+                8,
+                16,
+                false,
+                CursorShape::Block,
+                None,
+                tx,
+                Arc::new(|| {}),
+            )
+            .expect("scrollback budget fixture");
+            let bytes = scrollback_line_bytes(120) * (24 + 8);
+            terminal.set_scrollback_limits(usize::MAX, bytes);
+            assert!(terminal.term_config.scrolling_history > 20);
+            let mut processor: Processor = Processor::new();
+            if retained != 0 {
+                processor.advance(
+                    &mut *terminal.term.lock().unwrap(),
+                    "\r\n".repeat(24 + retained).as_bytes(),
+                );
+            }
+            let history_before = terminal.term.lock().unwrap().grid().history_size();
+            terminal
+                .try_resize_geometry(PtyGeometry::new(120, 24, 960, 384))
+                .unwrap();
+            assert_eq!(
+                terminal.term.lock().unwrap().grid().history_size(),
+                history_before,
+                "resize must preserve existing history"
             );
-            cap = next;
-            seen.push(cap);
+            let mut term = terminal.term.lock().unwrap();
+            processor.advance(&mut *term, b"\x1b[24;1H");
+            processor.advance(&mut *term, "\r\n".repeat(16).as_bytes());
+            assert_eq!(term.grid().history_size(), 8);
         }
-        assert_eq!(
-            cap, start,
-            "a round trip back to the starting width must leave the cap where \
-             it began, not where the widest step left it: {seen:?}"
-        );
-
-        // A genuinely larger allowance still raises the ceiling — the cap is
-        // monotonic, not frozen.
-        let narrower = scrollback_cap_after_resize(cap, LINES, BYTES, 40, ROWS);
-        assert!(
-            narrower > cap,
-            "narrowing past the starting width must be allowed to raise the \
-             cap ({cap} -> {narrower})"
-        );
-    }
-
-    /// The other half of that rule. A resize must never lower the cap, but
-    /// *editing the setting* is the user asking for exactly that, so the two
-    /// paths have to disagree. The edit path must also reach panes that are
-    /// already open, or the Settings overlay's two scrollback rows change
-    /// nothing visible.
-    #[test]
-    fn an_edited_scrollback_setting_may_lower_a_cap_a_resize_could_not() {
-        const BYTES: usize = 10_000_000;
-        const COLUMNS: usize = 100;
-        const ROWS: usize = 28;
-
-        let generous = effective_scrollback_lines(10_000, BYTES, COLUMNS, ROWS);
-        let meagre = effective_scrollback_lines(500, BYTES, COLUMNS, ROWS);
-        // Precondition: the two settings must actually differ at this geometry,
-        // or neither direction below proves anything.
-        assert!(
-            meagre < generous,
-            "fixture must span a real decrease ({generous} -> {meagre})"
-        );
-
-        // A resize refuses to carry the decrease...
-        assert_eq!(
-            scrollback_cap_after_resize(generous, 500, BYTES, COLUMNS, ROWS),
-            generous,
-            "a resize must never enact a lower cap, whatever the settings say"
-        );
-        // ...while `set_scrollback_limits` computes the same lower number the
-        // resize path declined to apply, and applies it.
-        assert_eq!(
-            effective_scrollback_lines(500, BYTES, COLUMNS, ROWS),
-            meagre,
-            "the edit path's arithmetic is the shared helper, not a second copy"
-        );
-
-        // And the setter is wired to that helper rather than to the monotonic
-        // resize rule — a guard, because the two are one line apart and reusing
-        // the resize wrapper here would silently make the rows inert again.
-        let src = super::production_source();
-        let body = src
-            .split("pub fn set_scrollback_limits(")
-            .nth(1)
-            .and_then(|rest| rest.split("\n    }\n").next())
-            .expect("set_scrollback_limits present");
-        assert!(
-            body.contains("effective_scrollback_lines(lines, bytes,"),
-            "the setting path must compute the cap directly"
-        );
-        assert!(
-            !body.contains("scrollback_cap_after_resize"),
-            "the setting path must NOT go through the resize rule, which \
-             refuses every decrease"
-        );
     }
 
     #[test]
@@ -15195,6 +15334,72 @@ mod teardown_tests {
         };
         assert_eq!(replies, 1);
         assert_eq!(code, 0, "child checked the exact query response bytes");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn selected_animation_frame_reaches_virtual_and_relative_tiles() {
+        for synchronized in [false, true] {
+            let start = if synchronized { r"\033[?2026h" } else { "" };
+            let end = if synchronized { r"\033[?2026l" } else { "" };
+            let placeholder = "\u{10eeee}\u{0305}\u{0305}";
+            let script = format!(
+                r"printf '{start}\033_Ga=T,i=1,p=1,f=32,s=1,v=1,c=1,r=1,C=1;AQID/w==\033\\\033_Ga=p,i=1,p=2,U=1,c=1,r=1\033\\\033_Ga=p,i=1,p=3,P=1,Q=1,c=1,r=1\033\\\033_Ga=f,i=1,f=32,s=1,v=1;BQYH/w==\033\\\033_Ga=a,i=1,c=2,s=1\033\\\033[1;1H\033[38;2;0;0;1m{placeholder}\033[0m{end}\033[2;1HFRAME_READY'; read done"
+            );
+            let (tx, _rx) = crossbeam_channel::unbounded();
+            let terminal = Terminal::new(
+                &["/bin/sh".into(), "-c".into(), script],
+                None,
+                100,
+                80,
+                24,
+                8,
+                16,
+                false,
+                CursorShape::Block,
+                None,
+                tx,
+                Arc::new(|| {}),
+            )
+            .expect("animation placement fixture");
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while !terminal
+                .screen_text(0)
+                .unwrap()
+                .text
+                .contains("FRAME_READY")
+            {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            for running in [false, true] {
+                if running {
+                    let mut animations = terminal.anims.lock().unwrap();
+                    let animation = animations.get_mut(&1).unwrap();
+                    animation.state.running = true;
+                    animation.state.loops = 1;
+                    animation.gaps = vec![10, 10];
+                    animation.started = std::time::Instant::now() - Duration::from_secs(1);
+                }
+                for placements in [
+                    terminal.placements(),
+                    terminal.placeholder_tiles(),
+                    terminal.relative_tiles(),
+                ] {
+                    assert_eq!(placements.len(), 1);
+                    assert_eq!(placements[0].img.rgba.as_slice(), &[5, 6, 7, 255]);
+                }
+                assert_eq!(
+                    terminal.placeholder_tiles()[0].source_rect,
+                    Some(ImageSourceRect {
+                        x: 0,
+                        y: 0,
+                        width: 1,
+                        height: 1,
+                    })
+                );
+            }
+        }
     }
 
     #[cfg(unix)]
@@ -17333,6 +17538,57 @@ mod atomic_geometry_tests {
     }
 
     #[test]
+    fn resize_defers_history_eviction_until_output_and_config_edits_still_trim() {
+        let first = PtyGeometry::new(20, 4, 160, 64);
+        let desired = PtyGeometry::new(120, 4, 960, 64);
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let options = TermConfig {
+            scrolling_history: 100,
+            ..Default::default()
+        };
+        let term: SharedTerm = Arc::new(Mutex::new(Term::new(
+            options,
+            &TermSize::new(first.columns, first.rows),
+            EventProxy::new(tx, Arc::new(|| {})),
+        )));
+        let geometry = Arc::new(Mutex::new(VersionedPtyGeometry {
+            geometry: first,
+            generation: 0,
+        }));
+        let mut processor: Processor = Processor::new();
+        processor.advance(&mut *term.lock().unwrap(), "\r\n".repeat(24).as_bytes());
+        let before = term.lock().unwrap().grid().history_size();
+        assert!(before > 8);
+        let options = TermConfig {
+            scrolling_history: 8,
+            ..Default::default()
+        };
+        commit_local_geometry(&term, &geometry, desired, Some(options.clone()));
+        assert_eq!(term.lock().unwrap().grid().history_size(), before);
+        commit_local_geometry(
+            &term,
+            &geometry,
+            PtyGeometry::new(120, 2, 960, 32),
+            Some(options.clone()),
+        );
+        commit_local_geometry(&term, &geometry, desired, Some(options.clone()));
+        let mut term = term.lock().unwrap();
+        assert_eq!(term.grid().history_size(), before);
+        term.set_options(TermConfig {
+            unnegotiated_modified_enter: false,
+            ..options.clone()
+        });
+        assert_eq!(term.grid().history_size(), before);
+        processor.advance(&mut *term, b"\x1b[4;1H\r\n");
+        assert_eq!(term.grid().history_size(), 8);
+        term.set_options(TermConfig {
+            scrolling_history: 3,
+            ..options
+        });
+        assert_eq!(term.grid().history_size(), 3);
+    }
+
+    #[test]
     fn grid_and_pixel_generations_are_atomic_under_concurrent_resize_and_read() {
         let first = PtyGeometry::new(80, 24, 768, 384);
         let second = PtyGeometry::new(101, 37, 970, 703);
@@ -17497,6 +17753,31 @@ mod output_sender_tests {
 #[cfg(test)]
 mod pty_read_status_tests {
     use super::{PtyReadStatus, pty_read_error_status};
+
+    #[cfg(unix)]
+    #[test]
+    fn expired_child_exit_deadline_rejects_a_readable_master() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+        use std::time::{Duration, Instant};
+
+        let (mut writer, reader) = UnixStream::pair().unwrap();
+        std::io::Write::write_all(&mut writer, b"pending output").unwrap();
+        assert!(
+            super::wait_for_master_until(
+                reader.as_raw_fd(),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .unwrap()
+        );
+        assert!(
+            !super::wait_for_master_until(
+                reader.as_raw_fd(),
+                Instant::now() - Duration::from_millis(1),
+            )
+            .unwrap()
+        );
+    }
 
     #[test]
     fn an_unexpected_read_error_is_not_relabelled_as_eof() {

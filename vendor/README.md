@@ -69,6 +69,10 @@ date. Recheck that before upgrading a crate or dropping a patch.
   dark scheme that `CSI ? 996 n` answers and DEC mode 2031 reports on every
   colour change the caller signals, dark to dark included; DECSTR and RIS
   turn mode 2031 off.
+  `Term::set_options_preserving_history` changes the scrollback limit on a
+  resize without evicting rows: a smaller limit, such as the line cap a wider
+  pane's `scrollback-bytes` budget allows, applies when output next scrolls
+  into history, so widening keeps old rows but never grows past the budget.
   Each cell keeps at most 30 combining marks, `MAX_ZEROWIDTH_PER_CELL`, and
   drops the rest. 30 is the Stream-Safe Text Format's limit on a run of
   non-starters. Upstream stores every mark, so a program that prints one base
