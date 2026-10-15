@@ -2570,6 +2570,8 @@ struct QueuedPaste {
     target: Option<u64>,
     receipt_pane: Option<u64>,
     broadcast: crate::mux::BroadcastScope,
+    /// The panes a broadcast paste reaches, every window's, when it was made.
+    recipients: Vec<u64>,
     content: QueuedPasteContent,
 }
 
@@ -15956,13 +15958,33 @@ impl App {
             self.report_input_result(PaneInputResult::Oversize);
             return;
         }
+        let recipients = self.broadcast_recipients(ws);
         self.queued_pastes.push_back(QueuedPaste {
             window: ws.seq,
             target: paste_target(&ws.mux),
             receipt_pane: ws.mux.active_focus(),
             broadcast: ws.mux.broadcast.clone(),
+            recipients,
             content,
         });
+    }
+
+    /// Every pane, in this window and the others, that a broadcast from `ws`
+    /// reaches now, in order. Empty with broadcast off. `ws` must be checked
+    /// out of `self.windows`, as during dispatch.
+    fn broadcast_recipients(&self, ws: &WindowState) -> Vec<u64> {
+        if !ws.mux.is_broadcast_on() {
+            return Vec::new();
+        }
+        let mut panes = ws.mux.broadcast_target_ids();
+        if Mux::scope_crosses_windows(&ws.mux.broadcast) {
+            for other in self.windows.values() {
+                panes.extend(other.mux.foreign_target_ids(&ws.mux.broadcast));
+            }
+        }
+        panes.sort_unstable();
+        panes.dedup();
+        panes
     }
 
     /// Take the PNGs the encoder finished, then deliver the pastes at the
@@ -16006,6 +16028,7 @@ impl App {
             target,
             receipt_pane,
             broadcast,
+            recipients,
             content,
         } = paste;
         // A single-pane paste follows its pane, which may have changed window.
@@ -16020,9 +16043,10 @@ impl App {
             self.discard_queued_paste(content);
             return;
         };
-        // Broadcast goes where its scope reaches now. A scope changed since
-        // the paste could reach panes it was never meant for.
-        if ws.mux.broadcast != broadcast {
+        // Broadcast goes where its scope reaches now. A different scope, or
+        // the same scope over other panes (another tab, a group that changed),
+        // could reach panes the paste was never meant for.
+        if ws.mux.broadcast != broadcast || self.broadcast_recipients(&ws) != recipients {
             self.discard_queued_paste(content);
             self.finish_window_dispatch(el, window, ws);
             return;
@@ -42290,8 +42314,10 @@ mod tests {
         }
         let deliver = body("deliver_queued_paste");
         assert!(
-            deliver.contains("if ws.mux.broadcast != broadcast {"),
-            "a queued broadcast paste must not reach a scope changed since"
+            deliver.contains(
+                "if ws.mux.broadcast != broadcast || self.broadcast_recipients(&ws) != recipients {"
+            ),
+            "a queued broadcast paste must not reach a scope or panes changed since"
         );
     }
 

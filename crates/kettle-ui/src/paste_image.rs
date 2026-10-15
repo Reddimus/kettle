@@ -496,6 +496,9 @@ pub(crate) struct PastedImages {
     kind: StoreKind,
     dir: PathBuf,
     seq: usize,
+    /// The highest number a kept file has had. Its name may have been
+    /// handed out, so a later file never takes it again.
+    kept_max: usize,
     directory: Option<SessionDirectory>,
     files: Vec<LiveImage>,
     stuck: Vec<StuckImage>,
@@ -518,6 +521,7 @@ impl PastedImages {
             kind,
             dir: scratch_root().join(format!("{}{}-{nonce}", kind.prefix, std::process::id())),
             seq: 0,
+            kept_max: 0,
             directory: None,
             files: Vec::new(),
             stuck: Vec::new(),
@@ -720,12 +724,17 @@ impl PastedImages {
     }
 
     /// Give back the room `reservation` set aside, its copy not made, and
-    /// its name when no later file has taken one.
+    /// every name above the newest one still kept or reserved, since no file
+    /// was ever made under those.
     pub(crate) fn release(&mut self, reservation: Reservation) {
         self.unreserve(&reservation.next.name);
-        if self.seq == reservation.next.sequence {
-            self.seq -= 1;
-        }
+        let reserved = self
+            .reserved
+            .iter()
+            .filter_map(|(name, _)| parse_image_name(name.to_str()?, self.kind))
+            .max()
+            .unwrap_or(0);
+        self.seq = self.kept_max.max(reserved);
         if self.directory.is_none() {
             let _ = remove_session_directory(reservation.directory);
         }
@@ -971,6 +980,7 @@ impl PastedImages {
         self.bytes = total;
         // A copy reserved after this one may already have taken a later name.
         self.seq = self.seq.max(next.sequence);
+        self.kept_max = self.kept_max.max(next.sequence);
         self.files.push(LiveImage {
             path: next.path.clone(),
             name: next.name,
@@ -1168,6 +1178,7 @@ impl PastedImages {
         }
         self.bytes = 0;
         self.seq = 0;
+        self.kept_max = 0;
     }
 
     #[cfg(test)]
@@ -1181,6 +1192,7 @@ impl PastedImages {
             kind,
             dir,
             seq: 0,
+            kept_max: 0,
             directory: None,
             files: Vec::new(),
             stuck: Vec::new(),
@@ -2518,6 +2530,29 @@ mod tests {
         assert!(images.take_preview_for_path(&kept[1].1).is_none());
         assert!(images.reserved.is_empty());
         drop(encoder);
+        images.cleanup();
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn failed_encodes_give_back_every_name_no_file_was_kept_under() {
+        let dir = scratch("encoder-names");
+        let mut images = PastedImages::with_dir(dir.clone());
+        let red = [255u8, 0, 0, 255].repeat(4);
+        let kept = images.save_rgba(2, 2, &red, false).unwrap();
+        assert_eq!(kept.file_name(), Some(std::ffi::OsStr::new("0001.png")));
+        // Two encodes overlap, and both fail, in the order they started.
+        let first = images.reserve_png(2, 2, red.len(), false).unwrap();
+        let second = images.reserve_png(2, 2, red.len(), false).unwrap();
+        let stopped = || true;
+        let first = first.encode(&red, &stopped);
+        let second = second.encode(&red, &stopped);
+        assert!(images.keep_png(first).is_err());
+        assert!(images.keep_png(second).is_err());
+        // The next file takes the name after the one kept, not after the
+        // failures, and never reuses the kept one.
+        let next = images.save_rgba(2, 2, &red, false).unwrap();
+        assert_eq!(next.file_name(), Some(std::ffi::OsStr::new("0002.png")));
         images.cleanup();
         assert!(!dir.exists());
     }
