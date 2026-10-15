@@ -27,6 +27,9 @@ args = [{ name = "tag", type = "str" }]
 [messages.about_update_unknown]
 context = "crates/kettle-ui/src/app.rs open_about_panel: About panel row. No update check has finished."
 
+[messages.ctl_screenshot_pane_not_visible]
+context = "crates/kettle-ui/src/app.rs ctl_screenshot: control response when a pane is in an inactive tab or hidden by another pane's zoom."
+
 [messages.completion_a11y_list]
 context = "crates/kettle-ui/src/app.rs: screen-reader name of the completion list. kind is the translated list kind (for example Completions); source is a shell name such as fish, kept verbatim."
 args = [{ name = "kind", type = "str" }, { name = "source", type = "str" }]
@@ -1579,6 +1582,9 @@ args = [{ name = "tag", type = "str" }, { name = "url", type = "str" }]
 
 [messages.window_title_gpu_lost]
 context = "crates/kettle-ui/src/app.rs redraw: window title while Kettle recovers from a lost GPU device (a driver reset). kettle is the product name, kept lowercase; keep the hyphen separators."
+
+[messages.window_title_software_fallback]
+context = "crates/kettle-ui/src/app.rs desired_window_title: suffix after recovery onto a software adapter because the GPU is unavailable. The caller adds the hyphen separator."
 
 [messages.inline_card_pending]
 context = "crates/kettle-render/src/card_scene.rs: status inside an owned inline media card while its poster loads."

@@ -62,7 +62,7 @@ pub(crate) use shelf::{
     signer_name,
 };
 pub(crate) use sightings::{CardSightings, MAX_CARD_INSTANCE};
-pub(crate) use source::{Gallery, ItemSource, JobSpec, SourceInput, display_rows};
+pub(crate) use source::{Gallery, ItemSource, JobSpec, SourceInput};
 pub(crate) use tip::CardsTip;
 
 use queue::{Admitted, Queue};
@@ -497,7 +497,7 @@ pub(crate) fn display_title(text: &str) -> String {
             space = !title.is_empty();
             continue;
         }
-        if chars >= MAX_TITLE_CHARS {
+        if chars + usize::from(space) >= MAX_TITLE_CHARS {
             break;
         }
         if space {
@@ -749,6 +749,23 @@ mod tests {
         assert!(lane.join().is_err());
         assert_eq!(woken.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(closed_first.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn title_limits_include_pending_spaces() {
+        for len in [MAX_TITLE_CHARS - 2, MAX_TITLE_CHARS - 1, MAX_TITLE_CHARS] {
+            let prefix = "a".repeat(len);
+            for separator in [" ", "  ", "\n", "\u{202E}"] {
+                let title = display_title(&format!("{prefix}{separator}b"));
+                let expected = if len + 2 <= MAX_TITLE_CHARS {
+                    format!("{prefix} b")
+                } else {
+                    prefix.clone()
+                };
+                assert_eq!(title, expected);
+                assert!(title.chars().count() <= MAX_TITLE_CHARS);
+            }
+        }
     }
 
     #[test]

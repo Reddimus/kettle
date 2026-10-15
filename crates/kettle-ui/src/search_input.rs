@@ -752,16 +752,21 @@ impl SearchEditor {
     pub(crate) fn select_word_at(&mut self, point: QueryPoint) {
         self.run = None;
         let byte = self.byte_at(point);
+        let byte = if byte == self.text.len() {
+            previous_grapheme_boundary(&self.text, byte)
+        } else {
+            byte
+        };
         if let Some((start, word)) = self
             .text
             .unicode_word_indices()
-            .find(|(start, word)| byte >= *start && byte <= start.saturating_add(word.len()))
+            .find(|(start, word)| byte >= *start && byte < start.saturating_add(word.len()))
         {
             self.anchor = Some(start);
             self.cursor = start + word.len();
             return;
         }
-        let start = previous_grapheme_boundary(&self.text, byte);
+        let start = byte;
         let end = next_grapheme_boundary(&self.text, start);
         self.anchor = Some(start);
         self.cursor = end;
@@ -1052,6 +1057,31 @@ mod tests {
         assert_eq!(editor.selected_text(), Some("café"));
         editor.set_cursor_column(10, false);
         assert!(editor.text().is_char_boundary(editor.cursor()));
+    }
+
+    #[test]
+    fn double_click_selects_the_punctuation_under_the_pointer() {
+        let mut editor = SearchEditor::from_text("ab..cd".into(), 64);
+        for byte in [2, 3] {
+            editor.select_word_at(super::QueryPoint::Byte(byte));
+            assert_eq!(editor.selection(), Some(byte..byte + 1));
+        }
+        editor.select_word_at(super::QueryPoint::Byte(4));
+        assert_eq!(editor.selected_text(), Some("cd"));
+        editor.select_word_at(super::QueryPoint::Byte(6));
+        assert_eq!(editor.selected_text(), Some("cd"));
+
+        let mut editor = SearchEditor::from_text("ab \u{2764}\u{fe0f}!".into(), 64);
+        editor.select_word_at(super::QueryPoint::Byte(2));
+        assert_eq!(editor.selected_text(), Some(" "));
+        editor.select_word_at(super::QueryPoint::Byte(3));
+        assert_eq!(editor.selected_text(), Some("\u{2764}\u{fe0f}"));
+        editor.select_word_at(super::QueryPoint::Byte(editor.text().len()));
+        assert_eq!(editor.selected_text(), Some("!"));
+
+        let mut empty = SearchEditor::default();
+        empty.select_word_at(super::QueryPoint::Byte(0));
+        assert_eq!(empty.selection(), None);
     }
 
     #[test]

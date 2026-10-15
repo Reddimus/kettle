@@ -3,6 +3,7 @@
 
 screenshot_dimensions_too_large = "La captura supera el límite de textura de la GPU; reduce el margen de la ventana o el tamaño de la fuente."
 
+ctl_screenshot_pane_not_visible = "El panel solicitado no está visible."
 inline_card_pending = "Cargando…"
 inline_card_unavailable = "No disponible"
 inline_card_tip = "Haz clic para abrir"
@@ -617,6 +618,7 @@ update_a11y_available = "Actualización disponible: {tag}"
 update_a11y_open = "Abrir la página de la versión"
 update_banner = "kettle {tag} disponible — {url}    (clic: abrir · clic derecho: descartar)"
 window_title_gpu_lost = "kettle - se perdió el dispositivo GPU - recuperando"
+window_title_software_fallback = "renderizado por software (GPU no disponible)"
 
 media_viewer_a11y_pin = "Fijar junto al terminal"
 media_viewer_pin_short = "Fijar"

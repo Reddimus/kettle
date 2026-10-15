@@ -13,6 +13,7 @@ const MIN_RESTORE_WINDOW_WIDTH: u32 = 160;
 const MIN_RESTORE_WINDOW_HEIGHT: u32 = 120;
 const MAX_RESTORE_SURFACE_DIMENSION: u32 = 8192;
 const MAX_RESTORE_SURFACE_PIXELS: u64 = 32 * 1024 * 1024;
+const MAX_SESSION_BYTES: u64 = 16 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub enum SNode {
@@ -540,8 +541,28 @@ pub(crate) fn save_to_path(s: &Session, p: &std::path::Path) -> std::io::Result<
     let text = serde_json::to_string_pretty(s)
         .map_err(|e| std::io::Error::other(format!("serialize session: {e}")))?;
     // A missing or unreadable file is simply "not what we are about to write".
-    if std::fs::read(p).is_ok_and(|on_disk| on_disk == text.as_bytes()) {
-        return Ok(());
+    match open_session_file(p) {
+        Ok((file, size)) => {
+            if size > MAX_SESSION_BYTES {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "existing session exceeds the size limit",
+                ));
+            }
+            if size == text.len() as u64 {
+                let mut on_disk = Vec::with_capacity(text.len());
+                if file
+                    .take(text.len() as u64 + 1)
+                    .read_to_end(&mut on_disk)
+                    .is_ok()
+                    && on_disk == text.as_bytes()
+                {
+                    return Ok(());
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => return Err(error),
+        Err(_) => {}
     }
     kettle_state::atomic_replace(
         p,
@@ -570,7 +591,6 @@ pub(crate) fn save_to_path(s: &Session, p: &std::path::Path) -> std::io::Result<
 /// are checked on the opened handle, and the read itself stops at limit + 1,
 /// so a path replacement or concurrent append cannot bypass the cap.
 pub(crate) fn load_from_path(p: &std::path::Path) -> Option<Session> {
-    const MAX_SESSION_BYTES: u64 = 16 * 1024 * 1024;
     let (file, size) = open_session_file(p).ok()?;
     if size > MAX_SESSION_BYTES {
         stash_oversize_session(p, size, MAX_SESSION_BYTES);
@@ -584,8 +604,7 @@ pub(crate) fn load_from_path(p: &std::path::Path) -> Option<Session> {
         stash_oversize_session(p, bytes.len() as u64, MAX_SESSION_BYTES);
         return None;
     }
-    let text = String::from_utf8(bytes).ok()?;
-    match serde_json::from_str(&text) {
+    match serde_json::from_slice(&bytes) {
         Ok(s) => Some(s),
         Err(e) => {
             let dst = p.with_extension(format!(
@@ -935,6 +954,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn save_to_path_rejects_an_oversize_destination() {
+        let dir = private_tempdir();
+        let path = dir.path().join("session.json");
+        let size = 16 * 1024 * 1024 + 1;
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(size).unwrap();
+        drop(file);
+
+        let error = save_to_path(&Session::default(), &path).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), size);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_to_path_rejects_a_symlink_even_when_its_bytes_match() {
+        let dir = private_tempdir();
+        let target = dir.path().join("target.json");
+        let path = dir.path().join("session.json");
+        let session = Session::default();
+        let bytes = serde_json::to_vec_pretty(&session).unwrap();
+        std::fs::write(&target, &bytes).unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+
+        let error = save_to_path(&session, &path).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(std::fs::read(&target).unwrap(), bytes);
+        assert!(std::fs::symlink_metadata(&path).unwrap().is_symlink());
+    }
+
     fn leaf_node() -> SNode {
         SNode::Leaf {
             cwd: None,
@@ -1149,6 +1201,27 @@ mod tests {
             let _ = std::fs::remove_file(dir.join(n));
         }
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn load_from_path_preserves_invalid_utf8_before_the_next_save() {
+        let dir = private_tempdir();
+        let path = dir.path().join("session.json");
+        let bytes = b"{\"tabs\":[],\"active\":0,\"theme\":\"caf\xe9\",\"windows\":[]}";
+        std::fs::write(&path, bytes).unwrap();
+
+        assert!(load_from_path(&path).is_none());
+        assert!(!path.exists());
+        save_to_path(&Session::default(), &path).unwrap();
+
+        let backups: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.to_string_lossy().contains(".broken."))
+            .collect();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(std::fs::read(&backups[0]).unwrap(), bytes);
+        assert!(load_from_path(&path).is_some());
     }
 
     #[test]

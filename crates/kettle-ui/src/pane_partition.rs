@@ -349,7 +349,7 @@ fn carve(body: Rect, metrics: Metrics, request: LaneRequest) -> (Rect, LaneShare
     // The terminal keeps whole cells; the lane takes the pixels after them.
     let terminal_for = |lane: f32| -> f32 {
         let cells = metrics.cells_in(along - lane, vertical);
-        metrics.extent(cells, vertical).min(along)
+        metrics.extent(cells, vertical).clamp(0.0, along)
     };
     let split = |terminal: f32| -> (Rect, Rect) {
         let lane = along - terminal;
@@ -370,7 +370,9 @@ fn carve(body: Rect, metrics: Metrics, request: LaneRequest) -> (Rect, LaneShare
     // The strip is one row along the bottom, whatever the side, and the
     // terminal above it keeps its whole rows and every column.
     let row = metrics.cell.1;
-    let above = metrics.extent(metrics.cells_in(h - row, true), true).min(h);
+    let above = metrics
+        .extent(metrics.cells_in(h - row, true), true)
+        .clamp(0.0, h);
     if above >= metrics.extent(FLOOR.1, true) && h - above >= row {
         return (
             (x, y, w, above),
@@ -469,6 +471,35 @@ mod tests {
             }
         }
         assert!(checked > 1000);
+    }
+
+    #[test]
+    fn negative_padding_keeps_terminal_and_lane_inside_the_leaf() {
+        let m = Metrics::new((8.0, 16.0), (-128.0, -64.0), 0.0, false).unwrap();
+        for size in [0.0, 8.0, 48.0, 128.0, 400.0] {
+            let leaf = (13.5, 7.25, size, size);
+            for side in [LaneSide::Bottom, LaneSide::Right] {
+                for expanded in [false, true] {
+                    let p = partition_leaf(leaf, m, Some(LaneRequest::new(side, 0.4, expanded)));
+                    let mut parts = vec![p.terminal];
+                    parts.extend(p.lane.and_then(LaneShare::rect));
+                    for part in &parts {
+                        assert!(part.2 >= 0.0 && part.3 >= 0.0, "{p:?}");
+                        assert!(contains(leaf, *part), "{p:?}");
+                    }
+                    if parts.len() == 2 {
+                        assert!(overlap(parts[0], parts[1]) < 1e-3, "{p:?}");
+                    }
+                    let total: f64 = parts.into_iter().map(area).sum();
+                    assert!((total - area(leaf)).abs() < 1e-2, "{p:?}");
+                    if size < 16.0 {
+                        assert_eq!(p.lane, Some(LaneShare::Badge), "{p:?}");
+                    } else if size == 48.0 {
+                        assert!(matches!(p.lane, Some(LaneShare::Strip(_))), "{p:?}");
+                    }
+                }
+            }
+        }
     }
 
     /// With no lane, the terminal is the leaf less its titlebar, which keeps

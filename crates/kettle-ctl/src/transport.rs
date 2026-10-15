@@ -151,7 +151,9 @@ impl CtlStream {
     }
 
     /// [`write_all_until`](CtlStream::write_all_until), also reporting how many
-    /// bytes reached the peer.
+    /// bytes reached the peer on success. On failure, the count is a
+    /// conservative upper bound on bytes that may have reached the peer;
+    /// zero guarantees that this frame never touched the wire.
     ///
     /// A caller that must know whether an exchange *started* cannot infer it
     /// from the error: a deadline or a cancellation can land before the first
@@ -211,7 +213,16 @@ impl CtlStream {
                     }
                     #[cfg(windows)]
                     CtlStream::Windows(stream) => {
-                        windows_io::write(&stream.file, buf, Some(deadline), cancelled)?
+                        match windows_io::write(&stream.file, buf, Some(deadline), cancelled) {
+                            Ok(written) => written,
+                            Err(error) => {
+                                // A failed pending pipe write may have delivered
+                                // bytes before cancellation. Only a successful
+                                // completion proves its exact byte count.
+                                written_total += buf.len().min(u32::MAX as usize);
+                                return Err(error);
+                            }
+                        }
                     }
                 };
                 if written == 0 {
@@ -839,8 +850,7 @@ mod windows_io {
             // Returning before this drain would leave kernel I/O pointing at
             // stack storage that is about to be freed.
             unsafe { CancelIoEx(handle, &overlapped) };
-            let _ = completed_result(handle, &mut overlapped, true);
-            return Err(error);
+            return completed_result(handle, &mut overlapped, true).or(Err(error));
         }
         completed_result(handle, &mut overlapped, false)
     }
@@ -876,6 +886,58 @@ mod windows_io {
             ));
         }
         None
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn completed_write_survives_cancellation_racing_completion() {
+        let endpoint = super::tests::test_endpoint("completed-write-cancel");
+        let listener = CtlListener::bind(&endpoint).expect("bind");
+        let (release, released) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let mut stream = listener.accept().expect("accept");
+            let mut bytes = [0; 5];
+            stream.read_exact(&mut bytes).expect("read completed write");
+            assert_eq!(&bytes, b"frame");
+            released.recv().expect("release peer");
+        });
+        let CtlStream::Windows(stream) = super::connect(&endpoint).expect("connect");
+        let cancelled = AtomicBool::new(false);
+        let result = run(
+            &stream.file,
+            Some(Instant::now() + Duration::from_secs(5)),
+            Some(&cancelled),
+            |handle, overlapped| {
+                // Complete real I/O before letting the wait observe cancellation,
+                // reproducing an already-completed ERROR_IO_PENDING operation.
+                let started = unsafe {
+                    WriteFile(
+                        handle,
+                        b"frame".as_ptr(),
+                        5,
+                        std::ptr::null_mut(),
+                        overlapped,
+                    )
+                };
+                if started == 0 {
+                    assert_eq!(
+                        io::Error::last_os_error().raw_os_error(),
+                        Some(ERROR_IO_PENDING as i32)
+                    );
+                }
+                // SAFETY: run owns this OVERLAPPED and the buffer is static.
+                assert_eq!(
+                    completed_result(handle, unsafe { &mut *overlapped }, true).unwrap(),
+                    5
+                );
+                cancelled.store(true, Ordering::Release);
+                unsafe { windows_sys::Win32::Foundation::SetLastError(ERROR_IO_PENDING) };
+                0
+            },
+        );
+        release.send(()).expect("release server");
+        server.join().expect("server thread");
+        assert_eq!(result.expect("preserve the completed write"), 5);
     }
 
     fn duration_millis(duration: Duration) -> u32 {
@@ -1149,19 +1211,95 @@ mod imp {
     /// socket file is gone) means a dead server, so bail at once instead of
     /// spending the retry budget.
     pub fn connect(endpoint: &str) -> io::Result<CtlStream> {
-        use std::os::unix::net::UnixStream;
+        let deadline = Instant::now() + super::CONNECT_RETRIES * super::CONNECT_BACKOFF;
         let mut last = None;
         for _ in 0..super::CONNECT_RETRIES {
-            match UnixStream::connect(endpoint) {
+            if Instant::now() >= deadline {
+                break;
+            }
+            match connect_once(endpoint, deadline) {
                 Ok(s) => return Ok(CtlStream::Unix(super::UnixStream::new(s)?)),
                 Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(e),
+                Err(e) if e.kind() == io::ErrorKind::TimedOut => return Err(e),
                 Err(e) => {
                     last = Some(e);
-                    std::thread::sleep(super::CONNECT_BACKOFF);
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    std::thread::sleep(super::CONNECT_BACKOFF.min(remaining));
                 }
             }
         }
-        Err(last.unwrap_or_else(|| io::Error::other("unix socket connect failed")))
+        Err(last.unwrap_or_else(|| {
+            io::Error::new(io::ErrorKind::TimedOut, "unix socket connect timed out")
+        }))
+    }
+
+    fn connect_once(
+        endpoint: &str,
+        deadline: Instant,
+    ) -> io::Result<std::os::unix::net::UnixStream> {
+        use std::os::fd::{AsRawFd as _, FromRawFd as _};
+        use std::os::unix::net::UnixStream;
+
+        // SAFETY: a zeroed sockaddr_un is valid storage for this address.
+        let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        let path = endpoint.as_bytes();
+        if path.is_empty() || path.contains(&0) || path.len() >= address.sun_path.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid unix socket path",
+            ));
+        }
+        address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        for (dest, &byte) in address.sun_path.iter_mut().zip(path) {
+            *dest = byte as libc::c_char;
+        }
+        let len =
+            (std::mem::offset_of!(libc::sockaddr_un, sun_path) + path.len() + 1) as libc::socklen_t;
+        #[cfg(any(
+            target_vendor = "apple",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd",
+            target_os = "dragonfly"
+        ))]
+        {
+            address.sun_len = len as u8;
+        }
+
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let flags = libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK;
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        let flags = 0;
+        // SAFETY: socket has no pointer arguments and returns a new owned fd.
+        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | flags, 0) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: fd was just created and ownership is transferred once.
+        let stream = unsafe { UnixStream::from_raw_fd(fd) };
+        stream.set_nonblocking(true)?;
+        // SAFETY: the stream owns this fd; F_SETFD takes an integer flag.
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: address contains a bounded, NUL-terminated pathname and
+        // remains alive for this call; the socket is already nonblocking.
+        if unsafe { libc::connect(stream.as_raw_fd(), std::ptr::addr_of!(address).cast(), len) }
+            == 0
+        {
+            return Ok(stream);
+        }
+        let error = io::Error::last_os_error();
+        // Linux's full-backlog EAGAIN did not start a connection: retry on a
+        // fresh socket rather than treating writable readiness as success.
+        if error.raw_os_error() != Some(libc::EINPROGRESS) {
+            return Err(error);
+        }
+        wait_unix_writable(&stream, deadline, None)?;
+        if let Some(error) = stream.take_error()? {
+            return Err(error);
+        }
+        Ok(stream)
     }
 }
 
@@ -1710,6 +1848,39 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn connect_to_full_unix_backlog_is_bounded() {
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::net::{UnixListener, UnixStream};
+
+        let endpoint = test_endpoint("full-backlog");
+        let _ = std::fs::remove_file(&endpoint);
+        let listener = UnixListener::bind(&endpoint).expect("bind");
+        // SAFETY: the listener owns this fd. Linux admits one queued
+        // connection with backlog zero; no thread accepts it.
+        assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 0) }, 0);
+        let queued = UnixStream::connect(&endpoint).expect("fill backlog");
+        let (done, completed) = std::sync::mpsc::channel();
+        let target = endpoint.clone();
+        let connector = std::thread::spawn(move || {
+            done.send(connect(&target).map(|_| ()))
+                .expect("send result");
+        });
+        let result =
+            completed.recv_timeout(CONNECT_RETRIES * CONNECT_BACKOFF + Duration::from_secs(2));
+
+        // Release even a blocking implementation before asserting failure.
+        drop(listener);
+        drop(queued);
+        let _ = std::fs::remove_file(&endpoint);
+        connector.join().expect("connector thread");
+        assert!(
+            result.expect("connect outlived its retry budget").is_err(),
+            "a full backlog must not produce a connected stream"
+        );
+    }
+
     /// The REAL server/client usage: each side splits its connection into a
     /// reader thread + a writer thread over `try_clone`d handles, with
     /// concurrent read+write, as the control server does. Guards against a
@@ -2017,10 +2188,14 @@ pub(crate) mod tests {
         let payload = vec![b'x'; 8 * 1024 * 1024];
         let (mut timed, release_timed, timed_server) = stalled_connection("write-timeout");
         let started = Instant::now();
-        let error = timed
-            .write_all_until(&payload, Instant::now() + Duration::from_millis(30), None)
-            .expect_err("blocked write must time out");
+        let (written, result) = timed.write_all_until_counted(
+            &payload,
+            Instant::now() + Duration::from_millis(30),
+            None,
+        );
+        let error = result.expect_err("blocked write must time out");
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(written > 0, "an issued write cannot prove zero delivery");
         assert!(started.elapsed() < Duration::from_secs(1));
         drop(timed);
         release_timed.send(()).expect("release timed peer");

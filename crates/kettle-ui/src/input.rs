@@ -629,6 +629,7 @@ pub fn encode(
             if !composed_a_character {
                 return Some(if alt { vec![0x1b, code] } else { vec![code] });
             }
+            return text.map(|t| t.as_bytes().to_vec());
         }
         let mut out = Vec::new();
         if alt {
@@ -2506,12 +2507,7 @@ mod tests {
             mode,
         )
         .expect("composed key encodes");
-        assert_ne!(
-            composed,
-            vec![0x1b, 0x11],
-            "a press that committed a printable character must not be \
-             encoded as that key's control code"
-        );
+        assert_eq!(composed, b"@".to_vec());
 
         // A chord that committed no printable text still takes the table, so
         // the composition check does not switch the table off.

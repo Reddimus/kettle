@@ -18,6 +18,7 @@
 # The drop-error notification was checked in the GNOME notification list,
 # expanded and readable, after a rejected 33-file batch left input unchanged.
 [status]
+ctl_screenshot_pane_not_visible = "draft"
 screenshot_dimensions_too_large = "draft"
 notify_body_drop_unreadable = "accepted"
 inline_card_pending = "accepted"
@@ -637,6 +638,7 @@ update_a11y_available = "accepted"
 update_a11y_open = "accepted"
 update_banner = "accepted"
 window_title_gpu_lost = "accepted"
+window_title_software_fallback = "draft"
 
 # Messages whose review needs the second pass: destructive confirmations and
 # screen-reader names and descriptions.
