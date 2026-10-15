@@ -44,6 +44,21 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Keep text after decomposed accents, common in macOS file names, in its own
+  column; the block cursor now draws those accents too.
+- Update a preview's play and pause control as soon as it changes, and show a
+  wallpaper as soon as it finishes decoding.
+- Draw terminal text again once images free GPU memory, instead of leaving it
+  blank.
+- Sample cropped kitty images at their pixel centers, and brighten bold text
+  from the palette colors a program set at runtime.
+- Keep wallpaper GIF frames and still images within the 64 MiB decode limit,
+  and keep dark colors in a blurred wallpaper from turning black.
+- Refuse a screenshot larger than the GPU texture limit with a clear message.
+- Show the whole "Kettle" label in Codex's narrower card gutter, and blank
+  cells instead of boxes for a card partly scrolled out of a full-screen
+  program.
+
 - Report each zsh command's real exit status to Kettle, so failed commands
   are marked and notified again; zsh's prompt hook always reported 0.
 - Build the media worker in `just install-local`, `just install-recording` and

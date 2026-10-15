@@ -1,6 +1,8 @@
 # Neutral Latin American Spanish. The owner designated an independent reviewer.
 # Rendered context and required second-pass acceptance remain pending for 5.0.
 
+screenshot_dimensions_too_large = "La captura supera el límite de textura de la GPU; reduce el margen de la ventana o el tamaño de la fuente."
+
 inline_card_pending = "Cargando…"
 inline_card_unavailable = "No disponible"
 inline_card_tip = "Haz clic para abrir"

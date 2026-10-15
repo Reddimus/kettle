@@ -132,15 +132,13 @@ pub fn reply_for_text_area_size(
 /// (8..16). xterm convention; many programs (e.g. neovim's
 /// `:Termguicolors` off, ls --color) depend on it.
 ///
-/// Returns the original color if it doesn't match any low-palette
-/// index — caller (the render loop) doesn't need to branch.
-pub fn bright_for_bold(fg: Rgb, theme: &Theme) -> Rgb {
-    for low in 0..8 {
-        if theme.palette[low] == fg {
-            return theme.palette[low + 8];
-        }
+/// Preserve explicit RGB and non-palette named colors.
+pub fn bright_for_bold(fg: AnsiColor) -> AnsiColor {
+    match fg {
+        AnsiColor::Named(n) if (n as usize) < 8 => AnsiColor::Named(n.to_bright()),
+        AnsiColor::Indexed(i) if i < 8 => AnsiColor::Indexed(i + 8),
+        _ => fg,
     }
-    fg
 }
 
 /// Resolve a cell color. `term_colors` carries runtime OSC 4/10/11 overrides.

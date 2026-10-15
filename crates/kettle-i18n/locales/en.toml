@@ -1,5 +1,7 @@
 # English reference text. Every key in schema.toml, nothing else.
 
+screenshot_dimensions_too_large = "Screenshot dimensions exceed the GPU texture limit; reduce window padding or font size."
+
 inline_card_pending = "Loading…"
 inline_card_unavailable = "Unavailable"
 inline_card_tip = "Click to open"

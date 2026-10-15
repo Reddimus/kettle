@@ -2234,7 +2234,8 @@ search and terminal copy paths. Four-mark Kitty placeholders retain their
 existing meaning. `kettle-render` collects complete marks separately from the
 four-mark terminal cell copy, recognizes a registered footprint and paints its
 geometry. Unregistered clusters use an owned fallback glyph and background;
-a registered cluster with incomplete context uses a neutral glyph. Accepted
+a registered cluster with incomplete context, such as a card partly scrolled
+out of a full-screen program, draws blank cells. Accepted
 cells suppress raw placeholder ink, terminal decoration and cursor ink.
 
 Capture copies the viewport first and, only for a pane with registrations,

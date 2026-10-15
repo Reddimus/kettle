@@ -1092,7 +1092,7 @@ impl GlyphPipeline {
         queue: &wgpu::Queue,
         screen: [f32; 2],
         data: &[GlyphInstance],
-    ) {
+    ) -> bool {
         // Bump the frame counter once per frame. Every `ensure_glyph` touch
         // this frame already stamped `last_used` with the prior value, so next
         // frame's evictions see any slot left untouched since as strictly older
@@ -1128,21 +1128,21 @@ impl GlyphPipeline {
                 &self.counters,
             );
             self.count = if written { data.len() as u32 } else { 0 };
-            return;
+            return written;
         }
         if data.len() > self.capacity {
             let Some(capacity) = data.len().checked_next_power_of_two() else {
                 self.count = 0;
-                return;
+                return false;
             };
             let Some(bytes) = capacity.checked_mul(std::mem::size_of::<GlyphInstance>()) else {
                 self.count = 0;
-                return;
+                return false;
             };
             let Some(gpu) = self.budget.reserve_gpu(bytes) else {
                 log::warn!("glyph instance buffer growth exceeds GPU graphics budget");
                 self.count = 0;
-                return;
+                return false;
             };
             let instances = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("kettle-glyph-instances"),
@@ -1161,6 +1161,7 @@ impl GlyphPipeline {
             &self.counters,
         );
         self.count = data.len() as u32;
+        true
     }
 
     /// Draw the uploaded instances, each pane's contiguous range clipped to its
@@ -1239,6 +1240,62 @@ impl GlyphPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refused_grid_upload_recovers_without_text_or_layout_damage() {
+        use crate::headless_tests::{capture, focused, pane, snapshot_of};
+
+        let _serialized = crate::gpu_tests::gpu_test_guard();
+        for allow_mapping in [false, true] {
+            let cfg = crate::gpu_tests::gpu_test_config();
+            let Some(mut renderer) = crate::Renderer::headless_for_tests_with_mapping(
+                &cfg,
+                1024,
+                2048,
+                1.0,
+                false,
+                allow_mapping,
+            )
+            .expect("headless renderer builds") else {
+                eprintln!("no GPU adapter on this host; skipped");
+                return;
+            };
+            let budget = GraphicsBudget::independent(kettle_core::GraphicsLimits::default())
+                .expect("valid graphics limits");
+            let pipeline = GlyphPipeline::new_with_budget(
+                &renderer.gpu.device,
+                renderer.config.format,
+                budget.clone(),
+            )
+            .expect("glyph pipeline");
+            let charged = pipeline.color._gpu.bytes()
+                + pipeline.mask._gpu.bytes()
+                + pipeline.instance_gpu.bytes();
+            renderer.glyph_pipeline = pipeline;
+            let mut remaining = budget.limits().retained_bytes - charged;
+            let mut pressure = Vec::new();
+            while remaining > 0 {
+                let bytes = remaining.min(budget.limits().image_bytes);
+                pressure.push(budget.reserve_gpu(bytes).expect("remaining scope budget"));
+                remaining -= bytes;
+            }
+            let snap = snapshot_of(100, 100, &vec![b'A'; 10_000]);
+            let panes = [pane(&snap, 1024, 2048)];
+            let blank = capture(&mut renderer, &cfg, &panes, &focused(false));
+            assert!(renderer.glyph_instances.len() > 8192);
+            assert_eq!(renderer.glyph_pipeline.count, 0);
+            assert!(renderer.grid_glyphs_dirty);
+
+            drop(pressure);
+            let recovered = capture(&mut renderer, &cfg, &panes, &focused(false));
+            assert!(!renderer.grid_glyphs_dirty);
+            assert_eq!(
+                renderer.glyph_pipeline.count as usize,
+                renderer.glyph_instances.len()
+            );
+            assert_ne!(blank, recovered, "unchanged text must become visible again");
+        }
+    }
 
     /// The production source of this file, excluding test-only items.
     fn production_source() -> String {

@@ -163,6 +163,56 @@ pub(crate) fn renderer(width: u32, height: u32) -> Option<(Renderer, Config)> {
 }
 
 #[test]
+fn bold_palette_resolution_honors_osc_overrides_and_preserves_truecolor() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(320, 120) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    cfg.bold_is_bright = true;
+    cfg.minimum_contrast = 1.0;
+    cfg.theme.palette[1] = Rgb::new(210, 20, 30);
+    cfg.theme.palette[9] = Rgb::new(20, 210, 30);
+    let low = snapshot_of(20, 4, b"\x1b]4;9;rgb:12/34/56\x07\x1b[1;31mA");
+    let bright = snapshot_of(20, 4, b"\x1b]4;9;rgb:12/34/56\x07\x1b[1;91mA");
+    let expected = capture(
+        &mut renderer,
+        &cfg,
+        &[pane(&bright, 320, 120)],
+        &focused(false),
+    );
+    let actual = capture(
+        &mut renderer,
+        &cfg,
+        &[pane(&low, 320, 120)],
+        &focused(false),
+    );
+    assert_eq!(
+        actual, expected,
+        "bold red must resolve the overridden bright slot"
+    );
+
+    let rgb = cfg.theme.palette[1];
+    let text = format!("\x1b[1;38;2;{};{};{}mA", rgb.r, rgb.g, rgb.b);
+    let snap = snapshot_of(20, 4, text.as_bytes());
+    cfg.bold_is_bright = false;
+    let expected = capture(
+        &mut renderer,
+        &cfg,
+        &[pane(&snap, 320, 120)],
+        &focused(false),
+    );
+    cfg.bold_is_bright = true;
+    let actual = capture(
+        &mut renderer,
+        &cfg,
+        &[pane(&snap, 320, 120)],
+        &focused(false),
+    );
+    assert_eq!(actual, expected, "bold must preserve explicit RGB colors");
+}
+
+#[test]
 fn a_headless_frame_draws_a_real_pane() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(320, 120) else {
@@ -1050,6 +1100,41 @@ fn the_blink_phase_reaches_only_the_draw() {
     assert!(scene.contains("if cursor_on && self.pending_cursor_glyph.is_some()"));
 }
 
+#[test]
+fn combining_marks_do_not_move_the_following_grid_glyph() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(320, 120) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    for (plain, marked) in [
+        ("ex", "e\u{301}x"),
+        ("ex", "e\u{301}\u{308}x"),
+        ("\u{4f60}x", "\u{4f60}\u{301}x"),
+    ] {
+        let snap = snapshot_of(20, 4, plain.as_bytes());
+        capture(
+            &mut renderer,
+            &cfg,
+            &[pane(&snap, 320, 120)],
+            &focused(false),
+        );
+        let expected = renderer.glyph_instances.last().unwrap().pos;
+        let snap = snapshot_of(20, 4, marked.as_bytes());
+        capture(
+            &mut renderer,
+            &cfg,
+            &[pane(&snap, 320, 120)],
+            &focused(false),
+        );
+        assert_eq!(
+            renderer.glyph_instances.last().unwrap().pos,
+            expected,
+            "the x after {marked:?} must stay on its engine column"
+        );
+    }
+}
+
 /// Pane text in the default grid mode is drawn by the glyph pipeline, not
 /// glyphon, so output that changes only pane text prepares no glyphon text. A
 /// prepare would rewrite the chrome's unchanged vertices through the queue on
@@ -1093,6 +1178,35 @@ fn grid_output_prepares_no_glyphon_text() {
     );
     assert_eq!(renderer.render_uploads().chrome_prepares, chrome_prepares);
     assert_ne!(after, before, "the new text is still drawn");
+}
+
+#[test]
+fn block_cursor_shapes_attached_marks_and_invalidates_their_cache() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(320, 120) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    for (input, expected) in [
+        ("e\u{301}\r", "e\u{301}"),
+        ("e\u{308}\r", "e\u{308}"),
+        (" \u{301}\r", " \u{301}"),
+        ("\x1b[8me\u{301}\r", " "),
+    ] {
+        let mut snap = snapshot_of(20, 4, input.as_bytes());
+        snap.cursor.shape = alacritty_terminal::vte::ansi::CursorShape::Block;
+        capture(
+            &mut renderer,
+            &cfg,
+            &[pane(&snap, 320, 120)],
+            &focused(true),
+        );
+        assert_eq!(
+            renderer.cursor_glyph_buffer.lines[0].text(),
+            expected,
+            "the cursor must shape the complete visible cell"
+        );
+    }
 }
 
 /// The same character under the cursor with and without emoji presentation
@@ -2022,6 +2136,59 @@ fn a_hovered_card_is_outlined_in_the_accent() {
         let (lit, all) = ring(&frame, stale.rect);
         assert!(lit < all, "no outline for {stale:?}");
     }
+}
+
+#[test]
+fn lane_play_control_changes_invalidate_retained_text() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(800, 600) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let snap = snapshot_of(80, 30, b"");
+    let lane = MediaLanePanel {
+        focused_control: None,
+        pin_label: None,
+        play: Some(MediaLanePlay::Pause),
+        sound: Some(MediaLaneSound::Heard),
+        frame: None,
+        scrubber: None,
+        pane: 1,
+        rect: (0.0, 0.0, 800.0, 600.0),
+        collapsed: false,
+        title: "Video".into(),
+        detail: String::new(),
+        sender: MediaLaneSender::default(),
+        hint: String::new(),
+        position: (1, 1),
+        page: None,
+        image: None,
+        status: String::new(),
+        canvas: MediaCanvas::Theme,
+        open_outside: false,
+        mode: MediaLaneMode::Rendered,
+        source: None,
+        copy: false,
+        reload: false,
+        notice: None,
+        view: MediaViewport::FIT,
+        tile: None,
+        edge: None,
+    };
+    let mut overlay = focused(false);
+    overlay.media_lanes.push(lane);
+    capture(&mut renderer, &cfg, &[pane(&snap, 800, 600)], &overlay);
+    capture(&mut renderer, &cfg, &[pane(&snap, 800, 600)], &overlay);
+    let prepares = renderer.render_uploads().chrome_prepares;
+    overlay.media_lanes[0].play = Some(MediaLanePlay::Play);
+    capture(&mut renderer, &cfg, &[pane(&snap, 800, 600)], &overlay);
+    assert!(
+        renderer.render_uploads().chrome_prepares > prepares,
+        "switching the retained control buffer must prepare lane text"
+    );
+    let prepares = renderer.render_uploads().chrome_prepares;
+    capture(&mut renderer, &cfg, &[pane(&snap, 800, 600)], &overlay);
+    assert_eq!(renderer.render_uploads().chrome_prepares, prepares);
 }
 
 /// A lane's open-outside button is drawn where its geometry puts it, a
