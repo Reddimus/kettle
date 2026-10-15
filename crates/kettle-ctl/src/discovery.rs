@@ -553,13 +553,21 @@ fn read_registry_entry(path: &std::path::Path) -> Option<String> {
 /// Write (or replace) this server's registry entry. Creates the dir `0700` on
 /// Unix. Returns the entry-file path so the server can unlink it on shutdown.
 pub fn register(dir: &std::path::Path, entry: &RegistryEntry) -> std::io::Result<PathBuf> {
+    crate::ensure_private_dir(dir)?;
+    let _lock = kettle_state::ExclusiveFileLock::acquire_timeout(
+        &lock_path(dir),
+        REGISTRATION_LOCK_TIMEOUT,
+    )?;
+    register_locked(dir, entry)
+}
+
+fn register_locked(dir: &std::path::Path, entry: &RegistryEntry) -> std::io::Result<PathBuf> {
     if !registry_entry_is_valid(dir, entry.pid, entry) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "invalid control registry entry",
         ));
     }
-    crate::ensure_private_dir(dir)?;
     let path = entry_path(dir, entry.pid);
     let json = crate::protocol::to_json_vec_bounded(entry, MAX_REGISTRY_ENTRY_BYTES)
         .map_err(std::io::Error::other)?;
@@ -672,17 +680,16 @@ pub(crate) fn list_live_by(
 /// an entry that outlives its owner is pruned by the next reader, whereas a
 /// wrongly deleted one never comes back.
 pub fn prune_stale(dir: &std::path::Path, entry: &RegistryEntry) {
+    let Ok(Some(_lock)) = kettle_state::ExclusiveFileLock::try_acquire(&lock_path(dir)) else {
+        return;
+    };
     let path = entry_path(dir, entry.pid);
     let still_the_same = read_registry_entry(&path)
         .and_then(|text| serde_json::from_str::<RegistryEntry>(&text).ok())
         .is_some_and(|current| current == *entry);
     if still_the_same {
         let _ = std::fs::remove_file(&path);
-        // Without the lock a server may be between binding and registering;
-        // the socket is then left for a later prune or startup sweep.
-        if endpoint_is_derived(dir, entry.pid, &entry.endpoint)
-            && let Ok(Some(_lock)) = kettle_state::ExclusiveFileLock::try_acquire(&lock_path(dir))
-        {
+        if endpoint_is_derived(dir, entry.pid, &entry.endpoint) {
             remove_dead_socket(dir, entry.pid, std::path::Path::new(&entry.endpoint));
         }
     }
@@ -700,15 +707,28 @@ fn lock_path(dir: &std::path::Path) -> PathBuf {
 #[derive(Debug)]
 pub struct RegistrationGuard {
     _lock: Option<kettle_state::ExclusiveFileLock>,
+    dir: PathBuf,
+}
+
+impl RegistrationGuard {
+    /// Publish under the startup lock, reacquiring it if startup timed out.
+    pub fn register(&self, entry: &RegistryEntry) -> std::io::Result<PathBuf> {
+        if self._lock.is_some() {
+            register_locked(&self.dir, entry)
+        } else {
+            register(&self.dir, entry)
+        }
+    }
 }
 
 /// How long a starting server waits for the registry lock. A holder only
-/// stats and unlinks files, so this is reached only when one is stuck; the
-/// server then starts without sweeping rather than not at all.
+/// stats and unlinks files, so this is reached only when one is stuck. A
+/// timeout skips sweeping; publication must reacquire the lock or fail.
 const REGISTRATION_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Take the registry lock for a starting server and clear sockets left by
-/// servers that are gone. Hold the guard until the server's entry is written.
+/// servers that are gone. Publish through [RegistrationGuard::register] before
+/// dropping the guard.
 pub fn begin_registration(dir: &std::path::Path) -> RegistrationGuard {
     let lock = crate::ensure_private_dir(dir)
         .and_then(|()| {
@@ -722,7 +742,10 @@ pub fn begin_registration(dir: &std::path::Path) -> RegistrationGuard {
     if lock.is_some() {
         sweep_orphan_endpoints(dir);
     }
-    RegistrationGuard { _lock: lock }
+    RegistrationGuard {
+        _lock: lock,
+        dir: dir.to_path_buf(),
+    }
 }
 
 /// Unlink `path` if it is a socket whose server is gone: no entry names its
@@ -1193,6 +1216,29 @@ mod tests {
     }
 
     #[test]
+    fn registration_requires_exclusive_coordination() {
+        let dir = crate::test_scratch_root()
+            .join(format!("kettle-ctl-register-locked-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        crate::ensure_private_dir(&dir).unwrap();
+        let lock = kettle_state::ExclusiveFileLock::try_acquire(&lock_path(&dir))
+            .unwrap()
+            .expect("take registry lock");
+        let pid = std::process::id();
+        let entry = RegistryEntry::registering("gui", pid, default_endpoint(&dir, pid), "x", 100);
+        assert_eq!(
+            register(&dir, &entry).unwrap_err().kind(),
+            std::io::ErrorKind::TimedOut
+        );
+        assert!(!entry_path(&dir, pid).exists());
+        drop(lock);
+
+        register(&dir, &entry).unwrap();
+        assert_eq!(list(&dir), vec![entry]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn list_skips_garbage_files() {
         let dir =
             crate::test_scratch_root().join(format!("kettle-ctl-garbage-{}", std::process::id()));
@@ -1567,7 +1613,7 @@ mod tests {
     }
 
     /// While a server holds the registration lock (between its bind and its
-    /// entry), pruning removes the stale entry but never a socket.
+    /// entry), pruning leaves both the entry and socket for a later reader.
     #[cfg(unix)]
     #[test]
     fn pruning_leaves_sockets_alone_while_a_server_registers() {
@@ -1580,12 +1626,15 @@ mod tests {
         let registering = begin_registration(&dir);
         assert!(registering._lock.is_some(), "the registry lock was taken");
         assert!(list_live(&dir).is_empty());
-        assert!(!entry_path(&dir, pid).exists(), "the stale entry is pruned");
+        assert!(entry_path(&dir, pid).exists(), "its entry waits");
         assert!(
             std::path::Path::new(&dead.endpoint).exists(),
             "its socket waits"
         );
         drop(registering);
+        prune_stale(&dir, &dead);
+        assert!(!entry_path(&dir, pid).exists());
+        assert!(!std::path::Path::new(&dead.endpoint).exists());
         let _ = std::fs::remove_file(&dead.endpoint);
         let _ = std::fs::remove_dir_all(&dir);
     }
