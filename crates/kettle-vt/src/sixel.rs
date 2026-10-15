@@ -103,6 +103,8 @@ struct SixelCanvas {
     /// Columns painted so far, checked against
     /// [`GraphicsLimits::sixel_column_writes`](crate::GraphicsLimits::sixel_column_writes).
     writes: usize,
+    /// Bytes initialized or copied while growing the canvas.
+    layout_bytes: usize,
 }
 
 impl SixelCanvas {
@@ -116,6 +118,7 @@ impl SixelCanvas {
             budget,
             reservation: None,
             writes: 0,
+            layout_bytes: 0,
         }
     }
 
@@ -148,6 +151,14 @@ impl SixelCanvas {
         let Some(bytes) = bytes else {
             return false;
         };
+        // Exact-fit fallback must not turn bounded storage into unbounded copying.
+        let layout_bytes = self
+            .layout_bytes
+            .saturating_add(bytes)
+            .saturating_add(self.width * self.height * 4);
+        if layout_bytes > self.budget.limits().image_bytes.saturating_mul(4) {
+            return false;
+        }
         // Hold the old canvas reservation until the new allocation has
         // succeeded, so geometric growth's transient old+new peak is counted.
         let Some(reservation) = self.budget.reserve_image_cpu(bytes) else {
@@ -168,6 +179,7 @@ impl SixelCanvas {
         }
         self.buf = nb;
         self.reservation = Some(reservation);
+        self.layout_bytes = layout_bytes;
         self.cap_w = ncw;
         self.cap_h = nch;
         self.width = new_w;
@@ -411,6 +423,32 @@ mod tests {
         let image = super::decode_with_budget(b"\"1;1;300;200@", &budget)
             .expect("the tight 300x200 image fits its configured byte budget");
         assert_eq!((image.width, image.height), (300, 200));
+    }
+
+    #[test]
+    fn canvas_relayout_work_is_bounded() {
+        let limits = crate::GraphicsLimits {
+            image_bytes: 1024 * 1024,
+            ..crate::GraphicsLimits::default()
+        };
+        let budget = crate::GraphicsBudget::isolated(limits).unwrap();
+        let mut canvas = super::SixelCanvas::new(budget.clone());
+        let mut layout_bytes = 0;
+        for width in 1..=430 {
+            let old_extent_bytes = canvas.width * canvas.height * 4;
+            let old_capacity = (canvas.cap_w, canvas.cap_h);
+            if !canvas.ensure(width, 600) {
+                break;
+            }
+            if old_capacity != (canvas.cap_w, canvas.cap_h) {
+                layout_bytes += canvas.buf.len() + old_extent_bytes;
+            }
+        }
+        assert!(layout_bytes <= 4 * limits.image_bytes);
+        assert!(super::decode_with_budget(b"\"1;1;1;600!430~", &budget).is_none());
+        let image = super::decode_with_budget(b"\"1;1;400;600!400~", &budget)
+            .expect("a single tight allocation remains allowed");
+        assert_eq!((image.width, image.height), (400, 600));
     }
 
     /// `$` returns the cursor to column 0 without growing the canvas, so a
