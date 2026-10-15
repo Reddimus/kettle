@@ -4,6 +4,7 @@
 //! live in `kettle-update`. This module owns only per-user throttle/dismissal
 //! state and delivery of background outcomes to the winit event loop.
 
+use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -99,7 +100,20 @@ fn cache_path() -> Option<std::path::PathBuf> {
 }
 
 fn load_cache() -> Option<UpdateCache> {
-    let bytes = std::fs::read(cache_path()?).ok()?;
+    let file = kettle_state::open_trusted_file_read(&cache_path()?).ok()?;
+    let size = file.metadata().ok()?.len();
+    read_cache(file, size)
+}
+
+fn read_cache(reader: impl Read, size: u64) -> Option<UpdateCache> {
+    if size > MAX_CACHE_BYTES as u64 {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    reader
+        .take(MAX_CACHE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
     if bytes.len() > MAX_CACHE_BYTES {
         return None;
     }
@@ -165,7 +179,6 @@ pub fn maybe_spawn_check(
     if !is_due(now, cache.last_check, interval_secs) {
         return;
     }
-    let dismissed = cache.dismissed_version.clone();
     // Persist the throttle before starting network I/O. The process guard and
     // OS file lock make the read/update decision exclusive across every window
     // and process sharing this config directory.
@@ -188,7 +201,7 @@ pub fn maybe_spawn_check(
                 Ok(CheckOutcome::UpToDate { .. }) => {}
                 Err(error) => log::warn!("update check failed: {error}"),
                 Ok(CheckOutcome::UpdateAvailable(update)) => {
-                    if dismissed.as_deref() == Some(update.tag.as_str()) {
+                    if is_dismissed(&update.tag) {
                         return;
                     }
                     if update_delivery(&policy, update.asset.is_some())
@@ -288,6 +301,16 @@ pub fn spawn_update_check_timer(proxy: EventLoopProxy<UserEvent>) {
         });
 }
 
+pub(crate) fn is_dismissed(tag: &str) -> bool {
+    is_dismissed_with(tag, || {
+        load_cache().and_then(|cache| cache.dismissed_version)
+    })
+}
+
+fn is_dismissed_with(tag: &str, load: impl FnOnce() -> Option<String>) -> bool {
+    load().as_deref() == Some(tag)
+}
+
 pub fn record_dismissed(tag: &str) {
     let mut cache = load_cache().unwrap_or_default();
     cache.dismissed_version = Some(tag.to_string());
@@ -326,6 +349,25 @@ mod tests {
 
     /// The daily default (`update-check-interval-hours = 24`) in seconds.
     const DAY: u64 = 24 * 60 * 60;
+
+    #[test]
+    fn queued_update_uses_dismissal_recorded_after_the_check() {
+        let temp = crate::test_tempdir();
+        let path = temp.path().join("update-check.json");
+        std::fs::write(&path, b"{}").unwrap();
+        let load = || {
+            let bytes = std::fs::read(&path).ok()?;
+            let cache: UpdateCache = serde_json::from_slice(&bytes).ok()?;
+            cache.dismissed_version
+        };
+        let queued_tag = "v5.0.2";
+        assert!(!super::is_dismissed_with(queued_tag, load));
+
+        std::fs::write(&path, br#"{"dismissed_version":"v5.0.2"}"#).unwrap();
+
+        assert!(super::is_dismissed_with(queued_tag, load));
+        assert!(!super::is_dismissed_with("v5.0.3", load));
+    }
 
     #[test]
     fn automatic_policy_notifies_when_the_platform_has_no_artifact() {
@@ -380,6 +422,27 @@ mod tests {
         // 6h cadence: due after 6h, not before.
         assert!(is_due(100 * hour, 100 * hour - 6 * hour, 6 * hour));
         assert!(!is_due(100 * hour, 100 * hour - 6 * hour + 1, 6 * hour));
+    }
+
+    #[test]
+    fn cache_reads_reject_oversize_before_reading_and_bound_growth() {
+        let limit = super::MAX_CACHE_BYTES;
+        let mut source = std::io::Cursor::new(vec![b' '; limit + 2]);
+        assert!(super::read_cache(&mut source, limit as u64 + 1).is_none());
+        assert_eq!(source.position(), 0);
+        assert!(super::read_cache(&mut source, 0).is_none());
+        assert_eq!(source.position(), limit as u64 + 1);
+
+        let mut bytes = br#"{"last_check":42}"#.to_vec();
+        bytes.resize(limit, b' ');
+        assert_eq!(
+            super::read_cache(bytes.as_slice(), limit as u64)
+                .unwrap()
+                .last_check,
+            42
+        );
+        bytes.push(b' ');
+        assert!(super::read_cache(bytes.as_slice(), limit as u64).is_none());
     }
 
     #[test]

@@ -25,32 +25,66 @@ use kettle_media::{
 /// Bytes a preview keeps, charged to the process preview account for as
 /// long as they are held.
 pub(crate) struct ChargedBytes {
-    bytes: Box<[u8]>,
+    bytes: RetainedBytes,
+    line_starts: Box<[usize]>,
     _charge: Option<GraphicsReservation>,
+}
+
+enum RetainedBytes {
+    Bytes(Box<[u8]>),
+    Text(Box<str>),
 }
 
 impl ChargedBytes {
     /// Keep `bytes`, charged; `None` when the account has no room.
     pub(crate) fn new(bytes: Vec<u8>) -> Option<Self> {
-        let bytes = bytes.into_boxed_slice();
-        let charge = match bytes.len() {
+        let len = bytes.len();
+        let text = String::from_utf8(bytes);
+        let starts = text.as_ref().map_or(0, |text| display_row_count(text) - 1);
+        let retained = len.checked_add(starts.checked_mul(std::mem::size_of::<usize>())?)?;
+        let charge = match retained {
             0 => None,
             len => Some(GraphicsBudget::previews().reserve_retained_cpu(len)?),
         };
+        let mut line_starts = Vec::with_capacity(starts);
+        let bytes = match text {
+            Ok(text) => {
+                // Row zero starts at zero; a final newline does not add a row.
+                line_starts.extend(
+                    text.strip_suffix('\n')
+                        .unwrap_or(&text)
+                        .match_indices('\n')
+                        .map(|(byte, _)| byte + 1),
+                );
+                RetainedBytes::Text(text.into_boxed_str())
+            }
+            Err(error) => RetainedBytes::Bytes(error.into_bytes().into_boxed_slice()),
+        };
         Some(Self {
             bytes,
+            line_starts: line_starts.into_boxed_slice(),
             _charge: charge,
         })
     }
 
     pub(crate) fn as_slice(&self) -> &[u8] {
-        &self.bytes
+        match &self.bytes {
+            RetainedBytes::Bytes(bytes) => bytes,
+            RetainedBytes::Text(text) => text.as_bytes(),
+        }
+    }
+
+    fn as_str(&self) -> Option<&str> {
+        match &self.bytes {
+            RetainedBytes::Text(text) => Some(text),
+            RetainedBytes::Bytes(_) => None,
+        }
     }
 }
 
 impl std::fmt::Debug for ChargedBytes {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ChargedBytes({} bytes)", self.bytes.len())
+        write!(f, "ChargedBytes({} bytes)", self.as_slice().len())
     }
 }
 
@@ -248,8 +282,7 @@ impl ItemSource {
         };
         let rows = held_text(&spec.input, &file_text)
             .filter(|_| textual)
-            .and_then(|text| std::str::from_utf8(text.as_slice()).ok())
-            .map(display_row_count);
+            .and_then(|text| text.as_str().map(|_| text.line_starts.len() + 1));
         Self {
             spec,
             digest,
@@ -298,9 +331,7 @@ impl ItemSource {
         let Ok(digest) = kettle_media::content_digest(bytes.as_slice(), None) else {
             return false;
         };
-        self.rows = std::str::from_utf8(bytes.as_slice())
-            .ok()
-            .map(display_row_count);
+        self.rows = bytes.as_str().map(|_| bytes.line_starts.len() + 1);
         self.digest = digest;
         self.spec = spec;
         if let Some((_, shown)) = &mut self.gallery {
@@ -359,8 +390,7 @@ impl ItemSource {
     /// The item's source text exactly as rendered, when it is text and is
     /// still held.
     pub(crate) fn text(&self) -> Option<&str> {
-        self.text_backing()
-            .and_then(|backing| std::str::from_utf8(backing.as_slice()).ok())
+        self.text_backing().and_then(|backing| backing.as_str())
     }
 
     /// What holds the item's source text, shared, its UTF-8 checked when the
@@ -368,6 +398,36 @@ impl ItemSource {
     /// than a second copy of the text.
     pub(crate) fn text_backing(&self) -> Option<&Arc<ChargedBytes>> {
         self.rows.and(held_text(&self.spec.input, &self.file_text))
+    }
+
+    pub(crate) fn display_rows(
+        &self,
+        first_row: usize,
+        rows: usize,
+        first_column: usize,
+        columns: usize,
+    ) -> Vec<String> {
+        let Some(backing) = self.text_backing() else {
+            return Vec::new();
+        };
+        let Some(text) = backing.as_str() else {
+            return Vec::new();
+        };
+        let text = text.strip_suffix('\n').unwrap_or(text);
+        let last_row = first_row
+            .saturating_add(rows)
+            .min(backing.line_starts.len() + 1);
+        let lines = (first_row..last_row).map(|row| {
+            let start = row
+                .checked_sub(1)
+                .map_or(0, |previous| backing.line_starts[previous]);
+            let end = backing
+                .line_starts
+                .get(row)
+                .map_or(text.len(), |next| next - 1);
+            &text[start..end]
+        });
+        display_lines(lines, first_column, columns)
     }
 
     /// A small SVG an inline request carried, for tests.
@@ -440,24 +500,40 @@ const TAB_STOP: usize = 8;
 /// column (combining marks) cannot make a row in view arbitrarily long.
 const MAX_ROW_BYTES_PER_COLUMN: usize = 16;
 
+const MAX_ROW_SCAN_BYTES: usize = 64 * 1024;
+
 /// The rows of `text` a lane shows: `rows` lines from `first_row`, each from
 /// display column `first_column` and at most `columns` wide. Tabs expand to
 /// stops of eight; control, format and bidirectional characters show as
 /// U+FFFD, so source text can neither reorder nor hide what is shown; a
-/// line's CR is dropped. Work is bounded by what is shown.
-pub(crate) fn display_rows(
+/// line's CR is dropped. Each row examines at most 64 KiB, including text
+/// before the visible columns.
+#[cfg(test)]
+fn display_rows(
     text: &str,
     first_row: usize,
     rows: usize,
     first_column: usize,
     columns: usize,
 ) -> Vec<String> {
+    display_lines(
+        text.strip_suffix('\n')
+            .unwrap_or(text)
+            .split('\n')
+            .skip(first_row)
+            .take(rows),
+        first_column,
+        columns,
+    )
+}
+
+fn display_lines<'a>(
+    lines: impl Iterator<Item = &'a str>,
+    first_column: usize,
+    columns: usize,
+) -> Vec<String> {
     use unicode_width::UnicodeWidthChar as _;
-    text.strip_suffix('\n')
-        .unwrap_or(text)
-        .split('\n')
-        .skip(first_row)
-        .take(rows)
+    lines
         .map(|line| {
             let line = line.strip_suffix('\r').unwrap_or(line);
             let mut row = String::new();
@@ -465,8 +541,11 @@ pub(crate) fn display_rows(
             let max_bytes = columns
                 .saturating_add(1)
                 .saturating_mul(MAX_ROW_BYTES_PER_COLUMN);
-            for c in line.chars() {
-                if shown >= columns || row.len() + c.len_utf8() > max_bytes {
+            for (byte, c) in line.char_indices() {
+                if byte >= MAX_ROW_SCAN_BYTES
+                    || shown >= columns
+                    || row.len() + c.len_utf8() > max_bytes
+                {
                     break;
                 }
                 let (glyph, width) = match c {
@@ -773,6 +852,36 @@ mod tests {
             "{} bytes",
             row.len()
         );
+    }
+
+    #[test]
+    fn display_rows_bounds_work_before_the_visible_column() {
+        let text = format!("{}\tx", "\u{0301}".repeat(100_000));
+        assert_eq!(display_rows(&text, 0, 1, 1, 80), [""]);
+    }
+
+    #[test]
+    fn indexed_rows_match_the_source_across_pages_and_release() {
+        for text in ["", "\n", "a\n\n", "a\r\nb\nlast", "a\nb\n"] {
+            let mut source = ItemSource::sample(text.as_bytes());
+            for first in 0..5 {
+                for rows in 0..4 {
+                    assert_eq!(
+                        source.display_rows(first, rows, 0, 80),
+                        display_rows(text, first, rows, 0, 80)
+                    );
+                }
+            }
+            source.release();
+            assert!(source.display_rows(0, 4, 0, 80).is_empty());
+        }
+
+        let gallery = Arc::new(Gallery::new(vec!["a\nb\n".into(), "last".into()]).unwrap());
+        let mut source = ItemSource::page(&spec(Source::Bytes(Vec::new())), gallery, 0).unwrap();
+        assert_eq!(source.display_rows(1, 1, 0, 80), ["b"]);
+        assert!(source.select(1));
+        assert!(source.display_rows(1, 1, 0, 80).is_empty());
+        assert_eq!(source.display_rows(0, 1, 0, 80), ["last"]);
     }
 
     /// A source's rows are its lines, a final line break ending the last.

@@ -44,6 +44,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Keep the saved workspace when a restored second window fails to open, and
+  pass a Settings click to its confirmation dialog.
+- Resize sibling windows when the update banner changes, and refresh what a
+  screen reader reads after scrolling.
+- Type the character an AltGr chord composes, and keep a closed tab's
+  snapshot when reopening it fails.
+- Keep WSL panes in the right directory when cloned or restored.
+- Validate a saved session's size and encoding before overwriting it, and keep
+  a dismissed update banner dismissed.
+- Bound the update-check cache read, keep window padding from producing a
+  negative terminal size, and keep display titles within 256 characters.
+
 - Keep a control-API command's output once scrollback is full, write each
   pane's log to its own file, and reap trigger and URL-handler processes.
 - Keep pinned previews open while searching, show recording indicators beside

@@ -1148,19 +1148,19 @@ fn pinch_zoom(delta: f64) -> f64 {
     }
 }
 
-/// The part of `text`, which has `total` rows, a lane shows from `scroll`
+/// The part of `source` a lane shows from `scroll`
 /// in `rows` rows of `columns` columns. A source replaced under its key may
 /// be shorter than the one scrolled, so the scroll is kept on it.
 fn lane_source(
-    text: &str,
-    total: usize,
+    source: &crate::media::ItemSource,
     scroll: (usize, usize),
     rows: usize,
     columns: usize,
 ) -> kettle_render::MediaLaneSource {
+    let total = source.text_rows();
     let (first_row, first_column) = scrolled_source(scroll, 0, 0, total);
     kettle_render::MediaLaneSource {
-        rows: crate::media::display_rows(text, first_row, rows, first_column, columns),
+        rows: source.display_rows(first_row, rows, first_column, columns),
         first_row,
         total_rows: total,
     }
@@ -11039,6 +11039,35 @@ impl App {
         }
     }
 
+    fn confirm_mouse_press(
+        &mut self,
+        ws: &mut WindowState,
+        event_loop: &ActiveEventLoop,
+        bcode: u8,
+    ) -> bool {
+        if ws.confirm_dialog.is_none() {
+            return false;
+        }
+        if bcode == 0
+            && let Some(result) = self.confirm_button_click_result(ws)
+        {
+            match result {
+                ConfirmKeyResult::Confirm => {
+                    if let Some(to_run) = ws.confirm_dialog.as_ref().map(|s| s.on_confirm.clone()) {
+                        ws.confirm_dialog = None;
+                        self.dispatch_confirm_action(ws, to_run, event_loop);
+                    }
+                }
+                ConfirmKeyResult::Cancel => self.cancel_confirm_dialog(ws),
+                ConfirmKeyResult::Move(_) | ConfirmKeyResult::Ignore => {}
+            }
+        }
+        if let Some(w) = &ws.window {
+            w.request_redraw();
+        }
+        true
+    }
+
     fn media_paste_receipt_geometry(
         &self,
         ws: &WindowState,
@@ -13815,14 +13844,13 @@ impl App {
         // The source rows in view, for the room the lane has: only those are
         // read out of the text.
         if mode == kettle_render::MediaLaneMode::Source
-            && let Some(text) = text
+            && text.is_some()
             && let Some(geometry) = self.preview_lane_geometry(ws, &lane)
         {
             let glyph = self.overlay_text_cell_width(ws).max(1.0);
             let columns = (geometry.image_area.2 / glyph).ceil() as usize + 1;
             lane.source = Some(lane_source(
-                text,
-                item.source.text_rows(),
+                &item.source,
                 panel.scroll,
                 geometry.source_rows,
                 columns,
@@ -22087,6 +22115,15 @@ impl App {
         }
     }
 
+    fn queue_window_resizes<'a>(windows: impl Iterator<Item = &'a mut WindowState>) {
+        for ws in windows {
+            ws.pending_resize = true;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        }
+    }
+
     /// Act on the update banner: dismiss it (recording the tag so it
     /// won't re-nag) and, when `open` is true, open the release page first.
     /// Returns `false` when no banner is showing (the caller decides whether
@@ -22102,10 +22139,7 @@ impl App {
         }
         crate::update_check::record_dismissed(&tag);
         self.update_available = None;
-        self.resize_all(ws);
-        if let Some(w) = &ws.window {
-            w.request_redraw();
-        }
+        Self::queue_window_resizes(std::iter::once(&mut *ws).chain(self.windows.values_mut()));
         true
     }
 
@@ -28144,6 +28178,9 @@ impl App {
         }
         self.release_held_buttons(ws, |held| held.button == bcode);
         ws.held_buttons.pressed(bcode, None, (0, 0));
+        if self.confirm_mouse_press(ws, event_loop, bcode) {
+            return true;
+        }
         let bar = self.tab_bar(ws);
         let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
         if ws.context_menu.is_some()
@@ -35235,6 +35272,12 @@ impl App {
                 pane.title.hash(&mut hasher);
                 pane.read_only.hash(&mut hasher);
                 pane.term.output_generation().hash(&mut hasher);
+                pane.term
+                    .term
+                    .lock()
+                    .ok()
+                    .map(|term| term.grid().display_offset())
+                    .hash(&mut hasher);
             }
         }
         hasher.finish()
@@ -37388,6 +37431,9 @@ impl App {
                                     .open_window(event_loop, WindowOpen::Restore(sw), None, None)
                                     .is_err()
                                 {
+                                    self.stash_unrestorable_session(
+                                        "could not open an additional window",
+                                    );
                                     log::warn!(
                                         "session restore: could not open an additional window"
                                     );
@@ -37837,17 +37883,21 @@ impl App {
             UserEvent::RemoteCommand => self.drain_remote_commands(ws),
             UserEvent::Ctl => self.drain_ctl(ws, _el),
             UserEvent::UpdateAvailable { tag, url } => {
+                if crate::update_check::is_dismissed(&tag) {
+                    return;
+                }
                 // A newer release exists. Show the dismissable
                 // bottom-bar banner, fire one desktop toast, and nudge the
                 // taskbar/dock so the user notices even if kettle is unfocused.
-                // The background thread already filtered out dismissed versions.
                 fire_notify(
                     self.ui_text
                         .text(kettle_i18n::Text::NotifyTitleUpdateAvailable),
                     &self.ui_text.notify_body_update_available(&tag),
                 );
                 self.update_available = Some((tag, url));
-                self.resize_all(ws);
+                Self::queue_window_resizes(
+                    std::iter::once(&mut *ws).chain(self.windows.values_mut()),
+                );
                 if let Some(w) = &ws.window {
                     // Only raise OS attention (+ latch the tracker)
                     // when unfocused — mirroring the bell path — so
@@ -37859,7 +37909,6 @@ impl App {
                         w.request_user_attention(Some(UserAttentionType::Informational));
                         ws.attention_active = true;
                     }
-                    w.request_redraw();
                 }
             }
             UserEvent::UpdateInstalled {
@@ -38521,6 +38570,9 @@ impl App {
                     // press is Kettle's until a program receives it.
                     self.release_held_buttons(ws, |held| held.button == sgr);
                     ws.held_buttons.pressed(sgr, None, (0, 0));
+                    if self.confirm_mouse_press(ws, event_loop, sgr) {
+                        return;
+                    }
                     // A lone context menu must swallow the side-button press
                     // too. Dismiss the menu and DON'T forward.
                     // `modal_swallows_pointer` returns false for a lone menu,
@@ -38568,6 +38620,9 @@ impl App {
                 // gesture until a program receives it.
                 self.release_held_buttons(ws, |held| held.button == bcode);
                 ws.held_buttons.pressed(bcode, None, (0, 0));
+                if self.confirm_mouse_press(ws, event_loop, bcode) {
+                    return;
+                }
                 // Context menu: if the menu is open, a left-click
                 // either fires the row that was hit or — if the click landed
                 // outside the panel — closes the menu. Middle-click outside
@@ -38620,33 +38675,6 @@ impl App {
                     && (bcode == 0 || bcode == 2)
                     && self.settings_mouse(ws, if bcode == 2 { -1 } else { 1 }, true)
                 {
-                    return;
-                }
-                // Confirm dialog buttons are real click targets. Handle them
-                // before the generic modal swallow below so a visible
-                // [Cancel] / [Close] affordance does not behave like inert
-                // text. Clicks elsewhere in the modal still get swallowed.
-                if ws.confirm_dialog.is_some()
-                    && bcode == 0
-                    && let Some(result) = self.confirm_button_click_result(ws)
-                {
-                    match result {
-                        ConfirmKeyResult::Confirm => {
-                            if let Some(to_run) =
-                                ws.confirm_dialog.as_ref().map(|s| s.on_confirm.clone())
-                            {
-                                ws.confirm_dialog = None;
-                                self.dispatch_confirm_action(ws, to_run, event_loop);
-                            }
-                        }
-                        ConfirmKeyResult::Cancel => {
-                            self.cancel_confirm_dialog(ws);
-                        }
-                        ConfirmKeyResult::Move(_) | ConfirmKeyResult::Ignore => {}
-                    }
-                    if let Some(w) = &ws.window {
-                        w.request_redraw();
-                    }
                     return;
                 }
                 // With any *other* modal open
@@ -40740,6 +40768,41 @@ mod modal_discipline_guard {
     use super::{production_source, session_write_target};
 
     #[test]
+    fn confirmation_owns_presses_before_settings() {
+        let src = production_source();
+        let flat: String = src.split_whitespace().collect();
+        assert_eq!(
+            flat.matches(
+                "ws.held_buttons.pressed(bcode,None,(0,0));ifself.confirm_mouse_press(ws,event_loop,bcode){return"
+            )
+            .count(),
+            2,
+            "native and control presses must reach confirmation before underlying UI"
+        );
+        assert!(flat.contains(
+            "ws.held_buttons.pressed(sgr,None,(0,0));ifself.confirm_mouse_press(ws,event_loop,sgr){return;"
+        ));
+        let helper = src
+            .split_once("fn confirm_mouse_press(")
+            .unwrap()
+            .1
+            .split("\n    fn ")
+            .next()
+            .unwrap();
+        let helper: String = helper.split_whitespace().collect();
+        assert!(helper.contains("ifws.confirm_dialog.is_none(){returnfalse;}"));
+        assert!(
+            helper.contains("ifbcode==0&&letSome(result)=self.confirm_button_click_result(ws)")
+        );
+        assert!(helper.contains("self.cancel_confirm_dialog(ws)"));
+        assert!(helper.contains("self.dispatch_confirm_action(ws,to_run,event_loop)"));
+        assert!(
+            helper.ends_with("true}"),
+            "an active confirmation must also consume non-button presses"
+        );
+    }
+
+    #[test]
     fn confirm_dialog_is_tracked_as_a_modal() {
         let src = production_source();
         let body = |name: &str| -> String {
@@ -41218,6 +41281,23 @@ mod modal_discipline_guard {
 mod tests {
     const EN_TEXT: kettle_i18n::Translator =
         kettle_i18n::Translator::new(kettle_i18n::Language::En);
+
+    #[test]
+    fn failed_additional_window_restore_preserves_source_session() {
+        let src = super::production_source();
+        let restore = src
+            .split_once("for (index, sw) in rest.iter().enumerate() {")
+            .unwrap()
+            .1
+            .split("// Focus comes home to window 1")
+            .next()
+            .unwrap();
+        let flat: String = restore.split_whitespace().collect();
+        assert!(
+            flat.contains(".is_err(){self.stash_unrestorable_session("),
+            "every additional-window open failure must preserve the loaded session"
+        );
+    }
 
     #[test]
     fn startup_plan_truth_table() {
@@ -50986,6 +51066,26 @@ mod tests {
     }
 
     #[test]
+    fn accessibility_key_tracks_each_visible_panes_scroll_offset() {
+        let src = production_source();
+        let key = src
+            .split_once("fn accessibility_key(&self, ws: &WindowState, overlay: &Overlay) -> u64")
+            .unwrap()
+            .1
+            .split("fn publish_accessibility_if_due")
+            .next()
+            .unwrap();
+        let panes = key
+            .split_once("for (pane_id, partition) in layout {")
+            .unwrap()
+            .1;
+        let flat: String = panes.split_whitespace().collect();
+        assert!(flat.contains(
+            "pane.term.term.lock().ok().map(|term|term.grid().display_offset()).hash(&muthasher);"
+        ));
+    }
+
+    #[test]
     fn accessibility_hashes_the_visible_completion_projection() {
         let src = production_source();
         let tree = src
@@ -51573,7 +51673,7 @@ mod tests {
         );
         assert!(
             src.contains(
-                "self.release_held_buttons(ws, |held| held.button == sgr); ws.held_buttons.pressed(sgr, None, (0, 0)); // A lone context menu"
+                "self.release_held_buttons(ws, |held| held.button == sgr); ws.held_buttons.pressed(sgr, None, (0, 0)); if self.confirm_mouse_press(ws, event_loop, sgr) { return; } // A lone context menu"
             ),
             "a side press first releases one whose release went elsewhere, and is Kettle's until a program gets it"
         );
@@ -51675,8 +51775,8 @@ mod tests {
         for needle in [
             // Each press first releases one whose release went elsewhere, and
             // is Kettle's own gesture until a program receives it.
-            "self.release_held_buttons(ws, |held| held.button == bcode); ws.held_buttons.pressed(bcode, None, (0, 0)); // Context menu:",
-            "if bcode == 0 { ws.card_press = None; } if ws.card_focus.take().is_some() { ws.accessibility_pending = true; } self.release_held_buttons(ws, |held| held.button == bcode); ws.held_buttons.pressed(bcode, None, (0, 0)); let bar",
+            "self.release_held_buttons(ws, |held| held.button == bcode); ws.held_buttons.pressed(bcode, None, (0, 0)); if self.confirm_mouse_press(ws, event_loop, bcode) { return; } // Context menu:",
+            "if bcode == 0 { ws.card_press = None; } if ws.card_focus.take().is_some() { ws.accessibility_pending = true; } self.release_held_buttons(ws, |held| held.button == bcode); ws.held_buttons.pressed(bcode, None, (0, 0)); if self.confirm_mouse_press(ws, event_loop, bcode) { return true; } let bar",
             // Each release ends a gesture of Kettle's own first.
             "ws.held_buttons.end_own(bcode); // A release ends an editor drag inside the search bar;",
             "if let Some(sgr) = extra_mouse_sgr(button) { ws.held_buttons.end_own(sgr); self.send_mouse(ws, sgr, false, false); return; }",
@@ -56003,6 +56103,34 @@ mod tests {
     }
 
     #[test]
+    fn update_banner_queues_resizes_for_current_and_sibling_windows() {
+        let mut current = WindowState::new(2, Mux::new());
+        let mut windows = std::collections::BTreeMap::from([
+            (1, WindowState::new(1, Mux::new())),
+            (3, WindowState::new(3, Mux::new())),
+        ]);
+        assert!(!current.pending_resize);
+        assert!(windows.values().all(|ws| !ws.pending_resize));
+
+        App::queue_window_resizes(std::iter::once(&mut current).chain(windows.values_mut()));
+
+        assert!(current.pending_resize);
+        assert!(windows.values().all(|ws| ws.pending_resize));
+        assert!(current.renderer.is_none());
+        assert!(windows.values().all(|ws| ws.renderer.is_none()));
+
+        let src = production_source();
+        let flat: String = src.split_whitespace().collect();
+        let flat = flat.replace(",);", ");");
+        for value in ["Some((tag,url))", "None"] {
+            let transition = format!(
+                "self.update_available={value};Self::queue_window_resizes(std::iter::once(&mut*ws).chain(self.windows.values_mut()));"
+            );
+            assert!(flat.contains(&transition), "banner transition: {value}");
+        }
+    }
+
+    #[test]
     fn content_rect_for_carves_out_update_banner_band() {
         use super::{ContentBands, content_rect_for_with_strip};
         use kettle_config::{StatusBarMode, TabBarPos};
@@ -60056,11 +60184,13 @@ mod lane_control_tests {
     /// row rather than past its end; within it, from the row scrolled to.
     #[test]
     fn a_lane_shows_its_source_from_a_row_it_has() {
-        let replaced = lane_source("<svg/>", 1, (80, 0), 4, 10);
+        let source = crate::media::ItemSource::sample(b"<svg/>");
+        let replaced = lane_source(&source, (80, 0), 4, 10);
         assert_eq!(replaced.first_row, 0);
         assert_eq!(replaced.rows, ["<svg/>"]);
         assert_eq!(replaced.total_rows, 1);
-        let within = lane_source("a\nb\nc\n", 3, (1, 0), 1, 10);
+        let source = crate::media::ItemSource::sample(b"a\nb\nc\n");
+        let within = lane_source(&source, (1, 0), 1, 10);
         assert_eq!((within.first_row, within.rows), (1, vec!["b".to_owned()]));
     }
 

@@ -2209,6 +2209,7 @@ impl Mux {
                 } else {
                     cmd.clone()
                 };
+                let (argv, cwd) = launch_cwd(argv, cwd.clone());
                 let geometry = geometries
                     .next()
                     .unwrap_or_else(|| PtyGeometry::from_cell_size(80, 24, 8, 16));
@@ -3701,12 +3702,13 @@ impl Mux {
         geometry: PtyGeometry,
         waker: Waker,
     ) -> Result<bool> {
-        let Some(snap) = self.closed_tabs.pop_back() else {
+        let Some(snap) = self.closed_tabs.back().cloned() else {
             return Ok(false);
         };
         // Re-spawn the same argv + cwd. Empty argv → configured shell
         // (matches `new_tab_with`'s contract).
         let id = self.spawn_pane(cfg, geometry, waker, snap.cwd.as_deref(), &snap.argv)?;
+        self.closed_tabs.pop_back();
         let insert_at = snap.original_index.min(self.tabs.len());
         self.tabs.insert(
             insert_at,
@@ -4599,9 +4601,22 @@ pub(crate) fn argv_is_wsl(argv: &[String]) -> bool {
 /// usable Windows dir as before. Pure (unit-tested).
 fn launch_cwd(mut argv: Vec<String>, raw_cwd: Option<String>) -> (Vec<String>, Option<String>) {
     if argv_is_wsl(&argv) {
-        if let Some(d) = raw_cwd.filter(|d| !d.is_empty())
-            && !argv.iter().any(|a| a == "--cd")
-        {
+        if let Some(d) = raw_cwd.filter(|d| !d.is_empty()) {
+            let mut i = 1;
+            while i < argv.len() {
+                match argv[i].as_str() {
+                    "--" | "-e" | "--exec" => break,
+                    "--cd" => {
+                        let end = (i + 2).min(argv.len());
+                        argv.drain(i..end);
+                    }
+                    "-d" | "--distribution" | "-u" | "--user" | "--shell-type" => {
+                        i += 2;
+                    }
+                    arg if arg.starts_with('-') => i += 1,
+                    _ => break,
+                }
+            }
             // Insert `--cd <dir>` immediately AFTER the launcher (index 1), in
             // WSL's option section. Appended at the end, it would follow any
             // command (`wsl -d Ubuntu -- bash -l --cd <dir>`) and go to `bash`,
@@ -4816,6 +4831,48 @@ mod node_tests {
     }
 
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_leaf_routes_wsl_cwd_through_launcher() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().expect("temp dir");
+        let launcher = root.path().join("wsl.exe");
+        std::fs::write(&launcher, b"#!/bin/sh\nexit 0\n").expect("launcher fixture");
+        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755))
+            .expect("executable fixture");
+        let launcher = launcher.to_string_lossy().into_owned();
+        let cfg = Config {
+            shell_integration: false,
+            login_shell: false,
+            ..Config::default()
+        };
+        let saved = SNode::Leaf {
+            cwd: Some("/home/me/project".into()),
+            cmd: vec![launcher.clone(), "-d".into(), "Ubuntu".into()],
+            group: None,
+        };
+        let mut mux = Mux::new();
+        let mut geometries = std::iter::once(PtyGeometry::from_cell_size(80, 24, 8, 16));
+        let mut spawned = Vec::new();
+        let mk = || -> Waker { Arc::new(|| {}) };
+        let node = mux
+            .build_node(&saved, &cfg, &mut geometries, &mk, &mut spawned)
+            .expect("restore leaf");
+        let argv = mux.panes[&node.first_leaf()].argv.clone();
+        mux.kill_children();
+        assert_eq!(
+            argv,
+            vec![
+                launcher,
+                "--cd".into(),
+                "/home/me/project".into(),
+                "-d".into(),
+                "Ubuntu".into(),
+            ]
+        );
+    }
 
     /// Focus must follow the tab, not the index.
     #[test]
@@ -7197,11 +7254,33 @@ mod node_tests {
         assert_eq!(cwd, None);
 
         // WSL already specifying --cd → not double-injected.
-        let (argv, _) = launch_cwd(
+        let (argv, cwd) = launch_cwd(
             s(&["wsl.exe", "--cd", "/home/me"]),
             Some("/mnt/c/other".into()),
         );
-        assert_eq!(argv, s(&["wsl.exe", "--cd", "/home/me"]));
+        assert_eq!(argv, s(&["wsl.exe", "--cd", "/mnt/c/other"]));
+        assert_eq!(cwd, None);
+    }
+
+    #[test]
+    fn launch_cwd_does_not_treat_command_cd_as_a_launcher_option() {
+        let s = |a: &[&str]| a.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let commands: &[&[&str]] = &[
+            &["wsl.exe", "--", "tool", "--cd", "/command"],
+            &["wsl.exe", "-d", "Ubuntu", "tool", "--cd", "/command"],
+            &["wsl.exe", "-e", "tool", "--cd", "/command"],
+            &["wsl.exe", "--exec", "tool", "--cd", "/command"],
+            &["wsl.exe", "--distribution", "--cd", "--", "tool"],
+        ];
+        for command in commands {
+            let mut expected = s(command);
+            expected.insert(1, "/current".into());
+            expected.insert(1, "--cd".into());
+            assert_eq!(
+                launch_cwd(s(command), Some("/current".into())),
+                (expected, None)
+            );
+        }
     }
 
     #[test]
@@ -8296,6 +8375,41 @@ mod node_tests {
             TabActivity::Output,
             "backward clock should NOT trigger Silent"
         );
+    }
+
+    #[test]
+    fn undo_close_tab_preserves_snapshot_on_spawn_failure() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let argv = vec![root.path().join("missing-shell").display().to_string()];
+        let cwd = Some(root.path().display().to_string());
+        let mut mux = Mux::new();
+        for original_index in 0..2 {
+            mux.closed_tabs.push_back(ClosedTab {
+                original_index,
+                argv: argv.clone(),
+                cwd: cwd.clone(),
+            });
+        }
+        let cfg = Config {
+            shell_integration: false,
+            login_shell: false,
+            ..Config::default()
+        };
+        for _ in 0..2 {
+            let result = mux.undo_close_tab_geometry(
+                &cfg,
+                PtyGeometry::from_cell_size(80, 24, 8, 16),
+                Arc::new(|| {}),
+            );
+            assert!(result.is_err());
+            assert_eq!(mux.closed_tabs.len(), 2);
+            let snap = mux.closed_tabs.back().expect("latest snapshot retained");
+            assert_eq!(snap.original_index, 1);
+            assert_eq!(snap.argv, argv);
+            assert_eq!(snap.cwd, cwd);
+            assert!(mux.tabs.is_empty());
+            assert!(mux.panes.is_empty());
+        }
     }
 
     #[test]
