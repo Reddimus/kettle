@@ -2563,9 +2563,62 @@ fn ctl_page_values_with_page(
     Response::ok(req.id, serde_json::Value::Object(result))
 }
 
+/// A paste made while a clipboard image was still being encoded. It waits
+/// its turn so pastes land in the order they were made.
+struct QueuedPaste {
+    window: u64,
+    target: Option<u64>,
+    receipt_pane: Option<u64>,
+    broadcast: crate::mux::BroadcastScope,
+    /// The panes a broadcast paste reaches, every window's, when it was made.
+    recipients: Vec<u64>,
+    content: QueuedPasteContent,
+}
+
+enum QueuedPasteContent {
+    /// The PNG of encoder job `id`, once it is kept or has failed, and the
+    /// clipboard's text to paste instead if it failed.
+    Image {
+        id: u64,
+        fallback: String,
+        path: Option<std::io::Result<std::path::PathBuf>>,
+    },
+    Text(String),
+    Paths {
+        paths: Vec<std::path::PathBuf>,
+        trailing_space: bool,
+        video: Option<crate::video_preview::VideoPasteRequest>,
+    },
+}
+
+impl QueuedPasteContent {
+    /// The bytes it holds while it waits.
+    fn bytes(&self) -> usize {
+        match self {
+            Self::Image { fallback, .. } => fallback.len(),
+            Self::Text(text) => text.len(),
+            Self::Paths { paths, .. } => paths
+                .iter()
+                .map(|path| path.as_os_str().len())
+                .fold(0, usize::saturating_add),
+        }
+    }
+
+    /// Whether it is an image still being encoded.
+    fn encoding(&self) -> bool {
+        matches!(self, Self::Image { path: None, .. })
+    }
+}
+
+/// Most pastes that may wait behind encoding images, and their text bytes.
+const QUEUED_PASTES_MAX: usize = 64;
+const QUEUED_PASTE_BYTES_MAX: usize = 4 * LOCAL_PASTE_MAX;
+
 #[derive(Debug, Clone)]
 pub enum UserEvent {
     Wakeup,
+    /// The paste encoder finished a clipboard image's PNG.
+    PastedImageEncoded,
     #[cfg(target_os = "linux")]
     Wayland,
     /// The coalescing process-tree worker published a new remote/cwd snapshot.
@@ -9332,6 +9385,11 @@ pub struct App {
     /// Temporary PNGs materialized from clipboard bitmaps. Owner-only, bounded,
     /// and removed on exit — see [`crate::paste_image`].
     pasted_images: crate::paste_image::PastedImages,
+    /// Encodes clipboard images off the window thread; started on first use.
+    png_encoder: Option<crate::paste_image::PngEncoder>,
+    png_jobs: u64,
+    /// Pastes waiting, in order, for the images ahead of them to encode.
+    queued_pastes: std::collections::VecDeque<QueuedPaste>,
     /// The PNG copies handed to the image viewer, made off the window thread.
     /// Owner-only, bounded, oldest dropped first, and removed on exit.
     viewer_copies: std::sync::Arc<std::sync::Mutex<crate::paste_image::PastedImages>>,
@@ -9885,6 +9943,9 @@ impl App {
             .map(crate::activation_server::ActivationInbox::drain)
             .unwrap_or_default();
         for request in pending {
+            if !request.claim() {
+                continue;
+            }
             if !activation_recording_available(
                 request.request.requires_recording(),
                 self.recording_status(),
@@ -10400,6 +10461,9 @@ impl App {
             cards_tip: crate::media::CardsTip::load(),
             clipboard,
             pasted_images: crate::paste_image::PastedImages::new(crate::paste_image::PASTED),
+            png_encoder: None,
+            png_jobs: 0,
+            queued_pastes: std::collections::VecDeque::new(),
             viewer_copies: std::sync::Arc::new(std::sync::Mutex::new(
                 crate::paste_image::PastedImages::new(crate::paste_image::OPENED),
             )),
@@ -10453,6 +10517,13 @@ impl App {
         // Pasted screenshots are captured screen content, so they do not outlive
         // the session that produced them. Runs on the error path too — an exit
         // caused by a failure is exactly when leftovers would go unnoticed.
+        // PNGs still being encoded are stopped and kept first, so cleanup
+        // takes them too.
+        if let Some(encoder) = app.png_encoder.take() {
+            for encoded in encoder.close() {
+                let _ = app.pasted_images.keep_png(encoded);
+            }
+        }
         app.pasted_images.cleanup();
         // So are the copies handed to the image viewer, and the store closes
         // so an open still on its way cannot leave a new one.
@@ -12603,7 +12674,7 @@ impl App {
             .preview_copy
             .as_ref()
             .map_or(crate::media::CopyStarted::Unavailable, |copy| {
-                copy.copy(ws.seq, pane, content)
+                copy.copy(ws.seq, pane, item.id, item.generation, content)
             });
         let notice = match started {
             crate::media::CopyStarted::Started => None,
@@ -15775,10 +15846,7 @@ impl App {
         // path can see it. Materialize it as a PNG and paste the path, reusing
         // the same shell-quoting / WSL-translation pipeline. Ordered after the
         // file branch so a genuine copied file always wins.
-        if self.cfg.paste_images.enabled()
-            && let Some(path) = self.clipboard_image_paste_path()
-        {
-            self.paste_paths(ws, vec![path], false, None);
+        if self.cfg.paste_images.enabled() && self.paste_clipboard_image(ws) {
             return;
         }
         let text = self
@@ -15789,27 +15857,240 @@ impl App {
         self.paste_text(ws, text);
     }
 
-    /// Write a clipboard bitmap to a temporary PNG, or `None` when the
-    /// clipboard holds no image.
-    ///
-    /// A failure to encode or write is logged and degrades to `None` so the
+    /// Paste the clipboard's bitmap as the path of a temporary PNG. False
+    /// when the clipboard holds no image, or it cannot be stored, so the
     /// paste falls through to text rather than silently doing nothing — the
     /// failure mode this whole path exists to remove.
-    fn clipboard_image_paste_path(&mut self) -> Option<std::path::PathBuf> {
-        let image = self.clipboard.as_mut()?.get_image().ok()?;
-        let path = match self.pasted_images.save_rgba(
+    ///
+    /// A large screenshot takes long enough to encode to stall the window,
+    /// so the PNG is made on the encoder thread and the paste waits in
+    /// [`App::queued_pastes`], with any made after it.
+    fn paste_clipboard_image(&mut self, ws: &mut WindowState) -> bool {
+        let Some(image) = self.clipboard.as_mut().and_then(|c| c.get_image().ok()) else {
+            return false;
+        };
+        // Read now: by the time the PNG is ready the clipboard may have changed.
+        let fallback = self
+            .clipboard
+            .as_mut()
+            .and_then(|c| c.get_text().ok())
+            .filter(|text| local_paste_within_limit(text))
+            .unwrap_or_default();
+        if !self.paste_queue_admits(fallback.len()) {
+            self.report_input_result(PaneInputResult::Oversize);
+            return true;
+        }
+        let png = match self.pasted_images.reserve_png(
             image.width,
             image.height,
-            &image.bytes,
+            image.bytes.len(),
             self.cfg.paste_image_preview,
         ) {
-            Ok(path) => path,
+            Ok(png) => png,
             Err(error) => {
                 log::warn!("clipboard image paste failed: {error}");
-                return None;
+                return false;
             }
         };
-        Some(path)
+        let id = self.png_jobs;
+        self.png_jobs = self.png_jobs.wrapping_add(1);
+        let rgba = image.bytes.into_owned();
+        let submitted = match self.png_encoder() {
+            Some(encoder) => encoder.submit(id, png, rgba),
+            None => Err((png, rgba)),
+        };
+        if let Err((png, rgba)) = submitted {
+            // No encoder thread: encode here, as a paste always did once.
+            let encoded = png.encode(&rgba, &|| false);
+            return match self.pasted_images.keep_png(encoded) {
+                Ok(path) => {
+                    self.paste_paths(ws, vec![path], false, None);
+                    true
+                }
+                Err(error) => {
+                    log::warn!("clipboard image paste failed: {error}");
+                    false
+                }
+            };
+        }
+        self.queue_paste(
+            ws,
+            QueuedPasteContent::Image {
+                id,
+                fallback,
+                path: None,
+            },
+        );
+        true
+    }
+
+    /// The clipboard-image encoder, started on first use.
+    fn png_encoder(&mut self) -> Option<&crate::paste_image::PngEncoder> {
+        if self.png_encoder.is_none() {
+            let proxy = self.proxy.clone();
+            match crate::paste_image::PngEncoder::new(Box::new(move || {
+                let _ = proxy.send_event(UserEvent::PastedImageEncoded);
+            })) {
+                Ok(encoder) => self.png_encoder = Some(encoder),
+                Err(error) => log::warn!("clipboard image encoder could not start: {error}"),
+            }
+        }
+        self.png_encoder.as_ref()
+    }
+
+    /// Whether one more paste of `bytes` may wait in the queue.
+    fn paste_queue_admits(&self, bytes: usize) -> bool {
+        let waiting = self
+            .queued_pastes
+            .iter()
+            .map(|paste| paste.content.bytes())
+            .fold(bytes, usize::saturating_add);
+        self.queued_pastes.len() < QUEUED_PASTES_MAX && waiting <= QUEUED_PASTE_BYTES_MAX
+    }
+
+    /// Queue `content` to paste where a paste made now would go, once the
+    /// images ahead of it are encoded. Refused when too much is waiting.
+    fn queue_paste(&mut self, ws: &WindowState, content: QueuedPasteContent) {
+        if !matches!(content, QueuedPasteContent::Image { .. })
+            && !self.paste_queue_admits(content.bytes())
+        {
+            self.discard_queued_paste(content);
+            self.report_input_result(PaneInputResult::Oversize);
+            return;
+        }
+        let recipients = self.broadcast_recipients(ws);
+        self.queued_pastes.push_back(QueuedPaste {
+            window: ws.seq,
+            target: paste_target(&ws.mux),
+            receipt_pane: ws.mux.active_focus(),
+            broadcast: ws.mux.broadcast.clone(),
+            recipients,
+            content,
+        });
+    }
+
+    /// Every pane, in this window and the others, that a broadcast from `ws`
+    /// reaches now, in order. Empty with broadcast off. `ws` must be checked
+    /// out of `self.windows`, as during dispatch.
+    fn broadcast_recipients(&self, ws: &WindowState) -> Vec<u64> {
+        if !ws.mux.is_broadcast_on() {
+            return Vec::new();
+        }
+        let mut panes = ws.mux.broadcast_target_ids();
+        if Mux::scope_crosses_windows(&ws.mux.broadcast) {
+            for other in self.windows.values() {
+                panes.extend(other.mux.foreign_target_ids(&ws.mux.broadcast));
+            }
+        }
+        panes.sort_unstable();
+        panes.dedup();
+        panes
+    }
+
+    /// Take the PNGs the encoder finished, then deliver the pastes at the
+    /// front of the queue that are ready, in order.
+    fn drain_queued_pastes(&mut self, el: &ActiveEventLoop) {
+        while let Some((id, encoded)) = self.png_encoder.as_ref().and_then(|e| e.try_recv()) {
+            let kept = self.pasted_images.keep_png(encoded);
+            let waiting =
+                self.queued_pastes
+                    .iter_mut()
+                    .find_map(|paste| match &mut paste.content {
+                        QueuedPasteContent::Image {
+                            id: queued, path, ..
+                        } if *queued == id => Some(path),
+                        _ => None,
+                    });
+            match (waiting, kept) {
+                (Some(path), kept) => *path = Some(kept),
+                // Its paste is gone, so its PNG goes too.
+                (None, Ok(path)) => {
+                    let _ = self.pasted_images.remove(&path);
+                }
+                (None, Err(_)) => {}
+            }
+        }
+        while self
+            .queued_pastes
+            .front()
+            .is_some_and(|paste| !paste.content.encoding())
+        {
+            let Some(paste) = self.queued_pastes.pop_front() else {
+                break;
+            };
+            self.deliver_queued_paste(el, paste);
+        }
+    }
+
+    fn deliver_queued_paste(&mut self, el: &ActiveEventLoop, paste: QueuedPaste) {
+        let QueuedPaste {
+            window,
+            target,
+            receipt_pane,
+            broadcast,
+            recipients,
+            content,
+        } = paste;
+        // A single-pane paste follows its pane, which may have changed window.
+        let window = target
+            .and_then(|pane| {
+                self.windows
+                    .iter()
+                    .find_map(|(&seq, ws)| ws.mux.panes.contains_key(&pane).then_some(seq))
+            })
+            .unwrap_or(window);
+        let Some(mut ws) = self.windows.remove(&window) else {
+            self.discard_queued_paste(content);
+            return;
+        };
+        // Broadcast goes where its scope reaches now. A different scope, or
+        // the same scope over other panes (another tab, a group that changed),
+        // could reach panes the paste was never meant for.
+        if ws.mux.broadcast != broadcast || self.broadcast_recipients(&ws) != recipients {
+            self.discard_queued_paste(content);
+            self.finish_window_dispatch(el, window, ws);
+            return;
+        }
+        match content {
+            QueuedPasteContent::Image {
+                path: Some(Ok(path)),
+                ..
+            } => self.paste_paths_to(&mut ws, target, receipt_pane, vec![path], false, None),
+            QueuedPasteContent::Image {
+                path: Some(Err(error)),
+                fallback,
+                ..
+            } => {
+                log::warn!("clipboard image paste failed: {error}");
+                self.paste_text_to(&mut ws, target, &fallback);
+            }
+            QueuedPasteContent::Image { path: None, .. } => {}
+            QueuedPasteContent::Text(text) => self.paste_text_to(&mut ws, target, &text),
+            QueuedPasteContent::Paths {
+                paths,
+                trailing_space,
+                video,
+            } => self.paste_paths_to(&mut ws, target, receipt_pane, paths, trailing_space, video),
+        }
+        self.finish_window_dispatch(el, window, ws);
+    }
+
+    /// Let go of what a paste that will not be delivered holds.
+    fn discard_queued_paste(&mut self, content: QueuedPasteContent) {
+        match content {
+            QueuedPasteContent::Image {
+                path: Some(Ok(path)),
+                ..
+            } => {
+                self.pasted_images
+                    .discard_previews_for_paths(std::slice::from_ref(&path));
+                let _ = self.pasted_images.remove(&path);
+            }
+            QueuedPasteContent::Paths { paths, .. } => {
+                self.pasted_images.discard_previews_for_paths(&paths);
+            }
+            QueuedPasteContent::Image { .. } | QueuedPasteContent::Text(_) => {}
+        }
     }
 
     /// Read a file list from the clipboard (CF_HDROP on Windows,
@@ -15847,18 +16128,26 @@ impl App {
     /// and `paste_primary` (and any future paste channel) can't drift on the
     /// safety/scoping rules.
     fn paste_text(&mut self, ws: &mut WindowState, text: String) {
+        if !self.queued_pastes.is_empty() && !text.is_empty() && local_paste_within_limit(&text) {
+            self.queue_paste(ws, QueuedPasteContent::Text(text));
+            return;
+        }
+        let target = paste_target(&ws.mux);
+        self.paste_text_to(ws, target, &text);
+    }
+
+    fn paste_text_to(&mut self, ws: &mut WindowState, target: Option<u64>, text: &str) {
         if text.is_empty() {
             return;
         }
         // Reject rather than silently truncate. A truncated shell command,
         // patch, or encoded file can be more dangerous than no paste, and the
         // explicit notice tells the user to pass the data by file instead.
-        if !local_paste_within_limit(&text) {
+        if !local_paste_within_limit(text) {
             self.report_input_result(PaneInputResult::Oversize);
             return;
         }
-        let target = paste_target(&ws.mux);
-        self.deliver_text_paste(ws, target, &text);
+        self.deliver_text_paste(ws, target, text);
     }
 
     fn deliver_text_paste(&mut self, ws: &mut WindowState, target: Option<u64>, text: &str) {
@@ -15923,9 +16212,35 @@ impl App {
         if paths.is_empty() {
             return;
         }
+        if !self.queued_pastes.is_empty() {
+            self.queue_paste(
+                ws,
+                QueuedPasteContent::Paths {
+                    paths,
+                    trailing_space,
+                    video,
+                },
+            );
+            return;
+        }
         let target = paste_target(&ws.mux);
         let receipt_pane = ws.mux.active_focus();
-        let mut preview = crate::mux::format_paths_for_paste(&ws.mux.focused_argv(), &paths);
+        self.paste_paths_to(ws, target, receipt_pane, paths, trailing_space, video);
+    }
+
+    fn paste_paths_to(
+        &mut self,
+        ws: &mut WindowState,
+        target: Option<u64>,
+        receipt_pane: Option<u64>,
+        paths: Vec<std::path::PathBuf>,
+        trailing_space: bool,
+        video: Option<crate::video_preview::VideoPasteRequest>,
+    ) {
+        let argv = target
+            .and_then(|pane| ws.mux.panes.get(&pane))
+            .map_or_else(|| ws.mux.focused_argv(), |pane| pane.argv.clone());
+        let mut preview = crate::mux::format_paths_for_paste(&argv, &paths);
         if trailing_space {
             preview.push(' ');
         }
@@ -25332,17 +25647,12 @@ impl App {
             .map(crate::media::CopyService::take_done)
             .unwrap_or_default();
         for copy in copies {
-            let notice = match (copy.copied, copy.image) {
-                (true, true) => LaneNotice::ImageCopied,
-                (true, false) => LaneNotice::SourceCopied,
-                (false, _) => LaneNotice::CopyFailed,
-            };
-            let item = self
+            let current = self
                 .window_by_seq(ws, copy.window)
-                .and_then(|window| window.preview_panels.get(&copy.pane))
-                .map(|panel| panel.item);
-            if let Some(item) = item {
-                self.tell_lane(ws, copy.window, copy.pane, item, notice);
+                .and_then(|window| preview_item(window, copy.pane))
+                .map(|item| (item.id, item.generation));
+            if let Some(notice) = copy.notice_for(current) {
+                self.tell_lane(ws, copy.window, copy.pane, copy.item, notice);
             }
         }
     }
@@ -33674,6 +33984,7 @@ impl ApplicationHandler<UserEvent> for App {
             #[cfg(target_os = "linux")]
             UserEvent::Wayland => self.poll_wayland(el),
             UserEvent::Activation => self.drain_activation_requests(el),
+            UserEvent::PastedImageEncoded => self.drain_queued_pastes(el),
             // A watcher event starts a short non-blocking settle window. The
             // pending latch stays closed until about_to_wait clears it just
             // before the single process-level read.
@@ -37764,6 +38075,7 @@ impl App {
             // Consumed by the outer window-less dispatch before a WindowState
             // is checked out.
             UserEvent::Activation
+            | UserEvent::PastedImageEncoded
             | UserEvent::NativeFullscreenExited { .. }
             | UserEvent::RemoteScanReady
             | UserEvent::MediaRendered
@@ -41978,6 +42290,38 @@ mod tests {
     }
 
     #[test]
+    fn clipboard_images_encode_off_the_window_thread_in_paste_order() {
+        let source = production_source();
+        let body = |name: &str| {
+            source
+                .split(&format!("\n    fn {name}("))
+                .nth(1)
+                .and_then(|rest| rest.split("\n    fn ").next())
+                .unwrap_or_else(|| panic!("{name} body"))
+        };
+        let image = body("paste_clipboard_image");
+        assert!(
+            image.contains("self.pasted_images.reserve_png(")
+                && image.contains("encoder.submit(id, png, rgba)")
+                && !image.contains("save_rgba"),
+            "the window thread reserves the PNG and hands the encode to the encoder"
+        );
+        for name in ["paste_text", "paste_paths"] {
+            assert!(
+                body(name).contains("if !self.queued_pastes.is_empty()"),
+                "{name} must wait behind an image still encoding"
+            );
+        }
+        let deliver = body("deliver_queued_paste");
+        assert!(
+            deliver.contains(
+                "if ws.mux.broadcast != broadcast || self.broadcast_recipients(&ws) != recipients {"
+            ),
+            "a queued broadcast paste must not reach a scope or panes changed since"
+        );
+    }
+
+    #[test]
     fn media_receipt_wiring_fails_closed_and_keeps_diagnostics_private() {
         let source = production_source();
         let confirmed = source
@@ -42009,7 +42353,7 @@ mod tests {
         let clipboard = source
             .split("fn paste_clipboard(")
             .nth(1)
-            .and_then(|rest| rest.split("\n    fn clipboard_image_paste_path").next())
+            .and_then(|rest| rest.split("\n    fn paste_clipboard_image").next())
             .expect("clipboard paste entry point");
         let dropped = source
             .split("WindowEvent::DroppedFile(path) => {")
@@ -50578,6 +50922,12 @@ mod tests {
     #[test]
     fn every_program_key_rule_is_a_shipped_default() {
         let macos = cfg!(target_os = "macos");
+        // Labels name Alt and Super the way the platform's keyboard does.
+        let (alt, cmd) = if macos {
+            ("Opt", "Cmd")
+        } else {
+            ("Alt", "Super")
+        };
         let defaults = kettle_config::keybinds::defaults();
         let mut yielding: Vec<String> = defaults
             .iter()
@@ -50609,18 +50959,22 @@ mod tests {
         ]
         .iter()
         .map(|chord| chord.to_string())
-        .chain((1..=9).map(|n| format!("Alt+{n}")))
+        .chain((1..=9).map(|n| format!("{alt}+{n}")))
         .chain(
             macos
                 .then(|| {
-                    ["Super+Up".to_string(), "Super+Down".to_string()]
+                    [format!("{cmd}+Up"), format!("{cmd}+Down")]
                         .into_iter()
-                        .chain((1..=9).map(|n| format!("Super+{n}")))
-                        .chain(["Alt+Super", "Ctrl+Super"].into_iter().flat_map(|m| {
-                            ["Up", "Down", "Left", "Right"]
+                        .chain((1..=9).map(|n| format!("{cmd}+{n}")))
+                        .chain(
+                            [format!("{alt}+{cmd}"), format!("Ctrl+{cmd}")]
                                 .into_iter()
-                                .map(move |k| format!("{m}+{k}"))
-                        }))
+                                .flat_map(|m| {
+                                    ["Up", "Down", "Left", "Right"]
+                                        .into_iter()
+                                        .map(move |k| format!("{m}+{k}"))
+                                }),
+                        )
                 })
                 .into_iter()
                 .flatten(),

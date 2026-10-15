@@ -3026,6 +3026,7 @@ def flood_row(samples: List[tuple], done_ns: Optional[int], offsets: Sequence[fl
     release = next((t for t, fp, _ in samples if t >= done_ns and fp / 2**20 <= settled + 8), None)
     row["release_s"] = (release - done_ns) / 1e9 if release is not None else None
     row["timeline"] = [[round((t - done_ns) / 1e6), round(fp / 2**20, 2)] for t, fp, _ in samples]
+    row["timeline_ns"] = [[t - done_ns, fp] for t, fp, _ in samples]
     return row
 
 

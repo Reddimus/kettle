@@ -363,8 +363,12 @@ Pasted clipboard bitmaps add a narrower ephemeral-file lifecycle on top of
 those primitives. One process owns at most 64 PNG handles and 256 MiB of final
 encoded PNG bytes; the streaming writer refuses a write that would cross the
 remaining aggregate budget and removes a failed/partial object through its
-creating handle. An empty bootstrap object establishes and identifies the
-owner-private session directory before any clipboard content is written.
+creating handle. The window thread only checks a bitmap and reserves its
+PNG's room (`reserve_png`); one `PngEncoder` thread encodes in paste order and
+the window keeps the result (`keep_png`). Pastes made meanwhile wait in a
+bounded queue behind it (64 entries, 16 MiB of text), so they land in order.
+An empty bootstrap object establishes and identifies the owner-private session
+directory before any clipboard content is written.
 Every Unix PNG is then created with `openat` beneath that held descriptor, so a
 rename/path replacement cannot redirect screenshot bytes; Windows pins the
 directory name by denying delete-sharing before real PNG creation. A successful
@@ -609,7 +613,13 @@ only directories that Kettle created. Install, authenticated update, and
 uninstall walk components without following links, validate owner/write modes,
 and verify the complete prior record before mutation. Uninstall consequently
 unlinks only recorded leaves and removes only recorded empty directories; it
-does not recursively delete a shared XDG prefix or adopt a legacy tree. Startup
+does not recursively delete a shared XDG prefix or adopt a legacy tree. Before
+it writes, the installer publishes an owner-only `install-pending.json` receipt
+naming every file it is about to write, and removes it once the new record is
+verified. A failed publish records what it did replace when that record would
+be complete; a retry or uninstall accepts a file that differs from its record,
+or has none, only when it matches the receipt. Equal bytes alone never adopt a
+file. Startup
 and explicit update first authenticate the marker, layout, prefix ownership, and
 update journal under the update lock; they recover an incomplete transaction
 before checking file-content provenance, so the old record cannot strand the
@@ -1165,6 +1175,12 @@ Two roles split cleanly across the bin and the GUI:
   to stdout, no GUI), `kettle ctl` (the kettle-ctl client that drives a running
   kettle), and `kettle mcp` (the Model Context Protocol bridge that exposes both
   as native agent tools).
+
+`kettle mcp` reads capped input lines on a dedicated thread through a
+one-slot channel. The dispatcher monitors stdout while waiting for input,
+so a write stalled for 30 seconds also ends a connection with stdin open.
+On that failure it detaches blocked transport threads; the CLI exits with
+status 1.
 
 The surface is multi-window aware: `get_state` reports
 `{windows, focused_window}`; `list_tabs` / `list_panes` enumerate every

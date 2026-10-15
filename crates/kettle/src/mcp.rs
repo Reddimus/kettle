@@ -152,6 +152,22 @@ struct WriterProgress {
     completed: AtomicU64,
 }
 
+fn stdout_stall_detector(progress: &WriterProgress, limit: Duration) -> impl FnMut() -> bool + '_ {
+    let mut seen = progress.completed.load(Ordering::Relaxed);
+    let mut since = Instant::now();
+    move || {
+        let completed = progress.completed.load(Ordering::Relaxed);
+        if completed != seen || !progress.in_write.load(Ordering::Relaxed) {
+            // Progress, or nothing in flight: the peer is not the problem.
+            seen = completed;
+            since = Instant::now();
+            false
+        } else {
+            since.elapsed() >= limit
+        }
+    }
+}
+
 /// Wait until `done()`, giving up only if the writer is parked inside a single
 /// write for longer than `limit`.
 ///
@@ -163,18 +179,12 @@ fn wait_unless_stdout_stalled(
     limit: Duration,
     mut done: impl FnMut() -> bool,
 ) -> bool {
-    let mut seen = progress.completed.load(Ordering::Relaxed);
-    let mut since = Instant::now();
+    let mut stalled = stdout_stall_detector(progress, limit);
     loop {
         if done() {
             return true;
         }
-        let completed = progress.completed.load(Ordering::Relaxed);
-        if completed != seen || !progress.in_write.load(Ordering::Relaxed) {
-            // Progress, or nothing in flight: the peer is not the problem.
-            seen = completed;
-            since = Instant::now();
-        } else if since.elapsed() >= limit {
+        if stalled() {
             return false;
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -183,8 +193,8 @@ fn wait_unless_stdout_stalled(
 
 /// Run the stdio MCP server loop until stdin closes. Returns zero on clean EOF.
 pub fn run_mcp(selection: ToolSelection) -> i32 {
-    let stdin = std::io::stdin();
-    run_mcp_with(stdin.lock(), std::io::stdout(), selection)
+    let stdin = std::io::BufReader::new(std::io::stdin());
+    run_mcp_with(stdin, std::io::stdout(), selection)
 }
 
 /// The server proper, over any transport.
@@ -194,10 +204,27 @@ pub fn run_mcp(selection: ToolSelection) -> i32 {
 /// peer stops reading, and the process's real stdout cannot be made to do that
 /// from inside a test.
 pub fn run_mcp_with(
-    mut input: impl BufRead,
+    mut input: impl BufRead + Send + 'static,
     output: impl Write + Send + 'static,
     selection: ToolSelection,
 ) -> i32 {
+    let (input_tx, input_rx) = crossbeam_channel::bounded(1);
+    if let Err(error) = std::thread::Builder::new()
+        .name("kettle-mcp-reader".into())
+        .spawn(move || {
+            loop {
+                let line = read_capped_line(&mut input);
+                let finished = !matches!(&line, Ok(Some(_)));
+                if input_tx.send(line).is_err() || finished {
+                    break;
+                }
+            }
+        })
+    {
+        eprintln!("kettle mcp: cannot spawn protocol reader: {error}");
+        return 1;
+    }
+
     let (responses_tx, responses_rx) =
         crossbeam_channel::bounded::<Value>(TOOL_QUEUE_CAPACITY + TOOL_WORKERS + 8);
     let progress = Arc::new(WriterProgress::default());
@@ -246,8 +273,19 @@ pub fn run_mcp_with(
     }
 
     let mut lifecycle = Lifecycle::Uninitialized;
+    let mut stdout_stalled = stdout_stall_detector(&progress, STDOUT_STALL_LIMIT);
+    let mut stalled = false;
     loop {
-        let line = match read_capped_line(&mut input) {
+        if responses_tx.peer_gone() || stdout_stalled() {
+            stalled = true;
+            break;
+        }
+        let read = match input_rx.recv_timeout(Duration::from_millis(10)) {
+            Ok(read) => read,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+        };
+        let line = match read {
             Ok(Some(line)) => line,
             Ok(None) => break,
             Err(ReadLineError::TooLarge) => {
@@ -323,7 +361,7 @@ pub fn run_mcp_with(
     // `wait_unless_stdout_stalled` tells that apart from a worker that is
     // simply busy, which a fixed time budget would kill.
     drop(jobs_tx);
-    let mut stalled = responses_tx.peer_gone();
+    stalled |= responses_tx.peer_gone();
     for worker in workers {
         // `JoinHandle` has no timed join, so watch `is_finished` instead.
         if !stalled
@@ -651,6 +689,14 @@ fn dispatch_message(
             return;
         }
         dispatch_modern(id, method, params, selection, jobs, responses, pending);
+        return;
+    }
+
+    if method == "server/discover" {
+        respond(
+            responses,
+            success(id, modernize(discover_result(selection))),
+        );
         return;
     }
 
@@ -1497,6 +1543,68 @@ mod tests {
             // write, so the server thread is what must be joinable.
             server.join().expect("server thread panicked");
         }
+    }
+
+    #[test]
+    fn a_stalled_stdout_is_detected_while_stdin_stays_open() {
+        struct OpenInput {
+            bytes: std::io::Cursor<Vec<u8>>,
+            closed: std::sync::mpsc::Receiver<()>,
+            idle: std::sync::mpsc::SyncSender<()>,
+        }
+
+        impl std::io::Read for OpenInput {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let read = std::io::Read::read(&mut self.bytes, buf)?;
+                if read != 0 || buf.is_empty() {
+                    return Ok(read);
+                }
+                let _ = self.idle.try_send(());
+                let _ = self.closed.recv();
+                Ok(0)
+            }
+        }
+
+        let messages = [
+            json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": init_params(MCP_PROTOCOL_VERSION)}),
+            json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+            json!({"jsonrpc": "2.0", "id": 2, "method": "ping"}),
+        ];
+        let bytes = messages
+            .iter()
+            .map(|message| format!("{message}\n"))
+            .collect::<String>();
+        let (keep_open, closed) = std::sync::mpsc::sync_channel::<()>(0);
+        let (idle, input_idle) = std::sync::mpsc::sync_channel(1);
+        let (entered, first_write) = std::sync::mpsc::sync_channel(1);
+        let (finished, done) = std::sync::mpsc::sync_channel(1);
+        let server = std::thread::spawn(move || {
+            let input = OpenInput {
+                bytes: std::io::Cursor::new(bytes.into_bytes()),
+                closed,
+                idle,
+            };
+            let code = run_mcp_with(
+                std::io::BufReader::new(input),
+                NeverDrains { entered },
+                ToolSelection::Full,
+            );
+            let _ = finished.try_send(code);
+        });
+        first_write
+            .recv_timeout(Duration::from_secs(10))
+            .expect("writer did not start");
+        input_idle
+            .recv_timeout(Duration::from_secs(10))
+            .expect("stdin did not become idle");
+        let result = done.recv_timeout(STDOUT_STALL_LIMIT + Duration::from_secs(10));
+        drop(keep_open);
+        server.join().expect("server thread panicked");
+        assert_eq!(
+            result.expect("stdout stall was not detected with stdin open"),
+            1
+        );
     }
 
     fn init_params(version: &str) -> Value {

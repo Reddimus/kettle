@@ -192,6 +192,8 @@ interactive `zsh -f` with `PROMPT_SUBST` off and its system Bash 3.2, while
 Linux CI installs Fish and executes its OSC 133 event hooks and OSC 7 cwd report.
 A separate Ubuntu 24.04 job asserts Fish 3.7.x before running the same suite, so
 the oldest supported completion binding cannot drift with `ubuntu-latest`.
+The Fish job also runs the AppleScript payload fixture with a simulated window
+and a real Fish command interpreter, checking argument quoting and exit status.
 Windows runs the PowerShell prompt-status and PSReadLine binding fixture
 under each installed PowerShell host. Other hosts run the interpreters they have
 and print explicit skips for native legs that belong to the CI matrix.
@@ -204,6 +206,8 @@ shortened by locale-sensitive character counts. A real interactive Fish PTY
 proves default and Vi-insert Tab behavior, keymap ownership changes, reverse
 cycling, cursor-move invalidation, paging beyond 64 candidates, and that Fish's
 pager stays closed.
+A second Fish run sources integration from a path containing spaces, an
+apostrophe and a dollar sign, including the Vi-mode re-source.
 It also pins the count, per-field, and aggregate retained-state caps and keeps
 the selected row in a bounded wide-character wire page. Ordinary and
 bounded-prefix singletons are inserted from the captured result without a
@@ -942,6 +946,14 @@ the same lock; Rust lock acquisition rejects a removed or replaced inode.
 The Linux smoke checks the published 5.0.0 archive's retained empty lock as
 legacy behavior. Current installs and later archives must remove it; a
 regression distinguishes those policies and rejects nonempty or symlink locks.
+FIFO fixtures require bounded rejection of source, payload and provenance
+leaves without a writer.
+Interrupted-install fixtures fail a publish with `ENOSPC` part way and end
+the process after a file is in place. A retry and an uninstall must work after
+either, through the recorded provenance and the `install-pending.json`
+receipt; a file with the right bytes but no receipt is still refused, and a
+plan past the 128-file provenance limit is refused before anything is
+written.
 Linux updater tests require both package binaries, promote the 4.9 compatibility
 capsule on
 first restart, recover an interrupted bootstrap idempotently, and restore the
@@ -3681,6 +3693,8 @@ name/size/SHA-256 binding, bounded release-document updates, immutable archive
 references, bounded archive structure and extraction, modern no-downgrade
 behavior, compatible legacy sidecars, and hostile archive/network/parser
 fixtures.
+Raw TAR-header fixtures reject oversized GNU metadata and forbidden PAX before
+extension parsing, while retaining support for bounded GNU long names.
 The update-smoke case checks relative and absolute cache paths, including
 spaces, using a synthetic archive and verifier. It failed with the original
 absolute-path prefix. This covers wiring; `macos-update-smoke` separately checks
@@ -5331,6 +5345,10 @@ not in Kettle, and naming this Kettle and pane through the environment from
 outside lands unverified.
 #### `kettle mcp`
 
+`a_stalled_stdout_is_detected_while_stdin_stays_open` drives the transport
+with a blocked writer and keeps input open until the server returns. It uses
+the shortened unit-test stall limit; production remains 30 seconds.
+
 `kettle mcp --self-test` (in-process handshake +
 `tools/list` + one `kettle_run`). CI also runs
 `crates/kettle/tests/mcp_stdio.rs`, which spawns the real `kettle mcp`
@@ -5339,7 +5357,8 @@ Claude Code / Codex use when the server is registered as an MCP. Protocol
 tests must cover both supported revisions, the exact initialized
 notification, initialization-time ping, notification silence, malformed or
 unknown tool envelopes, encoded-response truncation, 1 MiB/768 KiB framing
-limits, queue saturation, duplicate ids, and cancellation. `kettle-ctl`
+limits, queue saturation, duplicate ids, and cancellation. Oversized run
+geometry must be rejected before terminal allocation. `kettle-ctl`
 loopback tests separately pin response deadlines, cancellation,
 authenticated peers, strict frame/id validation, concurrent activation,
 and preservation of events that precede a response. They also pin that a
@@ -5442,7 +5461,10 @@ pixels cannot masquerade as row drift.
 `delta_fixtures` records whether the git and SVN `diff | delta` fixtures
 were active. Interaction runs include
 `notification-events.jsonl` and `notification-event.json` for the OSC 777
-event-feed assertion. Native
+event-feed assertion. Before it sends OSC 777, the helper waits up to eight
+seconds for `kettle ctl events` to print `kettle ctl: listening for events`
+on stderr, which it does once the server confirms the subscription. The
+helper self-test holds that line back to check the wait. Native
 Windows runs the tabbar/underline recipes through
 `scripts/check-live-ui-smoke.py`; WSL uses the Unix shell scripts. Run those
 platform-local recipes before changing renderer defaults or tab/underline

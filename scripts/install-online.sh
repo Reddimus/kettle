@@ -60,7 +60,7 @@ REPO="Reddimus/kettle"
 VERSION="${KETTLE_VERSION:-latest}"
 # Whether the caller named the version, or the release channel did. It decides
 # whether the pre-manifest trust path may be taken at all; see the floor below.
-if [ -n "${KETTLE_VERSION:-}" ]; then
+if [ -n "${KETTLE_VERSION:-}" ] && [ "$VERSION" != "latest" ]; then
   VERSION_PINNED=1
 else
   VERSION_PINNED=0

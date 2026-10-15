@@ -671,6 +671,10 @@ kettle ctl get_state --pid 12345                        # target a specific kett
 Note: `--text` is literal — backslash escapes like `\n` are **not** decoded —
 so press Enter with `send_keys`, not a trailing `\n`.
 
+`kettle ctl events` prints `kettle ctl: listening for events` on stderr once
+it is subscribed, so a script can wait for that line before it causes the
+events it expects.
+
 ### Methods (protocol v1)
 
 | Method | Mode | Result |
@@ -1255,6 +1259,9 @@ any PNG bytes are persisted. An explicit `path` must name a new leaf beneath an 
 parent; Kettle creates it owner-only and never overwrites or follows an existing
 leaf. Omitting `path` uses Kettle's private diagnostics location and its stricter
 verified-ancestor policy.
+
+`kettle_run` accepts at most 512 columns and 512 rows (defaults 80 by 24).
+Oversized dimensions return a tool error before a PTY or terminal is created.
 
 `kettle mcp --self-test` runs an in-process handshake + `tools/list` + one
 `kettle_run`, for CI.

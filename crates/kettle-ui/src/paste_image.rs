@@ -199,6 +199,7 @@ enum Copying {
 /// the store's bounds, its bytes included, and cleanup tries it again.
 struct StuckImage {
     name: OsString,
+    file: File,
 }
 
 /// Bounded renderer projection retained only beside the private PNG whose path
@@ -291,6 +292,201 @@ impl Reservation {
     }
 }
 
+/// Room and a name a store set aside for one clipboard bitmap's PNG.
+pub(crate) struct PngReservation {
+    reservation: Reservation,
+    width: usize,
+    height: usize,
+    with_preview: bool,
+}
+
+/// A PNG encoded for a [`PngReservation`], for the store to keep.
+pub(crate) struct EncodedPng {
+    reservation: Reservation,
+    /// The private file and its length.
+    png: io::Result<(File, u64)>,
+    preview: Option<PastedImagePreview>,
+}
+
+impl PngReservation {
+    /// Encode `rgba`, the bitmap reserved for, into the reserved private
+    /// file without holding the store. `stop` is asked between writes; an
+    /// encode it ends, like one that fails, is discarded.
+    pub(crate) fn encode(self, rgba: &[u8], stop: &dyn Fn() -> bool) -> EncodedPng {
+        let Self {
+            reservation,
+            width,
+            height,
+            with_preview,
+        } = self;
+        let png = encode_png_into(&reservation, rgba, width, height, stop);
+        let preview = (with_preview && png.is_ok())
+            .then(|| make_preview(width, height, rgba))
+            .flatten();
+        EncodedPng {
+            reservation,
+            png,
+            preview,
+        }
+    }
+}
+
+fn encode_png_into(
+    reservation: &Reservation,
+    rgba: &[u8],
+    width: usize,
+    height: usize,
+    stop: &dyn Fn() -> bool,
+) -> io::Result<(File, u64)> {
+    if Some(rgba.len()) != width.checked_mul(height).and_then(|px| px.checked_mul(4)) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "clipboard image changed size after it was checked",
+        ));
+    }
+    let directory = &reservation.directory;
+    let name = reservation.next.name.as_os_str();
+    let file = create_private_file_in_session(directory, name)?;
+    let stoppable = StopWriter {
+        inner: io::BufWriter::new(file),
+        stop,
+    };
+    let mut writer = BudgetWriter::new(stoppable, reservation.size);
+    // `image` is already a kettle-ui dependency (the window icon decodes
+    // through it), and the `png` feature it is built with covers encoding.
+    use image::ImageEncoder as _;
+    let encoded = image::codecs::png::PngEncoder::new(&mut writer)
+        .write_image(
+            rgba,
+            width as u32,
+            height as u32,
+            image::ExtendedColorType::Rgba8,
+        )
+        .map_err(|error| {
+            if writer.exceeded() {
+                io::Error::new(
+                    io::ErrorKind::QuotaExceeded,
+                    "encoded PNG exceeds the remaining pasted-image budget",
+                )
+            } else {
+                io::Error::other(format!("PNG encode failed: {error}"))
+            }
+        })
+        .and_then(|()| writer.flush());
+    let written = writer.written();
+    let (file, _pending) = writer.into_inner().inner.into_parts();
+    match encoded {
+        Ok(()) => Ok((file, written)),
+        Err(error) => {
+            discard_private_file_in_session(directory, file, name);
+            Err(error)
+        }
+    }
+}
+
+/// A writer that fails once `stop` says so.
+struct StopWriter<'a, W> {
+    inner: W,
+    stop: &'a dyn Fn() -> bool,
+}
+
+impl<W: io::Write> io::Write for StopWriter<'_, W> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        // Not `Interrupted`: `write_all` retries that.
+        if (self.stop)() {
+            return Err(io::Error::other("the PNG encode was stopped"));
+        }
+        self.inner.write(buffer)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// Encodes clipboard bitmaps to PNGs on one worker thread, in the order they
+/// came, so a large screenshot never holds up the window. Each job holds its
+/// [`PngReservation`], so the store's file and byte bounds also bound the
+/// queue and the bitmaps waiting in it.
+pub(crate) struct PngEncoder {
+    jobs: Option<crossbeam_channel::Sender<(u64, PngReservation, Vec<u8>)>>,
+    done: crossbeam_channel::Receiver<(u64, EncodedPng)>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl PngEncoder {
+    /// Start the worker. `wake` runs, on the worker, after each PNG.
+    pub(crate) fn new(wake: Box<dyn Fn() + Send>) -> io::Result<Self> {
+        let (jobs, queued) = crossbeam_channel::unbounded::<(u64, PngReservation, Vec<u8>)>();
+        let (finished, done) = crossbeam_channel::unbounded();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopping = std::sync::Arc::clone(&stop);
+        let thread = std::thread::Builder::new()
+            .name("kettle-paste-png".into())
+            .spawn(move || {
+                let stopped = || stopping.load(std::sync::atomic::Ordering::Acquire);
+                for (id, png, rgba) in queued {
+                    let encoded = png.encode(&rgba, &stopped);
+                    drop(rgba);
+                    if finished.send((id, encoded)).is_err() {
+                        break;
+                    }
+                    wake();
+                }
+            })?;
+        Ok(Self {
+            jobs: Some(jobs),
+            done,
+            stop,
+            thread: Some(thread),
+        })
+    }
+
+    /// Queue `rgba` for `png`, under `id`. Gives both back when the worker
+    /// is gone.
+    #[allow(clippy::result_large_err)]
+    pub(crate) fn submit(
+        &self,
+        id: u64,
+        png: PngReservation,
+        rgba: Vec<u8>,
+    ) -> Result<(), (PngReservation, Vec<u8>)> {
+        let Some(jobs) = self.jobs.as_ref() else {
+            return Err((png, rgba));
+        };
+        jobs.send((id, png, rgba))
+            .map_err(|crossbeam_channel::SendError((_, png, rgba))| (png, rgba))
+    }
+
+    /// The next finished PNG, if one is ready.
+    pub(crate) fn try_recv(&self) -> Option<(u64, EncodedPng)> {
+        self.done.try_recv().ok()
+    }
+
+    /// Stop encoding, wait for the worker, and hand back what it finished
+    /// for the store to keep or give back. Encodes cut short come back as
+    /// errors, their files already gone.
+    pub(crate) fn close(mut self) -> Vec<EncodedPng> {
+        self.shut_down();
+        self.done.try_iter().map(|(_, encoded)| encoded).collect()
+    }
+
+    fn shut_down(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        self.jobs.take();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Drop for PngEncoder {
+    fn drop(&mut self) {
+        self.shut_down();
+    }
+}
+
 /// Owner of this process's pasted-image scratch directory.
 ///
 /// The directory is created lazily only after bitmap validation and budget
@@ -300,6 +496,9 @@ pub(crate) struct PastedImages {
     kind: StoreKind,
     dir: PathBuf,
     seq: usize,
+    /// The highest number a kept file has had. Its name may have been
+    /// handed out, so a later file never takes it again.
+    kept_max: usize,
     directory: Option<SessionDirectory>,
     files: Vec<LiveImage>,
     stuck: Vec<StuckImage>,
@@ -322,6 +521,7 @@ impl PastedImages {
             kind,
             dir: scratch_root().join(format!("{}{}-{nonce}", kind.prefix, std::process::id())),
             seq: 0,
+            kept_max: 0,
             directory: None,
             files: Vec::new(),
             stuck: Vec::new(),
@@ -335,7 +535,8 @@ impl PastedImages {
     /// Encode `width`×`height` RGBA8 `rgba` as a PNG and return its path.
     ///
     /// Split from the clipboard call so the encode/bounds policy is testable
-    /// without a live clipboard or a display server.
+    /// without a live clipboard or a display server. The window thread uses
+    /// [`PastedImages::reserve_png`] and a [`PngEncoder`] instead.
     pub(crate) fn save_rgba(
         &mut self,
         width: usize,
@@ -343,6 +544,22 @@ impl PastedImages {
         rgba: &[u8],
         with_preview: bool,
     ) -> io::Result<PathBuf> {
+        let png = self.reserve_png(width, height, rgba.len(), with_preview)?;
+        let encoded = png.encode(rgba, &|| false);
+        self.keep_png(encoded)
+    }
+
+    /// Check a `width`×`height` RGBA8 bitmap of `len` bytes and set aside
+    /// room and a name for its PNG, to be encoded without holding the store
+    /// ([`PngReservation::encode`]) and then kept
+    /// ([`PastedImages::keep_png`]).
+    pub(crate) fn reserve_png(
+        &mut self,
+        width: usize,
+        height: usize,
+        len: usize,
+        with_preview: bool,
+    ) -> io::Result<PngReservation> {
         if width == 0 || height == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -372,71 +589,52 @@ impl PastedImages {
                 ),
             ));
         }
-        if rgba.len() != expected {
+        if len != expected {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "clipboard image is {} bytes, expected {expected} for {width}x{height} RGBA",
-                    rgba.len()
+                    "clipboard image is {len} bytes, expected {expected} for {width}x{height} RGBA"
                 ),
             ));
         }
         // Make room oldest first, for as much as the PNG can take: its
-        // filtered rows, deflated no larger than stored, plus framing.
+        // filtered rows, deflated no larger than stored, plus framing. A
+        // bitmap near the store's size may still fit once deflated, so it
+        // gets whatever room there is.
         let bound = u64::try_from(expected + height)
             .unwrap_or(u64::MAX)
             .saturating_mul(9)
             / 8
             + 4096;
         let next = self.begin(bound, "png")?;
-        let directory = self
-            .directory
-            .as_ref()
-            .expect("begin established the session directory");
-        let name = next.name.as_os_str();
-        let file = create_private_file_in_session(directory, name)?;
-        let mut writer = BudgetWriter::new(io::BufWriter::new(file), next.remaining);
-        // `image` is already a kettle-ui dependency (the window icon decodes
-        // through it), and the `png` feature it is built with covers encoding.
-        use image::ImageEncoder as _;
-        let encoded = image::codecs::png::PngEncoder::new(&mut writer)
-            .write_image(
-                rgba,
-                width as u32,
-                height as u32,
-                image::ExtendedColorType::Rgba8,
-            )
-            .map_err(|error| {
-                if writer.exceeded() {
-                    budget_error(self.files.len(), self.bytes)
-                } else {
-                    io::Error::other(format!("PNG encode failed: {error}"))
-                }
-            })
-            .and_then(|()| writer.flush());
-        let written = writer.written();
-        let buffered = writer.into_inner();
-        let (file, _pending) = buffered.into_parts();
-        if let Err(error) = encoded {
-            discard_private_file_in_session(directory, file, name);
-            return Err(error);
+        let size = bound.min(next.remaining);
+        let reservation = self.reserve(next, size)?;
+        Ok(PngReservation {
+            reservation,
+            width,
+            height,
+            with_preview,
+        })
+    }
+
+    /// Keep the PNG `encoded` holds once it checks out as
+    /// [`PastedImages::keep_copy`] would, with its preview. A failed encode
+    /// gives its room back.
+    pub(crate) fn keep_png(&mut self, encoded: EncodedPng) -> io::Result<PathBuf> {
+        let EncodedPng {
+            reservation,
+            png,
+            preview,
+        } = encoded;
+        match png {
+            Ok((file, written)) => {
+                self.keep_reserved(reservation, file, written, |_| Ok(()), || preview)
+            }
+            Err(error) => {
+                self.release(reservation);
+                Err(error)
+            }
         }
-        // Build UI chrome only after the private PNG has been published. A
-        // session already at its file or byte limit should fail before doing
-        // even the bounded thumbnail resize on every rejected paste.
-        self.finish(
-            next,
-            file,
-            written,
-            |_| Ok(()),
-            || {
-                if with_preview {
-                    make_preview(width, height, rgba)
-                } else {
-                    None
-                }
-            },
-        )
     }
 
     /// Set aside room and a name for a `size` byte copy named with
@@ -459,12 +657,18 @@ impl PastedImages {
         if size > next.remaining {
             return Err(budget_error(self.files.len(), self.bytes));
         }
+        self.reserve(next, size)
+    }
+
+    /// Hold `size` bytes and the name `begin` gave for a file made without
+    /// holding the store.
+    fn reserve(&mut self, next: NextFile, size: u64) -> io::Result<Reservation> {
         let directory = self
             .directory
             .as_ref()
             .expect("begin established the session directory")
             .try_clone()?;
-        // The name is taken now, so a copy reserved meanwhile gets the next.
+        // The name is taken now, so a file reserved meanwhile gets the next.
         self.seq = next.sequence;
         self.reserved.push((next.name.clone(), size));
         Ok(Reservation {
@@ -486,11 +690,22 @@ impl PastedImages {
         file: File,
         check: impl FnOnce(&File) -> io::Result<()>,
     ) -> io::Result<PathBuf> {
+        let size = reservation.size;
+        self.keep_reserved(reservation, file, size, check, || None)
+    }
+
+    /// Keep `file`, `written` bytes made for `reservation`, as
+    /// [`PastedImages::keep_copy`] describes, with `preview`.
+    fn keep_reserved(
+        &mut self,
+        reservation: Reservation,
+        file: File,
+        written: u64,
+        check: impl FnOnce(&File) -> io::Result<()>,
+        preview: impl FnOnce() -> Option<PastedImagePreview>,
+    ) -> io::Result<PathBuf> {
         let Reservation {
-            directory,
-            next,
-            size,
-            ..
+            directory, next, ..
         } = reservation;
         self.unreserve(&next.name);
         let same = self.directory.as_ref().is_some_and(|held| {
@@ -505,12 +720,21 @@ impl PastedImages {
             }
             return Err(io::Error::other("the store closed while the copy was made"));
         }
-        self.finish(next, file, size, check, || None)
+        self.finish(next, file, written, check, preview)
     }
 
-    /// Give back the room `reservation` set aside, its copy not made.
+    /// Give back the room `reservation` set aside, its copy not made, and
+    /// every name above the newest one still kept or reserved, since no file
+    /// was ever made under those.
     pub(crate) fn release(&mut self, reservation: Reservation) {
         self.unreserve(&reservation.next.name);
+        let reserved = self
+            .reserved
+            .iter()
+            .filter_map(|(name, _)| parse_image_name(name.to_str()?, self.kind))
+            .max()
+            .unwrap_or(0);
+        self.seq = self.kept_max.max(reserved);
         if self.directory.is_none() {
             let _ = remove_session_directory(reservation.directory);
         }
@@ -534,13 +758,20 @@ impl PastedImages {
             io::Error::new(io::ErrorKind::InvalidData, "the store holds no directory")
         })?;
         let image = self.files.remove(index);
-        match remove_open_private_file_in_session(directory, image.file, &image.name) {
+        match image
+            .file
+            .try_clone()
+            .and_then(|file| remove_open_private_file_in_session(directory, file, &image.name))
+        {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => {
                 // Still on disk: still counted, its bytes included, for
                 // cleanup to try again.
-                self.stuck.push(StuckImage { name: image.name });
+                self.stuck.push(StuckImage {
+                    name: image.name,
+                    file: image.file,
+                });
                 return Err(error);
             }
         }
@@ -749,6 +980,7 @@ impl PastedImages {
         self.bytes = total;
         // A copy reserved after this one may already have taken a later name.
         self.seq = self.seq.max(next.sequence);
+        self.kept_max = self.kept_max.max(next.sequence);
         self.files.push(LiveImage {
             path: next.path.clone(),
             name: next.name,
@@ -788,7 +1020,11 @@ impl PastedImages {
             .is_some_and(|image| image.created.elapsed() >= self.kind.min_age)
         {
             let image = self.files.remove(0);
-            match remove_open_private_file_in_session(directory, image.file, &image.name) {
+            match image
+                .file
+                .try_clone()
+                .and_then(|file| remove_open_private_file_in_session(directory, file, &image.name))
+            {
                 Ok(()) => {}
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => {
@@ -796,7 +1032,10 @@ impl PastedImages {
                         "image store left {} unchanged: {error}",
                         image.path.display()
                     );
-                    self.stuck.push(StuckImage { name: image.name });
+                    self.stuck.push(StuckImage {
+                        name: image.name,
+                        file: image.file,
+                    });
                     continue;
                 }
             }
@@ -913,14 +1152,13 @@ impl PastedImages {
                 );
             }
         }
-        // Images an eviction could not delete get another try, through a
-        // fresh handle on the same held directory.
+        // Retry against the original file identity in the held directory.
         for image in self.stuck.drain(..) {
             let Some(directory) = self.directory.as_ref() else {
                 break;
             };
-            if let Err(error) = open_existing_private_file_in_session(directory, &image.name)
-                .and_then(|file| remove_open_private_file_in_session(directory, file, &image.name))
+            if let Err(error) =
+                remove_open_private_file_in_session(directory, image.file, &image.name)
                 && error.kind() != io::ErrorKind::NotFound
             {
                 log::debug!(
@@ -940,6 +1178,7 @@ impl PastedImages {
         }
         self.bytes = 0;
         self.seq = 0;
+        self.kept_max = 0;
     }
 
     #[cfg(test)]
@@ -953,6 +1192,7 @@ impl PastedImages {
             kind,
             dir,
             seq: 0,
+            kept_max: 0,
             directory: None,
             files: Vec::new(),
             stuck: Vec::new(),
@@ -2247,6 +2487,101 @@ mod tests {
     }
 
     #[test]
+    fn png_encoder_works_off_the_caller_in_order_within_the_store() {
+        let dir = scratch("encoder");
+        let two = StoreKind {
+            max_files: 2,
+            ..PASTED
+        };
+        let mut images = PastedImages::of_kind_in(two, dir.clone());
+        let red = [255u8, 0, 0, 255].repeat(4);
+        let blue = [0u8, 0, 255, 255].repeat(4);
+        let first = images.reserve_png(2, 2, red.len(), true).unwrap();
+        let second = images.reserve_png(2, 2, blue.len(), false).unwrap();
+        // Bitmaps waiting to encode count against the store, which bounds them.
+        assert_eq!(
+            images
+                .reserve_png(2, 2, red.len(), false)
+                .err()
+                .map(|e| e.kind()),
+            Some(io::ErrorKind::QuotaExceeded)
+        );
+        let caller = std::thread::current().id();
+        let (woke, wakes) = crossbeam_channel::unbounded();
+        let encoder = PngEncoder::new(Box::new(move || {
+            let _ = woke.send(std::thread::current().id());
+        }))
+        .unwrap();
+        assert!(encoder.submit(1, first, red.clone()).is_ok());
+        assert!(encoder.submit(2, second, blue.clone()).is_ok());
+        let mut kept = Vec::new();
+        for _ in 0..2 {
+            let worker = wakes.recv_timeout(Duration::from_secs(10)).unwrap();
+            assert_ne!(worker, caller, "encoded on the worker thread");
+            let (id, encoded) = encoder.try_recv().unwrap();
+            kept.push((id, images.keep_png(encoded).unwrap()));
+        }
+        assert_eq!(kept[0].0, 1, "in the order submitted");
+        assert_eq!(kept[1].0, 2);
+        let pixels = |path: &Path| image::open(path).unwrap().to_rgba8().into_raw();
+        assert_eq!(pixels(&kept[0].1), red);
+        assert_eq!(pixels(&kept[1].1), blue);
+        assert!(images.take_preview_for_path(&kept[0].1).is_some());
+        assert!(images.take_preview_for_path(&kept[1].1).is_none());
+        assert!(images.reserved.is_empty());
+        drop(encoder);
+        images.cleanup();
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn failed_encodes_give_back_every_name_no_file_was_kept_under() {
+        let dir = scratch("encoder-names");
+        let mut images = PastedImages::with_dir(dir.clone());
+        let red = [255u8, 0, 0, 255].repeat(4);
+        let kept = images.save_rgba(2, 2, &red, false).unwrap();
+        assert_eq!(kept.file_name(), Some(std::ffi::OsStr::new("0001.png")));
+        // Two encodes overlap, and both fail, in the order they started.
+        let first = images.reserve_png(2, 2, red.len(), false).unwrap();
+        let second = images.reserve_png(2, 2, red.len(), false).unwrap();
+        let stopped = || true;
+        let first = first.encode(&red, &stopped);
+        let second = second.encode(&red, &stopped);
+        assert!(images.keep_png(first).is_err());
+        assert!(images.keep_png(second).is_err());
+        // The next file takes the name after the one kept, not after the
+        // failures, and never reuses the kept one.
+        let next = images.save_rgba(2, 2, &red, false).unwrap();
+        assert_eq!(next.file_name(), Some(std::ffi::OsStr::new("0002.png")));
+        images.cleanup();
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn closing_the_png_encoder_leaves_nothing_behind() {
+        let dir = scratch("encoder-close");
+        let mut images = PastedImages::with_dir(dir.clone());
+        let encoder = PngEncoder::new(Box::new(|| {})).unwrap();
+        for id in 0..3 {
+            let rgba = vec![7u8; 1024 * 1024 * 4];
+            let png = images.reserve_png(1024, 1024, rgba.len(), true).unwrap();
+            assert!(encoder.submit(id, png, rgba).is_ok());
+        }
+        let finished = encoder.close();
+        assert_eq!(
+            finished.len(),
+            3,
+            "every job comes back, encoded or stopped"
+        );
+        for encoded in finished {
+            let _ = images.keep_png(encoded);
+        }
+        assert!(images.reserved.is_empty(), "no room is left set aside");
+        images.cleanup();
+        assert!(!dir.exists(), "no PNG, whole or partial, is left behind");
+    }
+
+    #[test]
     fn saves_rgba_as_a_real_png() {
         let dir = scratch("save");
         let mut images = PastedImages::with_dir(dir.clone());
@@ -3141,9 +3476,32 @@ mod tests {
         std::fs::rename(&other, &path).unwrap();
         assert!(copies.remove(&path).is_err());
         assert_eq!((copies.held(), copies.counted_bytes()), (1, 64));
-        std::fs::remove_file(&path).unwrap();
         copies.cleanup();
-        assert!(!dir.exists());
+        assert_eq!(std::fs::read(&path).unwrap(), b"x");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn eviction_retry_preserves_a_replacement() {
+        let dir = scratch("eviction-replacement");
+        let kind = StoreKind {
+            max_files: 1,
+            min_age: Duration::ZERO,
+            ..OPENED
+        };
+        let mut images = PastedImages::of_kind_in(kind, dir.clone());
+        let path = images.save_rgba(1, 1, &[0, 0, 0, 255], false).unwrap();
+        let other = dir.join("other");
+        std::fs::write(&other, b"replacement").unwrap();
+        std::fs::rename(&other, &path).unwrap();
+        assert!(!images.drop_oldest());
+        assert_eq!(images.held(), 1);
+        images.cleanup();
+        assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&dir).unwrap();
     }
 
     /// Byte copies made at once keep the reserve between them: what another

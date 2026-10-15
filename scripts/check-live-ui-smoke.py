@@ -6467,10 +6467,19 @@ class EventStream:
         self.lines: List[str] = []
         self.stderr_lines: List[str] = []
         self._events: "queue.Queue[Dict[str, object]]" = queue.Queue()
+        self._ready = threading.Event()
         self._stdout_thread = threading.Thread(target=self._read_stdout, daemon=True)
         self._stderr_thread = threading.Thread(target=self._read_stderr, daemon=True)
         self._stdout_thread.start()
         self._stderr_thread.start()
+        deadline = time.monotonic() + 8.0
+        while not self._ready.wait(0.05):
+            if self.proc.poll() is not None or time.monotonic() >= deadline:
+                self.close()
+                raise SystemExit(
+                    "live-ui smoke: event subscription did not become ready; "
+                    f"stderr={self.stderr_lines}"
+                )
 
     def _read_stdout(self) -> None:
         if self.proc.stdout is None:
@@ -6492,6 +6501,8 @@ class EventStream:
             return
         for line in self.proc.stderr:
             self.stderr_lines.append(line.rstrip("\n"))
+            if line.strip() == "kettle ctl: listening for events":
+                self._ready.set()
 
     def wait_for(
         self,
@@ -6533,6 +6544,59 @@ class EventStream:
         self.path.write_text(("\n".join(self.lines) + "\n") if self.lines else "")
         if self.stderr_lines:
             self.path.with_suffix(".stderr.txt").write_text("\n".join(self.stderr_lines) + "\n")
+
+
+def event_stream_readiness_selftest() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    entered = threading.Event()
+    release = threading.Event()
+    result = queue.Queue()
+
+    class Stderr:
+        def __iter__(self):
+            entered.set()
+            release.wait()
+            yield "kettle ctl: listening for events\n"
+
+    proc = SimpleNamespace(stdout=io.StringIO(""), stderr=Stderr(), returncode=None)
+    proc.poll = lambda: proc.returncode
+    proc.terminate = lambda: setattr(proc, "returncode", 0)
+    proc.wait = lambda **kwargs: 0
+
+    with tempfile.TemporaryDirectory(prefix="kettle-events-ready-") as temp:
+        def start():
+            try:
+                result.put(EventStream(SimpleNamespace(kettle="kettle", pid=1), Path(temp) / "events.jsonl"))
+            except BaseException as error:
+                result.put(error)
+
+        with patch.object(subprocess, "Popen", return_value=proc):
+            worker = threading.Thread(target=start, daemon=True)
+            worker.start()
+            stream = None
+            try:
+                assert entered.wait(timeout=2)
+                try:
+                    stream = result.get(timeout=0.4)
+                except queue.Empty:
+                    pass
+                else:
+                    raise AssertionError("EventStream returned before subscription acknowledgement")
+                release.set()
+                stream = result.get(timeout=2)
+                if isinstance(stream, BaseException):
+                    raise stream
+                assert isinstance(stream, EventStream)
+                assert proc.poll() is None
+            finally:
+                release.set()
+                worker.join(timeout=3)
+                if stream is None and not result.empty():
+                    stream = result.get_nowait()
+                if isinstance(stream, EventStream):
+                    stream.close()
 
 
 def rect_center(rect: Dict[str, float]) -> Tuple[float, float]:
@@ -7649,16 +7713,14 @@ def set_bitmap_clipboard(path: Path) -> Optional[subprocess.Popen]:
         )
     elif os.environ.get("WAYLAND_DISPLAY") and shutil.which("wl-copy"):
         # Wayland clients own clipboard data and serve it on demand; no server
-        # stores the bytes for them. Keep one provider alive until Kettle reads
-        # the image, then --paste-once makes it exit. The caller retains the
-        # process as a bounded cleanup fallback.
+        # stores the bytes for them. Keep the provider alive for every paste;
+        # the caller terminates it when the smoke finishes.
         source = path.open("rb")
         try:
             owner = subprocess.Popen(
                 [
                     "wl-copy",
                     "--foreground",
-                    "--paste-once",
                     "--type",
                     "image/png",
                 ],
@@ -7805,7 +7867,6 @@ def set_file_list_clipboard(paths: Sequence[Path]) -> Optional[subprocess.Popen]
             [
                 "wl-copy",
                 "--foreground",
-                "--paste-once",
                 "--type",
                 "text/uri-list",
             ],
@@ -8605,8 +8666,34 @@ def darwin_process_environment_selftest() -> None:
     assert clock.now == 0 and sysctl.calls == 1
 
 
+def wayland_clipboard_providers_are_reusable_selftest() -> None:
+    from unittest.mock import Mock, patch
+
+    with tempfile.TemporaryDirectory(prefix="kettle-wayland-clipboard-") as temp:
+        fixture = Path(temp) / "fixture.png"
+        fixture.write_bytes(b"bitmap")
+        for writer, argument, mime in (
+            (set_bitmap_clipboard, fixture, "image/png"),
+            (set_file_list_clipboard, [fixture], "text/uri-list"),
+        ):
+            owner = Mock()
+            owner.poll.return_value = None
+            with (
+                patch.object(platform, "system", return_value="Linux"),
+                patch.dict(os.environ, {"WAYLAND_DISPLAY": "wayland-test"}),
+                patch.object(shutil, "which", return_value="/fixture/wl-copy"),
+                patch.object(time, "sleep"),
+                patch.object(subprocess, "Popen", return_value=owner) as launch,
+            ):
+                assert writer(argument) is owner
+                argv = launch.call_args.args[0]
+                assert argv == ["wl-copy", "--foreground", "--type", mime]
+
+
 def live_helper_selftest() -> None:
     import importlib.util
+
+    event_stream_readiness_selftest()
 
     image_paste_spec = importlib.util.spec_from_file_location(
         "kettle_image_paste_selftest", Path(__file__).with_name("check-image-paste-parity.py")
@@ -8616,6 +8703,7 @@ def live_helper_selftest() -> None:
     image_paste_helpers.composer_readiness_selftest(sys.modules[__name__])
     darwin_process_environment_selftest()
     darwin_zombie_selftest()
+    wayland_clipboard_providers_are_reusable_selftest()
     assert "mapped_writes" in STEADY_UPLOAD_QUIET_KEYS, "a blink must not write through the mapped ring"
     import inspect
     assert "quiet_keys = STEADY_UPLOAD_QUIET_KEYS" in inspect.getsource(run_steady_uploads), \
@@ -8669,6 +8757,7 @@ def live_helper_selftest() -> None:
     assert shell_clear_line_keys("Windows") == ["escape"]
     assert shell_clear_line_keys("Darwin") == ["ctrl+u"]
     assert shell_clear_line_keys("Linux") == ["ctrl+u"]
+    recorder_path_quoting_selftest()
 
     hidden_error = (
         "kettle ctl: server error [busy]: " + HIDDEN_WINDOW_SCREENSHOT_MESSAGE + "\n"
@@ -16869,7 +16958,6 @@ def run_interaction(kettle: str, root: Path) -> Path:
         notify_marker = "KETTLE_INTERACTION_NOTIFY_DONE"
         events = EventStream(live, out / "notification-events.jsonl")
         try:
-            time.sleep(0.3)
             live_shell_command(
                 live,
                 notification_command(notify_title, notify_body, notify_marker),
@@ -19205,7 +19293,7 @@ def run_color_scheme(kettle: str, root: Path) -> Path:
 
     with LiveKettle(kettle, cfg, out / "kettle.log") as live:
         time.sleep(1.0)
-        live.ctl("send_text", params={"text": f"python3 '{recorder}' '{log}'\r"})
+        live.ctl("send_text", params={"text": f"python3 {shell_quote(str(recorder), windows=False)} {shell_quote(str(log), windows=False)}\r"})
         deadline = time.monotonic() + 15.0
         while "SCHEME-READY" not in screen_text(live.json_ctl("read_screen")):
             if time.monotonic() > deadline:
@@ -19555,6 +19643,49 @@ def run_raw_paste(kettle: str, root: Path) -> Path:
     return out
 
 
+def recorder_path_quoting_selftest() -> None:
+    from unittest.mock import patch
+
+    class Started(Exception):
+        pass
+
+    class Live:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def json_ctl(self, method, params=None):
+            return {
+                "window_focused": True,
+                "panes": [{"id": 1, "focused": False}, {"id": 2, "focused": True}],
+            }
+
+        def ctl(self, method, *, params):
+            assert method == "send_text"
+            self.command = params["text"]
+            raise Started
+
+    with tempfile.TemporaryDirectory(prefix="kettle-recorder-paths-") as temp:
+        for scenario in (run_color_scheme, run_program_keys, run_zoomed_layout_keys, run_pane_focus_reports):
+            root = Path(temp) / scenario.__name__ / "O'Brien $HOME"
+            live = Live()
+            with (
+                patch(__name__ + ".LiveKettle", return_value=live),
+                patch.object(platform, "system", return_value="Linux"),
+                patch.object(time, "sleep"),
+            ):
+                try:
+                    scenario("kettle", root)
+                except Started:
+                    pass
+                else:
+                    raise AssertionError("recorder was not launched")
+            out = next(root.iterdir())
+            assert shlex.split(live.command) == ["python3", str(out / "recorder.py"), str(out / "recorded.bin")]
+
+
 def run_program_keys(kettle: str, root: Path) -> Path:
     """A default chord a program also uses goes to a program that owns the
     keyboard, and stays Kettle's otherwise.
@@ -19637,7 +19768,7 @@ def run_program_keys(kettle: str, root: Path) -> Path:
             time.sleep(0.1)
         time.sleep(1.0)
         pane = focused(live).get("id")
-        live.ctl("send_text", params={"pane": pane, "text": f"python3 '{recorder}' '{log}'\r"})
+        live.ctl("send_text", params={"pane": pane, "text": f"python3 {shell_quote(str(recorder), windows=False)} {shell_quote(str(log), windows=False)}\r"})
         wait_screen(live, pane, "RECORDING-OWNED")
         time.sleep(0.3)
 
@@ -19785,7 +19916,7 @@ def run_zoomed_layout_keys(kettle: str, root: Path) -> Path:
             time.sleep(0.1)
         time.sleep(1.0)
         owner = focused(live)
-        live.ctl("send_text", params={"pane": owner, "text": f"python3 '{recorder}' '{log}'\r"})
+        live.ctl("send_text", params={"pane": owner, "text": f"python3 {shell_quote(str(recorder), windows=False)} {shell_quote(str(log), windows=False)}\r"})
         wait_screen(live, owner, "ZOOMKEYS-KITTY")
         time.sleep(0.3)
 
@@ -19961,7 +20092,7 @@ def run_pane_focus_reports(kettle: str, root: Path) -> Path:
                 break
             time.sleep(0.1)
         first = focused(live)
-        live.ctl("send_text", params={"pane": first, "text": f"python3 '{recorder}' '{log}'\r"})
+        live.ctl("send_text", params={"pane": first, "text": f"python3 {shell_quote(str(recorder), windows=False)} {shell_quote(str(log), windows=False)}\r"})
         wait_screen(live, first, "FOCUSREC-READY")
         time.sleep(0.5)
         log.write_bytes(b"")

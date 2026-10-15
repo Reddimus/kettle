@@ -2,10 +2,13 @@
 """Portable regression tests for macos-compare.sh's embedded score step."""
 
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -117,6 +120,43 @@ def run_score(terminals: list[str]) -> ScoreResult:
             stderr=completed.stderr,
             score=json.loads(score.read_text(encoding="utf-8")),
         )
+
+
+class ApplePayloadTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("fish"), "Fish unavailable")
+    def test_terminal_payload_records_status_under_fish(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+        start = source.index('cat > "$apple_run" <<\'PY\'\n')
+        start += len('cat > "$apple_run" <<\'PY\'\n')
+        end = source.index("\nPY\n", start)
+        namespace = {"__name__": "apple_run_test"}
+        exec(compile(source[start:end], str(SCRIPT), "exec"), namespace)
+        sentinel = "argument with spaces, 'quotes', $dollars and ; semicolons"
+
+        def launch(lines, timeout):
+            command = json.loads(lines[0].split("do script ", 1)[1])
+            result = subprocess.run(
+                [shutil.which("fish"), "--no-config", "-c", command],
+                capture_output=True, text=True, timeout=2,
+            )
+            self.assertIn(sentinel, result.stdout, result.stderr)
+            return subprocess.CompletedProcess([], 0, "tab 1 of window id 7\n", "")
+
+        namespace["osascript"] = launch
+        namespace["process_ids"] = lambda name: set()
+        namespace["close_window"] = lambda app, window: None
+        with tempfile.TemporaryDirectory(prefix="apple payload ' ") as raw:
+            root = Path(raw)
+            arguments = [
+                "apple-run.py", "--app", "terminal", "--timeout", "0.2",
+                "--launch-timeout", "2", "--pid-log", str(root / "pids"),
+                "--marker-dir", str(root), "--window-log", str(root / "windows"),
+                "--", sys.executable, "-c",
+                "import sys; print(sys.argv[1]); sys.exit(7)", sentinel,
+            ]
+            with mock.patch.dict(os.environ, {"APPLE_WINDOW_LOG": str(root / "windows")}):
+                with mock.patch.object(sys, "argv", arguments):
+                    self.assertEqual(namespace["main"](), 7)
 
 
 class MacosCompareScoreTests(unittest.TestCase):

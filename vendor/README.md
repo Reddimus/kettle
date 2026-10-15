@@ -103,6 +103,12 @@ date. Recheck that before upgrading a crate or dropping a patch.
   function's three `match pw` fallbacks and suggests `pw?`, which does not
   compile there because all three share one `pw`. Drop the allow if a later
   upstream release rewrites the function.
+  Narrowing the grid (`Grid::shrink_columns`) takes the rows that wrapping
+  adds from blank rows below the cursor before it pushes the top of the
+  screen into history, and moves the cursor down with the content. Upstream
+  keeps the cursor's row fixed, so splitting a pane scrolled its visible lines
+  away while the rows under the prompt stayed empty. Two `grid/tests.rs`
+  cases cover wrapping above and below the cursor.
 - Upstream status, checked 2026-09-30: crates.io's newest `alacritty_terminal`
   is still 0.26.0, published 2026-04-06. Alacritty's `master`, at `d692748d`
   from 2026-08-31, is `0.26.1-dev`. Since

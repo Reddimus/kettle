@@ -222,7 +222,7 @@ macos-update-smoke TAG="":
 # `ttf-parser` disappear from the tree.
 [unix]
 ttf-parser-scope:
-    python3 scripts/check-ttf-parser-scope.py
+    ./scripts/check-ttf-parser-scope.sh
 
 # Guard the accepted RUSTSEC-2026-0253 warning while #207 is open. The
 # affected `LruCache::pop()` method is not used by glyphon 0.12.0, but any
@@ -328,6 +328,7 @@ media-worker:
 [unix]
 shell-integration-check:
     python3 scripts/check-shell-integration.py
+    python3 scripts/test-shell-integration-paths.py
 
 [windows]
 shell-integration-check:
@@ -355,6 +356,13 @@ macos-standing-self-test:
 macos-avsync-self-test:
     python3 scripts/perf/macos-avsync.py --self-test
     tmp=$(mktemp -d) && swiftc -O -swift-version 5 -o "$tmp/avsync-probe" scripts/perf/macos-avsync/avsync-probe.swift && "$tmp/avsync-probe" --self-test; status=$?; rm -rf "$tmp"; exit $status
+
+# GUI-free checks for the live-probe timing rules and menu-screenshot's
+# window ownership, with fake tools standing in for the desktop.
+[unix]
+script-fixture-self-test:
+    python3 scripts/perf/kettle-live-probes-self-test.py
+    python3 scripts/test-menu-screenshot.py
 
 # Pin the eligibility rule in macos-compare.sh's embedded scorer: Kettle-only
 # measurements cannot count as competitive evidence. The fixture is GUI-free

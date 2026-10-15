@@ -261,6 +261,8 @@ pub struct PrivateOutputFilter {
     discard_utf8_continuations: u8,
     recovery_private_prefix: u8,
     recovery_private_started: bool,
+    #[cfg(test)]
+    cancel_scan_bytes: usize,
 }
 
 impl PrivateOutputFilter {
@@ -441,7 +443,12 @@ impl PrivateOutputFilter {
 
                     let hay = &input[index..];
                     let terminator = memchr::memchr3(0x1b, 0x9c, 0x07, hay);
-                    let cancel = memchr::memchr2(0x18, 0x1a, hay);
+                    let cancel_hay = &hay[..terminator.unwrap_or(hay.len())];
+                    #[cfg(test)]
+                    {
+                        self.cancel_scan_bytes += cancel_hay.len();
+                    }
+                    let cancel = memchr::memchr2(0x18, 0x1a, cancel_hay);
                     let stop = match (terminator, cancel) {
                         (Some(t), Some(c)) => Some(t.min(c)),
                         (t, c) => t.or(c),
@@ -747,6 +754,8 @@ pub struct Extractor {
     seq_tail_len: u8,
     /// The hostname when this pane's shell started. See [`is_local_host`].
     shell_hostname: Option<String>,
+    #[cfg(test)]
+    cancel_scan_bytes: usize,
 }
 
 impl Default for Extractor {
@@ -804,6 +813,8 @@ impl Extractor {
             seq_tail: [0; 3],
             seq_tail_len: 0,
             shell_hostname: None,
+            #[cfg(test)]
+            cancel_scan_bytes: 0,
         }
     }
 
@@ -1084,7 +1095,12 @@ impl Extractor {
                         // CAN/SUB cancel the string wherever they appear, so
                         // they are stop bytes too — scanned separately because
                         // `memchr` tops out at three needles.
-                        let cancel = memchr::memchr2(0x18, 0x1a, hay);
+                        let cancel_hay = &hay[..terminator.unwrap_or(hay.len())];
+                        #[cfg(test)]
+                        {
+                            self.cancel_scan_bytes += cancel_hay.len();
+                        }
+                        let cancel = memchr::memchr2(0x18, 0x1a, cancel_hay);
                         let stop = match (terminator, cancel) {
                             (Some(t), Some(c)) => Some(t.min(c)),
                             (t, c) => t.or(c),
@@ -2212,7 +2228,6 @@ fn parse_osc7_with(s: &str, is_local: impl FnOnce(&str) -> bool) -> Option<Strin
     if !host.is_empty() && !host.eq_ignore_ascii_case("localhost") && !is_local(host) {
         return None;
     }
-    let path = path.trim();
     if path.is_empty() {
         return None;
     }
@@ -2646,6 +2661,30 @@ mod tests {
         PromptKind,
     };
     use crate::kitty::PlacementKey;
+
+    #[test]
+    fn cancellation_scan_work_is_linear() {
+        let payload = "\u{2733}".repeat(21_000);
+        for intro in [&b"\x1b]0;"[..], &b"\x1bPtext;"[..], &b"\x1b_text;"[..]] {
+            let mut input = intro.to_vec();
+            input.extend_from_slice(payload.as_bytes());
+            input.extend_from_slice(b"\x1b\\visible");
+            let mut extractor = Extractor::isolated();
+            let chunks = extractor.feed(&input);
+            assert_eq!(passed(&chunks), input);
+            assert!(extractor.cancel_scan_bytes <= input.len());
+        }
+
+        let mut input = b"\x1b]777;kettle-completion;".to_vec();
+        input.extend_from_slice(payload.as_bytes());
+        input.extend_from_slice(b"\x1b\\visible");
+        for capture in [false, true] {
+            let mut filter = PrivateOutputFilter::default();
+            let output = filter.feed(&input, capture);
+            assert_eq!(output, if capture { &b"visible"[..] } else { &b""[..] });
+            assert!(filter.cancel_scan_bytes <= input.len());
+        }
+    }
 
     #[test]
     fn completion_metadata_never_enters_the_raw_tap() {
@@ -3330,6 +3369,27 @@ mod tests {
             })
             .flatten()
             .collect()
+    }
+
+    #[test]
+    fn osc7_preserves_trailing_path_whitespace() {
+        for report in [
+            "kitty-shell-cwd://localhost/tmp/project ",
+            "file://localhost/tmp/project%20",
+            "file://localhost/tmp/project ",
+        ] {
+            let mut extractor = Extractor::isolated();
+            let chunks = extractor.feed(format!("\x1b]7;{report}\x07").as_bytes());
+            let cwd = chunks.into_iter().find_map(|chunk| match chunk {
+                Chunk::Cwd(path) => Some(path),
+                _ => None,
+            });
+            assert_eq!(cwd.as_deref(), Some("/tmp/project "));
+        }
+
+        let mut extractor = Extractor::isolated();
+        let chunks = extractor.feed(b"\x1b]7;kitty-shell-cwd://localhost/tmp/project\t\x07");
+        assert!(!chunks.iter().any(|chunk| matches!(chunk, Chunk::Cwd(_))));
     }
 
     /// As in Ghostty, OSC 7 accepts the kitty-shell-cwd scheme (raw path, no

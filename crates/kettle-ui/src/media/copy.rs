@@ -24,13 +24,35 @@ pub(crate) enum CopyContent {
 pub(crate) struct CopyDone {
     pub window: u64,
     pub pane: u64,
+    pub item: u64,
+    pub generation: u64,
     pub image: bool,
     pub copied: bool,
+}
+
+impl CopyDone {
+    pub(crate) fn notice_for(
+        self,
+        current: Option<(u64, u64)>,
+    ) -> Option<crate::window_state::LaneNotice> {
+        use crate::window_state::LaneNotice;
+
+        if current != Some((self.item, self.generation)) {
+            return None;
+        }
+        Some(match (self.copied, self.image) {
+            (true, true) => LaneNotice::ImageCopied,
+            (true, false) => LaneNotice::SourceCopied,
+            (false, _) => LaneNotice::CopyFailed,
+        })
+    }
 }
 
 struct CopyRequest {
     window: u64,
     pane: u64,
+    item: u64,
+    generation: u64,
     content: CopyContent,
 }
 
@@ -68,6 +90,8 @@ impl CopyService {
                     let done = CopyDone {
                         window: request.window,
                         pane: request.pane,
+                        item: request.item,
+                        generation: request.generation,
                         image: matches!(request.content, CopyContent::Image(_)),
                         copied,
                     };
@@ -111,10 +135,19 @@ impl CopyService {
     }
 
     /// Copy `content` for `pane`'s lane in window `window`.
-    pub(crate) fn copy(&self, window: u64, pane: u64, content: CopyContent) -> CopyStarted {
+    pub(crate) fn copy(
+        &self,
+        window: u64,
+        pane: u64,
+        item: u64,
+        generation: u64,
+        content: CopyContent,
+    ) -> CopyStarted {
         match self.work.try_send(CopyRequest {
             window,
             pane,
+            item,
+            generation,
             content,
         }) {
             Ok(()) => CopyStarted::Started,
@@ -162,19 +195,19 @@ mod tests {
         .unwrap();
         let image = kettle_core::ImageData::new(1, 1, vec![0, 0, 0, 255]).unwrap();
         assert_eq!(
-            service.copy(1, 7, text("flowchart LR")),
+            service.copy(1, 7, 4, 2, text("flowchart LR")),
             CopyStarted::Started
         );
         // Until the thread takes the first, the channel holds it; give it a
         // moment to, then one more may wait and a third is refused.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        let mut second = service.copy(1, 8, CopyContent::Image(image.clone()));
+        let mut second = service.copy(1, 8, 5, 3, CopyContent::Image(image.clone()));
         while second == CopyStarted::Busy && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(5));
-            second = service.copy(1, 8, CopyContent::Image(image.clone()));
+            second = service.copy(1, 8, 5, 3, CopyContent::Image(image.clone()));
         }
         assert_eq!(second, CopyStarted::Started);
-        assert_eq!(service.copy(1, 9, text("x")), CopyStarted::Busy);
+        assert_eq!(service.copy(1, 9, 6, 0, text("x")), CopyStarted::Busy);
         release.send(()).unwrap();
         release.send(()).unwrap();
         woken.recv().unwrap();
@@ -187,12 +220,16 @@ mod tests {
                 CopyDone {
                     window: 1,
                     pane: 7,
+                    item: 4,
+                    generation: 2,
                     image: false,
                     copied: true
                 },
                 CopyDone {
                     window: 1,
                     pane: 8,
+                    item: 5,
+                    generation: 3,
                     image: true,
                     copied: false
                 },
@@ -201,14 +238,56 @@ mod tests {
         assert!(service.take_done().is_empty(), "each told once");
     }
 
+    #[test]
+    fn a_stalled_copy_notice_stays_with_its_original_item_and_generation() {
+        use crate::window_state::LaneNotice;
+        use std::time::Duration;
+
+        let (entered_tx, entered) = crossbeam_channel::bounded(1);
+        let (release, held) = crossbeam_channel::bounded(1);
+        let service = CopyService::start(
+            move |_| {
+                entered_tx.send(()).unwrap();
+                held.recv_timeout(Duration::from_secs(5)).unwrap();
+                true
+            },
+            no_wake(),
+        )
+        .unwrap();
+        assert_eq!(
+            service.copy(1, 7, 4, 2, text("item A")),
+            CopyStarted::Started
+        );
+        entered.recv_timeout(Duration::from_secs(5)).unwrap();
+        let displayed = Some((5, 2));
+        release.send(()).unwrap();
+        let done = service.done.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        assert_eq!(done.notice_for(displayed), None);
+        assert_eq!(done.notice_for(Some((4, 3))), None);
+        assert_eq!(done.notice_for(None), None);
+        assert_eq!(
+            done.notice_for(Some((4, 2))),
+            Some(LaneNotice::SourceCopied)
+        );
+        assert_eq!(
+            CopyDone {
+                copied: false,
+                ..done
+            }
+            .notice_for(displayed),
+            None
+        );
+    }
+
     /// A thread that stopped refuses at once.
     #[test]
     fn a_stopped_thread_refuses_copies() {
         let service = CopyService::start(|_| panic!("the clipboard fails"), no_wake()).unwrap();
-        assert_eq!(service.copy(1, 1, text("a")), CopyStarted::Started);
+        assert_eq!(service.copy(1, 1, 1, 0, text("a")), CopyStarted::Started);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            match service.copy(1, 1, text("b")) {
+            match service.copy(1, 1, 1, 0, text("b")) {
                 CopyStarted::Unavailable => break,
                 _ if std::time::Instant::now() > deadline => panic!("never refused"),
                 _ => std::thread::sleep(std::time::Duration::from_millis(5)),

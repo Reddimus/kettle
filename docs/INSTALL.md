@@ -101,6 +101,9 @@ links, devices, aliases, unsafe permissions, and path traversal. Archives from
   records each managed file's path, mode, size, and SHA-256 plus each directory
   it created in `share/kettle/install-files.json`. Upgrade and uninstall first
   verify the complete recorded tree, then touch only those recorded paths.
+  While it writes, the installer keeps a private `install-pending.json` beside
+  that record listing what it is writing, so if it is interrupted (a full
+  disk, a crash) running it again finishes the job, and uninstall still works.
   Installation, updating and removal share an exclusive update lock. A busy or
   changed lock refuses the operation; successful uninstall removes the idle
   `.kettle-update.lock` after removing its recorded files.

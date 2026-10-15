@@ -432,11 +432,10 @@ def main() -> int:
     os.unlink(marker_name)
     marker = Path(marker_name)
     payload = " ".join(shlex.quote(value) for value in args.payload)
-    # Terminal.app runs the command in the user's login shell. `status` is a
-    # read-only special parameter in zsh, so use a deliberately unique name.
-    command = (
+    command = "/bin/sh -c " + shlex.quote(
         f"{payload}; kettle_perf_status=$?; "
-        f"echo $kettle_perf_status > {shlex.quote(str(marker))}; exit"
+        f"echo \"$kettle_perf_status\" > {shlex.quote(str(marker))}; "
+        'exit "$kettle_perf_status"'
     )
     escaped_command = apple_string(command)
     if args.app == "terminal":

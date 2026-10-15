@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import stat
 import struct
 import subprocess
 import sys
@@ -274,7 +275,7 @@ def audit(root: Path) -> dict[str, Any]:
                 resolved.relative_to(root)
             except ValueError:
                 errors.append(f"{relative}: symlink escapes the repository: {target}")
-        elif not path.is_file():
+        elif not stat.S_ISREG(path.lstat().st_mode):
             errors.append(f"{relative}: tracked path is not a regular file")
             continue
         else:

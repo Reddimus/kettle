@@ -723,6 +723,7 @@ def check_fish(executable: str) -> None:
         TERM="xterm-256color",
         TERM_PROGRAM="kettle",
         KETTLE_COMPLETION_OVERLAY="1",
+        KETTLE_FISH_INTEGRATION=str(INTEGRATION / "kettle.fish"),
     )
     process = subprocess.Popen(
         [
@@ -730,7 +731,7 @@ def check_fish(executable: str) -> None:
             "--no-config",
             "-i",
             "-C",
-            f"source {INTEGRATION / 'kettle.fish'}",
+            'source "$KETTLE_FISH_INTEGRATION"',
         ],
         cwd=ROOT,
         stdin=slave,
@@ -1003,7 +1004,10 @@ def check_fish(executable: str) -> None:
 
         os.write(master, b"\x03")
         drain(0.25)
-        os.write(master, b"fish_vi_key_bindings; source " + str(INTEGRATION / "kettle.fish").encode() + b"\n")
+        os.write(
+            master,
+            b'fish_vi_key_bindings; source "$KETTLE_FISH_INTEGRATION"\n',
+        )
         vi_setup = drain(0.75)
         if not re.search(
             rb"\x1b\]777;kettle-completion;4;sync;[0-9]+;3\x07", vi_setup

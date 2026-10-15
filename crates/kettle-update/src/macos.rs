@@ -630,7 +630,12 @@ fn ensure_directory_at(directory: &File, name: &std::ffi::CStr) -> Result<File, 
             return Err(UpdateError::Io(error));
         }
     }
-    open_directory_at(directory, name)
+    let child = open_directory_at(directory, name)?;
+    if unsafe { libc::fchmod(child.as_raw_fd(), 0o755) } != 0 {
+        return Err(UpdateError::Io(std::io::Error::last_os_error()));
+    }
+    child.sync_all()?;
+    Ok(child)
 }
 
 /// Create a new file relative to `directory`, failing if anything is there.
@@ -883,6 +888,32 @@ pub(crate) fn sweep_interrupted_updates(parent: &Path) {
     }
 }
 
+fn require_live_bundle_upgrade(
+    install: &ManagedInstall,
+    candidate: &semver::Version,
+    verifier: &dyn SealVerifier,
+) -> Result<(), UpdateError> {
+    let live = locate_bundle_install(&install.executable, verifier)?;
+    if live.prefix != install.prefix {
+        return Err(UpdateError::UnmanagedInstall(
+            "the bundle path changed while updating".into(),
+        ));
+    }
+    let output = Command::new("/usr/libexec/PlistBuddy")
+        .args(["-c", "Print :CFBundleShortVersionString"])
+        .arg(&live.marker_path)
+        .output()?;
+    if !output.status.success() {
+        return Err(UpdateError::UnmanagedInstall(format!(
+            "cannot read the installed bundle version: {}",
+            first_line(&String::from_utf8_lossy(&output.stderr))
+        )));
+    }
+    let installed = semver::Version::parse(String::from_utf8_lossy(&output.stdout).trim())
+        .map_err(|error| UpdateError::InvalidCurrentVersion(error.to_string()))?;
+    require_strict_upgrade(candidate, &installed)
+}
+
 /// Download, verify, and swap in a new bundle.
 pub(crate) fn install_bundle_update(
     client: &FeedClient,
@@ -891,6 +922,15 @@ pub(crate) fn install_bundle_update(
     verifier: &dyn SealVerifier,
 ) -> Result<InstallOutcome, UpdateError> {
     reverify_available_update(update, &UPDATE_PUBLIC_KEY, std::time::SystemTime::now())?;
+    install_bundle_update_with_download(update, install, verifier, || client.download_bytes(update))
+}
+
+fn install_bundle_update_with_download(
+    update: &AvailableUpdate,
+    install: &ManagedInstall,
+    verifier: &dyn SealVerifier,
+    download: impl FnOnce() -> Result<Vec<u8>, UpdateError>,
+) -> Result<InstallOutcome, UpdateError> {
     let running = semver::Version::parse(env!("CARGO_PKG_VERSION"))
         .map_err(|error| UpdateError::InvalidCurrentVersion(error.to_string()))?;
     require_strict_upgrade(&update.version, &running)?;
@@ -912,12 +952,13 @@ pub(crate) fn install_bundle_update(
     let lock_path = update_lock_path(bundle)?;
     let _lock = kettle_state::ExclusiveFileLock::try_acquire(&lock_path)?
         .ok_or(UpdateError::UpdateLocked)?;
+    require_live_bundle_upgrade(install, &update.version, verifier)?;
     sweep_interrupted_updates(parent);
 
     // Held in memory from download through extraction, for the same reason the
     // Linux path does: there is no temporary archive on disk for anyone to
     // swap between the digest check and the read that trusts it.
-    let archive = client.download_bytes(update)?;
+    let archive = download()?;
     verify_sha256_bytes(&archive, &asset.sha256)?;
 
     let id = unique_suffix();
@@ -931,6 +972,11 @@ pub(crate) fn install_bundle_update(
     let live_name = bundle.file_name().ok_or_else(|| {
         UpdateError::UnmanagedInstall("the bundle path has no final component".to_string())
     })?;
+
+    if let Err(error) = require_live_bundle_upgrade(install, &update.version, verifier) {
+        staging.discard();
+        return Err(error);
+    }
 
     // The source is named relative to the staging descriptor, which was opened
     // when the directory was created. Renaming that directory in the meantime
@@ -1241,20 +1287,23 @@ mod tests {
         // a child process that owns its umask outright.
         if std::env::var_os(UMASK_CHILD).is_none() {
             let binary = std::env::current_exe().expect("the test binary knows its own path");
-            let status = Command::new(binary)
-                .args([
-                    "macos::tests::nothing_in_a_staged_bundle_is_writable_by_anyone_else",
-                    "--exact",
-                    "--nocapture",
-                ])
-                .env(UMASK_CHILD, "1")
-                .status()
-                .expect("the test binary re-runs");
-            assert!(status.success(), "the umask-isolated child failed");
+            for mask in ["002", "077"] {
+                let status = Command::new(&binary)
+                    .args([
+                        "macos::tests::nothing_in_a_staged_bundle_is_writable_by_anyone_else",
+                        "--exact",
+                        "--nocapture",
+                    ])
+                    .env(UMASK_CHILD, mask)
+                    .status()
+                    .expect("the test binary re-runs");
+                assert!(status.success(), "the umask-{mask} child failed");
+            }
             return;
         }
 
-        unsafe { libc::umask(0o002) };
+        let mask = std::env::var(UMASK_CHILD).unwrap();
+        unsafe { libc::umask(libc::mode_t::from_str_radix(&mask, 8).unwrap()) };
         let temp = kettle_test_support::private_tempdir("kettle-macos-modes-");
         let staging = Staging::create(temp.path(), "2").unwrap();
         extract_bundle_into(&staging, &official_zip()).unwrap();
@@ -1267,9 +1316,9 @@ mod tests {
         for relative in ["", "Contents", "Contents/MacOS", "Contents/_CodeSignature"] {
             let directory = staging.bundle().join(relative);
             assert_eq!(
-                mode_of(&directory) & 0o022,
-                0,
-                "{} is writable by group or other",
+                mode_of(&directory),
+                0o755,
+                "{} must be traversable by every user without granting write access",
                 directory.display()
             );
         }
@@ -1537,6 +1586,82 @@ mod tests {
         let _restore = StateHome(std::env::var_os("XDG_STATE_HOME"));
         unsafe { std::env::set_var("XDG_STATE_HOME", state) };
         body()
+    }
+
+    #[test]
+    fn stale_bundle_update_cannot_replace_a_newer_live_bundle() {
+        let _serial = serialized();
+        for advanced_before_lock in [true, false] {
+            let temp = kettle_test_support::private_tempdir("kettle-macos-version-");
+            let seal = StubSeal::official();
+            let executable = seed_bundle(temp.path(), "kettle.app");
+            let install = locate_bundle_install(&executable, &seal).unwrap();
+            let write_version = |version: &str| {
+                std::fs::write(
+                    &install.marker_path,
+                    format!(
+                        "<plist version=\"1.0\"><dict>\
+                         <key>CFBundleShortVersionString</key><string>{version}</string>\
+                         </dict></plist>"
+                    ),
+                )
+                .unwrap();
+            };
+            write_version(env!("CARGO_PKG_VERSION"));
+            let archive = official_zip();
+            let update = AvailableUpdate {
+                version: semver::Version::new(99, 0, 0),
+                tag: "v99.0.0".into(),
+                release_url: "https://example.invalid/release".into(),
+                download_url: None,
+                asset: Some(crate::ManifestAsset {
+                    target: current_target().unwrap().into(),
+                    name: "kettle-macos-universal.zip".into(),
+                    size: archive.len() as u64,
+                    sha256: hex::encode(Sha256::digest(&archive)),
+                }),
+                signed_manifest: None,
+            };
+
+            with_state_home(&temp.path().join("state"), || {
+                if advanced_before_lock {
+                    let held = kettle_state::ExclusiveFileLock::try_acquire(
+                        &update_lock_path(&install.prefix).unwrap(),
+                    )
+                    .unwrap()
+                    .unwrap();
+                    write_version("100.0.0");
+                    drop(held);
+                }
+                let error = install_bundle_update_with_download(&update, &install, &seal, || {
+                    assert!(
+                        !advanced_before_lock,
+                        "a stale update must stop before download"
+                    );
+                    write_version("100.0.0");
+                    Ok(archive)
+                })
+                .unwrap_err();
+                assert!(matches!(
+                    error,
+                    UpdateError::Rollback { candidate, installed }
+                        if candidate == update.version
+                            && installed == semver::Version::new(100, 0, 0)
+                ));
+            });
+            assert!(
+                std::fs::read_to_string(&install.marker_path)
+                    .unwrap()
+                    .contains("<string>100.0.0</string>")
+            );
+            assert!(std::fs::read_dir(temp.path()).unwrap().all(|entry| {
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(STAGED_PREFIX)
+            }));
+        }
     }
 
     #[test]

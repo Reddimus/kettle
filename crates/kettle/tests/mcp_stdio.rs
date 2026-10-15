@@ -129,6 +129,45 @@ fn mcp_stdio_display_mode_offers_only_kettle_show() {
 }
 
 #[test]
+fn mcp_stdio_discovery_without_metadata_preserves_legacy_lifecycle() {
+    for args in [&["mcp"][..], &["mcp", "--display"][..]] {
+        let messages = [
+            json!({"jsonrpc": "2.0", "id": 1, "method": "server/discover"}),
+            json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+            json!({"jsonrpc": "2.0", "id": 3, "method": "initialize", "params": {
+                "protocolVersion": "2025-11-25", "capabilities": {},
+                "clientInfo": {"name": "test", "version": "1"}}}),
+            json!({"jsonrpc": "2.0", "id": 4, "method": "server/discover"}),
+            json!({"jsonrpc": "2.0", "id": 5, "method": "tools/list"}),
+            json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+            json!({"jsonrpc": "2.0", "id": 6, "method": "server/discover"}),
+            json!({"jsonrpc": "2.0", "id": 7, "method": "tools/list"}),
+        ];
+        let (code, out, err) = run_mcp_stdio_with(args, &messages);
+        assert_eq!(code, 0, "{err}");
+        let responses = parse_responses(&out);
+        assert_eq!(responses.len(), 7, "{out}");
+        let by_id = |id: u64| {
+            responses
+                .iter()
+                .find(|response| response["id"] == id)
+                .unwrap_or_else(|| panic!("missing response {id}: {out}"))
+        };
+        for id in [1, 4, 6] {
+            assert_eq!(
+                by_id(id)["result"]["supportedVersions"],
+                json!(["2026-07-28", "2025-11-25", "2025-06-18"])
+            );
+            assert_eq!(by_id(id)["result"]["resultType"], "complete");
+        }
+        assert_eq!(by_id(2)["error"]["code"], -32002);
+        assert_eq!(by_id(3)["result"]["protocolVersion"], "2025-11-25");
+        assert_eq!(by_id(5)["error"]["code"], -32002);
+        assert!(by_id(7)["result"]["tools"].is_array());
+    }
+}
+
+#[test]
 fn mcp_stdio_initialize_list_and_kettle_run() {
     #[cfg(windows)]
     let command = json!(["cmd", "/c", "echo", "mcp-stdio-marker-42"]);

@@ -1563,7 +1563,13 @@ mod tests {
             );
             shown.insert(label);
         }
-        assert_eq!(shown.into_iter().collect::<Vec<_>>(), ["Ctrl+Shift+W"]);
+        // The shortest label wins: macOS spells Super as Cmd.
+        let stable = if cfg!(target_os = "macos") {
+            "Shift+Cmd+D"
+        } else {
+            "Ctrl+Shift+W"
+        };
+        assert_eq!(shown.into_iter().collect::<Vec<_>>(), [stable]);
     }
 
     #[test]

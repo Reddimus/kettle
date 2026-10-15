@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import importlib.util
 import io
@@ -606,6 +607,55 @@ class ArchiveExtractionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "PAX"):
                 MODULE.extract_archive(archive, output, LINUX_TARGET, VERSION)
             self.assertFalse(output.exists())
+
+    def test_bounds_tar_metadata_before_extension_processing(self):
+        cases = [
+            (tarfile.GNUTYPE_LONGNAME, MODULE.MAX_PACKAGE_PATH_BYTES + 2),
+            (tarfile.GNUTYPE_LONGNAME, 4 * 1024 ** 3),
+            (tarfile.GNUTYPE_LONGLINK, 4 * 1024 ** 3),
+            (tarfile.XHDTYPE, 4 * 1024 ** 3),
+            (tarfile.XGLTYPE, 4 * 1024 ** 3),
+            (tarfile.SOLARIS_XHDTYPE, 4 * 1024 ** 3),
+        ]
+        with tempfile.TemporaryDirectory() as raw:
+            temporary = Path(raw)
+            for kind, size in cases:
+                for first in (True, False):
+                    with self.subTest(kind=kind, size=size, first=first):
+                        archive = temporary / "metadata.tar.gz"
+                        output = temporary / "output"
+                        header = tarfile.TarInfo("././@LongLink")
+                        header.type = kind
+                        header.size = size
+                        with gzip.open(archive, "wb") as stream:
+                            if not first:
+                                root, _ = tar_entry("kettle", mode=0o755, entry_type=tarfile.DIRTYPE)
+                                stream.write(root.tobuf(format=tarfile.GNU_FORMAT))
+                            stream.write(header.tobuf(format=tarfile.GNU_FORMAT))
+                            stream.write(b"\0" * 1024)
+                        with mock.patch.object(
+                            tarfile.TarInfo, "_proc_gnulong",
+                            side_effect=AssertionError("GNU metadata was processed"),
+                        ), mock.patch.object(
+                            tarfile.TarInfo, "_proc_pax",
+                            side_effect=AssertionError("PAX metadata was processed"),
+                        ):
+                            with self.assertRaisesRegex(ValueError, "metadata|PAX|special tar"):
+                                MODULE.extract_archive(archive, output, LINUX_TARGET, VERSION)
+                        self.assertFalse(output.exists())
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode verification requires Linux")
+    def test_accepts_bounded_gnu_longname(self):
+        with tempfile.TemporaryDirectory() as raw:
+            temporary = Path(raw)
+            archive = temporary / "longname.tar.gz"
+            output = temporary / "output"
+            files = dict(self.linux_files)
+            name = "a" * 120
+            files[name] = (b"long path payload", 0o644)
+            write_linux_tar(archive, files)
+            MODULE.extract_archive(archive, output, LINUX_TARGET, VERSION)
+            self.assertEqual((output / name).read_bytes(), files[name][0])
 
     def test_rejects_linux_manifest_mode_mismatch(self):
         with tempfile.TemporaryDirectory() as raw:

@@ -1276,8 +1276,9 @@ fn wait_for_poll(
         .and_then(|v| v.as_u64())
         .unwrap_or(100)
         .clamp(50, 5_000);
-    let start = std::time::Instant::now();
-    let mut last_change = std::time::Instant::now();
+    let start = Instant::now();
+    let deadline = start + Duration::from_millis(timeout_ms);
+    let mut last_change = start;
     let mut last_fingerprint: Option<u64> = None;
     let mut polls = 0u64;
     // Pin the target pane for the WHOLE wait. Otherwise a no-`pane` wait
@@ -1287,6 +1288,9 @@ fn wait_for_poll(
     // the resolved pane id in its result, so the first probe's reply pins it.
     let mut pinned_pane: Option<serde_json::Value> = req.params.get("pane").cloned();
     loop {
+        if Instant::now() >= deadline {
+            break;
+        }
         // A vanished client (Ctrl+C'd `kettle ctl`, crashed MCP host) must not
         // keep this loop polling. It would pin one of the MAX_CONNECTIONS slots
         // and wake the UI thread every poll for up to the full timeout. The
@@ -1304,8 +1308,12 @@ fn wait_for_poll(
         });
         wake();
         polls += 1;
-        let resp = match rrx.recv_timeout(std::time::Duration::from_secs(10)) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let resp = match rrx.recv_timeout(remaining.min(Duration::from_secs(10))) {
             Ok(r) => r,
+            Err(_) if Instant::now() >= deadline => {
+                break;
+            }
             Err(_) => {
                 return Response::err(
                     req.id,
@@ -1314,6 +1322,9 @@ fn wait_for_poll(
                 );
             }
         };
+        if Instant::now() >= deadline {
+            break;
+        }
         // Propagate probe errors (no_such_pane, …) verbatim under our id.
         if let Some(err) = &resp.error {
             return Response::err(req.id, &err.code, err.message.clone());
@@ -1353,6 +1364,9 @@ fn wait_for_poll(
             polls > 1 && last_change.elapsed().as_millis() as u64 >= q
         });
         let elapsed = start.elapsed().as_millis() as u64;
+        if Instant::now() >= deadline {
+            break;
+        }
         if content_hit && quiet_hit {
             return Response::ok(
                 req.id,
@@ -1364,19 +1378,19 @@ fn wait_for_poll(
                 }),
             );
         }
-        if elapsed >= timeout_ms {
-            return Response::ok(
-                req.id,
-                serde_json::json!({
-                    "matched": false,
-                    "timed_out": true,
-                    "elapsed_ms": elapsed,
-                    "polls": polls,
-                }),
-            );
-        }
-        std::thread::sleep(std::time::Duration::from_millis(poll_ms));
+        std::thread::sleep(
+            Duration::from_millis(poll_ms).min(deadline.saturating_duration_since(Instant::now())),
+        );
     }
+    Response::ok(
+        req.id,
+        serde_json::json!({
+            "matched": false,
+            "timed_out": true,
+            "elapsed_ms": start.elapsed().as_millis() as u64,
+            "polls": polls,
+        }),
+    )
 }
 
 #[cfg(test)]
@@ -2045,6 +2059,52 @@ mod tests {
             Method::ReadScreen.capability(),
             "a probe must not carry more authority than its wait"
         );
+    }
+
+    #[test]
+    fn wait_for_deadline_bounds_sleep_and_outstanding_probes() {
+        for case in ["long-poll", "late-match", "unanswered"] {
+            let (endpoint, rx) = start_test_accept_loop(case, quick_policy());
+            let mut client = kettle_ctl::transport::connect(&endpoint).unwrap();
+            let _ = recv_new_conn(&rx, Duration::from_secs(2));
+            let poll_ms = if case == "long-poll" { 5000 } else { 50 };
+            let request = serde_json::json!({
+                "v": 1, "id": 1, "method": "wait_for",
+                "params": {"text": "done", "timeout_ms": 100, "poll_ms": poll_ms}
+            });
+            client
+                .write_all_until(
+                    format!("{request}\n").as_bytes(),
+                    Instant::now() + Duration::from_secs(1),
+                    None,
+                )
+                .unwrap();
+            let reply = loop {
+                if let CtlServerMsg::Request { reply, .. } =
+                    rx.recv_timeout(Duration::from_secs(2)).unwrap()
+                {
+                    break reply;
+                }
+            };
+            if case == "long-poll" {
+                reply
+                    .send(Response::ok(1, serde_json::json!({"pane": 3, "text": ""})))
+                    .unwrap();
+            } else if case == "late-match" {
+                std::thread::sleep(Duration::from_millis(150));
+                // An expired probe receiver may already have been dropped.
+                let _ = reply.send(Response::ok(
+                    1,
+                    serde_json::json!({"pane": 3, "text": "done"}),
+                ));
+            }
+            let response = read_response(&mut client, Duration::from_secs(1));
+            assert!(response.ok, "{case}: {:?}", response.error);
+            assert_eq!(response.result["matched"], false, "{case}");
+            assert_eq!(response.result["timed_out"], true, "{case}");
+            assert_eq!(response.result["polls"], 1, "{case}");
+            drop(reply);
+        }
     }
 
     /// The first nonblank frame fixes the connection's claim; nothing after

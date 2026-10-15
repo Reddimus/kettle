@@ -926,12 +926,36 @@ fn startup_failure(
     EXIT_INTERNAL
 }
 
+#[derive(Clone, Copy)]
+enum ExecCompletion {
+    Recording { code: i32, deadline: Instant },
+    Output { code: i32 },
+}
+
 fn run_exec_engine(
+    opts: ExecOpts,
+    size_probe: &dyn Fn() -> Option<(u16, u16)>,
+    output: &mut dyn ExecOutput,
+    cancelled: Option<&AtomicBool>,
+    capturing: bool,
+) -> i32 {
+    run_exec_engine_with_recording_poll(
+        opts,
+        size_probe,
+        output,
+        cancelled,
+        capturing,
+        poll_recording_finish,
+    )
+}
+
+fn run_exec_engine_with_recording_poll(
     mut opts: ExecOpts,
     _size_probe: &dyn Fn() -> Option<(u16, u16)>,
     output: &mut dyn ExecOutput,
     cancelled: Option<&AtomicBool>,
     capturing: bool,
+    mut recording_finished: impl FnMut(&mut Option<kettle_core::record::Recorder>, Instant) -> bool,
 ) -> i32 {
     if opts.argv.is_empty() {
         return startup_failure(
@@ -1104,8 +1128,7 @@ fn run_exec_engine(
 
     let mut child_gone_at: Option<Instant> = None;
     let mut child_exit_code: Option<i32> = None;
-    let mut completion_code: Option<i32> = None;
-    let mut recording_finish_deadline: Option<Instant> = None;
+    let mut completion: Option<ExecCompletion> = None;
     #[cfg(windows)]
     let mut pty_close_started_at: Option<Instant> = None;
     let mut last_lifecycle_trace = started;
@@ -1177,21 +1200,27 @@ fn run_exec_engine(
         // Ordinary completion is also driven asynchronously. In particular,
         // never join the stdout worker on this lifecycle thread: its final
         // write/flush can become blocked after the child has exited.
-        if let Some(code) = completion_code {
-            let _ = output_or_stop!(output.ready());
-            let output_complete = output_or_stop!(output.completion_ready());
-            let recording_complete = poll_recording_finish(
-                &mut recorder,
-                recording_finish_deadline
-                    .expect("ordinary completion must bound recorder finalization"),
-            );
-            if output_complete && recording_complete {
-                // This is the first point after status observation at which no
-                // timeout/cancellation can still supersede ordinary
-                // completion. Consume the Unix wait status now, releasing the
-                // Linux identity anchor immediately before returning.
-                let _ = term.child_exit_code();
-                return code;
+        if let Some(state) = completion {
+            match state {
+                ExecCompletion::Recording { code, deadline } => {
+                    if recording_finished(&mut recorder, deadline) {
+                        output_or_stop!(output.finish(
+                            code,
+                            started.elapsed(),
+                            OutputFinish::Complete,
+                        ));
+                        completion = Some(ExecCompletion::Output { code });
+                    }
+                }
+                ExecCompletion::Output { code } => {
+                    let _ = output_or_stop!(output.ready());
+                    if output_or_stop!(output.completion_ready()) {
+                        // Keep the Linux identity anchor until stdout confirms
+                        // completion, so a later stop can still contain the tree.
+                        let _ = term.child_exit_code();
+                        return code;
+                    }
+                }
             }
             std::thread::sleep(IDLE_TURN);
             continue;
@@ -1645,22 +1674,21 @@ fn run_exec_engine(
                     // a stale zero-pending snapshot cannot close stdout over a
                     // final repaint hidden in the parser pipeline.
                     let final_progress = term.pty_read_progress();
-                    if !pty_completion_snapshot_is_current(pty_drain_generation, final_progress) {
+                    if !pty_completion_snapshot_is_current(pty_drain_generation, final_progress)
+                        || event_backlog
+                        || !rx.is_empty()
+                    {
                         observed_read_generation = final_progress.generation;
                         last_pty_source_activity_at.set(Instant::now());
                         continue;
                     }
                     if let Some(recorder) = recorder.as_mut() {
                         recorder.begin_finish();
-                        recording_finish_deadline = Some(Instant::now() + RECORD_FINISH_TIMEOUT);
-                    } else {
-                        recording_finish_deadline = Some(Instant::now());
                     }
-                    let code = child_exit_code.unwrap_or(EXIT_INTERNAL);
-                    output_or_stop!(
-                        output.finish(code, started.elapsed(), OutputFinish::Complete,)
-                    );
-                    completion_code = Some(code);
+                    completion = Some(ExecCompletion::Recording {
+                        code: child_exit_code.unwrap_or(EXIT_INTERNAL),
+                        deadline: Instant::now() + RECORD_FINISH_TIMEOUT,
+                    });
                     // Give cancellation/deadline one final turn before
                     // returning, even when a direct in-memory sink finished
                     // synchronously.
@@ -1734,6 +1762,61 @@ struct ExecProcessTree {
     session: Option<LinuxSession>,
 }
 
+/// Whether every process in `group` is listed and has exited. A member
+/// Kettle may not inspect, such as another user's, counts as still running.
+/// The group is listed again afterwards: a member could have started another
+/// before it exited, and that one must be seen too.
+#[cfg(target_os = "macos")]
+fn process_group_has_only_exited_members(group: libc::pid_t) -> bool {
+    let Some(before) = process_group_members(group).filter(|members| !members.is_empty()) else {
+        return false;
+    };
+    if !before.iter().all(|&pid| member_has_exited(pid)) {
+        return false;
+    }
+    process_group_members(group).is_some_and(|after| after.iter().all(|pid| before.contains(pid)))
+}
+
+/// The processes in `group`, or `None` when the list may be incomplete.
+#[cfg(target_os = "macos")]
+fn process_group_members(group: libc::pid_t) -> Option<Vec<libc::pid_t>> {
+    let mut members = [0 as libc::pid_t; 256];
+    let size = libc::c_int::try_from(std::mem::size_of_val(&members)).ok()?;
+    // SAFETY: `members` is a live buffer of `size` bytes; the call writes at
+    // most that many and returns how many pids it wrote.
+    let count = unsafe { libc::proc_listpgrppids(group, members.as_mut_ptr().cast(), size) };
+    let count = usize::try_from(count).ok()?;
+    // A full buffer may have left members out.
+    (count < members.len()).then(|| members[..count].to_vec())
+}
+
+/// Whether the listed group member `pid` has exited. macOS answers `ESRCH`
+/// for a zombie it still lists, and `EPERM` for another user's process.
+#[cfg(target_os = "macos")]
+fn member_has_exited(pid: libc::pid_t) -> bool {
+    /// `pbi_status` of a process that has exited and awaits its parent.
+    const SZOMB: u32 = 5;
+    let size = std::mem::size_of::<libc::proc_bsdinfo>();
+    // SAFETY: an all-zero `proc_bsdinfo` is a valid value of this plain C
+    // struct of integers and byte arrays.
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    // SAFETY: `info` is a live buffer of exactly `size` bytes for this
+    // flavor; the call writes at most that many and returns how many.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            std::ptr::from_mut(&mut info).cast(),
+            size as libc::c_int,
+        )
+    };
+    if written > 0 {
+        return info.pbi_status == SZOMB;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
 impl ExecProcessTree {
     fn attach(term: &Terminal) -> Self {
         let root = term.child_pid();
@@ -1788,6 +1871,14 @@ impl ExecProcessTree {
                 let result = unsafe { libc::kill(-group, libc::SIGKILL) };
                 if result != 0 {
                     let error = std::io::Error::last_os_error();
+                    #[cfg(target_os = "macos")]
+                    if error.raw_os_error() == Some(libc::EPERM)
+                        && process_group_has_only_exited_members(group)
+                    {
+                        // macOS refuses to signal a group of zombies: the
+                        // processes have exited and only await reaping.
+                        return complete;
+                    }
                     if error.raw_os_error() != Some(libc::ESRCH) {
                         let _ = writeln!(
                             std::io::stderr(),
@@ -2477,30 +2568,32 @@ fn wait_for_exit_code(term: &Terminal) -> Option<u32> {
 /// genuinely-invalid bytes become one U+FFFD.
 fn push_utf8_streaming(carry: &mut Vec<u8>, bytes: &[u8], out: &mut String) {
     carry.extend_from_slice(bytes);
+    let mut offset = 0;
     loop {
-        match std::str::from_utf8(carry) {
+        match std::str::from_utf8(&carry[offset..]) {
             Ok(s) => {
                 out.push_str(s);
-                carry.clear();
-                return;
+                offset = carry.len();
+                break;
             }
             Err(e) => {
                 let valid = e.valid_up_to();
-                // SAFETY: bytes up to `valid` are valid UTF-8.
-                out.push_str(unsafe { std::str::from_utf8_unchecked(&carry[..valid]) });
+                // SAFETY: from_utf8 validated this prefix.
+                out.push_str(unsafe {
+                    std::str::from_utf8_unchecked(&carry[offset..offset + valid])
+                });
+                offset += valid;
                 match e.error_len() {
-                    None => {
-                        carry.drain(..valid);
-                        return;
-                    }
+                    None => break,
                     Some(n) => {
                         out.push('\u{FFFD}');
-                        carry.drain(..valid + n);
+                        offset += n;
                     }
                 }
             }
         }
     }
+    carry.drain(..offset);
 }
 
 #[derive(Clone, Copy)]
@@ -4274,6 +4367,54 @@ mod tests {
         }
     }
 
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn a_stop_during_recording_finalization_publishes_only_the_stop_code() {
+        let temp = kettle_test_support::private_tempdir("kettle-exec-finalization-");
+        #[cfg(unix)]
+        let argv = vec!["sh".into(), "-c".into(), "exit 0".into()];
+        #[cfg(windows)]
+        let argv = vec![
+            "cmd.exe".into(),
+            "/D".into(),
+            "/S".into(),
+            "/C".into(),
+            "exit 0".into(),
+        ];
+        let mut opts = opts_for(argv, None);
+        opts.mode = OutputMode::Json;
+        opts.record = Some(temp.path().join("trace.cast"));
+        let cancelled = AtomicBool::new(false);
+        let reader = SlowReader::new(Duration::ZERO);
+        let mut output = WorkerOutput::spawn(OutputMode::Json, reader.clone()).unwrap();
+        let mut polled_recording = false;
+
+        let code = run_exec_engine_with_recording_poll(
+            opts,
+            &|| None,
+            &mut output,
+            Some(&cancelled),
+            false,
+            |recorder, _deadline| {
+                assert!(recorder.is_some());
+                polled_recording = true;
+                cancelled.store(true, Ordering::Release);
+                false
+            },
+        );
+
+        assert!(polled_recording);
+        assert_eq!(code, EXIT_CANCELLED);
+        let exit_codes = reader
+            .text()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|event| event["event"] == "exit")
+            .map(|event| event["code"].as_i64().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(exit_codes, [i64::from(EXIT_CANCELLED)]);
+    }
+
     #[test]
     fn a_stopped_run_writes_its_exit_event_before_returning() {
         // `main` calls `process::exit` as soon as the lifecycle returns, so an
@@ -4437,6 +4578,76 @@ mod tests {
             waited < Duration::from_secs(1),
             "waited {waited:?} for a command that never reached the writer"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn completion_drains_queued_json_titles() {
+        struct GatedOutput<'a> {
+            direct: DirectOutput<'a>,
+            open_at: Instant,
+        }
+
+        impl ExecOutput for GatedOutput<'_> {
+            fn ready(&mut self) -> OutputResult<bool> {
+                Ok(Instant::now() >= self.open_at)
+            }
+
+            fn start(&mut self, cols: u16, rows: u16) -> OutputResult<()> {
+                self.open_at = Instant::now() + Duration::from_millis(300);
+                self.direct.start(cols, rows)
+            }
+
+            fn output(&mut self, bytes: Vec<u8>) -> OutputResult<()> {
+                self.direct.output(bytes)
+            }
+
+            fn title(&mut self, title: String) -> OutputResult<()> {
+                self.direct.title(title)
+            }
+
+            fn finish(
+                &mut self,
+                code: i32,
+                duration: Duration,
+                mode: OutputFinish,
+            ) -> OutputResult<()> {
+                self.direct.finish(code, duration, mode)
+            }
+        }
+
+        let count = EVENT_SLICE_MESSAGES * 2 + 1;
+        let mut opts = opts_for(
+            vec![
+                "sh".into(),
+                "-c".into(),
+                "printf '%s' \"$1\"".into(),
+                "kettle-exec-test".into(),
+                "\x1b]0;t\x07".repeat(count),
+            ],
+            None,
+        );
+        opts.mode = OutputMode::Json;
+        opts.timeout = Some(Duration::from_secs(5));
+        let mut sink = Vec::new();
+        let mut output = GatedOutput {
+            direct: DirectOutput::new(OutputMode::Json, &mut sink),
+            open_at: Instant::now(),
+        };
+
+        assert_eq!(run_exec_engine(opts, &|| None, &mut output, None, false), 0);
+        let events = String::from_utf8(sink)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let titles = events
+            .iter()
+            .filter(|event| event["event"] == "title")
+            .collect::<Vec<_>>();
+        assert_eq!(titles.len(), count);
+        assert!(titles.iter().all(|event| event["data"] == "t"));
+        assert_eq!(events.last().unwrap()["event"], "exit");
     }
 
     #[test]
@@ -5447,6 +5658,44 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    fn linux_process_has_exited(pid: u32) -> bool {
+        LinuxProcessStat::read(pid)
+            .unwrap_or_else(|error| panic!("read process state for pid {pid}: {error}"))
+            .is_none_or(|stat| matches!(stat.state, b'Z' | b'X' | b'x'))
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn teardown_accepts_unreaped_adopted_children() {
+        const FIXTURE: &str = "exec::tests::teardown_accepts_unreaped_adopted_children";
+        if invoked_as_fixture(FIXTURE) {
+            // SAFETY: only this isolated fixture adopts its orphaned descendants.
+            assert_eq!(
+                unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) },
+                0
+            );
+            let result = std::panic::catch_unwind(timeout_kills_a_background_session_member);
+            // SAFETY: this fixture owns all children; a null status is permitted.
+            while unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) } > 0 {}
+            if let Err(payload) = result {
+                std::panic::resume_unwind(payload);
+            }
+            return;
+        }
+
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", FIXTURE, "--nocapture", "--test-threads=1"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "subreaper fixture failed: stdout={}, stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn timeout_kills_a_background_session_member() {
         let temp = tempfile::tempdir().unwrap();
@@ -5475,19 +5724,18 @@ mod tests {
             .trim()
             .parse()
             .unwrap();
-        let process_path = std::path::PathBuf::from(format!("/proc/{pid}"));
         let deadline = Instant::now() + Duration::from_secs(2);
-        while process_path.exists() && Instant::now() < deadline {
+        while !linux_process_has_exited(pid) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
-        if process_path.exists() {
+        if !linux_process_has_exited(pid) {
             // Avoid leaking the fixture if the assertion fails.
             unsafe {
                 libc::kill(pid as libc::pid_t, libc::SIGKILL);
             }
         }
         assert!(
-            !process_path.exists(),
+            linux_process_has_exited(pid),
             "background session member {pid} survived timeout"
         );
     }
@@ -5537,19 +5785,18 @@ wait
             .trim()
             .parse()
             .unwrap();
-        let process_path = PathBuf::from(format!("/proc/{pid}"));
         let deadline = Instant::now() + Duration::from_secs(2);
-        while process_path.exists() && Instant::now() < deadline {
+        while !linux_process_has_exited(pid) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
-        if process_path.exists() {
+        if !linux_process_has_exited(pid) {
             // Avoid leaking the fixture if the assertion fails.
             unsafe {
                 libc::kill(pid as libc::pid_t, libc::SIGKILL);
             }
         }
         assert!(
-            !process_path.exists(),
+            linux_process_has_exited(pid),
             "descriptor-free reparented session member {pid} survived deadline teardown"
         );
     }
@@ -5624,16 +5871,15 @@ wait
             .trim()
             .parse()
             .unwrap();
-        let process_path = PathBuf::from(format!("/proc/{pid}"));
         let deadline = Instant::now() + Duration::from_secs(2);
-        while process_path.exists() && Instant::now() < deadline {
+        while !linux_process_has_exited(pid) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
-        if process_path.exists() {
+        if !linux_process_has_exited(pid) {
             unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
         }
         assert!(
-            !process_path.exists(),
+            linux_process_has_exited(pid),
             "late output deadline lost the root anchor and left session member {pid} alive"
         );
     }
@@ -6027,17 +6273,13 @@ wait
             "fixture must still be forking when teardown starts; output={output:?}"
         );
         let deadline = Instant::now() + Duration::from_secs(2);
-        while pids
-            .iter()
-            .any(|pid| PathBuf::from(format!("/proc/{pid}")).exists())
-            && Instant::now() < deadline
-        {
+        while pids.iter().any(|pid| !linux_process_has_exited(*pid)) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
         let survivors = pids
             .iter()
             .copied()
-            .filter(|pid| PathBuf::from(format!("/proc/{pid}")).exists())
+            .filter(|pid| !linux_process_has_exited(*pid))
             .collect::<Vec<_>>();
         for pid in &survivors {
             unsafe { libc::kill(*pid as libc::pid_t, libc::SIGKILL) };
@@ -6227,6 +6469,28 @@ wait
         assert!(
             !scan.contains("winit::") && !scan.contains("use winit"),
             "exec.rs must not use winit (headless)"
+        );
+    }
+
+    #[test]
+    fn invalid_utf8_decoding_scales_linearly() {
+        fn decode(size: usize) -> Duration {
+            let bytes = vec![0xff; size];
+            let mut carry = Vec::with_capacity(size);
+            let mut out = String::with_capacity(size * 3);
+            let started = Instant::now();
+            push_utf8_streaming(&mut carry, &bytes, &mut out);
+            let elapsed = started.elapsed();
+            assert!(carry.is_empty());
+            assert_eq!(out, "\u{FFFD}".repeat(size));
+            elapsed
+        }
+
+        let small = (0..3).map(|_| decode(8 * 1024)).min().unwrap();
+        let large = decode(512 * 1024);
+        assert!(
+            large <= small.saturating_mul(512) + Duration::from_millis(100),
+            "64 times as much invalid input took {large:?}, versus {small:?}"
         );
     }
 

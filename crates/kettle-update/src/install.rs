@@ -4327,7 +4327,7 @@ fn open_transaction_snapshot(path: &Path) -> Result<(File, Option<u32>), UpdateE
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(libc::O_NOFOLLOW);
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
     #[cfg(windows)]
     {
@@ -5164,12 +5164,15 @@ fn rollback_entry_requires_restore(
     if replacement_matches {
         return Ok(true);
     }
-    if entry.state == JournalEntryState::Prepared {
+    if matches!(
+        entry.state,
+        JournalEntryState::Prepared | JournalEntryState::Installed
+    ) {
         let previous_matches = transaction_destination_matches_previous(&mut current, entry);
         if previous_matches {
-            // A crash can leave the write-ahead entry prepared before its
-            // publication. The previous object is already the desired result.
-            return Ok(false);
+            // Publication or restoration can finish before its checkpoint.
+            // Replay an installed entry's backup to restore its mode as well.
+            return Ok(entry.state == JournalEntryState::Installed && entry.existed);
         }
     }
     Err(UpdateError::Transaction(format!(
@@ -7349,6 +7352,39 @@ mod tests {
 
     #[cfg(any(windows, target_os = "linux"))]
     #[test]
+    fn recovery_resumes_after_restore_before_entry_checkpoint() {
+        for existed in [false, true] {
+            let root = test_tempdir();
+            fs::write(root.path().join("one"), b"old-one").unwrap();
+            if existed {
+                fs::write(root.path().join("two"), b"old-two").unwrap();
+            }
+            let mut tx = Transaction::begin(root.path(), "99.0.0").unwrap();
+            tx.install_bytes(Path::new("one"), b"new-one", None)
+                .unwrap();
+            tx.install_bytes(Path::new("two"), b"new-two", None)
+                .unwrap();
+            tx.journal.phase = JournalPhase::RollingBack;
+            tx.persist_journal().unwrap();
+            let entry = tx.journal.entries.last().unwrap();
+            assert_eq!(entry.state, JournalEntryState::Installed);
+            restore_entry(&tx.prefix, &tx.backup_dir, entry).unwrap();
+            std::mem::forget(tx);
+
+            recover_transaction(root.path()).unwrap();
+            assert_eq!(fs::read(root.path().join("one")).unwrap(), b"old-one");
+            if existed {
+                assert_eq!(fs::read(root.path().join("two")).unwrap(), b"old-two");
+            } else {
+                assert!(!root.path().join("two").exists());
+            }
+            assert!(!root.path().join(".kettle-update-journal.json").exists());
+            recover_transaction(root.path()).unwrap();
+        }
+    }
+
+    #[cfg(any(windows, target_os = "linux"))]
+    #[test]
     fn recovery_resumes_partially_completed_rollback_idempotently() {
         let root = test_tempdir();
         fs::write(root.path().join("one"), b"old-one").unwrap();
@@ -7461,6 +7497,69 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("duplicate install destination"));
         tx.rollback().unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_preflight_and_startup_recovery_reject_fifo_without_blocking() {
+        use std::os::unix::ffi::OsStrExt as _;
+        use std::os::unix::fs::{FileTypeExt as _, OpenOptionsExt as _};
+
+        for recovery in [false, true] {
+            let root = test_tempdir();
+            let prefix = root.path().join("install");
+            seed_linux_install_provenance(&prefix);
+            fs::write(
+                prefix.join("share/kettle/install.json"),
+                marker_json(env!("CARGO_PKG_VERSION")).unwrap(),
+            )
+            .unwrap();
+            let relative = PathBuf::from("share/kettle/value");
+            let destination = prefix.join(&relative);
+            if recovery {
+                fs::write(&destination, b"before").unwrap();
+                let mut tx = Transaction::begin(&prefix, "99.0.0").unwrap();
+                tx.install_bytes(&relative, b"after", None).unwrap();
+                std::mem::forget(tx);
+                fs::remove_file(&destination).unwrap();
+            }
+            let name = std::ffi::CString::new(destination.as_os_str().as_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+
+            let (send, receive) = std::sync::mpsc::channel();
+            let worker_prefix = prefix.clone();
+            let worker = std::thread::spawn(move || {
+                let result = if recovery {
+                    let version = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+                    prepare_linux_process_start_at(&worker_prefix.join("bin/kettle"), &version)
+                } else {
+                    let mut tx = Transaction::begin(&worker_prefix, "99.0.0").unwrap();
+                    tx.preflight_destinations(&[relative])
+                };
+                send.send(result.map_err(|error| error.to_string()))
+                    .unwrap();
+            });
+            let result = receive.recv_timeout(std::time::Duration::from_secs(5));
+            // Unblock a regressed reader before joining, so failure is bounded.
+            let _rescue = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&destination)
+                .unwrap();
+            worker.join().unwrap();
+            let error = result
+                .expect("a FIFO without a writer must not block the snapshot open")
+                .unwrap_err();
+            assert!(error.contains("non-regular file"), "{error}");
+            assert!(
+                fs::symlink_metadata(&destination)
+                    .unwrap()
+                    .file_type()
+                    .is_fifo()
+            );
+            assert!(prefix.join(".kettle-update-journal.json").is_file());
+        }
     }
 
     #[cfg(target_os = "linux")]

@@ -732,6 +732,18 @@ fi
         # And it should say how to get that release deliberately.
         self.assertIn("KETTLE_VERSION=v0.0.0", combined)
 
+    def test_explicit_latest_cannot_pick_legacy_trust_policy(self):
+        archive = self._archive()
+        result = self._run(
+            archive,
+            version="latest",
+            extra_environment={"FIXTURE_LATEST_TAG": "v1.3.4"},
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("predates signed manifests", result.stderr)
+        self.assertEqual(len(self.curl_log.read_text(encoding="ascii").splitlines()), 1)
+        self.assertFalse((self.root / "prefix").exists())
+
     def test_a_named_old_release_may_still_take_the_legacy_path(self):
         """Naming an old version explicitly is a human decision, not the
         channel's, so the pre-manifest path stays available for it."""

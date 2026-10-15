@@ -144,18 +144,20 @@ pub fn resolve_run(cells: &[RawCell]) -> Vec<ResolvedCell> {
             None if same_neighbor => left.map(|l| l.row).unwrap_or(0),
             None => 0,
         };
+        let same_row = same_neighbor && left.is_some_and(|l| l.row == row);
         let col = match c.diacritics.col {
             Some(cc) => cc,
             // Saturating add: `resolve_run` is a pure-spec `pub` fn, and a
             // >65,536-cell same-neighbor run would overflow `u16`. A plain
             // `+ 1` panics under debug overflow checks and wraps to 0 in release.
-            None if same_neighbor => left.map(|l| l.col.saturating_add(1)).unwrap_or(0),
+            None if same_row => left.map(|l| l.col.saturating_add(1)).unwrap_or(0),
             None => 0,
         };
+        let same_prefix = same_row && left.is_some_and(|l| l.col.checked_add(1) == Some(col));
         let msb = c
             .diacritics
             .msb
-            .or(if same_neighbor { prev_msb } else { None });
+            .or(if same_prefix { prev_msb } else { None });
         prev_msb = msb;
 
         out.push(ResolvedCell {
@@ -371,6 +373,46 @@ mod tests {
         let res = resolve_run(&[head, tail]);
         assert_eq!(res[0].image_id, 33_554_474);
         assert_eq!(res[1].image_id, 33_554_474, "msb inherited from left");
+    }
+
+    #[test]
+    fn resolve_inheritance_requires_matching_prefixes() {
+        let head = RawCell {
+            fg: 42,
+            placement_id: 7,
+            diacritics: CellDiacritics {
+                row: Some(0),
+                col: Some(3),
+                msb: Some(2),
+            },
+        };
+        for (row, col, expected_row, expected_col, expected_msb) in [
+            (None, None, 0, 4, 2),
+            (Some(0), None, 0, 4, 2),
+            (Some(1), None, 1, 0, 0),
+            (Some(1), Some(4), 1, 4, 0),
+            (Some(0), Some(8), 0, 8, 0),
+            (Some(0), Some(4), 0, 4, 2),
+        ] {
+            let tail = RawCell {
+                diacritics: CellDiacritics {
+                    row,
+                    col,
+                    msb: None,
+                },
+                ..head
+            };
+            let res = resolve_run(&[head, tail]);
+            assert_eq!(
+                res[1],
+                ResolvedCell {
+                    image_id: image_id(42, Some(expected_msb)),
+                    placement_id: 7,
+                    row: expected_row,
+                    col: expected_col,
+                }
+            );
+        }
     }
 
     #[test]

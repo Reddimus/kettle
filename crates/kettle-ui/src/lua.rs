@@ -89,6 +89,37 @@ const MAX_LUA_MENU_LABEL_BYTES: usize = 1 << 10;
 const MAX_LUA_URL_HANDLER_NAME_BYTES: usize = 256;
 const MAX_LUA_URL_PATTERN_BYTES: usize = 4 << 10;
 
+// Bound native matching work across the entire handler chain. Lua's instruction
+// hook cannot interrupt string.match. Count every possible quantifier byte,
+// including escaped ones, so the estimate can only overcharge a pattern.
+const MAX_URL_MATCH_WORK: usize = 2_000_000;
+
+fn url_pattern_work(url: &str, pattern: &str) -> Option<usize> {
+    let choices = url.len().checked_add(1)?.max(2);
+    let mut work = pattern.len().checked_add(1)?.checked_mul(8)?;
+    work = work.checked_mul(choices)?;
+    for byte in pattern.bytes() {
+        let factor = match byte {
+            b'?' => 2,
+            b'*' | b'+' | b'-' => choices,
+            _ => 1,
+        };
+        work = work.checked_mul(factor)?;
+        if work > MAX_URL_MATCH_WORK {
+            return None;
+        }
+    }
+    // Balanced matches and capture backreferences can each scan the subject.
+    if pattern
+        .as_bytes()
+        .windows(2)
+        .any(|pair| pair[0] == b'%' && (pair[1] == b'b' || pair[1].is_ascii_digit()))
+    {
+        work = work.checked_mul(choices)?;
+    }
+    (work <= MAX_URL_MATCH_WORK).then_some(work)
+}
+
 static LUA_EVENTS_WARNED: AtomicBool = AtomicBool::new(false);
 static LUA_UNKNOWN_EVENT_WARNED: AtomicBool = AtomicBool::new(false);
 static LUA_MENU_WARNED: AtomicBool = AtomicBool::new(false);
@@ -414,6 +445,57 @@ impl LuaEngine {
             // execute arbitrary code. Always nil in safe mode.
             if let Ok(pkg) = globals.get::<mlua::Table>("package") {
                 pkg.set("loadlib", mlua::Value::Nil)?;
+                let old: mlua::Table = pkg.get("searchers")?;
+                let searchers = lua.create_table()?;
+                searchers.set(1, old.get::<mlua::Function>(1)?)?;
+                searchers.set(
+                    2,
+                    lua.create_function(|lua, name: String| {
+                        let pkg: mlua::Table = lua.globals().get("package")?;
+                        let paths: String = pkg.get("path")?;
+                        if name.len() > 256 || paths.len() > 64 * 1024 {
+                            return Err(mlua::Error::RuntimeError(
+                                "Lua module search exceeds its size limit".into(),
+                            ));
+                        }
+                        let name = name.replace('.', "/");
+                        for template in paths.split(';').take(256) {
+                            let path = std::path::PathBuf::from(template.replace('?', &name));
+                            // Relative templates implicitly trust the launch directory.
+                            if !path.is_absolute() {
+                                continue;
+                            }
+                            let opened = (|| -> Result<_> {
+                                let parent = path.parent().context("module has no parent")?;
+                                kettle_state::validate_trusted_directory(parent)?;
+                                let (file, resolved) =
+                                    kettle_state::open_trusted_file_read_following_leaf(&path)?;
+                                Ok((LuaEngine::read_script(file, &resolved)?, resolved))
+                            })();
+                            let Ok((text, resolved)) = opened else {
+                                continue;
+                            };
+                            let loader = lua
+                                .load(&text)
+                                .set_name(resolved.display().to_string())
+                                .set_mode(mlua::chunk::ChunkMode::Text)
+                                .into_function()?;
+                            return Ok((
+                                mlua::Value::Function(loader),
+                                mlua::Value::String(
+                                    lua.create_string(resolved.to_string_lossy().as_bytes())?,
+                                ),
+                            ));
+                        }
+                        Ok((
+                            mlua::Value::String(
+                                lua.create_string("\n\tno trusted absolute Lua module source")?,
+                            ),
+                            mlua::Value::Nil,
+                        ))
+                    })?,
+                )?;
+                pkg.set("searchers", searchers)?;
             }
             // NOTE on `debug.*`: mlua's `Lua::new()`
             // loads `StdLib::ALL_SAFE`, which EXCLUDES the `debug`
@@ -436,6 +518,10 @@ impl LuaEngine {
         // error instead of an OOM-abort of kettle. 256 MiB is far above any sane
         // plugin yet bounds a hostile/buggy one.
         lua.set_memory_limit(256 << 20)?;
+        // Keep the native matcher private so scripts cannot replace it with a
+        // function whose native work is unrelated to the admitted pattern.
+        let matcher: mlua::Function = lua.globals().get::<mlua::Table>("string")?.get("match")?;
+        lua.set_named_registry_value("kettle_url_match", matcher)?;
         // Install the instruction-budget watchdog. The hook
         // fires every `HOOK_INSTRUCTION_INTERVAL` VM instructions; when a single
         // top-level invocation exceeds `max_fires` fires it errors out,
@@ -893,16 +979,18 @@ impl LuaEngine {
         let r: mlua::Result<UrlHandlerOutcome> = (|| {
             let handlers: mlua::Table = self.lua.named_registry_value("kettle_url_handlers")?;
             let n = handlers.len()?;
+            let mut remaining = MAX_URL_MATCH_WORK;
+            let s: mlua::Function = self.lua.named_registry_value("kettle_url_match")?;
             for i in 1..=n {
                 let entry: mlua::Table = handlers.get(i)?;
                 let pattern: String = entry.get("pattern")?;
-                // Use Lua's string.match for compat with user-typed
-                // patterns. If it returns non-nil, the handler matches.
-                let s: mlua::Function = self
-                    .lua
-                    .globals()
-                    .get::<mlua::Table>("string")?
-                    .get("match")?;
+                let Some(work) = url_pattern_work(url, &pattern) else {
+                    continue;
+                };
+                let Some(left) = remaining.checked_sub(work) else {
+                    continue;
+                };
+                remaining = left;
                 // A bad pattern is this handler's problem and nobody else's.
                 // `string.match` raises on malformed patterns (an unclosed
                 // `[`, say), and propagating that error would abandon the
@@ -1126,7 +1214,7 @@ impl LuaEngine {
         self.exec_open_file(file, &resolved)
     }
 
-    fn exec_open_file(&self, file: std::fs::File, path: &Path) -> Result<()> {
+    fn read_script(file: std::fs::File, path: &Path) -> Result<String> {
         use std::io::Read as _;
 
         const MAX_LUA_SCRIPT_BYTES: u64 = 4 * 1024 * 1024;
@@ -1149,6 +1237,11 @@ impl LuaEngine {
                 path.display()
             );
         }
+        Ok(text)
+    }
+
+    fn exec_open_file(&self, file: std::fs::File, path: &Path) -> Result<()> {
+        let text = Self::read_script(file, path)?;
         self.arm_budget();
         self.lua
             .load(&text)
@@ -1895,6 +1988,31 @@ mod tests {
     }
 
     #[test]
+    fn url_handlers_decline_patterns_over_the_native_work_budget() {
+        let eng = LuaEngine::new("Default").unwrap();
+        eng.eval_str(
+            "expensive_hits = 0
+             kettle.add_url_handler('expensive', string.rep('a*', 24) .. 'b',
+                 function() expensive_hits = expensive_hits + 1 return true end)
+             kettle.add_url_handler('fallback', '^https://',
+                 function() return 'https://fallback.example/' end)",
+        )
+        .unwrap();
+        let url = format!("https://example.com/{}", "a".repeat(100));
+        // The matching form fails quickly on the old implementation, before
+        // the nonmatching form below could trap the test in native backtracking.
+        assert_eq!(
+            eng.try_url_handler(&format!("{url}b")),
+            UrlHandlerOutcome::Open("https://fallback.example/".into())
+        );
+        assert_eq!(eng.eval_str("return expensive_hits").unwrap(), "0");
+        assert_eq!(
+            eng.try_url_handler(&url),
+            UrlHandlerOutcome::Open("https://fallback.example/".into())
+        );
+    }
+
+    #[test]
     fn url_handler_matches_pattern_and_short_circuits() {
         // `kettle.add_url_handler(name, pattern, cb)` registers a
         // handler; `try_url_handler(url)` invokes the cb only when the
@@ -2104,6 +2222,78 @@ mod tests {
             .exec_file(&path)
             .expect("--lua-script is an explicit trust grant");
         assert_eq!(explicit.eval_str("return answer").unwrap(), "42");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn required_modules_must_be_trusted_and_bounded() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = kettle_test_support::private_tempdir("kettle-lua-module-");
+        let modules = root.join("modules");
+        std::fs::create_dir(&modules).unwrap();
+        let init = root.join("init.lua");
+        std::fs::write(&init, "require('helper')").unwrap();
+        std::fs::set_permissions(&init, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let helper = modules.join("helper.lua");
+        std::fs::write(&helper, "kettle.send_text('module ran\\n')").unwrap();
+
+        let run = || {
+            let engine = LuaEngine::new("Default").unwrap();
+            let pkg: mlua::Table = engine.lua.globals().get("package").unwrap();
+            pkg.set("path", modules.join("?.lua").to_str().unwrap())
+                .unwrap();
+            let result = engine.exec_trusted_file(&init);
+            (engine, result)
+        };
+        std::fs::set_permissions(&modules, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let (engine, result) = run();
+        assert!(result.is_err());
+        assert!(engine.drain_commands().is_empty());
+
+        std::fs::set_permissions(&modules, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o666)).unwrap();
+        let (engine, result) = run();
+        assert!(result.is_err());
+        assert!(engine.drain_commands().is_empty());
+
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let (engine, result) = run();
+        result.unwrap();
+        assert!(matches!(
+            engine.drain_commands().as_slice(),
+            [LuaCommand::SendText(_)]
+        ));
+
+        let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
+        let absolute = modules.canonicalize().unwrap();
+        let common = cwd
+            .ancestors()
+            .find(|parent| absolute.starts_with(parent))
+            .unwrap();
+        let mut relative = std::path::PathBuf::new();
+        for _ in cwd.strip_prefix(common).unwrap().components() {
+            relative.push("..");
+        }
+        relative.push(absolute.strip_prefix(common).unwrap());
+        relative.push("?.lua");
+        let engine = LuaEngine::new("Default").unwrap();
+        let pkg: mlua::Table = engine.lua.globals().get("package").unwrap();
+        pkg.set("path", relative.to_str().unwrap()).unwrap();
+        assert!(engine.exec_trusted_file(&init).is_err());
+        assert!(engine.drain_commands().is_empty());
+
+        std::fs::write(
+            &helper,
+            format!(
+                "kettle.send_text('oversized') {}",
+                " ".repeat(4 * 1024 * 1024)
+            ),
+        )
+        .unwrap();
+        let (engine, result) = run();
+        assert!(result.is_err());
+        assert!(engine.drain_commands().is_empty());
     }
 
     #[cfg(unix)]

@@ -61,20 +61,27 @@ impl Trigger {
         Self { mods, key }
     }
 
-    /// Human-readable label, e.g. `Ctrl+Shift+E`, `Alt+Left`, `F5`.
+    /// Human-readable label, e.g. `Ctrl+Shift+E`, `Alt+Left`, `F5`. macOS
+    /// names Alt and Super the way its keyboards do, `Opt` and `Cmd`; a
+    /// config accepts either spelling.
     pub fn label(&self) -> String {
+        let (alt, super_key) = if cfg!(target_os = "macos") {
+            ("Opt", "Cmd")
+        } else {
+            ("Alt", "Super")
+        };
         let mut parts: Vec<String> = Vec::new();
         if self.mods.contains(Mods::CTRL) {
             parts.push("Ctrl".into());
         }
         if self.mods.contains(Mods::ALT) {
-            parts.push("Alt".into());
+            parts.push(alt.into());
         }
         if self.mods.contains(Mods::SHIFT) {
             parts.push("Shift".into());
         }
         if self.mods.contains(Mods::SUPER) {
-            parts.push("Super".into());
+            parts.push(super_key.into());
         }
         parts.push(match self.key {
             // Keys that `parse_key` accepts as named tokens
@@ -1887,8 +1894,17 @@ mod tests {
     fn trigger_label_formats() {
         let t = Trigger::new(Mods::CTRL | Mods::SHIFT, Key::Char('e'));
         assert_eq!(t.label(), "Ctrl+Shift+E");
-        assert_eq!(Trigger::new(Mods::ALT, Key::Left).label(), "Alt+Left");
         assert_eq!(Trigger::new(Mods::empty(), Key::F(5)).label(), "F5");
+        let alt_left = Trigger::new(Mods::ALT, Key::Left).label();
+        let super_t = Trigger::new(Mods::SUPER, Key::Char('t')).label();
+        if cfg!(target_os = "macos") {
+            assert_eq!((alt_left.as_str(), super_t.as_str()), ("Opt+Left", "Cmd+T"));
+        } else {
+            assert_eq!(
+                (alt_left.as_str(), super_t.as_str()),
+                ("Alt+Left", "Super+T")
+            );
+        }
     }
 
     #[test]
@@ -2447,9 +2463,14 @@ mod tests {
             hint_label(&d, &Action::NewTabShell(0)).as_deref(),
             Some("Ctrl+Shift+1")
         );
+        // Both `Ctrl+,` and the Super chord open Settings; macOS shows its own.
         assert_eq!(
             hint_label(&d, &Action::OpenSettings).as_deref(),
-            Some("Ctrl+,")
+            Some(if cfg!(target_os = "macos") {
+                "Cmd+,"
+            } else {
+                "Ctrl+,"
+            })
         );
         // An unbound action yields no hint.
         assert_eq!(hint_label(&d, &Action::OpenUpdate), None);
@@ -2572,19 +2593,22 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|l| l.starts_with("Ctrl+Shift+T") && l.contains("CloseTab")),
+                .any(|l| l.split_whitespace().next() == Some("Ctrl+Shift+T")
+                    && l.contains("CloseTab")),
             "override should appear with the new action: {lines:?}"
         );
         // No line should still show Ctrl+Shift+T → NewTab.
         assert!(
-            !lines
-                .iter()
-                .any(|l| l.starts_with("Ctrl+Shift+T") && l.contains("NewTab")),
+            !lines.iter().any(
+                |l| l.split_whitespace().next() == Some("Ctrl+Shift+T") && l.contains("NewTab")
+            ),
             "stale default should not coexist with override: {lines:?}"
         );
         // Unbound trigger is gone entirely (no Ctrl+Shift+C line).
         assert!(
-            !lines.iter().any(|l| l.starts_with("Ctrl+Shift+C")),
+            !lines
+                .iter()
+                .any(|l| l.split_whitespace().next() == Some("Ctrl+Shift+C")),
             "unbound trigger should not appear: {lines:?}"
         );
         // Output remains sorted by trigger label.

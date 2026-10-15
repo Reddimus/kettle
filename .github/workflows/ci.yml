@@ -34,7 +34,9 @@ jobs:
           sudo apt-get install -y fish
           fish --version | grep -E '^fish, version 3\.7\.'
       - name: Run native shell integration fixtures
-        run: python3 scripts/check-shell-integration.py
+        run: |
+          python3 scripts/check-shell-integration.py
+          python3 scripts/perf/macos-compare-score-self-test.py ApplePayloadTests
       - name: Run Fish 4 compatibility fixtures
         run: |
           install_fish() {
@@ -48,6 +50,7 @@ jobs:
             tar -xJf "$archive" -C ".fish-${version}"
             PATH="$PWD/.fish-${version}:$PATH" fish --version | grep -F "fish, version ${version}"
             PATH="$PWD/.fish-${version}:$PATH" python3 scripts/check-shell-integration.py
+            PATH="$PWD/.fish-${version}:$PATH" python3 scripts/test-shell-integration-paths.py
           }
 
           # 4.2 has two names for the Vi insert-mode Tab byte; 4.3 fixed that
@@ -286,6 +289,9 @@ jobs:
       - name: Hardened online installer fixtures
         if: runner.os == 'Linux'
         run: python3 scripts/test-install-online.py
+      - name: Live-probe and menu-screenshot fixtures
+        if: runner.os == 'Linux'
+        run: just script-fixture-self-test
       - name: Rustdoc (Linux, warnings denied)
         # rustdoc has its own warning class (broken intra-doc links, missing
         # docs on public items, malformed code blocks) that

@@ -42,6 +42,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Let Claude Code run `kettle_show` without a permission prompt, as Codex
   already does; it only shows you a file on this computer.
 
+- Show macOS shortcuts with Cmd and Opt, as macOS keyboards name them, in
+  menus, the command palette and Settings.
+- Keep a pane's lines on screen when a split narrows it. Lines that wrap take
+  the empty rows below the prompt instead of pushing the top into scrollback.
+- Print `kettle ctl: listening for events` on stderr once `kettle ctl events`
+  is subscribed, so a script can wait for it.
+
 ### Fixed
 
 - Keep the saved workspace when a restored second window fails to open, and
@@ -144,6 +151,22 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 - Update Rustls to 0.23.46 for upstream TLS fixes (RUSTSEC-2026-0346 to
   RUSTSEC-2026-0349).
+
+- Paste a large screenshot without freezing the window; pastes made while it
+  is being saved land after it, in order.
+- Load Lua modules with `require` in `safe` and `restricted` mode only from
+  trusted absolute paths, never from the directory Kettle was started in.
+- Keep an older Kettle that is still running from replacing a newer macOS app
+  during an update.
+- Report `kettle exec`'s stop code on macOS when the stop lands just after the
+  command ends, instead of an internal error.
+- Refuse `kettle_run` sizes over 512 columns or rows before starting it.
+- Retry or uninstall a Linux install that a full disk interrupted, and keep
+  `KETTLE_VERSION=latest` from installing a release older than signed
+  manifests.
+- Keep a trailing space in a directory name a shell reports with OSC 7.
+- Open no second window for a bare launch that already opened its own after
+  the running Kettle was slow to answer.
 
 ## [5.0.1] — 2026-10-13
 

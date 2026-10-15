@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 export PATH="$HOME/.cargo/bin:$PATH"
-exec python3 "$(dirname "$0")/check-ttf-parser-scope.py"
+here="$(dirname "$0")"
+python3 "$here/test-ttf-parser-scope.py"
+exec python3 "$here/check-ttf-parser-scope.py"
