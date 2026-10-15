@@ -17,6 +17,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Keep `kettle_show` available in Claude Code, which skipped the tool because
+  its schema used a top-level `oneOf`; inline cards and shelf delivery from
+  Claude Code work again.
+
 - Update Rustls to 0.23.46 for upstream TLS fixes (RUSTSEC-2026-0346 to
   RUSTSEC-2026-0349).
 
