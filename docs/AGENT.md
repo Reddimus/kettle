@@ -816,8 +816,9 @@ Its arguments are exactly one source, `mermaid` (Mermaid source, at most
 64 KiB of UTF-8) or an absolute `path` (an image, SVG, Mermaid or Markdown
 file, at most 4 KiB), and an optional `title` (at most 4 KiB) and `key` (at most 256
 bytes), none of them empty; other media bytes go through `kettle show -`
-instead. The schema says what is checked: `oneOf` the two sources, each
-string's `minLength` of one, the path's absolute pattern, and each byte cap
+instead. The schema says what is checked, except the one-source rule, which
+the description states and the server enforces, since Claude Code drops a tool
+whose schema has a top-level `oneOf`: each string's `minLength` of one, the path's absolute pattern, and each byte cap
 as its `maxLength`, a bound no string within the cap exceeds, since JSON
 Schema counts characters; text of wider characters can pass it and still be
 over the byte cap, which `kettle_show` refuses as `too_large` before it

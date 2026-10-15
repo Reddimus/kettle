@@ -64,8 +64,10 @@ const ABSOLUTE_PATH_PATTERN: &str = if cfg!(windows) {
 };
 
 /// `kettle_show`'s specification. The schema says what the validator
-/// checks: exactly one source, nonempty strings, an absolute path, and no
-/// other argument. JSON Schema counts characters where Kettle's caps count
+/// checks: nonempty strings, an absolute path, and no other argument. The
+/// rule of exactly one source is in the description and the validator, not
+/// a top-level `oneOf`: Claude Code drops a tool whose schema has one, since
+/// the Anthropic API refuses it. JSON Schema counts characters where Kettle's caps count
 /// bytes, so each `maxLength` is the byte cap, which no string within it
 /// exceeds, and the descriptions name the caps in bytes.
 fn show_tool_spec() -> Value {
@@ -76,8 +78,8 @@ fn show_tool_spec() -> Value {
             poster, with its length. Interactive supported harnesses get a card under \
             the call and a shelf entry; other modes use the shelf. Clicking opens it in the \
             media viewer. Tested diagram families: flowchart, sequence, state, class, \
-            ER, gantt, pie, mindmap, gitGraph, timeline, journey and quadrant. Returns delivery \
-            status and metadata, not the image contents.",
+            ER, gantt, pie, mindmap, gitGraph, timeline, journey and quadrant. Give exactly one \
+            of path or mermaid. Returns delivery status and metadata, not the image contents.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -107,7 +109,6 @@ fn show_tool_spec() -> Value {
                     "description": "replace the shelf item with this key instead of adding another (default: the file's path), at most 256 bytes"
                 }
             },
-            "oneOf": [{"required": ["mermaid"]}, {"required": ["path"]}],
             "additionalProperties": false
         }
     })
@@ -1189,6 +1190,26 @@ mod tests {
             .collect()
     }
 
+    /// Claude Code drops a tool whose input schema has a top-level `oneOf`,
+    /// `anyOf`, `allOf` or `not`, since the Anthropic API refuses them, so
+    /// every tool's schema is a plain object and the server checks the rest.
+    #[test]
+    fn no_tool_schema_has_top_level_combinators() {
+        for selection in [ToolSelection::Display, ToolSelection::Full] {
+            for spec in tool_specs(selection) {
+                let schema = spec["inputSchema"].as_object().unwrap();
+                assert_eq!(schema["type"], "object", "{}", spec["name"]);
+                for keyword in ["oneOf", "anyOf", "allOf", "not"] {
+                    assert!(
+                        !schema.contains_key(keyword),
+                        "{} uses top-level {keyword}",
+                        spec["name"]
+                    );
+                }
+            }
+        }
+    }
+
     /// Display mode offers `kettle_show` alone and takes no other call; full
     /// mode does not offer it.
     #[test]
@@ -1201,10 +1222,6 @@ mod tests {
             "one kettle_show for both"
         );
         let schema = &tool_specs(ToolSelection::Display)[0]["inputSchema"];
-        assert_eq!(
-            schema["oneOf"],
-            json!([{"required": ["mermaid"]}, {"required": ["path"]}])
-        );
         assert_eq!(schema["additionalProperties"], json!(false));
         let properties: Vec<_> = schema["properties"].as_object().unwrap().keys().collect();
         // In the order the schema lists them, as JSON objects keep it.
@@ -1235,8 +1252,8 @@ mod tests {
 
     /// Whether `args` meets `schema`, for the part of JSON Schema
     /// `kettle_show`'s uses: an object of string properties with lengths in
-    /// characters and its absolute-path pattern, `oneOf` of required names,
-    /// and no other property.
+    /// characters and its absolute-path pattern, and no other property; plus
+    /// the rule its description states, exactly one of `mermaid` and `path`.
     fn schema_accepts(schema: &Value, args: &Value) -> bool {
         let Some(object) = args.as_object() else {
             return false;
@@ -1266,19 +1283,11 @@ mod tests {
                     .is_none_or(|most| length <= most)
                 && pattern
         });
-        let matching = schema["oneOf"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|branch| {
-                branch["required"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .all(|name| object.contains_key(name.as_str().unwrap()))
-            })
+        let sources = ["mermaid", "path"]
+            .into_iter()
+            .filter(|name| object.contains_key(*name))
             .count();
-        fits && matching == 1
+        fits && sources == 1
     }
 
     /// The schema says what the validator checks: a request the validator
