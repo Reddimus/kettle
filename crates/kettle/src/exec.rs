@@ -1764,21 +1764,30 @@ struct ExecProcessTree {
 
 /// Whether every process in `group` is listed and has exited. A member
 /// Kettle may not inspect, such as another user's, counts as still running.
+/// The group is listed again afterwards: a member could have started another
+/// before it exited, and that one must be seen too.
 #[cfg(target_os = "macos")]
 fn process_group_has_only_exited_members(group: libc::pid_t) -> bool {
+    let Some(before) = process_group_members(group).filter(|members| !members.is_empty()) else {
+        return false;
+    };
+    if !before.iter().all(|&pid| member_has_exited(pid)) {
+        return false;
+    }
+    process_group_members(group).is_some_and(|after| after.iter().all(|pid| before.contains(pid)))
+}
+
+/// The processes in `group`, or `None` when the list may be incomplete.
+#[cfg(target_os = "macos")]
+fn process_group_members(group: libc::pid_t) -> Option<Vec<libc::pid_t>> {
     let mut members = [0 as libc::pid_t; 256];
-    let size = libc::c_int::try_from(std::mem::size_of_val(&members)).unwrap_or(0);
+    let size = libc::c_int::try_from(std::mem::size_of_val(&members)).ok()?;
     // SAFETY: `members` is a live buffer of `size` bytes; the call writes at
     // most that many and returns how many pids it wrote.
     let count = unsafe { libc::proc_listpgrppids(group, members.as_mut_ptr().cast(), size) };
-    let Ok(count) = usize::try_from(count) else {
-        return false;
-    };
+    let count = usize::try_from(count).ok()?;
     // A full buffer may have left members out.
-    if count == 0 || count >= members.len() {
-        return false;
-    }
-    members[..count].iter().all(|&pid| member_has_exited(pid))
+    (count < members.len()).then(|| members[..count].to_vec())
 }
 
 /// Whether the listed group member `pid` has exited. macOS answers `ESRCH`
