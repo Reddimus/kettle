@@ -50896,6 +50896,12 @@ mod tests {
     #[test]
     fn every_program_key_rule_is_a_shipped_default() {
         let macos = cfg!(target_os = "macos");
+        // Labels name Alt and Super the way the platform's keyboard does.
+        let (alt, cmd) = if macos {
+            ("Opt", "Cmd")
+        } else {
+            ("Alt", "Super")
+        };
         let defaults = kettle_config::keybinds::defaults();
         let mut yielding: Vec<String> = defaults
             .iter()
@@ -50927,18 +50933,22 @@ mod tests {
         ]
         .iter()
         .map(|chord| chord.to_string())
-        .chain((1..=9).map(|n| format!("Alt+{n}")))
+        .chain((1..=9).map(|n| format!("{alt}+{n}")))
         .chain(
             macos
                 .then(|| {
-                    ["Super+Up".to_string(), "Super+Down".to_string()]
+                    [format!("{cmd}+Up"), format!("{cmd}+Down")]
                         .into_iter()
-                        .chain((1..=9).map(|n| format!("Super+{n}")))
-                        .chain(["Alt+Super", "Ctrl+Super"].into_iter().flat_map(|m| {
-                            ["Up", "Down", "Left", "Right"]
+                        .chain((1..=9).map(|n| format!("{cmd}+{n}")))
+                        .chain(
+                            [format!("{alt}+{cmd}"), format!("Ctrl+{cmd}")]
                                 .into_iter()
-                                .map(move |k| format!("{m}+{k}"))
-                        }))
+                                .flat_map(|m| {
+                                    ["Up", "Down", "Left", "Right"]
+                                        .into_iter()
+                                        .map(move |k| format!("{m}+{k}"))
+                                }),
+                        )
                 })
                 .into_iter()
                 .flatten(),
