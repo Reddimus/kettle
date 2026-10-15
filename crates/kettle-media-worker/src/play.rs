@@ -633,7 +633,7 @@ fn audio_tail(video_end: Option<u64>, last: Option<u64>, frame_ms: u64, sound: b
 
 impl<W: Write> Session<'_, W> {
     fn run(mut self, events: &mpsc::Receiver<Event>, opened_by: Instant) -> i32 {
-        let frame_ms = (1_000_000 / u64::from(self.opened.fps_milli)).max(1);
+        let frame_ms = 1_000_000u64.div_ceil(u64::from(self.opened.fps_milli));
         // A frame written this far past its time sets the clock again.
         let mut pacer = Pacer::new(Duration::from_millis(frame_ms.max(20)));
         let stall = STALL + Duration::from_millis(2 * frame_ms);
@@ -1040,7 +1040,7 @@ mod tests {
         before_read: impl Fn(usize),
         later: impl FnOnce(&Parent) + Send,
     ) -> Vec<(Instant, Frame)> {
-        run_with(opened, held, None, steps, before_read, later)
+        run_with(opened, held, None, None, steps, before_read, later)
     }
 
     /// [`run`], with `sound` as the session's sound.
@@ -1048,6 +1048,7 @@ mod tests {
         opened: Opened,
         held: &Held<'_>,
         sound: Option<Sound>,
+        video_end_ms: Option<u64>,
         steps: Vec<Step>,
         before_read: impl Fn(usize),
         later: impl FnOnce(&Parent) + Send,
@@ -1070,7 +1071,7 @@ mod tests {
                     total: 0,
                 };
                 let session = Session {
-                    video_end_ms: None,
+                    video_end_ms,
                     opened,
                     held,
                     asked,
@@ -1630,6 +1631,56 @@ mod tests {
         assert!(!audio_tail(Some(4000), None, 100, true));
     }
 
+    #[test]
+    fn a_thirty_fps_video_waits_past_a_stall_for_its_audio_tail() {
+        use crate::sound::testing::{Blocks, stand};
+        use std::sync::atomic::AtomicBool;
+
+        let (speaker, told) = stand(3);
+        told.lock().unwrap().played = Some(192_000.0);
+        let source = Box::new(Blocks(VecDeque::from([(0.5, 960_000, 0)])));
+        let sound = Sound::start(speaker, source, 0, SoundWish::new(false)).unwrap();
+        let mut opened = opened(30_000, 4, 2);
+        opened.info.duration_ms = 20_000;
+        opened.info.has_audio = true;
+        opened.audio = AudioStatus::Ready;
+        let shown_last = AtomicBool::new(false);
+        let read = run_with(
+            opened,
+            &Held::Bytes(&[]),
+            Some(sound),
+            Some(4000),
+            vec![
+                Step::Ask(PlayCommand::Play),
+                Step::Send(frame(&opened, 3966)),
+            ],
+            |read| {
+                if read == 2 {
+                    shown_last.store(true, Ordering::SeqCst);
+                }
+            },
+            |parent| {
+                while !shown_last.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                std::thread::sleep(STALL + SECOND);
+                told.lock().unwrap().played = Some(960_000.0);
+                parent.send(Event::End);
+            },
+        );
+        assert_eq!(
+            shown(&read).iter().map(|(_, pts)| *pts).collect::<Vec<_>>(),
+            [3966]
+        );
+        assert_eq!(
+            said(&read),
+            [
+                &Frame::PlayState(PlayState::Playing),
+                &Frame::PlayState(PlayState::Ended)
+            ]
+        );
+    }
+
     /// A frame goes out `VIDEO_LEAD` before its sound is heard: held while
     /// early, out within a frame of it, dropped once the sound passed it by
     /// more, and held while the sound has no clock.
@@ -1690,6 +1741,7 @@ mod tests {
             opened,
             &Held::Bytes(&[]),
             Some(sound),
+            None,
             vec![
                 Step::Ask(PlayCommand::Play),
                 Step::Ask(PlayCommand::Mute),
@@ -1760,6 +1812,7 @@ mod tests {
             opened,
             &Held::Bytes(&[]),
             Some(sound),
+            None,
             vec![
                 Step::Ask(PlayCommand::Play),
                 Step::Send(frame(&opened, 0)),
@@ -1797,6 +1850,7 @@ mod tests {
             opened,
             &Held::Bytes(&[]),
             Some(sound),
+            None,
             vec![
                 Step::Ask(PlayCommand::Play),
                 Step::Send(frame(&opened, 0)),

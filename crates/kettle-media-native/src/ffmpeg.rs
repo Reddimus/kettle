@@ -983,7 +983,7 @@ impl VideoPlayer for Ffmpeg {
         let start_ms = request
             .start_ms
             .min(video_end_ms.saturating_sub(probe.frame_ms()));
-        let opened = Opened {
+        let mut opened = Opened {
             info,
             width,
             height,
@@ -996,7 +996,6 @@ impl VideoPlayer for Ffmpeg {
         let args = play_args(input.container, index, &seek, width, height, fps_milli);
         let left = (info.duration_ms - start_ms).div_ceil(1000);
         let cpu = PLAY_CPU_SECONDS.saturating_add(left.saturating_mul(PLAY_CPU_PER_SECOND));
-        let file = reopen(input.file, input.identity)?;
         let initial_gap = probe
             .stream
             .start_us
@@ -1004,30 +1003,35 @@ impl VideoPlayer for Ffmpeg {
         if request.audio != kettle_media::AudioRequest::Off && info.has_audio {
             let pipes = crate::run::triple(
                 &self.ffmpeg,
-                |pipes| sounding_args(args, pipes, initial_gap, start_ms, info.duration_ms),
-                file,
+                |pipes| sounding_args(args.clone(), pipes, initial_gap, start_ms, info.duration_ms),
+                reopen(input.file, input.identity)?,
                 cpu,
             )
             .map_err(failure)?;
-            let (frames, audio) = playback::split(
+            match playback::split(
                 pipes,
                 width as usize * height as usize * 4,
                 start_ms,
                 info.duration_ms,
-                probe.stream.start_us.is_some_and(|video| {
-                    video > probe.start_us.saturating_add((start_ms * 1000) as i64)
-                }),
-            )?;
-            return Ok(Playback {
-                video_end_ms: Some(video_end_ms),
-                opened: Opened {
-                    audio: AudioStatus::Ready,
-                    ..opened
-                },
-                frames: Box::new(frames),
-                audio: Some(Box::new(audio)),
-            });
+                initial_gap,
+                deadline,
+            ) {
+                Ok((frames, audio)) => {
+                    return Ok(Playback {
+                        video_end_ms: Some(video_end_ms),
+                        opened: Opened {
+                            audio: AudioStatus::Ready,
+                            ..opened
+                        },
+                        frames: Box::new(frames),
+                        audio: Some(Box::new(audio)),
+                    });
+                }
+                Err(FailureCode::RenderParse) => opened.audio = AudioStatus::Unsupported,
+                Err(error) => return Err(error),
+            }
         }
+        let file = reopen(input.file, input.identity)?;
         let streaming = stream(&self.ffmpeg, &args, file, cpu).map_err(failure)?;
         Ok(Playback {
             video_end_ms: Some(video_end_ms),

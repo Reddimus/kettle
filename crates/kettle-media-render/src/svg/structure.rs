@@ -317,6 +317,7 @@ pub(super) fn admit(document: &Document<'_>) -> Result<(), FailureCode> {
         .iter()
         .map(|node| {
             node.children()
+                .filter(Node::is_text)
                 .filter_map(|child| child.text())
                 .map(|text| text.chars().count() as u64)
                 .sum()
@@ -401,6 +402,7 @@ pub(super) fn admit(document: &Document<'_>) -> Result<(), FailureCode> {
         });
         let text: u64 = node
             .children()
+            .filter(Node::is_text)
             .filter_map(|child| child.text())
             .map(|text| text.chars().count() as u64)
             .sum();
@@ -1058,6 +1060,32 @@ mod tests {
             ))
             .unwrap_err(),
             FailureCode::RenderResource
+        );
+    }
+
+    #[test]
+    fn text_character_limits_do_not_depend_on_span_wrapping() {
+        for count in [10_001, 20_000, 20_001] {
+            let text = "x".repeat(count);
+            let expected = if count <= MAX_TEXT_CHARACTERS as usize {
+                Ok(())
+            } else {
+                Err(FailureCode::RenderResource)
+            };
+            for body in [
+                format!("<text>{text}</text>"),
+                format!("<text><tspan>{text}</tspan></text>"),
+            ] {
+                assert_eq!(admitted(&body), expected, "{count}");
+            }
+        }
+        let text = "x".repeat(MAX_TEXT_CHARACTERS as usize);
+        let uses = r##"<use href="#t"/>"##.repeat(10);
+        assert!(
+            admitted(&format!(
+                r#"<defs><text id="t"><tspan>{text}</tspan></text></defs>{uses}"#
+            ))
+            .is_ok()
         );
     }
 

@@ -44,6 +44,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Play a video whose sound cannot be decoded without its sound, instead of
+  failing, and keep playing a 30 fps video's sound after its last frame.
+- Report that a video ended only after its worker exited cleanly.
+- Bound SVG text and CSS selector work by what each element actually holds,
+  and reuse video frame buffers between frames.
+
 - Keep text after decomposed accents, common in macOS file names, in its own
   column; the block cursor now draws those accents too.
 - Update a preview's play and pause control as soon as it changes, and show a

@@ -332,6 +332,35 @@ fn next(session: &PlaySession, after: u64) -> u64 {
     }
 }
 
+fn poll_completion<T>(
+    status: impl FnOnce() -> T,
+    take_pts: impl FnOnce() -> Option<u64>,
+    last: &mut Option<u64>,
+) -> T {
+    let status = status();
+    if let Some(pts) = take_pts() {
+        *last = Some(pts);
+    }
+    status
+}
+
+#[test]
+fn completion_poll_takes_pixels_after_observing_ended() {
+    let frame = std::cell::Cell::new(None);
+    let mut last = None;
+    let status = poll_completion(
+        || {
+            frame.set(Some(3900));
+            PlayState::Ended
+        },
+        || frame.take(),
+        &mut last,
+    );
+    assert_eq!(status, PlayState::Ended);
+    assert_eq!(last, Some(3900));
+    assert_eq!(frame.take(), None);
+}
+
 #[test]
 #[ignore = "requires native PulseAudio service, trusted FFmpeg, and a production worker"]
 fn linux_client_decodes_audio_pauses_seeks_and_closes_both_workers() {
@@ -431,10 +460,11 @@ fn linux_client_decodes_audio_pauses_seeks_and_closes_both_workers() {
     loop {
         other.keep();
         assert_eq!(other.audio(), Some(AudioStatus::Ready));
-        if let Some(frame) = other.take_frame() {
-            last = Some(frame.pts_ms);
-        }
-        match other.status() {
+        match poll_completion(
+            || other.status(),
+            || other.take_frame().map(|frame| frame.pts_ms),
+            &mut last,
+        ) {
             SessionStatus::Open {
                 state: PlayState::Ended,
                 ..
@@ -565,11 +595,12 @@ fn video_survives_sound_failure(missing_broker: bool) {
     let mut last = None;
     loop {
         session.keep();
-        if let Some(frame) = session.take_frame() {
-            last = Some(frame.pts_ms);
-        }
         assert_eq!(session.audio(), Some(AudioStatus::Unavailable));
-        match session.status() {
+        match poll_completion(
+            || session.status(),
+            || session.take_frame().map(|frame| frame.pts_ms),
+            &mut last,
+        ) {
             SessionStatus::Open {
                 state: PlayState::Ended,
                 ..
@@ -654,10 +685,11 @@ fn linux_client_keeps_the_last_picture_while_longer_audio_finishes() {
     loop {
         session.keep();
         assert_eq!(session.audio(), Some(AudioStatus::Ready));
-        if let Some(frame) = session.take_frame() {
-            last = Some(frame.pts_ms);
-        }
-        match session.status() {
+        match poll_completion(
+            || session.status(),
+            || session.take_frame().map(|frame| frame.pts_ms),
+            &mut last,
+        ) {
             SessionStatus::Open {
                 state: PlayState::Ended,
                 ..

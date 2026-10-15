@@ -400,7 +400,11 @@ fn end(inner: &Inner, worker: &mut Running<'_>, event: Result<Said, Wait>) {
             worker.stop();
         }
         Ok(Said::Ended) => match worker.stop() {
-            Stopped::Exited(WorkerExit::Code(0)) => {}
+            Stopped::Exited(WorkerExit::Code(0)) => inner.publish(|state| {
+                if let SessionStatus::Open { state, .. } = &mut state.status {
+                    *state = PlayState::Ended;
+                }
+            }),
             Stopped::Exited(exit) => inner.fail(lifecycle::exit_failure(exit)),
             Stopped::OverFootprint => inner.fail(FailureCode::RenderResource),
             Stopped::Killed | Stopped::Stuck => inner.fail(FailureCode::WorkerUnavailable),
@@ -528,8 +532,11 @@ fn start_reader(
             if said.send(Said::Opened).is_err() {
                 return;
             }
+            let mut rgba = Vec::new();
             loop {
-                let mut rgba = inner.lock().spares.pop().unwrap_or_default();
+                if rgba.capacity() == 0 {
+                    rgba = inner.lock().spares.pop().unwrap_or_default();
+                }
                 let read = wire::read_session_frame(
                     &mut stdout,
                     opened.width,
@@ -548,7 +555,7 @@ fn start_reader(
                             pts_ms,
                             width: opened.width,
                             height: opened.height,
-                            rgba,
+                            rgba: std::mem::take(&mut rgba),
                         };
                         inner.publish(|state| {
                             if let Some(old) = state.frame.replace(frame)
@@ -570,16 +577,14 @@ fn start_reader(
                             }
                             Said::Broken
                         }
+                        Frame::PlayState(PlayState::Ended) => Said::Ended,
                         Frame::PlayState(now) => {
                             inner.publish(|state| {
                                 if let SessionStatus::Open { state: was, .. } = &mut state.status {
                                     *was = now;
                                 }
                             });
-                            if now != PlayState::Ended {
-                                continue;
-                            }
-                            Said::Ended
+                            continue;
                         }
                         // Sound only ever goes: a session without it never
                         // gains it.
@@ -756,6 +761,7 @@ mod tests {
     struct Behavior {
         /// Frames it plays after the first.
         frames: u64,
+        interleaves_states: bool,
         /// Between frames while playing.
         every: Duration,
         /// Refuses Hello with this, in place of Ready.
@@ -780,6 +786,7 @@ mod tests {
         dies_after: Option<u64>,
         /// How it exits after a refusal.
         refused_exit: WorkerExit,
+        ended_exit: WorkerExit,
         /// Opens a video whose sound plays.
         sounds: bool,
         /// Says its sound is this as it starts playing.
@@ -788,6 +795,7 @@ mod tests {
 
     const PLAYS: Behavior = Behavior {
         frames: 5,
+        interleaves_states: false,
         every: Duration::from_millis(10),
         refuses_hello: None,
         trails: false,
@@ -800,6 +808,7 @@ mod tests {
         footprint: 1 << 20,
         dies_after: None,
         refused_exit: WorkerExit::Code(0),
+        ended_exit: WorkerExit::Code(0),
         sounds: false,
         says_sound: None,
     };
@@ -1001,12 +1010,16 @@ mod tests {
                             return WorkerExit::Signal(9);
                         }
                         std::thread::sleep(behavior.every);
+                        if behavior.interleaves_states {
+                            out(&mut stdout, &Frame::PlayState(PlayState::Paused));
+                            out(&mut stdout, &Frame::PlayState(PlayState::Playing));
+                        }
                         if !out(&mut stdout, &frame(sent, behavior.misframes)) {
                             return WorkerExit::Code(2);
                         }
                     }
                     out(&mut stdout, &Frame::PlayState(PlayState::Ended));
-                    return WorkerExit::Code(0);
+                    return behavior.ended_exit;
                 }
                 PlayCommand::Pause => {
                     out(&mut stdout, &Frame::PlayState(PlayState::Paused));
@@ -1073,6 +1086,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn ended_followed_by_a_crash_fails() {
+        let (client, seen) = client(Behavior {
+            frames: 0,
+            ended_exit: WorkerExit::Signal(6),
+            ..PLAYS
+        });
+        let session = client.play(&open(), Box::new(|| {})).unwrap();
+        session.play();
+        until("supervisor finished", || {
+            client.shared.sessions.load(Ordering::SeqCst) == 0
+        });
+        assert!(seen.reaped.load(Ordering::SeqCst) > 0);
+        assert_eq!(
+            session.status(),
+            SessionStatus::Failed(FailureCode::RenderResource)
+        );
+    }
+
     /// A session opens paused on its first frame, plays its frames, and
     /// ends; its worker is reaped and it no longer counts.
     #[test]
@@ -1129,6 +1161,36 @@ mod tests {
             .filter(|command| **command != PlayCommand::Heartbeat)
             .collect();
         assert_eq!(asked, [&PlayCommand::Play]);
+    }
+
+    #[test]
+    fn non_video_messages_preserve_recycled_pixels() {
+        let (client, _seen) = client(Behavior {
+            frames: 8,
+            every: Duration::ZERO,
+            interleaves_states: true,
+            ..PLAYS
+        });
+        let session = client.play(&open(), Box::new(|| {})).unwrap();
+        let mut first = None;
+        until("first frame", || {
+            first = session.take_frame();
+            first.is_some()
+        });
+        let mut first = first.unwrap();
+        first.rgba.reserve(4096);
+        session.recycle(first.rgba);
+        session.recycle(Vec::with_capacity(4096));
+        session.play();
+        until("ended", || {
+            client.shared.sessions.load(Ordering::SeqCst) == 0
+        });
+        let last = session.take_frame().unwrap();
+        assert_eq!(last.seq, 8);
+        assert!(
+            last.rgba.capacity() >= 4096,
+            "recycled pixel buffer was discarded"
+        );
     }
 
     /// Only the newest frame waits for the caller, and one wake stands for
