@@ -95,7 +95,7 @@ pub(crate) fn section_header(line: &str) -> Option<(usize, &str)> {
 /// Terminator structures with no kettle equivalent, and reading them would
 /// apply settings the user did not select.
 #[derive(Default)]
-struct Section {
+pub(crate) struct Section {
     /// `None` until the first header — a file with no sections at all is
     /// kettle's own format and applies wholesale.
     path: Option<Vec<String>>,
@@ -106,7 +106,7 @@ struct Section {
 }
 
 impl Section {
-    fn enter(&mut self, header: Option<(usize, &str)>) {
+    pub(crate) fn enter(&mut self, header: Option<(usize, &str)>) {
         let path = self.path.get_or_insert_with(Vec::new);
         let Some((depth, name)) = header else {
             // Unreadable header: we have lost our place in the file.
@@ -129,7 +129,7 @@ impl Section {
         path.push(name.to_ascii_lowercase());
     }
 
-    fn applies(&self) -> bool {
+    pub(crate) fn applies(&self) -> bool {
         if self.unknown {
             return false;
         }

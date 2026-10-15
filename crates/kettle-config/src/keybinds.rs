@@ -41,6 +41,23 @@ pub struct Trigger {
 
 impl Trigger {
     pub fn new(mods: Mods, key: Key) -> Self {
+        // The Ctrl+Shift+1..9 defaults and their US-shifted symbols share
+        // a trigger so overrides and unbinds apply to either spelling.
+        let key = match key {
+            Key::Char(c) if mods.contains(Mods::CTRL | Mods::SHIFT) => Key::Char(match c {
+                '!' => '1',
+                '@' => '2',
+                '#' => '3',
+                '$' => '4',
+                '%' => '5',
+                '^' => '6',
+                '&' => '7',
+                '*' => '8',
+                '(' => '9',
+                _ => c,
+            }),
+            _ => key,
+        };
         Self { mods, key }
     }
 
@@ -1675,18 +1692,10 @@ pub fn defaults_audit() -> (Bindings, Vec<Trigger>) {
         bind(a, Char((b'0' + n) as char), GotoTab(n - 1));
     }
     // Dropdown parity (Windows Terminal's Ctrl+Shift+1..9 profile
-    // shortcuts): open the Nth new-tab `▾` dropdown entry. Shift+digit
-    // arrives as the US-shifted SYMBOL from winit (see the font-zoom
-    // rationale above), so bind both spellings of each chord. None of
-    // `! @ # $ % ^ & * (` collides with an existing Ctrl+Shift default.
-    const US_SHIFTED_DIGITS: [char; 9] = ['!', '@', '#', '$', '%', '^', '&', '*', '('];
+    // shortcuts): open the Nth new-tab dropdown entry. Trigger::new
+    // canonicalizes winit's US-shifted symbols to the digit spelling.
     for n in 1u8..=9 {
         bind(cs, Char((b'0' + n) as char), NewTabShell(n - 1));
-        bind(
-            cs,
-            Char(US_SHIFTED_DIGITS[(n - 1) as usize]),
-            NewTabShell(n - 1),
-        );
     }
     (m, triggers)
 }
@@ -2417,6 +2426,7 @@ mod tests {
         for n in 0u8..9 {
             for k in [(b'1' + n) as char, shifted[n as usize]] {
                 let t = Trigger::new(cs, Key::Char(k));
+                assert_eq!(t.key, Key::Char((b'1' + n) as char));
                 assert_eq!(
                     d.get(&t),
                     Some(&Action::NewTabShell(n)),
@@ -2432,8 +2442,7 @@ mod tests {
     #[test]
     fn hint_label_prefers_alphanumeric_trigger_and_follows_rebinds() {
         let d = defaults();
-        // Both Ctrl+Shift+1 and Ctrl+Shift+! are bound; the hint shows the
-        // digit spelling.
+        // Both spellings resolve to one trigger; the hint shows the digit.
         assert_eq!(
             hint_label(&d, &Action::NewTabShell(0)).as_deref(),
             Some("Ctrl+Shift+1")
@@ -2447,7 +2456,6 @@ mod tests {
         // A rebind takes over once the defaults are unbound.
         let mut m = d.clone();
         apply_keybind(&mut m, "ctrl+shift+1=unbind");
-        apply_keybind(&mut m, "ctrl+shift+!=unbind");
         apply_keybind(&mut m, "ctrl+f9=new_tab_shell_1");
         assert_eq!(
             hint_label(&m, &Action::NewTabShell(0)).as_deref(),

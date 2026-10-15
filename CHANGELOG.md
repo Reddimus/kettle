@@ -44,6 +44,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Save Settings changes even when a config has an older spelling of the same
+  key further down, such as `copy-on-selection` or `padding-x`.
+- Save settings into the part of a Terminator-format config Kettle reads, not
+  into a trailing `[layouts]` or other ignored section.
+- Refuse a settings save that would push the config past its 1 MiB limit,
+  rather than writing a file Kettle then ignores.
+- Give up on a config lock after half a second when another Kettle holds it,
+  instead of freezing the window.
+- Apply `keybind = ctrl+shift+1 = …` and its unbind to the `Ctrl+Shift+!`
+  spelling winit reports for the same chord.
+- List only profile names whose file opens under that name.
+
 - Preserve Wayland window dimensions at startup and when tearing off tabs.
 
 - Open pasted screenshots in Kettle without changing the pasted command line.

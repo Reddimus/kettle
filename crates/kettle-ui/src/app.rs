@@ -49836,6 +49836,35 @@ mod tests {
     }
 
     #[test]
+    fn keybind_resolver_honors_shifted_digit_rebinds_and_unbinds() {
+        use super::resolve_keybind_action;
+        use kettle_config::{Action, Config};
+        use winit::keyboard::{Key, KeyCode, ModifiersState, PhysicalKey};
+
+        let mods = ModifiersState::CONTROL | ModifiersState::SHIFT;
+        let physical = PhysicalKey::Code(KeyCode::Digit1);
+        for spelling in ["1", "!"] {
+            for (action, expected) in [("copy", Some(Action::Copy)), ("unbind", None)] {
+                let cfg =
+                    Config::parse_text(&format!("keybind = ctrl+shift+{spelling} = {action}\n"));
+                for logical in ["1", "!"] {
+                    let matched = resolve_keybind_action(
+                        &cfg.keybinds,
+                        Some(&Key::Character(logical.into())),
+                        Some(&physical),
+                        mods,
+                    );
+                    assert_eq!(
+                        matched.map(|(_, action)| action),
+                        expected,
+                        "{spelling}={action}, logical {logical}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn keybind_resolver_falls_back_to_physical_zoom_keys() {
         use super::resolve_keybind_action;
         use kettle_config::Action;
