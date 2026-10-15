@@ -268,6 +268,13 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         let mut buffered: Option<Vec<T>> = None;
 
         let mut rows = self.raw.take_all();
+        // Rows wrapped at or below the cursor push it up; count them even past
+        // the top of the screen, where the cursor itself is clamped.
+        let cursor_line_before = self.cursor.point.line;
+        let mut cursor_pushed_up = 0;
+        // Rows that wrapping added to the screen. Those added in history
+        // move nothing on screen.
+        let mut added_on_screen = 0;
         for (i, mut row) in rows.drain(..).enumerate().rev() {
             // Append lines left over from the previous row.
             if let Some(buffered) = buffered.take() {
@@ -356,6 +363,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
                         || i < cursor_buffer_line
                     {
                         self.cursor.point.line = max(self.cursor.point.line - 1, Line(0));
+                        cursor_pushed_up += 1;
                     }
 
                     // Reflow the cursor if it is on this line beyond the width.
@@ -363,6 +371,10 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
                         // Since only a single new line is created, we subtract only `columns`
                         // from the cursor instead of reflowing it completely.
                         self.cursor.point.column -= columns;
+                    }
+
+                    if i < self.lines {
+                        added_on_screen += 1;
                     }
 
                     // Make sure new row is at least as long as new width.
@@ -382,6 +394,22 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
 
         // Reverse iterator and use it as the new grid storage.
         let mut reversed: Vec<Row<T>> = new_raw.drain(..).rev().collect();
+        // Wrapped rows are added above the cursor, which pushes the top of the
+        // screen into history. Take them from blank rows below the cursor
+        // first, so narrowing a pane with room to spare keeps all of its
+        // content in view and moves the cursor down with it.
+        if reflow {
+            // The cursor's row, which may now be above the screen.
+            let cursor_line = cursor_line_before.0 as isize - cursor_pushed_up;
+            let below = (self.lines as isize - 1 - cursor_line).max(0) as usize;
+            let blank = reversed.iter().take(below).take_while(|row| row.is_clear()).count();
+            let room = min(added_on_screen, blank);
+            if room > 0 {
+                reversed.drain(..room);
+                self.cursor.point.line = Line((cursor_line + room as isize).max(0) as i32);
+                self.display_offset = self.display_offset.saturating_sub(room);
+            }
+        }
         // Reflow can produce more rows than the history holds — narrowing wraps
         // long lines into several. The excess dropped here is the oldest end of
         // the document, so the origin has to move with it or surviving anchors

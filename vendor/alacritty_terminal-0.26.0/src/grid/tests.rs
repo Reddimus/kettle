@@ -271,6 +271,72 @@ fn shrink_reflow() {
 }
 
 #[test]
+fn shrink_reflow_uses_blank_rows_below_the_cursor_before_history() {
+    // A full line, the cursor on the next row, and two blank rows below it.
+    let mut grid = Grid::<Cell>::new(4, 5, 10);
+    for (column, character) in "12345".chars().enumerate() {
+        grid[Line(0)][Column(column)] = cell(character);
+    }
+    grid.cursor.point = Point::new(Line(1), Column(0));
+
+    grid.resize(true, 4, 2);
+
+    // The line wraps into three rows. The blank rows make room for them, so
+    // nothing leaves the screen and the cursor moves down with the content.
+    assert_eq!(grid.total_lines(), 4);
+    assert_eq!(grid[Line(0)][Column(0)], cell('1'));
+    assert_eq!(grid[Line(1)][Column(0)], cell('3'));
+    assert_eq!(grid[Line(2)][Column(0)], cell('5'));
+    assert_eq!(grid.cursor.point, Point::new(Line(3), Column(0)));
+
+    // With no blank row left below the cursor, wrapping uses history as before.
+    grid.resize(true, 4, 1);
+    assert_eq!(grid.total_lines(), 6);
+    assert_eq!(grid[Line(-2)][Column(0)], wrap_cell('1'));
+    assert_eq!(grid[Line(2)][Column(0)], cell('5'));
+    assert_eq!(grid.cursor.point, Point::new(Line(3), Column(0)));
+}
+
+#[test]
+fn shrink_reflow_below_the_cursor_takes_blank_rows_and_keeps_the_cursor() {
+    // The cursor on the top row and a full line below it, as a full-screen
+    // program leaves it; two blank rows at the bottom.
+    let mut grid = Grid::<Cell>::new(4, 5, 10);
+    for (column, character) in "12345".chars().enumerate() {
+        grid[Line(1)][Column(column)] = cell(character);
+    }
+    grid.cursor.point = Point::new(Line(0), Column(0));
+
+    grid.resize(true, 4, 2);
+
+    assert_eq!(grid.total_lines(), 4);
+    assert_eq!(grid.cursor.point, Point::new(Line(0), Column(0)));
+    assert_eq!(grid[Line(1)][Column(0)], cell('1'));
+    assert_eq!(grid[Line(3)][Column(0)], cell('5'));
+}
+
+#[test]
+fn shrink_reflow_in_history_leaves_the_screen_alone() {
+    // History holds a full line; on screen, a short line, the cursor and
+    // two blank rows.
+    let mut grid = Grid::<Cell>::new(4, 5, 10);
+    for (column, character) in "abcde".chars().enumerate() {
+        grid[Line(0)][Column(column)] = cell(character);
+    }
+    grid.scroll_up(&(Line(0)..Line(4)), 1);
+    grid[Line(0)][Column(0)] = cell('x');
+    grid.cursor.point = Point::new(Line(1), Column(0));
+
+    grid.resize(true, 4, 2);
+
+    // Only the history line wrapped, so the screen is as it was.
+    assert_eq!(grid.history_size(), 3);
+    assert_eq!(grid[Line(-1)][Column(0)], cell('e'));
+    assert_eq!(grid[Line(0)][Column(0)], cell('x'));
+    assert_eq!(grid.cursor.point, Point::new(Line(1), Column(0)));
+}
+
+#[test]
 fn shrink_reflow_twice() {
     let mut grid = Grid::<Cell>::new(1, 5, 2);
     grid[Line(0)][Column(0)] = cell('1');
