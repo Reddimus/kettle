@@ -948,9 +948,12 @@ legacy behavior. Current installs and later archives must remove it; a
 regression distinguishes those policies and rejects nonempty or symlink locks.
 FIFO fixtures require bounded rejection of source, payload and provenance
 leaves without a writer.
-Interrupted-install fixtures fail a publish with `ENOSPC` part way: an
-upgrade must still record what it replaced so a retry and an uninstall work,
-and a retry accepts files that already hold exactly what it would write.
+Interrupted-install fixtures fail a publish with `ENOSPC` part way and end
+the process after a file is in place. A retry and an uninstall must work after
+either, through the recorded provenance and the `install-pending.json`
+receipt; a file with the right bytes but no receipt is still refused, and a
+plan past the 128-file provenance limit is refused before anything is
+written.
 Linux updater tests require both package binaries, promote the 4.9 compatibility
 capsule on
 first restart, recover an interrupted bootstrap idempotently, and restore the

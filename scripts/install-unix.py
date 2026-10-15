@@ -16,6 +16,10 @@ from typing import Any, Dict, Iterator, List, NoReturn, Optional, Sequence, Tupl
 
 
 MANIFEST_RELATIVE = "share/kettle/install-files.json"
+# What an install is about to write, kept until its provenance is committed.
+# A retry trusts a file that differs from its record only when this receipt
+# shows the interrupted install wrote it; equal bytes alone prove nothing.
+PENDING_RELATIVE = "share/kettle/install-pending.json"
 MANIFEST_SCHEMA = 1
 MAX_ENTRIES = 128
 # Every provenance record names these. A partial first install has no record
@@ -258,7 +262,7 @@ def _validate_file_record(record: Any) -> Dict[str, Any]:
     size = record.get("size")
     digest = record.get("sha256")
     mode = record.get("mode")
-    if not isinstance(path, str) or path == MANIFEST_RELATIVE:
+    if not isinstance(path, str) or path in (MANIFEST_RELATIVE, PENDING_RELATIVE):
         _fail("install provenance contains an invalid file path")
     _relative_parts(path)
     if not _is_int(size) or size < 0 or size > MAX_FILE_BYTES:
@@ -285,9 +289,11 @@ def _validate_directory_record(record: Any) -> Dict[str, Any]:
     return {"path": path, "mode": mode}
 
 
-def _read_manifest(root_fd: int, prefix: str) -> Optional[Dict[str, Any]]:
+def _read_owned_json(root_fd: int, relative: str, mode: int, label: str) -> Optional[Any]:
+    """The JSON in the owned, bounded regular file at `relative`, or `None`
+    when there is none."""
     try:
-        parent_fd, leaf = _open_parent(root_fd, MANIFEST_RELATIVE)
+        parent_fd, leaf = _open_parent(root_fd, relative)
     except FileNotFoundError:
         return None
     try:
@@ -303,18 +309,78 @@ def _read_manifest(root_fd: int, prefix: str) -> Optional[Dict[str, Any]]:
             not stat.S_ISREG(metadata.st_mode)
             or metadata.st_nlink != 1
             or metadata.st_uid != os.geteuid()
-            or stat.S_IMODE(metadata.st_mode) != 0o644
+            or stat.S_IMODE(metadata.st_mode) != mode
             or metadata.st_size <= 0
             or metadata.st_size > MAX_MANIFEST_BYTES
         ):
-            _fail("install provenance is not an owned bounded regular file")
+            _fail(f"{label} is not an owned bounded regular file")
         raw = _read_fd_bounded(handle, MAX_MANIFEST_BYTES)
     finally:
         os.close(handle)
     try:
-        document = json.loads(raw.decode("utf-8"))
+        return json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        _fail(f"install provenance is not strict UTF-8 JSON: {error}")
+        _fail(f"{label} is not strict UTF-8 JSON: {error}")
+
+
+def _read_pending(root_fd: int, prefix: str) -> Dict[str, List[Dict[str, Any]]]:
+    """The files an interrupted install was writing, by path; empty when no
+    install was interrupted."""
+    document = _read_owned_json(root_fd, PENDING_RELATIVE, 0o600, "install receipt")
+    if document is None:
+        return {}
+    expected = {"schema", "product", "managed_by", "prefix", "owner_uid", "files"}
+    if (
+        not isinstance(document, dict)
+        or set(document) != expected
+        or not _is_int(document["schema"])
+        or document["schema"] != MANIFEST_SCHEMA
+        or document["product"] != "kettle"
+        or document["managed_by"] != "kettle-installer"
+        or document["prefix"] != prefix
+        or not _is_int(document["owner_uid"])
+        or document["owner_uid"] != os.geteuid()
+        or not isinstance(document["files"], list)
+        or not 1 <= len(document["files"]) <= 2 * MAX_ENTRIES
+    ):
+        _fail("install receipt does not identify this installation")
+    pending: Dict[str, List[Dict[str, Any]]] = {}
+    for record in document["files"]:
+        record = _validate_file_record(record)
+        pending.setdefault(record["path"], []).append(record)
+    return pending
+
+
+def _publish_pending(
+    root_fd: int,
+    prefix: str,
+    pending: Dict[str, List[Dict[str, Any]]],
+    created: Dict[str, int],
+) -> None:
+    records = [record for path in sorted(pending) for record in pending[path]]
+    encoded = (
+        json.dumps(
+            {
+                "schema": MANIFEST_SCHEMA,
+                "product": "kettle",
+                "managed_by": "kettle-installer",
+                "prefix": prefix,
+                "owner_uid": os.geteuid(),
+                "files": records,
+            },
+            indent=2,
+        )
+        + "\n"
+    ).encode("utf-8")
+    if len(encoded) > MAX_MANIFEST_BYTES:
+        _fail("install receipt exceeds its bounded size")
+    _publish_bytes(root_fd, PENDING_RELATIVE, encoded, 0o600, created)
+
+
+def _read_manifest(root_fd: int, prefix: str) -> Optional[Dict[str, Any]]:
+    document = _read_owned_json(root_fd, MANIFEST_RELATIVE, 0o644, "install provenance")
+    if document is None:
+        return None
     expected = {
         "schema",
         "product",
@@ -683,7 +749,7 @@ def _install(arguments: argparse.Namespace) -> None:
     total_size = 0
     for relative, mode_text, source in arguments.file:
         _relative_parts(relative)
-        if relative == MANIFEST_RELATIVE or relative in seen:
+        if relative in (MANIFEST_RELATIVE, PENDING_RELATIVE) or relative in seen:
             _fail(f"duplicate or reserved managed path: {relative}")
         seen.add(relative)
         mode = _parse_mode(mode_text)
@@ -741,18 +807,20 @@ def _install(arguments: argparse.Namespace) -> None:
     try:
         with _update_lock(root_fd):
             existing = _read_manifest(root_fd, prefix)
+            pending = _read_pending(root_fd, prefix)
             planned = {spec["path"]: _planned_record(spec) for spec in specs}
+
+            def written_by_interrupted_install(path: str) -> bool:
+                return any(_file_matches(root_fd, record) for record in pending.get(path, []))
+
             if existing is None:
                 old_files: Dict[str, Dict[str, Any]] = {}
                 owned_directories: Dict[str, int] = {}
             else:
-                # An install cut short may already have put a planned file in
-                # place. It holds exactly what this install writes, so it
-                # stands in for its stale record.
                 for directory in existing["directories"]:
                     _verify_directory(root_fd, directory)
                 for record in existing["files"]:
-                    if not _file_matches(root_fd, planned.get(record["path"])):
+                    if not written_by_interrupted_install(record["path"]):
                         _verify_file(root_fd, record)
                 old_files = {record["path"]: record for record in existing["files"]}
                 owned_directories = {
@@ -760,16 +828,25 @@ def _install(arguments: argparse.Namespace) -> None:
                 }
             if len(set(owned_directories).union(planned_parents)) > MAX_ENTRIES:
                 _fail("install provenance directory set exceeds its bounded limit")
+            if len(set(old_files).union(planned)) > MAX_ENTRIES:
+                _fail("install provenance file set exceeds its bounded limit")
 
             for spec in specs:
                 exists = _destination_exists(root_fd, spec["path"])
                 if (
                     exists
                     and spec["path"] not in old_files
-                    and not _file_matches(root_fd, planned[spec["path"]])
+                    and not written_by_interrupted_install(spec["path"])
                 ):
                     _fail(f"refusing to overwrite an unrecorded path: {spec['path']}")
             created: Dict[str, int] = {}
+            # Name what this install will write before writing it, keeping
+            # what an interrupted one wrote, so a retry can tell its own files
+            # from anyone else's.
+            for path, record in planned.items():
+                if record not in pending.setdefault(path, []):
+                    pending[path].append(record)
+            _publish_pending(root_fd, prefix, pending, created)
             new_records: Dict[str, Dict[str, Any]] = dict(old_files)
             try:
                 for spec in specs:
@@ -801,6 +878,7 @@ def _install(arguments: argparse.Namespace) -> None:
             if committed is None:
                 _fail("install provenance publication failed")
             _verify_manifest_tree(root_fd, committed)
+            _unlink_recorded(root_fd, PENDING_RELATIVE)
     finally:
         os.close(root_fd)
 
@@ -893,6 +971,11 @@ def _uninstall(arguments: argparse.Namespace) -> None:
     try:
         manifest = _read_manifest(root_fd, prefix)
         if manifest is None:
+            if _read_pending(root_fd, prefix):
+                _fail(
+                    "an interrupted install left files here; run the installer "
+                    "again to finish it, then uninstall"
+                )
             _fail(
                 "no Kettle install provenance was found; refusing to guess which "
                 "paths belong to this installation"
@@ -901,12 +984,31 @@ def _uninstall(arguments: argparse.Namespace) -> None:
             manifest = _read_manifest(root_fd, prefix)
             if manifest is None:
                 _fail("installation changed before uninstall acquired its lock")
-            # Nothing is removed until every recorded object proves its identity.
-            _verify_manifest_tree(root_fd, manifest)
-            for record in sorted(
-                manifest["files"], key=lambda item: (item["path"].count("/"), item["path"]), reverse=True
+            # Nothing is removed until every recorded object proves its identity:
+            # it matches its record, or the receipt of an interrupted install
+            # shows that install wrote it.
+            pending = _read_pending(root_fd, prefix)
+
+            def written_by_interrupted_install(path: str) -> bool:
+                return any(_file_matches(root_fd, record) for record in pending.get(path, []))
+
+            for directory in manifest["directories"]:
+                _verify_directory(root_fd, directory)
+            recorded = {record["path"] for record in manifest["files"]}
+            for record in manifest["files"]:
+                if not written_by_interrupted_install(record["path"]):
+                    _verify_file(root_fd, record)
+            unrecorded = [
+                path
+                for path in pending
+                if path not in recorded and written_by_interrupted_install(path)
+            ]
+            for path in sorted(
+                [*recorded, *unrecorded], key=lambda path: (path.count("/"), path), reverse=True
             ):
-                _unlink_recorded(root_fd, record["path"])
+                _unlink_recorded(root_fd, path)
+            if pending:
+                _unlink_recorded(root_fd, PENDING_RELATIVE)
             _unlink_recorded(root_fd, MANIFEST_RELATIVE)
             for record in sorted(
                 manifest["directories"],

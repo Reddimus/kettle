@@ -613,7 +613,13 @@ only directories that Kettle created. Install, authenticated update, and
 uninstall walk components without following links, validate owner/write modes,
 and verify the complete prior record before mutation. Uninstall consequently
 unlinks only recorded leaves and removes only recorded empty directories; it
-does not recursively delete a shared XDG prefix or adopt a legacy tree. Startup
+does not recursively delete a shared XDG prefix or adopt a legacy tree. Before
+it writes, the installer publishes an owner-only `install-pending.json` receipt
+naming every file it is about to write, and removes it once the new record is
+verified. A failed publish records what it did replace when that record would
+be complete; a retry or uninstall accepts a file that differs from its record,
+or has none, only when it matches the receipt. Equal bytes alone never adopt a
+file. Startup
 and explicit update first authenticate the marker, layout, prefix ownership, and
 update journal under the update lock; they recover an incomplete transaction
 before checking file-content provenance, so the old record cannot strand the
