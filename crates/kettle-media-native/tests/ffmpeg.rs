@@ -838,6 +838,58 @@ fn a_session_decodes_from_its_start_at_its_rate() {
     assert_eq!(arg_after(&call, "-ss"), Some("0.900000"));
 }
 
+#[test]
+fn a_session_retries_video_when_audio_conversion_is_unavailable() {
+    let mut description = DESCRIPTION.to_vec();
+    description.push("streams.stream.1.codec_type=\"audio\"");
+    let fake = Fake::new(&description, PACKETS, Answer { frames: 4, ..GOOD });
+    let executable = fake.directory.path().join("ffmpeg");
+    let script = std::fs::read_to_string(&executable).unwrap();
+    write_script(
+        &executable,
+        script
+            .replacen(
+                "#!/bin/sh\n",
+                r#"#!/bin/sh
+case "$*" in
+    *0:a:0*)
+        printf '%s\n' "$@" '--' >> "${0%/*}/ffmpeg.log"
+        exit 1
+        ;;
+esac
+"#,
+                1,
+            )
+            .as_bytes(),
+    );
+    let clip = Clip::mp4();
+    let mut playback = play(&fake.decoder(), &clip, (20, 20), 300, 10_000).unwrap();
+    assert!(playback.opened.info.has_audio);
+    assert_eq!(
+        playback.opened.audio,
+        kettle_media::AudioStatus::Unsupported
+    );
+    assert!(playback.audio.is_none());
+    let frames = frames_of(&mut playback).unwrap();
+    assert_eq!(
+        frames.iter().map(|(pts, _)| *pts).collect::<Vec<_>>(),
+        [300, 400, 500, 600]
+    );
+    assert!(frames.iter().all(|(_, rgba)| {
+        rgba.len() == 20 * 15 * 4
+            && rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| *pixel == [255, 0, 0, 255])
+    }));
+    let calls = fake.calls("ffmpeg");
+    assert_eq!(calls.len(), 2);
+    assert!(calls[0].iter().any(|arg| arg == "0:a:0"));
+    assert!(calls[1].iter().any(|arg| arg == "-an"));
+    assert_eq!(arg_after(&calls[1], "-ss"), Some("0.300000"));
+}
+
 /// A session's run that ends inside a frame is a misframed stream; one that
 /// gives no frame at all is explained, by its codec missing from this
 /// ffmpeg or by the stream; one that fails after whole frames fails the

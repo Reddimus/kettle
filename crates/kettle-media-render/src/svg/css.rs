@@ -18,8 +18,9 @@
 //! Selectors are simple only: a type or `*`, then any `.class` and `#id`
 //! parts, in comma-separated lists. A combinator, pseudo-class, attribute
 //! selector or at-rule refuses the document, as does any `!` in a value; so
-//! the matching cost is rules times elements, bounded before it is paid.
+//! selector comparisons and class-list scans are bounded before they are paid.
 
+use std::cell::Cell;
 use std::rc::Rc;
 
 use kettle_media::{FailureCode, MAX_SVG_WORK};
@@ -27,9 +28,10 @@ use roxmltree::Node;
 
 use super::sanitize;
 
-/// Rules and the declarations they apply, times elements: the matching and
-/// applying done here.
+/// Selector comparisons, class-list scans and declarations applied.
 const MAX_MATCHING: u64 = 10 * MAX_SVG_WORK;
+const MAX_SELECTOR_BYTES: usize = 1024;
+const MAX_SELECTOR_PARTS: usize = 64;
 
 /// A declaration, shared by every selector of its rule and every element it
 /// applies to rather than copied.
@@ -161,6 +163,12 @@ impl Selector {
         )
     }
 
+    fn matching_work(&self, class_bytes: usize) -> u64 {
+        1 + self.element.as_ref().map_or(0, |name| name.len() as u64)
+            + self.ids.iter().map(|id| 1 + id.len() as u64).sum::<u64>()
+            + (self.classes.len() as u64).saturating_mul(1 + class_bytes as u64)
+    }
+
     fn matches(&self, node: Node<'_, '_>) -> bool {
         if self
             .element
@@ -189,6 +197,9 @@ fn identifier_char(c: char) -> bool {
 /// Parse a simple selector, or refuse it.
 fn selector(text: &str) -> Result<Selector, FailureCode> {
     let text = text.trim();
+    if text.len() > MAX_SELECTOR_BYTES {
+        return Err(FailureCode::RenderResource);
+    }
     let mut selector = Selector {
         element: None,
         classes: Vec::new(),
@@ -220,6 +231,9 @@ fn selector(text: &str) -> Result<Selector, FailureCode> {
             '#' => selector.ids.push(name),
             _ => return Err(FailureCode::RenderParse),
         }
+        if selector.classes.len() + selector.ids.len() > MAX_SELECTOR_PARTS {
+            return Err(FailureCode::RenderResource);
+        }
         rest = &after[end..];
     }
     if text.is_empty() {
@@ -237,6 +251,7 @@ struct Rule {
 /// The style sheets of a document, parsed and in usvg's order.
 pub(super) struct StyleSheets {
     rules: Vec<Rule>,
+    remaining: Cell<u64>,
 }
 
 /// A property name: lower-case letters and hyphens only (simplecss would
@@ -373,21 +388,32 @@ impl StyleSheets {
         // Each rule is matched against every element and may apply all its
         // declarations to each: bound that before any of it is done.
         let per_element = rules.iter().fold(0u64, |total, rule| {
-            total.saturating_add(1 + rule.declarations.len() as u64)
+            total.saturating_add(rule.selector.matching_work(0) + rule.declarations.len() as u64)
         });
         if per_element.saturating_mul(elements as u64) > MAX_MATCHING {
             return Err(FailureCode::RenderResource);
         }
         // A stable sort: a later rule of equal specificity still wins.
         rules.sort_by_key(|rule| rule.selector.specificity());
-        Ok(Self { rules })
+        Ok(Self {
+            rules,
+            remaining: Cell::new(MAX_MATCHING),
+        })
     }
 
     /// The presentation properties CSS sets on `node`, its `style` attribute
     /// last, in the order they apply (a later one replacing an earlier).
     pub(super) fn applied(&self, node: Node<'_, '_>) -> Result<Vec<Applied>, FailureCode> {
         let mut out = Vec::new();
+        let class_bytes = sanitize::plain(node, "class").map_or(0, str::len);
         for rule in &self.rules {
+            let work = rule.selector.matching_work(class_bytes) + rule.declarations.len() as u64;
+            let remaining = self
+                .remaining
+                .get()
+                .checked_sub(work)
+                .ok_or(FailureCode::RenderResource)?;
+            self.remaining.set(remaining);
             if rule.selector.matches(node) {
                 out.extend(rule.declarations.iter().cloned());
             }
@@ -449,20 +475,51 @@ mod tests {
 
     #[test]
     fn rules_and_declarations_apply_ten_million_times_at_most() {
-        // Ten thousand rules of one declaration: 20,000 per element.
+        // Ten thousand class rules of one declaration: 30,000 per element.
         let selectors: Vec<String> = (0..10_000).map(|i| format!(".c{i}")).collect();
         let css = format!("{} {{ fill: red }}", selectors.join(","));
         assert_eq!(
-            StyleSheets::parse(&css, 501).err(),
+            StyleSheets::parse(&css, 334).err(),
             Some(FailureCode::RenderResource)
         );
-        assert!(StyleSheets::parse(&css, 499).is_ok());
+        assert!(StyleSheets::parse(&css, 333).is_ok());
         // Many declarations count as much as many rules.
         let declarations = "fill: red;".repeat(20_000);
         assert_eq!(
             StyleSheets::parse(&format!(".a {{ {declarations} }}"), 501).err(),
             Some(FailureCode::RenderResource)
         );
+    }
+
+    #[test]
+    fn selector_bytes_and_parts_are_bounded() {
+        for text in [
+            ".a".repeat(100_000),
+            ".a".repeat(65),
+            format!("#{}", "a".repeat(1024)),
+        ] {
+            assert_eq!(selector(&text).unwrap_err(), FailureCode::RenderResource);
+        }
+        assert!(selector(&".a".repeat(64)).is_ok());
+        assert!(selector(&format!("#{}", "a".repeat(1023))).is_ok());
+    }
+
+    #[test]
+    fn selector_components_and_class_scans_share_the_matching_budget() {
+        let selector = ".a".repeat(64);
+        let css = format!("{selector} {{ fill: red }}");
+        assert_eq!(
+            StyleSheets::parse(&css, 200_000).err(),
+            Some(FailureCode::RenderResource)
+        );
+        assert!(StyleSheets::parse(&css, 1_000).is_ok());
+        let classes = format!("{}a", "b ".repeat(512));
+        let rects = format!(r#"<rect class="{classes}"/>"#).repeat(1_000);
+        let svg =
+            format!(r#"<svg xmlns="http://www.w3.org/2000/svg"><style>{css}</style>{rects}</svg>"#);
+        assert!(svg.len() < kettle_media::MAX_SVG_BYTES);
+        let document = sanitize::parse(&svg).unwrap();
+        assert_eq!(sanitize::write(&document), Err(FailureCode::RenderResource));
     }
 
     #[test]

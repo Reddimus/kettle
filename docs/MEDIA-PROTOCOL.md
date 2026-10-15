@@ -846,7 +846,8 @@ back, so usvg only ever sees the rewritten text:
 | a property naming anything else | the attribute, or the declaration, removed |
 | a backslash, or an unclosed `url(`, in a property | `RenderParse` |
 | a selector other than a type or `*` with `.class` and `#id` parts (a combinator, pseudo-class or attribute selector), an at-rule, any `!` in a declaration, or a property name other than lower-case letters and hyphens | `RenderParse` |
-| style rules plus the declarations they apply, times elements, over 10,000,000 | `RenderResource` |
+| a selector over 1,024 bytes or with more than 64 class/id parts | `RenderResource` |
+| selector comparisons, class-list bytes scanned per class part, and declarations applied, cumulatively over 10,000,000 | `RenderResource`, charged before matching; a lower bound times elements is checked before applying CSS |
 | more than 256 attributes on one element | `RenderResource`, counted in one pass before any parser runs: the parser compares each attribute with all before it |
 | a presentation property value over 1,024 bytes | `RenderParse`: usvg parses an inherited value again for every element it reaches |
 | a font size other than a number with an absolute unit (`em`, `ex`, `%`, or a keyword such as `larger` or `xx-large`) | `RenderParse`: usvg scales each by the parent's size, and a chain multiplies past any bound |

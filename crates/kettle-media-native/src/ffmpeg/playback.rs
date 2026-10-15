@@ -3,7 +3,7 @@
 use std::io::{BufReader, Read};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use kettle_media::FailureCode;
 use kettle_media::audio::{AudioBlock, AudioSource, CHANNELS};
@@ -56,6 +56,7 @@ pub(super) fn split(
     start_ms: u64,
     duration_ms: u64,
     initial_gap: bool,
+    deadline: Instant,
 ) -> Result<(Video, Audio), FailureCode> {
     let Triple {
         metadata,
@@ -73,11 +74,13 @@ pub(super) fn split(
     let raw_audio = drain(audio, 7680, Arc::clone(&shared)).inspect_err(|_| shared.stop())?;
     let (video_tx, video_rx) = mpsc::sync_channel(2);
     let (audio_tx, audio_rx) = mpsc::sync_channel(8);
+    let (started, startup) = mpsc::sync_channel(1);
     let drained = Arc::clone(&shared);
     std::thread::Builder::new()
         .name("kettle-media-tee".into())
         .spawn(move || {
             let mut metadata = Metadata::new(BufReader::new(metadata), size, start_ms, duration_ms);
+            let mut started = Some(started);
             let mut read = || -> Result<(), ()> {
                 // Separate readers prevent tee's per-slave interleaver from
                 // holding metadata while a large raw packet fills its pipe.
@@ -89,6 +92,11 @@ pub(super) fn split(
                 {
                     if drained.cancelled.load(Ordering::Acquire) {
                         return Err(());
+                    }
+                    // A packet proves the muxer opened both codecs. Waiting for
+                    // video here would block when audio precedes the picture.
+                    if let Some(started) = started.take() {
+                        let _ = started.send(());
                     }
                     let raw = if stream == 0 { &raw_video } else { &raw_audio };
                     let data = raw.recv().map_err(|_| ())??;
@@ -136,6 +144,15 @@ pub(super) fn split(
         .map_err(|_| {
             shared.stop();
             FailureCode::RenderResource
+        })?;
+    startup
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .map_err(|error| {
+            shared.stop();
+            match error {
+                mpsc::RecvTimeoutError::Timeout => FailureCode::RenderTimeout,
+                mpsc::RecvTimeoutError::Disconnected => FailureCode::RenderParse,
+            }
         })?;
     Ok((
         Video {

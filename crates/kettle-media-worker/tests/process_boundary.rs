@@ -2283,12 +2283,22 @@ fn apples_decoder_plays_a_session_with_its_sound_in_the_worker() {
     let mut shown = vec![0];
     loop {
         match frames.next(5 * SECOND) {
-            Some(Frame::VideoFrame(frame)) => shown.push(frame.pts_ms),
+            Some(Frame::VideoFrame(frame)) => {
+                if frame.pts_ms == 3_900 {
+                    assert_eq!(exit_code(&mut child, 5 * SECOND), 0);
+                }
+                shown.push(frame.pts_ms);
+            }
             Some(Frame::PlayState(PlayState::Playing)) => {}
             Some(Frame::PlayState(PlayState::Ended)) => break,
             other => panic!("unexpected {other:?}"),
         }
-        command(&mut child, PlayCommand::Heartbeat);
+        // Completion can be buffered before the test reads the last frame.
+        let _ = write_frame(
+            child.stdin.as_mut().unwrap(),
+            &Frame::PlayCommand(PlayCommand::Heartbeat),
+            Direction::ParentToWorker,
+        );
     }
     let elapsed = played.elapsed();
     assert!(

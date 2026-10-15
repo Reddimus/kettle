@@ -327,31 +327,37 @@ fn number_spans(text: &str, mut each: impl FnMut(usize, usize)) {
 /// colors, fragments) are kept as they are.
 pub(super) fn bound_numbers(value: &str) -> Result<String, FailureCode> {
     let mut out = String::with_capacity(value.len());
-    let mut rest = value;
-    loop {
-        let lower = rest.to_ascii_lowercase();
-        let (plain, kept) = match (lower.find("url("), rest.find('#')) {
-            (Some(url), hash) if hash.is_none_or(|hash| url < hash) => {
-                let end = rest[url..]
-                    .find(')')
-                    .map_or(rest.len(), |end| url + end + 1);
-                (&rest[..url], &rest[url..end])
+    let bytes = value.as_bytes();
+    let mut at = 0;
+    let mut plain = 0;
+    while at < bytes.len() {
+        let end = if bytes[at..]
+            .get(..4)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"url("))
+        {
+            bytes[at + 4..]
+                .iter()
+                .position(|&byte| byte == b')')
+                .map_or(bytes.len(), |end| at + 4 + end + 1)
+        } else if bytes[at] == b'#' {
+            let mut end = at + 1;
+            while bytes
+                .get(end)
+                .is_some_and(|&byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+            {
+                end += 1;
             }
-            (_, Some(hash)) => {
-                let end = rest[hash + 1..]
-                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
-                    .map_or(rest.len(), |end| hash + 1 + end);
-                (&rest[..hash], &rest[hash..end])
-            }
-            _ => (rest, ""),
+            end
+        } else {
+            at += 1;
+            continue;
         };
-        bound_plain(plain, &mut out)?;
-        out.push_str(kept);
-        rest = &rest[plain.len() + kept.len()..];
-        if kept.is_empty() {
-            break;
-        }
+        bound_plain(&value[plain..at], &mut out)?;
+        out.push_str(&value[at..end]);
+        at = end;
+        plain = end;
     }
+    bound_plain(&value[plain..], &mut out)?;
     Ok(out)
 }
 
@@ -1199,6 +1205,26 @@ mod tests {
         for absent in ["#small", "xml:base", "marker-mid", "xlink:title"] {
             assert!(!out.contains(absent), "{absent} in {out}");
         }
+    }
+
+    #[test]
+    fn many_short_fragments_in_an_unknown_attribute_stay_fast() {
+        let value = "#a ".repeat(500_000);
+        let svg = format!(r#"{OPEN}<rect note="{value}"/></svg>"#);
+        assert!(svg.len() < kettle_media::MAX_SVG_BYTES);
+        let started = std::time::Instant::now();
+        let out = clean(&svg).unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        let document = parse(&out).unwrap();
+        let rect = document
+            .descendants()
+            .find(|node| node.has_tag_name("rect"))
+            .unwrap();
+        assert_eq!(rect.attribute("note"), Some(value.as_str()));
+        assert_eq!(
+            bound_numbers("1e-9 #a1e99 URL('#g1e99') 2e-9#b").unwrap(),
+            "0 #a1e99 URL('#g1e99') 0#b"
+        );
     }
 
     #[test]
