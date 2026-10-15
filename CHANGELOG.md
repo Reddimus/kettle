@@ -6,27 +6,23 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [5.1.0] — 2026-10-15
+
 ### Added
 
 - Tear off and rejoin live tabs on supported Wayland desktops, including
   lone-tab windows, with cancellation and destination focus.
 - Drop local files from Wayland file managers through the shared paste path.
-
 - Open image copies in Ubuntu's Loupe image viewer, with Eye of GNOME as a
   fallback.
-
 - Move a live tab to another window from the command palette, including on
   Wayland; keep its running programs, splits and scrollback.
-
 - Play Linux video sound through a PulseAudio-compatible service, with pause,
   per-video mute, synchronized frames, and a visible video-only fallback.
-
 - Show inline agent cards on Linux for Codex 0.162 and Claude Code started
   from a Kettle pane.
-
 - Follow the desktop's reduced-motion preference on Linux, with live portal
   updates and explicit `reduce-motion` overrides.
-
 - Center manual media previews within their split without resizing the
   terminal. Pin the same preview beside the terminal, with keyboard navigation
   and focus return; `media-open-mode = lane` keeps the previous layout.
@@ -35,13 +31,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 - Paste multi-line text straight into a shell, without a confirmation.
   `clipboard-paste-protection` is retired and ignored.
-
 - Open file links printed behind tmux, screen or zellij directly, as in a
   local pane. A path that is not on this computer gets a notice.
-
 - Let Claude Code run `kettle_show` without a permission prompt, as Codex
   already does; it only shows you a file on this computer.
-
 - Show macOS shortcuts with Cmd and Opt, as macOS keyboards name them, in
   menus, the command palette and Settings.
 - Keep a pane's lines on screen when a split narrows it. Lines that wrap take
@@ -62,7 +55,6 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   a dismissed update banner dismissed.
 - Bound the update-check cache read, keep window padding from producing a
   negative terminal size, and keep display titles within 256 characters.
-
 - Keep a control-API command's output once scrollback is full, write each
   pane's log to its own file, and reap trigger and URL-handler processes.
 - Keep pinned previews open while searching, show recording indicators beside
@@ -71,7 +63,6 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   capturing the whole window.
 - Return to the tab you were viewing after confirming a pane's close, and stop
   `Ctrl`+wheel down from enlarging a size-5 font.
-
 - Read a pane's command line with its empty arguments, so container options
   are not shifted, and reconnect a duplicated kubectl or Podman session with
   its credential selectors and storage root.
@@ -79,13 +70,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   nested shell, not a forked helper beside it.
 - Save state files whose names are long enough to overflow the temporary
   name.
-
 - Play a video whose sound cannot be decoded without its sound, instead of
   failing, and keep playing a 30 fps video's sound after its last frame.
 - Report that a video ended only after its worker exited cleanly.
 - Bound SVG text and CSS selector work by what each element actually holds,
   and reuse video frame buffers between frames.
-
 - Keep text after decomposed accents, common in macOS file names, in its own
   column; the block cursor now draws those accents too.
 - Update a preview's play and pause control as soon as it changes, and show a
@@ -100,14 +89,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Show the whole "Kettle" label in Codex's narrower card gutter, and blank
   cells instead of boxes for a card partly scrolled out of a full-screen
   program.
-
 - Report each zsh command's real exit status to Kettle, so failed commands
   are marked and notified again; zsh's prompt hook always reported 0.
 - Build the media worker in `just install-local`, `just install-recording` and
   the source-install steps, so a local build can show media.
 - Keep the Homebrew-installed macOS app's code signature intact when the
   formula copies its documentation.
-
 - Resize the terminal grid before telling the program, so a program that
   redraws at once is never parsed against the old size.
 - Finish a pane's exit on time when a background process keeps writing to its
@@ -121,7 +108,6 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Open the whole file a bare path names, such as `out/report#1.pdf`, rather
   than the part before `#`.
 - Report the full match when a regex search spans a very long wrapped line.
-
 - Save Settings changes even when a config has an older spelling of the same
   key further down, such as `copy-on-selection` or `padding-x`.
 - Save settings into the part of a Terminator-format config Kettle reads, not
@@ -133,25 +119,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Apply `keybind = ctrl+shift+1 = …` and its unbind to the `Ctrl+Shift+!`
   spelling winit reports for the same chord.
 - List only profile names whose file opens under that name.
-
 - Preserve Wayland window dimensions at startup and when tearing off tabs.
-
 - Open pasted screenshots in Kettle without changing the pasted command line.
-
 - Keep Linux desktop notifications visible after sending them on GNOME.
-
 - Paste copied Nautilus files without adding a carriage return to the filename.
-
 - Define Kettle's `codex` and `claude` functions in zsh on Debian, Ubuntu and
   Fedora, whose stock `zshenv` mentions `NO_RCS` in a comment.
-
 - Keep `kettle_show` available in Claude Code, which skipped the tool because
   its schema used a top-level `oneOf`; inline cards and shelf delivery from
   Claude Code work again.
-
 - Update Rustls to 0.23.46 for upstream TLS fixes (RUSTSEC-2026-0346 to
   RUSTSEC-2026-0349).
-
 - Paste a large screenshot without freezing the window; pastes made while it
   is being saved land after it, in order.
 - Load Lua modules with `require` in `safe` and `restricted` mode only from
