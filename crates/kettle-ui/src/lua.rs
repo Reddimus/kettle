@@ -445,6 +445,57 @@ impl LuaEngine {
             // execute arbitrary code. Always nil in safe mode.
             if let Ok(pkg) = globals.get::<mlua::Table>("package") {
                 pkg.set("loadlib", mlua::Value::Nil)?;
+                let old: mlua::Table = pkg.get("searchers")?;
+                let searchers = lua.create_table()?;
+                searchers.set(1, old.get::<mlua::Function>(1)?)?;
+                searchers.set(
+                    2,
+                    lua.create_function(|lua, name: String| {
+                        let pkg: mlua::Table = lua.globals().get("package")?;
+                        let paths: String = pkg.get("path")?;
+                        if name.len() > 256 || paths.len() > 64 * 1024 {
+                            return Err(mlua::Error::RuntimeError(
+                                "Lua module search exceeds its size limit".into(),
+                            ));
+                        }
+                        let name = name.replace('.', "/");
+                        for template in paths.split(';').take(256) {
+                            let path = std::path::PathBuf::from(template.replace('?', &name));
+                            // Relative templates implicitly trust the launch directory.
+                            if !path.is_absolute() {
+                                continue;
+                            }
+                            let opened = (|| -> Result<_> {
+                                let parent = path.parent().context("module has no parent")?;
+                                kettle_state::validate_trusted_directory(parent)?;
+                                let (file, resolved) =
+                                    kettle_state::open_trusted_file_read_following_leaf(&path)?;
+                                Ok((LuaEngine::read_script(file, &resolved)?, resolved))
+                            })();
+                            let Ok((text, resolved)) = opened else {
+                                continue;
+                            };
+                            let loader = lua
+                                .load(&text)
+                                .set_name(resolved.display().to_string())
+                                .set_mode(mlua::chunk::ChunkMode::Text)
+                                .into_function()?;
+                            return Ok((
+                                mlua::Value::Function(loader),
+                                mlua::Value::String(
+                                    lua.create_string(resolved.to_string_lossy().as_bytes())?,
+                                ),
+                            ));
+                        }
+                        Ok((
+                            mlua::Value::String(
+                                lua.create_string("\n\tno trusted absolute Lua module source")?,
+                            ),
+                            mlua::Value::Nil,
+                        ))
+                    })?,
+                )?;
+                pkg.set("searchers", searchers)?;
             }
             // NOTE on `debug.*`: mlua's `Lua::new()`
             // loads `StdLib::ALL_SAFE`, which EXCLUDES the `debug`
@@ -1163,7 +1214,7 @@ impl LuaEngine {
         self.exec_open_file(file, &resolved)
     }
 
-    fn exec_open_file(&self, file: std::fs::File, path: &Path) -> Result<()> {
+    fn read_script(file: std::fs::File, path: &Path) -> Result<String> {
         use std::io::Read as _;
 
         const MAX_LUA_SCRIPT_BYTES: u64 = 4 * 1024 * 1024;
@@ -1186,6 +1237,11 @@ impl LuaEngine {
                 path.display()
             );
         }
+        Ok(text)
+    }
+
+    fn exec_open_file(&self, file: std::fs::File, path: &Path) -> Result<()> {
+        let text = Self::read_script(file, path)?;
         self.arm_budget();
         self.lua
             .load(&text)
@@ -2166,6 +2222,78 @@ mod tests {
             .exec_file(&path)
             .expect("--lua-script is an explicit trust grant");
         assert_eq!(explicit.eval_str("return answer").unwrap(), "42");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn required_modules_must_be_trusted_and_bounded() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = kettle_test_support::private_tempdir("kettle-lua-module-");
+        let modules = root.join("modules");
+        std::fs::create_dir(&modules).unwrap();
+        let init = root.join("init.lua");
+        std::fs::write(&init, "require('helper')").unwrap();
+        std::fs::set_permissions(&init, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let helper = modules.join("helper.lua");
+        std::fs::write(&helper, "kettle.send_text('module ran\\n')").unwrap();
+
+        let run = || {
+            let engine = LuaEngine::new("Default").unwrap();
+            let pkg: mlua::Table = engine.lua.globals().get("package").unwrap();
+            pkg.set("path", modules.join("?.lua").to_str().unwrap())
+                .unwrap();
+            let result = engine.exec_trusted_file(&init);
+            (engine, result)
+        };
+        std::fs::set_permissions(&modules, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let (engine, result) = run();
+        assert!(result.is_err());
+        assert!(engine.drain_commands().is_empty());
+
+        std::fs::set_permissions(&modules, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o666)).unwrap();
+        let (engine, result) = run();
+        assert!(result.is_err());
+        assert!(engine.drain_commands().is_empty());
+
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let (engine, result) = run();
+        result.unwrap();
+        assert!(matches!(
+            engine.drain_commands().as_slice(),
+            [LuaCommand::SendText(_)]
+        ));
+
+        let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
+        let absolute = modules.canonicalize().unwrap();
+        let common = cwd
+            .ancestors()
+            .find(|parent| absolute.starts_with(parent))
+            .unwrap();
+        let mut relative = std::path::PathBuf::new();
+        for _ in cwd.strip_prefix(common).unwrap().components() {
+            relative.push("..");
+        }
+        relative.push(absolute.strip_prefix(common).unwrap());
+        relative.push("?.lua");
+        let engine = LuaEngine::new("Default").unwrap();
+        let pkg: mlua::Table = engine.lua.globals().get("package").unwrap();
+        pkg.set("path", relative.to_str().unwrap()).unwrap();
+        assert!(engine.exec_trusted_file(&init).is_err());
+        assert!(engine.drain_commands().is_empty());
+
+        std::fs::write(
+            &helper,
+            format!(
+                "kettle.send_text('oversized') {}",
+                " ".repeat(4 * 1024 * 1024)
+            ),
+        )
+        .unwrap();
+        let (engine, result) = run();
+        assert!(result.is_err());
+        assert!(engine.drain_commands().is_empty());
     }
 
     #[cfg(unix)]

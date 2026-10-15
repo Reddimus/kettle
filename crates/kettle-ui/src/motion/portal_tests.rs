@@ -82,10 +82,16 @@ fn initial_preference_and_live_signals_are_observed() {
     let bus = Bus::start();
     let state = Arc::new(Settings::default());
     let connection = future::block_on(server(&bus, state));
+    let (published_tx, published) = crossbeam_channel::bounded(1);
+    let (release, held) = crossbeam_channel::bounded(1);
     let wakes = Arc::new(AtomicUsize::new(0));
     let counted = wakes.clone();
     let watch = Watch::start(
         Arc::new(move || {
+            if counted.load(Ordering::Acquire) == 2 {
+                published_tx.send(()).unwrap();
+                held.recv_timeout(Duration::from_secs(6)).unwrap();
+            }
             counted.fetch_add(1, Ordering::AcqRel);
         }),
         Some(bus.address.clone()),
@@ -98,8 +104,15 @@ fn initial_preference_and_live_signals_are_observed() {
         watch.preference() == Preference::Reduced
     });
     future::block_on(signal(&connection, Value::from(0u32)));
+    published.recv_timeout(Duration::from_secs(6)).unwrap();
+    let mut release = Some(release);
     wait_for("normal-motion signal", || {
-        watch.preference() == Preference::Normal
+        let ready = watch.preference() == Preference::Normal && wakes.load(Ordering::Acquire) >= 3;
+        if let Some(release) = release.take() {
+            assert!(!ready, "the final wake callback is still blocked");
+            release.send(()).unwrap();
+        }
+        ready
     });
     assert!(wakes.load(Ordering::Acquire) >= 3);
     stop(watch);

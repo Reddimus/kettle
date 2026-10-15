@@ -9941,6 +9941,9 @@ impl App {
             .map(crate::activation_server::ActivationInbox::drain)
             .unwrap_or_default();
         for request in pending {
+            if !request.claim() {
+                continue;
+            }
             if !activation_recording_available(
                 request.request.requires_recording(),
                 self.recording_status(),

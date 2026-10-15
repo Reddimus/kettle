@@ -400,6 +400,11 @@ the same checks. `--lua-script FILE` is the explicit-path escape hatch for
 project or shared scripts; it retains the 4 MiB bounded read and is a deliberate
 trust grant, just as `--config FILE` is for configuration.
 
+In `safe` and `restricted` mode, `require` keeps preloaded modules but searches
+only absolute `package.path` templates. Imported files must pass the same
+directory and leaf checks and the 4 MiB read cap. Relative templates, including
+launch-directory discovery, are ignored; use an absolute module path.
+
 `kettle --gpu-info` honors the GPU settings above, including `--config` and
 `--profile`, without opening a window. It reports the requested backend policy,
 the active backend, and whether an explicit backend fallback occurred.
