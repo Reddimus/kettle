@@ -311,14 +311,17 @@ Screenshot persistence has two deliberately separate policies. UI/default
 screenshots are private state and therefore require Kettle-owned, verified
 ancestors. An explicit ctl/MCP `path` is a user-selected export: its parent must
 already exist, but it may be an ordinary user directory. Both policies stream
-into a randomly named owner-only sibling; the requested leaf remains absent
+into owner-only staging; the requested leaf remains absent
 until a complete, durably flushed inode is atomically linked without
 replacement. Filesystems without hard-link support use the platform's atomic
 no-replace rename operation instead.
 Creation and publication pin the selected parent, derive both children from the
-held object, and verify file identity. Unix uses `openat`/`linkat` and
-`renameat2`/`renameatx_np` fallback plus identity-matched descriptor-relative
-cleanup. Because Darwin ACLs can grant
+held object, and verify file identity. Unix keeps the payload in a held
+owner-only staging directory, publishes with `linkat` or the
+`renameat2`/`renameatx_np` fallback, and unlinks the payload only inside that
+private directory. Directly created visible Unix exports are retained on
+failure because an identity check cannot make pathname deletion conditional.
+Because Darwin ACLs can grant
 read access independently of mode bits, macOS first creates an empty owner-only,
 ACL-free staging directory in the selected parent and secures the sibling there;
 the requested name is never visible with an inherited ACL or partial content.
@@ -327,9 +330,9 @@ protected current-user DACL, and rejects NUL, alternate-stream, and trailing
 dot/space aliases before Win32 normalization can erase them. Neither policy
 overwrites or follows an existing leaf. A writable export parent can still
 rename or remove the staging name or published pathname; the open file object
-remains the one Kettle created, publication then fails closed, and cleanup
-removes only that object when it still occupies the staging sibling. Cleanup
-failure is reported and a replacement is never removed, but the pathname is not
+remains the one Kettle created. Unix cleanup uses the held private staging
+directory and never unlinks a published export pathname. Cleanup failure is
+reported, but the pathname is not
 a durable capability. This policy is not a substitute for private-state storage
 and is never used implicitly.
 

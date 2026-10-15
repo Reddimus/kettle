@@ -376,7 +376,7 @@ mod tests {
         let ArgvRead::Complete(argv) = tree.read_argv(std::process::id(), &mut total) else {
             panic!("own argv should be readable");
         };
-        let expected: Vec<String> = std::env::args().filter(|arg| !arg.is_empty()).collect();
+        let expected: Vec<String> = std::env::args().collect();
         assert_eq!(argv, expected);
         assert!(total > 0);
     }

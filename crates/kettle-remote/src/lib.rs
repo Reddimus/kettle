@@ -672,7 +672,8 @@ struct ParsedProcArgv {
 fn parse_proc_argv(bytes: &[u8]) -> ParsedProcArgv {
     let mut argv = Vec::new();
     let mut decoded_bytes = 0_usize;
-    for arg in bytes.split(|byte| *byte == 0).filter(|arg| !arg.is_empty()) {
+    for arg in bytes.split_inclusive(|byte| *byte == 0) {
+        let arg = arg.strip_suffix(&[0]).unwrap_or(arg);
         if argv.len() >= MAX_PROC_ARGS_PER_PROCESS {
             return ParsedProcArgv {
                 argv,
@@ -797,7 +798,7 @@ mod kern_procargs2_tests {
         );
         let parsed = parse_kern_procargs2(&bytes).expect("complete area");
         assert!(parsed.complete);
-        assert_eq!(parsed.argv, ["ssh", "host.example"]);
+        assert_eq!(parsed.argv, ["", "ssh", "host.example"]);
     }
 
     #[test]
@@ -1690,12 +1691,11 @@ fn find_foreground_composer_in_index_with_scratch(
         {
             return Some(ForegroundProcess { pid, argv });
         }
-        if let Some(children) = children_by_parent.get(&pid) {
-            for child in children {
-                if visited.insert(*child) {
-                    queue.push_back(*child);
-                }
-            }
+        let [child] = children_by_parent.get(&pid).map(Vec::as_slice)? else {
+            return None;
+        };
+        if visited.insert(*child) {
+            queue.push_back(*child);
         }
     }
     None
@@ -2451,6 +2451,7 @@ fn container_global_option(
         // re-emit. Recognizing only the long spelling would leave
         // `podman -r exec web` reconnecting to the LOCAL socket.
         (Runtime::Podman, "remote" | "r") => (Slot::Unreproducible, false),
+        (Runtime::Podman, "root") => (Slot::Unreproducible, true),
         // kubectl: the cluster, the namespace, and the file that resolves both.
         (Runtime::Kubectl, "context") => (Slot::Context, true),
         (Runtime::Kubectl, "server" | "s") => (Slot::Endpoint, true),
@@ -2471,8 +2472,8 @@ fn container_global_option(
         // single-flag equivalent that resolves the same way), so they suppress
         // the Reconnect entry, as `--token` does.
         //
-        // NB: this is the GLOBAL `--user` — the kubeconfig user. The `--user`
-        // AFTER `exec` is a uid inside the container and stays ignorable.
+        // kubectl's `--user` selects the kubeconfig user before or after
+        // `exec`; Docker and Podman use it for the container uid after `exec`.
         (
             _,
             "user"
@@ -2515,6 +2516,11 @@ fn container_exec_option(
 ) -> Option<(ContainerOptionSlot, bool)> {
     use ContainerOptionSlot as Slot;
     use ContainerRuntime as Runtime;
+    if runtime == Runtime::Kubectl
+        && let Some(option) = container_global_option(runtime, name)
+    {
+        return Some(option);
+    }
     Some(match (runtime, name) {
         // `lxc-attach -n NAME` / `--name NAME` IS the container.
         (Runtime::Lxc, "name" | "n") => (Slot::Name, true),
@@ -2541,12 +2547,7 @@ fn container_exec_option(
         // A pod is not one shell: `-c`/`--container` picks which of its
         // containers the session entered.
         (Runtime::Kubectl, "container" | "c") => (Slot::PodContainer, true),
-        // kubectl's cluster-selecting flags are accepted after the subcommand
-        // as well as before it.
-        (Runtime::Kubectl, "namespace" | "n") => (Slot::Namespace, true),
-        (Runtime::Kubectl, "context") => (Slot::Context, true),
-        (Runtime::Kubectl, "kubeconfig") => (Slot::Config, true),
-        (Runtime::Kubectl, "server" | "s") => (Slot::Endpoint, true),
+        (Runtime::Docker | Runtime::Podman, "user" | "u") => (Slot::Ignored, true),
         // Value-taking options that name something INSIDE the container — a
         // uid, an env file, a working directory. Consumed, never captured. A
         // missing entry here would make `docker exec --env-file vars web`
@@ -2555,7 +2556,6 @@ fn container_exec_option(
             _,
             "env"
             | "env-file"
-            | "user"
             | "workdir"
             | "detach-keys"
             | "cidfile"
@@ -2574,7 +2574,6 @@ fn container_exec_option(
             | "logfile"
             | "logpriority"
             | "e"
-            | "u"
             | "w"
             | "c"
             | "n"
@@ -2878,7 +2877,7 @@ mod tests {
             [12, 34, 56]
         );
         let parsed = parse_proc_argv(b"ssh\0alice@host\0bad-\xff\0\0");
-        assert_eq!(parsed.argv, ["ssh", "alice@host", "bad-\u{fffd}"]);
+        assert_eq!(parsed.argv, ["ssh", "alice@host", "bad-\u{fffd}", ""]);
         assert!(parsed.complete);
 
         let exact_arg_count = [b'x', 0]
@@ -2921,6 +2920,39 @@ mod tests {
         assert_eq!(parsed.argv.len(), MAX_PROC_ARGS_PER_PROCESS);
         assert!(!parsed.complete);
         assert!(!parsed.argv.iter().any(|arg| arg == "host.example"));
+    }
+
+    #[test]
+    fn proc_argv_preserves_empty_option_values_and_destination() {
+        let parsed = parse_proc_argv(b"docker\0exec\0-it\0--detach-keys\0\0web\0sh\0");
+        assert!(parsed.complete);
+        assert_eq!(
+            parsed.argv,
+            ["docker", "exec", "-it", "--detach-keys", "", "web", "sh"]
+        );
+        let ctx = detect_container(&parsed.argv).expect("docker exec session");
+        assert_eq!(ctx, container_ctx(ContainerRuntime::Docker, "web"));
+        assert_eq!(
+            clone_session_command(&ctx),
+            Some("docker exec -it 'web' $SHELL".to_string())
+        );
+        assert!(parse_proc_argv(b"").argv.is_empty());
+        assert_eq!(parse_proc_argv(b"\0").argv, [""]);
+        assert_eq!(
+            parse_proc_argv(b"\0first\0\0last\0\0").argv,
+            ["", "first", "", "last", ""]
+        );
+    }
+
+    #[test]
+    fn proc_argv_counts_empty_arguments_toward_the_cap() {
+        let parsed = parse_proc_argv(&vec![0; MAX_PROC_ARGS_PER_PROCESS]);
+        assert_eq!(parsed.argv.len(), MAX_PROC_ARGS_PER_PROCESS);
+        assert!(parsed.complete);
+
+        let parsed = parse_proc_argv(&vec![0; MAX_PROC_ARGS_PER_PROCESS + 1]);
+        assert_eq!(parsed.argv.len(), MAX_PROC_ARGS_PER_PROCESS);
+        assert!(!parsed.complete);
     }
 
     #[cfg(target_os = "linux")]
@@ -4398,6 +4430,70 @@ mod tests {
         );
     }
 
+    #[test]
+    fn kubectl_inherited_options_after_exec_suppress_reconnect() {
+        let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for name in [
+            "user",
+            "username",
+            "cluster",
+            "token",
+            "password",
+            "as",
+            "as-group",
+            "certificate-authority",
+            "client-certificate",
+            "client-key",
+        ] {
+            let flag = format!("--{name}");
+            let joined = format!("{flag}=prod-admin");
+            for form in [
+                &[
+                    "kubectl",
+                    "exec",
+                    flag.as_str(),
+                    "prod-admin",
+                    "api-0",
+                    "--",
+                    "sh",
+                ][..],
+                &["kubectl", "exec", "api-0", joined.as_str(), "--", "sh"],
+            ] {
+                let ctx = detect_container(&argv(form)).expect("kubectl exec session");
+                assert_eq!(format_remote_title(&ctx), "kubectl: api-0");
+                assert_eq!(clone_session_command(&ctx), None, "{form:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn podman_storage_root_suppresses_reconnect() {
+        let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for form in [
+            &[
+                "podman",
+                "--root",
+                "/srv/alternate-store",
+                "exec",
+                "-it",
+                "web",
+                "sh",
+            ][..],
+            &[
+                "podman",
+                "--root=/srv/alternate-store",
+                "exec",
+                "-it",
+                "web",
+                "sh",
+            ],
+        ] {
+            let ctx = detect_container(&argv(form)).expect("podman exec session");
+            assert_eq!(format_remote_title(&ctx), "podman: web");
+            assert_eq!(clone_session_command(&ctx), None, "{form:?}");
+        }
+    }
+
     /// A credential can never be echoed back into a command line, and
     /// `podman --remote` has no value to carry. Both still produce a remote
     /// title; both refuse to produce a Reconnect, because the one that could
@@ -5095,6 +5191,17 @@ mod tests {
             None,
             "multiple shell branches cannot identify foreground versus background"
         );
+    }
+
+    #[test]
+    fn foreground_composer_rejects_forks_below_nested_shells() {
+        let mut tree = MockProcessTree::new();
+        tree.add(1, None, &["pwsh.exe"]);
+        tree.add(2, Some(1), &["pwsh.exe"]);
+        tree.add(3, Some(2), &["claude"]);
+        tree.add(4, Some(2), &["python"]);
+        let index = build_children_index(&tree);
+        assert_eq!(find_foreground_composer_in_index(1, &tree, &index), None);
     }
 
     #[test]

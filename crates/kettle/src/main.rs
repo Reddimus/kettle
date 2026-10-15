@@ -2197,7 +2197,7 @@ enum DefaultConfigWrite {
 /// atomic decision, and refuses to follow a symlink.
 ///
 /// Implicit default and profile paths use Kettle's private-state creator.
-/// Explicit `--config` paths use the user-selected-file creator so shared and
+/// Explicit `--config` paths use staged user-selected publication so shared and
 /// synced parent directories remain supported. Both create the leaf owner-only.
 fn write_default_config(
     path: &std::path::Path,
@@ -2228,11 +2228,22 @@ fn write_default_config(
     };
 
     if trust == kettle_config::ConfigTrust::ExplicitPath {
-        return match kettle_state::create_user_selected_file_new(path) {
+        return match kettle_state::stage_user_selected_file_new(path) {
             Ok(mut file) => {
                 write(&mut file)?;
-                drop(file.persist());
-                Ok(DefaultConfigWrite::Written)
+                match file.publish() {
+                    Ok(()) => Ok(DefaultConfigWrite::Written),
+                    Err(error)
+                        if !error.destination_may_exist()
+                            && error.kind() == std::io::ErrorKind::AlreadyExists =>
+                    {
+                        Ok(DefaultConfigWrite::AlreadyPresent)
+                    }
+                    Err(error) => Err(anyhow::anyhow!(
+                        "could not write config {}: {error}",
+                        path.display()
+                    )),
+                }
             }
             Err(e) => create_error(e),
         };

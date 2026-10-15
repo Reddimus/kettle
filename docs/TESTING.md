@@ -1772,7 +1772,10 @@ preserves an existing destination's permissions, rejects symlink
 destinations, and proves exclusive advisory locks block competing handles
 and release on drop. Acquisition checks the held file against its path, so a
 waiter on a retired inode cannot proceed. Reaping tests preserve live-PID,
-noncanonical, multi-link and nonregular lookalikes. Scheduler regressions pin
+noncanonical, multi-link and nonregular lookalikes. A Unix regression creates
+a backup and replaces a destination with a 240-byte basename, then verifies
+that its bounded staging name remains recognizable by the stale-file parser.
+Scheduler regressions pin
 in-flight
 coalescing, the five-minute completion cooldown, eviction rather than
 permanent saturation after 256 tracked destinations, and completion after a
@@ -1791,7 +1794,10 @@ rejected without changing the intended file.
 User-selected-output tests keep that private-state policy intact while
 allowing a new `0600`/current-user-only leaf beneath an existing public
 parent. Native Unix displaces the parent after it is opened and proves the
-helper fails without writing into the replacement; macOS seeds an inheritable
+helper fails without writing into the replacement and retains the visible
+original entry. Discard tests require visible Unix exports to remain in place
+and confine fallible export payloads and cleanup to an owner-only staging
+directory, preserving a competing destination. macOS seeds an inheritable
 read ACL and proves atomic publication from an ACL-free staging directory
 leaves the new leaf with no extended ACL. Native Windows pins the
 parent against rename, verifies the protected DACL, and rejects alternate
