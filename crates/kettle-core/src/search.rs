@@ -534,6 +534,9 @@ impl CompiledSearch {
                     if haystack.work_limited {
                         return yielded_batch(matches, frontier);
                     }
+                    if haystack.truncated {
+                        return accuracy_limited_batch(matches);
+                    }
                     work.record(&haystack);
                     let matches_before_chunk = matches.len();
                     for found in self.nonempty_matches(&haystack) {
@@ -592,6 +595,9 @@ impl CompiledSearch {
                     );
                     if haystack.work_limited {
                         return yielded_batch(matches, frontier);
+                    }
+                    if haystack.truncated {
+                        return accuracy_limited_batch(matches);
                     }
                     work.record(&haystack);
                     let remaining = limit.saturating_sub(matches.len());
@@ -1940,14 +1946,51 @@ mod tests {
         assert!(outcome.accuracy_limited);
         assert!(!outcome.wrapped);
 
-        // Short exact matches away from each artificial edge remain useful; the truncation bit
-        // still tells callers that a longer cross-split expression may have been omitted.
         let mut literal = CompiledSearch::compile("x", CaseSensitivity::Always)
             .unwrap()
             .unwrap();
         let batch = literal.find_in_range(&term, bounds, SearchDirection::Forward, 8);
-        assert_eq!(batch.matches.len(), 8);
+        assert!(batch.matches.is_empty());
         assert!(batch.truncated);
+    }
+
+    #[test]
+    fn truncated_greedy_matches_preserve_only_complete_lines() {
+        let mut term = empty_term(2, 302);
+        for line in 1..=300 {
+            write_ascii(&mut term, line, 0, "xx");
+            if line < 300 {
+                term.grid_mut()[Line(line)][Column(1)]
+                    .flags
+                    .insert(Flags::WRAPLINE);
+            }
+        }
+        for line in [0, 1, 299, 301] {
+            write_ascii(&mut term, line, 0, "ab");
+        }
+        write_ascii(&mut term, 300, 0, "xb");
+        let low = SearchPoint::new(0, 0);
+        let high = SearchPoint::new(301, 1);
+        for (direction, bounds, complete_line) in [
+            (SearchDirection::Forward, SearchBounds::new(low, high), 0),
+            (SearchDirection::Reverse, SearchBounds::new(high, low), 301),
+        ] {
+            let mut search = CompiledSearch::compile("a.*b", CaseSensitivity::Always)
+                .unwrap()
+                .unwrap();
+            let batch = search.find_in_range(&term, bounds, direction, 8);
+            assert_eq!(
+                batch.matches,
+                [SearchSpan::new(
+                    SearchPoint::new(complete_line, 0),
+                    SearchPoint::new(complete_line, 1),
+                )]
+            );
+            assert!(batch.accuracy_limited);
+            assert!(batch.truncated);
+            assert!(!batch.exhausted);
+            assert_eq!(batch.continuation, None);
+        }
     }
 
     #[test]

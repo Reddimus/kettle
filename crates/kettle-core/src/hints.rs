@@ -291,9 +291,11 @@ fn quoted_path_len(body: &str, quote: char) -> Option<usize> {
 /// name containing `:12:` reads the same way.
 fn is_bounded(before: Option<char>, rest: &str) -> bool {
     let left = before.is_none_or(|c| c.is_whitespace() || "\"'`*([{<=".contains(c));
-    if !left {
-        return false;
-    }
+    left && match_has_end(before, rest)
+}
+
+/// Whether a match ends a token, allowing a location suffix and closing quote.
+pub(crate) fn match_has_end(before: Option<char>, rest: &str) -> bool {
     let (tail, grep) = skip_location(rest);
     match before.filter(|c| "\"'`*".contains(*c)) {
         Some(quote) => tail

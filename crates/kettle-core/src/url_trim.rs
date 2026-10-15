@@ -30,6 +30,19 @@
 /// any of them, so a multi-byte char inside a URL is left untouched).
 pub fn trim_trailing(s: &str) -> &str {
     let bytes = s.as_bytes();
+    let mut opens = [0usize; 3];
+    let mut closes = [0usize; 3];
+    for &byte in bytes {
+        match byte {
+            b'(' => opens[0] += 1,
+            b'[' => opens[1] += 1,
+            b'{' => opens[2] += 1,
+            b')' => closes[0] += 1,
+            b']' => closes[1] += 1,
+            b'}' => closes[2] += 1,
+            _ => {}
+        }
+    }
     let mut end = bytes.len();
     while end > 0 {
         let last = bytes[end - 1];
@@ -39,16 +52,18 @@ pub fn trim_trailing(s: &str) -> &str {
             // it ends a URL: `` `https://x.test/a` `` and `**https://x.test**`.
             b'.' | b',' | b';' | b':' | b'\'' | b'"' | b'`' | b'*' => true,
             b')' | b']' | b'}' => {
-                let open = match last {
-                    b')' => b'(',
-                    b']' => b'[',
-                    b'}' => b'{',
+                let pair = match last {
+                    b')' => 0,
+                    b']' => 1,
+                    b'}' => 2,
                     _ => unreachable!(),
                 };
-                let prefix = &bytes[..end];
-                let closes = prefix.iter().filter(|&&b| b == last).count();
-                let opens = prefix.iter().filter(|&&b| b == open).count();
-                closes > opens
+                if closes[pair] > opens[pair] {
+                    closes[pair] -= 1;
+                    true
+                } else {
+                    false
+                }
             }
             _ => false,
         };
@@ -63,6 +78,21 @@ pub fn trim_trailing(s: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::trim_trailing;
+
+    #[test]
+    fn long_mixed_bracket_tail_is_trimmed_promptly() {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            let expected = "https://x.test/a(b)[c]{d}";
+            let candidate = format!("{expected}{}", ")]}".repeat(1_000_000));
+            tx.send(trim_trailing(&candidate) == expected).unwrap();
+        });
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_secs(5))
+                .expect("trimming a bracket tail exceeded the linear-work budget")
+        );
+        worker.join().unwrap();
+    }
 
     #[test]
     fn strips_sentence_punctuation() {

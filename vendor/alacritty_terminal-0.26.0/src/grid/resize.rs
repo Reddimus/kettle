@@ -16,6 +16,8 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         T: ResetDiscriminant<D>,
         D: PartialEq,
     {
+        // Resize can scroll internally; only output may enforce this budget.
+        let history_limit_on_growth = self.history_limit_on_growth.take();
         // Use empty template cell for resetting cells due to resize.
         let template = mem::take(&mut self.cursor.template);
 
@@ -33,6 +35,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
 
         // Restore template cell.
         self.cursor.template = template;
+        self.history_limit_on_growth = history_limit_on_growth;
     }
 
     /// Add lines to the visible area.

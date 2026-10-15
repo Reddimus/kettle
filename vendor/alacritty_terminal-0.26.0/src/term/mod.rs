@@ -735,6 +735,21 @@ impl<T> Term<T> {
     where
         T: EventListener,
     {
+        self.set_options_inner(options, false);
+    }
+
+    /// Apply resize options without evicting history until output scrolls.
+    pub fn set_options_preserving_history(&mut self, options: Config)
+    where
+        T: EventListener,
+    {
+        self.set_options_inner(options, true);
+    }
+
+    fn set_options_inner(&mut self, options: Config, preserve_history: bool)
+    where
+        T: EventListener,
+    {
         let old_config = mem::replace(&mut self.config, options);
 
         let title_event = match &self.title {
@@ -744,11 +759,15 @@ impl<T> Term<T> {
 
         self.event_proxy.send_event(title_event);
 
-        if self.mode.contains(TermMode::ALT_SCREEN) {
-            self.inactive_grid
-                .update_history(self.config.scrolling_history);
+        let grid = if self.mode.contains(TermMode::ALT_SCREEN) {
+            &mut self.inactive_grid
         } else {
-            self.grid.update_history(self.config.scrolling_history);
+            &mut self.grid
+        };
+        if preserve_history {
+            grid.update_history_on_growth(self.config.scrolling_history);
+        } else if self.config.scrolling_history != old_config.scrolling_history {
+            grid.update_history(self.config.scrolling_history);
         }
         self.normalize_selection_to_grid();
 

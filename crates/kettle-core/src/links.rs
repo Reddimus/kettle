@@ -52,11 +52,11 @@ fn path_candidates(text: &str) -> impl Iterator<Item = (usize, usize, &str)> {
     path_re().find_iter(text).filter_map(move |m| {
         let matched = trim_trailing(m.as_str());
         let before = text[..m.start()].chars().next_back();
-        (!matched.is_empty() && crate::hints::path_may_start_after(before)).then_some((
-            m.start(),
-            m.end(),
-            matched,
-        ))
+        let path_end = m.start() + strip_location_suffix(matched).len();
+        (!matched.is_empty()
+            && crate::hints::path_may_start_after(before)
+            && crate::hints::match_has_end(before, &text[path_end..]))
+        .then_some((m.start(), m.end(), matched))
     })
 }
 
@@ -826,6 +826,36 @@ mod tests {
         assert_eq!(found("--out=/tmp/x.png"), ["/tmp/x.png"]);
         assert_eq!(found("cmd >/tmp/out.log"), ["/tmp/out.log"]);
         assert_eq!(found("see src/main.rs:12"), ["src/main.rs:12"]);
+    }
+
+    #[test]
+    fn bare_path_links_require_a_complete_filename() {
+        for line in [
+            "out/report#1.pdf",
+            "out/report?raw=1",
+            "out/report:final.pdf",
+            "out/report:12,final.pdf",
+            "\"docs/annual report.pdf",
+        ] {
+            let term = term_with(80, &[line], &[]);
+            assert!(links_with_cwd(&term, Some("/work")).is_empty(), "{line}");
+        }
+        for (line, uri) in [
+            ("src/main.rs:12:5", "file:///work/src/main.rs"),
+            ("src/main.rs:12:let x = 1;", "file:///work/src/main.rs"),
+            ("cmd >out/report.pdf", "file:///work/out/report.pdf"),
+            ("see (out/report.pdf).", "file:///work/out/report.pdf"),
+            ("\"out/report#1.pdf\"", "file:///work/out/report%231.pdf"),
+            (
+                "open \"docs/annual report.pdf\" now",
+                "file:///work/docs/annual%20report.pdf",
+            ),
+        ] {
+            let term = term_with(80, &[line], &[]);
+            let found = links_with_cwd(&term, Some("/work"));
+            assert_eq!(found.len(), 1, "{line}: {found:?}");
+            assert_eq!(found[0].uri, uri, "{line}");
+        }
     }
 
     #[cfg(unix)]

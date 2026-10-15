@@ -44,6 +44,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Resize the terminal grid before telling the program, so a program that
+  redraws at once is never parsed against the old size.
+- Finish a pane's exit on time when a background process keeps writing to its
+  terminal after the shell has gone.
+- Play kitty animations in Unicode-placeholder and relative placements, and
+  stop redrawing once a finite animation has played.
+- Keep a pane's `scrollback-bytes` budget after it is widened.
+- Keep `log-strip-ansi` logs free of the text inside a control sequence that
+  follows a very long one, and recover from an unterminated sequence after
+  64 KiB of multi-byte text as promised.
+- Open the whole file a bare path names, such as `out/report#1.pdf`, rather
+  than the part before `#`.
+- Report the full match when a regex search spans a very long wrapped line.
+
 - Save Settings changes even when a config has an older spelling of the same
   key further down, such as `copy-on-selection` or `padding-x`.
 - Save settings into the part of a Terminator-format config Kettle reads, not
