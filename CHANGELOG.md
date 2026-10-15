@@ -8,6 +8,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- Tear off and rejoin live tabs on supported Wayland desktops, including
+  lone-tab windows, with cancellation and destination focus.
+- Drop local files from Wayland file managers through the shared paste path.
+
 - Open image copies in Ubuntu's Loupe image viewer, with Eye of GNOME as a
   fallback.
 
@@ -28,6 +32,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   and focus return; `media-open-mode = lane` keeps the previous layout.
 
 ### Fixed
+
+- Preserve Wayland window dimensions at startup and when tearing off tabs.
+
+- Open pasted screenshots in Kettle without changing the pasted command line.
+
+- Keep Linux desktop notifications visible after sending them on GNOME.
+
+- Paste copied Nautilus files without adding a carriage return to the filename.
 
 - Define Kettle's `codex` and `claude` functions in zsh on Debian, Ubuntu and
   Fedora, whose stock `zshenv` mentions `NO_RCS` in a comment.

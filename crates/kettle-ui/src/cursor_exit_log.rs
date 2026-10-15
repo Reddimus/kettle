@@ -961,7 +961,7 @@ mod tests {
         let bind = resumed
             .find("ws.cursor_exit_log.bind(ws.seq, pane_id, window);")
             .unwrap();
-        assert!(bind < resumed.find("self.redraw(ws);").unwrap());
+        assert!(bind < resumed.find("self.start_window_frames(ws);").unwrap());
         assert!(resumed[..bind].contains("ws.mux.tabs.get(ws.mux.active).map(|tab| tab.focus)"));
         let module = include_str!("cursor_exit_log.rs")
             .split("#[cfg(test)]\nmod tests")

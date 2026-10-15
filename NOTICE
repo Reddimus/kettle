@@ -14,6 +14,11 @@ This product depends on and/or adapts ideas from the following projects:
 * cosmic-text / glyphon — MIT OR Apache-2.0
   Text shaping, font fallback and GPU glyph atlas.
 
+* arboard — MIT OR Apache-2.0
+  https://github.com/1Password/arboard
+  Cross-platform clipboard access. The vendored copy backports Linux CRLF
+  file-list decoding; licenses and patch provenance are in vendor/.
+
 * resvg / usvg — Apache-2.0 OR MIT
   https://github.com/linebender/resvg
   The media worker renders SVG with resvg and usvg, which draw with

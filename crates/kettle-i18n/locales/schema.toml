@@ -1943,3 +1943,6 @@ context = "Command palette and destination chooser for moving the active tab int
 
 [messages.window_transfer_no_targets]
 context = "Empty destination chooser when there are no other windows in this Kettle process."
+
+[messages.notify_body_drop_unreadable]
+context = "Desktop notification when a Wayland file drop cannot be read or exceeds local-file limits."

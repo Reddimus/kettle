@@ -11,8 +11,11 @@ a validation-only workspace.
 dependency graph; package-local `Cargo.lock` files and `target/` directories
 remain generated noise and must not be committed. Run every retained unit
 target, doctest, and warnings-denied clippy target with `just vendor-check`.
-CI exercises the parser patches on Linux and the PTY patch on Linux, macOS, and
-native Windows. Dependabot excludes this validation workspace and reads patched
+CI exercises the parser and clipboard patches on Linux and the PTY patch on
+Linux, macOS, and native Windows. The clipboard check runs display-free tests;
+its upstream desktop clipboard test also requires a clipboard manager to
+retain data after its owner exits, which bare Xvfb does not supply. Dependabot
+excludes this validation workspace and reads patched
 crate manifests only as resolution support files. Updating vendored manifests
 or this lock requires a reviewed vendor-source update that revalidates provenance
 and local patches.
@@ -334,3 +337,29 @@ upstream release that carries an equivalent of every behavior change above.
 Kettle calls `take_nonblocking_writer`, `set_process_tree_containment` and
 `set_require_cwd` directly, so it does not build against a release without
 them.
+
+
+## `arboard-3.6.1`
+
+- Source: crates.io `arboard` 3.6.1, checksum
+  `0348a1c054491f4bfe6ab86a7b6ab1e44e45d899005de92f58b3df180b36ddaf`.
+- Licenses: MIT or Apache-2.0; both licenses and the upstream README are retained.
+- Patch: strip a URI-list line's CR terminator before percent decoding. Nautilus
+  supplies CRLF, which otherwise becomes an extra filename byte and triggers a
+  multiline paste prompt. Encoded `%0D` filename bytes remain intact.
+  The Linux and macOS image readers also use the current `image::ImageReader`
+  name for the same type, avoiding deprecated aliases in warnings-denied builds.
+- Upstream: backport the decoder line from
+  [b4e0616](https://github.com/1Password/arboard/commit/b4e061622caa1356425f81073d9685166017c7f9).
+  On 2026-10-14 the latest published version was still 3.6.1. The upstream
+  encoder change is not needed for reading Nautilus clipboard data.
+- Excluded: registry markers, generated package lock, original manifest,
+  standalone examples and their tools. Only example target stanzas are removed
+  from the normalized manifest; test dependencies and optional features remain.
+- Validation: `just vendor-clipboard-check` runs the retained display-free Linux
+  tests, the CRLF/encoded-CR regression, formatting and warnings-denied Clippy.
+  Nautilus copy/paste is a separate native GNOME check. Other platforms retain
+  their upstream implementations and product CI coverage.
+
+Remove this copy and its root patch entry when a released arboard includes the
+CRLF decoder correction.

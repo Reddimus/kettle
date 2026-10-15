@@ -568,7 +568,7 @@ mod tests {
             at(resumed, "event_loop.create_window(attrs)"),
             at(resumed, &needle(Phase::WindowCreated)),
             at(resumed, &needle(Phase::GpuReady)),
-            at(resumed, "self.redraw(ws);"),
+            at(resumed, "self.start_window_frames(ws);"),
             hidden_gate,
             hidden_gate + at(&flat(resumed)[hidden_gate..], "startup_trace::flush()"),
         ];

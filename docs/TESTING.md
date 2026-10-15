@@ -253,13 +253,13 @@ forked helpers, and cover the policy matrix. A live `kettle ctl send_keys` check
 remains useful because it exercises the GUI/control encoding path against the
 actual pane.
 
-### Vendored parser crates
+### Vendored dependencies
 
 The patched crates under `vendor/` are explicitly excluded from the product
 workspace, so the root gates exercise their public Kettle integration but do
 not run package-owned unit targets. A separate validation workspace and
 committed `vendor/Cargo.lock` pin the direct-test dependency graph for `vte`,
-`alacritty_terminal`, and `portable-pty`.
+`alacritty_terminal`, `portable-pty`, and `arboard`.
 
 `cosmic-text` is the exception: it stays outside that workspace, because its
 optional editor features and `fontdb`'s `ttf-parser` would put unmaintained
@@ -269,7 +269,8 @@ it, the product audit covers it under the scoped `ttf-parser` exception, and
 CI platform. `vendor/README.md` records how its upstream unit tests were run.
 `just deny` checks licenses, sources, and banned crates in both lock graphs;
 the Audit workflow scans both for RustSec advisories. Run all retained unit
-targets, doctests, and warnings-denied clippy targets with:
+parser and PTY targets, doctests, warnings-denied Clippy, and display-free
+Linux clipboard URI tests with:
 
 ```sh
 just vendor-check
@@ -2767,7 +2768,34 @@ empty destination list, lone-tab rejoin, a source with remaining tabs, and a
 destination closed while its chooser is open. Original pane/child IDs and
 scrollback must survive; automatic window accents must differ. The matching
 Ubuntu 26 ARM Xvfb fixture passed all five cases. This does not establish a
-Wayland drag gesture. Portable tests cover action parsing and shared menu
+Wayland drag gesture. Native GNOME checks must also exercise held-press tear,
+lone-window rejoin, original PTY preservation, actual destination typing,
+Escape restoration, source/destination closure and tiled carriers. Drop an
+image and video from Nautilus, copy/paste a file through its real clipboard,
+and check a modal never receives terminal input. URI tests cover exact byte,
+path-count and URI bounds, malformed/remote batches, Unix filename bytes,
+stalled producers, cancellation and oversize streams before EOF. Input tests
+reject a delayed drop after another paste while preserving focus reports.
+`just vendor-clipboard-check` covers Nautilus CRLF decoding and encoded CR
+filenames without touching the desktop clipboard. Its regression fails with
+the upstream decoder correction removed.
+Normal decorated Wayland windows must also retain their configured grid at
+startup and their content dimensions after a tear. In an isolated test profile,
+capture `WAYLAND_DEBUG=client` while opening those windows, then run:
+
+```sh
+python3 scripts/check-wayland-first-frame.py wayland.log --minimum-windows 2
+```
+
+The checker requires decoration buffers to commit before each window's first
+client buffer; an earlier client commit clips the decoration geometry. Its
+portable fixtures cover the old ordering, uncommitted buffers, missing evidence,
+reused object IDs and bounded file reads. Logs must be regular files of at most
+16 MiB. `just wayland-first-frame-self-test` runs them in the gate.
+The native regression lost 35 pixels at startup and again on tear-off with inline
+first paint; queued Wayland first paint must preserve both grids instead.
+
+Portable tests cover action parsing and shared menu
 dispatch; the pre-change native fixture rejects the unknown action.
 
 On native GNOME Wayland, also check the destination's `window_focused` state
@@ -4534,6 +4562,13 @@ run from protected copies stripped with binutils `objcopy`; Cargo's original
 artifact is unchanged even under a group-writable umask or with large debug
 sections. Install binutils and `dbus-daemon` to run these Linux tests.
 The portal tests share the private bus fixture.
+
+Linux notification tests use a private bus to verify that completed sends share
+one live sender, preserve their messages, and release the connection at shutdown.
+The regression fails when each send drops its connection. Native GNOME checks
+must also confirm a Kettle notification remains visible after delivery; a
+successful D-Bus method reply alone does not establish visual delivery.
+
 Reversals of selection, filename-free launch, unique recipient, held program,
 process instance, reply cap and call timeout each failed their regression test.
 For native acceptance, open a shown image through its menu on GNOME Wayland,
@@ -5421,6 +5456,14 @@ are cropped to the receipt lane so the private command-line path never
 enters the visual artifact. After the visual states are captured, a second
 paste proves that later key input clears both the shell line and its
 now-stale receipt.
+
+On GNOME Wayland, also paste a native screenshot and click its receipt. The
+configured Kettle viewer must open without a default-application dialog. In the
+default overlay mode, check its 90% pane-relative frame and unchanged terminal
+grid; Escape must restore the exact command line and cursor. Capture audio output
+separately when checking video sound, and compare a continuous tone with direct
+PipeWire playback under the same video load. A virtual-device capture does not
+prove physical speaker output.
 
 `just video-paste-receipt-smoke` copies two generated videos, invokes the
 real Paste action, and captures the receipt lane in expanded, compact,

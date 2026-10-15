@@ -1,3 +1,8 @@
+mod drag;
+mod files;
+pub(crate) use drag::{Point, Update};
+pub(crate) use files::FileUpdate;
+
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::os::fd::{AsFd, AsRawFd};
@@ -47,8 +52,11 @@ struct State {
     seats: BTreeMap<u32, Seat>,
     windows: BTreeMap<u64, LiveWindow>,
     gestures: super::Gestures,
+    primary: super::PrimaryPresses,
     pending: BTreeMap<u64, Pending>,
     next_request: u64,
+    drag: drag::State,
+    wake: Option<kettle_core::Waker>,
 }
 
 /// Protocol objects share Winit's display, but own their event queue. The
@@ -77,6 +85,10 @@ impl Bridge {
         let registry = connection.display().get_registry(&queue.handle(), ());
         connection.flush().ok()?;
         let (stop, stopped) = UnixStream::pair().ok()?;
+        let state = State {
+            wake: Some(wake.clone()),
+            ..State::default()
+        };
         let read = connection.clone();
         let reader = std::thread::Builder::new()
             .name("kettle-wayland".into())
@@ -85,7 +97,7 @@ impl Bridge {
         Some(Self {
             reader: Some(reader),
             stop,
-            state: State::default(),
+            state,
             queue,
             _registry: registry,
             connection,
@@ -116,6 +128,7 @@ impl Bridge {
             }
         }
         if self.queue.dispatch_pending(&mut self.state).is_err() {
+            self.state.drag.close();
             for (_, request) in std::mem::take(&mut self.state.pending) {
                 request.token.destroy();
             }
@@ -124,6 +137,10 @@ impl Bridge {
             }
             return;
         }
+        self.state
+            .drag
+            .ensure_devices(&self.state.seats, &self.queue.handle());
+        self.state.drag.poll();
         let now = Instant::now();
         self.state.pending.retain(|_, request| {
             let live = live
@@ -158,10 +175,27 @@ impl Bridge {
         if self.state.pending.len() >= MAX_PENDING {
             return false;
         }
-        let Some(manager) = self.state.activation.as_ref() else {
+        if self.state.activation.is_none() {
+            return false;
+        }
+        let Some((seat, serial)) = self.state.gestures.take(from, Instant::now()) else {
             return false;
         };
-        let Some((seat, serial)) = self.state.gestures.take(from, Instant::now()) else {
+        self.activate_with_serial(seat, serial, source, to, target)
+    }
+
+    fn activate_with_serial(
+        &mut self,
+        seat: u32,
+        serial: u32,
+        source: Arc<Window>,
+        to: u64,
+        target: Arc<Window>,
+    ) -> bool {
+        if self.state.pending.len() >= MAX_PENDING {
+            return false;
+        }
+        let Some(manager) = self.state.activation.as_ref() else {
             return false;
         };
         let Some(seat) = self.state.seats.get(&seat) else {
@@ -198,6 +232,7 @@ impl Bridge {
             .pending
             .values()
             .map(|request| request.deadline)
+            .chain(self.state.drag.deadline())
             .min()
     }
 }
@@ -307,6 +342,12 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                         },
                     );
                 }
+                "wl_data_device_manager" if version >= 3 && state.drag.data_manager.is_none() => {
+                    state.drag.data_manager = Some(registry.bind(name, 3, qh, ()));
+                }
+                "xdg_toplevel_drag_manager_v1" if state.drag.manager.is_none() => {
+                    state.drag.manager = Some(registry.bind(name, 1, qh, ()));
+                }
                 _ => {}
             },
             wl_registry::Event::GlobalRemove { name } => {
@@ -314,6 +355,8 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                     seat.destroy();
                 }
                 state.gestures.0.remove(&name);
+                state.primary.0.remove(&name);
+                state.drag.remove_seat(name);
             }
             _ => {}
         }
@@ -345,6 +388,7 @@ impl Dispatch<wl_seat::WlSeat, u32> for State {
                     pointer.release();
                 }
                 seat.mouse_window = None;
+                state.primary.0.remove(name);
             }
             if capabilities.contains(wl_seat::Capability::Keyboard) {
                 if seat.keyboard.is_none() {
@@ -377,6 +421,21 @@ impl Dispatch<wl_pointer::WlPointer, u32> for State {
         let Some(seat) = state.seats.get_mut(name) else {
             return;
         };
+        if let wl_pointer::Event::Button {
+            button,
+            serial,
+            state: WEnum::Value(button_state),
+            ..
+        } = &event
+        {
+            state.primary.button(
+                *name,
+                seat.mouse_window,
+                *button,
+                *button_state == wl_pointer::ButtonState::Pressed,
+                *serial,
+            );
+        }
         match event {
             wl_pointer::Event::Enter { .. } => seat.mouse_window = entered,
             wl_pointer::Event::Leave { .. } => seat.mouse_window = None,
@@ -478,6 +537,7 @@ impl Seat {
 
 impl Drop for Bridge {
     fn drop(&mut self) {
+        self.state.drag.close();
         let _ = self.stop.write_all(&[0]);
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();

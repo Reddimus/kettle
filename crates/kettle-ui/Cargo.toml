@@ -63,7 +63,6 @@ log.workspace = true
 # namespace for introspection, text input, and event hooks.
 mlua.workspace = true
 notify = "8.2.0"
-notify-rust.workspace = true
 # 5.4.0 hardens launcher argument handling against option and shell injection.
 open = "5.4.0"
 pollster = "1.0.1"
@@ -104,6 +103,9 @@ winit = { version = "0.30.13", default-features = false, features = [
     "wayland-dlopen",
     "wayland-csd-adwaita-notitle",
 ] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+notify-rust.workspace = true
 
 # SCM_RIGHTS fd-passing for detachable-tabs Bucket-D. Unix-only
 # (Linux + macOS + BSDs); Windows + Wayland get the
@@ -164,6 +166,7 @@ windows = { version = "0.62", features = [
 
 [dev-dependencies]
 kettle-test-support.workspace = true
+url = "2.5"
 # Layout checks run every text-sized surface against the pseudo-locale, which
 # exists only in debug test builds.
 kettle-i18n = { workspace = true, features = ["dev-pseudo"] }

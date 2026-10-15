@@ -25,6 +25,7 @@ exclude = [
     "target/perf-tools/macos-standing/vtebench",
     "target/perf-tools/macos-standing/vtebench-us",
     "vendor/alacritty_terminal-0.26.0",
+    "vendor/arboard-3.6.1",
     "vendor/cosmic-text-0.19.0",
     "vendor/portable-pty-0.9.0",
     "vendor/vte-0.15.0",
@@ -142,6 +143,9 @@ todo = "deny"
 unimplemented = "deny"
 
 [patch.crates-io]
+# GNOME file URI lists use CRLF; retain encoded CR filename bytes.
+# Remove this backport once a released arboard includes the upstream fix.
+arboard = { path = "vendor/arboard-3.6.1" }
 # alacritty_terminal 0.26.0 evicts from `title_stack` when the keyboard
 # mode stack reaches its depth cap. That can panic with an empty title stack
 # and corrupts unrelated title state. Its active-mode query/screen bookkeeping

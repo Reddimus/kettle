@@ -164,8 +164,12 @@ vendor-pty-check:
     cargo test --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p portable-pty --features serde_support
     cargo clippy --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p portable-pty --all-targets --features serde_support -- -D warnings
 
+# The clipboard backport has display-free Linux tests; other hosts check format.
+vendor-clipboard-check:
+    python3 scripts/check-arboard-uri-list.py
+
 # Complete direct validation for all patched crates on the current OS.
-vendor-check: vendor-parser-check vendor-pty-check
+vendor-check: vendor-parser-check vendor-pty-check vendor-clipboard-check
 
 # Audit every Git-tracked path: index/worktree object identity, path/case
 # uniqueness, UTF-8/LF hygiene, manifests, Markdown links, and binary font/image
@@ -364,7 +368,7 @@ macos-compare-score-self-test:
 # This is the fast pre-commit loop; run it before every commit. It does NOT
 # cover the packaging/installer/update-manifest/GPU-render checks ci.yml
 # also runs; see `gauntlet-full` below for those.
-gauntlet: live-ui-helper-selftest native-titlebar-self-test shell-integration-check vm-launcher-test fuzz-check
+gauntlet: live-ui-helper-selftest native-titlebar-self-test wayland-first-frame-self-test shell-integration-check vm-launcher-test fuzz-check
     cargo fmt --all --check
     cargo clippy --locked --workspace --all-targets -- -D warnings
     # Feature unification hides a crate that leans on an optional dependency,
@@ -798,6 +802,14 @@ native-titlebar-smoke: release
 # Native checker semantics can be tested without a desktop.
 native-titlebar-self-test:
     python3 scripts/test-native-titlebar.py
+
+[unix]
+wayland-first-frame-self-test:
+    python3 scripts/check-wayland-first-frame.py self-test
+
+[windows]
+wayland-first-frame-self-test:
+    python scripts/check-wayland-first-frame.py self-test
 
 # Command chords must not act as ordinary hint, vi or menu letters.
 [macos]

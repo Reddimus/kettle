@@ -133,6 +133,9 @@ jobs:
           cargo clippy --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p vte --all-targets --features ansi -- -D warnings
           cargo test --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p alacritty_terminal
           cargo clippy --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p alacritty_terminal --all-targets -- -D warnings
+      - name: Vendored Linux clipboard URI patch
+        if: runner.os == 'Linux'
+        run: python3 scripts/check-arboard-uri-list.py
       - name: Vendored portable-pty patch — native unit and doctest
         # Each OS compiles its own descriptor and pipe code. Linux uses
         # close_range, macOS lists open descriptors through proc_pidinfo, and
@@ -147,6 +150,12 @@ jobs:
       - name: Live UI helper self-test (Unix)
         if: runner.os != 'Windows'
         run: python3 scripts/check-live-ui-smoke.py self-test
+      - name: Wayland first-frame trace fixtures (Windows)
+        if: runner.os == 'Windows'
+        run: python scripts/check-wayland-first-frame.py self-test
+      - name: Wayland first-frame trace fixtures (Unix)
+        if: runner.os != 'Windows'
+        run: python3 scripts/check-wayland-first-frame.py self-test
       # The session recorder is now a runtime toggle (config `record = on` /
       # `--record`) compiled into every build, so the default build/clippy/test
       # above exercise it directly — no separate feature leg is needed.
