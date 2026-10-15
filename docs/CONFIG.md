@@ -383,7 +383,7 @@ table. For example, `show-titlebar` and `show_titlebar` are equivalent.
 | `search-case-sensitive` | enum | `smart` | `smart` ignores case until the query contains uppercase. `always` / `sensitive` forces matching case; `never` / `insensitive` always ignores it. `case-sensitive = true/false` remains accepted as an alias |
 | `link-single-click` | bool | `false` | Single-click opens URLs (default needs `Ctrl`/`Cmd`+click) |
 | `disable-mouse-paste` | bool | `false` | Block middle-click paste |
-| `clipboard-paste-protection` | bool | `true` | Confirm multi-line pastes when any writable target would receive raw, non-bracketed paste. Single-line pastes and panes that enabled bracketed paste (editors/agent CLIs) paste immediately |
+| `clipboard-paste-protection` | bool | — | Retired in 5.1: pastes no longer ask first. Still accepted, so an older config stays free of warnings |
 | `putty-paste-style` | bool | `false` | Right-click pastes instead of opening the context menu. By default it uses the same PRIMARY-first source as middle-click paste on Linux and falls back to the regular clipboard on platforms without PRIMARY |
 | `putty-paste-style-source-clipboard` | bool | `false` | When `putty-paste-style = true`, source right-click paste from the regular system clipboard instead of X11 PRIMARY |
 | `close-button-on-tab` | bool | `true` | Show `✕` on tab segments |
@@ -667,8 +667,8 @@ Markdown (`.md`, `.markdown`, whose Mermaid diagrams are a gallery) files the
 focused pane names, by their extension, as a whole path (not on
 Windows, where path hints are never resolved) or a local `file://` link.
 Type a label to render that file in its pane's lane, which opens when it is
-ready; a link from another machine's pane is refused, and behind tmux,
-screen or zellij Kettle asks first, as `hint_mode` does for a path it opens.
+ready; a link from another machine's pane is refused. Behind tmux, screen or
+zellij, whose server runs on this computer, it renders as it would locally.
 A control client can open this quick select but not pick from it: only your
 own key press or click reads a file. With nothing to label it says so; a
 file that cannot be previewed (gone, unreadable, too large, not an image, or
@@ -753,9 +753,10 @@ type a label to open a URL or copy anything else, or hold Shift while typing it
 to copy a URL or open a path in the default app, resolved from that pane's
 directory. A path is copied instead when it names another machine's file (a
 detected ssh, mosh or container session), when the label marks only part of a
-name, such as `out/report` in `out/report#1.pdf`, or when it climbs with `..`;
-behind tmux, screen or zellij Kettle asks first, as it does for a clicked file
-link there. Kettle does
+name, such as `out/report` in `out/report#1.pdf`, or when it climbs with `..`.
+Behind tmux, screen or zellij a path opens as it would locally; one that is
+not on this computer, as when an ssh inside tmux printed it, gets a notice.
+Kettle does
 not look the path up itself, so printed text cannot make it reach a network
 mount. On Windows path hints are always copied),
 `new_ssh` (`ssh`), `context_menu`

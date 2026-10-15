@@ -2554,7 +2554,7 @@ Each span says whether it meets a boundary on both sides. `out/report#1.pdf`,
 or `*` before a path must close right after it. In kettle-ui, a plain label opens a URL and copies
 anything else, and Shift (the modifier, not Caps Lock) copies a URL and opens
 a path, only when the span is bounded and its own pane, looked up by id, is
-not remote (behind a multiplexer it asks, as below). A path hint resolves against that pane's directory or
+not remote. A path hint resolves against that pane's directory or
 home into a percent-encoded `file://` URL that passes the same open check as
 a clicked link, without touching the filesystem: a source guard keeps stats
 and `canonicalize` out, so a printed `/net/host/…` path cannot mount a share
@@ -2599,33 +2599,30 @@ such as `env less /tmp/ssh`), past shell keywords (`if … then tmux`, `while
 tmux`, `exec -a work tmux`, `noglob ssh`; `command -v ssh` runs nothing); a
 command the parser cannot name
 (`$EDITOR`, `` `cmd` ``, `eval`), a script past 4 KiB or 16 commands and
-nesting past four levels fail closed as remote, and a remote client wins over
-a multiplexer. A Lua URL handler's rewritten
-target meets the same gate, as does a rewrite of a link the user confirmed
-behind a multiplexer: only the confirmed link opens unasked. The name a prompt or notification shows has
+nesting past four levels fail closed as remote, and tmux, screen and zellij
+count as local. A Lua URL handler's rewritten
+target meets the same gate. The name a notification shows has
 bidirectional and format characters replaced and a long name shortened around
-an ellipsis, by display width. The confirmation ("Open report.pdf? tmux may
-be remote.") sizes the name to the window's bar (`confirm_name_columns`, from
-the renderer's `confirm_prompt_columns`), so the warning stays whole; a test
-checks it in an 80-column window in English and Spanish with `zellij` and a
-long name, a narrower window shrinks the name below twelve columns (to five at
-least) while the rest fits, and the dialog asks for a frame when a click
-installs it. Source guards keep every
-`open_url` call inside `open_pane_link`, its confirmation and the release
+an ellipsis, by display width. Source guards keep every
+`open_url` call inside `open_pane_link` and the release
 page, route Cmd-click, the right-click "Open link" (which captures the link's
 pane with its address), quick-select hints and "open cwd in file manager"
-through it, and confirm through the shared confirmation transition. Red
+through it. Red
 checks: opening from a remote or gone pane, a hint ignoring the origin,
-Cmd-click bypassing the gate, dropping the shell unwrap, a multiplexer
-outranking a remote client, the menu dropping the pane, and a confirmation
-that opens nothing each fail a test. `just remote-links-smoke` checks it live,
-with a missing file so nothing opens: in a bare `/bin/sh` a Shift-picked path
-hint opens without asking, and under a private tmux server (an explicit `-S`
-socket in a temporary directory, killed and removed afterwards) it asks and Esc
-cancels. The smoke picks only
-once the path is the one target on screen, so it never copies to the
-clipboard. Red check: with the multiplexer gate opening directly, the smoke
-fails ("behind tmux, a Shift-picked path opened without asking").
+Cmd-click bypassing the gate, dropping the shell unwrap and the menu dropping
+the pane each fail a test. `just remote-links-smoke` checks it live, with a
+missing file so nothing opens: in a bare `/bin/sh` and under a private tmux
+server (an explicit `-S` socket in a temporary directory, killed and removed
+afterwards) a Shift-picked path hint opens without asking. The smoke picks
+only once the path is the one target on screen, so it never copies to the
+clipboard. Red check: 5.0.1's multiplexer prompt fails it ("behind tmux, a
+Shift-picked path asked before opening").
+
+`just raw-paste-smoke` checks that a two-line paste into a bare `/bin/sh`,
+which never turns bracketed paste on, runs both lines with no confirmation.
+It sets the desktop clipboard; on macOS it saves the clipboard's text first
+and restores it. Red check: 5.0.1 fails it ("a multi-line paste asked before
+pasting").
 
 A local link that names a program or shortcut is refused (kettle-core
 `names_program_or_shortcut`, kettle-ui `check_file_link`): Windows, macOS and
@@ -5047,9 +5044,8 @@ client's are answered; that a replaced request, or one whose pane went, ends
 without a word; and that a client leaving never touches it. App tests pin
 the files quick select for previews labels (by extension in any case, a
 whole path off Windows, a local `file://` link, never a web link, hash or
-card), that a preview confirmed behind a multiplexer reads its pane's origin
-again, that the menu row and quick select reach `preview_pane_link` through
-`link_gate`, that its confirmation uses the shared transition, that a
+card), that the menu row and quick select reach `preview_pane_link` through
+`link_gate`, that a
 quick select for previews keeps its purpose with the targets it chose
 (an empty scan leaves an open quick select as it was) and a pick is checked
 again, that a lane is measured where its pane is or will be once another

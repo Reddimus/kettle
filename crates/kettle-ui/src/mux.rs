@@ -4035,25 +4035,6 @@ impl Mux {
         targets
     }
 
-    /// Return true when any writable pane in the active broadcast target set
-    /// would receive a raw paste instead of bracketed paste wrapping. Used by
-    /// the app-level paste protection prompt: a multi-line paste is safe to
-    /// send directly only when every target has enabled BRACKETED_PASTE.
-    pub fn broadcast_paste_has_raw_writable_target(&self) -> bool {
-        self.broadcast_target_ids().into_iter().any(|id| {
-            self.panes.get(&id).is_some_and(|p| {
-                !p.read_only
-                    && !p
-                        .term
-                        .term
-                        .lock()
-                        .ok()
-                        .map(|t| t.mode().contains(kettle_core::TermMode::BRACKETED_PASTE))
-                        .unwrap_or(false)
-            })
-        })
-    }
-
     /// Distribute a clipboard paste to every pane in the broadcast set.
     /// Companion to `broadcast_write_delivery`. Paste is user input, so with
     /// broadcast on (group-input mode, Ctrl+Shift+G on Windows) it follows the
@@ -4136,30 +4117,6 @@ impl Mux {
             trailing_space,
             max_text_bytes,
         )
-    }
-
-    /// Would a paste under ANOTHER window's scope land raw and executable in
-    /// one of this window's panes?
-    ///
-    /// The paste-protection prompt fires when a multi-line paste can reach a
-    /// pane with no bracketed-paste mode, because there the newline runs the
-    /// line. Once a group paste crosses windows, the panes that answer that
-    /// question live in more than one of them: a group member at a shell prompt
-    /// in a second window is exactly the target the prompt exists for, and
-    /// asking only the focused window would have suppressed it.
-    pub fn broadcast_paste_foreign_has_raw_writable_target(&self, scope: &BroadcastScope) -> bool {
-        self.foreign_target_ids(scope).into_iter().any(|id| {
-            self.panes.get(&id).is_some_and(|pane| {
-                !pane.read_only
-                    && !pane
-                        .term
-                        .term
-                        .lock()
-                        .ok()
-                        .map(|t| t.mode().contains(kettle_core::TermMode::BRACKETED_PASTE))
-                        .unwrap_or(false)
-            })
-        })
     }
 
     /// Panes in THIS window that a scope owned by another window selects.

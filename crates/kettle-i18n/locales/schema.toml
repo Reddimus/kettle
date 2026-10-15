@@ -45,15 +45,6 @@ context = "crates/kettle-ui/src/app.rs: Confirmation button that closes the dial
 [messages.confirm_button_close]
 context = "crates/kettle-ui/src/app.rs: Destructive confirmation button for closing panes."
 
-[messages.confirm_button_open]
-context = "crates/kettle-ui/src/app.rs open_pane_link: the confirm button that opens the file. An infinitive in Spanish."
-
-[messages.confirm_button_preview]
-context = "crates/kettle-ui/src/app.rs preview_pane_link: the confirm button that previews the file in Kettle's preview lane. Short: it sits on one line beside Cancel."
-
-[messages.confirm_button_paste]
-context = "crates/kettle-ui/src/app.rs: Confirmation button for a paste."
-
 [messages.confirm_button_reassign]
 context = "crates/kettle-ui/src/app.rs: Confirmation button for moving a key combination to another action."
 
@@ -67,19 +58,6 @@ plural = "count"
 
 [messages.confirm_close_window]
 context = "crates/kettle-ui/src/app.rs: confirmation before closing a window. count is the number of panes in that window."
-args = [{ name = "count", type = "u64" }]
-plural = "count"
-
-[messages.confirm_open_local_file]
-context = "crates/kettle-ui/src/app.rs open_pane_link: confirmation before opening a local file from a clicked terminal link in a pane running a terminal multiplexer, which may be connected to another machine. name is the file name (at most 25 characters), program is the multiplexer's name (tmux, screen, zellij), never translated. One line with the Cancel and Open buttons in an 80-column window: at most 58 columns with the longest name."
-args = [{ name = "name", type = "str" }, { name = "program", type = "str" }]
-
-[messages.confirm_preview_local_file]
-context = "crates/kettle-ui/src/app.rs preview_pane_link: confirmation before previewing, in Kettle's preview lane, a local file a pane running a terminal multiplexer names; the multiplexer may be connected to another machine. name is the file name, program is the multiplexer's name (tmux, screen, zellij), never translated. One line with the Cancel and Preview buttons in an 80-column window, leaving the name at least 12 columns."
-args = [{ name = "name", type = "str" }, { name = "program", type = "str" }]
-
-[messages.confirm_paste]
-context = "crates/kettle-ui/src/app.rs paste_confirm_prompt: confirmation before pasting text that a shell would run line by line."
 args = [{ name = "count", type = "u64" }]
 plural = "count"
 
@@ -485,6 +463,10 @@ context = "crates/kettle-ui/src/app.rs: desktop notification body."
 
 [messages.notify_body_remote_file_not_opened]
 context = "crates/kettle-ui/src/app.rs open_pane_link: desktop notification body. name is the file name, shown verbatim."
+args = [{ name = "name", type = "str" }]
+
+[messages.notify_body_file_link_not_found]
+context = "crates/kettle-ui/src/app.rs spawn_file_link_opener: desktop notification body when a clicked file link names no file on this computer, as when an ssh inside tmux printed it. name is the file name, shown verbatim."
 args = [{ name = "name", type = "str" }]
 
 [messages.notify_body_preview_no_room]

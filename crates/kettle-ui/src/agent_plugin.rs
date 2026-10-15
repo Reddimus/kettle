@@ -89,8 +89,20 @@ impl PluginFiles {
                 }
             }
         });
+        // `kettle_show` only shows the user a file on this computer, so the
+        // plugin allows exactly that tool, as Codex's launch already does.
         let hooks = serde_json::json!({
             "hooks": {
+                "PreToolUse": [{
+                    "matcher": "mcp__plugin_kettle_kettle__kettle_show",
+                    "hooks": [{
+                        "type": "mcp_tool",
+                        "server": "plugin:kettle:kettle",
+                        "tool": "kettle_allow",
+                        "input": {},
+                        "timeout": 3,
+                    }],
+                }],
                 "PostToolUse": [{
                     "matcher": "mcp__plugin_kettle_kettle__kettle_show",
                     "hooks": [{
@@ -743,7 +755,15 @@ mod tests {
         assert_eq!(post["hooks"][0]["tool"], "kettle_card");
         assert_eq!(post["hooks"][0]["input"]["tool_use_id"], "${tool_use_id}");
         assert_eq!(post["hooks"][0]["timeout"], 3);
-        assert!(hooks["hooks"].get("PreToolUse").is_none(), "no auto-allow");
+        // kettle_show only shows the user a file on this computer, so the
+        // plugin allows exactly that tool, as Codex's launch already does.
+        let pre = &hooks["hooks"]["PreToolUse"][0];
+        assert_eq!(pre["matcher"], "mcp__plugin_kettle_kettle__kettle_show");
+        assert_eq!(pre["hooks"][0]["type"], "mcp_tool");
+        assert_eq!(pre["hooks"][0]["server"], "plugin:kettle:kettle");
+        assert_eq!(pre["hooks"][0]["tool"], "kettle_allow");
+        assert_eq!(pre["hooks"][0]["timeout"], 3);
+        assert_eq!(hooks["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
         // Another executable is another plugin, in another directory.
         let other = PluginFiles::new(Path::new("/opt/kettle"), "5.0.0").unwrap();
         assert_ne!(other.directory_name(), files.directory_name());

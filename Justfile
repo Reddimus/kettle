@@ -1025,11 +1025,16 @@ color-scheme-smoke:
 theme-picker-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release theme-picker
 
-# Prove a Shift-picked path hint opens straight from a local pane but asks
-# first behind tmux (a private tmux server, killed afterwards). The path names
+# Prove a Shift-picked path hint opens straight from a local pane and from
+# behind tmux alike (a private tmux server, killed afterwards). The path names
 # a missing file, so nothing opens either way.
 remote-links-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release remote-links
+
+# Prove a multi-line paste into a shell without bracketed paste runs with no
+# confirmation. Sets the desktop clipboard (restored afterwards on macOS).
+raw-paste-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release raw-paste
 
 # Prove a default chord a program also uses goes to the program while it owns
 # the keyboard: a byte recorder takes kitty flags and the alternate screen in a

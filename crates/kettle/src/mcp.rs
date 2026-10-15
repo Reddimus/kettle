@@ -741,11 +741,15 @@ fn schedule_tool(
             );
             return;
         }
-        // The hook's card retrieval reads memory only and has a few seconds
-        // to finish, so it is answered here, after the duplicate-id check,
-        // rather than waiting behind renders in the tool queue.
+        // The hooks' card retrieval and allow read memory only and have a few
+        // seconds to finish, so they are answered here, after the
+        // duplicate-id check, rather than waiting behind renders in the tool
+        // queue.
         if selection == ToolSelection::Display
-            && params.get("name").and_then(Value::as_str) == Some("kettle_card")
+            && matches!(
+                params.get("name").and_then(Value::as_str),
+                Some("kettle_card" | "kettle_allow")
+            )
         {
             drop(requests);
             let result = crate::mcp_tools::call_tool(selection, &params);
