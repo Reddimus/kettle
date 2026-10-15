@@ -3570,7 +3570,7 @@ The rlib fingerprint is specific to that recorded checkout and changes after a
 dependency rebuild. Preserve raw results with the release audit; do not promote
 this host-specific median to a cross-platform CI threshold. Full details and
 the evidence boundary are in
-[AUDIT-2026-07-22-SEARCH.md](AUDIT-2026-07-22-SEARCH.md).
+[AUDIT-2026-07-22-SEARCH.md](https://github.com/Reddimus/kettle/blob/v5.0.1/docs/AUDIT-2026-07-22-SEARCH.md) (at v5.0.1).
 
 The settled local checkpoint also passed the core search tests (27/27), full
 core library tests (179/179), UI library tests (320/320), the renderer bounded

@@ -746,9 +746,15 @@ linux-installer-smoke: release media-worker
 
 # === Misc ==========================================================
 
-# Run kettle in a real window (Linux: needs X11 / Wayland; Windows:
-# native; macOS: native). Useful when verifying interactive behavior
-# the offscreen `--screenshot*` paths can't reach.
+# Run kettle in a real window (Linux: needs X11 / Wayland; macOS: native).
+# The media worker is built and placed beside the binary, so previews work
+# on Linux; macOS refuses a worker without the release signature.
+[unix]
+run: release media-worker
+    cp target/media-worker/kettle-media-worker target/release/kettle-media-worker
+    target/release/kettle
+
+[windows]
 run:
     cargo run --release -p kettle
 

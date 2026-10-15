@@ -832,7 +832,7 @@ uninstall with no documented recovery (`install-unix.py:700`).
 ## Search follow-up and platform evidence
 
 The two-track search audit is recorded in
-[AUDIT-2026-07-22-SEARCH.md](AUDIT-2026-07-22-SEARCH.md): track A covers every
+[AUDIT-2026-07-22-SEARCH.md](https://github.com/Reddimus/kettle/blob/v5.0.1/docs/AUDIT-2026-07-22-SEARCH.md) (at v5.0.1): track A covers every
 search-owning file/crate, public contract, cap, and complexity boundary; track B
 covers the 88-frame report, Xvfb/XTest reproduction, Terminator comparison, and
 live UI states. The implementation addresses the reproduced signed-history and
@@ -869,7 +869,7 @@ them up in priority order (robustness/correctness before perf before polish).
 ## v2.39.0 full-repository audit (2026-07-23)
 
 The whole-repository audit recorded in
-[AUDIT-2026-07-23-FULL.md](AUDIT-2026-07-23-FULL.md) confirmed 59 findings and
+[AUDIT-2026-07-23-FULL.md](https://github.com/Reddimus/kettle/blob/v5.0.1/docs/AUDIT-2026-07-23-FULL.md) (at v5.0.1) confirmed 59 findings and
 shipped 52. The seven below were deliberately deferred as multi-session refactors
 or cross-crate plumbing that should not be rushed into one release:
 

@@ -6,75 +6,48 @@
 [![MSRV](https://img.shields.io/badge/MSRV-1.95-blue?logo=rust)](Cargo.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Kettle is a GPU-accelerated terminal workspace for macOS and Linux. It has
-tabs, splits, search, session restore, themes, and local automation.
+Kettle is a GPU-accelerated terminal for macOS and Linux. It has tabs, splits,
+search, session restore and themes, and it shows the pictures, diagrams and
+videos your coding agents make right in the chat.
 
 ![Kettle with a two pane split and the TokyoNight Night theme](docs/images/kettle-hero.png)
 
 ## Install
 
-Download a package from the
-[latest release](https://github.com/Reddimus/kettle/releases/latest).
-
-| Platform | Package | Setup |
+| Platform | Download from the [latest release](https://github.com/Reddimus/kettle/releases/latest) | Setup |
 | --- | --- | --- |
-| Linux, glibc 2.35+ | `kettle-linux-*.tar.gz` | Run the installer below |
 | macOS 11+ | `kettle-macos-universal.zip` | Move `kettle.app` to `~/Applications` |
+| Linux, glibc 2.35+ | `kettle-linux-*.tar.gz` | Run the installer below |
 
-Neither package needs administrator access. On macOS, create `~/Applications`
-if needed; `/Applications` also works when it is writable. The Linux installer
-puts Kettle under `~/.local` for the current user and verifies the signed
-release before changing files.
-
-```sh
-KETTLE_RAW_URL=https://raw.githubusercontent.com/Reddimus/kettle/main
-curl -fsSL "$KETTLE_RAW_URL/scripts/install-online.sh" | sh
-```
-
-Windows packages ended with 3.3.0. See the
-[older-release index](docs/VERSION-HISTORY.md) for archived versions.
-
-Read [Installation](docs/INSTALL.md) for Nix, older Linux systems, source
-builds, and uninstall steps.
-
-Run CLI commands inside a Kettle pane. From another macOS terminal, use
-`~/Applications/kettle.app/Contents/MacOS/kettle` in place of `kettle` if it
-is not on your `PATH`.
-
-Check for a release and install it with:
+The Linux installer puts Kettle under `~/.local` for your user and checks the
+release signature first. Neither package needs administrator access.
 
 ```sh
-kettle --check-update
-kettle update
+curl -fsSL https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/install-online.sh | sh
 ```
 
-Kettle defaults to `update-policy = auto`: it checks the signed release feed at
-most once a day and installs a newer release in the background, taking effect
-on the next restart. Set `update-policy = notify` for a banner only, or
-`update-policy = off` to make no automatic network request. On macOS, the
-updater replaces `kettle.app` in place and refuses a copy owned by Homebrew.
+[Installation](docs/INSTALL.md) covers Nix, older Linux systems, source
+builds and uninstalling. Windows packages ended with 3.3.0
+([older releases](docs/VERSION-HISTORY.md)).
 
-## First run
+Kettle updates itself: by default it checks the signed release feed once a
+day and installs a newer release for your next restart. Run
+`kettle --check-update` to check now, or set `update-policy = notify` (banner
+only) or `update-policy = off` (no automatic network request).
 
-1. Open Kettle from the app launcher or run `kettle`.
-2. Press `Ctrl+Shift+E` for a side-by-side split or `Ctrl+Shift+O` for a
-   top-and-bottom split.
-3. Press `Ctrl+,` to open Settings.
-4. Add the optional [shell integration](docs/SHELL-INTEGRATION.md) for prompt
-   navigation and completion cards.
+## Get started
 
-These commands create, locate, validate, and inspect the active configuration:
+1. Open Kettle from your app launcher, or run `kettle`.
+2. Split the window with `Ctrl+Shift+E` (side by side) or `Ctrl+Shift+O`
+   (top and bottom).
+3. Open Settings with `Ctrl+,`.
+4. Optional: add [shell integration](docs/SHELL-INTEGRATION.md) for prompt
+   jumps and completion cards.
 
-```sh
-kettle --write-default-config
-kettle --config-path
-kettle --check-config
-kettle --list-keybinds
-```
-
-Kettle reloads its plain `key = value` configuration when you save it. See
-[Configuration](docs/CONFIG.md) for every setting and [Settings](docs/SETTINGS.md)
-for the in-app editor.
+Kettle reloads its `key = value` config when you save it.
+`kettle --write-default-config` creates one, `kettle --config-path` finds it
+and `kettle --check-config` validates it. [Configuration](docs/CONFIG.md)
+lists every setting.
 
 ## Common keys
 
@@ -84,121 +57,85 @@ for the in-app editor.
 | Split left or right | `Ctrl+Shift+E` |
 | Split top or bottom | `Ctrl+Shift+O` |
 | Focus next or previous pane | `Ctrl+Shift+N` or `Ctrl+Shift+P` |
-| Directional pane focus, Linux (passes through to the program at an edge or while zoomed) | `Alt+Arrow` |
-| Directional pane focus, macOS | `Cmd+Opt+Arrow` or `Ctrl+Cmd+Arrow` |
-| Search (the grid stays selectable while the bar is open) | `Ctrl+Shift+F` |
+| Focus the pane in a direction, Linux | `Alt+Arrow` |
+| Focus the pane in a direction, macOS | `Cmd+Opt+Arrow` or `Ctrl+Cmd+Arrow` |
+| Search | `Ctrl+Shift+F` |
 | Command palette | `Ctrl+Shift+K` |
 | Copy or paste | `Ctrl+Shift+C` or `Ctrl+Shift+V` |
 | Settings | `Ctrl+,` |
-| Delete word or line on macOS | `Opt+Backspace` or `Cmd+Backspace` |
 
-Use `kettle --list-keybinds` for the effective map. macOS also provides
-`Cmd+T`, `Cmd+C/V`, `Cmd+F`, and `Cmd+,`. [Getting started](docs/GETTING-STARTED.md)
-covers pane movement, tabs, search, and first-run troubleshooting.
-
-## Features
-
-- Tabs, splits, multiple windows, pane movement, and broadcast input
-- Drag tabs between windows on supported Wayland desktops, or choose
-  **Move tab to window** from the command palette
-- A macOS Dock menu for new tabs, new windows, and open windows
-- GPU rendering, bounded scrollback, search, and inline image protocols
-- Shell-driven completion cards
-- File drop, copied media paths, and private image or video previews
-- Session restore, recording, SSH profiles, and signed updates
-- A bundled font and more than 500 themes
-- An optional local control API and MCP server, both off by default
+macOS also has `Cmd+T`, `Cmd+C/V`, `Cmd+F` and `Cmd+,`. Run
+`kettle --list-keybinds` for the full map, and see
+[Getting started](docs/GETTING-STARTED.md) for more.
 
 ## Agent previews
 
-Coding agents in a Kettle pane can show you images, SVG and Mermaid diagrams,
-a Markdown file's diagrams as a gallery, and video posters, without
-reading your screen or typing. Turn on Settings, Agents, Agent
-previews (`agent-display`), then:
+Claude Code and Codex running in a Kettle pane can show you images, SVG and
+Mermaid diagrams, charts and video posters as cards under their messages.
+Turn on **Settings → Agents → Agent previews**, then the previews for your
+agent:
 
-- Claude Code: turn on Claude Code previews; new panes offer Claude Code
-  Kettle's plugin. Supported launches show cards under the call; other
-  versions keep the media shelf. Linux uses a checked per-launch function.
-- Codex: turn on Codex previews, or add the function `kettle agent-setup
-  --print` prints (the palette's "Copy agent setup commands" copies it).
-  Codex shows media when asked: say "show it in Kettle".
-- Any shell: `kettle show plot.png`, `kettle show notes.md`, `kettle show
-  clip.webm`, or `kettle show --mermaid < flow.mmd`, sends media to the
-  pane's shelf.
-- Reading a video yourself: the full MCP server's `kettle_video_frames`, or
-  `kettle video-frames clip.webm -o sheet.jpg`, returns a contact sheet of its
-  frames, each labeled with its time, and an index of what each shows.
+- **Claude Code**: new panes load Kettle's plugin. No setup, no prompts.
+- **Codex**: Kettle defines a `codex` shell function in new zsh and fish
+  panes. Codex asks once, in its own dialog, before trusting Kettle's hook.
+- **Any program**: `kettle show plot.png` (or `.svg`, `.md`, `.mp4`) puts a
+  file on the pane's media shelf.
 
-Click a card or choose **Open media shelf** to open a centered viewer inside
-its split, with padding around it. The terminal keeps its size. Press Esc
-or click outside to close; choose **Pin** to keep the preview beside the
-terminal. Zoom pictures, browse diagrams, or press Play for video. Nothing
-plays automatically. Linux video sound needs FFmpeg and a running PulseAudio
-15+ compatible service (including PipeWire). Set `media-open-mode = lane` for
-the previous layout.
-
-On Linux, choose **Open in Image Viewer** from a picture's menu to open a
-copy in Loupe, or Eye of GNOME if Loupe is not installed.
+Click a card to open it in a viewer centered over its split; press Esc to
+close it or **Pin** to keep it beside the terminal. Video plays only when you
+press Play. On Linux, sound needs FFmpeg and PulseAudio or PipeWire.
 
 ![An SVG chart in Kettle's centered viewer on Ubuntu](docs/images/media-viewer.png)
 
-Without an agent, `/copy` a diagram and use `render_clipboard_as_diagram`,
-or select one and use `render_selection_as_diagram`. `kettle agent-setup
---status` says what this shell would get. New panes get `kettle` on their
-`PATH` when they have none. Read [Automation and MCP](docs/AGENT.md) for the
-details and what each setting grants.
+[Automation and MCP](docs/AGENT.md) explains supported versions, what each
+setting allows, and the local control API.
 
-## Privacy and local automation
+## Features
 
-Media paste sends a quoted local path to the pane, not the file contents. Read
-[Terminal client compatibility](docs/TERMINAL-CLIENT-COMPATIBILITY.md) for
-shell quoting, temporary-file privacy, and client behavior.
+- Tabs, splits, multiple windows, and tabs you can drag between windows
+- Search, bounded scrollback, broadcast input and session restore
+- Inline images (kitty, iTerm2 and Sixel), file drop and pasted screenshots
+- Shell-driven completion cards, recording and SSH profiles
+- A bundled font and more than 500 themes, in English or Spanish
+- Signed self-updates
+- An optional local control API and MCP server, both off by default
 
-Enable the local control API or MCP server only if every process running as
-your operating system user is trusted. Once enabled, any same-user process can
-connect without a pairing prompt. `read-only` permits inspection. `full`
-permits input and arbitrary command execution as your user. Read
-[Automation and MCP](docs/AGENT.md) before using either interface.
+## Privacy
 
-## Build and test
+Pasting media sends a quoted local path to the pane, never the file. The
+control API and MCP server are off by default; once on, any process running
+as your user can use them, and `full` mode can type and run commands. Read
+[Automation and MCP](docs/AGENT.md) before turning them on.
 
-Kettle requires Rust 1.95 or newer. macOS needs a stable Rust toolchain. Linux
-contributors should install the dependencies listed under
-[source builds](docs/INSTALL.md#from-source).
+## Contributing
+
+Building Kettle requires Rust 1.95 or newer and
+[just](https://github.com/casey/just). Linux also needs the packages listed
+under [source builds](docs/INSTALL.md#from-source).
 
 ```sh
 git clone https://github.com/Reddimus/kettle
 cd kettle
-cargo build --locked --release -p kettle
-cargo build --locked --profile media-worker -p kettle-media-worker
+just run        # build and open Kettle
+just test       # run the test suite
+just gauntlet   # the checks to pass before a pull request
 ```
 
-The Unix media worker is built separately and installed beside `kettle`.
-See [Installation](docs/INSTALL.md#from-source) for the paired install route.
-
-Run the repository gate before sending a change:
-
-```sh
-cargo fmt --all --check
-just gauntlet
-```
-
-Read [Contributing](CONTRIBUTING.md) for the change workflow and
-[Testing](docs/TESTING.md) for prerequisites, native checks, and the larger
-verification gates. Performance work follows the
-[benchmark methodology](scripts/perf/README.md).
+[Contributing](CONTRIBUTING.md) describes the workflow, and
+[Testing](docs/TESTING.md) the larger gates.
 
 ## Documentation
 
-- [Getting started](docs/GETTING-STARTED.md) and [Installation](docs/INSTALL.md)
+- [Getting started](docs/GETTING-STARTED.md), [Installation](docs/INSTALL.md)
+  and [Updates](docs/UPDATES.md)
 - [Configuration](docs/CONFIG.md) and [Settings](docs/SETTINGS.md)
-- [Shell integration](docs/SHELL-INTEGRATION.md) and [Automation](docs/AGENT.md)
-- [Architecture](docs/ARCHITECTURE.md) and [Testing](docs/TESTING.md)
-- [Release process](docs/RELEASING.md)
-- [Security and vulnerability reporting](SECURITY.md)
-- [Changelog and older-release index](CHANGELOG.md)
+- [Shell integration](docs/SHELL-INTEGRATION.md) and
+  [Automation and MCP](docs/AGENT.md)
+- [Architecture](docs/ARCHITECTURE.md), [Testing](docs/TESTING.md) and
+  [Releasing](docs/RELEASING.md)
+- [Security](SECURITY.md) and [Changelog](CHANGELOG.md)
 
 ## License
 
-Kettle is available under the [MIT license](LICENSE). Third-party code, assets,
-protocol sources, and design references are listed in [NOTICE](NOTICE).
+Kettle is available under the [MIT license](LICENSE). Third-party code, assets
+and design references are listed in [NOTICE](NOTICE).
