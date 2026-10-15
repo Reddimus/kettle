@@ -3427,7 +3427,7 @@ fn live_gpu_context_uses_event_loop_owned_display_handle() {
         .expect("try_recover_gpu present");
     let recovery_tail = &src[recovery..];
     let recovery_end = recovery_tail
-        .find("\n    fn update_search(")
+        .find("\n    }\n")
         .expect("try_recover_gpu end");
     let recovery_body = &recovery_tail[..recovery_end];
     assert!(
@@ -4058,7 +4058,7 @@ fn the_blink_scheduler_honors_the_idle_timeout_and_every_activity_source() {
             "{delivery} must restart the blink"
         );
     }
-    let src = include_str!("../app.rs");
+    let src = &super::app_source();
     let scheduler = src
         .split_once("let pane_blink = self.pane_cursor_blinking(ws, cached_menu_snapshots);")
         .expect("blink scheduler")
@@ -4222,7 +4222,7 @@ fn a_layer_blink_ends_only_with_a_presented_frame() {
         .split_once("fn redraw(&mut self, ws: &mut WindowState) {")
         .expect("redraw")
         .1
-        .split_once("\n    fn build_status_bar(")
+        .split_once("\n    }\n")
         .expect("end of redraw")
         .0;
     assert!(
@@ -4291,7 +4291,7 @@ fn a_layer_blink_ends_only_with_a_presented_frame() {
         .split_once("fn apply_reloaded_config(")
         .expect("config reload")
         .1
-        .split_once("fn drain_ctl(")
+        .split_once("\n    }\n")
         .expect("end of config reload")
         .0;
     assert!(reload.contains("!self.cfg.macos_cursor_blink_layer && !ws.blink_layer.is_active()"));
@@ -4370,7 +4370,7 @@ fn cursor_patch_uses_the_presented_scene_and_hides_failed_contents() {
         .split_once("fn redraw(&mut self, ws: &mut WindowState) {")
         .expect("redraw")
         .1
-        .split_once("\n    fn build_status_bar(")
+        .split_once("\n    }\n")
         .expect("end redraw")
         .0;
     let render = redraw
@@ -9334,7 +9334,7 @@ fn every_program_key_rule_is_a_shipped_default() {
 /// pure predicates below treat as off, includes the declared-trigger check.
 #[test]
 fn adaptive_focus_respects_a_chord_the_user_binds() {
-    let src = include_str!("../app.rs");
+    let src = &super::app_source();
     let method = src
         .split("fn adaptive_focus_chord_falls_through(")
         .nth(1)
@@ -13292,10 +13292,15 @@ fn detachable_tabs_config_gates_all_detach_paths() {
         src.contains("if !self.cfg.detachable_tabs {\n                    log::info!(\"move_tab_to_new_window ignored because detachable-tabs = false\");"),
         "keyboard/palette move_tab_to_new_window must honor detachable-tabs = false"
     );
+    let tear_off = src
+        .split_once("fn maybe_tear_off(")
+        .and_then(|(_, rest)| rest.split_once(") -> bool {"))
+        .expect("maybe_tear_off")
+        .1;
     assert!(
-        src.contains(
-            "fn maybe_tear_off(&mut self, ws: &mut WindowState, event_loop: &ActiveEventLoop) -> bool {\n        if !self.cfg.detachable_tabs {"
-        ),
+        tear_off
+            .trim_start()
+            .starts_with("if !self.cfg.detachable_tabs {"),
         "mouse threshold tear-off must honor detachable-tabs = false"
     );
     assert!(
@@ -15399,7 +15404,7 @@ fn native_theme_hint_decision_table() {
 
 #[test]
 fn live_window_icon_uses_the_active_palette_variant() {
-    let src = kettle_test_support::production_source(include_str!("../app.rs"));
+    let src = kettle_test_support::production_source(&super::app_source());
     assert!(
         src.contains(".with_window_icon(load_window_icon(self.cfg.theme.is_dark()))"),
         "window creation must start with the active theme's icon"

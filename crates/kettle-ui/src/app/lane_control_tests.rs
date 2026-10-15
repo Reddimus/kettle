@@ -214,7 +214,7 @@ fn a_hover_rest_is_a_pointer_that_stays_put() {
 /// with their lane, and tick with the event loop.
 #[test]
 fn the_silent_preview_is_wired() {
-    let source = kettle_test_support::production_source(include_str!("../app.rs"));
+    let source = kettle_test_support::production_source(&super::app_source());
     let code = kettle_test_support::code_only(&source);
     let flat = code.split_whitespace().collect::<Vec<_>>().join(" ");
     let body = |name: &str| {
@@ -393,7 +393,7 @@ fn a_silent_playback_says_why() {
 /// silent preview.
 #[test]
 fn video_playback_is_wired() {
-    let source = kettle_test_support::production_source(include_str!("../app.rs"));
+    let source = kettle_test_support::production_source(&super::app_source());
     let code = kettle_test_support::code_only(&source);
     let flat = code.split_whitespace().collect::<Vec<_>>().join(" ");
     let body = |name: &str| {

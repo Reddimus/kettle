@@ -307,7 +307,7 @@ mod tests {
     /// never silent in the startup log.
     #[test]
     fn every_pre_launch_decline_records_a_reason() {
-        let app_rs = include_str!("app.rs");
+        let app_rs = &crate::app::app_source();
         let body = app_rs
             .split_once("fn start_first_pane_before_launch(&mut self)")
             .expect("early spawn")
@@ -460,7 +460,7 @@ mod tests {
     #[test]
     fn every_phase_is_marked_in_startup_order() {
         let main_rs = include_str!("../../kettle/src/main.rs");
-        let app_rs = include_str!("app.rs");
+        let app_rs = &crate::app::app_source();
         let production = app_rs.split("#[cfg(test)]\nmod tests").next().unwrap();
         let resumed = production.split_once("fn resumed_inner(").unwrap().1;
         let resumed = resumed.split_once("\n    fn ").unwrap().0;

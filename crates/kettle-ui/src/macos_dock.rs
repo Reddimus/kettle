@@ -380,7 +380,7 @@ mod tests {
     /// on `pty_key_modifiers`.
     #[test]
     fn install_is_called_unconditionally_from_run_with() {
-        let source = kettle_test_support::production_source(include_str!("app.rs"));
+        let source = kettle_test_support::production_source(&crate::app::app_source());
         let needle = "crate::macos_dock::install(proxy.clone(), &ui_text);";
         assert_eq!(
             source.matches(needle).count(),

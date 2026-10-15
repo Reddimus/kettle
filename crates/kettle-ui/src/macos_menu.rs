@@ -252,7 +252,7 @@ mod tests {
     /// unconditionally, the platform split inside `imp`.
     #[test]
     fn resumed_installs_the_app_menu() {
-        let source = kettle_test_support::production_source(include_str!("app.rs"));
+        let source = kettle_test_support::production_source(&crate::app::app_source());
         let needle = "crate::macos_menu::install(&self.ui_text);";
         assert_eq!(source.matches(needle).count(), 1);
         let resumed = source

@@ -2720,7 +2720,7 @@ mod tests {
             "client requests and wait_for probes are the only requests sent to the App"
         );
 
-        let app = kettle_test_support::production_source(include_str!("app.rs"));
+        let app = kettle_test_support::production_source(&crate::app::app_source());
         let handler = app
             .split_once("fn handle_ctl_request(")
             .expect("handle_ctl_request present")
