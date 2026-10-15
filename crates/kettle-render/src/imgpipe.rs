@@ -101,6 +101,63 @@ mod cache_lifetime_tests {
     }
 
     #[test]
+    fn cropped_pixels_keep_native_spacing_and_clamp_without_neighbor_bleed() {
+        let _serialized = crate::gpu_tests::gpu_test_guard();
+        pollster::block_on(async {
+            let Ok((_, adapter)) = crate::resolve_headless_adapter(
+                &crate::gpu_tests::gpu_test_config(),
+                "image-crop-spacing",
+            )
+            .await
+            else {
+                eprintln!("no GPU adapter on this host; skipped");
+                return;
+            };
+            let (device, queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    required_limits: crate::live_device_limits(adapter.limits()),
+                    ..Default::default()
+                })
+                .await
+                .expect("GPU device");
+            let mut pipeline = ImagePipeline::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb)
+                .expect("image pipeline");
+            let image = ImageData::new(
+                4,
+                1,
+                vec![
+                    0, 0, 255, 255, 255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255,
+                ],
+            )
+            .unwrap();
+            for width in [2.0, 4.0] {
+                let item = ImageItem::placement(
+                    [0.0, 0.0, width, 1.0],
+                    image.clone(),
+                    Some(kettle_core::ImageSourceRect {
+                        x: 1,
+                        y: 0,
+                        width: 2,
+                        height: 1,
+                    }),
+                    None,
+                    [0.0, 0.0, 2.0, 1.0],
+                );
+                pipeline.upload(&device, &queue, [2.0, 1.0], &[item]);
+                let pixels = read_two_pixels(&device, &queue, &pipeline);
+                assert_eq!(&pixels[..4], &[255, 0, 0, 255]);
+                if width == 2.0 {
+                    assert_eq!(&pixels[4..], &[0, 255, 0, 255]);
+                } else {
+                    assert!((i16::from(pixels[4]) - 225).abs() <= 2, "{pixels:?}");
+                    assert!((i16::from(pixels[5]) - 137).abs() <= 2, "{pixels:?}");
+                    assert_eq!(&pixels[6..], &[0, 255]);
+                }
+            }
+        });
+    }
+
+    #[test]
     fn cached_texture_does_not_retain_cpu_pixels() {
         let _serialized = crate::gpu_tests::gpu_test_guard();
         pollster::block_on(async {
@@ -454,7 +511,23 @@ impl ImageItem {
         let (origin, size) = self
             .uv_override
             .or_else(|| source_uv(&self.image, self.source_rect, self.source_crop))?;
-        clipped_instance(self.rect, origin, size, self.clip_rect)
+        let mut instance = clipped_instance(self.rect, origin, size, self.clip_rect)?;
+        instance.uv_clamp = self.uv_clamp();
+        Some(instance)
+    }
+
+    fn uv_clamp(&self) -> [f32; 4] {
+        let Some(source) = self.source_rect else {
+            return [-1.0; 4];
+        };
+        let width = self.image.width as f32;
+        let height = self.image.height as f32;
+        [
+            (source.x as f32 + 0.5) / width,
+            (source.y as f32 + 0.5) / height,
+            (source.x as f32 + source.width as f32 - 0.5) / width,
+            (source.y as f32 + source.height as f32 - 0.5) / height,
+        ]
     }
 
     pub(crate) fn full(x: f32, y: f32, width: f32, height: f32, image: ImageData) -> Self {
@@ -508,6 +581,8 @@ struct Inst {
     size: [f32; 2],
     uv_origin: [f32; 2],
     uv_size: [f32; 2],
+    // Crop pixel centers; a negative minimum leaves repeat sampling unclamped.
+    uv_clamp: [f32; 4],
 }
 
 #[repr(C)]
@@ -526,6 +601,7 @@ struct Screen { size: vec2<f32>, pad: vec2<f32> };
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
+    @location(1) @interpolate(flat) uv_clamp: vec4<f32>,
 };
 
 @vertex
@@ -533,7 +609,8 @@ fn vs(@builtin(vertex_index) vi: u32,
       @location(0) pos: vec2<f32>,
       @location(1) size: vec2<f32>,
       @location(2) uv_origin: vec2<f32>,
-      @location(3) uv_size: vec2<f32>) -> VsOut {
+      @location(3) uv_size: vec2<f32>,
+      @location(4) uv_clamp: vec4<f32>) -> VsOut {
     var c = array<vec2<f32>, 4>(
         vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0),
         vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 1.0));
@@ -544,12 +621,17 @@ fn vs(@builtin(vertex_index) vi: u32,
     var o: VsOut;
     o.clip = vec4<f32>(ndc, 0.0, 1.0);
     o.uv = uv_origin + corner * uv_size;
+    o.uv_clamp = uv_clamp;
     return o;
 }
 
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
-    let c = textureSample(tex, smp, in.uv);
+    var uv = in.uv;
+    if in.uv_clamp.x >= 0.0 {
+        uv = clamp(uv, in.uv_clamp.xy, in.uv_clamp.zw);
+    }
+    let c = textureSample(tex, smp, uv);
     return vec4<f32>(c.rgb * c.a, c.a);
 }
 "#;
@@ -616,15 +698,12 @@ fn source_uv(
             return None;
         }
 
-        // Sample sub-rect edges at pixel centers. A cropped texture would clamp
-        // there; doing the same in the shared parent texture prevents linear
-        // filtering from bleeding adjacent placeholder tiles into one another.
         let image_w = image.width as f32;
         let image_h = image.height as f32;
-        let u0 = (source.x as f32 + 0.5) / image_w;
-        let v0 = (source.y as f32 + 0.5) / image_h;
-        let u1 = (x1 as f32 - 0.5) / image_w;
-        let v1 = (y1 as f32 - 0.5) / image_h;
+        let u0 = source.x as f32 / image_w;
+        let v0 = source.y as f32 / image_h;
+        let u1 = x1 as f32 / image_w;
+        let v1 = y1 as f32 / image_h;
         ([u0, v0], [u1 - u0, v1 - v0])
     } else {
         ([0.0, 0.0], [1.0, 1.0])
@@ -675,6 +754,7 @@ fn clipped_instance(
             size: [rect[2], rect[3]],
             uv_origin,
             uv_size,
+            uv_clamp: [-1.0; 4],
         });
     };
     if !clip.into_iter().all(f32::is_finite) || clip[2] <= 0.0 || clip[3] <= 0.0 {
@@ -706,6 +786,7 @@ fn clipped_instance(
             uv_origin[1] + uv_size[1] * v0,
         ],
         uv_size: [uv_size[0] * (u1 - u0), uv_size[1] * (v1 - v0)],
+        uv_clamp: [-1.0; 4],
     };
     instance
         .pos
@@ -856,7 +937,8 @@ impl ImageShared {
                         0 => Float32x2,
                         1 => Float32x2,
                         2 => Float32x2,
-                        3 => Float32x2
+                        3 => Float32x2,
+                        4 => Float32x4
                     ],
                 })],
             },
@@ -1281,11 +1363,13 @@ impl ImagePipeline {
                 log::warn!("skipping image placement with an invalid source rectangle");
                 continue;
             };
-            let Some(instance) = clipped_instance(item.rect, uv_origin, uv_size, item.clip_rect)
+            let Some(mut instance) =
+                clipped_instance(item.rect, uv_origin, uv_size, item.clip_rect)
             else {
                 insts.push(Inst::zeroed());
                 continue;
             };
+            instance.uv_clamp = item.uv_clamp();
             insts.push(instance);
             if let Some(key) = self.ensure_texture(device, queue, &item.image, &mut reusable) {
                 record_draw(&mut self.draws, key, item.repeat, i as u32);
@@ -1429,7 +1513,7 @@ mod aba_guard_tests {
     }
 
     #[test]
-    fn source_rect_uses_pixel_centers_and_rejects_out_of_bounds() {
+    fn source_rect_uses_pixel_edges_and_rejects_out_of_bounds() {
         let image = ImageData::new(4, 2, vec![0; 4 * 2 * 4]).expect("test image");
         assert_eq!(
             super::source_uv(&image, None, None),
@@ -1446,7 +1530,7 @@ mod aba_guard_tests {
                 }),
                 None,
             ),
-            Some(([0.625, 0.25], [0.25, 0.5]))
+            Some(([0.5, 0.0], [0.5, 1.0]))
         );
         assert_eq!(
             super::source_uv(
@@ -1473,7 +1557,7 @@ mod aba_guard_tests {
                     bottom: 0.75,
                 }),
             ),
-            Some(([0.625, 0.375], [0.25, 0.25]))
+            Some(([0.5, 0.25], [0.5, 0.5]))
         );
         assert_eq!(
             super::source_uv(

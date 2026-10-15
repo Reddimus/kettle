@@ -273,6 +273,9 @@ impl CardScene {
                 block.column as f32 * cw,
                 rect[3],
             ];
+            // Codex leaves a four-column gutter and Claude Code five; the
+            // longest name, "Kettle" or "Claude", is six letters.
+            let label_scale = (block.column as f32 / 6.0).clamp(0.6, 0.8);
             if let Some(badge) = intersect(badge, geometry.clip) {
                 self.decoration.push(quad(badge, colors.background, 1.0));
                 for (row, kind) in [CardLabelKind::Brand, CardLabelKind::Harness(block.harness)]
@@ -295,7 +298,7 @@ impl CardScene {
                             rect: label,
                             kind,
                             tr: geometry.tr,
-                            scale: 0.8,
+                            scale: label_scale,
                         });
                     }
                 }
@@ -632,6 +635,48 @@ mod tests {
         assert!(card.contains(40.0, 16.0) && card.contains(135.9, 63.9));
         assert!(!card.contains(136.0, 20.0) && !card.contains(50.0, 64.0));
         assert!(!card.contains(39.9, 20.0) && !card.contains(50.0, 15.9));
+    }
+
+    /// Codex leaves a four-column gutter; its brand and harness names still
+    /// fit whole, so neither is cut to "Kett…".
+    #[test]
+    fn gutter_labels_fit_a_four_column_codex_gutter() {
+        let (cards, snap) = crate::inline_cards::tests::codex_fixture();
+        let mut frame = CardFrame::default();
+        cards.recognize_into(&snap, &mut frame);
+        let mut scene = CardScene::default();
+        let cw = 8.0;
+        scene.append(
+            &cards,
+            &frame,
+            &snap,
+            &CardGeometry {
+                grid_origin: [0.0, 0.0],
+                cell: [cw, 16.0],
+                clip: [0.0, 0.0, 640.0, 256.0],
+                tr: kettle_i18n::Translator::default(),
+            },
+            &CardColors {
+                background: Rgb::new(10, 10, 10),
+                frame: Rgb::new(255, 0, 0),
+                selection: Rgb::new(0, 0, 255),
+            },
+        );
+        let gutter: Vec<_> = scene
+            .labels
+            .iter()
+            .filter(|label| matches!(label.kind, CardLabelKind::Brand | CardLabelKind::Harness(_)))
+            .collect();
+        assert_eq!(gutter.len(), 2);
+        for label in gutter {
+            let needed = label.text().chars().count() as f32 * cw * label.scale;
+            assert!(
+                needed <= label.rect[2] + 0.01,
+                "{:?} needs {needed} of {}",
+                label.text(),
+                label.rect[2]
+            );
+        }
     }
 
     #[test]

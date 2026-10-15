@@ -1,6 +1,9 @@
 # Stable message identifiers, argument types and translator context.
 # Context names the code that shows the message. Edit TOML, never generated Rust.
 
+[messages.screenshot_dimensions_too_large]
+context = "crates/kettle-render/src/lib.rs capture_png_with_annotation: CLI screenshot error when window padding and at least one terminal cell cannot fit the GPU texture limit."
+
 [messages.a11y_pane]
 context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of a pane whose program set no title. id is the pane's number."
 args = [{ name = "id", type = "u64" }]

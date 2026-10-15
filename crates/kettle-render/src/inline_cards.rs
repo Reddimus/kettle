@@ -436,7 +436,7 @@ impl CardCell {
                 }
             }
             Self::Accepted => ' ',
-            Self::Neutral => '\u{25a1}',
+            Self::Neutral => ' ',
             Self::Unknown => '\u{2b1a}',
         }
     }
@@ -572,6 +572,15 @@ pub(crate) mod tests {
         let mut snap = PaneSnapshot::default();
         snap.capture_with_card_marks(&term, true);
         (cards, snap, nonce)
+    }
+
+    /// A card as Codex prints it: under its `↳ Hook ·` line, at column 4.
+    pub(crate) fn codex_fixture() -> (InlineCards, PaneSnapshot) {
+        let (cards, term, _) =
+            harness_term(0, CardHarness::CodexHook, "\u{21b3} Hook \u{00b7} ", 4);
+        let mut snap = PaneSnapshot::default();
+        snap.capture_with_card_marks(&term, true);
+        (cards, snap)
     }
 
     pub(crate) fn fixture_term(
@@ -792,7 +801,9 @@ pub(crate) mod tests {
     fn pane_and_cursor_share_projected_placeholder_glyphs() {
         for hidden in [false, true] {
             assert_eq!(CardCell::Accepted.glyph('\u{10eeee}', hidden), ' ');
-            assert_eq!(CardCell::Neutral.glyph('\u{10eeee}', hidden), '\u{25a1}');
+            // A card Kettle cannot verify whole shows as blank cells, not a
+            // grid of boxes; its caption line still names it.
+            assert_eq!(CardCell::Neutral.glyph('\u{10eeee}', hidden), ' ');
             assert_eq!(CardCell::Unknown.glyph('\u{10eeee}', hidden), '\u{2b1a}');
         }
         assert_eq!(CardCell::Ordinary.glyph('x', false), 'x');

@@ -2616,6 +2616,8 @@ struct PendingCursorGlyph {
     y: f32,
     /// The character under the cursor (drawn in `color`).
     ch: char,
+    /// Base plus the snapshot's bounded attached marks.
+    text: String,
     /// Whether that cell carried an explicit U+FE0F. The cursor pass makes the
     /// same presentation choice the pane does and has to make it on the same
     /// evidence: `ch` alone cannot show a variation selector, so a qualified
@@ -2639,7 +2641,7 @@ fn cursor_glyph_damage_key(
     let mut hash = std::hash::DefaultHasher::new();
     cursor.x.to_bits().hash(&mut hash);
     cursor.y.to_bits().hash(&mut hash);
-    cursor.ch.hash(&mut hash);
+    cursor.text.hash(&mut hash);
     cursor.emoji_qualified.hash(&mut hash);
     cursor.color.r.hash(&mut hash);
     cursor.color.g.hash(&mut hash);
@@ -2708,8 +2710,8 @@ pub struct Renderer {
     /// pane's text is clipped to its own rect at draw time (persists across idle
     /// frames alongside the instance buffer).
     glyph_clips: Vec<GlyphClip>,
-    /// Pooled per-run scratch: byte offset of each char in a row (char index ==
-    /// grid column, since `build_pane` pushes exactly one char per cell). Reused
+    /// Pooled per-run scratch: byte offset of each cell's base scalar.
+    /// Attached zero-width marks share their base cell's column. Reused
     /// across runs/frames to keep the glyph-emit walk allocation-free.
     glyph_char_starts: Vec<u32>,
     /// Cell-locked glyph instance buffer needs a forced upload after the GPU
@@ -3062,6 +3064,7 @@ pub struct Renderer {
     /// (tens of ms per frame, up to 128 frames) never stalls a frame the
     /// winit event loop and every window's render pass depend on.
     bg_image_worker: Option<BgImageWorker>,
+    bg_image_redraw: Option<Arc<dyn Fn() + Send + Sync>>,
     /// The `(path, blur_radius)` key of the job currently in flight on
     /// `bg_image_worker`, if any. Lets `apply_bg_image_worker_result` discard
     /// a stale result (config changed again before the first decode
@@ -3602,7 +3605,7 @@ enum BgImageSubmitError {
 }
 
 impl BgImageWorker {
-    fn start() -> std::io::Result<Self> {
+    fn start(redraw: Option<Arc<dyn Fn() + Send + Sync>>) -> std::io::Result<Self> {
         let (sender, job_rx) = std::sync::mpsc::sync_channel::<BgImageJob>(1);
         let (result_tx, receiver) = std::sync::mpsc::channel::<BgImageResult>();
         let busy = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -3624,6 +3627,9 @@ impl BgImageWorker {
                         // The Renderer (and its `BgImageWorker`) was dropped —
                         // no one is left to hand results to.
                         break;
+                    }
+                    if let Some(redraw) = redraw.as_ref() {
+                        redraw();
                     }
                 }
             })
@@ -4792,13 +4798,36 @@ mod live_screenshot_tests {
 mod bg_image_worker_tests {
     use super::{BgImageJob, BgImageWorker};
 
+    #[test]
+    fn completed_decode_requests_redraw_after_publishing_the_result() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = BgImageWorker::start(Some(std::sync::Arc::new(move || {
+            let _ = tx.send(());
+        })))
+        .expect("worker thread should start");
+        assert!(
+            worker
+                .try_submit(BgImageJob {
+                    path: "/definitely/does/not/exist/kettle-wake-test.png".into(),
+                    blur_radius: 0,
+                })
+                .is_ok()
+        );
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("a completed decode must request redraw without a frame poll");
+        assert!(!worker.busy.load(std::sync::atomic::Ordering::Acquire));
+        let result = worker.try_recv().expect("the result precedes the redraw");
+        assert_eq!(result.blur_radius, 0);
+        assert!(result.frames.is_empty());
+    }
+
     /// A nonexistent path decodes to an empty frame list rather than blocking
     /// or panicking, and the result must arrive on `try_recv` carrying back the
     /// same `(path, blur_radius)` key the job was submitted with, which is what
     /// `apply_bg_image_worker_result` keys its stale-result check on.
     #[test]
     fn worker_delivers_a_keyed_result_for_a_failed_decode() {
-        let worker = BgImageWorker::start().expect("worker thread should start");
+        let worker = BgImageWorker::start(None).expect("worker thread should start");
         let path = "/definitely/does/not/exist/kettle-test-wallpaper.png".to_string();
         assert!(
             worker
@@ -4835,7 +4864,7 @@ mod bg_image_worker_tests {
     /// on this to decide whether to (re)submit.
     #[test]
     fn worker_reports_busy_for_a_second_submit_before_the_first_completes() {
-        let worker = BgImageWorker::start().expect("worker thread should start");
+        let worker = BgImageWorker::start(None).expect("worker thread should start");
         assert!(
             worker
                 .try_submit(BgImageJob {
@@ -5599,6 +5628,7 @@ impl Renderer {
             bg_image_cache: None,
             bg_image_retry_at: None,
             bg_image_worker: None,
+            bg_image_redraw: None,
             bg_image_pending: None,
             font_family: cfg.font_family.as_str().into(),
             font_size,
@@ -6090,6 +6120,13 @@ impl Renderer {
         self.render_frame_with_status_and_pre_present(panes, tabbar, cfg, overlay, status, || {})
     }
 
+    /// Install the owning window's redraw callback before its first frame.
+    pub fn ensure_background_redraw(&mut self, redraw: impl Fn() + Send + Sync + 'static) {
+        if self.bg_image_redraw.is_none() {
+            self.bg_image_redraw = Some(Arc::new(redraw));
+        }
+    }
+
     /// (Re)submit a background-image decode to `bg_image_worker`, starting
     /// the worker thread on first use. A no-op when a job for this exact
     /// `(path, blur_radius)` key is already in flight, so a `need_reload ==
@@ -6105,7 +6142,7 @@ impl Renderer {
             return;
         }
         if self.bg_image_worker.is_none() {
-            match BgImageWorker::start() {
+            match BgImageWorker::start(self.bg_image_redraw.clone()) {
                 Ok(worker) => self.bg_image_worker = Some(worker),
                 Err(error) => {
                     log::warn!("could not start background-image decode worker: {error}");
@@ -9774,6 +9811,7 @@ impl Renderer {
             .hash(&mut h);
             self.media_receipt_title_text.hash(&mut h);
             self.media_receipt_detail_text.hash(&mut h);
+            prepared_text_areas_damage_key(&lane_areas).hash(&mut h);
             // Retained like the receipt's: a buffer keeps its address when
             // the viewer moves to another item, so hash what it shows.
             for lane in &overlay.media_lanes {
@@ -9819,7 +9857,7 @@ impl Renderer {
             && self
                 .pending_cursor_glyph
                 .as_ref()
-                .is_some_and(|c| c.ch != ' ' && c.ch != '\0');
+                .is_some_and(|c| c.text != " " && c.text != "\0");
         // The frame an overlay CLOSES (`overlay_open` flips true→false) must
         // still prepare once, or the closed panel's cached text vertices keep
         // rendering until the next keystroke. Open overlays are covered above;
@@ -9933,23 +9971,33 @@ impl Renderer {
             if cfg.text_renderer == TextRendererMode::Grid {
                 self.emit_pane_glyphs(panes, cfg, &mut gi, &mut gc);
             }
-            self.glyph_pipeline
-                .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &gi);
+            self.grid_glyphs_dirty =
+                !self
+                    .glyph_pipeline
+                    .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &gi);
             self.glyph_instances = gi;
             self.glyph_clips = gc;
-            self.grid_glyphs_dirty = false;
         }
         // Prepare the focused solid-block cursor's inverted glyph only when its
         // text/position/style changed. A main text prepare also forces this tiny
         // prepare because both renderers share an atlas that may have repacked.
         // Menu-highlight and other quad-only frames reuse retained vertices.
-        if let Some((gx, gy, gch, gqualified, gcolor, gclip)) = self
+        if let Some((gx, gy, gch, gqualified, gcolor, gclip, gtext)) = self
             .pending_cursor_glyph
             .as_ref()
-            .map(|c| (c.x, c.y, c.ch, c.emoji_qualified, c.color, c.clip))
+            .map(|c| {
+                (
+                    c.x,
+                    c.y,
+                    c.ch,
+                    c.emoji_qualified,
+                    c.color,
+                    c.clip,
+                    c.text.as_str(),
+                )
+            })
             .filter(|_| need_cursor_prepare)
         {
-            let mut enc = [0u8; 4];
             self.cursor_glyph_buffer.set_metrics(metrics);
             // The cursor draws its own glyph last, over the pane's, so it has
             // to reach the same answer the pane did. Both halves matter: skip
@@ -9961,7 +10009,7 @@ impl Renderer {
                 .filter(|_| !gqualified && single_column_text_presentation(gch))
                 .unwrap_or(&family);
             self.cursor_glyph_buffer.set_text(
-                gch.encode_utf8(&mut enc),
+                gtext,
                 &Attrs::new().family(Family::Name(cursor_family)),
                 Shaping::Advanced,
                 None,
@@ -10918,7 +10966,7 @@ impl Renderer {
         // row's shaping cache every blink and force a whole-viewport
         // re-prepare. This way the buffer stays byte-identical across a blink,
         // so the prepare is skipped.
-        let mut cursor_glyph_capture: Option<(char, Rgb, bool)> = None;
+        let mut cursor_glyph_capture: Option<(char, Rgb, &[char])> = None;
         let mut fallback_run = None;
 
         for (snapshot_index, sc) in snap.cells.iter().enumerate() {
@@ -10938,28 +10986,40 @@ impl Renderer {
             let card_cell = card_frame.cell(snap, snapshot_index);
             let owned_cell = !matches!(card_cell, inline_cards::CardCell::Ordinary);
             let flags = if owned_cell { Flags::empty() } else { sc.flags };
-            let mut fg = if owned_cell {
-                theme.foreground
-            } else {
-                color::resolve(sc.fg, theme, term_colors)
-            };
-            let mut bg = if owned_cell {
-                theme.background
-            } else {
-                color::resolve(sc.bg, theme, term_colors)
-            };
-            if flags.contains(Flags::INVERSE) {
-                std::mem::swap(&mut fg, &mut bg);
-            }
-            let selected = selection_range.is_some_and(|r| r.contains(sc.point()));
             // Terminator parity, terminatorlib/config.py:111
             // `allow_bold`: when false, suppress bold attr entirely.
             // Useful on fonts without a bold companion.
             let bold = cfg.allow_bold && flags.contains(Flags::BOLD);
+            let (raw_fg, raw_bg) = if flags.contains(Flags::INVERSE) {
+                (sc.bg, sc.fg)
+            } else {
+                (sc.fg, sc.bg)
+            };
+            let raw_fg = if bold && cfg.bold_is_bright {
+                color::bright_for_bold(raw_fg)
+            } else {
+                raw_fg
+            };
+            let mut fg = if owned_cell {
+                theme.foreground
+            } else {
+                color::resolve(raw_fg, theme, term_colors)
+            };
+            let bg = if owned_cell {
+                theme.background
+            } else {
+                color::resolve(raw_bg, theme, term_colors)
+            };
+            let selected = selection_range.is_some_and(|r| r.contains(sc.point()));
             let italic = flags.contains(Flags::ITALIC);
             saw_styled_text |= bold || italic;
             let hidden = flags.contains(Flags::HIDDEN);
             let dc = card_cell.glyph(sc.c, hidden);
+            let marks: &[char] = if hidden || owned_cell {
+                &[]
+            } else {
+                sc.zerowidth()
+            };
             // The same search pair drives the match background quads and the
             // terminal glyphs above them. Active matches use the configured
             // search fg/bg; inactive matches reuse the theme selection pair.
@@ -11020,11 +11080,7 @@ impl Renderer {
                 // cursor pass draws this recolored copy on top of the block.
                 // See `color::cursor_glyph_color` for which colour and why.
                 let cursor_fg = color::cursor_glyph_color(theme, term_colors, bg);
-                cursor_glyph_capture = Some((
-                    dc,
-                    cursor_fg,
-                    !owned_cell && sc.zerowidth().contains(&'\u{FE0F}'),
-                ));
+                cursor_glyph_capture = Some((dc, cursor_fg, marks));
             }
 
             if bg != default_bg {
@@ -11077,11 +11133,6 @@ impl Renderer {
             // Append them right after the base char so the shaper composes the
             // full grapheme; skip on a HIDDEN cell (the base became a space, so
             // the marks have nothing to attach to).
-            let marks: &[char] = if hidden || owned_cell {
-                &[]
-            } else {
-                sc.zerowidth()
-            };
             match cur {
                 Some((f, cb, ci)) if f == fg && cb == bold && ci == italic => {
                     // Same style — extend the current run (the last live span).
@@ -11210,13 +11261,14 @@ impl Renderer {
                 // full Block shape covers the glyph; beam/underline leave it
                 // visible in its normal color, so they need no overdraw.
                 if matches!(shape, EShape::Block)
-                    && let Some((gch, gcolor, gqualified)) = cursor_glyph_capture
+                    && let Some((gch, gcolor, gmarks)) = cursor_glyph_capture
                 {
                     self.pending_cursor_glyph = Some(PendingCursorGlyph {
                         x: bx,
                         y: by,
                         ch: gch,
-                        emoji_qualified: gqualified,
+                        text: std::iter::once(gch).chain(gmarks.iter().copied()).collect(),
+                        emoji_qualified: gmarks.contains(&'\u{FE0F}'),
                         color: gcolor,
                         clip: pv.terminal,
                     });
@@ -11250,9 +11302,8 @@ impl Renderer {
         );
         // Terminal rows are hard-wrapped by the VT engine at `cols`; the renderer
         // must NEVER soft-wrap. Wrap::None keeps exactly one layout run per buffer
-        // line — both so a too-wide fallback glyph can't push the line onto a
-        // phantom second visual row, AND so the cell-locked emit can rely on
-        // `char index == grid column`. cosmic-text no-ops this when unchanged.
+        // line so a too-wide fallback glyph can't push the line onto a
+        // phantom second visual row. cosmic-text no-ops this when unchanged.
         buf.set_wrap(Wrap::None);
         let ff = font_features(cfg);
         // Copied out before the `&mut self` borrows below.
@@ -11448,8 +11499,8 @@ impl Renderer {
             let default_color = GColor::rgb(pane_fg.r, pane_fg.g, pane_fg.b);
 
             let buf = &pane_buffers[i];
-            // `build_pane` pushes exactly one char per cell with `Wrap::None`, so
-            // the shared cell-lock emit pins each glyph to its grid column.
+            // Each cell contributes a base scalar and any attached marks.
+            // The shared emit keeps those marks on their base cell's column.
             emit_cell_locked_glyphs(
                 out,
                 buf,
@@ -15419,60 +15470,28 @@ fn pane_backdrop_rect(terminal: (f32, f32, f32, f32), bw: f32) -> Option<(f32, f
     (bwid > 0.0 && bhgt > 0.0).then_some((rx + bw, ry + bw, bwid, bhgt))
 }
 
-/// The foreground a cell's glyph is drawn in, after the attributes that modify
-/// colour have all had their turn.
-///
-/// Order is the whole content of this function, which is why it is a function.
-///
-/// 1. **SGR 2 dim/faint** (`\e[2m`) blends toward the background. `less`
-///    status lines, `mc` and fish prompt themers all use it.
-/// 2. **`bold-is-bright`** (Terminator `bold_is_bright`) remaps a bold
-///    foreground from `palette[0..8]` to its `palette[8..16]` bright variant.
-/// 3. **`minimum-contrast`** lifts toward whichever extreme is reachable, if
-///    the result still falls below the configured WCAG ratio. The caller
-///    applies this step to the returned colour (`MinimumContrastCache`).
-///
-/// The lift has to be LAST, because it is the only step that reasons about the
-/// colour against the background rather than transforming it. It used to run
-/// second, before `bold_is_bright` — which then replaced the foreground
-/// outright with a palette entry, discarding the lift. `minimum-contrast`
-/// therefore did nothing at all for bold text whenever `bold-is-bright` was on,
-/// which is the common configuration; and since the bright variant is the
-/// lighter one, the case it discarded is precisely the one that needed it, pale
-/// bold text on a pale background.
-///
-/// Callers apply the search-highlight and cursor-block overrides after this,
-/// deliberately: each substitutes a colour paired with its OWN background, so
-/// lifting them against the cell's background would measure the ratio against a
-/// surface that is not behind them.
-fn transformed_foreground(
-    fg: Rgb,
-    bg: Rgb,
-    dim: bool,
-    bold: bool,
-    cfg: &kettle_config::Config,
-    theme: &kettle_config::Theme,
-) -> Rgb {
-    let mut fg = fg;
-    if dim {
-        fg = color::dim(fg, bg);
-    }
-    if bold && cfg.bold_is_bright {
-        fg = color::bright_for_bold(fg, theme);
-    }
-    fg
+/// Apply dim after palette brightening and RGB resolution. The caller applies
+/// minimum contrast last, against the background actually painted under it.
+fn transformed_foreground(fg: Rgb, bg: Rgb, dim: bool) -> Rgb {
+    if dim { color::dim(fg, bg) } else { fg }
 }
 
 #[cfg(test)]
 fn attributed_foreground(
-    fg: Rgb,
+    fg: alacritty_terminal::vte::ansi::Color,
     bg: Rgb,
     dim: bool,
     bold: bool,
     cfg: &kettle_config::Config,
     theme: &kettle_config::Theme,
 ) -> Rgb {
-    let fg = transformed_foreground(fg, bg, dim, bold, cfg, theme);
+    let fg = if bold && cfg.bold_is_bright {
+        color::bright_for_bold(fg)
+    } else {
+        fg
+    };
+    let fg = color::resolve(fg, theme, &Default::default());
+    let fg = transformed_foreground(fg, bg, dim);
     if cfg.minimum_contrast > 1.0 {
         color::with_min_contrast(fg, bg, cfg.minimum_contrast as f64)
     } else {
@@ -15533,9 +15552,18 @@ fn resolved_cell_foreground(
     cfg: &kettle_config::Config,
     theme: &kettle_config::Theme,
 ) -> Rgb {
+    use alacritty_terminal::vte::ansi::{Color as AnsiColor, Rgb as AnsiRgb};
+
+    let spec = |c: Rgb| {
+        AnsiColor::Spec(AnsiRgb {
+            r: c.r,
+            g: c.g,
+            b: c.b,
+        })
+    };
     match highlight {
         CellHighlight::Search(true) => attributed_foreground(
-            cfg.search_foreground.unwrap_or(theme.background),
+            spec(cfg.search_foreground.unwrap_or(theme.background)),
             cfg.search_background.unwrap_or(theme.palette[3]),
             false,
             false,
@@ -15543,14 +15571,14 @@ fn resolved_cell_foreground(
             theme,
         ),
         CellHighlight::Search(false) | CellHighlight::Selection => attributed_foreground(
-            theme.selection_foreground,
+            spec(theme.selection_foreground),
             theme.selection_background,
             false,
             false,
             cfg,
             theme,
         ),
-        CellHighlight::None => attributed_foreground(fg, bg, dim, bold, cfg, theme),
+        CellHighlight::None => attributed_foreground(spec(fg), bg, dim, bold, cfg, theme),
     }
 }
 
@@ -15563,23 +15591,21 @@ fn resolved_cell_foreground_cached(
     theme: &kettle_config::Theme,
     cache: &mut MinimumContrastCache,
 ) -> Rgb {
-    let (dim, bold) = attributes;
-    let (fg, bg, dim, bold) = match highlight {
+    let (dim, _) = attributes;
+    let (fg, bg, dim) = match highlight {
         CellHighlight::Search(true) => (
             cfg.search_foreground.unwrap_or(theme.background),
             cfg.search_background.unwrap_or(theme.palette[3]),
-            false,
             false,
         ),
         CellHighlight::Search(false) | CellHighlight::Selection => (
             theme.selection_foreground,
             theme.selection_background,
             false,
-            false,
         ),
-        CellHighlight::None => (fg, bg, dim, bold),
+        CellHighlight::None => (fg, bg, dim),
     };
-    let fg = transformed_foreground(fg, bg, dim, bold, cfg, theme);
+    let fg = transformed_foreground(fg, bg, dim);
     cache.resolve(fg, bg, cfg.minimum_contrast as f64)
 }
 
@@ -15698,11 +15724,9 @@ fn desired_alpha_mode(
 }
 
 /// Grid column of the cluster a laid-out glyph belongs to (cell-locked
-/// rendering). `char_starts[k]` is the byte offset of the k-th char in the row
-/// text, and because `build_pane` writes exactly ONE char per grid cell (the
-/// wide-char spacer included), `k` IS the grid column. A glyph's `cluster_start`
-/// byte indexes into that same row text, so its column is the char whose byte
-/// range contains the cluster start (the last `char_starts` entry `<= start`).
+/// rendering). `char_starts[k]` is the byte offset of cell k's base scalar,
+/// including wide-char spacers but excluding attached zero-width marks.
+/// A mark's cluster start therefore maps to the same column as its base.
 fn glyph_grid_col(char_starts: &[u32], cluster_start: usize) -> usize {
     char_starts
         .partition_point(|&bs| (bs as usize) <= cluster_start)
@@ -15749,12 +15773,13 @@ fn emit_cell_locked_glyphs(
     char_starts: &mut Vec<u32>,
 ) {
     for run in buf.layout_runs() {
-        // Map a cluster's byte offset → grid column. `Wrap::None` guarantees one
-        // run per buffer line and one char per cell, so the Nth char IS grid
-        // column N.
+        // Use the engine's width classifier: zero-width scalars attach to
+        // the preceding cell; wide bases still have an explicit spacer cell.
         char_starts.clear();
-        for (b, _) in run.text.char_indices() {
-            char_starts.push(b as u32);
+        for (b, ch) in run.text.char_indices() {
+            if unicode_width::UnicodeWidthChar::width(ch) != Some(0) {
+                char_starts.push(b as u32);
+            }
         }
         let line_y = run.line_y;
         for glyph in run.glyphs.iter() {
@@ -16310,6 +16335,11 @@ pub fn capture_png_with_annotation(
         let body_h = rows as f32 * ch;
         let w = (pad * 2.0 + body_w).ceil() as u32;
         let h = (tab_h + body_h + pad * 2.0).ceil() as u32;
+        let texture_limit = device.limits().max_texture_dimension_2d.min(8192);
+        if w > texture_limit || h > texture_limit {
+            let tr = Translator::new(cfg.language.resolve(kettle_i18n::os_locale));
+            return Err(anyhow!(tr.text(Text::ScreenshotDimensionsTooLarge)));
+        }
         let (wf, hf) = (w as f32, h as f32);
         let split_x = (wf / 2.0).round();
 
@@ -18221,6 +18251,36 @@ mod gpu_tests {
         });
     }
 
+    #[test]
+    fn screenshot_rejects_padding_larger_than_texture_limit() {
+        let _serialized = gpu_test_guard();
+        let parsed = Config::parse_text("window-padding-x = 100000\n");
+        let mut cfg = Config {
+            padding_x: parsed.padding_x,
+            ..gpu_test_config()
+        };
+        assert_eq!(cfg.padding_x, 100_000.0);
+        if pollster::block_on(resolve_headless_adapter(&cfg, "screenshot_padding")).is_err() {
+            eprintln!("no GPU adapter on this host; skipped");
+            return;
+        }
+        let dir = tempfile::tempdir().expect("screenshot directory");
+        let out = dir.path().join("oversized-padding.png");
+        for (language, preference) in [
+            (Language::En, kettle_config::LanguagePreference::English),
+            (Language::Es, kettle_config::LanguagePreference::Spanish),
+        ] {
+            cfg.language = preference;
+            let error = capture_png_with(&cfg, 80, 24, &out, DebugScene::Default)
+                .expect_err("oversized padding must return an error");
+            assert_eq!(
+                error.to_string(),
+                Translator::new(language).text(Text::ScreenshotDimensionsTooLarge)
+            );
+            assert!(!out.exists(), "rejected screenshot must not create a PNG");
+        }
+    }
+
     /// The shared `emit_cell_locked_glyphs` loop, which the default (Grid)
     /// `--screenshot` path runs over its `left`/`right` pane buffers, must
     /// produce a NON-EMPTY cell-locked glyph set. The README hero/showcase
@@ -19785,6 +19845,7 @@ mod pane_buffer_lifecycle_tests {
             x: 10.0,
             y: 20.0,
             ch: 'x',
+            text: "x".into(),
             emoji_qualified: false,
             color: kettle_config::Rgb::new(1, 2, 3),
             clip: (0.0, 0.0, 100.0, 80.0),
@@ -19803,6 +19864,16 @@ mod pane_buffer_lifecycle_tests {
             initial
         );
 
+        cursor.text.push('\u{301}');
+        assert_ne!(
+            super::cursor_glyph_damage_key(
+                Some(&cursor),
+                glyphon::Metrics::new(14.0, 18.0),
+                "Kettle Mono",
+            ),
+            initial
+        );
+        cursor.text = "x".into();
         cursor.x = 11.0;
         assert_ne!(
             super::cursor_glyph_damage_key(
@@ -23940,6 +24011,7 @@ mod attributed_foreground_tests {
         CellHighlight, MinimumContrastCache, Rgb, attributed_foreground, color,
         resolved_cell_foreground,
     };
+    use alacritty_terminal::vte::ansi::Color as AnsiColor;
     use kettle_config::{Config, Theme};
 
     /// `minimum-contrast` must survive `bold-is-bright`.
@@ -23959,16 +24031,14 @@ mod attributed_foreground_tests {
         // ratio against it (9.44:1), and a bright variant that badly does not
         // (1.01:1).
         //
-        // The base colour being compliant is what makes this load-bearing. The
-        // lift is then a no-op, so running it before the remap leaves the remap
-        // free to replace the result with something unreadable. A fixture whose
-        // base is NON-compliant cannot show that: the lift moves the colour off
-        // the palette entry, and the remap — which matches palette entries
-        // exactly — finds nothing to remap and quietly does nothing.
+        // The compliant base makes this sensitive to ordering: lifting it
+        // before the remap is a no-op and leaves the pale bright variant
+        // unreadable.
         theme.palette[2] = Rgb::new(0x20, 0x40, 0x20);
         theme.palette[10] = Rgb::new(0xd8, 0xf0, 0xd8);
         let bg = theme.background;
         let fg = theme.palette[2];
+        let ansi_fg = AnsiColor::Indexed(2);
 
         let cfg = Config {
             bold_is_bright: true,
@@ -23978,7 +24048,7 @@ mod attributed_foreground_tests {
 
         // The bright variant on its own is far below the requested ratio —
         // otherwise this fixture would prove nothing.
-        let bright = color::bright_for_bold(fg, &theme);
+        let bright = color::resolve(color::bright_for_bold(ansi_fg), &theme, &Default::default());
         assert_eq!(bright, theme.palette[10], "the fixture must actually remap");
         assert!(
             color::contrast_ratio(bright, bg) < 4.5,
@@ -23986,7 +24056,7 @@ mod attributed_foreground_tests {
             color::contrast_ratio(bright, bg)
         );
 
-        let drawn = attributed_foreground(fg, bg, false, true, &cfg, &theme);
+        let drawn = attributed_foreground(ansi_fg, bg, false, true, &cfg, &theme);
         assert!(
             color::contrast_ratio(drawn, bg) >= 4.5 - 1e-6,
             "minimum-contrast must hold for bold text under bold-is-bright, \
@@ -24002,7 +24072,7 @@ mod attributed_foreground_tests {
             color::contrast_ratio(fg, bg)
         );
         assert_eq!(
-            attributed_foreground(fg, bg, false, false, &cfg, &theme),
+            attributed_foreground(ansi_fg, bg, false, false, &cfg, &theme),
             fg,
             "a compliant non-bold colour must be left alone"
         );
@@ -24013,21 +24083,23 @@ mod attributed_foreground_tests {
             ..Config::default()
         };
         assert_eq!(
-            attributed_foreground(fg, bg, false, true, &no_lift, &theme),
+            attributed_foreground(ansi_fg, bg, false, true, &no_lift, &theme),
             bright,
             "with minimum-contrast off, the bright variant must be what is drawn"
         );
 
         // Dim composes first, and the lift still applies to its result.
-        let dimmed = attributed_foreground(fg, bg, true, false, &no_lift, &theme);
+        let dimmed = attributed_foreground(ansi_fg, bg, true, false, &no_lift, &theme);
         assert_eq!(
             dimmed,
             color::dim(fg, bg),
             "dim must apply to the resolved fg"
         );
         assert!(
-            color::contrast_ratio(attributed_foreground(fg, bg, true, false, &cfg, &theme), bg)
-                >= 4.5 - 1e-6,
+            color::contrast_ratio(
+                attributed_foreground(ansi_fg, bg, true, false, &cfg, &theme),
+                bg
+            ) >= 4.5 - 1e-6,
             "a dimmed foreground must still be lifted to the configured ratio"
         );
     }
@@ -24095,8 +24167,8 @@ mod attributed_foreground_tests {
             selection_foreground: Rgb::new(90, 100, 110),
             ..Theme::default()
         };
-        // If BOLD reaches the highlight foreground, bold-is-bright remaps this
-        // exact search colour to the deliberately distinct bright slot.
+        // The explicit search RGB matches a low palette entry but must keep
+        // its own color even when the underlying cell is bold.
         theme.palette[2] = Rgb::new(20, 80, 20);
         theme.palette[10] = Rgb::new(180, 250, 180);
         let cfg = Config {
@@ -24143,7 +24215,11 @@ mod attributed_foreground_tests {
             "the DIM fixture must visibly change the configured search foreground"
         );
         assert_ne!(
-            color::bright_for_bold(cfg.search_foreground.unwrap(), &theme),
+            color::resolve(
+                color::bright_for_bold(AnsiColor::Indexed(2)),
+                &theme,
+                &Default::default(),
+            ),
             cfg.search_foreground.unwrap(),
             "the bold-is-bright fixture must visibly remap the configured search foreground"
         );

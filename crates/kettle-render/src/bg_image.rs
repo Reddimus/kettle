@@ -128,48 +128,69 @@ fn box_blur(img: &mut BgImage, radius: u32) -> bool {
     if radius == 0 || img.width == 0 || img.height == 0 {
         return true;
     }
-    let r = radius.min(16);
-    // One scratch buffer serves all six sub-passes; a fresh full-image Vec per
-    // pass would cost up to 6 × 256 MB at MAX_BG_IMAGE_DIM. Each pass writes
-    // into `scratch` then swaps, so the result always lands back in `img.rgba`.
-    let mut scratch = Vec::new();
-    if scratch.try_reserve_exact(img.rgba.len()).is_err() {
+    let Some(bytes) = decoder_frame_bytes((img.width, img.height)) else {
+        return false;
+    };
+    if usize::try_from(bytes).ok() != Some(img.rgba.len()) {
         return false;
     }
-    scratch.resize(img.rgba.len(), 0);
-    premultiply_linear_rgba8(&mut img.rgba);
-    for _ in 0..3 {
-        box_blur_axis(img, r, true, &mut scratch);
-        box_blur_axis(img, r, false, &mut scratch);
+    let r = radius.min(16);
+    // Two f32 buffers use at most eight times the bounded RGBA byte count.
+    // Reserve both before modifying the image.
+    let mut linear = Vec::new();
+    let mut scratch = Vec::new();
+    if linear.try_reserve_exact(img.rgba.len()).is_err()
+        || scratch.try_reserve_exact(img.rgba.len()).is_err()
+    {
+        return false;
     }
-    unpremultiply_linear_rgba8(&mut img.rgba);
+    linear.resize(img.rgba.len(), 0.0);
+    scratch.resize(img.rgba.len(), 0.0);
+    premultiply_linear_rgba8(&img.rgba, &mut linear);
+    for _ in 0..3 {
+        box_blur_axis(&mut linear, (img.width, img.height), r, true, &mut scratch);
+        box_blur_axis(&mut linear, (img.width, img.height), r, false, &mut scratch);
+    }
+    unpremultiply_linear_rgba8(&linear, &mut img.rgba);
     true
 }
 
-fn premultiply_linear_rgba8(rgba: &mut [u8]) {
-    for pixel in rgba.as_chunks_mut::<4>().0 {
+fn premultiply_linear_rgba8(rgba: &[u8], out: &mut [f32]) {
+    for (pixel, dst) in rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(out.as_chunks_mut::<4>().0)
+    {
         let alpha = pixel[3] as f64 / 255.0;
-        for channel in &mut pixel[..3] {
-            let srgb = *channel as f64 / 255.0;
+        for (channel, &encoded) in dst[..3].iter_mut().zip(&pixel[..3]) {
+            let srgb = encoded as f64 / 255.0;
             let linear = if srgb <= 0.04045 {
                 srgb / 12.92
             } else {
                 ((srgb + 0.055) / 1.055).powf(2.4)
             };
-            *channel = (linear * alpha * 255.0).round().clamp(0.0, 255.0) as u8;
+            *channel = (linear * alpha) as f32;
         }
+        dst[3] = alpha as f32;
     }
 }
 
-fn unpremultiply_linear_rgba8(rgba: &mut [u8]) {
-    for pixel in rgba.as_chunks_mut::<4>().0 {
-        let alpha = pixel[3] as f64 / 255.0;
+fn unpremultiply_linear_rgba8(linear: &[f32], rgba: &mut [u8]) {
+    for (src, pixel) in linear
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(rgba.as_chunks_mut::<4>().0)
+    {
+        let alpha = f64::from(src[3]).clamp(0.0, 1.0);
+        pixel[3] = (alpha * 255.0).round() as u8;
         if alpha == 0.0 {
             pixel[..3].fill(0);
             continue;
         }
-        for channel in &mut pixel[..3] {
-            let linear = (*channel as f64 / 255.0 / alpha).clamp(0.0, 1.0);
+        for (channel, &premultiplied) in pixel[..3].iter_mut().zip(&src[..3]) {
+            let linear = (f64::from(premultiplied) / alpha).clamp(0.0, 1.0);
             let srgb = if linear <= 0.003_130_8 {
                 linear * 12.92
             } else {
@@ -181,22 +202,27 @@ fn unpremultiply_linear_rgba8(rgba: &mut [u8]) {
 }
 
 /// One separable box-blur pass along the horizontal (`horizontal == true`) or
-/// vertical axis, reading `img.rgba` and writing the blurred result back into
-/// it via `scratch`.
+/// vertical axis, reading premultiplied linear RGBA and swapping in `scratch`.
 ///
 /// A sliding-window running sum makes the pass O(W·H) regardless of radius.
 /// The divisor is a constant `2r+1` because every clamped edge sample counts,
 /// so the output is byte-identical to the brute-force reference in the tests.
 /// The telescoping `sum += entering − leaving` holds even under edge clamping
 /// because the clamp is applied per index consistently on both windows.
-fn box_blur_axis(img: &mut BgImage, r: u32, horizontal: bool, scratch: &mut Vec<u8>) {
-    let w = img.width as usize;
-    let h = img.height as usize;
+fn box_blur_axis(
+    rgba: &mut Vec<f32>,
+    (width, height): (u32, u32),
+    r: u32,
+    horizontal: bool,
+    scratch: &mut Vec<f32>,
+) {
+    let w = width as usize;
+    let h = height as usize;
     if w == 0 || h == 0 {
         return;
     }
     let r = r as usize;
-    let win = (2 * r + 1) as u32;
+    let win = (2 * r + 1) as f64;
     // `len` = number of pixels along the blur axis; `lines` = the other axis.
     let (len, lines) = if horizontal { (w, h) } else { (h, w) };
     // Index of pixel `pos` on line `line`, mapped back to a flat rgba offset.
@@ -205,24 +231,24 @@ fn box_blur_axis(img: &mut BgImage, r: u32, horizontal: bool, scratch: &mut Vec<
         (y * w + x) * 4
     };
     let last = len as isize - 1;
-    let src = &img.rgba;
+    let src = &*rgba;
     let dst = scratch.as_mut_slice();
     for line in 0..lines {
         // Initial window centered at pos 0 (the left/top side clamps to 0).
-        let mut sum = [0u32; 4];
+        let mut sum = [0.0f64; 4];
         for d in -(r as isize)..=(r as isize) {
             let i = offset(line, d.clamp(0, last) as usize);
-            sum[0] += src[i] as u32;
-            sum[1] += src[i + 1] as u32;
-            sum[2] += src[i + 2] as u32;
-            sum[3] += src[i + 3] as u32;
+            sum[0] += f64::from(src[i]);
+            sum[1] += f64::from(src[i + 1]);
+            sum[2] += f64::from(src[i + 2]);
+            sum[3] += f64::from(src[i + 3]);
         }
         for pos in 0..len {
             let o = offset(line, pos);
-            dst[o] = (sum[0] / win) as u8;
-            dst[o + 1] = (sum[1] / win) as u8;
-            dst[o + 2] = (sum[2] / win) as u8;
-            dst[o + 3] = (sum[3] / win) as u8;
+            dst[o] = (sum[0] / win) as f32;
+            dst[o + 1] = (sum[1] / win) as f32;
+            dst[o + 2] = (sum[2] / win) as f32;
+            dst[o + 3] = (sum[3] / win) as f32;
             if pos + 1 < len {
                 // Slide to pos+1: add entering (pos+1+r), drop leaving (pos−r),
                 // both clamped — keeps the constant `win` divisor.
@@ -231,14 +257,14 @@ fn box_blur_axis(img: &mut BgImage, r: u32, horizontal: bool, scratch: &mut Vec<
                     (pos as isize + 1 + r as isize).clamp(0, last) as usize,
                 );
                 let leaving = offset(line, (pos as isize - r as isize).clamp(0, last) as usize);
-                sum[0] = sum[0] + src[entering] as u32 - src[leaving] as u32;
-                sum[1] = sum[1] + src[entering + 1] as u32 - src[leaving + 1] as u32;
-                sum[2] = sum[2] + src[entering + 2] as u32 - src[leaving + 2] as u32;
-                sum[3] = sum[3] + src[entering + 3] as u32 - src[leaving + 3] as u32;
+                sum[0] = sum[0] + f64::from(src[entering]) - f64::from(src[leaving]);
+                sum[1] = sum[1] + f64::from(src[entering + 1]) - f64::from(src[leaving + 1]);
+                sum[2] = sum[2] + f64::from(src[entering + 2]) - f64::from(src[leaving + 2]);
+                sum[3] = sum[3] + f64::from(src[entering + 3]) - f64::from(src[leaving + 3]);
             }
         }
     }
-    std::mem::swap(&mut img.rgba, scratch);
+    std::mem::swap(rgba, scratch);
 }
 
 /// Home directory for `~/` expansion. Windows sets `USERPROFILE`, not `HOME`,
@@ -313,10 +339,23 @@ pub fn decode_bg_image(path: &str) -> Option<BgImage> {
     limits.max_image_width = Some(MAX_BG_IMAGE_DIM);
     limits.max_image_height = Some(MAX_BG_IMAGE_DIM);
     limits.max_alloc = Some(MAX_BG_IMAGE_BYTES);
-    reader.limits(limits);
-    match reader.decode() {
+    reader.limits(limits.clone());
+    match reader.into_decoder().and_then(|mut decoder| {
+        use image::ImageDecoder;
+        if decoder_frame_bytes(decoder.dimensions()).is_none() {
+            return Err(image::ImageError::Limits(
+                image::error::LimitError::from_kind(
+                    image::error::LimitErrorKind::InsufficientMemory,
+                ),
+            ));
+        }
+        // Preserve ImageReader::decode's accounting for the decoded buffer.
+        limits.reserve(decoder.total_bytes())?;
+        decoder.set_limits(limits)?;
+        image::DynamicImage::from_decoder(decoder)
+    }) {
         Ok(img) => {
-            let rgba = img.to_rgba8();
+            let rgba = img.into_rgba8();
             let (w, h) = rgba.dimensions();
             Some(BgImage {
                 width: w,
@@ -380,8 +419,18 @@ pub fn decode_bg_image_frames(path: &str) -> Option<Vec<BgFrame>> {
     // decodes as a one-frame animation.
     let (mut frames, frame_upper_bound) = match format {
         Some(ImageFormat::Gif) => match image::codecs::gif::GifDecoder::new(inner) {
-            Ok(d) if decoder_dimensions_fit(d.dimensions()) => {
-                let bytes = decoder_frame_bytes(d.dimensions())?;
+            Ok(mut d) if decoder_dimensions_fit(d.dimensions()) => {
+                let (w, h) = d.dimensions();
+                let bytes = decoder_frame_bytes((w, h))?;
+                let mut limits = image::Limits::default();
+                limits.max_image_width = Some(w);
+                limits.max_image_height = Some(h);
+                // Previous canvas, decoded subframe, and composited output.
+                limits.max_alloc = Some(bytes.checked_mul(3)?);
+                if let Err(e) = d.set_limits(limits) {
+                    log::warn!("background-image gif {}: {e}", pb.display());
+                    return None;
+                }
                 (d.into_frames(), bytes)
             }
             Ok(d) => {
@@ -506,6 +555,10 @@ pub fn decode_bg_image_frames(path: &str) -> Option<Vec<BgFrame>> {
         });
     }
     if out.is_empty() {
+        // Do not retry a GIF through a decoder with different frame limits.
+        if format == Some(ImageFormat::Gif) {
+            return None;
+        }
         // Animated path yielded nothing usable — last-ditch single decode.
         return single_frame(path);
     }
@@ -564,14 +617,15 @@ mod tests {
             return;
         }
         let r = (radius.min(16)) as i32;
-        premultiply_linear_rgba8(&mut img.rgba);
-        let pass = |img: &mut BgImage, horizontal: bool| {
+        let mut linear = vec![0.0f32; img.rgba.len()];
+        premultiply_linear_rgba8(&img.rgba, &mut linear);
+        let pass = |linear: &mut Vec<f32>, horizontal: bool| {
             let w = img.width as i32;
             let h = img.height as i32;
-            let mut out = vec![0u8; img.rgba.len()];
+            let mut out = vec![0.0f32; linear.len()];
             for y in 0..h {
                 for x in 0..w {
-                    let mut sum = [0u32; 4];
+                    let mut sum = [0.0f64; 4];
                     let mut count = 0u32;
                     for d in -r..=r {
                         let (xx, yy) = if horizontal {
@@ -580,26 +634,48 @@ mod tests {
                             (x, (y + d).clamp(0, h - 1))
                         };
                         let i = (yy as usize * w as usize + xx as usize) * 4;
-                        sum[0] += img.rgba[i] as u32;
-                        sum[1] += img.rgba[i + 1] as u32;
-                        sum[2] += img.rgba[i + 2] as u32;
-                        sum[3] += img.rgba[i + 3] as u32;
+                        sum[0] += f64::from(linear[i]);
+                        sum[1] += f64::from(linear[i + 1]);
+                        sum[2] += f64::from(linear[i + 2]);
+                        sum[3] += f64::from(linear[i + 3]);
                         count += 1;
                     }
                     let o = (y as usize * w as usize + x as usize) * 4;
-                    out[o] = (sum[0] / count) as u8;
-                    out[o + 1] = (sum[1] / count) as u8;
-                    out[o + 2] = (sum[2] / count) as u8;
-                    out[o + 3] = (sum[3] / count) as u8;
+                    out[o] = (sum[0] / f64::from(count)) as f32;
+                    out[o + 1] = (sum[1] / f64::from(count)) as f32;
+                    out[o + 2] = (sum[2] / f64::from(count)) as f32;
+                    out[o + 3] = (sum[3] / f64::from(count)) as f32;
                 }
             }
-            img.rgba = out;
+            *linear = out;
         };
         for _ in 0..3 {
-            pass(img, true);
-            pass(img, false);
+            pass(&mut linear, true);
+            pass(&mut linear, false);
         }
-        unpremultiply_linear_rgba8(&mut img.rgba);
+        unpremultiply_linear_rgba8(&linear, &mut img.rgba);
+    }
+
+    #[test]
+    fn blur_preserves_constant_dark_colors() {
+        for channel in [6u8, 1, 13, 64] {
+            for alpha in [255u8, 128, 1] {
+                for radius in [1, 8, 16] {
+                    let pixel = [channel, channel, channel, alpha];
+                    let rgba = pixel.repeat(5 * 3);
+                    let mut image = BgImage {
+                        width: 5,
+                        height: 3,
+                        rgba: rgba.clone(),
+                    };
+                    assert!(box_blur(&mut image, radius));
+                    assert_eq!(
+                        image.rgba, rgba,
+                        "channel={channel} alpha={alpha} r={radius}"
+                    );
+                }
+            }
+        }
     }
 
     /// Drift guard: the O(W·H) sliding-window blur must be
@@ -769,6 +845,30 @@ mod tests {
     }
 
     #[test]
+    fn gif_rejects_subframe_larger_than_canvas() {
+        use image::codecs::gif::GifEncoder;
+        use image::{Frame, Rgba, RgbaImage};
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("subframe.gif");
+        let mut encoded = Vec::new();
+        {
+            let mut encoder = GifEncoder::new(&mut encoded);
+            let pixels = RgbaImage::from_pixel(4, 4, Rgba([6, 6, 6, 255]));
+            encoder
+                .encode_frame(Frame::new(pixels))
+                .expect("encode gif");
+        }
+        std::fs::write(&path, &encoded).expect("write gif");
+        assert!(decode_bg_image_frames(path.to_str().unwrap()).is_some());
+
+        // Shrink only the logical screen; retain the valid 4x4 frame.
+        encoded[6..10].copy_from_slice(&[1, 0, 1, 0]);
+        std::fs::write(&path, &encoded).expect("write small canvas gif");
+        assert!(decode_bg_image_frames(path.to_str().unwrap()).is_none());
+    }
+
+    #[test]
     fn empty_path_is_none() {
         // Drift guard. The cfg default for
         // background_image is an empty string; decode_bg_image
@@ -776,6 +876,18 @@ mod tests {
         // spam logs for every non-bg-image kettle run).
         assert!(decode_bg_image("").is_none());
         assert!(decode_bg_image("   ").is_none());
+    }
+
+    #[test]
+    fn rejects_rgb_bmp_whose_rgba_exceeds_byte_cap() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("oversized-rgba.bmp");
+        let pixels = image::RgbImage::new(8192, 2049);
+        pixels.save(&path).expect("write rgb bmp");
+        drop(pixels);
+
+        assert!(decode_bg_image(path.to_str().unwrap()).is_none());
+        assert!(decode_bg_image_frames(path.to_str().unwrap()).is_none());
     }
 
     #[test]

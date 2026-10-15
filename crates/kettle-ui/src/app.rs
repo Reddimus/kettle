@@ -19535,6 +19535,14 @@ impl App {
         if layer_exit && let Some(layer) = &ws.cursor_layer {
             layer.begin_exit_frame();
         }
+        if let Some(window) = window.as_ref() {
+            let window = Arc::downgrade(window);
+            renderer.ensure_background_redraw(move || {
+                if let Some(window) = window.upgrade() {
+                    window.request_redraw();
+                }
+            });
+        }
         let frame_started = std::time::Instant::now();
         let frame_result = renderer.render_frame_with_status_and_pre_present(
             &panes,
