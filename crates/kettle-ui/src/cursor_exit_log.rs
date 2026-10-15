@@ -845,20 +845,18 @@ mod tests {
         assert_eq!(format!("{first}{duplicate}").lines().count(), 2);
     }
 
-    fn app_source() -> &'static str {
-        include_str!("app.rs")
-            .split("#[cfg(test)]\nmod tests")
-            .next()
-            .unwrap()
+    fn app_source() -> String {
+        crate::app::app_source()
     }
 
     #[test]
     fn source_guard_brackets_the_complete_exit_frame() {
-        let redraw = app_source()
+        let source = app_source();
+        let redraw = source
             .split_once("fn redraw(&mut self, ws: &mut WindowState) {")
             .unwrap()
             .1
-            .split_once("fn build_status_bar(")
+            .split_once("\n    }\n")
             .unwrap()
             .0;
         let start = redraw.find("crate::cursor_exit_log::raw_now_ns()").unwrap();

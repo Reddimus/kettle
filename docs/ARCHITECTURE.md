@@ -357,6 +357,28 @@ relative operations; ancestor identities are recorded and the complete chain
 is reopened and revalidated around publication. This keeps steady descriptor
 use O(1) per guard rather than O(path depth) without weakening path-swap checks.
 
+### Where the App's code lives
+
+`kettle-ui`'s `App` (`crates/kettle-ui/src/app.rs`) owns every window and
+runs the event loop: window and user events, `handle_action`, drawing and
+the per-pane output drain. Its subsystems are `impl App` blocks in
+`crates/kettle-ui/src/app/`:
+
+| Module | Holds |
+| --- | --- |
+| `ctl` | the control API's requests and replies |
+| `automation` | Lua hooks, the remote command spool, output triggers |
+| `media`, `preview` | the media shelf's jobs; lanes, the viewer and cards on screen |
+| `paste` | text, file and screenshot pastes, the paste queue, the receipt |
+| `search`, `menus`, `modals` | the search bar; context menus; Settings, the palette and other dialogs |
+| `windowing` | opening and closing windows, tear-off, docking, tab transfer |
+| `pointer`, `chrome` | mouse reporting, wheel and selection; the tab bar, status bar and banner |
+| `accessibility` | the accessibility tree and its actions |
+| `config_reload`, `sessions`, `gpu_recovery` | reloads and themes; session save and restore; GPU loss |
+
+The other files in `app/` are its tests. Guards that read the App's source
+use `app_source()`, which joins app.rs and these modules.
+
 ### Private clipboard images and video receipts
 
 Pasted clipboard bitmaps add a narrower ephemeral-file lifecycle on top of

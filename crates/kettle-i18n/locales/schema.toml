@@ -5,30 +5,30 @@
 context = "crates/kettle-render/src/lib.rs capture_png_with_annotation: CLI screenshot error when window padding and at least one terminal cell cannot fit the GPU texture limit."
 
 [messages.a11y_pane]
-context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of a pane whose program set no title. id is the pane's number."
+context = "crates/kettle-ui/src/app/accessibility.rs accessibility_tree: screen-reader name of a pane whose program set no title. id is the pane's number."
 args = [{ name = "id", type = "u64" }]
 
 [messages.a11y_window]
 context = "crates/kettle-ui/src/app.rs: screen-reader name of a Kettle window. Kettle is the product name."
 
 [messages.about_copy_version]
-context = "crates/kettle-ui/src/app.rs open_about_panel: About panel row."
+context = "crates/kettle-ui/src/app/menus.rs open_about_panel: About panel row."
 
 [messages.about_open_github]
-context = "crates/kettle-ui/src/app.rs open_about_panel: About panel row."
+context = "crates/kettle-ui/src/app/menus.rs open_about_panel: About panel row."
 
 [messages.about_open_release]
-context = "crates/kettle-ui/src/app.rs open_about_panel: About panel row. The page of an available update's release."
+context = "crates/kettle-ui/src/app/menus.rs open_about_panel: About panel row. The page of an available update's release."
 
 [messages.about_update_available]
-context = "crates/kettle-ui/src/app.rs open_about_panel: About panel row. tag is a release tag such as v5.0.0, verbatim."
+context = "crates/kettle-ui/src/app/menus.rs open_about_panel: About panel row. tag is a release tag such as v5.0.0, verbatim."
 args = [{ name = "tag", type = "str" }]
 
 [messages.about_update_unknown]
-context = "crates/kettle-ui/src/app.rs open_about_panel: About panel row. No update check has finished."
+context = "crates/kettle-ui/src/app/menus.rs open_about_panel: About panel row. No update check has finished."
 
 [messages.ctl_screenshot_pane_not_visible]
-context = "crates/kettle-ui/src/app.rs ctl_screenshot: control response when a pane is in an inactive tab or hidden by another pane's zoom."
+context = "crates/kettle-ui/src/app/ctl.rs ctl_screenshot: control response when a pane is in an inactive tab or hidden by another pane's zoom."
 
 [messages.completion_a11y_list]
 context = "crates/kettle-ui/src/app.rs: screen-reader name of the completion list. kind is the translated list kind (for example Completions); source is a shell name such as fish, kept verbatim."
@@ -117,34 +117,34 @@ context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-re
 context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader name of the right-click menu."
 
 [messages.menu_about]
-context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row. Row of the new-tab dropdown. kettle is the product name."
+context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row. Row of the new-tab dropdown. kettle is the product name."
 
 [messages.menu_close_pane]
-context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row."
+context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row."
 
 [messages.menu_close_tab]
-context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row."
+context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row."
 
 [messages.menu_close_window]
-context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row."
+context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row."
 
 [messages.menu_command_palette]
-context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row. Row of the new-tab dropdown."
+context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row. Row of the new-tab dropdown."
 
 [messages.menu_copy]
-context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row."
+context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row."
 
 [messages.menu_copy_link]
-context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row."
+context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row."
 
 [messages.menu_group_tab]
-context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row. Puts every pane of the tab in one broadcast group."
+context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row. Puts every pane of the tab in one broadcast group."
 
 [messages.menu_new_tab]
-context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row."
+context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row."
 
 [messages.menu_new_window]
-context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row."
+context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row."
 
 [messages.menu_open_in_kettle]
 context = "crates/kettle-ui/src/app.rs card menu: right-click menu row on an inline media card that opens its item in Kettle's own media viewer."
@@ -162,28 +162,28 @@ context = "crates/kettle-ui/src/media/external/video.rs: right-click menu row on
 context = "crates/kettle-ui/src/media/external/video.rs: right-click menu row on an inline media card, and the media lane button's accessible name, Linux only, that opens a private copy of a shown video in the mpv video player. 'mpv' is the program's name, lowercase."
 
 [messages.notify_title_open_image]
-context = "crates/kettle-ui/src/app.rs act_on_media: desktop notification title when opening a copy of a media item in the image viewer did not work."
+context = "crates/kettle-ui/src/app/preview.rs act_on_media: desktop notification title when opening a copy of a media item in the image viewer did not work."
 
 [messages.notify_title_open_video]
-context = "crates/kettle-ui/src/app.rs open_item_outside: desktop notification title when opening a private copy of a shown video in the permitted video player did not work. 'kettle' is the product name, lowercase as in the other notification titles."
+context = "crates/kettle-ui/src/app/preview.rs open_item_outside: desktop notification title when opening a private copy of a shown video in the permitted video player did not work. 'kettle' is the product name, lowercase as in the other notification titles."
 
 [messages.notify_body_open_video_busy]
-context = "crates/kettle-ui/src/app.rs open_item_outside: body when two opens are already under way, or Kettle's store of video copies is full of copies made in the last five minutes."
+context = "crates/kettle-ui/src/app/preview.rs open_item_outside: body when two opens are already under way, or Kettle's store of video copies is full of copies made in the last five minutes."
 
 [messages.notify_body_open_video_copy]
-context = "crates/kettle-ui/src/app.rs open_item_outside: body when the private copy of the video could not be made, or was changed before the player got it."
+context = "crates/kettle-ui/src/app/preview.rs open_item_outside: body when the private copy of the video could not be made, or was changed before the player got it."
 
 [messages.notify_body_open_video_player]
-context = "crates/kettle-ui/src/app.rs open_item_outside: body when the permitted video player (QuickTime Player on macOS, mpv on Linux) is missing or failed its check."
+context = "crates/kettle-ui/src/app/preview.rs open_item_outside: body when the permitted video player (QuickTime Player on macOS, mpv on Linux) is missing or failed its check."
 
 [messages.notify_body_open_video_unplayable]
-context = "crates/kettle-ui/src/app.rs open_item_outside: body when the permitted video player does not play the video's container or codec. The poster is the still frame Kettle shows for the video."
+context = "crates/kettle-ui/src/app/preview.rs open_item_outside: body when the permitted video player does not play the video's container or codec. The poster is the still frame Kettle shows for the video."
 
 [messages.notify_body_open_video_changed]
-context = "crates/kettle-ui/src/app.rs open_item_outside: body when the video's file was changed, moved or replaced after Kettle showed it, so Kettle does not copy it. Showing it again renders the current file."
+context = "crates/kettle-ui/src/app/preview.rs open_item_outside: body when the video's file was changed, moved or replaced after Kettle showed it, so Kettle does not copy it. Showing it again renders the current file."
 
 [messages.notify_body_open_video_room]
-context = "crates/kettle-ui/src/app.rs open_item_outside: body when the video is larger than the 4 GiB Kettle copies, or copying it would leave less than 2 GiB free on the disk. GiB is the binary unit; keep the numbers."
+context = "crates/kettle-ui/src/app/preview.rs open_item_outside: body when the video is larger than the 4 GiB Kettle copies, or copying it would leave less than 2 GiB free on the disk. GiB is the binary unit; keep the numbers."
 
 [messages.notify_body_open_video_refused]
 context = "crates/kettle-ui/src/media/external/video.rs open: body when the video player started but exited with an error instead of opening the copy, for example because its build lacks the codec or it cannot reach the display."
@@ -216,7 +216,7 @@ context = "crates/kettle-ui/src/app.rs preview_failure_body: body when a video c
 context = "crates/kettle-ui/src/app.rs notify_preview_failure: body for any other failure: the render timed out, needed too much memory, or Kettle was rendering something else."
 
 [messages.notify_body_preview_unplaced]
-context = "crates/kettle-ui/src/app.rs act_hint: body, under notify_title_preview_failed, when a path picked for a preview cannot be placed on this computer: the pane's folder is unknown or not local, or the path climbs with '..'."
+context = "crates/kettle-ui/src/app/modals.rs act_hint: body, under notify_title_preview_failed, when a path picked for a preview cannot be placed on this computer: the pane's folder is unknown or not local, or the path climbs with '..'."
 
 [messages.notify_title_preview_nothing]
 context = "crates/kettle-ui/src/app.rs handle_action PreviewLink: title of the desktop notification when the focused pane names no file to preview. 'kettle' is the product name, lowercase as in the other notification titles."
@@ -225,110 +225,110 @@ context = "crates/kettle-ui/src/app.rs handle_action PreviewLink: title of the d
 context = "crates/kettle-ui/src/app.rs handle_action PreviewLink: body when the focused pane's visible text names no image, SVG or Mermaid file. Quick select finds a path only with a folder in it; './plot.png' is a literal example path and stays as is."
 
 [messages.notify_body_preview_nothing_copied]
-context = "crates/kettle-ui/src/app.rs preview_copied_file: body, under notify_title_preview_nothing, when the clipboard names no image, SVG or Mermaid file. 'file://' is a literal URL scheme and stays as is."
+context = "crates/kettle-ui/src/app/media.rs preview_copied_file: body, under notify_title_preview_nothing, when the clipboard names no image, SVG or Mermaid file. 'file://' is a literal URL scheme and stays as is."
 
 [messages.notify_body_preview_no_diagram]
-context = "crates/kettle-ui/src/app.rs preview_copied_diagram: body, under notify_title_preview_nothing, when the copied or selected text holds no Mermaid diagram: no ```mermaid fence and no row a diagram starts with (flowchart, sequenceDiagram and so on)."
+context = "crates/kettle-ui/src/app/media.rs preview_copied_diagram: body, under notify_title_preview_nothing, when the copied or selected text holds no Mermaid diagram: no ```mermaid fence and no row a diagram starts with (flowchart, sequenceDiagram and so on)."
 
 [messages.notify_body_preview_diagram_wrapped]
-context = "crates/kettle-ui/src/app.rs preview_copied_diagram: body, under notify_title_preview_nothing, when a selected or copied diagram's rows were hard-wrapped by the agent's terminal UI and Kettle cannot tell for sure where its lines end. '/copy' is the literal command in Claude Code and Codex that copies the exact block, and stays as is."
+context = "crates/kettle-ui/src/app/media.rs preview_copied_diagram: body, under notify_title_preview_nothing, when a selected or copied diagram's rows were hard-wrapped by the agent's terminal UI and Kettle cannot tell for sure where its lines end. '/copy' is the literal command in Claude Code and Codex that copies the exact block, and stays as is."
 
 [messages.notify_body_preview_diagram_unbounded]
-context = "crates/kettle-ui/src/app.rs preview_copied_diagram: body, under notify_title_preview_nothing, when a selected or copied reply holds a diagram whose rows are not indented and more text follows it after a blank row, so Kettle cannot tell whether that text is more of the diagram or the agent's prose."
+context = "crates/kettle-ui/src/app/media.rs preview_copied_diagram: body, under notify_title_preview_nothing, when a selected or copied reply holds a diagram whose rows are not indented and more text follows it after a blank row, so Kettle cannot tell whether that text is more of the diagram or the agent's prose."
 
 [messages.notify_body_preview_diagram_too_many]
-context = "crates/kettle-ui/src/app.rs preview_copied_diagram: body, under notify_title_preview_nothing, when copied or selected text holds more than count Mermaid diagrams, more than one preview gallery shows, so none is previewed."
+context = "crates/kettle-ui/src/app/media.rs preview_copied_diagram: body, under notify_title_preview_nothing, when copied or selected text holds more than count Mermaid diagrams, more than one preview gallery shows, so none is previewed."
 args = [{ name = "count", type = "u64" }]
 
 [messages.notify_title_preview_no_room]
-context = "crates/kettle-ui/src/app.rs show_media_item: title of the desktop notification when the user opens a pane's preview lane but the pane is too small to hold even its one-row strip beside the terminal. 'kettle' is the product name, lowercase as in the other notification titles."
+context = "crates/kettle-ui/src/app/preview.rs show_media_item: title of the desktop notification when the user opens a pane's preview lane but the pane is too small to hold even its one-row strip beside the terminal. 'kettle' is the product name, lowercase as in the other notification titles."
 
 [messages.notify_body_open_image_busy]
-context = "crates/kettle-ui/src/app.rs act_on_media: desktop notification body when too many opens are already running."
+context = "crates/kettle-ui/src/app/preview.rs act_on_media: desktop notification body when too many opens are already running."
 
 [messages.notify_body_open_image_refused]
 context = "crates/kettle-ui/src/media/external.rs open: body when the image viewer started but exited with an error instead of opening the PNG copy Kettle made."
 
 [messages.notify_body_open_image_copy]
-context = "crates/kettle-ui/src/app.rs act_on_media: desktop notification body when the private PNG copy could not be written, or the item's pixels are no longer held."
+context = "crates/kettle-ui/src/app/preview.rs act_on_media: desktop notification body when the private PNG copy could not be written, or the item's pixels are no longer held."
 
 [messages.notify_body_open_image_viewer]
-context = "crates/kettle-ui/src/app.rs act_on_media: desktop notification body when the permitted image viewer (Preview on macOS, Eye of GNOME on Linux) is missing or failed its check."
+context = "crates/kettle-ui/src/app/preview.rs act_on_media: desktop notification body when the permitted image viewer (Preview on macOS, Eye of GNOME on Linux) is missing or failed its check."
 
 [messages.menu_open_link]
-context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row. Shown when the right-click lands on a link."
+context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row. Shown when the right-click lands on a link."
 
 [messages.menu_preview_in_kettle]
 context = "crates/kettle-ui/src/app.rs link_menu_rows: right-click menu row on a link to a local image, SVG or Mermaid file, after Open Link: show the file in the pane's own preview lane in Kettle instead of another app. 'Kettle' is the product name."
 
 [messages.menu_preview_copied_file]
-context = "crates/kettle-ui/src/app.rs open_context_menu: right-click menu row, shown on Shift+right-click when the clipboard names a file the preview lane can show; it previews that file in the pane's lane. Title Case like the other menu rows."
+context = "crates/kettle-ui/src/app/menus.rs open_context_menu: right-click menu row, shown on Shift+right-click when the clipboard names a file the preview lane can show; it previews that file in the pane's lane. Title Case like the other menu rows."
 
 [messages.menu_preview_copied_diagram]
-context = "crates/kettle-ui/src/app.rs open_context_menu: right-click menu row, shown on Shift+right-click when the clipboard holds a Mermaid diagram, as /copy in Claude Code or Codex leaves it; it renders the diagram in the pane's preview lane. Title Case like the other menu rows."
+context = "crates/kettle-ui/src/app/menus.rs open_context_menu: right-click menu row, shown on Shift+right-click when the clipboard holds a Mermaid diagram, as /copy in Claude Code or Codex leaves it; it renders the diagram in the pane's preview lane. Title Case like the other menu rows."
 
 [messages.menu_preview_selected_diagram]
-context = "crates/kettle-ui/src/app.rs open_context_menu: right-click menu row, shown when the selected text holds a Mermaid diagram an agent printed; it renders the diagram in the pane's preview lane. Title Case like the other menu rows."
+context = "crates/kettle-ui/src/app/menus.rs open_context_menu: right-click menu row, shown when the selected text holds a Mermaid diagram an agent printed; it renders the diagram in the pane's preview lane. Title Case like the other menu rows."
 
 [messages.menu_paste]
-context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row."
+context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row."
 
 [messages.menu_pref_advanced]
-context = "crates/kettle-ui/src/app.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
+context = "crates/kettle-ui/src/app/menus.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
 
 [messages.menu_pref_bell_attention]
-context = "crates/kettle-ui/src/app.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
+context = "crates/kettle-ui/src/app/menus.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
 
 [messages.menu_pref_bell_both]
-context = "crates/kettle-ui/src/app.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
+context = "crates/kettle-ui/src/app/menus.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
 
 [messages.menu_pref_bell_off]
-context = "crates/kettle-ui/src/app.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
+context = "crates/kettle-ui/src/app/menus.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
 
 [messages.menu_pref_bell_visual]
-context = "crates/kettle-ui/src/app.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
+context = "crates/kettle-ui/src/app/menus.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
 
 [messages.menu_pref_confirm_always]
-context = "crates/kettle-ui/src/app.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
+context = "crates/kettle-ui/src/app/menus.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
 
 [messages.menu_pref_confirm_multiple]
-context = "crates/kettle-ui/src/app.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
+context = "crates/kettle-ui/src/app/menus.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
 
 [messages.menu_pref_confirm_never]
-context = "crates/kettle-ui/src/app.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
+context = "crates/kettle-ui/src/app/menus.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
 
 [messages.menu_pref_copy_on_select]
-context = "crates/kettle-ui/src/app.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
+context = "crates/kettle-ui/src/app/menus.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
 
 [messages.menu_pref_cursor_blink]
-context = "crates/kettle-ui/src/app.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
+context = "crates/kettle-ui/src/app/menus.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
 
 [messages.menu_pref_font_bigger]
-context = "crates/kettle-ui/src/app.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
+context = "crates/kettle-ui/src/app/menus.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
 
 [messages.menu_pref_font_smaller]
-context = "crates/kettle-ui/src/app.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
+context = "crates/kettle-ui/src/app/menus.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
 
 [messages.menu_pref_mouse_hide]
-context = "crates/kettle-ui/src/app.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
+context = "crates/kettle-ui/src/app/menus.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
 
 [messages.menu_pref_scrollbar_always]
-context = "crates/kettle-ui/src/app.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
+context = "crates/kettle-ui/src/app/menus.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
 
 [messages.menu_pref_scrollbar_auto]
-context = "crates/kettle-ui/src/app.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
+context = "crates/kettle-ui/src/app/menus.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
 
 [messages.menu_pref_scrollbar_hidden]
-context = "crates/kettle-ui/src/app.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
+context = "crates/kettle-ui/src/app/menus.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
 
 [messages.menu_preferences]
-context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row. Submenu of quick toggles."
+context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row. Submenu of quick toggles."
 
 [messages.menu_profile]
-context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row. Submenu listing config profiles."
+context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row. Submenu listing config profiles."
 
 [messages.menu_read_only]
-context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row. Check row: the pane ignores typing while output keeps flowing."
+context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row. Check row: the pane ignores typing while output keeps flowing."
 
 [messages.menu_reattach]
 context = "crates/kettle-ui/src/app.rs remote_reconnect_label: right-click row that reopens a detected remote session in a new pane. runtime is a command name (docker, podman, kubectl, lxc) and container a container name, both verbatim. Spanish may reorder them."
@@ -343,49 +343,49 @@ context = "crates/kettle-ui/src/app.rs remote_reconnect_label: right-click row t
 args = [{ name = "user", type = "str" }, { name = "host", type = "str" }]
 
 [messages.menu_reset_terminal]
-context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row."
+context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row."
 
 [messages.menu_restore]
-context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row. Shown instead of Zoom while the pane is zoomed."
+context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row. Shown instead of Zoom while the pane is zoomed."
 
 [messages.menu_set_group]
-context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row. Broadcast group of the pane. Opens an editor."
+context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row. Broadcast group of the pane. Opens an editor."
 
 [messages.menu_set_pane_title]
-context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row. Opens an editor."
+context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row. Opens an editor."
 
 [messages.menu_set_tab_title]
-context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row. Opens an editor."
+context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row. Opens an editor."
 
 [messages.menu_set_window_title]
-context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row. Opens an editor."
+context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row. Opens an editor."
 
 [messages.menu_settings]
-context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row. Opens the Settings panel."
+context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row. Opens the Settings panel."
 
 [messages.menu_split_auto]
-context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row. Splits along the pane's longer side."
+context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row. Splits along the pane's longer side."
 
 [messages.menu_split_down]
-context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row."
+context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row."
 
 [messages.menu_split_left]
-context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row."
+context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row."
 
 [messages.menu_split_right]
-context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row."
+context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row."
 
 [messages.menu_split_up]
-context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row."
+context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row."
 
 [messages.menu_theme_picker]
-context = "crates/kettle-ui/src/app.rs append_theme_menu_item: right-click menu row that opens the theme picker. The ellipsis says it opens a picker."
+context = "crates/kettle-ui/src/app/menus.rs append_theme_menu_item: right-click menu row that opens the theme picker. The ellipsis says it opens a picker."
 
 [messages.menu_ungroup_tab]
-context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row."
+context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row."
 
 [messages.menu_zoom]
-context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row. Shows the pane alone in its tab."
+context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row. Shows the pane alone in its tab."
 
 [messages.notify_body_command_exit]
 context = "crates/kettle-ui/src/app.rs: desktop notification body. A command's non-zero exit status. Keep the ✗."
@@ -476,7 +476,7 @@ context = "crates/kettle-ui/src/app.rs spawn_file_link_opener: desktop notificat
 args = [{ name = "name", type = "str" }]
 
 [messages.notify_body_preview_no_room]
-context = "crates/kettle-ui/src/app.rs show_media_item: body of that notification: nothing opened, and what to do. 'shelf' is the pane's media shelf, the list of images and diagrams sent to it."
+context = "crates/kettle-ui/src/app/preview.rs show_media_item: body of that notification: nothing opened, and what to do. 'shelf' is the pane's media shelf, the list of images and diagrams sent to it."
 
 [messages.notify_body_remote_not_delivered]
 context = "crates/kettle-ui/src/app.rs: desktop notification body. pane is a pane number."
@@ -1146,11 +1146,11 @@ context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-re
 context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader name of the Settings dialog when no category is known."
 
 [messages.settings_active_gpu]
-context = "crates/kettle-ui/src/app.rs settings_overlay_projection: Graphics note. name, kind and backend are the adapter's own words, verbatim."
+context = "crates/kettle-ui/src/app/modals.rs settings_overlay_projection: Graphics note. name, kind and backend are the adapter's own words, verbatim."
 args = [{ name = "name", type = "str" }, { name = "kind", type = "str" }, { name = "backend", type = "str" }]
 
 [messages.settings_active_gpu_initializing]
-context = "crates/kettle-ui/src/app.rs settings_overlay_projection: Graphics note before the GPU is ready."
+context = "crates/kettle-ui/src/app/modals.rs settings_overlay_projection: Graphics note before the GPU is ready."
 
 [messages.settings_category_agents]
 context = "crates/kettle-ui/src/settings.rs categories(): Settings category tab name. Settings for AI agents that use Kettle."
@@ -1306,19 +1306,19 @@ context = "crates/kettle-ui/src/settings.rs categories(): Settings row label. Bl
 context = "crates/kettle-ui/src/settings.rs categories(): Settings row label. Space between the window edge and the terminal text."
 
 [messages.settings_gpu_kind_discrete]
-context = "crates/kettle-ui/src/app.rs settings_overlay_projection: GPU kind inside the Active GPU note (feminine: la GPU)."
+context = "crates/kettle-ui/src/app/modals.rs settings_overlay_projection: GPU kind inside the Active GPU note (feminine: la GPU)."
 
 [messages.settings_gpu_kind_integrated]
-context = "crates/kettle-ui/src/app.rs settings_overlay_projection: GPU kind inside the Active GPU note (feminine: la GPU)."
+context = "crates/kettle-ui/src/app/modals.rs settings_overlay_projection: GPU kind inside the Active GPU note (feminine: la GPU)."
 
 [messages.settings_gpu_kind_other]
-context = "crates/kettle-ui/src/app.rs settings_overlay_projection: GPU kind inside the Active GPU note (feminine: la GPU)."
+context = "crates/kettle-ui/src/app/modals.rs settings_overlay_projection: GPU kind inside the Active GPU note (feminine: la GPU)."
 
 [messages.settings_gpu_kind_software]
-context = "crates/kettle-ui/src/app.rs settings_overlay_projection: GPU kind inside the Active GPU note (feminine: la GPU)."
+context = "crates/kettle-ui/src/app/modals.rs settings_overlay_projection: GPU kind inside the Active GPU note (feminine: la GPU)."
 
 [messages.settings_gpu_kind_virtual]
-context = "crates/kettle-ui/src/app.rs settings_overlay_projection: GPU kind inside the Active GPU note (feminine: la GPU)."
+context = "crates/kettle-ui/src/app/modals.rs settings_overlay_projection: GPU kind inside the Active GPU note (feminine: la GPU)."
 
 [messages.settings_heading]
 context = "crates/kettle-render/src/lib.rs settings_display_lines: panel title. category is a translated category name."
@@ -1376,19 +1376,19 @@ context = "crates/kettle-ui/src/settings.rs categories(): Keybinds row for the `
 context = "crates/kettle-ui/src/settings.rs categories(): Keybinds row for the `toggle_zoom` action."
 
 [messages.settings_note_agent_previews]
-context = "crates/kettle-ui/src/app.rs agent_previews_note: footer note on the Agent previews row."
+context = "crates/kettle-ui/src/app/media.rs agent_previews_note: footer note on the Agent previews row."
 
 [messages.settings_note_agent_previews_full]
-context = "crates/kettle-ui/src/app.rs agent_previews_note: footer note on the Agent previews row when agent-server = full, which already lets agents show previews."
+context = "crates/kettle-ui/src/app/media.rs agent_previews_note: footer note on the Agent previews row when agent-server = full, which already lets agents show previews."
 
 [messages.settings_note_agent_previews_launch_off]
-context = "crates/kettle-ui/src/app.rs agent_previews_note: footer note on the Agent previews row when Kettle was started with --agent-display off or --agent-server off."
+context = "crates/kettle-ui/src/app/media.rs agent_previews_note: footer note on the Agent previews row when Kettle was started with --agent-display off or --agent-server off."
 
 [messages.settings_note_agent_previews_pending_off]
-context = "crates/kettle-ui/src/app.rs agent_previews_note: footer note on the Agent previews row after it was turned off while previews are still on in this run. Infinitive in Spanish, like the other notes."
+context = "crates/kettle-ui/src/app/media.rs agent_previews_note: footer note on the Agent previews row after it was turned off while previews are still on in this run. Infinitive in Spanish, like the other notes."
 
 [messages.settings_note_agent_previews_unavailable]
-context = "crates/kettle-ui/src/app.rs agent_previews_note: footer note on the Agent previews row when the local server agents connect to failed to start."
+context = "crates/kettle-ui/src/app/media.rs agent_previews_note: footer note on the Agent previews row when the local server agents connect to failed to start."
 
 [messages.settings_note_blur]
 context = "crates/kettle-ui/src/app.rs settings_footer_note: shown on the Window blur and Background opacity rows."
@@ -1439,7 +1439,7 @@ context = "crates/kettle-ui/src/app.rs settings_footer_note: shown on the Comple
 context = "crates/kettle-ui/src/app.rs settings_footer_note: a change needs a new renderer."
 
 [messages.settings_press_chord]
-context = "crates/kettle-ui/src/app.rs settings_overlay_projection: shown in a Keybinds row while it waits for a key combination. Keep Esc."
+context = "crates/kettle-ui/src/app/modals.rs settings_overlay_projection: shown in a Keybinds row while it waits for a key combination. Keep Esc."
 
 [messages.settings_value_always]
 context = "crates/kettle-ui/src/settings.rs read(): Settings value."
@@ -1596,21 +1596,21 @@ context = "crates/kettle-render/src/card_scene.rs: status inside an owned inline
 context = "crates/kettle-render/src/card_scene.rs: a short, one-time tip drawn on a strip along the foot of the first inline media card a user sees, saying that clicking the card opens it in Kettle's media viewer. Keep it very short: it must fit a card a few cells wide."
 
 [messages.media_shelf_copied_diagram]
-context = "crates/kettle-ui/src/app.rs preview_copied_diagram: title of the shelf item for a diagram the user previewed from the clipboard, shown in the preview lane's header."
+context = "crates/kettle-ui/src/app/media.rs preview_copied_diagram: title of the shelf item for a diagram the user previewed from the clipboard, shown in the preview lane's header."
 
 [messages.media_shelf_copied_diagrams]
-context = "crates/kettle-ui/src/app.rs preview_copied_diagram: title of the shelf item when the clipboard held several Mermaid diagrams, shown as one gallery the user pages through in the preview lane; count is how many there are. It stays the same on every page."
+context = "crates/kettle-ui/src/app/media.rs preview_copied_diagram: title of the shelf item when the clipboard held several Mermaid diagrams, shown as one gallery the user pages through in the preview lane; count is how many there are. It stays the same on every page."
 args = [{ name = "count", type = "u64" }]
 
 [messages.media_shelf_selected_diagram]
-context = "crates/kettle-ui/src/app.rs preview_copied_diagram: title of the shelf item for a diagram the user previewed from selected text, shown in the preview lane's header."
+context = "crates/kettle-ui/src/app/media.rs preview_copied_diagram: title of the shelf item for a diagram the user previewed from selected text, shown in the preview lane's header."
 
 [messages.media_shelf_selected_diagrams]
-context = "crates/kettle-ui/src/app.rs preview_copied_diagram: title of the shelf item when selected text held several Mermaid diagrams, shown as one gallery the user pages through in the preview lane; count is how many there are. It stays the same on every page."
+context = "crates/kettle-ui/src/app/media.rs preview_copied_diagram: title of the shelf item when selected text held several Mermaid diagrams, shown as one gallery the user pages through in the preview lane; count is how many there are. It stays the same on every page."
 args = [{ name = "count", type = "u64" }]
 
 [messages.media_shelf_untitled]
-context = "crates/kettle-ui/src/app.rs ctl_show: title of a media shelf item an agent sent as inline image or SVG bytes without a title. The item is a picture; keep it short."
+context = "crates/kettle-ui/src/app/media.rs ctl_show: title of a media shelf item an agent sent as inline image or SVG bytes without a title. The item is a picture; keep it short."
 
 [messages.palette_open_media_shelf]
 context = "crates/kettle-config/src/palette.rs: command palette entry that opens the focused pane's media shelf (images an agent sent) in the viewer."
@@ -1667,26 +1667,26 @@ context = "crates/kettle-config/src/palette.rs: command palette entry for previe
 context = "crates/kettle-config/src/palette.rs: command palette entry for copy_agent_setup, which puts on the clipboard the shell function that starts Codex with Kettle's display server, for the user to paste into their shell's startup file. 'agent' means AI coding agents such as Codex and Claude Code."
 
 [messages.notify_title_agent_setup_copied]
-context = "crates/kettle-ui/src/app.rs copy_agent_setup: title of the desktop notification once the codex shell function is on the clipboard. 'kettle' is the product name, lowercase as in the other notification titles."
+context = "crates/kettle-ui/src/app/media.rs copy_agent_setup: title of the desktop notification once the codex shell function is on the clipboard. 'kettle' is the product name, lowercase as in the other notification titles."
 
 [messages.notify_body_agent_setup_copied]
-context = "crates/kettle-ui/src/app.rs copy_agent_setup: body under notify_title_agent_setup_copied. shell is the shell's program name (bash, zsh or fish), never translated; 'codex' is the function's name and stays as is."
+context = "crates/kettle-ui/src/app/media.rs copy_agent_setup: body under notify_title_agent_setup_copied. shell is the shell's program name (bash, zsh or fish), never translated; 'codex' is the function's name and stays as is."
 args = [{ name = "shell", type = "str" }]
 
 [messages.notify_title_agent_setup_not_copied]
-context = "crates/kettle-ui/src/app.rs copy_agent_setup: title of the desktop notification when the codex shell function could not be put on the clipboard. 'kettle' is the product name, lowercase as in the other notification titles."
+context = "crates/kettle-ui/src/app/media.rs copy_agent_setup: title of the desktop notification when the codex shell function could not be put on the clipboard. 'kettle' is the product name, lowercase as in the other notification titles."
 
 [messages.notify_body_agent_setup_shell]
-context = "crates/kettle-ui/src/app.rs copy_agent_setup: body when new panes start a shell other than bash, zsh or fish, or on a system without agent setup. bash, zsh, fish and 'kettle agent-setup --print --shell' are literal and stay as is."
+context = "crates/kettle-ui/src/app/media.rs copy_agent_setup: body when new panes start a shell other than bash, zsh or fish, or on a system without agent setup. bash, zsh, fish and 'kettle agent-setup --print --shell' are literal and stay as is."
 
 [messages.notify_body_agent_setup_translocated]
-context = "crates/kettle-ui/src/app.rs copy_agent_setup: body when Kettle runs from a copy macOS moved to a temporary location (App Translocation), whose path would not last in the function. /Applications is the literal folder name."
+context = "crates/kettle-ui/src/app/media.rs copy_agent_setup: body when Kettle runs from a copy macOS moved to a temporary location (App Translocation), whose path would not last in the function. /Applications is the literal folder name."
 
 [messages.notify_body_agent_setup_clipboard]
-context = "crates/kettle-ui/src/app.rs copy_agent_setup: body under notify_title_agent_setup_not_copied when the system clipboard could not be reached or written."
+context = "crates/kettle-ui/src/app/media.rs copy_agent_setup: body under notify_title_agent_setup_not_copied when the system clipboard could not be reached or written."
 
 [messages.notify_body_agent_setup_unnamed]
-context = "crates/kettle-ui/src/app.rs copy_agent_setup: body when Kettle's own path cannot be written into the function because it is not a plain absolute path."
+context = "crates/kettle-ui/src/app/media.rs copy_agent_setup: body when Kettle's own path cannot be written into the function because it is not a plain absolute path."
 
 [messages.palette_render_clipboard_as_diagram]
 context = "crates/kettle-config/src/palette.rs: command palette entry for render_clipboard_as_diagram, which renders the Mermaid diagram on the clipboard (as /copy in Claude Code or Codex leaves it) in the focused pane's preview lane. 'Kettle' is the product name."
@@ -1707,10 +1707,10 @@ context = "crates/kettle-ui/src/app.rs media_viewer_projection: kind of a raster
 context = "crates/kettle-ui/src/app.rs media_viewer_projection: kind of an SVG item in the media viewer's detail line, which lists kind, size and sender. SVG is a format name."
 
 [messages.media_viewer_kind_mermaid]
-context = "crates/kettle-ui/src/app.rs media_item_kind_and_sender: the kind of a media shelf item that is a rendered Mermaid diagram, in the viewer's detail line and a card's screen-reader label. Mermaid is a product name."
+context = "crates/kettle-ui/src/app/preview.rs media_item_kind_and_sender: the kind of a media shelf item that is a rendered Mermaid diagram, in the viewer's detail line and a card's screen-reader label. Mermaid is a product name."
 
 [messages.media_viewer_kind_video]
-context = "crates/kettle-ui/src/app.rs media_item_kind_and_sender: the kind of a media shelf item that is a video, shown as its poster, in the preview lane's detail line and a card's screen-reader label."
+context = "crates/kettle-ui/src/app/preview.rs media_item_kind_and_sender: the kind of a media shelf item that is a video, shown as its poster, in the preview lane's detail line and a card's screen-reader label."
 
 [messages.media_video_with_audio]
 context = "crates/kettle-ui/src/app.rs video_detail: in a video's detail line after its size, codec and length, saying it has a sound track. Kettle plays no sound from a preview."
@@ -1725,7 +1725,7 @@ context = "crates/kettle-ui/src/app.rs media_viewer_projection: kind of any othe
 context = "crates/kettle-ui/src/app.rs media_viewer_projection: the media viewer's sender line, under the kind and size, when Kettle verified the item came from a program running in this pane. It starts its own line."
 
 [messages.media_viewer_from_user]
-context = "crates/kettle-ui/src/app.rs media_item_kind_and_sender: the sender line of a preview the user opened themselves from a file the pane's output names, rather than one a program sent. Shown in the preview lane and read by screen readers."
+context = "crates/kettle-ui/src/app/preview.rs media_item_kind_and_sender: the sender line of a preview the user opened themselves from a file the pane's output names, rather than one a program sent. Shown in the preview lane and read by screen readers."
 
 [messages.media_viewer_unverified]
 context = "crates/kettle-ui/src/app.rs media_viewer_projection: the media viewer's sender line when Kettle could not verify the sender is in this pane and macOS could not validate who signed it. program is the executable path the system reports, shortened from its middle when the line is too long; pid is its process id. It starts its own line."
@@ -1746,55 +1746,55 @@ context = "crates/kettle-ui/src/app.rs media_lane_accessibility: screen-reader n
 args = [{ name = "index", type = "u64" }, { name = "count", type = "u64" }, { name = "title", type = "str" }, { name = "detail", type = "str" }]
 
 [messages.media_lane_hint]
-context = "crates/kettle-ui/src/app.rs preview_lane_panel: footer of a pane's preview lane. While the lane shows, typing still reaches the program in the terminal beside it (often an AI agent), so the user knows the lane does not take their keys."
+context = "crates/kettle-ui/src/app/preview.rs preview_lane_panel: footer of a pane's preview lane. While the lane shows, typing still reaches the program in the terminal beside it (often an AI agent), so the user knows the lane does not take their keys."
 
 [messages.media_lane_hint_focused]
-context = "crates/kettle-ui/src/app.rs preview_lane_panel: footer of a pane's preview lane while it holds the keyboard (focus_preview): keys move, zoom or copy the preview and reach nothing else, and Esc gives the keyboard back to the terminal beside the lane. Keep it short; it shares one line of the lane."
+context = "crates/kettle-ui/src/app/preview.rs preview_lane_panel: footer of a pane's preview lane while it holds the keyboard (focus_preview): keys move, zoom or copy the preview and reach nothing else, and Esc gives the keyboard back to the terminal beside the lane. Keep it short; it shares one line of the lane."
 
 [messages.media_lane_a11y_previous]
-context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of the preview lane's button that shows the previous item on the pane's media shelf."
+context = "crates/kettle-ui/src/app/accessibility.rs accessibility_tree: screen-reader name of the preview lane's button that shows the previous item on the pane's media shelf."
 
 [messages.media_lane_a11y_next]
-context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of the preview lane's button that shows the next item on the pane's media shelf."
+context = "crates/kettle-ui/src/app/accessibility.rs accessibility_tree: screen-reader name of the preview lane's button that shows the next item on the pane's media shelf."
 
 [messages.media_lane_a11y_collapse]
-context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of the preview lane's button that shrinks it to a one-line strip, giving the terminal its room back."
+context = "crates/kettle-ui/src/app/accessibility.rs accessibility_tree: screen-reader name of the preview lane's button that shrinks it to a one-line strip, giving the terminal its room back."
 
 [messages.media_lane_a11y_expand]
-context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of the collapsed preview lane's button that opens it out again."
+context = "crates/kettle-ui/src/app/accessibility.rs accessibility_tree: screen-reader name of the collapsed preview lane's button that opens it out again."
 
 [messages.media_lane_a11y_close]
-context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of the preview lane's button that closes it."
+context = "crates/kettle-ui/src/app/accessibility.rs accessibility_tree: screen-reader name of the preview lane's button that closes it."
 
 [messages.media_lane_a11y_source]
-context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of a preview lane's button that shows the item's source text (SVG or Mermaid) instead of the rendered image."
+context = "crates/kettle-ui/src/app/accessibility.rs accessibility_tree: screen-reader name of a preview lane's button that shows the item's source text (SVG or Mermaid) instead of the rendered image."
 
 [messages.media_lane_a11y_rendered]
-context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of a preview lane's button that shows the rendered image again after its source."
+context = "crates/kettle-ui/src/app/accessibility.rs accessibility_tree: screen-reader name of a preview lane's button that shows the rendered image again after its source."
 
 [messages.media_lane_a11y_canvas]
-context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of a preview lane's button that shows the image on the next background: the pane's, white, then a checkerboard."
+context = "crates/kettle-ui/src/app/accessibility.rs accessibility_tree: screen-reader name of a preview lane's button that shows the image on the next background: the pane's, white, then a checkerboard."
 
 [messages.media_lane_a11y_copy]
-context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of a preview lane's button that copies the image, or the source while the source shows, to the clipboard. An infinitive in Spanish."
+context = "crates/kettle-ui/src/app/accessibility.rs accessibility_tree: screen-reader name of a preview lane's button that copies the image, or the source while the source shows, to the clipboard. An infinitive in Spanish."
 
 [messages.media_lane_a11y_reload]
-context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of a preview lane's button that reads the item's file again and shows what it holds now. An infinitive in Spanish."
+context = "crates/kettle-ui/src/app/accessibility.rs accessibility_tree: screen-reader name of a preview lane's button that reads the item's file again and shows what it holds now. An infinitive in Spanish."
 
 [messages.media_lane_a11y_zoom_out]
-context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of a preview lane's button that shrinks the image by one step. An infinitive in Spanish."
+context = "crates/kettle-ui/src/app/accessibility.rs accessibility_tree: screen-reader name of a preview lane's button that shrinks the image by one step. An infinitive in Spanish."
 
 [messages.media_lane_a11y_zoom_in]
-context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of a preview lane's button that magnifies the image by one step. An infinitive in Spanish."
+context = "crates/kettle-ui/src/app/accessibility.rs accessibility_tree: screen-reader name of a preview lane's button that magnifies the image by one step. An infinitive in Spanish."
 
 [messages.media_lane_a11y_fit]
-context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of a preview lane's button that shows the image whole again, fitted to the lane, after zooming or panning. An infinitive in Spanish; the lane is the panel beside the terminal."
+context = "crates/kettle-ui/src/app/accessibility.rs accessibility_tree: screen-reader name of a preview lane's button that shows the image whole again, fitted to the lane, after zooming or panning. An infinitive in Spanish; the lane is the panel beside the terminal."
 
 [messages.media_lane_a11y_previous_diagram]
-context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of a preview lane's button that shows the diagram before this one in a gallery: the Mermaid diagrams of one Markdown file, or several copied together. Unavailable on the first diagram."
+context = "crates/kettle-ui/src/app/accessibility.rs accessibility_tree: screen-reader name of a preview lane's button that shows the diagram before this one in a gallery: the Mermaid diagrams of one Markdown file, or several copied together. Unavailable on the first diagram."
 
 [messages.media_lane_a11y_next_diagram]
-context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of a preview lane's button that shows the diagram after this one in a gallery: the Mermaid diagrams of one Markdown file, or several copied together. Unavailable on the last diagram."
+context = "crates/kettle-ui/src/app/accessibility.rs accessibility_tree: screen-reader name of a preview lane's button that shows the diagram after this one in a gallery: the Mermaid diagrams of one Markdown file, or several copied together. Unavailable on the last diagram."
 
 [messages.media_lane_a11y_diagram]
 context = "crates/kettle-ui/src/app.rs media_lane_accessibility: part of a preview lane's screen-reader name for a gallery of diagrams: which diagram it shows (index of count, counting from 1). Lowercase, as it sits between other parts separated by middle dots."

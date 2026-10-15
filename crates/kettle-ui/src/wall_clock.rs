@@ -177,7 +177,7 @@ mod tests {
 
     #[test]
     fn the_schedule_and_status_clock_read_local_time() {
-        let app = kettle_test_support::production_source(include_str!("app.rs"));
+        let app = kettle_test_support::production_source(&crate::app::app_source());
         let schedule = app
             .split_once("fn theme_schedule_is_dark(")
             .expect("theme_schedule_is_dark")

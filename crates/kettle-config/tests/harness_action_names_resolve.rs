@@ -31,14 +31,19 @@ fn scripts_dir() -> PathBuf {
 /// here. Extraction stops at the `Action::from_name` call, which is where the
 /// control-only prefix of that function ends.
 fn control_only_action_names() -> Vec<String> {
-    let source = std::fs::read_to_string(
-        repo_root()
-            .join("crates")
-            .join("kettle-ui")
-            .join("src")
-            .join("app.rs"),
-    )
-    .expect("kettle-ui/src/app.rs is readable");
+    // The App's source: app.rs and its modules in app/.
+    let src = repo_root().join("crates").join("kettle-ui").join("src");
+    let mut files = vec![src.join("app.rs")];
+    let mut modules: Vec<_> = std::fs::read_dir(src.join("app"))
+        .expect("kettle-ui/src/app/ is readable")
+        .map(|entry| entry.expect("app/ entry").path())
+        .collect();
+    modules.sort();
+    files.extend(modules);
+    let source: String = files
+        .iter()
+        .map(|path| std::fs::read_to_string(path).expect("App source is readable"))
+        .collect();
     let body = source
         .split("fn ctl_perform_action(")
         .nth(1)
