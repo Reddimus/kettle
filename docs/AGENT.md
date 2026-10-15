@@ -671,6 +671,10 @@ kettle ctl get_state --pid 12345                        # target a specific kett
 Note: `--text` is literal — backslash escapes like `\n` are **not** decoded —
 so press Enter with `send_keys`, not a trailing `\n`.
 
+`kettle ctl events` prints `kettle ctl: listening for events` on stderr once
+it is subscribed, so a script can wait for that line before it causes the
+events it expects.
+
 ### Methods (protocol v1)
 
 | Method | Mode | Result |

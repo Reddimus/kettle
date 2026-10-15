@@ -5595,6 +5595,44 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    fn linux_process_has_exited(pid: u32) -> bool {
+        LinuxProcessStat::read(pid)
+            .unwrap_or_else(|error| panic!("read process state for pid {pid}: {error}"))
+            .is_none_or(|stat| matches!(stat.state, b'Z' | b'X' | b'x'))
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn teardown_accepts_unreaped_adopted_children() {
+        const FIXTURE: &str = "exec::tests::teardown_accepts_unreaped_adopted_children";
+        if invoked_as_fixture(FIXTURE) {
+            // SAFETY: only this isolated fixture adopts its orphaned descendants.
+            assert_eq!(
+                unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) },
+                0
+            );
+            let result = std::panic::catch_unwind(timeout_kills_a_background_session_member);
+            // SAFETY: this fixture owns all children; a null status is permitted.
+            while unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) } > 0 {}
+            if let Err(payload) = result {
+                std::panic::resume_unwind(payload);
+            }
+            return;
+        }
+
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", FIXTURE, "--nocapture", "--test-threads=1"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "subreaper fixture failed: stdout={}, stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn timeout_kills_a_background_session_member() {
         let temp = tempfile::tempdir().unwrap();
@@ -5623,19 +5661,18 @@ mod tests {
             .trim()
             .parse()
             .unwrap();
-        let process_path = std::path::PathBuf::from(format!("/proc/{pid}"));
         let deadline = Instant::now() + Duration::from_secs(2);
-        while process_path.exists() && Instant::now() < deadline {
+        while !linux_process_has_exited(pid) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
-        if process_path.exists() {
+        if !linux_process_has_exited(pid) {
             // Avoid leaking the fixture if the assertion fails.
             unsafe {
                 libc::kill(pid as libc::pid_t, libc::SIGKILL);
             }
         }
         assert!(
-            !process_path.exists(),
+            linux_process_has_exited(pid),
             "background session member {pid} survived timeout"
         );
     }
@@ -5685,19 +5722,18 @@ wait
             .trim()
             .parse()
             .unwrap();
-        let process_path = PathBuf::from(format!("/proc/{pid}"));
         let deadline = Instant::now() + Duration::from_secs(2);
-        while process_path.exists() && Instant::now() < deadline {
+        while !linux_process_has_exited(pid) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
-        if process_path.exists() {
+        if !linux_process_has_exited(pid) {
             // Avoid leaking the fixture if the assertion fails.
             unsafe {
                 libc::kill(pid as libc::pid_t, libc::SIGKILL);
             }
         }
         assert!(
-            !process_path.exists(),
+            linux_process_has_exited(pid),
             "descriptor-free reparented session member {pid} survived deadline teardown"
         );
     }
@@ -5772,16 +5808,15 @@ wait
             .trim()
             .parse()
             .unwrap();
-        let process_path = PathBuf::from(format!("/proc/{pid}"));
         let deadline = Instant::now() + Duration::from_secs(2);
-        while process_path.exists() && Instant::now() < deadline {
+        while !linux_process_has_exited(pid) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
-        if process_path.exists() {
+        if !linux_process_has_exited(pid) {
             unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
         }
         assert!(
-            !process_path.exists(),
+            linux_process_has_exited(pid),
             "late output deadline lost the root anchor and left session member {pid} alive"
         );
     }
@@ -6175,17 +6210,13 @@ wait
             "fixture must still be forking when teardown starts; output={output:?}"
         );
         let deadline = Instant::now() + Duration::from_secs(2);
-        while pids
-            .iter()
-            .any(|pid| PathBuf::from(format!("/proc/{pid}")).exists())
-            && Instant::now() < deadline
-        {
+        while pids.iter().any(|pid| !linux_process_has_exited(*pid)) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
         let survivors = pids
             .iter()
             .copied()
-            .filter(|pid| PathBuf::from(format!("/proc/{pid}")).exists())
+            .filter(|pid| !linux_process_has_exited(*pid))
             .collect::<Vec<_>>();
         for pid in &survivors {
             unsafe { libc::kill(*pid as libc::pid_t, libc::SIGKILL) };

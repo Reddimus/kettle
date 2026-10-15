@@ -60,7 +60,9 @@ fn refuse_inline_cards(method: &str, params: Value) -> Result<Value, String> {
     Ok(params)
 }
 
-/// Subscribe, then print each event line as it arrives until EOF / Ctrl+C.
+/// Subscribe, say so on stderr, then print each event line as it arrives
+/// until EOF / Ctrl+C. Scripts can wait for that stderr line before they
+/// cause the events they expect.
 fn stream_events(client: &mut Client, pane: Option<u64>) -> i32 {
     let mut params = serde_json::Map::new();
     if let Some(p) = pane {
@@ -70,6 +72,7 @@ fn stream_events(client: &mut Client, pane: Option<u64>) -> i32 {
         eprintln!("kettle ctl: subscribe failed: {e}");
         return 1;
     }
+    eprintln!("kettle ctl: listening for events");
     loop {
         match client.next_event() {
             Ok(Some(ev)) => {

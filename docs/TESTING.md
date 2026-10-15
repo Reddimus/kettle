@@ -5447,7 +5447,10 @@ pixels cannot masquerade as row drift.
 `delta_fixtures` records whether the git and SVN `diff | delta` fixtures
 were active. Interaction runs include
 `notification-events.jsonl` and `notification-event.json` for the OSC 777
-event-feed assertion. Native
+event-feed assertion. Before it sends OSC 777, the helper waits up to eight
+seconds for `kettle ctl events` to print `kettle ctl: listening for events`
+on stderr, which it does once the server confirms the subscription. The
+helper self-test holds that line back to check the wait. Native
 Windows runs the tabbar/underline recipes through
 `scripts/check-live-ui-smoke.py`; WSL uses the Unix shell scripts. Run those
 platform-local recipes before changing renderer defaults or tab/underline

@@ -6467,10 +6467,19 @@ class EventStream:
         self.lines: List[str] = []
         self.stderr_lines: List[str] = []
         self._events: "queue.Queue[Dict[str, object]]" = queue.Queue()
+        self._ready = threading.Event()
         self._stdout_thread = threading.Thread(target=self._read_stdout, daemon=True)
         self._stderr_thread = threading.Thread(target=self._read_stderr, daemon=True)
         self._stdout_thread.start()
         self._stderr_thread.start()
+        deadline = time.monotonic() + 8.0
+        while not self._ready.wait(0.05):
+            if self.proc.poll() is not None or time.monotonic() >= deadline:
+                self.close()
+                raise SystemExit(
+                    "live-ui smoke: event subscription did not become ready; "
+                    f"stderr={self.stderr_lines}"
+                )
 
     def _read_stdout(self) -> None:
         if self.proc.stdout is None:
@@ -6492,6 +6501,8 @@ class EventStream:
             return
         for line in self.proc.stderr:
             self.stderr_lines.append(line.rstrip("\n"))
+            if line.strip() == "kettle ctl: listening for events":
+                self._ready.set()
 
     def wait_for(
         self,
@@ -6533,6 +6544,59 @@ class EventStream:
         self.path.write_text(("\n".join(self.lines) + "\n") if self.lines else "")
         if self.stderr_lines:
             self.path.with_suffix(".stderr.txt").write_text("\n".join(self.stderr_lines) + "\n")
+
+
+def event_stream_readiness_selftest() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    entered = threading.Event()
+    release = threading.Event()
+    result = queue.Queue()
+
+    class Stderr:
+        def __iter__(self):
+            entered.set()
+            release.wait()
+            yield "kettle ctl: listening for events\n"
+
+    proc = SimpleNamespace(stdout=io.StringIO(""), stderr=Stderr(), returncode=None)
+    proc.poll = lambda: proc.returncode
+    proc.terminate = lambda: setattr(proc, "returncode", 0)
+    proc.wait = lambda **kwargs: 0
+
+    with tempfile.TemporaryDirectory(prefix="kettle-events-ready-") as temp:
+        def start():
+            try:
+                result.put(EventStream(SimpleNamespace(kettle="kettle", pid=1), Path(temp) / "events.jsonl"))
+            except BaseException as error:
+                result.put(error)
+
+        with patch.object(subprocess, "Popen", return_value=proc):
+            worker = threading.Thread(target=start, daemon=True)
+            worker.start()
+            stream = None
+            try:
+                assert entered.wait(timeout=2)
+                try:
+                    stream = result.get(timeout=0.4)
+                except queue.Empty:
+                    pass
+                else:
+                    raise AssertionError("EventStream returned before subscription acknowledgement")
+                release.set()
+                stream = result.get(timeout=2)
+                if isinstance(stream, BaseException):
+                    raise stream
+                assert isinstance(stream, EventStream)
+                assert proc.poll() is None
+            finally:
+                release.set()
+                worker.join(timeout=3)
+                if stream is None and not result.empty():
+                    stream = result.get_nowait()
+                if isinstance(stream, EventStream):
+                    stream.close()
 
 
 def rect_center(rect: Dict[str, float]) -> Tuple[float, float]:
@@ -8628,6 +8692,8 @@ def wayland_clipboard_providers_are_reusable_selftest() -> None:
 
 def live_helper_selftest() -> None:
     import importlib.util
+
+    event_stream_readiness_selftest()
 
     image_paste_spec = importlib.util.spec_from_file_location(
         "kettle_image_paste_selftest", Path(__file__).with_name("check-image-paste-parity.py")
@@ -16892,7 +16958,6 @@ def run_interaction(kettle: str, root: Path) -> Path:
         notify_marker = "KETTLE_INTERACTION_NOTIFY_DONE"
         events = EventStream(live, out / "notification-events.jsonl")
         try:
-            time.sleep(0.3)
             live_shell_command(
                 live,
                 notification_command(notify_title, notify_body, notify_marker),
