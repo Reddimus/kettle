@@ -1117,9 +1117,7 @@ a pane names (a whole path, off Windows, or a local `file://` link), and the
 right-click menu adds a "Preview in Kettle" row (`UrlHow::Preview`) on a
 link to one. Both reach `preview_pane_link`, which passes the pane's
 `link_gate` as opening the link would: a remote pane, or one that has gone,
-is refused, and one behind a multiplexer is asked about
-(`ConfirmAction::PreviewLocalFile`), its origin read again on confirm
-(`confirmed_preview_path`). `pull_preview` sends a `Source::user_pull`
+is refused. `pull_preview` sends a `Source::user_pull`
 carrying a `GuiActionWitness`, which only a user's gesture in the GUI makes,
 as a `media::Push` whose `Requester::User` answers no client: it waits in
 the queue's user slot (`Sender::User`), and a newer request takes its place

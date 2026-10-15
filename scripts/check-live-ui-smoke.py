@@ -19343,12 +19343,12 @@ def run_theme_picker(kettle: str, root: Path) -> Path:
 
 
 def run_remote_links(kettle: str, root: Path) -> Path:
-    """A Shift-picked path hint opens straight from a local pane but asks first
-    behind tmux, whose server may be on another machine.
+    """A Shift-picked path hint opens straight from a local pane and from
+    behind tmux alike, with no confirmation.
 
-    The path names a missing file, so nothing opens either way: what differs
-    is whether the confirmation comes up. tmux runs on a private server socket
-    that the smoke kills when it finishes, never the owner's server.
+    The path names a missing file, so nothing opens either way: what is
+    checked is that no confirmation comes up. tmux runs on a private server
+    socket that the smoke kills when it finishes, never the owner's server.
     """
     out = root / f"remote-links-{time.strftime('%Y%m%d-%H%M%S')}"
     out.mkdir(parents=True, exist_ok=True)
@@ -19442,15 +19442,11 @@ def run_remote_links(kettle: str, root: Path) -> Path:
                 live.ctl("send_text", params={"text": show})
                 wait_screen(live, missing, "tmux-path")
                 geo = shift_pick_path(live, "tmux")
-                if not modal_open(geo, "confirm_dialog"):
+                if modal_open(geo, "confirm_dialog") or modal_open(geo, "hint_mode"):
                     raise SystemExit(
-                        "remote-links smoke: behind tmux, a Shift-picked path opened "
-                        "without asking"
+                        "remote-links smoke: behind tmux, a Shift-picked path asked "
+                        "before opening, or kept hint mode open"
                     )
-                live.json_ctl("dispatch_ui_key", {"keys": ["escape"]})
-                time.sleep(0.3)
-                if modal_open(geometry(live, "tmux-cancelled"), "confirm_dialog"):
-                    raise SystemExit("remote-links smoke: Esc did not cancel the confirmation")
                 checked.append("tmux")
             finally:
                 subprocess.run(
@@ -19464,6 +19460,98 @@ def run_remote_links(kettle: str, root: Path) -> Path:
                 shutil.rmtree(socket_dir, ignore_errors=True)
 
     (out / "analysis.json").write_text(json.dumps({"checked": checked}, indent=2) + "\n")
+    return out
+
+
+def set_text_clipboard(text: str) -> Optional[subprocess.Popen]:
+    """Replace the desktop clipboard with plain text for an explicit smoke.
+    A Wayland or X11 provider must stay alive until Kettle reads it; the
+    caller keeps the returned process and stops it afterwards."""
+    data = text.encode()
+    if platform.system() == "Darwin":
+        require_cmd("pbcopy")
+        subprocess.run(["pbcopy"], input=data, check=True, timeout=10)
+        return None
+    if os.environ.get("WAYLAND_DISPLAY") and shutil.which("wl-copy"):
+        owner = subprocess.Popen(
+            ["wl-copy", "--foreground", "--type", "text/plain;charset=utf-8"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    elif os.environ.get("DISPLAY") and shutil.which("xclip"):
+        owner = subprocess.Popen(
+            ["xclip", "-quiet", "-selection", "clipboard", "-in"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    else:
+        raise SystemExit("raw-paste smoke: no text clipboard writer (pbcopy, wl-copy or xclip)")
+    assert owner.stdin is not None
+    owner.stdin.write(data)
+    owner.stdin.close()
+    time.sleep(0.3)
+    return owner
+
+
+def run_raw_paste(kettle: str, root: Path) -> Path:
+    """A multi-line paste into a shell without bracketed paste goes straight
+    through, with no confirmation, and runs each line.
+
+    The smoke puts two commands on the desktop clipboard. On macOS it saves
+    the clipboard's text first and puts it back afterwards.
+    """
+    out = root / f"raw-paste-{time.strftime('%Y%m%d-%H%M%S')}"
+    out.mkdir(parents=True, exist_ok=True)
+    cfg = out / "config"
+    cfg.write_text(
+        "\n".join(["agent-server = full", "restore-session = false", "update-check = false"])
+        + "\n"
+    )
+    saved = None
+    if platform.system() == "Darwin":
+        saved = subprocess.run(["pbpaste"], capture_output=True, timeout=10).stdout
+    markers = ("KETTLE_RAW_PASTE_ONE", "KETTLE_RAW_PASTE_TWO")
+    owner = None
+    try:
+        with LiveKettle(kettle, cfg, out / "kettle.log") as live:
+            time.sleep(1.0)
+            # /bin/sh (bash 3.2 as sh on macOS, dash on Debian) never turns
+            # bracketed paste on, so the paste reaches a raw prompt.
+            live.ctl(
+                "send_text",
+                params={"text": "env -i PATH=/usr/bin:/bin TERM=xterm-256color PS1='$ ' /bin/sh\nclear\n"},
+            )
+            time.sleep(0.8)
+            owner = set_text_clipboard("".join(f"echo {m}\n" for m in markers))
+            live.json_ctl("perform_action", {"action": "paste"})
+            time.sleep(0.4)
+            geo = live.json_ctl("ui_geometry")
+            (out / "paste.geometry.json").write_text(json.dumps(geo, indent=2) + "\n")
+            if modal_open(geo, "confirm_dialog"):
+                raise SystemExit("raw-paste smoke: a multi-line paste asked before pasting")
+            deadline = time.monotonic() + 10.0
+            while True:
+                text = screen_text(live.json_ctl("read_screen"))
+                # Each marker shows twice: the echoed command and its output.
+                if all(text.count(m) >= 2 for m in markers):
+                    break
+                if time.monotonic() > deadline:
+                    (out / "paste.screen.txt").write_text(text)
+                    raise SystemExit("raw-paste smoke: the pasted lines did not run")
+                time.sleep(0.1)
+    finally:
+        if owner is not None and owner.poll() is None:
+            owner.terminate()
+            try:
+                owner.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                owner.kill()
+                owner.wait(timeout=3)
+        if saved is not None:
+            subprocess.run(["pbcopy"], input=saved, check=False, timeout=10)
+    (out / "analysis.json").write_text(json.dumps({"checked": ["raw-paste"]}, indent=2) + "\n")
     return out
 
 
@@ -20359,6 +20447,7 @@ def main() -> int:
             "color-scheme",
             "theme-picker",
             "remote-links",
+            "raw-paste",
             "steady-uploads",
             "text-presentation",
             "zoom-keybind",
@@ -20519,6 +20608,9 @@ def main() -> int:
     if args.case in ("remote-links", "all"):
         out = run_remote_links(args.kettle, root)
         print(f"remote-links smoke: OK artifacts={out}")
+    if args.case in ("raw-paste", "all"):
+        out = run_raw_paste(args.kettle, root)
+        print(f"raw-paste smoke: OK artifacts={out}")
     if args.case in ("zoom-keybind", "all"):
         out = run_zoom_keybind(args.kettle, root)
         print(f"zoom-keybind smoke: OK artifacts={out}")

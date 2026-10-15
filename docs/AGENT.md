@@ -974,9 +974,10 @@ reading are separate operations with separate permissions.
 default, and it needs agent previews) gives Claude Code started in a new
 Kettle pane Kettle's own plugin: the display server, run as this Kettle's
 absolute path with `mcp --display --claude-card-hook`, and the `PostToolUse`
-hook that prints its cards. The hook matches only
-`mcp__plugin_kettle_kettle__kettle_show`, and the plugin approves nothing, so
-Claude Code asks before the first `kettle_show` as it does for any tool.
+hook that prints its cards, and a `PreToolUse` hook that allows
+`kettle_show` without a permission prompt, as Kettle's Codex launch already
+does: the tool only shows the user a file on this computer. Both hooks match
+only `mcp__plugin_kettle_kettle__kettle_show`.
 
 Kettle changes none of Claude Code's settings and nothing in its plugin list.
 It writes the plugin into its own data directory, in a directory named by the

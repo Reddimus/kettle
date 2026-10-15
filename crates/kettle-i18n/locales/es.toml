@@ -112,13 +112,8 @@ completion_kind_completions = "Sugerencias"
 completion_kind_prediction = "Predicción"
 confirm_button_cancel = "Cancelar"
 confirm_button_close = "Cerrar"
-confirm_button_open = "Abrir"
-confirm_button_preview = "Ver"
-confirm_button_paste = "Pegar"
 confirm_button_reassign = "Reasignar"
 confirm_close_pane = "¿Cerrar este panel?"
-confirm_open_local_file = "¿Abrir {name}? {program} puede ser remoto."
-confirm_preview_local_file = "¿Ver {name}? {program} puede ser remoto."
 confirm_rebind = "{chord} ya está asignada a \"{taken}\". ¿Reasignarla a \"{action}\"?"
 macos_menu_about = "Acerca de Kettle"
 macos_menu_services = "Servicios"
@@ -255,6 +250,7 @@ notify_body_recording_overloaded = "La cola de escritura acotada se llenó. La c
 notify_body_recording_start_failed = "No se pudo iniciar la grabación de sesión solicitada: {error}"
 notify_body_recording_write_failed = "La grabación de la sesión se detuvo porque no se pudo escribir el archivo de grabación."
 notify_body_remote_file_not_opened = "{name} apareció en un panel conectado a otra máquina, así que nombra un archivo de esa máquina, no de esta computadora."
+notify_body_file_link_not_found = "{name} no está en esta computadora."
 notify_body_preview_no_room = "Este panel es demasiado pequeño para una vista previa. Agrándalo y vuelve a abrir el estante."
 notify_body_remote_not_delivered = "El panel de destino ({pane}) de un envío de archivo remoto en cola se cerró antes de la entrega. El comando se descartó y no se redirigió."
 notify_body_screenshot_wait = "Esperar a que termine la captura actual y volver a intentarlo."
@@ -636,10 +632,6 @@ other = "¿Cerrar la pestaña con {count} paneles?"
 [confirm_close_window]
 one = "¿Cerrar la ventana con {count} panel?"
 other = "¿Cerrar la ventana con {count} paneles?"
-
-[confirm_paste]
-one = "¿Pegar {count} línea en un destino tipo shell?"
-other = "¿Pegar {count} líneas en un destino tipo shell?"
 
 [notify_body_lua_callback_stopped]
 one = "{count} callback `{event}` tardó demasiado y no se volverá a llamar. Revisar init.lua en busca de un bucle que nunca termina."

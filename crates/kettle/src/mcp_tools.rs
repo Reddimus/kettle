@@ -464,8 +464,9 @@ fn parse_tool_call(selection: ToolSelection, params: &Value) -> Result<ToolCallP
 
 fn is_known_tool(selection: ToolSelection, name: &str) -> bool {
     if selection == ToolSelection::Display {
-        // `kettle_card` is the hook's retrieval, never listed for the model.
-        return matches!(name, "kettle_show" | "kettle_card");
+        // `kettle_card` and `kettle_allow` are the hooks', never listed for
+        // the model.
+        return matches!(name, "kettle_show" | "kettle_card" | "kettle_allow");
     }
     matches!(
         name,
@@ -513,6 +514,7 @@ fn call_tool_inner(
     match call.name.as_str() {
         "kettle_show" => tool_kettle_show(&args, params, cancelled, crate::mcp_display::session()),
         "kettle_card" => tool_kettle_card(&args, params, crate::mcp_display::session()),
+        "kettle_allow" => tool_kettle_allow(params),
         "kettle_video_frames" => tool_kettle_video_frames(&args, fits),
         "kettle_run" => tool_kettle_run(&args, cancelled),
         "kettle_list_panes" => ctl_call(
@@ -824,6 +826,24 @@ fn tool_kettle_card_with(
     json!({ "content": [{ "type": "text", "text": output.to_string() }] })
 }
 
+/// `kettle_allow`: the PreToolUse hook's answer for `kettle_show`, an allow.
+/// The tool only shows the user a file on this computer, so Claude Code need
+/// not ask each time, as Codex's launch already approves it. Hidden from
+/// `tools/list`; a model's own call is refused.
+fn tool_kettle_allow(params: &Value) -> Value {
+    if crate::mcp_display::from_model(params) {
+        return error_result("kettle_allow is for Kettle's hook; the model does not call it.");
+    }
+    let output = json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+            "permissionDecisionReason": "Kettle shows media to the user in this terminal only.",
+        }
+    });
+    json!({ "content": [{ "type": "text", "text": output.to_string() }] })
+}
+
 /// A `kettle_show` that did not reach the shelf: its fixed wording, and its
 /// fixed code and reason, which name no path, source or card.
 fn show_failed(refusal: crate::show_cli::Refusal) -> Value {
@@ -1085,6 +1105,7 @@ fn tool_argument_fields(name: &str) -> Option<&'static [(&'static str, ArgKind)]
             ("key", ArgKind::String),
         ],
         "kettle_card" => &[("tool_use_id", ArgKind::String)],
+        "kettle_allow" => &[],
         "kettle_video_frames" => &[
             ("path", ArgKind::String),
             ("start_s", ArgKind::Number),
@@ -1460,6 +1481,34 @@ mod tests {
                 "nothing else, and nothing of the media: {fields:?}"
             );
         }
+    }
+
+    /// `kettle_allow` answers Kettle's PreToolUse hook with an allow for
+    /// `kettle_show` alone. It is never listed, a model's own call is
+    /// refused, and full mode does not know it.
+    #[test]
+    fn kettle_allow_is_the_hooks_alone() {
+        use crate::mcp_display::TOOL_USE_ID_META;
+        let listed = tool_specs(ToolSelection::Display);
+        assert!(listed.iter().all(|spec| spec["name"] != "kettle_allow"));
+        let hook = call_tool(
+            ToolSelection::Display,
+            &json!({"name": "kettle_allow", "arguments": {}}),
+        );
+        let output: Value =
+            serde_json::from_str(hook["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(output["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+        assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "allow");
+        let model = call_tool(
+            ToolSelection::Display,
+            &json!({"name": "kettle_allow", "arguments": {}, "_meta": {TOOL_USE_ID_META: "toolu_1"}}),
+        );
+        assert_eq!(model["isError"], true);
+        let full = call_tool(
+            ToolSelection::Full,
+            &json!({"name": "kettle_allow", "arguments": {}}),
+        );
+        assert_eq!(full["isError"], true);
     }
 
     /// `kettle_card` is the hook's: known only to a display server, never

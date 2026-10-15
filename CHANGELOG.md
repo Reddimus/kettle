@@ -31,6 +31,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   terminal. Pin the same preview beside the terminal, with keyboard navigation
   and focus return; `media-open-mode = lane` keeps the previous layout.
 
+### Changed
+
+- Paste multi-line text straight into a shell, without a confirmation.
+  `clipboard-paste-protection` is retired and ignored.
+
+- Open file links printed behind tmux, screen or zellij directly, as in a
+  local pane. A path that is not on this computer gets a notice.
+
+- Let Claude Code run `kettle_show` without a permission prompt, as Codex
+  already does; it only shows you a file on this computer.
+
 ### Fixed
 
 - Preserve Wayland window dimensions at startup and when tearing off tabs.

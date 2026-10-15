@@ -3915,46 +3915,9 @@ fn stamp_accepted_input(
     }
 }
 
-fn text_contains_line_break(text: &str) -> bool {
-    text.as_bytes().iter().any(|b| matches!(*b, b'\n' | b'\r'))
-}
-
-fn paste_needs_confirmation(
-    text: &str,
-    protection_enabled: bool,
-    any_target_without_bracketed_paste: bool,
-) -> bool {
-    protection_enabled && any_target_without_bracketed_paste && text_contains_line_break(text)
-}
-
-fn paste_confirm_prompt(text: &str, tr: &kettle_i18n::Translator) -> String {
-    let mut line_breaks = 0usize;
-    let mut prev_cr = false;
-    for b in text.bytes() {
-        match b {
-            b'\r' => {
-                line_breaks += 1;
-                prev_cr = true;
-            }
-            b'\n' if prev_cr => {
-                prev_cr = false;
-            }
-            b'\n' => {
-                line_breaks += 1;
-                prev_cr = false;
-            }
-            _ => prev_cr = false,
-        }
-    }
-    let commands = line_breaks.saturating_add(1);
-    tr.confirm_paste(commands as u64)
-}
-
-/// Pin a single-pane paste request to its current pane. Broadcast deliberately
-/// carries no pane id: confirmation keeps the live group semantics, and if the
-/// scope has been turned off while the prompt is open there is no safe pane to
-/// fall back to.
-fn confirmed_paste_target(mux: &Mux) -> Option<u64> {
+/// The pane a single-pane paste goes to: the focused one. Broadcast names no
+/// pane and keeps its live group semantics.
+fn paste_target(mux: &Mux) -> Option<u64> {
     if mux.is_broadcast_on() {
         None
     } else {
@@ -4550,6 +4513,15 @@ fn spawn_file_link_opener(
                 ),
                 FileLinkCheck::Unresolved => {
                     log::warn!("not opening a file link that names no local file or folder");
+                    // Say so: from behind tmux this is usually a path an ssh
+                    // inside it printed, which names a file on that machine.
+                    let name = kettle_core::links::file_url_for_path(&path)
+                        .map(|url| link_display_name(&url, 48))
+                        .unwrap_or_default();
+                    fire_notify(
+                        tr.text(kettle_i18n::Text::NotifyTitleRemoteFileNotOpened),
+                        &tr.notify_body_file_link_not_found(&name),
+                    );
                 }
                 FileLinkCheck::Open(resolved) => open_checked_file(&resolved, handler.as_deref()),
             }
@@ -6480,30 +6452,20 @@ enum LinkGate {
     Open,
     /// A local file link from a remote pane, or one that has gone.
     Refuse,
-    /// A local file link from behind this multiplexer: ask first.
-    Confirm(&'static str),
 }
 
 /// Whether a link from a pane with `origin` (`None`: the pane has gone) may
 /// open. Only a `file://` link names a local file; web and mail links open
-/// wherever they were printed.
+/// wherever they were printed. A multiplexer's server runs on this computer,
+/// so its panes' file links open as local ones do; a file an ssh inside it
+/// named is usually missing here, which the opener reports.
 fn link_gate(uri: &str, origin: Option<PathOrigin>) -> LinkGate {
     let file_link = uri
         .get(..7)
         .is_some_and(|scheme| scheme.eq_ignore_ascii_case("file://"));
     match (file_link, origin) {
         (false, _) | (true, Some(PathOrigin::Local)) => LinkGate::Open,
-        (true, Some(PathOrigin::Multiplexer(program))) => LinkGate::Confirm(program),
         (true, Some(PathOrigin::Remote) | None) => LinkGate::Refuse,
-    }
-}
-
-/// The file a preview the user confirmed names, read again when they
-/// confirm: `None` once its pane has gone remote, or gone.
-fn confirmed_preview_path(uri: &str, origin: Option<PathOrigin>) -> Option<std::path::PathBuf> {
-    match origin? {
-        PathOrigin::Local | PathOrigin::Multiplexer(_) => kettle_core::links::local_file_path(uri),
-        PathOrigin::Remote => None,
     }
 }
 
@@ -6575,38 +6537,6 @@ fn link_display_name(uri: &str, max_cols: usize) -> String {
         .collect()
 }
 
-/// How many columns the file name may take in the multiplexer confirmation
-/// `prompt` words so that the whole prompt fits beside its buttons in a bar
-/// of `max_cols` (see `kettle_render::confirm_bar_columns`); at least 5. The
-/// name is sized when the dialog opens.
-fn confirm_name_columns(
-    max_cols: usize,
-    buttons: &[ConfirmButton],
-    tr: &kettle_i18n::Translator,
-    prompt: impl Fn(&str) -> String,
-) -> usize {
-    let buttons_cols = buttons
-        .iter()
-        .map(|button| confirm_dialog_button_cells(button, tr))
-        .sum::<usize>()
-        + 2 * buttons.len().saturating_sub(1);
-    let prompt_cols = kettle_render::confirm_prompt_columns(max_cols, buttons_cols);
-    prompt_cols.saturating_sub(prompt("").width()).max(5)
-}
-
-/// The multiplexer confirmation `prompt` words for the file link `uri`, its
-/// name shortened so the prompt fits beside `buttons` in a bar of `max_cols`.
-fn local_file_prompt(
-    max_cols: usize,
-    buttons: &[ConfirmButton],
-    tr: &kettle_i18n::Translator,
-    uri: &str,
-    prompt: impl Fn(&str) -> String,
-) -> String {
-    let name_cols = confirm_name_columns(max_cols, buttons, tr, &prompt);
-    prompt(&link_display_name(uri, name_cols))
-}
-
 /// The pane `ws.links` were scanned from: the focused pane at the last scan.
 fn links_pane(ws: &WindowState) -> Option<u64> {
     ws.links_scan_key.as_ref().and_then(|key| key.0.1)
@@ -6615,20 +6545,16 @@ fn links_pane(ws: &WindowState) -> Option<u64> {
 /// Where the files a pane's output names live, as far as Kettle can tell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PathOrigin {
-    /// This computer.
+    /// This computer, including behind tmux, screen or zellij, whose server
+    /// runs here.
     Local,
-    /// Behind a terminal multiplexer, which attaches to a server outside the
-    /// pane: often on this computer, but an ssh inside it leaves no trace in
-    /// the pane's process tree. Holds the multiplexer's name.
-    Multiplexer(&'static str),
     /// Another machine or a container: a detected remote session, or a
     /// remote shell or container client in the pane.
     Remote,
 }
 
 /// Where a pane's printed paths live: remote when it runs a detected remote
-/// session or a remote or container client, behind a multiplexer when tmux,
-/// screen or zellij runs there, and local otherwise.
+/// session or a remote or container client, and local otherwise.
 ///
 /// What runs now decides: the foreground program, shell scripts included
 /// (`sh -c 'tmux attach'`). The command the pane was launched with counts
@@ -6654,10 +6580,9 @@ fn path_origin(remote: bool, launch: &[String], foreground: Option<&[String]>) -
     let foreground_client = foreground.and_then(|argv| argv_client(argv, 0));
     match (
         remote,
-        strongest([launch_client, foreground_client].into_iter()),
+        any_client([launch_client, foreground_client].into_iter()),
     ) {
         (true, _) | (false, Some(Client::Remote)) => PathOrigin::Remote,
-        (false, Some(Client::Multiplexer(name))) => PathOrigin::Multiplexer(name),
         (false, None) => PathOrigin::Local,
     }
 }
@@ -6665,16 +6590,14 @@ fn path_origin(remote: bool, launch: &[String], foreground: Option<&[String]>) -
 /// What kind of client a command line runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Client {
-    Multiplexer(&'static str),
     Remote,
 }
 
-/// The multiplexer or remote client `argv` runs, looking through a shell's
-/// `-c` script, every command in it (`sh -c 'cd ~ && "tmux" attach'`), and
+/// The remote or container client `argv` runs, looking through a shell's
+/// `-c` script, every command in it (`sh -c 'cd ~ && "ssh" host'`), and
 /// through wrappers that run another command (`env TERM=xterm ssh host`,
-/// `sudo -u me tmux`, `nice -n 5 mosh host`). A remote client outranks a
-/// multiplexer. Nesting deeper than four levels counts as remote: it fails
-/// closed rather than reading as local.
+/// `sudo -u me ssh host`, `nice -n 5 mosh host`). Nesting deeper than four
+/// levels counts as remote: it fails closed rather than reading as local.
 fn argv_client(argv: &[String], depth: usize) -> Option<Client> {
     argv_client_with(argv, depth, true)
 }
@@ -6695,9 +6618,6 @@ fn argv_client_with(argv: &[String], depth: usize, scripts: bool) -> Option<Clie
     let name = name.strip_suffix(".exe").unwrap_or(&name);
     let rest = &argv[1..];
     match name {
-        "tmux" => Some(Client::Multiplexer("tmux")),
-        "screen" => Some(Client::Multiplexer("screen")),
-        "zellij" => Some(Client::Multiplexer("zellij")),
         "ssh" | "autossh" | "mosh" | "mosh-client" | "et" | "telnet" | "docker" | "podman"
         | "kubectl" | "lxc-attach" => Some(Client::Remote),
         "sh" | "bash" | "zsh" | "dash" | "ksh" | "mksh" | "fish" if !scripts => None,
@@ -6713,7 +6633,7 @@ fn argv_client_with(argv: &[String], depth: usize, scripts: bool) -> Option<Clie
             let Some(commands) = shell_commands(rest.get(flag + 1)?) else {
                 return Some(Client::Remote);
             };
-            strongest(commands.iter().map(|words| {
+            any_client(commands.iter().map(|words| {
                 let words = command_words(words);
                 // A command the parser cannot name (`$cmd`, `` `cmd` ``,
                 // `eval …`) fails closed.
@@ -6797,11 +6717,9 @@ fn argv_client_with(argv: &[String], depth: usize, scripts: bool) -> Option<Clie
     }
 }
 
-/// The strongest client among `clients`: remote over multiplexer.
-fn strongest(clients: impl Iterator<Item = Option<Client>>) -> Option<Client> {
-    clients
-        .flatten()
-        .max_by_key(|client| matches!(client, Client::Remote))
+/// The client any of `clients` runs.
+fn any_client(mut clients: impl Iterator<Item = Option<Client>>) -> Option<Client> {
+    clients.find_map(|client| client)
 }
 
 /// A command's words past leading redirections and assignments, the shell
@@ -7516,7 +7434,7 @@ pub enum DropPanes {
 
 /// The action a confirmed modal dispatches when the user accepts. Used by
 /// the `ask_before_closing` flow (`Action::CloseWindow` / `CloseTab` /
-/// `ClosePane`), paste protection, and keybind rebind conflicts. See
+/// `ClosePane`) and keybind rebind conflicts. See
 /// [`TERMINATOR-CONFIRM-DIALOG-DESIGN.md`](
 /// ../../../docs/TERMINATOR-CONFIRM-DIALOG-DESIGN.md).
 #[allow(clippy::enum_variant_names)] // close-family prefix is intentional
@@ -7543,25 +7461,6 @@ pub enum ConfirmAction {
     /// sibling into focus — and confirming would then close the sibling, which
     /// may be a tmux or agent session the user never selected.
     ClosePane(u64),
-    /// Send a clipboard/PRIMARY paste after the user accepted the multi-line
-    /// paste protection prompt. `target` is `Some` for a single-pane paste and
-    /// pins the pane the prompt was about. Broadcast carries `None` and keeps
-    /// live group semantics instead of inventing one pinned pane.
-    PasteText { text: Box<str>, target: Option<u64> },
-    /// Format and send original file paths per target pane after paste
-    /// protection confirmation. See [`ConfirmAction::PasteText`] for the
-    /// `target` contract.
-    PastePaths {
-        paths: Box<[std::path::PathBuf]>,
-        /// Provenance-bound video request created only at an explicit file
-        /// clipboard or drop entry point. Plain terminal text never creates it.
-        video: Option<Box<crate::video_preview::VideoPasteRequest>>,
-        trailing_space: bool,
-        target: Option<u64>,
-        /// Pane that initiated the paste. Separate from `target` because a
-        /// broadcast has live group semantics but the receipt remains local.
-        receipt_pane: Option<u64>,
-    },
     /// Finish a Settings keybind rebind that would otherwise silently steal
     /// a chord already bound to a different action. Once the user confirms
     /// the reassignment, applies via `App::apply_keybind_rebind`, the same
@@ -7571,18 +7470,6 @@ pub enum ConfirmAction {
         act: Action,
         action_name: &'static str,
     },
-    /// Open a local file link from a pane behind a terminal multiplexer, once
-    /// the user confirms the file is on this computer (see
-    /// `App::open_pane_link`). `program` is the multiplexer it was asked
-    /// about, which still gates a Lua handler's rewrite of the link.
-    OpenLocalFile {
-        uri: Box<str>,
-        program: &'static str,
-    },
-    /// Preview a local file link from a pane behind a terminal multiplexer
-    /// in that pane's lane, once the user confirms the file is on this
-    /// computer (see `App::preview_pane_link`).
-    PreviewLocalFile { pane: u64, uri: Box<str> },
 }
 
 /// Which buttons a confirm modal shows. v1 is just
@@ -15659,10 +15546,9 @@ impl App {
     }
 
     /// Open a link taken from pane `pane`'s output. A local file link from a
-    /// pane whose files may live elsewhere does not simply open: from a remote
-    /// pane it is refused with a notification, since the path names a file on
-    /// that machine, and behind a multiplexer Kettle asks first. A pane that
-    /// has gone counts as remote. Other links open through [`Self::open_url`].
+    /// remote pane is refused with a notification, since the path names a file
+    /// on that machine; a pane that has gone counts as remote. Other links open
+    /// through [`Self::open_url`].
     fn open_pane_link(&mut self, ws: &mut WindowState, pane: Option<u64>, uri: &str) {
         let origin = pane
             .and_then(|id| ws.mux.panes.get(&id))
@@ -15674,56 +15560,6 @@ impl App {
                 tr.text(kettle_i18n::Text::NotifyTitleRemoteFileNotOpened),
                 &tr.notify_body_remote_file_not_opened(&link_display_name(uri, 48)),
             ),
-            LinkGate::Confirm(program) => self.confirm_local_file(
-                ws,
-                uri,
-                |name| tr.confirm_open_local_file(name, program),
-                kettle_i18n::Text::ConfirmButtonOpen,
-                ConfirmAction::OpenLocalFile {
-                    uri: uri.into(),
-                    program,
-                },
-            ),
-        }
-    }
-
-    /// Ask before acting on the local file link `uri` from behind a
-    /// multiplexer: `prompt` asks about a file name, `button` labels the
-    /// confirm button, and `on_confirm` is what confirming does. The name is
-    /// sized to this window, so the prompt, warning included, fits on the bar.
-    fn confirm_local_file(
-        &mut self,
-        ws: &mut WindowState,
-        uri: &str,
-        prompt: impl Fn(&str) -> String,
-        button: kettle_i18n::Text,
-        on_confirm: ConfirmAction,
-    ) {
-        let tr = self.ui_text;
-        let buttons = vec![
-            ConfirmButton::Cancel,
-            ConfirmButton::Confirm {
-                label: tr.text(button).to_string(),
-                destructive: false,
-            },
-        ];
-        let max_cols = ws.window.as_ref().map_or(79, |window| {
-            let (cell_w, _) = self.cell_px(ws);
-            kettle_render::confirm_bar_columns(window.inner_size().width as f32, cell_w as f32)
-        });
-        self.install_confirm_dialog(
-            ws,
-            ConfirmDialogState {
-                prompt: local_file_prompt(max_cols, &buttons, &tr, uri, prompt),
-                buttons,
-                focus_idx: 0,
-                on_confirm,
-            },
-        );
-        // A click can install this with no other event to come, so ask for
-        // the frame that shows it.
-        if let Some(window) = &ws.window {
-            window.request_redraw();
         }
     }
 
@@ -15939,54 +15775,11 @@ impl App {
             self.report_input_result(PaneInputResult::Oversize);
             return;
         }
-        let target = confirmed_paste_target(&ws.mux);
-        let text = text.as_str();
-        let raw_target = if ws.mux.is_broadcast_on() {
-            // Ask every window the broadcast can reach, not just this one. A
-            // group member sitting at a shell prompt in a SECOND window is
-            // precisely the target the confirmation exists for — a newline in
-            // an unbracketed paste runs the line there — and consulting only
-            // the focused window would have suppressed the prompt for it.
-            ws.mux.broadcast_paste_has_raw_writable_target()
-                || (crate::mux::Mux::scope_crosses_windows(&ws.mux.broadcast)
-                    && self.windows.values().any(|other| {
-                        other
-                            .mux
-                            .broadcast_paste_foreign_has_raw_writable_target(&ws.mux.broadcast)
-                    }))
-        } else {
-            !self
-                .focused_mode(ws)
-                .contains(kettle_core::TermMode::BRACKETED_PASTE)
-        };
-        if paste_needs_confirmation(text, self.cfg.clipboard_paste_protection, raw_target) {
-            self.install_confirm_dialog(
-                ws,
-                ConfirmDialogState {
-                    prompt: paste_confirm_prompt(text, &self.ui_text),
-                    buttons: vec![
-                        ConfirmButton::Cancel,
-                        ConfirmButton::Confirm {
-                            label: self
-                                .ui_text
-                                .text(kettle_i18n::Text::ConfirmButtonPaste)
-                                .to_string(),
-                            destructive: false,
-                        },
-                    ],
-                    focus_idx: 0,
-                    on_confirm: ConfirmAction::PasteText {
-                        text: text.to_string().into_boxed_str(),
-                        target,
-                    },
-                },
-            );
-            return;
-        }
-        self.paste_text_confirmed(ws, target, text);
+        let target = paste_target(&ws.mux);
+        self.deliver_text_paste(ws, target, &text);
     }
 
-    fn paste_text_confirmed(&mut self, ws: &mut WindowState, target: Option<u64>, text: &str) {
+    fn deliver_text_paste(&mut self, ws: &mut WindowState, target: Option<u64>, text: &str) {
         self.sync_pane_focus_reports(ws);
         if text.is_empty() {
             return;
@@ -16048,7 +15841,7 @@ impl App {
         if paths.is_empty() {
             return;
         }
-        let target = confirmed_paste_target(&ws.mux);
+        let target = paste_target(&ws.mux);
         let receipt_pane = ws.mux.active_focus();
         let mut preview = crate::mux::format_paths_for_paste(&ws.mux.focused_argv(), &paths);
         if trailing_space {
@@ -16075,50 +15868,10 @@ impl App {
             return;
         }
 
-        let raw_target = if ws.mux.is_broadcast_on() {
-            ws.mux.broadcast_paste_has_raw_writable_target()
-                || (Mux::scope_crosses_windows(&ws.mux.broadcast)
-                    && self.windows.values().any(|other| {
-                        other
-                            .mux
-                            .broadcast_paste_foreign_has_raw_writable_target(&ws.mux.broadcast)
-                    }))
-        } else {
-            !self
-                .focused_mode(ws)
-                .contains(kettle_core::TermMode::BRACKETED_PASTE)
-        };
-        if paste_needs_confirmation(&preview, self.cfg.clipboard_paste_protection, raw_target) {
-            self.install_confirm_dialog(
-                ws,
-                ConfirmDialogState {
-                    prompt: paste_confirm_prompt(&preview, &self.ui_text),
-                    buttons: vec![
-                        ConfirmButton::Cancel,
-                        ConfirmButton::Confirm {
-                            label: self
-                                .ui_text
-                                .text(kettle_i18n::Text::ConfirmButtonPaste)
-                                .to_string(),
-                            destructive: false,
-                        },
-                    ],
-                    focus_idx: 0,
-                    on_confirm: ConfirmAction::PastePaths {
-                        paths: paths.into_boxed_slice(),
-                        video: video.map(Box::new),
-                        trailing_space,
-                        target,
-                        receipt_pane,
-                    },
-                },
-            );
-            return;
-        }
-        self.paste_paths_confirmed(ws, target, receipt_pane, &paths, trailing_space, video);
+        self.deliver_path_paste(ws, target, receipt_pane, &paths, trailing_space, video);
     }
 
-    fn paste_paths_confirmed(
+    fn deliver_path_paste(
         &mut self,
         ws: &mut WindowState,
         target: Option<u64>,
@@ -18513,12 +18266,6 @@ impl App {
         ws.links
             .iter()
             .find(|l| l.row == row && col >= l.start_col && col <= l.end_col)
-    }
-
-    fn focused_mode(&mut self, ws: &mut WindowState) -> kettle_core::TermMode {
-        let pane = ws.mux.active_focus();
-        pane.and_then(|pane| self.pane_mode(ws, pane))
-            .unwrap_or(kettle_core::TermMode::empty())
     }
 
     fn pane_mode(&self, ws: &WindowState, pane_id: u64) -> Option<kettle_core::TermMode> {
@@ -24386,16 +24133,8 @@ impl App {
         }
     }
 
-    /// Drop the renderer-only copy attached to a bitmap paste when its prompt
-    /// is dismissed. The private PNG keeps its documented process lifetime;
-    /// only a receipt that can no longer be shown is released here.
     fn cancel_confirm_dialog(&mut self, ws: &mut WindowState) {
-        let Some(dialog) = ws.confirm_dialog.take() else {
-            return;
-        };
-        if let ConfirmAction::PastePaths { paths, .. } = dialog.on_confirm {
-            self.pasted_images.discard_previews_for_paths(&paths);
-        }
+        ws.confirm_dialog = None;
     }
 
     fn dispatch_confirm_action_arms(&mut self, ws: &mut WindowState, action: ConfirmAction) {
@@ -24470,47 +24209,6 @@ impl App {
                 if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
-            }
-            ConfirmAction::PasteText { text, target } => {
-                self.paste_text_confirmed(ws, target, &text);
-            }
-            // The user confirmed this link; the pane's gate still applies to
-            // anything a Lua handler turns it into.
-            ConfirmAction::OpenLocalFile { uri, program } => self.open_url(
-                ws,
-                &uri,
-                LinkSource::Pane(Some(PathOrigin::Multiplexer(program))),
-            ),
-            // The user confirmed; a pane that has since gone remote, or gone,
-            // still refuses.
-            ConfirmAction::PreviewLocalFile { pane, uri } => {
-                let origin = ws.mux.panes.get(&pane).map(pane_path_origin);
-                match confirmed_preview_path(&uri, origin) {
-                    Some(path) => self.pull_preview(ws, pane, &path, None),
-                    None => fire_notify(
-                        self.ui_text
-                            .text(kettle_i18n::Text::NotifyTitleRemoteFileNotOpened),
-                        &self
-                            .ui_text
-                            .notify_body_remote_file_not_opened(&link_display_name(&uri, 48)),
-                    ),
-                }
-            }
-            ConfirmAction::PastePaths {
-                paths,
-                video,
-                trailing_space,
-                target,
-                receipt_pane,
-            } => {
-                self.paste_paths_confirmed(
-                    ws,
-                    target,
-                    receipt_pane,
-                    &paths,
-                    trailing_space,
-                    video.map(|candidate| *candidate),
-                );
             }
             ConfirmAction::RebindKeybind {
                 trig,
@@ -25631,8 +25329,8 @@ impl App {
 
     /// Preview the local file a link from pane `pane`'s output names in that
     /// pane's lane. A link from a pane that may be remote, or has gone, is
-    /// refused as opening it is; one from behind a multiplexer is asked
-    /// about first. The pane's origin is read now, when the user acts.
+    /// refused as opening it is. The pane's origin is read now, when the user
+    /// acts.
     fn preview_pane_link(&mut self, ws: &mut WindowState, pane: u64, uri: &str) {
         let tr = self.ui_text;
         let origin = ws.mux.panes.get(&pane).map(pane_path_origin);
@@ -25644,16 +25342,6 @@ impl App {
             LinkGate::Refuse => fire_notify(
                 tr.text(kettle_i18n::Text::NotifyTitleRemoteFileNotOpened),
                 &tr.notify_body_remote_file_not_opened(&link_display_name(uri, 48)),
-            ),
-            LinkGate::Confirm(program) => self.confirm_local_file(
-                ws,
-                uri,
-                |name| tr.confirm_preview_local_file(name, program),
-                kettle_i18n::Text::ConfirmButtonPreview,
-                ConfirmAction::PreviewLocalFile {
-                    pane,
-                    uri: uri.into(),
-                },
             ),
         }
     }
@@ -41626,29 +41314,27 @@ mod tests {
 
     use super::{
         ACCESSIBILITY_COMPLETION_CONTAINER_ID, ACCESSIBILITY_MEDIA_RECEIPT_DISMISS_ID,
-        ACCESSIBILITY_MEDIA_RECEIPT_ID, AUTOMATION_RETRY_MIN, App, AutomationRetry, ConfirmAction,
-        ConfirmButton, ConfirmDialogState, ContextMenuItem, GroupBulkScope,
-        MAX_REMOTE_COMMANDS_PER_BATCH, Osc52ClipboardChannel, PaneDrag, ParsedRemoteCommandBatch,
-        PendingLuaCommand, PendingLuaCommands, PendingRemoteCommand, RemoteBatchClaim, SplitDrag,
-        TitleEditScope, accessibility_completion_row_id, apply_bs_del_binding,
-        apply_mux_title_edit, apply_output_generation_outcome, apply_remote_title_transition,
-        argv_is_nonlocal_client, assign_mnemonics, background_is_dark_enough_to_reveal_early,
-        begin_title_edit, broadcast_scope_for_default, cached_pane_cursor_blinking,
-        claim_remote_command_file, clear_stale_title_edit, command_picker_list,
-        confirmed_paste_target, context_menu_item_columns, context_menu_max_scroll_offset,
-        context_menu_scroll_for_highlight, context_menu_snapshot_reuse_safe,
-        context_menu_surface_can_fit_row, count_rows_fitting, ctl_input_error, filter_disabled,
-        find_menu_row_y, fit_context_menu_row, group_scope_is_globally_stale,
-        input_rejection_message, key_is_modified_enter, layout_picker_list,
-        local_paste_within_limit, macos_effective_modifiers, macos_pty_modifiers,
-        modal_swallows_pointer, option_is_meta_for, osc52_clipboard_channel,
+        ACCESSIBILITY_MEDIA_RECEIPT_ID, AUTOMATION_RETRY_MIN, App, AutomationRetry,
+        ContextMenuItem, GroupBulkScope, MAX_REMOTE_COMMANDS_PER_BATCH, Osc52ClipboardChannel,
+        PaneDrag, ParsedRemoteCommandBatch, PendingLuaCommand, PendingLuaCommands,
+        PendingRemoteCommand, RemoteBatchClaim, SplitDrag, TitleEditScope,
+        accessibility_completion_row_id, apply_bs_del_binding, apply_mux_title_edit,
+        apply_output_generation_outcome, apply_remote_title_transition, argv_is_nonlocal_client,
+        assign_mnemonics, background_is_dark_enough_to_reveal_early, begin_title_edit,
+        broadcast_scope_for_default, cached_pane_cursor_blinking, claim_remote_command_file,
+        clear_stale_title_edit, command_picker_list, context_menu_item_columns,
+        context_menu_max_scroll_offset, context_menu_scroll_for_highlight,
+        context_menu_snapshot_reuse_safe, context_menu_surface_can_fit_row, count_rows_fitting,
+        ctl_input_error, filter_disabled, find_menu_row_y, fit_context_menu_row,
+        group_scope_is_globally_stale, input_rejection_message, key_is_modified_enter,
+        layout_picker_list, local_paste_within_limit, macos_effective_modifiers,
+        macos_pty_modifiers, modal_swallows_pointer, option_is_meta_for, osc52_clipboard_channel,
         output_generation_advanced, output_wakeup_needs_paint, pane_cursor_blinking_with,
-        pane_snapshot_keys_match, parse_remote_command_batch, paste_paths_into_target,
-        paste_text_into_target, picker_context_menu, picker_overlay_context_menu,
-        picker_scroll_offset, production_source, rank_layouts, rank_ssh_hosts,
-        sanitize_native_window_title, sanitize_title, selected_ssh_target, selection_kind,
-        session_sweep_due, should_notify_input_rejection, should_poll_remote_window,
-        should_restore_session, should_reveal_after_renderer_init,
+        pane_snapshot_keys_match, parse_remote_command_batch, picker_context_menu,
+        picker_overlay_context_menu, picker_scroll_offset, production_source, rank_layouts,
+        rank_ssh_hosts, sanitize_native_window_title, sanitize_title, selected_ssh_target,
+        selection_kind, session_sweep_due, should_notify_input_rejection,
+        should_poll_remote_window, should_restore_session, should_reveal_after_renderer_init,
         should_reveal_before_first_surface_frame, ssh_picker_list, stage_applied_remote_probe,
         stage_output_generations_for_frame, stage_remote_targets, stamp_accepted_input,
         startup_inner_size_px, typeahead_match,
@@ -41663,30 +41349,6 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-
-    fn paste_test_mux() -> (Mux, u64, u64) {
-        #[cfg(unix)]
-        let argv = vec!["/bin/cat".to_string()];
-        #[cfg(windows)]
-        let argv = vec!["cmd.exe".to_string(), "/d".to_string(), "/q".to_string()];
-
-        let cfg = kettle_config::Config {
-            shell_integration: false,
-            login_shell: false,
-            ..kettle_config::Config::default()
-        };
-        let waker: kettle_core::Waker = Arc::new(|| {});
-        let mut mux = Mux::new();
-        mux.new_tab_with(&cfg, 80, 24, 8, 16, waker.clone(), &argv, None)
-            .expect("spawn paste target pane");
-        let target = mux.active_focus().expect("target pane id");
-        mux.split_with(Dir::Horizontal, &cfg, 80, 24, 8, 16, waker, argv, None)
-            .expect("spawn sibling pane");
-        let sibling = mux.active_focus().expect("sibling pane id");
-        assert_ne!(target, sibling);
-        assert!(mux.focus_pane(target));
-        (mux, target, sibling)
-    }
 
     fn title_test_config() -> kettle_config::Config {
         kettle_config::Config {
@@ -41720,32 +41382,6 @@ mod tests {
         let sibling = mux.active_focus().expect("sibling pane id");
         assert!(mux.focus_pane(target));
         (mux, target, sibling)
-    }
-
-    fn make_paste_target_observable(mux: &mut Mux, target: u64, sibling: u64) {
-        assert!(!mux.panes.get(&target).unwrap().read_only);
-        assert!(!mux.panes.get(&sibling).unwrap().read_only);
-        mux.panes.get_mut(&target).unwrap().read_only = true;
-    }
-
-    fn confirm_text_dialog(mux: &mut Mux, dialog: ConfirmDialogState) -> Option<PaneInputResult> {
-        match dialog.on_confirm {
-            ConfirmAction::PasteText { text, target } => paste_text_into_target(mux, target, &text),
-            _ => panic!("text confirmation carried the wrong action"),
-        }
-    }
-
-    fn confirm_paths_dialog(mux: &mut Mux, dialog: ConfirmDialogState) -> Option<PaneInputResult> {
-        match dialog.on_confirm {
-            ConfirmAction::PastePaths {
-                paths,
-                trailing_space,
-                target,
-                ..
-            } => paste_paths_into_target(mux, target, &paths, trailing_space)
-                .map(|delivery| delivery.result),
-            _ => panic!("path confirmation carried the wrong action"),
-        }
     }
 
     fn title_test_tab_mux(count: usize) -> (Mux, Vec<u64>) {
@@ -42182,7 +41818,7 @@ mod tests {
     fn media_receipt_wiring_fails_closed_and_keeps_diagnostics_private() {
         let source = production_source();
         let confirmed = source
-            .split("fn paste_paths_confirmed(")
+            .split("fn deliver_path_paste(")
             .nth(1)
             .and_then(|rest| rest.split("\n    fn show_media_paste_receipt").next())
             .expect("confirmed path delivery body");
@@ -42223,25 +41859,14 @@ mod tests {
                 && clipboard.contains("VideoPasteRequest::from_user_paths")
                 && dropped.contains("VideoPasteRequest::from_user_paths")
                 && !clipboard.contains("VideoPasteCandidate::from_user_paths")
-                && !dropped.contains("VideoPasteCandidate::from_user_paths")
-                && source.contains("video: Option<Box<crate::video_preview::VideoPasteRequest>>"),
-            "video receipts must retain an explicit clipboard/drop provenance token through confirmation"
+                && !dropped.contains("VideoPasteCandidate::from_user_paths"),
+            "video receipts must retain an explicit clipboard/drop provenance token"
         );
 
-        let cancel = source
-            .split("fn cancel_confirm_dialog(")
-            .nth(1)
-            .and_then(|rest| rest.split("\n    fn ").next())
-            .expect("confirmation cancellation body");
-        assert!(
-            cancel.contains("ConfirmAction::PastePaths { paths, .. }")
-                && cancel.contains("discard_previews_for_paths(&paths)"),
-            "cancelling a protected bitmap paste must release its one-shot preview"
-        );
         let paths = source
             .split("fn paste_paths(")
             .nth(1)
-            .and_then(|rest| rest.split("\n    fn paste_paths_confirmed").next())
+            .and_then(|rest| rest.split("\n    fn deliver_path_paste").next())
             .expect("path paste body");
         assert!(
             paths.contains("if !within_limit {")
@@ -42412,7 +42037,7 @@ mod tests {
             .and_then(|rest| rest.split("\n    fn ").next())
             .expect("broadcast input body");
         let text_paste = source
-            .split("fn paste_text_confirmed(")
+            .split("fn deliver_text_paste(")
             .nth(1)
             .and_then(|rest| rest.split("\n    fn paste_paths(").next())
             .expect("confirmed text paste body");
@@ -42930,33 +42555,6 @@ mod tests {
         );
     }
 
-    /// Widening where a paste GOES without widening what the safety check
-    /// LOOKS AT is how a protection quietly stops protecting.
-    ///
-    /// The confirmation fires when a multi-line paste can reach a pane with no
-    /// bracketed-paste mode, because a newline runs the line there. Once a
-    /// group paste crosses windows, the panes that answer that question live in
-    /// more than one of them — a group member at a shell prompt in a second
-    /// window is exactly the target the prompt exists for. Asking only the
-    /// focused window would have suppressed it for precisely that case.
-    #[test]
-    fn the_paste_prompt_asks_every_window_the_paste_can_reach() {
-        let src = production_source();
-        assert_eq!(
-            src.split("let raw_target = if ws.mux.is_broadcast_on() {")
-                .skip(1)
-                .take(2)
-                .filter(|gate| {
-                    let end = gate.find("\n        };").unwrap_or(gate.len());
-                    gate[..end].contains("scope_crosses_windows(&ws.mux.broadcast)")
-                        && gate[..end].contains("broadcast_paste_foreign_has_raw_writable_target")
-                })
-                .count(),
-            2,
-            "text and path paste prompts must both inspect foreign raw targets"
-        );
-    }
-
     /// Both user-input paths have to cross the window boundary, not just the
     /// keystroke one. A paste is user input under the same scope as a
     /// keystroke, and `broadcast_paste_delivery` is just as window-local.
@@ -42968,8 +42566,8 @@ mod tests {
         for (path, entry) in [
             ("keystroke", "fn broadcast_input("),
             ("key event", "fn write_terminal_key_event("),
-            ("text paste", "fn paste_text_confirmed("),
-            ("path paste", "fn paste_paths_confirmed("),
+            ("text paste", "fn deliver_text_paste("),
+            ("path paste", "fn deliver_path_paste("),
         ] {
             let body = src
                 .split(entry)
@@ -42988,18 +42586,18 @@ mod tests {
         // broadcast must take its existing group path before either helper can
         // interpret the optional single-pane target.
         for (entry, targeted_delivery) in [
-            ("fn paste_text_confirmed(", "paste_text_into_target"),
-            ("fn paste_paths_confirmed(", "paste_paths_into_target"),
+            ("fn deliver_text_paste(", "paste_text_into_target"),
+            ("fn deliver_path_paste(", "paste_paths_into_target"),
         ] {
-            let body = src.split(entry).nth(1).expect("confirmed paste body");
+            let body = src.split(entry).nth(1).expect("paste delivery body");
             let end = body.find("\n    fn ").unwrap_or(body.len());
             let body = &body[..end];
             let broadcast = body
                 .find("if ws.mux.is_broadcast_on()")
-                .expect("confirmed paste keeps broadcast semantics");
+                .expect("paste delivery keeps broadcast semantics");
             let targeted = body
                 .find(targeted_delivery)
-                .expect("confirmed paste has pinned-pane delivery");
+                .expect("paste delivery has single-pane delivery");
             assert!(
                 broadcast < targeted,
                 "broadcast must branch before the pinned single-pane delivery"
@@ -43007,21 +42605,10 @@ mod tests {
             for stale_focus_lookup in [".focused()", "focused_mode(ws)", "focused_argv()"] {
                 assert!(
                     !body.contains(stale_focus_lookup),
-                    "confirmed single-pane paste must not resolve through {stale_focus_lookup}"
+                    "single-pane paste delivery must not resolve through {stale_focus_lookup}"
                 );
             }
         }
-        let confirm_arms = src
-            .split("fn dispatch_confirm_action_arms(")
-            .nth(1)
-            .expect("confirm dispatch arms");
-        assert!(confirm_arms.contains("paste_text_confirmed(ws, target, &text)"));
-        assert!(
-            confirm_arms.contains("ConfirmAction::PastePaths {")
-                && confirm_arms.contains("video,")
-                && confirm_arms.contains("self.paste_paths_confirmed("),
-            "the confirmation dispatcher must carry the pinned target and video provenance into path delivery"
-        );
         let dropped = src
             .split("WindowEvent::DroppedFile(path) => {")
             .nth(1)
@@ -45539,7 +45126,7 @@ mod tests {
         // Every paste channel (keys, menu, middle click, right click, file
         // drop, broadcast) delivers through these two. A paste restarts the
         // blink even with the pointer, and without a keystroke.
-        for delivery in ["fn paste_text_confirmed(", "fn paste_paths_confirmed("] {
+        for delivery in ["fn deliver_text_paste(", "fn deliver_path_paste("] {
             let body = production
                 .split_once(delivery)
                 .expect("paste delivery")
@@ -53183,9 +52770,8 @@ mod tests {
             normalized_src
                 .matches("self.install_confirm_dialog(")
                 .count(),
-            5,
-            "every confirmation path, including protected text and path paste and a local file \
-             link opened or previewed behind a multiplexer, must use the shared transition"
+            2,
+            "every confirmation path (closing and keybind conflicts) must use the shared transition"
         );
         assert_eq!(
             normalized_src.matches("ws.confirm_dialog = Some(").count(),
@@ -55859,189 +55445,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn paste_protection_only_prompts_for_raw_multiline_targets() {
-        use super::{paste_confirm_prompt, paste_needs_confirmation};
-
-        assert!(!paste_needs_confirmation("printf hello", true, true));
-        assert!(paste_needs_confirmation(
-            "printf hello\nprintf world",
-            true,
-            true
-        ));
-        assert!(!paste_needs_confirmation(
-            "printf hello\nprintf world",
-            true,
-            false
-        ));
-        assert!(!paste_needs_confirmation(
-            "printf hello\nprintf world",
-            false,
-            true
-        ));
-        assert_eq!(
-            paste_confirm_prompt(
-                "one\r\ntwo\nthree",
-                &kettle_i18n::Translator::new(kettle_i18n::Language::En)
-            ),
-            "Paste 3 lines into a shell-like target?"
-        );
-        assert_eq!(
-            paste_confirm_prompt(
-                "one\r\ntwo\nthree",
-                &kettle_i18n::Translator::new(kettle_i18n::Language::Es)
-            ),
-            "¿Pegar 3 líneas en un destino tipo shell?"
-        );
-    }
-
-    /// The confirmation action must retain pane A even if focus moves to pane
-    /// B while the modal is open. Only A becomes read-only after the prompt is
-    /// raised, so the input result identifies which pane received the write
-    /// without depending on the child process echoing it.
-    #[test]
-    fn confirmed_text_paste_never_follows_focus_to_a_sibling() {
-        let (mut mux, target, sibling) = paste_test_mux();
-        mux.broadcast = BroadcastScope::Tab;
-        assert_eq!(
-            confirmed_paste_target(&mux),
-            None,
-            "broadcast prompts intentionally pin no single pane"
-        );
-        mux.broadcast = BroadcastScope::Off;
-        let marker = "KETTLE_TEXT_TARGET_A\nsecond line";
-        assert!(
-            super::paste_needs_confirmation(marker, true, true),
-            "fixture must genuinely require the paste-protection prompt"
-        );
-        let dialog = ConfirmDialogState {
-            prompt: "Paste 2 lines into a shell-like target?".into(),
-            buttons: vec![
-                ConfirmButton::Cancel,
-                ConfirmButton::Confirm {
-                    label: "Paste".into(),
-                    destructive: false,
-                },
-            ],
-            focus_idx: 1,
-            on_confirm: ConfirmAction::PasteText {
-                text: marker.into(),
-                target: confirmed_paste_target(&mux),
-            },
-        };
-        // Change writability only after the prompt has captured its target.
-        // Pane B stays writable, making ReadOnly unique to pane A.
-        make_paste_target_observable(&mut mux, target, sibling);
-        assert!(mux.focus_pane(sibling), "focus moved while prompt was open");
-        assert_eq!(
-            confirm_text_dialog(&mut mux, dialog),
-            Some(PaneInputResult::ReadOnly),
-            "confirmation must write to the original read-only target, not the writable sibling"
-        );
-
-        // The target exits while a second prompt is open. Its sibling is now
-        // focused, but confirmation must resolve to nowhere, never to focus.
-        assert!(mux.focus_pane(target));
-        let dead_marker = "KETTLE_TEXT_DEAD_TARGET\nsecond line";
-        let dead_dialog = ConfirmDialogState {
-            prompt: "Paste 2 lines into a shell-like target?".into(),
-            buttons: vec![
-                ConfirmButton::Cancel,
-                ConfirmButton::Confirm {
-                    label: "Paste".into(),
-                    destructive: false,
-                },
-            ],
-            focus_idx: 1,
-            on_confirm: ConfirmAction::PasteText {
-                text: dead_marker.into(),
-                target: confirmed_paste_target(&mux),
-            },
-        };
-        assert!(!mux.close_focused(), "the sibling keeps the tab alive");
-        assert_eq!(mux.active_focus(), Some(sibling));
-        assert_eq!(confirm_text_dialog(&mut mux, dead_dialog), None);
-    }
-
-    /// Path confirmation has the same stable-target contract, plus its shell
-    /// formatting must come from that target rather than the newly focused
-    /// sibling. A newline in the synthetic path is what raises paste safety.
-    #[test]
-    fn confirmed_path_paste_never_follows_focus_or_argv_to_a_sibling() {
-        let (mut mux, target, sibling) = paste_test_mux();
-        mux.panes.get_mut(&target).unwrap().argv = vec!["wsl.exe".into()];
-        mux.panes.get_mut(&sibling).unwrap().argv = vec!["pwsh.exe".into()];
-
-        let path = std::path::PathBuf::from("C:\\Users\\me\\KETTLE_PATH_TARGET_A\nnext.txt");
-        let preview =
-            crate::mux::format_paths_for_paste(&["wsl.exe".into()], std::slice::from_ref(&path));
-        let sibling_preview =
-            crate::mux::format_paths_for_paste(&["pwsh.exe".into()], std::slice::from_ref(&path));
-        assert_ne!(
-            preview, sibling_preview,
-            "fixture must distinguish the original target's argv from the sibling's"
-        );
-        assert!(
-            super::paste_needs_confirmation(&preview, true, true),
-            "fixture must genuinely require the paste-protection prompt"
-        );
-        let dialog = ConfirmDialogState {
-            prompt: super::paste_confirm_prompt(
-                &preview,
-                &kettle_i18n::Translator::new(kettle_i18n::Language::En),
-            ),
-            buttons: vec![
-                ConfirmButton::Cancel,
-                ConfirmButton::Confirm {
-                    label: "Paste".into(),
-                    destructive: false,
-                },
-            ],
-            focus_idx: 1,
-            on_confirm: ConfirmAction::PastePaths {
-                paths: vec![path].into_boxed_slice(),
-                video: None,
-                trailing_space: true,
-                target: confirmed_paste_target(&mux),
-                receipt_pane: mux.active_focus(),
-            },
-        };
-        // Preserve the writable state used to raise the prompt; only after it
-        // exists do we make pane A's delivery result distinguishable.
-        make_paste_target_observable(&mut mux, target, sibling);
-        assert!(mux.focus_pane(sibling), "focus moved while prompt was open");
-        assert_eq!(
-            confirm_paths_dialog(&mut mux, dialog),
-            Some(PaneInputResult::ReadOnly),
-            "confirmation must write to the original read-only target, not the writable sibling"
-        );
-
-        assert!(mux.focus_pane(target));
-        let dead_path =
-            std::path::PathBuf::from("C:\\Users\\me\\KETTLE_PATH_DEAD_TARGET\nnext.txt");
-        let dead_dialog = ConfirmDialogState {
-            prompt: "Paste 2 lines into a shell-like target?".into(),
-            buttons: vec![
-                ConfirmButton::Cancel,
-                ConfirmButton::Confirm {
-                    label: "Paste".into(),
-                    destructive: false,
-                },
-            ],
-            focus_idx: 1,
-            on_confirm: ConfirmAction::PastePaths {
-                paths: vec![dead_path].into_boxed_slice(),
-                video: None,
-                trailing_space: true,
-                target: confirmed_paste_target(&mux),
-                receipt_pane: mux.active_focus(),
-            },
-        };
-        assert!(!mux.close_focused(), "the sibling keeps the tab alive");
-        assert_eq!(mux.active_focus(), Some(sibling));
-        assert_eq!(confirm_paths_dialog(&mut mux, dead_dialog), None);
-    }
-
     /// The title-edit overlay must be wide enough to show what you are typing.
     ///
     /// Under a vertical tab bar, the first tab SEGMENT's rect is only
@@ -58072,9 +57475,8 @@ mod ui_text_drift_tests {
 #[cfg(test)]
 mod hint_action_tests {
     use super::{
-        Client, ConfirmButton, HintAction, HintWhat, LinkGate, PathOrigin, argv_client,
-        confirm_name_columns, confirmed_preview_path, hint_action, hint_path_url, hint_previews,
-        link_display_name, link_gate, link_menu_rows, local_file_prompt, path_origin,
+        Client, HintAction, HintWhat, LinkGate, PathOrigin, argv_client, hint_action,
+        hint_path_url, hint_previews, link_display_name, link_gate, link_menu_rows, path_origin,
         previewable_name, production_source,
     };
     use super::{CopiedPreview, copied_preview, lane_action_hit, unquote_copied_path};
@@ -58308,27 +57710,6 @@ mod hint_action_tests {
         }
     }
 
-    /// A preview confirmed behind a multiplexer reads its pane's origin
-    /// again: one that has since gone remote, or gone, previews nothing.
-    #[test]
-    fn a_confirmed_preview_rechecks_its_pane() {
-        let root = tempfile::tempdir().unwrap();
-        let file = root.path().join("plot.png");
-        let uri = kettle_core::links::file_url_for_path(&file).expect("a file URL");
-        for origin in [PathOrigin::Local, PathOrigin::Multiplexer("tmux")] {
-            assert_eq!(
-                confirmed_preview_path(&uri, Some(origin)),
-                Some(file.clone())
-            );
-        }
-        assert_eq!(confirmed_preview_path(&uri, Some(PathOrigin::Remote)), None);
-        assert_eq!(confirmed_preview_path(&uri, None), None);
-        assert_eq!(
-            confirmed_preview_path("https://example.com/plot.png", Some(PathOrigin::Local)),
-            None
-        );
-    }
-
     /// Quick select for previews labels a file a lane can show, by its
     /// extension in any case: a whole path, or a local `file://` link.
     #[test]
@@ -58447,12 +57828,9 @@ mod hint_action_tests {
     }
 
     #[test]
-    fn multiplexers_and_remote_clients_are_not_local() {
+    fn remote_clients_are_not_local() {
         for (words, client) in [
-            (&["tmux", "x"][..], Client::Multiplexer("tmux")),
-            (&["/usr/bin/screen", "-r"], Client::Multiplexer("screen")),
-            (&["zellij"], Client::Multiplexer("zellij")),
-            (&["ssh", "host"], Client::Remote),
+            (&["ssh", "host"][..], Client::Remote),
             (&["mosh-client", "x"], Client::Remote),
             (&["docker", "exec", "-it", "c", "sh"], Client::Remote),
             (&["kubectl", "exec", "p"], Client::Remote),
@@ -58464,7 +57842,11 @@ mod hint_action_tests {
             assert_eq!(argv_client(&argv(words), 0), Some(client), "{words:?}");
         }
         for words in [
-            &["zsh"][..],
+            // A multiplexer's server runs on this computer.
+            &["tmux", "x"][..],
+            &["/usr/bin/screen", "-r"],
+            &["zellij"],
+            &["zsh"],
             &["bash"],
             &["vim", "ssh.txt"],
             &["tmuxinator-notes"],
@@ -58479,70 +57861,46 @@ mod hint_action_tests {
     #[test]
     fn wrapped_clients_are_found() {
         for (words, client) in [
-            (
-                &["sh", "-c", "tmux attach -t work"][..],
-                Client::Multiplexer("tmux"),
-            ),
+            (&["sh", "-c", "ssh attach -t work"][..], Client::Remote),
             (&["/bin/bash", "-lc", "exec ssh host"], Client::Remote),
             (
                 &["zsh", "-c", "TERM=xterm-256color ssh host"],
                 Client::Remote,
             ),
             (&["env", "TERM=xterm", "ssh", "host"], Client::Remote),
-            (
-                &["env", "-u", "TMUX", "tmux", "new"],
-                Client::Multiplexer("tmux"),
-            ),
-            (&["sudo", "-u", "me", "tmux"], Client::Multiplexer("tmux")),
+            (&["env", "-u", "TMUX", "ssh", "new"], Client::Remote),
+            (&["sudo", "-u", "me", "ssh"], Client::Remote),
             (&["nice", "-n", "5", "mosh", "host"], Client::Remote),
             (&["sshpass", "-p", "secret", "ssh", "host"], Client::Remote),
-            (
-                &["caffeinate", "-i", "sh", "-c", "screen -r"],
-                Client::Multiplexer("screen"),
-            ),
+            (&["caffeinate", "-i", "sh", "-c", "ssh -r"], Client::Remote),
             // Quotes, chained commands and pipelines.
-            (
-                &["sh", "-c", "\"tmux\" attach; :"],
-                Client::Multiplexer("tmux"),
-            ),
-            (
-                &["sh", "-c", "cd ~ && 'tmux' attach"],
-                Client::Multiplexer("tmux"),
-            ),
+            (&["sh", "-c", "\"ssh\" attach; :"], Client::Remote),
+            (&["sh", "-c", "cd ~ && 'ssh' attach"], Client::Remote),
             (&["bash", "-c", "echo hi | ssh host"], Client::Remote),
             (&["sh", "-c", "tmux attach || ssh host"], Client::Remote),
             (&["sh", "-c", "(exec env A=1 ssh host)"], Client::Remote),
             // Flags that take no value do not swallow the client, and long
             // or unknown options do not hide it.
-            (&["sudo", "-n", "tmux"], Client::Multiplexer("tmux")),
+            (&["sudo", "-n", "ssh"], Client::Remote),
             (&["time", "-p", "ssh", "host"], Client::Remote),
             (&["env", "--", "ssh", "host"], Client::Remote),
-            (
-                &["sudo", "--user", "alice", "tmux"],
-                Client::Multiplexer("tmux"),
-            ),
+            (&["sudo", "--user", "alice", "ssh"], Client::Remote),
             (&["sudo", "--preserve-env", "X", "ssh", "h"], Client::Remote),
             (
-                &["sh", "-c", "sudo --user alice tmux attach; :"],
-                Client::Multiplexer("tmux"),
+                &["sh", "-c", "sudo --user alice ssh attach; :"],
+                Client::Remote,
             ),
-            (
-                &["sh", "-c", "command -p tmux attach; :"],
-                Client::Multiplexer("tmux"),
-            ),
-            (
-                &["sh", "-c", "exec -a work tmux attach"],
-                Client::Multiplexer("tmux"),
-            ),
+            (&["sh", "-c", "command -p ssh attach; :"], Client::Remote),
+            (&["sh", "-c", "exec -a work ssh attach"], Client::Remote),
             (&["zsh", "-c", "noglob ssh host"], Client::Remote),
             // Shell keywords before a command, and commands the parser
             // cannot name, which fail closed.
             (
-                &["sh", "-c", "if true; then tmux attach; fi; :"],
-                Client::Multiplexer("tmux"),
+                &["sh", "-c", "if true; then ssh attach; fi; :"],
+                Client::Remote,
             ),
             (&["sh", "-c", "while :; do ssh host; done"], Client::Remote),
-            (&["sh", "-c", "! { tmux; }"], Client::Multiplexer("tmux")),
+            (&["sh", "-c", "! { ssh; }"], Client::Remote),
             (&["sh", "-c", "time -p ssh host"], Client::Remote),
             (&["sh", "-c", "$EDITOR notes"], Client::Remote),
             (&["sh", "-c", "eval tmux"], Client::Remote),
@@ -58556,7 +57914,7 @@ mod hint_action_tests {
                 ],
                 Client::Remote,
             ),
-            (&["sh", "-c", "echo `tmux ls`"], Client::Multiplexer("tmux")),
+            (&["sh", "-c", "echo `ssh ls`"], Client::Remote),
             (&["sh", "-c", "echo $(echo $(ssh h))"], Client::Remote),
             (&["sh", "-c", "echo $(unclosed"], Client::Remote),
             (
@@ -58564,41 +57922,20 @@ mod hint_action_tests {
                 Client::Remote,
             ),
             // Redirections before a command.
-            (
-                &["bash", "-c", "2>/dev/null tmux attach; :"],
-                Client::Multiplexer("tmux"),
-            ),
+            (&["bash", "-c", "2>/dev/null ssh attach; :"], Client::Remote),
             (&["sh", "-c", "2> /dev/null ssh h"], Client::Remote),
-            (
-                &["sh", "-c", ">/tmp/log 2>&1 tmux"],
-                Client::Multiplexer("tmux"),
-            ),
+            (&["sh", "-c", ">/tmp/log 2>&1 ssh"], Client::Remote),
             (&["sh", "-c", "&>/tmp/log ssh h; :"], Client::Remote),
-            (
-                &["sh", "-c", "tmux attach 2>&1; :"],
-                Client::Multiplexer("tmux"),
-            ),
-            (
-                &["sh", "-c", "tmux</dev/tty attach; :"],
-                Client::Multiplexer("tmux"),
-            ),
+            (&["sh", "-c", "ssh attach 2>&1; :"], Client::Remote),
+            (&["sh", "-c", "ssh</dev/tty attach; :"], Client::Remote),
             (&["sh", "-c", "ssh>/dev/null host"], Client::Remote),
             // A backslash-newline continues the word.
-            (
-                &["sh", "-c", "t\\\nmux attach; :"],
-                Client::Multiplexer("tmux"),
-            ),
+            (&["sh", "-c", "s\\\nsh host; :"], Client::Remote),
             (&["sh", "-c", "\"ss\\\nh\" host"], Client::Remote),
             // Fish's keywords.
-            (
-                &["fish", "-c", "not tmux attach; true"],
-                Client::Multiplexer("tmux"),
-            ),
+            (&["fish", "-c", "not ssh attach; true"], Client::Remote),
             (&["fish", "-c", "true; and ssh host"], Client::Remote),
-            (
-                &["fish", "-c", "begin; tmux; end"],
-                Client::Multiplexer("tmux"),
-            ),
+            (&["fish", "-c", "begin; ssh; end"], Client::Remote),
         ] {
             assert_eq!(argv_client(&argv(words), 0), Some(client), "{words:?}");
         }
@@ -58637,9 +57974,9 @@ mod hint_action_tests {
         assert_eq!(argv_client(&deep, 0), Some(Client::Remote));
     }
 
-    /// A remote session or client wins over a multiplexer; a multiplexer
-    /// alone asks; nothing of either is local. What runs now decides: a
-    /// launch script counts only while it is the foreground program.
+    /// A remote session or client makes a pane remote; anything else,
+    /// tmux included, is local. What runs now decides: a launch script
+    /// counts only while it is the foreground program.
     #[test]
     fn a_pane_path_origin_combines_its_command_lines() {
         let shell = argv(&["zsh"]);
@@ -58651,10 +57988,7 @@ mod hint_action_tests {
             path_origin(remote, launch, foreground.map(|argv| argv.as_slice()))
         };
         assert_eq!(origin(false, &shell, None), PathOrigin::Local);
-        assert_eq!(
-            origin(false, &shell, Some(&tmux)),
-            PathOrigin::Multiplexer("tmux")
-        );
+        assert_eq!(origin(false, &shell, Some(&tmux)), PathOrigin::Local);
         assert_eq!(origin(false, &tmux, Some(&ssh)), PathOrigin::Remote);
         assert_eq!(
             origin(true, &shell, None),
@@ -58686,17 +58020,13 @@ mod hint_action_tests {
         assert_eq!(origin(false, &wrapped_client, None), PathOrigin::Remote);
     }
 
-    /// Only a local file link is gated: from a local pane it opens, behind a
-    /// multiplexer it asks, and from a remote pane or one that has gone it is
-    /// refused. Web and mail links open wherever they were printed.
+    /// Only a local file link is gated: from a local pane, tmux included, it
+    /// opens, and from a remote pane or one that has gone it is refused. Web
+    /// and mail links open wherever they were printed.
     #[test]
     fn file_links_are_gated_by_their_pane() {
         let file = "file:///home/me/a.pdf";
         assert_eq!(link_gate(file, Some(PathOrigin::Local)), LinkGate::Open);
-        assert_eq!(
-            link_gate(file, Some(PathOrigin::Multiplexer("tmux"))),
-            LinkGate::Confirm("tmux")
-        );
         assert_eq!(link_gate(file, Some(PathOrigin::Remote)), LinkGate::Refuse);
         assert_eq!(link_gate(file, None), LinkGate::Refuse);
         assert_eq!(
@@ -58737,64 +58067,11 @@ mod hint_action_tests {
         assert!(width(&wide) <= 13, "{wide}");
         let undecodable = link_display_name(&format!("file:///{}", "%zz".repeat(40)), 25);
         assert_eq!(width(&undecodable), 25);
-        // Each confirmation, sized to an 80-column window with the longest
-        // multiplexer name, fits beside its rendered buttons in every
-        // language, warning and file name included.
-        let max_cols = 79;
-        for (language, preview) in [
-            (kettle_i18n::Language::En, false),
-            (kettle_i18n::Language::Es, false),
-            (kettle_i18n::Language::En, true),
-            (kettle_i18n::Language::Es, true),
-        ] {
-            let tr = kettle_i18n::Translator::new(language);
-            let (button, ask): (_, &dyn Fn(&str) -> String) = if preview {
-                (kettle_i18n::Text::ConfirmButtonPreview, &|name| {
-                    tr.confirm_preview_local_file(name, "zellij")
-                })
-            } else {
-                (kettle_i18n::Text::ConfirmButtonOpen, &|name| {
-                    tr.confirm_open_local_file(name, "zellij")
-                })
-            };
-            let buttons = vec![
-                ConfirmButton::Cancel,
-                ConfirmButton::Confirm {
-                    label: tr.text(button).to_string(),
-                    destructive: false,
-                },
-            ];
-            let uri = format!("file:///tmp/{}-end.pdf", "x".repeat(200));
-            let name_cols = confirm_name_columns(max_cols, &buttons, &tr, ask);
-            let name = link_display_name(&uri, name_cols);
-            let prompt = local_file_prompt(max_cols, &buttons, &tr, &uri, ask);
-            let buttons_cols = buttons
-                .iter()
-                .map(|button| super::confirm_dialog_button_cells(button, &tr))
-                .sum::<usize>()
-                + 2;
-            assert!(
-                width(&prompt) <= kettle_render::confirm_prompt_columns(max_cols, buttons_cols),
-                "{language:?}: {prompt}"
-            );
-            assert!(
-                name_cols >= 12 && prompt.contains(&name) && prompt.ends_with('.'),
-                "{language:?}: {name_cols} columns for the name in {prompt}"
-            );
-            // A narrower window shrinks the name below twelve columns, as long
-            // as the rest of the prompt fits.
-            let template = width(&ask(""));
-            let narrow_cols = max_cols
-                - kettle_render::confirm_prompt_columns(max_cols, buttons_cols)
-                + template
-                + 8;
-            assert_eq!(confirm_name_columns(narrow_cols, &buttons, &tr, ask), 8);
-        }
     }
 
     /// Every link taken from terminal output goes through `open_pane_link`:
-    /// `open_url` is called only from there, from the confirmation it asks
-    /// for, and for Kettle's own release page.
+    /// `open_url` is called only from there and for Kettle's own release
+    /// page.
     #[test]
     fn terminal_links_open_through_their_pane() {
         let src = production_source();
@@ -58821,32 +58098,6 @@ mod hint_action_tests {
                 "open_url called from {caller}"
             );
         }
-        // A confirmation installed from a click asks for the frame that shows
-        // it, for opening and previewing alike.
-        let confirm = src
-            .split("fn confirm_local_file(")
-            .nth(1)
-            .and_then(|rest| rest.split("\n    fn ").next())
-            .expect("confirm_local_file");
-        let installed = confirm
-            .find("self.install_confirm_dialog(")
-            .expect("install");
-        let redraw = confirm.find("window.request_redraw();").expect("redraw");
-        assert!(installed < redraw);
-        for (caller, action) in [
-            ("open_pane_link", "ConfirmAction::OpenLocalFile {"),
-            ("preview_pane_link", "ConfirmAction::PreviewLocalFile {"),
-        ] {
-            let body = src
-                .split(&format!("fn {caller}("))
-                .nth(1)
-                .and_then(|rest| rest.split("\n    fn ").next())
-                .expect(caller);
-            let asks = body
-                .find("LinkGate::Confirm(program) => self.confirm_local_file(")
-                .unwrap_or_else(|| panic!("{caller} asks through confirm_local_file"));
-            assert!(body[asks..].contains(action), "{caller}");
-        }
         // A Lua handler's rewritten target meets the same pane gate.
         let open_url = src
             .split("fn open_url(&mut self, ws: &WindowState, uri: &str, source: LinkSource) {")
@@ -58867,12 +58118,8 @@ mod hint_action_tests {
         // space or `#` in the name would fail the check or name another folder.
         assert!(!src.contains(&["format!(\"file://", "{cwd}\")"].concat()));
         assert!(src.contains("kettle_core::links::file_url_for_path(std::path::Path::new(&cwd))"));
-        // The right-click menu captures the link's pane with its address, and
-        // confirming the multiplexer prompt opens the link it was about.
+        // The right-click menu captures the link's pane with its address.
         assert!(src.contains("items.extend(link_menu_rows(&url, links_pane(ws), tr));"));
-        assert!(src.contains(
-            "ConfirmAction::OpenLocalFile { uri, program } => self.open_url(\n                ws,\n                &uri,\n                LinkSource::Pane(Some(PathOrigin::Multiplexer(program))),"
-        ));
         for site in [
             "self.open_pane_link(ws, links_pane(ws), &uri);",
             "UrlHow::Open => self.open_pane_link(ws, pane, &url),",

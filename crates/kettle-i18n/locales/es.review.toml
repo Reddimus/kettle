@@ -131,16 +131,10 @@ completion_kind_prediction = "accepted"
 completion_matches = "accepted"
 confirm_button_cancel = "accepted"
 confirm_button_close = "accepted"
-confirm_button_open = "accepted"
-confirm_button_preview = "accepted"
-confirm_button_paste = "accepted"
 confirm_button_reassign = "accepted"
 confirm_close_pane = "accepted"
 confirm_close_tab = "accepted"
 confirm_close_window = "accepted"
-confirm_open_local_file = "accepted"
-confirm_preview_local_file = "accepted"
-confirm_paste = "accepted"
 confirm_rebind = "accepted"
 macos_menu_about = "accepted"
 macos_menu_services = "accepted"
@@ -277,6 +271,7 @@ notify_body_recording_overloaded = "accepted"
 notify_body_recording_start_failed = "accepted"
 notify_body_recording_write_failed = "accepted"
 notify_body_remote_file_not_opened = "accepted"
+notify_body_file_link_not_found = "accepted"
 notify_body_preview_no_room = "draft"
 notify_body_remote_not_delivered = "accepted"
 notify_body_screenshot_wait = "accepted"
@@ -660,16 +655,10 @@ keys = [
     "completion_a11y_list",
     "confirm_button_cancel",
     "confirm_button_close",
-    "confirm_button_open",
-    "confirm_button_paste",
-    "confirm_button_preview",
     "confirm_button_reassign",
     "confirm_close_pane",
     "confirm_close_tab",
     "confirm_close_window",
-    "confirm_open_local_file",
-    "confirm_paste",
-    "confirm_preview_local_file",
     "confirm_rebind",
     "hint_a11y_list",
     "media_lane_a11y",

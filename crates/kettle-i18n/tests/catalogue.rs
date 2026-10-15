@@ -75,10 +75,6 @@ fn integer_plural_boundaries() {
             )
         );
     }
-    assert_eq!(
-        en.confirm_paste(1),
-        "Paste 1 line into a shell-like target?"
-    );
     for count in [0, 1, 2, 1000, 1_000_000, u64::MAX] {
         let one = count == 1;
         assert_eq!(
