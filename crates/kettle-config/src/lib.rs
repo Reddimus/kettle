@@ -2099,9 +2099,16 @@ pub fn persist_config_toggle(path: &Path, key: &str, new_value: &str) -> std::io
     let line_ending = preferred_line_ending(existing);
     let mut out = String::with_capacity(existing.len() + candidate_line.len() + 2);
     let mut replaced = false;
+    let mut section = parse::Section::default();
     for segment in existing.split_inclusive('\n') {
         let (line, ending) = split_line_ending(segment);
-        if let Some(line_key) = parse_line_key(line)
+        if line.trim().starts_with('[') {
+            section.enter(parse::section_header(line.trim()));
+            out.push_str(segment);
+            continue;
+        }
+        if section.applies()
+            && let Some(line_key) = parse_line_key(line)
             && normalize_key(line_key) == needle
         {
             // Only the FIRST matching line becomes the new value; later
@@ -2119,8 +2126,12 @@ pub fn persist_config_toggle(path: &Path, key: &str, new_value: &str) -> std::io
         out.push_str(segment);
     }
     if !replaced {
-        ensure_blank_line_before_append(&mut out, line_ending);
-        out.push_str(&format!("{key} = {new_value}"));
+        if section.applies() {
+            ensure_blank_line_before_append(&mut out, line_ending);
+            out.push_str(&format!("{key} = {new_value}"));
+        } else {
+            out.insert_str(0, &format!("{key} = {new_value}{line_ending}"));
+        }
     }
     // Ensure trailing newline so the file is well-formed.
     if !out.ends_with('\n') {
@@ -2173,9 +2184,16 @@ pub fn append_keybind(path: &Path, trigger: &str, action: &str) -> std::io::Resu
     let want_trig = keybinds::parse_trigger(trigger.trim());
     let line_ending = preferred_line_ending(existing);
     let mut out = String::with_capacity(existing.len() + candidate_line.len() + 2);
+    let mut section = parse::Section::default();
     for segment in existing.split_inclusive('\n') {
         let (line, _) = split_line_ending(segment);
-        let drop = parse_line_key(line).is_some_and(|k| normalize_key(k) == "keybind")
+        if line.trim().starts_with('[') {
+            section.enter(parse::section_header(line.trim()));
+            out.push_str(segment);
+            continue;
+        }
+        let drop = section.applies()
+            && parse_line_key(line).is_some_and(|k| normalize_key(k) == "keybind")
             && want_trig.is_some()
             && line
                 .split_once('=')
@@ -2186,9 +2204,13 @@ pub fn append_keybind(path: &Path, trigger: &str, action: &str) -> std::io::Resu
             out.push_str(segment);
         }
     }
-    ensure_blank_line_before_append(&mut out, line_ending);
-    out.push_str(&format!("keybind = {trigger}={action}"));
-    out.push_str(line_ending);
+    if section.applies() {
+        ensure_blank_line_before_append(&mut out, line_ending);
+        out.push_str(&format!("keybind = {trigger}={action}"));
+        out.push_str(line_ending);
+    } else {
+        out.insert_str(0, &format!("keybind = {trigger}={action}{line_ending}"));
+    }
     if Config::detect_malformed_values(&out).len() > Config::detect_malformed_values(existing).len()
     {
         return Err(std::io::Error::new(
@@ -2465,7 +2487,12 @@ impl ConfigEdit {
                     |extension| format!("{extension}.lock"),
                 ),
         );
-        let lock = kettle_state::ExclusiveFileLock::acquire(&lock_path)?;
+        // Another Kettle saving holds this for milliseconds; one stopped in a
+        // debugger or suspended must not freeze this UI, so give up soon.
+        let lock = kettle_state::ExclusiveFileLock::acquire_timeout(
+            &lock_path,
+            std::time::Duration::from_millis(500),
+        )?;
         let document = ConfigDocument::read(&path)?;
         let backup = path.with_extension(
             path.extension()
@@ -2497,6 +2524,10 @@ impl ConfigEdit {
                 ),
             ));
         }
+        let encoded = self.document.encode(text);
+        if encoded.len() as u64 > MAX_CONFIG_BYTES {
+            return Err(std::io::ErrorKind::InvalidData.into());
+        }
         kettle_state::atomic_create_new(
             &self.backup,
             &self.document.bytes,
@@ -2504,7 +2535,7 @@ impl ConfigEdit {
         )?;
         kettle_state::atomic_replace(
             &self.path,
-            &self.document.encode(text),
+            &encoded,
             kettle_state::AtomicWriteOptions::PRESERVE_PERMISSIONS,
         )?;
         Ok(self.backup)
@@ -2554,11 +2585,39 @@ fn validate_single_line(label: &str, value: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Normalize a config-key name for comparison: lowercase
-/// the value and treat `-` as equivalent to `_`. So `cursor-blink`,
-/// `cursor_blink`, and `Cursor-Blink` all hash to the same key.
+/// Key spellings the parser reads as one setting, the canonical one first.
+/// The config writers collapse them, so a value Settings saves is never
+/// shadowed by an older alias line further down the file.
+const KEY_ALIASES: &[&[&str]] = &[
+    &["copy-on-select", "copy-on-selection"],
+    &["cursor-blink", "cursor-style-blink"],
+    &["cursor-style", "cursor-shape"],
+    &["mouse-hide-while-typing", "mouse-hide", "mouse-autohide"],
+    &["scrollback", "scrollback-limit", "scrollback-lines"],
+    &[
+        "scrollback-bytes",
+        "scrollback-byte-limit",
+        "scrollback-memory",
+    ],
+    &["search-case-sensitive", "case-sensitive"],
+    &["tab-bar-position", "tab-position"],
+    &["window-padding-x", "padding-x"],
+    &["window-padding-y", "padding-y"],
+];
+
+/// Normalize a config-key name for comparison: lowercase the value, treat
+/// `-` as equivalent to `_`, and fold an alias into its canonical key. So
+/// `cursor-blink`, `Cursor_Blink` and `cursor-style-blink` are one key.
 fn normalize_key(k: &str) -> String {
-    k.trim().to_ascii_lowercase().replace('-', "_")
+    let normalized = k.trim().to_ascii_lowercase().replace('-', "_");
+    KEY_ALIASES
+        .iter()
+        .find(|group| {
+            group
+                .iter()
+                .any(|alias| alias.replace('-', "_") == normalized)
+        })
+        .map_or(normalized, |group| group[0].replace('-', "_"))
 }
 
 /// Split a Pango font description — Terminator's `font = Mono 10` — into a
@@ -3149,7 +3208,14 @@ impl Config {
                     return None;
                 }
                 let name = p.file_name()?.to_str()?;
-                name.strip_suffix(".config").map(|s| s.to_string())
+                name.strip_suffix(".config")
+                    .filter(|stem| {
+                        !stem.is_empty()
+                            && stem
+                                .chars()
+                                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+                    })
+                    .map(str::to_string)
             })
             .collect();
         sort_profile_names(&mut names);
@@ -11032,6 +11098,53 @@ split_horiz = <Control><Shift>j
         }
     }
 
+    #[test]
+    fn listed_profiles_round_trip_to_their_files() {
+        const CHILD: &str = "KETTLE_TEST_PROFILE_LISTING_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let names = super::Config::list_profiles();
+            assert_eq!(names, ["A.b-2", "my_work"]);
+            for name in names {
+                let path = super::Config::path_for_profile(&name).unwrap();
+                assert_eq!(
+                    std::fs::read_to_string(path).unwrap(),
+                    format!("{name}.config")
+                );
+            }
+            return;
+        }
+        let dir = tempdir_for("profile-listing");
+        let profiles = dir.join("kettle").join("profiles");
+        std::fs::create_dir_all(&profiles).unwrap();
+        for file in [
+            ".config",
+            "my work.config",
+            "my_work.config",
+            "caf\u{e9}.config",
+            "A.b-2.config",
+            "ignored.CONFIG",
+        ] {
+            std::fs::write(profiles.join(file), file).unwrap();
+        }
+        std::fs::create_dir(profiles.join("directory.config")).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "config_tests::listed_profiles_round_trip_to_their_files",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("XDG_CONFIG_HOME", dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     /// The profile cycle order must be total, stable, and case-insensitive.
     ///
     /// `Action::NextProfile` / `PrevProfile` step through this list, so an
@@ -11200,6 +11313,37 @@ split_horiz = <Control><Shift>j
 
     fn tempdir_for(test_name: &str) -> kettle_test_support::PrivateTempDir {
         kettle_test_support::private_tempdir(&format!("kettle-cfg-{test_name}-"))
+    }
+
+    #[test]
+    fn config_editors_preserve_ignored_sections_and_save_applying_values() {
+        for prefix in [
+            "",
+            "[global_config]\ncursor-blink = true\nkeybind = Ctrl+Alt+R=split_right\n",
+            "[profiles]\n[[default]]\ncursor-blink = true\nkeybind = Ctrl+Alt+R=split_right\n",
+        ] {
+            for ignored in [
+                "[layouts]\n",
+                "[layouts]\ncursor-blink = true\nkeybind = Ctrl+Alt+R=split_right\n",
+                "[profiles]\n[[work]]\ncursor-blink = true\nkeybind = Ctrl+Alt+R=split_right\n",
+                "[profiles]\n[[[default]]]\ncursor-blink = true\nkeybind = Ctrl+Alt+R=split_right\n",
+            ] {
+                let dir = tempdir_for("edit-section-scope");
+                let path = dir.join("config");
+                std::fs::write(&path, format!("{prefix}{ignored}")).unwrap();
+                super::persist_config_toggle(&path, "cursor-blink", "false").unwrap();
+                let text = std::fs::read_to_string(&path).unwrap();
+                assert!(!super::Config::parse_text(&text).cursor_blink, "{text:?}");
+                assert!(text.ends_with(ignored), "{text:?}");
+                super::append_keybind(&path, "Ctrl+Alt+R", "new_tab").unwrap();
+                let text = std::fs::read_to_string(&path).unwrap();
+                let cfg = super::Config::parse_text(&text);
+                let trigger = super::keybinds::parse_trigger("Ctrl+Alt+R").unwrap();
+                assert!(!cfg.cursor_blink, "{text:?}");
+                assert_eq!(cfg.keybinds.get(&trigger), Some(&super::Action::NewTab));
+                assert!(text.ends_with(ignored), "{text:?}");
+            }
+        }
     }
 
     /// `append_keybind` appends a repeatable `keybind` line, the
@@ -11424,6 +11568,92 @@ split_horiz = <Control><Shift>j
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Every spelling in `KEY_ALIASES` sets exactly what its canonical key
+    /// sets, so collapsing them when saving changes nothing else.
+    #[test]
+    fn key_aliases_parse_as_their_canonical_key() {
+        // The keybind map's order varies between runs, and no alias here
+        // touches it.
+        let shown = |mut cfg: super::Config| {
+            cfg.keybinds.clear();
+            format!("{cfg:?}")
+        };
+        for group in super::KEY_ALIASES {
+            let value = alias_sample(group[0]).1;
+            let canonical = shown(super::Config::parse_text(&format!(
+                "{} = {value}",
+                group[0]
+            )));
+            assert_ne!(
+                canonical,
+                shown(super::Config::default()),
+                "{} = {value} must change something",
+                group[0]
+            );
+            for alias in &group[1..] {
+                let (cfg, unknown) = super::Config::parse_collect(&format!("{alias} = {value}"));
+                assert!(unknown.is_empty(), "{alias} is unknown");
+                assert_eq!(shown(cfg), canonical, "{alias}");
+            }
+        }
+    }
+
+    #[test]
+    fn persist_config_toggle_collapses_cursor_blink_aliases() {
+        for key in ["cursor-blink", "cursor-style-blink", "Cursor_Style_Blink"] {
+            let dir = tempdir_for("toggle-blink-alias");
+            let path = dir.join("config");
+            std::fs::write(
+                &path,
+                "cursor-blink = true\nfont-size = 14\ncursor-style-blink = true\n",
+            )
+            .unwrap();
+            super::persist_config_toggle(&path, key, "false").unwrap();
+            let text = std::fs::read_to_string(&path).unwrap();
+            let cfg = super::Config::parse_text(&text);
+            assert!(!cfg.cursor_blink, "{text:?}");
+            assert_eq!(cfg.font_size, 14.0);
+            assert_eq!(text, format!("{key} = false\nfont-size = 14\n"));
+        }
+    }
+
+    /// Saving any key in `KEY_ALIASES` replaces every spelling of it, so an
+    /// alias line further down cannot undo the save.
+    #[test]
+    fn persist_config_toggle_collapses_every_alias_group() {
+        for group in super::KEY_ALIASES {
+            let canonical = group[0];
+            let last = group[group.len() - 1];
+            let dir = tempdir_for("toggle-alias-group");
+            let path = dir.join("config");
+            let (old, new) = alias_sample(canonical);
+            std::fs::write(
+                &path,
+                format!("{canonical} = {old}\nfont-size = 14\n{last} = {old}\n"),
+            )
+            .unwrap();
+            super::persist_config_toggle(&path, canonical, new).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                format!("{canonical} = {new}\nfont-size = 14\n"),
+                "{group:?}"
+            );
+        }
+    }
+
+    /// Two valid values for a canonical key in `KEY_ALIASES`, the second one
+    /// not its default.
+    fn alias_sample(key: &str) -> (&'static str, &'static str) {
+        match key {
+            "cursor-style" => ("underline", "beam"),
+            "scrollback" => ("4000", "5000"),
+            "scrollback-bytes" => ("524288", "1048576"),
+            "tab-bar-position" => ("left", "bottom"),
+            "window-padding-x" | "window-padding-y" => ("5", "7"),
+            _ => ("true", "false"),
+        }
+    }
+
     /// Key normalization treats `cursor-blink` /
     /// `cursor_blink` / `Cursor-Blink` as the same line so a user
     /// who hand-edited with underscores doesn't get a duplicate
@@ -11590,6 +11820,33 @@ split_horiz = <Control><Shift>j
     }
 
     #[test]
+    fn config_editors_give_up_soon_when_the_lock_is_held() {
+        let dir = tempdir_for("edit-held-lock");
+        let path = dir.join("config");
+        let original = "cursor-blink = true\n";
+        std::fs::write(&path, original).unwrap();
+        let holder =
+            kettle_state::ExclusiveFileLock::acquire(&path.with_extension("lock")).unwrap();
+        let worker_path = path.clone();
+        let (send, receive) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let toggle = super::persist_config_toggle(&worker_path, "cursor-blink", "false");
+            let keybind = super::append_keybind(&worker_path, "Ctrl+Alt+R", "new_tab");
+            send.send((toggle, keybind)).unwrap();
+        });
+        let result = receive.recv_timeout(std::time::Duration::from_secs(2));
+        drop(holder);
+        worker.join().unwrap();
+        let (toggle, keybind) = result.expect("config editors must not wait for the held lock");
+        assert_eq!(toggle.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+        assert_eq!(keybind.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        assert!(!path.with_extension("bak").exists());
+        super::persist_config_toggle(&path, "cursor-blink", "false").unwrap();
+        super::append_keybind(&path, "Ctrl+Alt+R", "new_tab").unwrap();
+    }
+
+    #[test]
     fn config_edit_refuses_to_overwrite_an_external_change() {
         let dir = tempdir_for("toggle-external-change");
         let path = dir.join("config");
@@ -11604,6 +11861,41 @@ split_horiz = <Control><Shift>j
         );
         assert!(!path.with_extension("bak").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn config_editors_enforce_the_encoded_size_cap_before_backup() {
+        for (bom, width) in [
+            (&[][..], 1),
+            (&[0xef, 0xbb, 0xbf][..], 1),
+            (&[0xff, 0xfe][..], 2),
+            (&[0xfe, 0xff][..], 2),
+        ] {
+            for append in [false, true] {
+                let dir = tempdir_for("edit-size-cap");
+                let path = dir.join("config");
+                let document = super::ConfigDocument::decode(bom.to_vec()).unwrap();
+                let text_len = (super::MAX_CONFIG_BYTES as usize - bom.len()) / width;
+                let mut text = String::from("cursor-blink = true\n#");
+                text.push_str(&"x".repeat(text_len - text.len() - 1));
+                text.push('\n');
+                let original = document.encode(&text);
+                assert_eq!(original.len() as u64, super::MAX_CONFIG_BYTES);
+                std::fs::write(&path, &original).unwrap();
+                let result = if append {
+                    super::append_keybind(&path, "Ctrl+Alt+R", "new_tab")
+                } else {
+                    super::persist_config_toggle(&path, "cursor-blink", "false")
+                };
+                assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+                assert_eq!(std::fs::read(&path).unwrap(), original);
+                assert!(!path.with_extension("bak").exists());
+                let loaded = super::ConfigDocument::read(&path).unwrap();
+                assert!(super::Config::parse_text(&loaded.text).cursor_blink);
+                super::persist_config_toggle(&path, "cursor-blink", "true").unwrap();
+                assert_eq!(std::fs::read(&path).unwrap(), original);
+            }
+        }
     }
 
     #[test]
