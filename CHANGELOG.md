@@ -44,6 +44,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Keep a control-API command's output once scrollback is full, write each
+  pane's log to its own file, and reap trigger and URL-handler processes.
+- Keep pinned previews open while searching, show recording indicators beside
+  a custom window title, and translate the software-rendering title notice.
+- Refuse a control-API screenshot of a pane in a background tab instead of
+  capturing the whole window.
+- Return to the tab you were viewing after confirming a pane's close, and stop
+  `Ctrl`+wheel down from enlarging a size-5 font.
+
 - Read a pane's command line with its empty arguments, so container options
   are not shifted, and reconnect a duplicated kubectl or Podman session with
   its credential selectors and storage root.

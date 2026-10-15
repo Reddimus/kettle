@@ -2,6 +2,7 @@
 
 screenshot_dimensions_too_large = "Screenshot dimensions exceed the GPU texture limit; reduce window padding or font size."
 
+ctl_screenshot_pane_not_visible = "The requested pane is not visible."
 inline_card_pending = "Loading…"
 inline_card_unavailable = "Unavailable"
 inline_card_tip = "Click to open"
@@ -616,6 +617,7 @@ update_a11y_available = "Update available: {tag}"
 update_a11y_open = "Open the release page"
 update_banner = "kettle {tag} available — {url}    (click: open · right-click: dismiss)"
 window_title_gpu_lost = "kettle - GPU device lost - recovering"
+window_title_software_fallback = "software rendering (GPU unavailable)"
 
 media_viewer_a11y_pin = "Pin beside terminal"
 media_viewer_pin_short = "Pin"

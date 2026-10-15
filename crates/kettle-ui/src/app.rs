@@ -1899,9 +1899,10 @@ struct PendingRun {
     conn_id: u64,
     /// Request id, echoed in the completion response.
     req_id: u64,
-    /// Absolute scrollback line where the command's output begins, so the reply
-    /// can slice just this command's output out of the grid.
-    start_line: usize,
+    /// Absolute line, counted from the first row ever written (evicted history
+    /// included), where the command's output begins, so the reply can slice
+    /// just this command's output out of the grid even after the ring wraps.
+    start_line: u64,
     /// When the request gives up waiting for OSC-133 and replies `timed_out`.
     deadline: std::time::Instant,
     /// Where the completion response is sent (the connection thread is blocked
@@ -1979,19 +1980,27 @@ fn optional_u64_param(
 }
 
 fn ctl_capture_bounds(
+    history_origin: u64,
     history_size: usize,
-    start_line: usize,
-    cursor_abs: usize,
+    start_line: u64,
+    cursor_abs: u64,
     returned_lines: usize,
 ) -> (usize, usize, bool) {
-    let take = history_size
+    let screen_top = history_origin.saturating_add(history_size as u64);
+    let take = screen_top
         .saturating_sub(start_line)
-        .min(MAX_CTL_SCROLLBACK_LINES);
-    // The first returned line is absolute `history_size - min(take, history_size)`.
-    let first_abs = history_size - take.min(history_size);
-    let start_idx = start_line.saturating_sub(first_abs);
+        .min(MAX_CTL_SCROLLBACK_LINES as u64)
+        .max(1)
+        .min(history_size as u64);
+    let first_abs = screen_top.saturating_sub(take);
+    let start_idx = start_line
+        .saturating_sub(first_abs)
+        .min(returned_lines as u64) as usize;
     // Inclusive of the cursor line; clamp to what screen_text actually returned.
-    let end_idx = (cursor_abs.saturating_sub(first_abs) + 1).min(returned_lines);
+    let end_idx = cursor_abs
+        .saturating_sub(first_abs)
+        .saturating_add(1)
+        .min(returned_lines as u64) as usize;
     (start_idx, end_idx, start_line < first_abs)
 }
 
@@ -3244,17 +3253,47 @@ fn spawn_trigger_command(argv: &[String]) {
     if argv.is_empty() {
         return;
     }
+    static ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let Some(slot) = TriggerCommandSlot::acquire(&ACTIVE) else {
+        log::warn!("trigger run-command skipped: too many running commands");
+        return;
+    };
     let mut cmd = std::process::Command::new(&argv[0]);
     cmd.args(&argv[1..]);
     // Don't capture stdout/stderr; the child inherits kettle's
     // file descriptors (where applicable). On Unix this means
     // stdout goes to wherever kettle was launched from — which
     // is acceptable for a user-configured fire-and-forget hook.
-    if let Err(e) = cmd.spawn() {
-        log::warn!(
-            "trigger run-command failed to spawn {:?}: {e}",
-            argv.first().map(String::as_str).unwrap_or("<empty>")
-        );
+    if let Err(error) = std::thread::Builder::new()
+        .name("kettle-trigger".into())
+        .spawn(move || {
+            let _slot = slot;
+            if let Err(error) = cmd.spawn().and_then(|mut child| child.wait()) {
+                log::warn!("trigger run-command spawn/wait failed: {error}");
+            }
+        })
+    {
+        log::warn!("trigger run-command reaper failed to start: {error}");
+    }
+}
+
+struct TriggerCommandSlot<'a>(&'a std::sync::atomic::AtomicUsize);
+
+impl<'a> TriggerCommandSlot<'a> {
+    fn acquire(active: &'a std::sync::atomic::AtomicUsize) -> Option<Self> {
+        use std::sync::atomic::Ordering::Relaxed;
+
+        // Rust 1.99 renames fetch_update to try_update; the MSRV (1.95) predates it.
+        #[allow(deprecated)]
+        let acquired =
+            active.fetch_update(Relaxed, Relaxed, |count| (count < 32).then_some(count + 1));
+        acquired.ok().map(|_| Self(active))
+    }
+}
+
+impl Drop for TriggerCommandSlot<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -3569,20 +3608,19 @@ fn validate_screenshot_path(s: &str) -> Result<std::path::PathBuf, &'static str>
 /// (XDG-respecting via env probe; falls back to `./kettle-logs/`
 /// when no cache dir is available).
 ///
-/// File name shape: `kettle-<unix-secs>-<pid>.log`. unix-secs is
-/// sortable; pid disambiguates simultaneous starts across windows.
-///
-/// Pure modulo the explicit `unix_secs` + `cache_dir` inputs —
-/// caller pins both so the helper is fully unit-testable.
+/// File name shape: `kettle-<unix-secs>-<pid>-<sequence>.log`. The process-wide
+/// sequence distinguishes panes and repeated logging sessions in one second.
 fn session_log_path(
     unix_secs: u64,
     pid: u32,
     cache_dir: Option<&std::path::Path>,
 ) -> std::path::PathBuf {
+    static NEXT_SESSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = NEXT_SESSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = cache_dir
         .map(|p| p.to_path_buf().join("kettle").join("logs"))
         .unwrap_or_else(|| std::path::PathBuf::from("kettle-logs"));
-    dir.join(format!("kettle-{unix_secs}-{pid}.log"))
+    dir.join(format!("kettle-{unix_secs}-{pid}-{sequence}.log"))
 }
 
 /// Locate the XDG cache dir for the current user without
@@ -4531,19 +4569,42 @@ fn spawn_file_link_opener(
     }
 }
 
+// Start the waiter before its child so a thread-spawn failure cannot lose a child handle.
+fn spawn_custom_url_handler(cmd: &str, target: &str) -> std::io::Result<()> {
+    let cmd = cmd.to_string();
+    let target = target.to_string();
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("kettle-url-handler".into())
+        .spawn(move || {
+            match std::process::Command::new(&cmd)
+                .arg(&target)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            {
+                Ok(mut child) => {
+                    let _ = tx.send(Ok(()));
+                    if let Err(e) = child.wait() {
+                        log::warn!("custom-url-handler {cmd:?}: could not reap child: {e}");
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(e));
+                }
+            }
+        })?;
+    rx.recv().map_err(std::io::Error::other)?
+}
+
 /// Open a checked, resolved local file: through `handler` with a file URL
 /// built from the resolved path, falling back to the system opener, which
 /// takes the path itself. Neither sees the link's own text, so neither can
 /// read a different path out of it.
 fn open_checked_file(resolved: &std::path::Path, handler: Option<&str>) {
     if let (Some(cmd), Some(url)) = (handler, kettle_core::links::file_url_for_path(resolved)) {
-        match std::process::Command::new(cmd)
-            .arg(&url)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
+        match spawn_custom_url_handler(cmd, &url) {
             Ok(_) => return,
             Err(e) => {
                 log::warn!("custom-url-handler {cmd:?}: {e}; opening the file with the system")
@@ -15655,14 +15716,7 @@ impl App {
             // Custom handler — spawn detached so a long-running
             // browser launch doesn't freeze kettle.
             let cmd = self.cfg.custom_url_handler.clone();
-            let uri = uri.to_string();
-            match std::process::Command::new(&cmd)
-                .arg(&uri)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-            {
+            match spawn_custom_url_handler(&cmd, uri) {
                 Ok(_) => return,
                 Err(e) => log::warn!("custom-url-handler {cmd:?}: {e}; falling through to system"),
             }
@@ -16962,18 +17016,7 @@ impl App {
     /// including after tab/focus switches, not only on OSC title events.
     /// Deduped so it isn't a syscall every frame.
     fn sync_window_title(&mut self, ws: &mut WindowState) {
-        // A user-set title wins over the computed one. Without this, the
-        // recompute below would revert "Edit window title" on the next redraw.
-        //
-        // An override is a fixed string and this runs on the redraw path, so
-        // compare before cloning: in the steady state nothing has changed and
-        // there is nothing to allocate. (The computed branch has to build its
-        // string before it can compare — that one is unavoidable.)
-        let want = match &ws.window_title_override {
-            Some(forced) if *forced == ws.last_title => return,
-            Some(forced) => forced.clone(),
-            None => self.desired_window_title(ws),
-        };
+        let want = self.desired_window_title(ws);
         if want != ws.last_title {
             if let Some(w) = &ws.window {
                 w.set_title(&want);
@@ -16992,7 +17035,10 @@ impl App {
             .and_then(|p| p.term.current_dir_or_native())
             .unwrap_or_default();
         let tab = ws.mux.active + 1;
-        let want = window_title(&self.cfg.window_title_format, title, &cwd, tab);
+        let want = match &ws.window_title_override {
+            Some(forced) => sanitize_title(forced),
+            None => window_title(&self.cfg.window_title_format, title, &cwd, tab),
+        };
         // An always-visible recording indicator in the title bar so the
         // recorder is never silently capturing (and `[REC RAW]` when raw
         // keystroke capture is on). Keep it ASCII because Linux window-manager
@@ -17012,7 +17058,11 @@ impl App {
         };
         let want = sanitize_native_window_title(&want);
         if self.gpu_software_fallback {
-            format!("{want} - software rendering (GPU unavailable)")
+            format!(
+                "{want} - {}",
+                self.ui_text
+                    .text(kettle_i18n::Text::WindowTitleSoftwareFallback)
+            )
         } else {
             want
         }
@@ -19062,7 +19112,7 @@ impl App {
             ime_preedit,
             completion: None,
             media_paste_receipt: None,
-            media_lanes: Vec::new(),
+            media_lanes,
             media_viewer_rect: None,
             card_hover,
             window_focused,
@@ -20123,24 +20173,13 @@ impl App {
                     let value = state.input;
                     // Empty clears the override and restores the
                     // `window-title-format` behaviour; anything else pins it
-                    // so `sync_window_title` stops recomputing over the top.
+                    // as the base for `sync_window_title`.
                     ws.window_title_override = if value.trim().is_empty() {
                         None
                     } else {
-                        Some(value.clone())
+                        Some(value)
                     };
-                    // Every path to the OS titlebar runs through
-                    // `sanitize_title`, which neutralizes control characters
-                    // *and* the Cf bidi overrides that enable right-to-left
-                    // titlebar / Alt-Tab spoofing. Paste makes a clipboard
-                    // payload a one-keystroke way in here, and terminal
-                    // programs can write the clipboard through OSC 52. The
-                    // buffer keeps what the user typed; only what reaches the
-                    // window manager is sanitized.
-                    if let Some(w) = &ws.window {
-                        w.set_title(&sanitize_title(&value));
-                    }
-                    ws.last_title = value;
+                    self.sync_window_title(ws);
                 }
                 _ => {
                     apply_mux_title_edit(&mut ws.mux, &state);
@@ -24189,19 +24228,17 @@ impl App {
                 // ctl API can, even with a modal on screen), snapping them back
                 // to the closed pane's tab is not something they asked for —
                 // so remember where they were and put them back.
-                let viewing = ws.mux.active;
+                let viewing = ws.mux.tab_anchor_panes(ws.mux.active);
                 if !ws.mux.focus_pane(target) {
                     if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
                     return;
                 }
-                let closing_tab = ws.mux.active;
                 self.fire_pane_close_event(ws, target);
                 let was_last = ws.mux.close_focused();
-                // Only restore when they were genuinely somewhere else; the
-                // close itself may have shifted indices, so clamp.
-                if !was_last && viewing != closing_tab && viewing < ws.mux.tabs.len() {
+                // Resolve the viewed tab again after a removal shifts indices.
+                if let Some(viewing) = ws.mux.tab_index_of_any_pane(&viewing) {
                     ws.mux.active = viewing;
                 }
                 // Honor close_focused()'s return like the
@@ -28449,7 +28486,7 @@ impl App {
             let new = if sign > 0 {
                 r.font_size() + 1.0
             } else {
-                (r.font_size() - 1.0).max(6.0)
+                r.font_size() - 1.0
             };
             r.set_font_size(new);
             self.resize_all(ws);
@@ -28706,6 +28743,26 @@ impl App {
                     .map(|(_, rect)| rect)
             })
         };
+        if !full_window && crop.is_none() {
+            let _ = reply.send(Response::err(
+                req.id,
+                ec::BUSY,
+                self.ui_text
+                    .text(kettle_i18n::Text::CtlScreenshotPaneNotVisible),
+            ));
+            return;
+        }
+        // A pane in a background tab or behind another pane's zoom has no
+        // rectangle to crop; refuse rather than capture the whole window.
+        if !full_window && crop.is_none() {
+            let _ = reply.send(Response::err(
+                req.id,
+                ec::BUSY,
+                self.ui_text
+                    .text(kettle_i18n::Text::CtlScreenshotPaneNotVisible),
+            ));
+            return;
+        }
         let (path, output_policy) = match req.params.get("path").and_then(|v| v.as_str()) {
             // Reject an existing destination up front for a prompt response; the
             // renderer independently enforces create-new, owner-only publication
@@ -29142,13 +29199,17 @@ impl App {
             .and_then(|v| v.as_f64())
             .unwrap_or(15.0)
             .clamp(0.1, 600.0);
-        // Snapshot the output start line as the ABSOLUTE cursor line
-        // (history_size + cursor row), not history_size + rows. Output usually
-        // fits on the visible screen without growing scrollback, so a rows-based
-        // start would slice out nothing. The cursor advances as output prints,
-        // so its absolute line tracks the real content whether or not it scrolls.
+        // Include evicted rows so the anchor survives a full scrollback ring.
         let start_line = Self::ctl_pane_ref(ws, &self.windows, pane)
-            .and_then(|p| p.term.screen_text(0).map(|s| s.history_size + s.cursor.0))
+            .and_then(|p| {
+                let term = p.term.term.lock().ok()?;
+                let grid = term.grid();
+                Some(
+                    grid.history_origin()
+                        .saturating_add(grid.history_size() as u64)
+                        .saturating_add(grid.cursor.point.line.0.max(0) as u64),
+                )
+            })
             .unwrap_or(0);
         if let Some(p) = Self::ctl_pane_ref(ws, &self.windows, pane) {
             let mut line = command.to_string();
@@ -29284,28 +29345,31 @@ impl App {
         &self,
         ws: &WindowState,
         pane: u64,
-        start_line: usize,
+        start_line: u64,
     ) -> (String, bool) {
         // The pane may have moved to another window mid-run.
         let Some(p) = Self::ctl_pane_ref(ws, &self.windows, pane) else {
             return (String::new(), false);
         };
-        let Some(probe) = p.term.screen_text(0) else {
+        let Ok(term) = p.term.term.lock() else {
             return (String::new(), false);
         };
-        let hist = probe.history_size;
-        let cursor_abs = hist + probe.cursor.0; // absolute line of the cursor now
-        // History lines we must pull to reach `start_line` (0 when it's already
-        // on the active screen, the common case), capped.
-        let take = hist
+        let grid = term.grid();
+        let origin = grid.history_origin();
+        let hist = grid.history_size();
+        let screen_top = origin.saturating_add(hist as u64);
+        let cursor_abs = screen_top.saturating_add(grid.cursor.point.line.0.max(0) as u64);
+        // Request at least one history row so a scrolled viewport cannot shift
+        // the scrape away from the active screen. Zero history clamps to zero.
+        let take = screen_top
             .saturating_sub(start_line)
-            .min(MAX_CTL_SCROLLBACK_LINES);
-        let Some(s) = p.term.screen_text(take) else {
-            return (String::new(), false);
-        };
+            .min(MAX_CTL_SCROLLBACK_LINES as u64)
+            .max(1) as usize;
+        let s = kettle_core::term::screen_text_of(&term, take);
+        drop(term);
         let lines: Vec<&str> = s.text.lines().collect();
         let (start_idx, end_idx, head_dropped) =
-            ctl_capture_bounds(hist, start_line, cursor_abs, lines.len());
+            ctl_capture_bounds(origin, hist, start_line, cursor_abs, lines.len());
         if start_idx >= end_idx {
             return (String::new(), head_dropped);
         }
@@ -40844,6 +40908,13 @@ mod modal_discipline_guard {
             "the re-focus must come BEFORE the close, or the close still acts \
              on whatever happens to be focused"
         );
+        let viewing = body
+            .find("let viewing = ws.mux.tab_anchor_panes(ws.mux.active);")
+            .expect("remember the viewed tab by its panes");
+        let restore = body
+            .find("ws.mux.tab_index_of_any_pane(&viewing)")
+            .expect("resolve the viewed tab after closing");
+        assert!(viewing < refocus && pane_close < restore);
     }
 
     /// `split_auto` must actually pick an axis.
@@ -44476,6 +44547,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn software_recovery_title_notice_is_translated() {
+        use kettle_i18n::{Language, Text, Translator};
+
+        let src = production_source();
+        let desired = src
+            .split("fn desired_window_title(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .unwrap();
+        // rustfmt may split the call across lines; compare without whitespace.
+        let compact: String = desired.split_whitespace().collect();
+        assert!(
+            compact.contains("self.ui_text.text(kettle_i18n::Text::WindowTitleSoftwareFallback)")
+        );
+        let en = Translator::new(Language::En);
+        let es = Translator::new(Language::Es);
+        let key = Text::ALL
+            .iter()
+            .copied()
+            .find(|key| en.text(*key) == "software rendering (GPU unavailable)")
+            .expect("software fallback notice is in the typed catalogue");
+        assert_eq!(es.text(key), "renderizado por software (GPU no disponible)");
+    }
+
     /// Source-drift guard: while the GPU device is lost the redraw guard must
     /// reset the output pacer + snapshot `seen_output_gen` so a streaming pane
     /// can't spin the loop. Recovery itself is driven from `about_to_wait_inner`
@@ -44734,6 +44830,25 @@ mod tests {
                 && body.contains("target window is minimized, hidden, or not yet shown"),
             "timeouts must either win cancellation or bound the wait for an already-committed result, and unavailable targets must receive a prompt error"
         );
+    }
+
+    #[test]
+    fn control_screenshot_requires_a_visible_pane_crop() {
+        let src = production_source();
+        let body = src
+            .split("fn ctl_screenshot(")
+            .nth(1)
+            .expect("ctl_screenshot body");
+        let guard = body
+            .find("if !full_window && crop.is_none() {")
+            .expect("pane capture must reject a missing visible rectangle");
+        let path = body.find("let (path, output_policy)").unwrap();
+        let queue = body.find("renderer.set_pending_screenshot").unwrap();
+        assert!(guard < path && path < queue);
+        let rejection = &body[guard..path];
+        assert!(rejection.contains("ec::BUSY"));
+        assert!(rejection.contains("Text::CtlScreenshotPaneNotVisible"));
+        assert!(rejection.contains("return;"));
     }
 
     #[test]
@@ -45185,11 +45300,15 @@ mod tests {
             .expect("end of blink toggle")
             .0;
         assert!(toggle.contains("self.reset_blink_phase(ws);"));
-        let reload = src
+        let reload = production
             .split_once("fn apply_reloaded_config(&mut self, ws: &mut WindowState, font_size_changed: bool) {")
             .expect("apply_reloaded_config")
-            .1;
+            .1
+            .split_once("\n    fn ")
+            .expect("end of apply_reloaded_config")
+            .0;
         assert!(reload.trim_start().starts_with("// A config change"));
+        assert!(!reload.contains("fn reload_config("));
         assert!(reload.contains("self.reset_blink_phase(ws);"));
     }
 
@@ -45671,7 +45790,16 @@ mod tests {
             .find("MouseAt::Pointer(rect)")
             .expect("pointer reports");
         assert!(held < motion && motion < pointer);
-        assert!(body("overlay").contains("let media_lanes = self.preview_lane_projections(ws);"));
+        let overlay = body("overlay");
+        assert!(overlay.contains("let media_lanes = self.preview_lane_projections(ws);"));
+        assert_eq!(
+            overlay
+                .lines()
+                .filter(|line| line.trim() == "media_lanes,")
+                .count(),
+            2,
+            "both the search and non-search overlays must retain preview lanes"
+        );
         let tree = body("accessibility_tree");
         assert!(tree.contains("let lanes_reachable = !self.non_search_modal_open(ws);"));
         assert!(tree.contains(".filter(|_| lanes_reachable)"));
@@ -48669,6 +48797,18 @@ mod tests {
             .expect("font step arm present");
         assert!(arm.contains("r.font_size() - 1.0"), "steps by one point");
         assert!(!arm.contains(".max("), "no floor above the renderer's own");
+
+        let wheel = src
+            .split("fn dispatch_wheel(")
+            .nth(1)
+            .and_then(|s| s.split("let new = if sign > 0 {").nth(1))
+            .and_then(|s| s.split("r.set_font_size(new);").next())
+            .expect("wheel font step present");
+        assert!(wheel.contains("r.font_size() - 1.0"));
+        assert!(
+            !wheel.contains(".max("),
+            "wheel must use the renderer floor"
+        );
     }
 
     /// Drift guard. `search_key`'s catch-all must route typed text through the
@@ -48888,21 +49028,35 @@ mod tests {
     /// Every route to that sink must run `sanitize_title`, including the
     /// user-set window title. Its editor accepts paste, which puts a clipboard
     /// payload one keystroke away, and terminal programs can write the
-    /// clipboard through OSC 52. Pin the sanitizer at the callsite; the edit
-    /// buffer itself deliberately keeps what was typed.
+    /// clipboard through OSC 52. Pin sanitization on the shared title path;
+    /// the edit buffer itself deliberately keeps what was typed.
     #[test]
     fn the_user_set_window_title_is_sanitized_before_it_reaches_the_window() {
         let src = production_source();
         let arm = src
             .split("TitleEditScope::Window => {")
             .nth(1)
-            .and_then(|rest| rest.split("ws.last_title = value;").next())
+            .and_then(|rest| rest.split("\n    fn ").next())
             .expect("window title-edit arm present");
-        assert!(
-            arm.contains("w.set_title(&sanitize_title(&value))"),
-            "the window title must be sanitized before set_title, or a pasted \
-             U+202E reverses the titlebar"
-        );
+        assert!(arm.contains("self.sync_window_title(ws);"));
+        assert!(!arm.contains("w.set_title("));
+        let sync = src
+            .split("fn sync_window_title(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .unwrap();
+        assert!(sync.contains("let want = self.desired_window_title(ws);"));
+        assert!(!sync.contains("window_title_override"));
+        let desired = src
+            .split("fn desired_window_title(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .unwrap();
+        assert!(desired.contains("Some(forced) => sanitize_title(forced),"));
+        let base = desired.find("ws.window_title_override").unwrap();
+        let recording = desired.find("recording_window_title(").unwrap();
+        let sanitize = desired.find("sanitize_native_window_title(").unwrap();
+        assert!(base < recording && recording < sanitize);
         // And the sanitizer must still cover the bidi class, not just controls.
         assert_eq!(sanitize_title("safe\u{202e}evil"), "safe evil");
         assert_eq!(sanitize_title("ok\u{2069}"), "ok ");
@@ -49549,32 +49703,28 @@ mod tests {
             )
         };
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while !detected_now(&ws)
-            .iter()
-            .any(|link| link.uri.contains("flight-data.contract.feature"))
+        while !ws.mux.panes[&pane]
+            .term
+            .screen_text(0)
+            .is_some_and(|screen| {
+                screen.text.lines().next() == Some(line) && screen.cursor == (1, 0)
+            })
         {
             assert!(
                 std::time::Instant::now() < deadline,
-                "the shell never printed the path"
+                "the shell never printed the complete fixture"
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        // The reader publishes the output generation after it releases the
-        // terminal, so the text can show before its read is counted. Prime the
-        // cache only once the count has settled; otherwise a late count would
-        // force the second scan by itself and hide a missing geometry key.
-        let mut settled = ws.mux.panes[&pane].term.output_generation();
-        let mut since = std::time::Instant::now();
-        while since.elapsed() < std::time::Duration::from_millis(200) {
+        // Text is visible before its chunk's output generation is published.
+        // Wait for parser completion before priming the cache, so a late
+        // generation cannot hide a missing geometry key.
+        while ws.mux.panes[&pane].term.pty_read_progress().pending_chunks != 0 {
             assert!(
                 std::time::Instant::now() < deadline,
-                "the output never settled"
+                "the parser never finished the fixture"
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
-            let now = ws.mux.panes[&pane].term.output_generation();
-            if now != settled {
-                (settled, since) = (now, std::time::Instant::now());
-            }
         }
 
         super::scan_links(&mut ws);
@@ -49596,6 +49746,31 @@ mod tests {
         let narrow = spans(&detected_now(&ws));
         assert_ne!(narrow, wide, "the reflow moved the links");
         assert_eq!(spans(&ws.links), narrow, "the scan followed the reflow");
+    }
+
+    #[test]
+    fn link_resize_fixture_waits_for_parser_completion_before_scanning() {
+        let code = kettle_test_support::code_only(include_str!("app.rs"));
+        let fixture = code
+            .split_once("fn detected_links_follow_a_resize_that_reflows_the_text() {")
+            .expect("resize fixture")
+            .1
+            .split_once("\n    fn ")
+            .expect("end of resize fixture")
+            .0;
+        let setup = fixture
+            .split_once("super::scan_links(&mut ws);")
+            .expect("cache priming")
+            .0;
+        let wait = setup
+            .rsplit_once("while ")
+            .expect("completion wait")
+            .1
+            .split_once('{')
+            .expect("wait body")
+            .0;
+        assert!(wait.contains(".pty_read_progress()"));
+        assert!(wait.contains(".pending_chunks != 0"));
     }
 
     #[test]
@@ -55199,6 +55374,64 @@ mod tests {
     }
 
     #[test]
+    fn trigger_command_slots_are_bounded_and_released() {
+        use super::TriggerCommandSlot;
+        use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+
+        let active = AtomicUsize::new(0);
+        let mut slots: Vec<_> = (0..32)
+            .map(|_| TriggerCommandSlot::acquire(&active).unwrap())
+            .collect();
+        assert!(TriggerCommandSlot::acquire(&active).is_none());
+        drop(slots.pop());
+        assert!(TriggerCommandSlot::acquire(&active).is_some());
+        drop(slots);
+        assert_eq!(active.load(Relaxed), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trigger_command_reaps_exited_child() {
+        use std::time::{Duration, Instant};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pid");
+        super::spawn_trigger_command(&[
+            "/bin/sh".into(),
+            "-c".into(),
+            "printf '%s' \"$$\" > \"$1\"".into(),
+            "kettle-trigger-test".into(),
+            path.to_str().unwrap().into(),
+        ]);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let pid: libc::pid_t = loop {
+            if let Some(pid) = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|text| text.parse().ok())
+            {
+                break pid;
+            }
+            assert!(Instant::now() < deadline, "trigger did not publish its pid");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let reaped = loop {
+            if unsafe { libc::kill(pid, 0) } == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        if !reaped {
+            unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) };
+        }
+        assert!(reaped, "the completed trigger child was left unreaped");
+    }
+
+    #[test]
     fn match_triggers_finds_pattern_anywhere_in_text() {
         // The matching engine fires on the first regex hit, returns its
         // action, and no-ops when nothing matches. Patterns are unanchored.
@@ -55896,28 +56129,34 @@ mod tests {
         );
     }
 
-    /// Drift guard. `session_log_path` is the pure helper
+    /// Drift guard. `session_log_path` is the helper
     /// behind `Action::ToggleSessionLog`. Verify:
     ///   - lives under `<cache>/kettle/logs/`
     ///   - filename includes both the unix-secs (for sort) and pid
-    ///     (for collision-resistance across kettle windows)
+    ///     plus a sequence for each logging session
     ///   - falls back to a relative dir when no cache dir resolves
     #[test]
     fn session_log_path_under_cache_kettle_logs() {
         use super::session_log_path;
         let cache = std::path::Path::new("/home/u/.cache");
         let p = session_log_path(1_716_422_400, 9876, Some(cache));
-        assert_eq!(
-            p,
-            std::path::PathBuf::from("/home/u/.cache/kettle/logs/kettle-1716422400-9876.log")
-        );
+        assert_eq!(p.parent(), Some(cache.join("kettle/logs").as_path()));
+        let filename = p.file_name().unwrap().to_str().unwrap();
+        assert!(filename.starts_with("kettle-1716422400-9876-"));
+        assert!(filename.ends_with(".log"));
         // No cache dir resolved → relative fallback (still gets the
         // log written somewhere instead of erroring out).
         let p = session_log_path(1_716_422_400, 9876, None);
-        assert_eq!(
-            p,
-            std::path::PathBuf::from("kettle-logs/kettle-1716422400-9876.log")
-        );
+        assert_eq!(p.parent(), Some(std::path::Path::new("kettle-logs")));
+        assert_eq!(p.extension().and_then(|s| s.to_str()), Some("log"));
+    }
+
+    #[test]
+    fn session_log_paths_are_unique_within_one_second() {
+        let paths: std::collections::HashSet<_> = (0..128)
+            .map(|_| super::session_log_path(1_716_422_400, 9876, None))
+            .collect();
+        assert_eq!(paths.len(), 128);
     }
 
     /// The join neither crate can check on its own.
@@ -56409,6 +56648,22 @@ mod tests {
             .nth(1)
             .and_then(|s| s.split("fn paste_clipboard").next())
             .expect("open_url helper present");
+        assert!(open_url.contains("spawn_custom_url_handler(&cmd, uri)"));
+        let checked = src
+            .split("fn open_checked_file(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .unwrap();
+        assert!(checked.contains("spawn_custom_url_handler(cmd, &url)"));
+        let helper = src
+            .split("fn spawn_custom_url_handler(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .unwrap();
+        let worker = helper.find(".spawn(move ||").unwrap();
+        let child = helper.find("Command::new(&cmd)").unwrap();
+        let wait = helper.find("child.wait()").unwrap();
+        assert!(worker < child && child < wait);
         assert!(
             open_url.contains("Ok(_) => return,"),
             "a successful custom-url-handler spawn should own the URL"
@@ -56456,8 +56711,13 @@ mod tests {
         use super::{MAX_CTL_SCROLLBACK_LINES, ctl_capture_bounds};
 
         let history_size = MAX_CTL_SCROLLBACK_LINES + 5_000;
-        let (start, end, head_dropped) =
-            ctl_capture_bounds(history_size, 0, history_size, MAX_CTL_SCROLLBACK_LINES + 24);
+        let (start, end, head_dropped) = ctl_capture_bounds(
+            0,
+            history_size,
+            0,
+            history_size as u64,
+            MAX_CTL_SCROLLBACK_LINES + 24,
+        );
         assert_eq!(start, 0);
         assert!(end > start);
         assert!(
@@ -56465,9 +56725,31 @@ mod tests {
             "a command that outruns the retained-line capture must mark its output incomplete"
         );
 
-        let (start, end, head_dropped) = ctl_capture_bounds(100, 50, 100, MAX_CTL_SCROLLBACK_LINES);
+        let (start, end, head_dropped) =
+            ctl_capture_bounds(0, 100, 50, 100, MAX_CTL_SCROLLBACK_LINES);
         assert!(end > start);
         assert!(!head_dropped, "a fully retained capture is complete");
+    }
+
+    #[test]
+    fn run_command_capture_survives_full_scrollback() {
+        use super::ctl_capture_bounds;
+
+        // Two retained history rows and two screen rows; the command began at
+        // document row 3, then printed through row 5 while history stayed full.
+        let lines = ["command", "first", "second"];
+        let (start, end, truncated) = ctl_capture_bounds(2, 2, 3, 5, lines.len());
+        assert_eq!(lines[start..end].join("\n"), "command\nfirst\nsecond");
+        assert!(!truncated);
+
+        // More output evicts the command's first rows.
+        let lines = ["second", "third", "fourth", "prompt"];
+        let (start, end, truncated) = ctl_capture_bounds(5, 2, 3, 8, lines.len());
+        assert_eq!(
+            lines[start..end].join("\n"),
+            "second\nthird\nfourth\nprompt"
+        );
+        assert!(truncated);
     }
 
     /// Drift guard. `pick_light_dark_target` is the
@@ -58308,6 +58590,53 @@ mod hint_action_tests {
 #[cfg(test)]
 mod program_link_tests {
     use super::{production_source, take_opener_slot};
+
+    #[cfg(unix)]
+    #[test]
+    fn a_custom_file_handler_is_reaped_after_exit() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::time::{Duration, Instant};
+
+        let root = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+        let handler = root.join("handler");
+        let pid_file = root.join("pid");
+        std::fs::write(&pid_file, b"").unwrap();
+        std::fs::write(
+            &handler,
+            b"#!/bin/sh\nprintf '%s\\n' \"$$\" > \"${1#file://}\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&handler, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        super::open_checked_file(&pid_file, Some(handler.to_str().unwrap()));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let pid: libc::pid_t = loop {
+            let text = std::fs::read_to_string(&pid_file).unwrap();
+            if text.ends_with('\n') {
+                break text.trim().parse().unwrap();
+            }
+            assert!(Instant::now() < deadline, "handler did not publish its pid");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let reaped = loop {
+            // SAFETY: signal zero only queries the child whose pid the handler wrote.
+            if unsafe { libc::kill(pid, 0) } == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        if !reaped {
+            // SAFETY: clean up only this handler's exited child if the regression returns.
+            unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) };
+        }
+        assert!(reaped, "the custom handler was left running or unreaped");
+    }
 
     /// A link to a program or a shortcut does not open: by extension, or a
     /// file with no extension that is executable or begins like a shortcut.
