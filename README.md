@@ -135,6 +135,9 @@ plays automatically. Linux video sound needs FFmpeg and a running PulseAudio
 15+ compatible service (including PipeWire). Set `media-open-mode = lane` for
 the previous layout.
 
+On Linux, choose **Open in Image Viewer** from a picture's menu to open a
+copy in Loupe, or Eye of GNOME if Loupe is not installed.
+
 ![An SVG chart in Kettle's centered viewer on Ubuntu](docs/images/media-viewer.png)
 
 Without an agent, `/copy` a diagram and use `render_clipboard_as_diagram`,
