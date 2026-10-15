@@ -1163,9 +1163,9 @@ define, or can autoload, still wins. In zsh the definition waits in
 `precmd_functions`, so a `.zshrc` that replaces that list outright gets no
 `codex` from Kettle. A system `zshenv` (`/etc/zshenv`, `/etc/zsh/zshenv`, or
 the `etc/zshenv` of the prefix zsh is installed under) runs before Kettle's
-file. One that names `ZDOTDIR` would find Kettle's directory there, and one
-that names the `RCS` option may stop zsh reading Kettle's file at all, so
-Kettle leaves that zsh alone, and `kettle agent-setup --status` names the
+file. One whose code names `ZDOTDIR` would find Kettle's directory there, and
+one that names the `RCS` option may stop zsh reading Kettle's file at all, so
+Kettle leaves that zsh alone (comment lines don't count), and `kettle agent-setup --status` names the
 file. Only the shell a pane starts gets it: your login shell, or a `zsh` or
 `fish` command with no arguments of its own, found the way the pane finds
 the shell it runs. Bash, a shell given arguments, and a shell started from the pane's

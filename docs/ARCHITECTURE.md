@@ -751,7 +751,7 @@ run, otherwise the passwd shell) and, for zsh or fish with no arguments of
 its own, adds `additions`. zsh gets `ZDOTDIR` pointing at the `.zshenv` plus
 its original value, any bytes, and whether it was set, which the file
 (`shell_startup::zshenv`) restores before anything else, unless a system
-`zshenv` names `ZDOTDIR` or the `RCS` option; a bare `zsh` command is found
+`zshenv` names `ZDOTDIR` or the `RCS` option outside a comment line; a bare `zsh` command is found
 on the pane's `PATH` for that check. fish gets `-C` and the code, which the vendored
 portable-pty passes to the default shell after its login `argv[0]`
 (`shell_arg`).
