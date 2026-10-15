@@ -240,7 +240,7 @@ impl Tri {
     }
 }
 
-/// True when the item is compiled **only** under `cfg(test)`.
+/// True when the item cannot appear in a non-test build.
 ///
 /// Presence of the `test` identifier is not the question, and treating it as
 /// one silently deletes production code. `#[cfg(any(unix, test))]` compiles on
@@ -256,10 +256,13 @@ fn cfg_is_test_only(contents: &[u8]) -> Result<bool, ()> {
     let Some((name, end)) = identifier(contents, cursor) else {
         return Ok(false);
     };
+    cursor = skip_trivia(contents, end)?;
+    if name == b"test" && cursor == contents.len() {
+        return Ok(true);
+    }
     if name != b"cfg" {
         return Ok(false);
     }
-    cursor = skip_trivia(contents, end)?;
     if contents.get(cursor) != Some(&b'(') {
         return Ok(false);
     }
@@ -408,10 +411,29 @@ fn find_item_end(bytes: &[u8], mut cursor: usize) -> Result<usize, ()> {
     let mut bracket_depth = 0usize;
     let mut brace_depth = 0usize;
     let mut angle_depth = 0usize;
+    let mut is_function = false;
+    let mut last_identifier_end = cursor;
     while cursor < bytes.len() {
         if let Some(end) = skip_lexeme(bytes, cursor)? {
             cursor = end;
             continue;
+        }
+        if !requires_semicolon && paren_depth == 0 && bracket_depth == 0 && angle_depth == 0 {
+            if let Some((word, end)) = identifier(bytes, cursor) {
+                is_function |= word == b"fn";
+                last_identifier_end = end;
+                cursor = end;
+                continue;
+            }
+            if is_function
+                && bytes[cursor] == b'!'
+                && skip_trivia(bytes, last_identifier_end)? == cursor
+            {
+                let next = skip_trivia(bytes, cursor + 1)?;
+                if bytes.get(next) == Some(&b'{') {
+                    return Err(());
+                }
+            }
         }
         if !requires_semicolon
             && paren_depth == 0

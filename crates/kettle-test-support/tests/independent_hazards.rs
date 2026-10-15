@@ -31,6 +31,21 @@ fn assert_kept(label: &str, src: &str, must_keep: &[&str], must_drop: &[&str]) {
 }
 
 #[test]
+fn standalone_test_functions_cannot_satisfy_source_guards() {
+    for attribute in ["test", "r#test", "test /* comment */"] {
+        let src = format!(
+            "fn keep() {{}}\n#[{attribute}]\nfn guard() {{ assert!(production_source(include_str!(\"module.rs\")).contains(\"required_call()\")); }}\n#[test_support::test]\nfn custom() {{}}\nfn also_keep() {{}}\n"
+        );
+        assert_kept(
+            attribute,
+            &src,
+            &["fn keep()", "fn custom()", "fn also_keep()"],
+            &["fn guard()", "required_call()"],
+        );
+    }
+}
+
+#[test]
 fn brace_inside_hashed_raw_string_does_not_end_the_item_early() {
     assert_kept(
         "hashed raw string",
@@ -283,4 +298,28 @@ fn boolean_cfg_literals_are_evaluated_not_treated_as_unknown_atoms() {
         &["fn keep()", "fn also_keep()"],
         &["fn gone()"],
     );
+}
+
+#[test]
+fn braced_return_type_macros_cannot_leak_test_bodies() {
+    assert_kept(
+        "never return type",
+        "fn keep() {}\n#[cfg(test)]\nfn helper() -> ! { panic!(\"required_call()\"); }\nfn also_keep() {}\n",
+        &["fn keep()", "fn also_keep()"],
+        &["fn helper()", "required_call()"],
+    );
+    for return_type in ["ty!{}", "ty! /* comment */ { u8 }"] {
+        let src = format!(
+            "fn keep() {{}}\n#[cfg(test)]\nfn helper() -> {return_type} {{ required_call(); 0 }}\nfn also_keep() {{}}\n"
+        );
+        if let Ok(out) = std::panic::catch_unwind(|| production_source(&src)) {
+            assert!(out.contains("fn keep()"), "preceding production item lost");
+            assert!(
+                out.contains("fn also_keep()"),
+                "following production item lost"
+            );
+            assert!(!out.contains("fn helper()"), "test signature survived");
+            assert!(!out.contains("required_call()"), "test body survived");
+        }
+    }
 }

@@ -44,6 +44,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Read a pane's command line with its empty arguments, so container options
+  are not shifted, and reconnect a duplicated kubectl or Podman session with
+  its credential selectors and storage root.
+- Recognize an agent's composer only when it is the one program under a
+  nested shell, not a forked helper beside it.
+- Save state files whose names are long enough to overflow the temporary
+  name.
+
 - Play a video whose sound cannot be decoded without its sound, instead of
   failing, and keep playing a 30 fps video's sound after its last frame.
 - Report that a video ended only after its worker exited cleanly.

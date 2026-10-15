@@ -346,11 +346,20 @@ fn create_staged_file(parent: &Path, destination: &Path) -> io::Result<(File, Pa
     ))
 }
 
-fn staged_file_stem(destination: &Path) -> &str {
-    destination
+fn staged_file_stem(destination: &Path) -> String {
+    let name = destination
         .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("state")
+        .unwrap_or_else(|| std::ffi::OsStr::new("state"));
+    if let Some(name) = name.to_str().filter(|name| name.len() <= 64) {
+        return name.to_owned();
+    }
+    // Keep the encoding and hash stable across processes for stale-file reaping.
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in name.as_encoded_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("kettle-{hash:016x}")
 }
 
 fn canonical_decimal(value: &str) -> bool {
@@ -1170,6 +1179,29 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert!(first.exists());
         assert!(second.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_writes_support_long_destination_components() {
+        let dir = crate::test_tempdir();
+        let path = dir.path().join(format!("{}.json", "x".repeat(235)));
+        let backup = path.with_extension("json.bak");
+        fs::write(&path, b"before").unwrap();
+        assert!(atomic_create_new(&backup, b"before", AtomicWriteOptions::PRIVATE).unwrap());
+        atomic_replace(&path, b"after", AtomicWriteOptions::PRESERVE_PERMISSIONS).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"after");
+        assert_eq!(fs::read(&backup).unwrap(), b"before");
+
+        let (file, staged_path) = create_staged_file(dir.path(), &path).unwrap();
+        let name = staged_path.file_name().unwrap().to_str().unwrap();
+        assert!(name.len() <= 255);
+        assert_eq!(
+            staged_file_creator_pid(name, &path),
+            Some(std::process::id())
+        );
+        assert_eq!(staged_file_creator_pid(name, &backup), None);
+        discard_created_private_file(file, &staged_path);
     }
 
     #[test]
