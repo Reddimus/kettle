@@ -144,6 +144,12 @@ handlers, names at 256 bytes, and patterns at 4 KiB. These byte limits are
 checked before copying Lua strings into Rust-owned storage; an unknown event or
 capacity/size violation returns `false` and leaves the registry unchanged.
 
+URL dispatch also caps the conservative native-pattern work estimate at
+2,000,000 units across the handler chain. A pattern that exceeds the remaining
+budget declines before matching; malformed patterns also decline. Later
+handlers remain eligible. This bound can refuse a complex pattern even when
+one particular subject would match quickly.
+
 The App processes at most 16 commands and 1 MiB of send data per event-loop
 turn. A backpressured `SendText` remains at the FIFO head byte-for-byte and is
 retried on an event-loop deadline with 10–250 ms exponential backoff; later

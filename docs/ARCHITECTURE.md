@@ -363,8 +363,12 @@ Pasted clipboard bitmaps add a narrower ephemeral-file lifecycle on top of
 those primitives. One process owns at most 64 PNG handles and 256 MiB of final
 encoded PNG bytes; the streaming writer refuses a write that would cross the
 remaining aggregate budget and removes a failed/partial object through its
-creating handle. An empty bootstrap object establishes and identifies the
-owner-private session directory before any clipboard content is written.
+creating handle. The window thread only checks a bitmap and reserves its
+PNG's room (`reserve_png`); one `PngEncoder` thread encodes in paste order and
+the window keeps the result (`keep_png`). Pastes made meanwhile wait in a
+bounded queue behind it (64 entries, 16 MiB of text), so they land in order.
+An empty bootstrap object establishes and identifies the owner-private session
+directory before any clipboard content is written.
 Every Unix PNG is then created with `openat` beneath that held descriptor, so a
 rename/path replacement cannot redirect screenshot bytes; Windows pins the
 directory name by denying delete-sharing before real PNG creation. A successful
