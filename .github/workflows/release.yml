@@ -108,7 +108,12 @@ jobs:
           key: release-pretest
       - run: cargo test --locked --workspace
       - name: Test patched vendor crates directly
-        run: cargo test --locked --manifest-path vendor/Cargo.toml --workspace
+        # arboard's upstream tests need a desktop clipboard, which this runner
+        # does not have; its backport's display-free tests run instead, as in
+        # scripts/check-arboard-uri-list.py (PR CI also lints there).
+        run: |
+          cargo test --locked --manifest-path vendor/Cargo.toml --workspace --exclude arboard
+          cargo test --locked --manifest-path vendor/Cargo.toml -p arboard --lib platform::linux::
 
   package:
     name: package (${{ matrix.os }})
