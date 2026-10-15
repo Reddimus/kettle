@@ -147,6 +147,156 @@ class MediaInstallTests(unittest.TestCase):
                     2,
                 )
 
+    def test_fifo_leaves_are_rejected_without_blocking(self):
+        import sys
+
+        self.assertEqual(self.run_installer().returncode, 0)
+        child = """
+import importlib.util
+import sys
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("installer", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+try:
+    if sys.argv[2] == "source":
+        module._open_source(sys.argv[4])
+    else:
+        root = module._open_absolute_directory(sys.argv[3], create=False)
+        manifest = module._read_manifest(root, sys.argv[3])
+        if sys.argv[2] == "payload":
+            module._verify_manifest_tree(root, manifest)
+except module.InstallerError as error:
+    print(error)
+    sys.exit(0)
+sys.exit(1)
+"""
+        for kind, path in [
+            ("source", self.worker),
+            ("payload", self.prefix / "bin/kettle-media-worker"),
+            ("manifest", self.prefix / "share/kettle/install-files.json"),
+        ]:
+            with self.subTest(kind=kind):
+                content = path.read_bytes()
+                mode = path.stat().st_mode & 0o777
+                path.unlink()
+                os.mkfifo(path, mode)
+                try:
+                    result = subprocess.run(
+                        [sys.executable, "-c", child,
+                         str(ROOT / "scripts/install-unix.py"), kind, str(self.prefix), str(path)],
+                        capture_output=True, text=True, timeout=2,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertTrue(result.stdout.strip())
+                finally:
+                    path.unlink()
+                    path.write_bytes(content)
+                    path.chmod(mode)
+
+    def helper(self, *files, fail_at=None):
+        """Run install-unix.py's install on `files`, a (path, bytes) list,
+        then the files every install has, failing the `fail_at`th file it
+        publishes as a full disk would."""
+        files = (
+            *files,
+            ("bin/kettle", b"kettle"),
+            ("share/kettle/install.sh", b"install.sh"),
+            ("share/kettle/install-unix.py", b"install-unix.py"),
+        )
+        sources = self.root / "sources"
+        sources.mkdir(exist_ok=True)
+        arguments = [
+            "install", "--prefix", str(self.prefix), "--channel", "local-dev",
+            "--target", "linux", "--version", "5.0.0",
+            "--desktop-template", str(ROOT / "packaging/linux/kettle.desktop"),
+            "--desktop-binary", str(self.prefix / "bin/kettle"),
+            "--desktop-icon", "kettle",
+        ]
+        for index, (relative, data) in enumerate(files):
+            source = sources / f"{index}-{len(data)}"
+            source.write_bytes(data)
+            arguments += ["--file", relative, "0644", str(source)]
+        child = """
+import errno, importlib.util, sys
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("installer", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+fail_at = int(sys.argv[2])
+publish = module._publish_source
+calls = []
+def failing(*arguments):
+    calls.append(arguments)
+    if len(calls) == fail_at:
+        raise OSError(errno.ENOSPC, "No space left on device")
+    return publish(*arguments)
+module._publish_source = failing
+sys.argv = ["install-unix.py", *sys.argv[3:]]
+sys.exit(module.main())
+"""
+        return subprocess.run(
+            [sys.executable, "-c", child, str(ROOT / "scripts/install-unix.py"),
+             str(fail_at or 0), *arguments],
+            capture_output=True, text=True, timeout=30,
+        )
+
+    def uninstall(self):
+        return subprocess.run(
+            [sys.executable, str(ROOT / "scripts/install-unix.py"), "uninstall",
+             "--prefix", str(self.prefix)],
+            capture_output=True, text=True, timeout=30,
+        )
+
+    def test_an_interrupted_upgrade_can_be_retried_and_removed(self):
+        old = [("share/kettle/a", b"old a"), ("share/kettle/b", b"old b")]
+        new = [("share/kettle/a", b"new a"), ("share/kettle/b", b"new b")]
+        installed = self.helper(*old)
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+
+        # The disk fills while the second file is written.
+        cut = self.helper(*new, fail_at=2)
+        self.assertNotEqual(cut.returncode, 0)
+        self.assertIn("No space left", cut.stderr)
+        self.assertEqual((self.prefix / "share/kettle/a").read_bytes(), b"new a")
+        self.assertEqual((self.prefix / "share/kettle/b").read_bytes(), b"old b")
+
+        retried = self.helper(*new)
+        self.assertEqual(retried.returncode, 0, retried.stderr)
+        self.assertEqual((self.prefix / "share/kettle/b").read_bytes(), b"new b")
+        removed = self.uninstall()
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertFalse((self.prefix / "share/kettle/a").exists())
+
+    def test_an_interrupted_first_install_can_be_retried_and_removed(self):
+        files = [("share/kettle/a", b"a"), ("share/kettle/b", b"b")]
+        cut = self.helper(*files, fail_at=2)
+        self.assertNotEqual(cut.returncode, 0)
+        self.assertEqual((self.prefix / "share/kettle/a").read_bytes(), b"a")
+        retried = self.helper(*files)
+        self.assertEqual(retried.returncode, 0, retried.stderr)
+        removed = self.uninstall()
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertFalse((self.prefix / "share/kettle/a").exists())
+
+    def test_a_retry_accepts_files_a_killed_install_already_wrote(self):
+        old = [("share/kettle/a", b"old a")]
+        new = [("share/kettle/a", b"new a"), ("share/kettle/b", b"new b")]
+        self.assertEqual(self.helper(*old).returncode, 0)
+        # Killed after both files were in place, before its provenance was.
+        for relative, data in new:
+            path = self.prefix / relative
+            path.write_bytes(data)
+            path.chmod(0o644)
+        retried = self.helper(*new)
+        self.assertEqual(retried.returncode, 0, retried.stderr)
+        # A file that is not what the install would write is still refused.
+        (self.prefix / "share/kettle/c").write_bytes(b"mine")
+        refused = self.helper(*new, ("share/kettle/c", b"theirs"))
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("unrecorded path", refused.stderr)
+        self.assertEqual((self.prefix / "share/kettle/c").read_bytes(), b"mine")
+
     def test_missing_worker_leaves_prefix_untouched(self):
         self.worker.unlink()
         result = self.run_installer()

@@ -4,7 +4,7 @@
 #
 # Launches a real kettle window, drives xdotool to right-click 320px
 # in and 240px down from its top-left corner, waits a beat for the menu
-# to paint, then captures the focused window via scrot. The resulting
+# to paint, then captures the fixture window via scrot. The resulting
 # PNG lands in target/menu-shots/ for diffing against prior runs as
 # further context-menu work lands.
 #
@@ -75,7 +75,7 @@ OUT_PATH="$OUT_DIR/${NAME}-${TS}.png"
 # --- Drive ---------------------------------------------------------
 
 echo "menu-screenshot: launching $KETTLE_BIN" >&2
-"$KETTLE_BIN" &
+"$KETTLE_BIN" --new-process &
 KETTLE_PID=$!
 
 cleanup() {
@@ -86,15 +86,20 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Give kettle's wgpu surface ~1.2s to initialize + paint the first
-# frame. Slower hosts may need a bump.
-sleep 1.2
-
-# Find the kettle window id. xdotool's --name uses regex; kettle's
-# default title is "kettle" or "~ — kettle".
-WID="$(xdotool search --name '\bkettle\b' 2>/dev/null | tail -n1 || true)"
+# Wait up to ten seconds for a visible X11 window owned by the fixture.
+WID=""
+for ((attempt = 0; attempt < 100; attempt++)); do
+    if ! kill -0 "$KETTLE_PID" 2>/dev/null; then
+        break
+    fi
+    WID="$(xdotool search --onlyvisible --pid "$KETTLE_PID" 2>/dev/null | head -n1 || true)"
+    if [ -n "$WID" ]; then
+        break
+    fi
+    sleep 0.1
+done
 if [ -z "$WID" ]; then
-    echo "menu-screenshot: couldn't find kettle window (xdotool search returned nothing)" >&2
+    echo "menu-screenshot: couldn't find a visible window owned by kettle PID=$KETTLE_PID" >&2
     exit 1
 fi
 
@@ -112,7 +117,7 @@ xdotool mousemove "$CLICK_X" "$CLICK_Y" click 3
 # Wait for the menu to render its first frame.
 sleep 0.35
 
-scrot -o -u "$OUT_PATH"
+scrot -o --window "$WID" "$OUT_PATH"
 echo "menu-screenshot: wrote $OUT_PATH" >&2
 
 if [ "$HOLD" -eq 1 ]; then

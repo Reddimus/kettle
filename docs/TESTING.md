@@ -192,6 +192,8 @@ interactive `zsh -f` with `PROMPT_SUBST` off and its system Bash 3.2, while
 Linux CI installs Fish and executes its OSC 133 event hooks and OSC 7 cwd report.
 A separate Ubuntu 24.04 job asserts Fish 3.7.x before running the same suite, so
 the oldest supported completion binding cannot drift with `ubuntu-latest`.
+The Fish job also runs the AppleScript payload fixture with a simulated window
+and a real Fish command interpreter, checking argument quoting and exit status.
 Windows runs the PowerShell prompt-status and PSReadLine binding fixture
 under each installed PowerShell host. Other hosts run the interpreters they have
 and print explicit skips for native legs that belong to the CI matrix.
@@ -204,6 +206,8 @@ shortened by locale-sensitive character counts. A real interactive Fish PTY
 proves default and Vi-insert Tab behavior, keymap ownership changes, reverse
 cycling, cursor-move invalidation, paging beyond 64 candidates, and that Fish's
 pager stays closed.
+A second Fish run sources integration from a path containing spaces, an
+apostrophe and a dollar sign, including the Vi-mode re-source.
 It also pins the count, per-field, and aggregate retained-state caps and keeps
 the selected row in a bounded wide-character wire page. Ordinary and
 bounded-prefix singletons are inserted from the captured result without a
@@ -942,6 +946,11 @@ the same lock; Rust lock acquisition rejects a removed or replaced inode.
 The Linux smoke checks the published 5.0.0 archive's retained empty lock as
 legacy behavior. Current installs and later archives must remove it; a
 regression distinguishes those policies and rejects nonempty or symlink locks.
+FIFO fixtures require bounded rejection of source, payload and provenance
+leaves without a writer.
+Interrupted-install fixtures fail a publish with `ENOSPC` part way: an
+upgrade must still record what it replaced so a retry and an uninstall work,
+and a retry accepts files that already hold exactly what it would write.
 Linux updater tests require both package binaries, promote the 4.9 compatibility
 capsule on
 first restart, recover an interrupted bootstrap idempotently, and restore the
@@ -3681,6 +3690,8 @@ name/size/SHA-256 binding, bounded release-document updates, immutable archive
 references, bounded archive structure and extraction, modern no-downgrade
 behavior, compatible legacy sidecars, and hostile archive/network/parser
 fixtures.
+Raw TAR-header fixtures reject oversized GNU metadata and forbidden PAX before
+extension parsing, while retaining support for bounded GNU long names.
 The update-smoke case checks relative and absolute cache paths, including
 spaces, using a synthetic archive and verifier. It failed with the original
 absolute-path prefix. This covers wiring; `macos-update-smoke` separately checks

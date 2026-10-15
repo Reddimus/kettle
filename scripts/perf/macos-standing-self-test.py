@@ -363,7 +363,17 @@ class Settle(unittest.TestCase):
         import tempfile
         cls.tmp = tempfile.TemporaryDirectory()
         cls.stamp = Path(cls.tmp.name) / "stamp"
-        subprocess.run(["clang", "-O", "-o", str(cls.stamp), str(HERE / "macos-standing" / "stamp.c")],
+        source = Path(cls.tmp.name) / "settle.c"
+        source.write_text(
+            '#include <unistd.h>\n'
+            'static int settling_sleep(useconds_t delay) {\n'
+            '    static int announced;\n'
+            '    if (!announced) { announced = 1; write(STDOUT_FILENO, ".", 1); }\n'
+            '    return usleep(delay);\n'
+            '}\n'
+            '#define usleep settling_sleep\n'
+            '#include "stamp.c"\n')
+        subprocess.run(["clang", "-O", "-I", str(HERE / "macos-standing"), "-o", str(cls.stamp), str(source)],
                        check=True, capture_output=True)
 
     @classmethod
@@ -373,20 +383,30 @@ class Settle(unittest.TestCase):
     def run_in_pty(self, size, resize_to, after: float, seconds: float):
         import fcntl
         import pty
+        import select
         import struct
         import termios
 
         master, slave = pty.openpty()
         self.addCleanup(os.close, master)
+        self.addCleanup(os.close, slave)
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", size[1], size[0], 0, 0))
         out = Path(self.tmp.name) / f"grid-{time.monotonic_ns()}"
         started = time.monotonic()
         process = subprocess.Popen([str(self.stamp), "--settle", "120", "36", str(seconds), str(out)],
-                                   stdin=slave, stdout=subprocess.DEVNULL, cwd=self.tmp.name)
+                                   stdin=slave, stdout=subprocess.PIPE, cwd=self.tmp.name)
+        def reap():
+            if process.poll() is None:
+                process.kill()
+            process.wait(10)
+        self.addCleanup(reap)
+        self.addCleanup(process.stdout.close)
         if resize_to:
+            self.assertTrue(select.select([process.stdout], [], [], 5)[0], "stamp never began settling")
+            self.assertEqual(process.stdout.read(1), b".")
+            started = time.monotonic()
             time.sleep(after)
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", resize_to[1], resize_to[0], 0, 0))
-        os.close(slave)
         self.assertEqual(process.wait(10), 0)
         elapsed = time.monotonic() - started
         self.assertFalse(Path(str(out) + ".tmp").exists())
@@ -398,6 +418,18 @@ class Settle(unittest.TestCase):
         self.assertEqual(grid, (120, 36))
         self.assertGreaterEqual(waited, 250)
         self.assertLess(elapsed, 3, "it ends at the resize, not at its limit")
+
+    def test_it_waits_even_when_the_child_starts_late(self) -> None:
+        from unittest.mock import patch
+        spawn = subprocess.Popen
+
+        def delayed(argv, **kwargs):
+            return spawn([sys.executable, "-c",
+                          "import os,sys,time; time.sleep(.4); os.execv(sys.argv[1],sys.argv[1:])",
+                          *argv], **kwargs)
+
+        with patch.object(subprocess, "Popen", side_effect=delayed):
+            self.test_it_waits_for_the_first_resize()
 
     def test_it_ends_at_once_on_the_right_grid(self) -> None:
         grid, waited, _ = self.run_in_pty((120, 36), None, 0, 5)
@@ -2132,6 +2164,40 @@ class FloodTimeline(unittest.TestCase):
     def test_flood_offset_takes_first_sample_at_or_after_offset(self) -> None:
         row = standing.flood_row(timeline([(2.95, 100), (3.05, 90), (19.9, 80), (20.0, 70)]), self.DONE, (3, 20))
         self.assertEqual((row["done3_mib"], row["done20_mib"]), (90, 70))
+
+    def test_publication_flood_selection_at_rounded_boundary(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "flood_facts", HERE / "macos-standing/publication_factcheck.py")
+        facts = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(facts)
+        samples = [(self.DONE + delta, mib * MIB, mib * MIB)
+                   for delta, mib in ((2999600000, 100), (3099600000, 90), (20000000000, 70))]
+        for exact in (True, False):
+            with self.subTest(exact=exact):
+                row = standing.flood_row(samples, self.DONE, (3, 20))
+                if not exact:
+                    row.pop("timeline_ns", None)
+                raw = [{"workloads": {
+                    "startup": {"kettle": [{"child_ms": 1}]},
+                    "idle": {"kettle": [{"frontmost": True, "footprint_mib": 1}]},
+                    "flood-memory": {"kettle": [row]},
+                }}]
+                self.assertEqual(row["done3_mib"], 90)
+                self.assertIn("flood-memory.done3_mib", facts.spot_rows(raw, require_typing=False))
+                row["done3_mib"] = 100
+                if exact:
+                    with self.assertRaisesRegex(ValueError, "flood designated sample mismatch"):
+                        facts.spot_rows(raw, require_typing=False)
+                else:
+                    facts.spot_rows(raw, require_typing=False)
+                row["done3_mib"] = 80
+                with self.assertRaisesRegex(ValueError, "flood designated sample mismatch"):
+                    facts.spot_rows(raw, require_typing=False)
+                row.pop("timeline_ns", None)
+                row["timeline"] = [[2999, 100], [3100, 90]]
+                row["done3_mib"] = 100
+                with self.assertRaisesRegex(ValueError, "flood designated sample mismatch"):
+                    facts.spot_rows(raw, require_typing=False)
 
     def test_peak_includes_the_lifetime_maximum(self) -> None:
         samples = [(int(100e9), 50 * MIB, 400 * MIB), (int(125e9), 40 * MIB, 400 * MIB)]
@@ -5329,7 +5395,7 @@ class OutputBlink(unittest.TestCase):
         class ReachedPreparation(Exception):pass
         for workload in ('output-memory','blink-window'):
             with patch.object(sys,'argv',['standing','--workloads',workload,'--no-build','--peers','',
-                                           '--kettle','fixture','--allow-bare']),patch.object(standing,'build_probes',side_effect=ReachedPreparation),patch.object(standing,'require_bundles'):
+                                           '--kettle','fixture','--allow-bare']),patch.object(sys,'platform','darwin'),patch.object(standing,'build_probes',side_effect=ReachedPreparation),patch.object(standing,'require_bundles'):
                 with self.assertRaises(ReachedPreparation):standing.main()
         for flag,value in [('--blink-settle','nan'),('--blink-window','inf'),('--blink-rounds','0'),
                            ('--output-memory-rounds','0'),('--blink-timeout','-1'),('--blink-cursor-rect','1,2,300,4')]:
@@ -5337,6 +5403,11 @@ class OutputBlink(unittest.TestCase):
                 with self.assertRaises(SystemExit) as raised:standing.main()
                 self.assertEqual(raised.exception.code,2)
                 run.assert_not_called();claim.assert_not_called()
+
+    def test_cli_optional_selection_is_portable(self):
+        from unittest.mock import patch
+        with patch.object(sys,'platform','linux'):
+            self.test_cli_optional_names_and_numeric_validation_before_side_effects()
 
     def test_printing_bytes_and_absolute_schedule(self):
         import hashlib
@@ -5697,71 +5768,93 @@ class OutputBlink(unittest.TestCase):
             self.assertIn('cleanup failed',result.get('error',''))
             self.assertTrue(_json.loads((work/'evidence.json').read_text())['killed'])
 
-    @unittest.skipUnless(sys.platform=='darwin' and shutil.which('swiftc'), 'needs macOS swiftc')
-    def test_native_launch_retains_exited_target_until_observer_drain(self):
+    def check_native_launch_observer_order(self, sparse=False):
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             work=Path(tmp);binary=work/'launch'
             subprocess.run(['swiftc','-O','-o',str(binary),str(HERE/'macos-standing'/'launch.swift')],check=True)
             context=work/'context';stamp=work/'stamp';env=dict(os.environ,KETTLE_HC_LAUNCH_CONTEXT=str(context))
             fixture=work/'fixture'
-            code=work/'fixture.c';code.write_text('#include <unistd.h>\nint main(void){usleep(1500000);return 0;}\n')
+            code=work/'fixture.c';code.write_text(
+                '#include <signal.h>\n#include <stdio.h>\n#include <stdlib.h>\n'
+                '#include <sys/types.h>\n#include <sys/proc.h>\n#include <sys/sysctl.h>\n'
+                '#include <unistd.h>\n'
+                'static volatile sig_atomic_t stopping;\n'
+                'static void stop(int sig){stopping=1;}\n'
+                'static void mark(const char *path){FILE *f=fopen(path,"w");if(!f)_exit(2);fclose(f);}\n'
+                'int main(int argc,char **argv){\n'
+                '    if(argc==2){while(access(argv[1],F_OK)!=0)usleep(1000);return 0;}\n'
+                '    if(chdir(argv[3])!=0)return 2;\n'
+                '    signal(SIGTERM,stop);mark("ready");\n'
+                '    while(!stopping)usleep(1000);\n'
+                '    struct kinfo_proc info={0};size_t length=sizeof(info);\n'
+                '    int mib[]={CTL_KERN,KERN_PROC,KERN_PROC_PID,atoi(argv[1])};\n'
+                '    int retained=sysctl(mib,4,&info,&length,NULL,0)==0 && length==sizeof(info)\n'
+                '        && info.kp_proc.p_stat==SZOMB && info.kp_eproc.e_ppid==getppid();\n'
+                '    FILE *out=fopen("draining.tmp","w");if(!out)return 2;\n'
+                '    fprintf(out,"%d\\n",retained);if(fclose(out)!=0 || rename("draining.tmp","draining")!=0)return 2;\n'
+                '    while(access("release",F_OK)!=0)usleep(1000);\n'
+                '    return 0;\n}\n')
             subprocess.run(['clang','-O','-o',str(fixture),str(code)],check=True)
-            process=subprocess.Popen([str(binary),str(work/'result'),str(stamp),'3','--','/bin/sleep','.5'],env=env)
+            process=subprocess.Popen([str(binary),str(work/'result'),str(stamp),'30','--',
+                                      str(fixture),str(work/'exit')],env=env)
             try:
-                deadline=time.monotonic()+2
+                deadline=time.monotonic()+5
+                pid_file=Path(str(stamp)+'.pid')
                 while time.monotonic()<deadline:
-                    pid_file=Path(str(stamp)+'.pid')
                     if pid_file.exists() and pid_file.read_text().strip().isdigit():break
                     time.sleep(.01)
-                pid=int(Path(str(stamp)+'.pid').read_text())
-                # A command-line fixture standing in for the observer. Its PID
-                # is owned by the same launch helper, which must reap it first.
+                pid=int(pid_file.read_text())
                 request=Path(str(context)+'.observer-request')
-                request.write_text(_json.dumps([str(fixture),str(pid),'0','unused','0','100','5']))
-                receipt=Path(str(context)+'.observer-reaped')
-                process.wait(timeout=5)
-                self.assertTrue(receipt.exists(), 'target released before observer reap')
-                self.assertFalse(Path(str(stamp)+'.pid').exists())
+                args=[str(fixture),str(pid),'0',str(work),'0','100','5']
+                if sparse:args.append('0,100,200,300,400')
+                request.write_text(_json.dumps(args))
+                deadline=time.monotonic()+5
+                while not (work/'ready').exists() and time.monotonic()<deadline:time.sleep(.01)
+                self.assertTrue((work/'ready').exists(), 'observer never became ready')
+                (work/'exit').touch()
+                drain=work/'draining'
+                deadline=time.monotonic()+5
+                while not drain.exists() and time.monotonic()<deadline:time.sleep(.01)
+                self.assertTrue(drain.exists(), 'observer never entered cleanup')
+                self.assertEqual(drain.read_text(),'1\n','target released before observer reap')
+                (work/'release').touch()
+                self.assertEqual(process.wait(timeout=5),0)
+                self.assertTrue(Path(str(context)+'.observer-reaped').exists())
+                self.assertFalse(pid_file.exists())
+                self.assertFalse(_json.loads((work/'result').read_text())['killed'])
             finally:
+                (work/'exit').touch()
+                (work/'release').touch()
                 if process.poll() is None:process.terminate()
                 process.wait(timeout=5)
-                # The deliberately reverted fixture observer exits by itself.
-                # Never signal an orphan after its owner released the PID.
-                time.sleep(1.6)
+
+    @unittest.skipUnless(sys.platform=='darwin' and shutil.which('swiftc'), 'needs macOS swiftc')
+    def test_native_launch_retains_exited_target_until_observer_drain(self):
+        self.check_native_launch_observer_order()
 
     @unittest.skipUnless(sys.platform=='darwin' and shutil.which('swiftc'), 'needs macOS swiftc')
     def test_native_launch_accepts_sparse_observer_request(self):
+        self.check_native_launch_observer_order(sparse=True)
+
+    @unittest.skipUnless(sys.platform=='darwin' and shutil.which('swiftc'), 'needs macOS swiftc')
+    def test_native_launch_order_check_rejects_target_first_reaping(self):
         import tempfile
+        from unittest.mock import patch
+        source=(HERE/'macos-standing'/'launch.swift').read_text()
+        old='if observedExit { stopObserver(); waitpid(pid, &status, 0) }'
+        new='if observedExit { waitpid(pid, &status, 0); stopObserver() }'
+        self.assertIn(old,source)
         with tempfile.TemporaryDirectory() as tmp:
-            work=Path(tmp);binary=work/'launch'
-            subprocess.run(['swiftc','-O','-o',str(binary),str(HERE/'macos-standing'/'launch.swift')],check=True)
-            context=work/'context';stamp=work/'stamp';env=dict(os.environ,KETTLE_HC_LAUNCH_CONTEXT=str(context))
-            fixture=work/'fixture'
-            code=work/'fixture.c';code.write_text('#include <unistd.h>\nint main(void){usleep(1500000);return 0;}\n')
-            subprocess.run(['clang','-O','-o',str(fixture),str(code)],check=True)
-            process=subprocess.Popen([str(binary),str(work/'result'),str(stamp),'3','--','/bin/sleep','.5'],env=env)
-            try:
-                deadline=time.monotonic()+2
-                while time.monotonic()<deadline:
-                    pid_file=Path(str(stamp)+'.pid')
-                    if pid_file.exists() and pid_file.read_text().strip().isdigit():break
-                    time.sleep(.01)
-                pid=int(Path(str(stamp)+'.pid').read_text())
-                # A command-line fixture standing in for the observer. Its PID
-                # is owned by the same launch helper, which must reap it first.
-                request=Path(str(context)+'.observer-request')
-                request.write_text(_json.dumps([str(fixture),str(pid),'0','unused','0','100','5','0,100,200,300,400']))
-                receipt=Path(str(context)+'.observer-reaped')
-                process.wait(timeout=5)
-                self.assertTrue(receipt.exists(), 'target released before observer reap')
-                self.assertFalse(Path(str(stamp)+'.pid').exists())
-            finally:
-                if process.poll() is None:process.terminate()
-                process.wait(timeout=5)
-                # The deliberately reverted fixture observer exits by itself.
-                # Never signal an orphan after its owner released the PID.
-                time.sleep(1.6)
+            mutant=Path(tmp)/'launch.swift'
+            mutant.write_text(source.replace(old,new,1))
+            run=subprocess.run
+            def build(argv, **kwargs):
+                if argv[0]=='swiftc':argv=[*argv[:-1],str(mutant)]
+                return run(argv, **kwargs)
+            with patch.object(subprocess,'run',side_effect=build):
+                with self.assertRaisesRegex(AssertionError,'target released before observer reap'):
+                    self.test_native_launch_retains_exited_target_until_observer_drain()
 
     @unittest.skipUnless(sys.platform=='darwin' and shutil.which('swiftc'), 'needs macOS swiftc')
     def test_native_launch_parent_loss_before_observer_registration(self):

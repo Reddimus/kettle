@@ -59,6 +59,7 @@ import hashlib
 import json
 import math
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -450,7 +451,7 @@ def prepare(kettle: Path, pid: int, fixture: Path) -> None:
     k = str(kettle)
     wait_for("the media worker",
              lambda: (ctl(k, pid, "get_state", "--raw").get("media") or {}).get("availability") == "available")
-    ctl(k, pid, "send_text", "--text", f"{k} show {fixture}\n")
+    ctl(k, pid, "send_text", "--text", shlex.join([k, "show", str(fixture)]) + "\n")
     wait_for("the fixture on the shelf",
              lambda: "Sent to the Kettle media shelf" in json.dumps(ctl(k, pid, "read_screen", "--raw")))
     ctl(k, pid, "perform_action", "--text", "open_media_shelf")
@@ -682,6 +683,27 @@ def self_test() -> int:
     # The fixture command is well formed.
     command = fixture_command("ffmpeg", Path("x.mov"))
     check("-n" in command and command[-1] == "x.mov" and "pcm_s16le" in command, "fixture command")
+
+    from unittest.mock import patch
+
+    kettle = Path("/tmp/Terminal Projects/kettle's $(false)")
+    fixture = Path("/tmp/media clips/flash;false.mov")
+    lane_geometry = {**geometry, "preview_lanes": geometry["preview_lanes"][:1]}
+    with patch(__name__ + ".ctl", side_effect=[
+        {"media": {"availability": "available"}},
+        {},
+        {"text": "Sent to the Kettle media shelf"},
+        {},
+        lane_geometry,
+    ]) as control:
+        prepare(kettle, 42, fixture)
+    text = control.call_args_list[1].args[-1]
+    try:
+        words = shlex.split(text)
+    except ValueError:
+        words = []
+    check(words == [str(kettle), "show", str(fixture)] and text.endswith("\n"),
+          "fixture paths survive shell parsing")
     for failure in failures:
         print("self-test:", failure, file=sys.stderr)
     if not failures:

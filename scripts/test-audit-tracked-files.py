@@ -45,6 +45,38 @@ def write_lf(path: Path, text: str) -> None:
 
 
 class TrackedFileAuditTests(unittest.TestCase):
+    def test_regular_file_replaced_by_external_symlink_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "repo"
+            root.mkdir()
+            tracked = root / "plain.txt"
+            external = root.parent / "external.txt"
+            write_lf(tracked, "identical bytes\n")
+            write_lf(external, "identical bytes\n")
+            initialize_repository(root)
+            tracked.unlink()
+            tracked.symlink_to(external)
+
+            report = AUDIT.audit(root)
+            self.assertIn(
+                "plain.txt: tracked path is not a regular file", report["errors"]
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--root",
+                    str(root),
+                    "--require-clean-index",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertIn("plain.txt: tracked path is not a regular file", result.stderr)
+
     def test_text_unset_files_keep_their_bytes(self) -> None:
         """A file `.gitattributes` marks `-text` keeps its CRLF, its last
         line without a newline and its trailing white space; any other text

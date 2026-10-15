@@ -192,19 +192,25 @@ def scrollback_probe(live: LiveKettle, cycles: int) -> Dict[str, Any]:
         t0 = time.perf_counter()
         live.ctl("perform_action", params={"action": "scroll_page_up"}, timeout=5.0)
         screen = live.json_ctl("read_screen", timeout=5.0)
-        top_samples_ms.append((time.perf_counter() - t0) * 1000.0)
         offset = int(screen.get("display_offset", 0))
-        offsets.append(offset)
         if offset <= 0:
             raise SystemExit("kettle-live-probes: scroll_page_up did not enter scrollback")
+        top_samples_ms.append((time.perf_counter() - t0) * 1000.0)
+        offsets.append(offset)
 
         t1 = time.perf_counter()
         live.ctl("perform_action", params={"action": "scroll_page_down"}, timeout=5.0)
-        live.json_ctl("read_screen", timeout=5.0)
+        screen = live.json_ctl("read_screen", timeout=5.0)
+        if int(screen.get("display_offset", -1)) != 0:
+            raise SystemExit("kettle-live-probes: scroll_page_down did not return to bottom")
         bottom_samples_ms.append((time.perf_counter() - t1) * 1000.0)
 
+    live.ctl("perform_action", params={"action": "scroll_page_up"}, timeout=5.0)
     live.ctl("perform_action", params={"action": "scroll_to_bottom"}, timeout=5.0)
     final = live.json_ctl("read_screen", timeout=5.0)
+    final_offset = int(final.get("display_offset", -1))
+    if final_offset != 0:
+        raise SystemExit("kettle-live-probes: scroll_to_bottom did not return to bottom")
     return {
         "workload": "kettle_live_scrollback_navigation",
         "unit": "ms",
@@ -214,7 +220,7 @@ def scrollback_probe(live: LiveKettle, cycles: int) -> Dict[str, Any]:
         "page_up_median_ms": median(top_samples_ms),
         "page_down_median_ms": median(bottom_samples_ms),
         "max_observed_display_offset": max(offsets),
-        "final_display_offset": int(final.get("display_offset", -1)),
+        "final_display_offset": final_offset,
     }
 
 

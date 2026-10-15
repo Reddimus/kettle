@@ -415,6 +415,42 @@ def _digest_open_archive(stream: BinaryIO) -> str:
     return sha256.hexdigest()
 
 
+class BoundedTarInfo(tarfile.TarInfo):
+    def _proc_member(self, archive):
+        # This hook runs on each raw header, before tarfile reads extensions.
+        count = getattr(archive, "_kettle_raw_headers", 0) + 1
+        archive._kettle_raw_headers = count
+        if count > 2 * MAX_ARCHIVE_ENTRIES:
+            raise ValueError("too many raw TAR headers")
+        if self.type in (tarfile.XHDTYPE, tarfile.XGLTYPE, tarfile.SOLARIS_XHDTYPE):
+            raise ValueError("PAX archive headers are forbidden")
+        longname = self.type == tarfile.GNUTYPE_LONGNAME
+        if longname:
+            if (
+                not 1 <= self.size <= MAX_PACKAGE_PATH_BYTES + 1
+                or getattr(archive, "_kettle_longname", False)
+            ):
+                raise ValueError("GNU name metadata exceeds its safety limit")
+        elif self.type not in (
+            tarfile.REGTYPE, tarfile.AREGTYPE, tarfile.CONTTYPE, tarfile.DIRTYPE
+        ):
+            raise ValueError("special tar archive entry is forbidden")
+        if self.size < 0 or (self.isdir() and self.size):
+            raise ValueError("invalid raw TAR member size")
+        total = getattr(archive, "_kettle_tar_bytes", 0)
+        total += 512 + ((self.size + 511) // 512) * 512
+        if total > MAX_TOTAL_BYTES + 2048 * MAX_ARCHIVE_ENTRIES:
+            raise ValueError("decompressed TAR exceeds its safety limit")
+        archive._kettle_tar_bytes = total
+        if longname:
+            archive._kettle_longname = True
+            try:
+                return super()._proc_member(archive)
+            finally:
+                archive._kettle_longname = False
+        return super()._proc_member(archive)
+
+
 def _catalog_tar(
     archive: tarfile.TarFile, target: str
 ) -> list[ArchiveMember]:
@@ -880,7 +916,9 @@ def extract_archive(archive_path: Path, root: Path, target: str, version: str) -
             initial_digest = _digest_open_archive(stream)
             stream.seek(0)
             if target.endswith("linux-gnu"):
-                with tarfile.open(fileobj=stream, mode="r:gz") as archive:
+                with tarfile.open(
+                    fileobj=stream, mode="r:gz", tarinfo=BoundedTarInfo
+                ) as archive:
                     members = _catalog_tar(archive, target)
                     _preflight_archive(archive, members, target, version)
                     output, output_identity = _prepare_output_root(root)

@@ -53,10 +53,19 @@ def spot_rows(results, require_typing=True):
             for row in runs:
                 if row.get('warmup') or row.get('error'):
                     continue
-                # Historical rounded timeline remains a descriptive check.
-                if row.get('timeline'):
-                    at = next((r for r in row['timeline'] if r[0] >= 3000), None)
-                    if at is not None and abs(at[1] - row['done3_mib']) > .11:
+                if 'timeline_ns' in row:
+                    at = next((r for r in row['timeline_ns'] if r[0] >= 3000000000), None)
+                    if at is None or abs(at[1] / MIB - row['done3_mib']) > 1e-10:
+                        raise ValueError('flood designated sample mismatch')
+                elif row.get('timeline'):
+                    # A rounded 3000 ms sample may precede the exact boundary.
+                    candidates = []
+                    for timestamp, value in row['timeline']:
+                        if timestamp >= 3000:
+                            candidates.append(value)
+                            if timestamp > 3000:
+                                break
+                    if candidates and not any(abs(v - row['done3_mib']) <= .11 for v in candidates):
                         raise ValueError('flood designated sample mismatch')
                 checked.add('flood-memory.done3_mib')
         for name, runs in rows.get('latency', {}).items():

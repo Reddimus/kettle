@@ -18,11 +18,22 @@ from typing import Any, Dict, Iterator, List, NoReturn, Optional, Sequence, Tupl
 MANIFEST_RELATIVE = "share/kettle/install-files.json"
 MANIFEST_SCHEMA = 1
 MAX_ENTRIES = 128
+# Every provenance record names these. A partial first install has no record
+# until it has them all; its retry recognizes the files it already wrote.
+REQUIRED_PATHS = frozenset(
+    {
+        "bin/kettle",
+        "share/applications/kettle.desktop",
+        "share/kettle/install.sh",
+        "share/kettle/install-unix.py",
+        "share/kettle/install.json",
+    }
+)
 MAX_FILE_BYTES = 512 * 1024 * 1024
 MAX_MANIFEST_BYTES = 1024 * 1024
 UPDATE_LOCK = ".kettle-update.lock"
 DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-FILE_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+FILE_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
 
 
 class InstallerError(RuntimeError):
@@ -339,14 +350,7 @@ def _read_manifest(root_fd: int, prefix: str) -> Optional[Dict[str, Any]]:
         _fail("install provenance file paths are not unique and sorted")
     if directory_paths != sorted(directory_paths) or len(set(directory_paths)) != len(directory_paths):
         _fail("install provenance directory paths are not unique and sorted")
-    required = {
-        "bin/kettle",
-        "share/applications/kettle.desktop",
-        "share/kettle/install.sh",
-        "share/kettle/install-unix.py",
-        "share/kettle/install.json",
-    }
-    if not required.issubset(set(file_paths)):
+    if not REQUIRED_PATHS.issubset(file_paths):
         _fail("install provenance is missing a required Kettle path")
     document["files"] = files
     document["directories"] = directories
@@ -737,11 +741,19 @@ def _install(arguments: argparse.Namespace) -> None:
     try:
         with _update_lock(root_fd):
             existing = _read_manifest(root_fd, prefix)
+            planned = {spec["path"]: _planned_record(spec) for spec in specs}
             if existing is None:
                 old_files: Dict[str, Dict[str, Any]] = {}
                 owned_directories: Dict[str, int] = {}
             else:
-                _verify_manifest_tree(root_fd, existing)
+                # An install cut short may already have put a planned file in
+                # place. It holds exactly what this install writes, so it
+                # stands in for its stale record.
+                for directory in existing["directories"]:
+                    _verify_directory(root_fd, directory)
+                for record in existing["files"]:
+                    if not _file_matches(root_fd, planned.get(record["path"])):
+                        _verify_file(root_fd, record)
                 old_files = {record["path"]: record for record in existing["files"]}
                 owned_directories = {
                     record["path"]: record["mode"] for record in existing["directories"]
@@ -751,52 +763,39 @@ def _install(arguments: argparse.Namespace) -> None:
 
             for spec in specs:
                 exists = _destination_exists(root_fd, spec["path"])
-                if exists and spec["path"] not in old_files:
+                if (
+                    exists
+                    and spec["path"] not in old_files
+                    and not _file_matches(root_fd, planned[spec["path"]])
+                ):
                     _fail(f"refusing to overwrite an unrecorded path: {spec['path']}")
             created: Dict[str, int] = {}
             new_records: Dict[str, Dict[str, Any]] = dict(old_files)
-            for spec in specs:
-                if "bytes" in spec:
-                    _publish_bytes(
-                        root_fd,
-                        spec["path"],
-                        spec["bytes"],
-                        spec["mode"],
-                        created,
-                    )
-                else:
-                    _publish_source(
-                        root_fd,
-                        spec["path"],
-                        spec["source"],
-                        spec["size"],
-                        spec["sha256"],
-                        spec["mode"],
-                        created,
-                    )
-                new_records[spec["path"]] = {
-                    "path": spec["path"],
-                    "size": spec["size"],
-                    "sha256": spec["sha256"],
-                    "mode": spec["mode"],
-                }
+            try:
+                for spec in specs:
+                    _publish_spec(root_fd, spec, created)
+                    new_records[spec["path"]] = planned[spec["path"]]
+            except BaseException:
+                # Record what did change before giving up, so a retry or an
+                # uninstall can still prove every file this install owns.
+                for path, record in planned.items():
+                    if path not in new_records or new_records[path] != record:
+                        try:
+                            if _file_matches(root_fd, record):
+                                new_records[path] = record
+                        except OSError:
+                            pass
+                owned_directories.update(created)
+                if REQUIRED_PATHS.issubset(new_records):
+                    try:
+                        _publish_provenance(
+                            root_fd, prefix, new_records, owned_directories, created
+                        )
+                    except (InstallerError, OSError):
+                        pass
+                raise
             owned_directories.update(created)
-            provenance = {
-                "schema": MANIFEST_SCHEMA,
-                "product": "kettle",
-                "managed_by": "kettle-installer",
-                "prefix": prefix,
-                "owner_uid": os.geteuid(),
-                "files": [new_records[path] for path in sorted(new_records)],
-                "directories": [
-                    {"path": path, "mode": owned_directories[path]}
-                    for path in sorted(owned_directories)
-                ],
-            }
-            encoded = (json.dumps(provenance, indent=2) + "\n").encode("utf-8")
-            if len(encoded) > MAX_MANIFEST_BYTES:
-                _fail("install provenance exceeds its bounded size")
-            _publish_bytes(root_fd, MANIFEST_RELATIVE, encoded, 0o644, created)
+            _publish_provenance(root_fd, prefix, new_records, owned_directories, created)
             # Re-open and verify the complete committed set before reporting success.
             committed = _read_manifest(root_fd, prefix)
             if committed is None:
@@ -804,6 +803,65 @@ def _install(arguments: argparse.Namespace) -> None:
             _verify_manifest_tree(root_fd, committed)
     finally:
         os.close(root_fd)
+
+
+def _planned_record(spec: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "path": spec["path"],
+        "size": spec["size"],
+        "sha256": spec["sha256"],
+        "mode": spec["mode"],
+    }
+
+
+def _file_matches(root_fd: int, record: Optional[Dict[str, Any]]) -> bool:
+    """Whether the file `record` describes is in place exactly as described."""
+    if record is None:
+        return False
+    try:
+        _verify_file(root_fd, record)
+    except (InstallerError, FileNotFoundError):
+        return False
+    return True
+
+
+def _publish_spec(root_fd: int, spec: Dict[str, Any], created: Dict[str, int]) -> None:
+    if "bytes" in spec:
+        _publish_bytes(root_fd, spec["path"], spec["bytes"], spec["mode"], created)
+    else:
+        _publish_source(
+            root_fd,
+            spec["path"],
+            spec["source"],
+            spec["size"],
+            spec["sha256"],
+            spec["mode"],
+            created,
+        )
+
+
+def _publish_provenance(
+    root_fd: int,
+    prefix: str,
+    files: Dict[str, Dict[str, Any]],
+    directories: Dict[str, int],
+    created: Dict[str, int],
+) -> None:
+    provenance = {
+        "schema": MANIFEST_SCHEMA,
+        "product": "kettle",
+        "managed_by": "kettle-installer",
+        "prefix": prefix,
+        "owner_uid": os.geteuid(),
+        "files": [files[path] for path in sorted(files)],
+        "directories": [
+            {"path": path, "mode": directories[path]} for path in sorted(directories)
+        ],
+    }
+    encoded = (json.dumps(provenance, indent=2) + "\n").encode("utf-8")
+    if len(encoded) > MAX_MANIFEST_BYTES:
+        _fail("install provenance exceeds its bounded size")
+    _publish_bytes(root_fd, MANIFEST_RELATIVE, encoded, 0o644, created)
 
 
 def _unlink_recorded(root_fd: int, relative: str) -> None:
