@@ -2299,10 +2299,28 @@ fn run_synchronized_eof_helper(mode: &str, input: &[u8]) -> (i32, String, String
         "--test-threads=1",
     ]);
     cmd.env("KETTLE_EXEC_TERMIOS_EOF_HELPER", mode);
+    // The EXTPROC fixture waits for this file, which appears once Kettle has
+    // reported the EOF it could not signal.
+    let scratch = tempfile::tempdir_in(private_test_scratch_root()).expect("scratch");
+    let go = scratch.path().join("go");
+    cmd.env("KETTLE_EXEC_EOF_GO", &go);
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     let mut child = cmd.spawn().expect("spawn kettle exec");
+    let stderr = child.stderr.take().expect("piped stderr");
+    let stderr_reader = std::thread::spawn(move || {
+        let mut err = String::new();
+        for line in std::io::BufReader::new(stderr).lines() {
+            let line = line.unwrap_or_default();
+            if line.contains("this PTY has no safe EOF signal") {
+                std::fs::write(&go, b"").expect("signal the fixture");
+            }
+            err.push_str(&line);
+            err.push('\n');
+        }
+        err
+    });
     let mut stdin = child.stdin.take().expect("piped stdin");
     let mut stdout = std::io::BufReader::new(child.stdout.take().expect("piped stdout"));
     let mut out = String::new();
@@ -2323,13 +2341,7 @@ fn run_synchronized_eof_helper(mode: &str, input: &[u8]) -> (i32, String, String
     }
     drop(stdin);
     stdout.read_to_string(&mut out).unwrap();
-    let mut err = String::new();
-    child
-        .stderr
-        .take()
-        .unwrap()
-        .read_to_string(&mut err)
-        .unwrap();
+    let err = stderr_reader.join().expect("stderr reader");
     let status = child.wait().expect("wait");
     (status.code().unwrap_or(-1), out, err)
 }
@@ -2458,7 +2470,13 @@ fn pty_custom_termios_eof_helper() {
         target_os = "dragonfly"
     ))]
     if mode == "extproc" {
-        std::thread::sleep(Duration::from_millis(250));
+        // Stay alive until the test has seen Kettle report the EOF it could
+        // not signal, so a loaded machine cannot let this exit first.
+        let go = std::env::var_os("KETTLE_EXEC_EOF_GO").map(PathBuf::from);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while go.as_ref().is_some_and(|go| !go.exists()) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
         assert_post_eof_terminal_queries("EXTPROC mode");
         println!("PTY_EXTPROC_EOF_QUERY_OK");
         return;
