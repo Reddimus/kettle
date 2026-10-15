@@ -176,7 +176,14 @@ jobs:
       # The aarch64 cross leg is covered by the Linux-native pretest above.
       - name: Test patched vendor crates on native release runner
         if: matrix.rust_target == ''
-        run: cargo test --locked --manifest-path vendor/Cargo.toml --workspace
+        shell: bash
+        # As in the pretest: arboard's upstream tests need a desktop clipboard,
+        # so only its backport's display-free Linux tests run.
+        run: |
+          cargo test --locked --manifest-path vendor/Cargo.toml --workspace --exclude arboard
+          if [ "$RUNNER_OS" = Linux ]; then
+            cargo test --locked --manifest-path vendor/Cargo.toml -p arboard --lib platform::linux::
+          fi
       # Build: macOS gets a universal2 binary (x86_64 + aarch64 via lipo) to
       # match the `kettle-macos-universal.zip` artifact name.
       # Linux x86_64: native release build.
