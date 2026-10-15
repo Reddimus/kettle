@@ -1,0 +1,69 @@
+name: Linux native audio
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "crates/kettle-media/**"
+      - "crates/kettle-media-native/**"
+      - "crates/kettle-media-render/**"
+      - "crates/kettle-media-worker/**"
+      - "scripts/check-linux-audio.py"
+      - ".github/workflows/linux-audio.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-audio-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audio:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CARGO_BUILD_JOBS: "8"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          shared-key: linux-native-audio
+      - name: Native decoder and audio service
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg pulseaudio
+          if [ ! -d "/run/user/$(id -u)" ]; then
+            sudo install -d -m 700 -o "$(id -u)" -g "$(id -g)" "/run/user/$(id -u)"
+          fi
+      - name: Build the worker independently
+        run: nice -n 10 cargo build --locked --profile media-worker -p kettle-media-worker
+      - name: Build matching native tests
+        run: |
+          nice -n 10 cargo test --locked -p kettle-media-worker --test native_audio --test process_boundary --no-run --message-format=json > "$RUNNER_TEMP/worker-tests.jsonl"
+          nice -n 10 cargo test --locked -p kettle-media-native --test ffmpeg --no-run --message-format=json > "$RUNNER_TEMP/decoder-tests.jsonl"
+          nice -n 10 cargo test --locked -p kettle-media-native --lib --no-run --message-format=json > "$RUNNER_TEMP/output-tests.jsonl"
+      - name: Mandatory native playback
+        run: |
+          python3 scripts/check-linux-audio.py \
+            --worker ./target/media-worker/kettle-media-worker \
+            --worker-tests-json "$RUNNER_TEMP/worker-tests.jsonl" \
+            --decoder-tests-json "$RUNNER_TEMP/decoder-tests.jsonl" \
+            --output-tests-json "$RUNNER_TEMP/output-tests.jsonl" \
+            --out-dir "$RUNNER_TEMP/linux-audio"
+      - name: Preserve native results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: linux-audio-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/linux-audio
+          if-no-files-found: warn
+          retention-days: 7

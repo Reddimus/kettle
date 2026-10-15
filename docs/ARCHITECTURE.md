@@ -185,13 +185,25 @@ invalid data restores the conservative no-motion fallback. Screen readers
 hear the lane's notices and that a preview is being made, but not each
 frame's time.
 
+Linux sound uses the same worker executable in a separate PCM-only role.
+The confined FFmpeg worker reads encoded media and sends timestamped, fixed-size
+PCM through a four-credit parent relay. The broker alone connects to the local
+PulseAudio-compatible service before confinement; it never accepts a media file.
+Both workers share the session's 768 MiB footprint budget and caller-driven lease.
+Their queues, commands and clock feedback stay off the GUI thread. Stream writes
+use PulseAudio credit, not the later hardware presentation clock. They request
+60 ms of buffering and cap negotiated storage and recovery credit at 160 ms;
+invalid credit retires the output. The hardware clock remains the A/V clock. Pause corks
+output, per-stream mute preserves time, and every seek retires the old generation.
+Missing sound output leaves video usable with its existing Unavailable notice.
+
 The lane plays the video itself on the user's gesture (`media::playback`),
 in a worker of its own: `WorkerClient::play` opens a playback session
 (`kettle_media::session`) on three threads of the session's, never the render
 slot, sized to the lane's picture, and the worker serves it (`play`):
 confined to the file and its decoder before reading it, it opens paused on
 its first frame, and paces every frame at its time from a decoder that fills
-three buffers only while it plays. The client keeps the newest frame, waking
+three session buffers, with bounded decoder prebuffering. The client keeps the newest frame, waking
 the window once until it looks; the lane makes it an image on the preview
 account (the frame it replaces gives its pixels back for the next) and draws
 it where the poster is, at the video's size, so the image pipeline hands each

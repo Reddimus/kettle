@@ -20,8 +20,28 @@ pub struct AudioBlock {
     pub at_frame: u64,
 }
 
+/// A nonblocking source distinguishes a temporary lack of PCM from EOF.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioRead {
+    Block(AudioBlock),
+    Pending,
+    End,
+}
+
 /// A session's sound, decoded in order a block at a time.
 pub trait AudioSource: Send {
+    /// An interrupt for a source that can block on another process. Closing
+    /// sound calls it before joining the feeding thread; video keeps running.
+    fn cancellation(&self) -> Option<std::sync::Arc<dyn Fn() + Send + Sync>> {
+        None
+    }
+
+    /// IPC sources override this so pause/mute can run while awaiting PCM.
+    fn poll_block(&mut self, samples: &mut [f32]) -> Result<AudioRead, FailureCode> {
+        self.next_block(samples)
+            .map(|block| block.map_or(AudioRead::End, AudioRead::Block))
+    }
+
     /// Write the next frames into `samples`, `CHANNELS` samples each, as
     /// many as fit, and say how many and where they play; `Ok(None)` once
     /// the sound has ended. A block never starts before the one before it

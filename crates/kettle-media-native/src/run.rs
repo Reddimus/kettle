@@ -44,7 +44,7 @@ pub(crate) struct Ran {
 const EXIT_WITHIN: Duration = Duration::from_secs(1);
 
 /// A started tool, killed and reaped unless it was waited for.
-struct Running(Option<Child>);
+pub(crate) struct Running(Option<Child>);
 
 impl Running {
     fn child(&mut self) -> &mut Child {
@@ -75,7 +75,7 @@ impl Running {
 
     /// How it exits within `within`, reaped if it does; one that does not
     /// is killed and reaped when dropped.
-    fn exit_within(&mut self, within: Duration) -> Exit {
+    pub(crate) fn exit_within(&mut self, within: Duration) -> Exit {
         let deadline = Instant::now() + within;
         let mut pause = Duration::from_micros(250);
         loop {
@@ -100,6 +100,14 @@ impl Running {
                 Ok(None) => return Exit::Stuck,
                 Err(_) => return Exit::Failed,
             }
+        }
+    }
+}
+
+impl Running {
+    pub(crate) fn stop(&mut self) {
+        if let Some(child) = self.0.as_mut() {
+            let _ = child.kill();
         }
     }
 }
@@ -130,6 +138,7 @@ fn start<A: AsRef<OsStr>>(
     args: &[A],
     input: Option<File>,
     cpu_seconds: Option<u64>,
+    writers: &[i32],
 ) -> Result<(Running, ChildStdout), RunError> {
     tool.check().map_err(|_| RunError::Unavailable)?;
     let mut command = Command::new(tool.path());
@@ -141,6 +150,20 @@ fn start<A: AsRef<OsStr>>(
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     crate::contain::contain(&mut command, cpu_seconds);
+    use std::os::unix::process::CommandExt as _;
+    let writers = writers.to_vec();
+    // SAFETY: writer owners outlive spawn. The hook only calls fcntl on
+    // precomputed descriptors, without allocation or a shared lock.
+    unsafe {
+        command.pre_exec(move || {
+            for &fd in &writers {
+                if libc::fcntl(fd, libc::F_SETFD, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
     let mut running = Running(Some(command.spawn().map_err(|_| RunError::Unavailable)?));
     let stdout = running.child().stdout.take().ok_or(RunError::Unavailable)?;
     Ok((running, stdout))
@@ -206,7 +229,7 @@ pub(crate) fn stream<A: AsRef<OsStr>>(
     input: File,
     cpu_seconds: u64,
 ) -> Result<Streaming, RunError> {
-    let (running, stdout) = start(tool, args, Some(input), Some(cpu_seconds))?;
+    let (running, stdout) = start(tool, args, Some(input), Some(cpu_seconds), &[])?;
     Ok(Streaming { stdout, running })
 }
 
@@ -219,7 +242,7 @@ pub(crate) fn run<A: AsRef<OsStr>>(
     cap: usize,
     deadline: Instant,
 ) -> Result<Ran, RunError> {
-    let (running, stdout) = start(tool, args, input, None)?;
+    let (running, stdout) = start(tool, args, input, None, &[])?;
     let (sender, received) = mpsc::channel();
     // The tool can start no process to hold the pipe open, so the reader
     // ends once the tool does, killed or not.
@@ -261,6 +284,42 @@ pub(crate) fn run<A: AsRef<OsStr>>(
         stdout,
         overran: false,
         success,
+    })
+}
+
+/// Three private pipes for one timestamped decode. Only the two writers
+/// named in the fixed tee output survive exec, and only in that child.
+pub(crate) struct Triple {
+    pub metadata: ChildStdout,
+    pub video: std::io::PipeReader,
+    pub audio: std::io::PipeReader,
+    pub running: Running,
+}
+
+pub(crate) fn triple(
+    tool: &Tool,
+    args: impl FnOnce([i32; 2]) -> Vec<std::ffi::OsString>,
+    input: File,
+    cpu_seconds: u64,
+) -> Result<Triple, RunError> {
+    use std::os::fd::AsRawFd as _;
+    let (video, video_writer) = std::io::pipe().map_err(|_| RunError::Unavailable)?;
+    let (audio, audio_writer) = std::io::pipe().map_err(|_| RunError::Unavailable)?;
+    let descriptors = [video_writer.as_raw_fd(), audio_writer.as_raw_fd()];
+    let (running, metadata) = start(
+        tool,
+        &args(descriptors),
+        Some(input),
+        Some(cpu_seconds),
+        &descriptors,
+    )?;
+    // Parent copies retain CLOEXEC and close here, so EOF tracks the child.
+    drop((video_writer, audio_writer));
+    Ok(Triple {
+        metadata,
+        video,
+        audio,
+        running,
     })
 }
 

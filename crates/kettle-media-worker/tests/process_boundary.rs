@@ -2364,3 +2364,106 @@ fn apples_decoder_plays_a_session_in_the_worker() {
     }
     assert_eq!(exit_code(&mut child, 5 * SECOND), 0);
 }
+
+/// Opt-in real local audio-service test; an unavailable service is a failure.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "needs a local PulseAudio-compatible service and matching worker"]
+fn linux_pcm_only_broker_plays_pauses_and_closes() {
+    use kettle_media::pcm::{BYTES, Block, FRAMES, Feedback, Message, Open};
+    struct Owned(Child);
+    impl Drop for Owned {
+        fn drop(&mut self) {
+            let before = self.0.try_wait();
+            eprintln!("PCM broker exit before cleanup: {before:?}");
+
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+            if let Some(mut stderr) = self.0.stderr.take() {
+                let mut text = String::new();
+                let _ = stderr.read_to_string(&mut text);
+                eprintln!("PCM broker stderr: {text}");
+            }
+        }
+    }
+    let path = std::env::var_os("KETTLE_TEST_PCM_WORKER").unwrap_or_else(|| WORKER.into());
+    let mut owned = Owned(spawn(&mut Command::new(path)));
+    println!("owned PCM broker pid={}", owned.0.id());
+    let child = &mut owned.0;
+    send(child, &hello(own_build()));
+    assert!(matches!(receive(child), Some(Frame::Ready(_))));
+    send(
+        child,
+        &Frame::Pcm(Message::Open(Open {
+            generation: 77,
+            start_frame: 48_000,
+            end_frame: 96_000,
+            muted: true,
+        })),
+    );
+    let stdout = child.stdout.take().unwrap();
+    let (sent, heard) = std::sync::mpsc::sync_channel(16);
+    let reader = std::thread::spawn(move || {
+        let mut stdout = stdout;
+        while let Ok(Some(frame)) = read_frame(&mut stdout, Direction::WorkerToParent) {
+            if sent.send(frame).is_err() {
+                break;
+            }
+        }
+    });
+    let feedback = |condition: &dyn Fn(Feedback) -> bool| -> Feedback {
+        let until = Instant::now() + Duration::from_secs(3);
+        loop {
+            let frame = heard
+                .recv_timeout(until.saturating_duration_since(Instant::now()))
+                .expect("PCM feedback deadline");
+            let Frame::Pcm(Message::Feedback(feedback)) = frame else {
+                panic!("unexpected PCM frame");
+            };
+            assert!(!feedback.failed, "PCM service/confinement failed");
+            if condition(feedback) {
+                return feedback;
+            }
+        }
+    };
+    feedback(&|_| true);
+    send(child, &Frame::PlayCommand(PlayCommand::Play));
+    // The real client can request Play before its first decoded packet arrives.
+    std::thread::sleep(Duration::from_millis(150));
+    for sequence in 0..4 {
+        send(
+            child,
+            &Frame::Pcm(Message::Block(Block {
+                generation: 77,
+                sequence,
+                at_frame: 48_000 + sequence * FRAMES as u64,
+                samples: 0.125f32.to_le_bytes().repeat(BYTES / 4),
+            })),
+        );
+    }
+    let playing = feedback(&|f| f.played_frame.is_some_and(|frame| frame > 48_000));
+    feedback(&|f| f.consumed == 4);
+    send(child, &Frame::PlayCommand(PlayCommand::Pause));
+    feedback(&|f| f.played_frame.is_none());
+    std::thread::sleep(Duration::from_millis(100));
+    for sequence in 4..8 {
+        send(
+            child,
+            &Frame::Pcm(Message::Block(Block {
+                generation: 77,
+                sequence,
+                at_frame: 48_000 + sequence * FRAMES as u64,
+                samples: 0.125f32.to_le_bytes().repeat(BYTES / 4),
+            })),
+        );
+    }
+    send(child, &Frame::PlayCommand(PlayCommand::Play));
+    feedback(&|f| {
+        f.played_frame
+            .is_some_and(|frame| frame > playing.played_frame.unwrap() + 480)
+    });
+    send(child, &Frame::PlayCommand(PlayCommand::Close));
+    assert_eq!(exit_code(child, Duration::from_secs(3)), 0);
+    drop(heard);
+    reader.join().unwrap();
+}

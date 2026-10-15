@@ -8,6 +8,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- Play Linux video sound through a PulseAudio-compatible service, with pause,
+  per-video mute, synchronized frames, and a visible video-only fallback.
+
 - Show inline agent cards on Linux for Codex 0.162 and Claude Code started
   from a Kettle pane.
 

@@ -1,0 +1,788 @@
+//! Opt-in native Linux playback through the real client and two production workers.
+#![cfg(target_os = "linux")]
+
+use std::path::{Path, PathBuf};
+use std::process::Child;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use kettle_media::client::{
+    FileIdentity, SpawnedWorker, UnavailableCause, WorkerClient, WorkerExit, WorkerPlatform,
+    WorkerProcess, worker_command,
+};
+use kettle_media::session::{PlaySession, SessionStatus};
+use kettle_media::{
+    AudioRequest, AudioStatus, BuildId, GuiActionWitness, NativePath, PlayOpen, PlayState, Source,
+};
+
+struct Group {
+    child: Child,
+    reaped: bool,
+}
+impl Group {
+    fn signal(&self) {
+        if !self.reaped {
+            // SAFETY: this test spawned and has not reaped this process-group leader.
+            unsafe {
+                libc::kill(-(self.child.id() as i32), libc::SIGKILL);
+            }
+        }
+    }
+}
+impl WorkerProcess for Group {
+    fn try_wait(&mut self) -> std::io::Result<Option<WorkerExit>> {
+        use std::os::unix::process::ExitStatusExt as _;
+        if self.reaped {
+            return Ok(None);
+        }
+        // SAFETY: zeroed siginfo_t is writable and waitid leaves the child unreaped.
+        let mut info = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                self.child.id(),
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if result != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if unsafe { info.si_pid() } == 0 {
+            return Ok(None);
+        }
+        self.signal();
+        let status = self.child.wait()?;
+        self.reaped = true;
+        Ok(Some(status.code().map_or_else(
+            || WorkerExit::Signal(status.signal().unwrap()),
+            WorkerExit::Code,
+        )))
+    }
+    fn kill(&mut self) {
+        self.signal();
+    }
+    fn footprint(&mut self) -> std::io::Result<u64> {
+        let mut total = 0u64;
+        // SAFETY: sysconf has no pointer arguments.
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
+        for entry in std::fs::read_dir("/proc")? {
+            let entry = entry?;
+            if entry.file_name().to_string_lossy().parse::<u32>().is_err() {
+                continue;
+            }
+            let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+                continue;
+            };
+            let Some((_, rest)) = stat.rsplit_once(") ") else {
+                continue;
+            };
+            let fields: Vec<_> = rest.split_whitespace().collect();
+            if fields.get(2).and_then(|v| v.parse::<u32>().ok()) == Some(self.child.id()) {
+                let rss: u64 = fields[21].parse().map_err(std::io::Error::other)?;
+                total = total.saturating_add(rss.saturating_mul(page));
+            }
+        }
+        Ok(total)
+    }
+}
+impl Drop for Group {
+    fn drop(&mut self) {
+        if !self.reaped {
+            self.signal();
+            let _ = self.child.wait();
+        }
+    }
+}
+struct Transcript {
+    start: Instant,
+    bytes: Vec<u8>,
+    chunks: Vec<(usize, Duration)>,
+}
+impl Transcript {
+    fn record(&mut self, bytes: &[u8]) {
+        let take = bytes
+            .len()
+            .min((4 * 1024 * 1024usize).saturating_sub(self.bytes.len()));
+        if take > 0 && self.chunks.len() < 16_384 {
+            self.bytes.extend_from_slice(&bytes[..take]);
+            self.chunks.push((self.bytes.len(), self.start.elapsed()));
+        }
+    }
+}
+struct Trace {
+    label: String,
+    direction: kettle_media::wire::Direction,
+    data: Arc<Mutex<Transcript>>,
+}
+type Traces = Arc<Mutex<Vec<Trace>>>;
+struct Traced<T> {
+    pipe: T,
+    data: Arc<Mutex<Transcript>>,
+}
+impl<T: std::io::Read> std::io::Read for Traced<T> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.pipe.read(bytes)?;
+        self.data.lock().unwrap().record(&bytes[..n]);
+        Ok(n)
+    }
+}
+impl<T: std::io::Write> std::io::Write for Traced<T> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let n = self.pipe.write(bytes)?;
+        self.data.lock().unwrap().record(&bytes[..n]);
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.pipe.flush()
+    }
+}
+struct Logs {
+    directory: kettle_test_support::PrivateTempDir,
+    traces: Traces,
+}
+impl Logs {
+    fn new(prefix: &str) -> Self {
+        Self {
+            directory: kettle_test_support::private_tempdir(prefix),
+            traces: Arc::default(),
+        }
+    }
+    fn path(&self) -> &Path {
+        self.directory.path()
+    }
+}
+impl Drop for Logs {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            return;
+        }
+        use kettle_media::wire::{Frame, read_frame_within};
+        for trace in self.traces.lock().unwrap().iter() {
+            let data = trace.data.lock().unwrap();
+            let mut input = std::io::Cursor::new(&data.bytes);
+            for _ in 0..120 {
+                let Ok(Some(frame)) =
+                    read_frame_within(&mut input, trace.direction, 4 * 1024 * 1024)
+                else {
+                    break;
+                };
+                let at = data
+                    .chunks
+                    .iter()
+                    .find(|(end, _)| *end >= input.position() as usize)
+                    .map(|(_, at)| at.as_millis())
+                    .unwrap_or(0);
+                let summary = match frame {
+                    Frame::Pcm(kettle_media::pcm::Message::Block(block)) => {
+                        format!("PCM block {} at {}", block.sequence, block.at_frame)
+                    }
+                    Frame::Pcm(message) => format!("PCM {message:?}"),
+                    Frame::VideoFrame(frame) => format!("picture {}", frame.pts_ms),
+                    Frame::PlayCommand(command) => format!("command {command:?}"),
+                    Frame::AudioState(state) => format!("audio {state:?}"),
+                    Frame::PlayState(state) => format!("state {state:?}"),
+                    Frame::Failure(failure) => format!("failure {:?}", failure.code),
+                    frame => format!("kind {}", frame.kind()),
+                };
+                eprintln!("{} {at}ms {summary}", trace.label);
+            }
+        }
+        if let Ok(entries) = std::fs::read_dir(self.path()) {
+            for entry in entries.flatten().take(8) {
+                if entry.file_name().to_string_lossy().starts_with("worker-") {
+                    use std::io::Read as _;
+                    if let Ok(file) = std::fs::File::open(entry.path()) {
+                        let mut bytes = Vec::new();
+                        let _ = file.take(65_536).read_to_end(&mut bytes);
+                        eprintln!(
+                            "{}: {}",
+                            entry.file_name().to_string_lossy(),
+                            String::from_utf8_lossy(&bytes)
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct Platform {
+    unavailable_broker: bool,
+    attempts: std::sync::atomic::AtomicUsize,
+    path: PathBuf,
+    children: Arc<Mutex<Vec<u32>>>,
+    logs: PathBuf,
+    traces: Traces,
+}
+impl Platform {
+    fn trace<T>(
+        &self,
+        pipe: T,
+        index: usize,
+        direction: kettle_media::wire::Direction,
+    ) -> Traced<T> {
+        let data = Arc::new(Mutex::new(Transcript {
+            start: Instant::now(),
+            bytes: Vec::new(),
+            chunks: Vec::new(),
+        }));
+        self.traces.lock().unwrap().push(Trace {
+            label: format!("worker-{index} {direction:?}"),
+            direction,
+            data: Arc::clone(&data),
+        });
+        Traced { pipe, data }
+    }
+}
+impl WorkerPlatform for Platform {
+    fn worker_path(&self) -> Result<&Path, UnavailableCause> {
+        Ok(&self.path)
+    }
+    fn inspect(&self, path: &Path) -> Result<FileIdentity, UnavailableCause> {
+        use std::os::unix::fs::MetadataExt as _;
+        let m = std::fs::metadata(path).map_err(|_| UnavailableCause::WorkerMissing)?;
+        Ok(FileIdentity {
+            dev: m.dev(),
+            ino: m.ino(),
+            size: m.len(),
+            mtime_seconds: m.mtime(),
+            mtime_nanos: m.mtime_nsec(),
+            ctime_seconds: m.ctime(),
+            ctime_nanos: m.ctime_nsec(),
+        })
+    }
+    fn verify(&self, _: &Path) -> Result<(), UnavailableCause> {
+        Ok(())
+    }
+    fn guard_pipe_writes(&self) -> std::io::Result<()> {
+        Ok(())
+    }
+    fn spawn(&self, path: &Path) -> std::io::Result<SpawnedWorker> {
+        let attempt = self
+            .attempts
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if self.unavailable_broker && attempt == 1 {
+            return Err(std::io::Error::other(
+                "fixture: PCM service worker unavailable",
+            ));
+        }
+        let mut children = self.children.lock().unwrap();
+        let index = children.len();
+        let log = std::fs::File::create(self.logs.join(format!("worker-{index}.log")))?;
+        let mut child = worker_command(path)
+            .env(kettle_media::video::DECODER_ENV, "/usr/bin/ffmpeg")
+            .stderr(log)
+            .spawn()?;
+        children.push(child.id());
+        eprintln!("owned native worker PID/PGID {}", child.id());
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        Ok(SpawnedWorker {
+            process: Box::new(Group {
+                child,
+                reaped: false,
+            }),
+            stdin: Box::new(self.trace(
+                stdin,
+                index,
+                kettle_media::wire::Direction::ParentToWorker,
+            )),
+            stdout: Box::new(self.trace(
+                stdout,
+                index,
+                kettle_media::wire::Direction::WorkerToParent,
+            )),
+        })
+    }
+}
+
+fn wait(session: &PlaySession, condition: impl Fn(SessionStatus) -> bool) {
+    let until = Instant::now() + Duration::from_secs(8);
+    loop {
+        session.keep();
+        let status = session.status();
+        assert!(
+            !matches!(status, SessionStatus::Failed(_)),
+            "native playback failed: {status:?}"
+        );
+        if condition(status) {
+            return;
+        }
+        assert!(
+            Instant::now() < until,
+            "native playback did not reach state: {status:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+fn next(session: &PlaySession, after: u64) -> u64 {
+    let until = Instant::now() + Duration::from_secs(4);
+    loop {
+        session.keep();
+        assert_eq!(session.audio(), Some(AudioStatus::Ready));
+        assert!(!matches!(session.status(), SessionStatus::Failed(_)));
+        if let Some(frame) = session.take_frame()
+            && frame.pts_ms > after
+        {
+            return frame.pts_ms;
+        }
+        assert!(Instant::now() < until, "no video after {after}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+#[ignore = "requires native PulseAudio service, trusted FFmpeg, and a production worker"]
+fn linux_client_decodes_audio_pauses_seeks_and_closes_both_workers() {
+    let path = PathBuf::from(
+        std::env::var_os("KETTLE_TEST_PCM_WORKER").expect("explicit production worker"),
+    );
+    let clip = PathBuf::from(
+        std::env::var_os("KETTLE_TEST_PCM_CLIP").expect("explicit ticks.mp4 fixture"),
+    );
+    let logs = Logs::new("kettle-native-audio-");
+    let children = Arc::new(Mutex::new(Vec::new()));
+    let client = WorkerClient::new(
+        BuildId::from_embedded(env!("CARGO_PKG_VERSION"), env!("KETTLE_SOURCE_HASH")).unwrap(),
+        Box::new(Platform {
+            unavailable_broker: false,
+            attempts: std::sync::atomic::AtomicUsize::new(0),
+            path,
+            children: Arc::clone(&children),
+            logs: logs.path().to_path_buf(),
+            traces: Arc::clone(&logs.traces),
+        }),
+    );
+    let request = PlayOpen {
+        source: Source::user_pull(
+            NativePath::from_path(&clip).unwrap(),
+            GuiActionWitness::from_explicit_gui_action(),
+        ),
+        max_width: 64,
+        max_height: 36,
+        start_ms: 0,
+        max_fps_milli: 30_000,
+        audio: AudioRequest::Muted,
+    };
+    let session = client.play(&request, Box::new(|| {})).unwrap();
+    wait(&session, |s| {
+        matches!(
+            s,
+            SessionStatus::Open {
+                state: PlayState::Paused,
+                ..
+            }
+        )
+    });
+    assert_eq!(session.audio(), Some(AudioStatus::Ready));
+    session.play();
+    let before = next(&session, 100);
+    session.pause();
+    wait(&session, |s| {
+        matches!(
+            s,
+            SessionStatus::Open {
+                state: PlayState::Paused,
+                ..
+            }
+        )
+    });
+    let _ = session.take_frame();
+    let until = Instant::now() + Duration::from_millis(350);
+    while Instant::now() < until {
+        session.keep();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(session.take_frame().is_none(), "paused video advanced");
+    session.set_muted(false);
+    session.play();
+    let _ = next(&session, before);
+    let other = client
+        .play(
+            &PlayOpen {
+                start_ms: 1533,
+                max_width: 640,
+                max_height: 360,
+                ..request.clone()
+            },
+            Box::new(|| {}),
+        )
+        .unwrap();
+    // Opening-time commands must also reach the broker created later.
+    let playing_at = Instant::now();
+    other.set_muted(false);
+    other.play();
+    wait(&other, |s| {
+        matches!(
+            s,
+            SessionStatus::Open {
+                state: PlayState::Playing,
+                ..
+            }
+        )
+    });
+    assert_eq!(other.audio(), Some(AudioStatus::Ready));
+    assert!(next(&other, 1500) > 1500);
+    drop(session);
+    // Closing one decoder/broker pair must not stop the other.
+    let until = Instant::now() + Duration::from_secs(8);
+    let mut last = None;
+    loop {
+        other.keep();
+        assert_eq!(other.audio(), Some(AudioStatus::Ready));
+        if let Some(frame) = other.take_frame() {
+            last = Some(frame.pts_ms);
+        }
+        match other.status() {
+            SessionStatus::Open {
+                state: PlayState::Ended,
+                ..
+            } => break,
+            SessionStatus::Failed(code) => panic!("surviving playback failed: {code:?}"),
+            _ => {}
+        }
+        assert!(
+            Instant::now() < until,
+            "surviving audio session did not end"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(last, Some(3933));
+    assert!(
+        playing_at.elapsed() >= Duration::from_secs(2),
+        "presentation clock ran ahead"
+    );
+    drop(other);
+    let until = Instant::now() + Duration::from_secs(8);
+    loop {
+        let live: Vec<_> = children
+            .lock()
+            .unwrap()
+            .iter()
+            .copied()
+            .filter(|pid| Path::new(&format!("/proc/{pid}")).exists())
+            .collect();
+        if live.is_empty() {
+            break;
+        }
+        assert!(
+            Instant::now() < until,
+            "workers outlived both sessions: {live:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        children.lock().unwrap().len(),
+        4,
+        "each session needs its own decoder and PCM broker"
+    );
+    for entry in std::fs::read_dir(logs.path()).unwrap() {
+        let entry = entry.unwrap();
+        assert!(
+            std::fs::read(entry.path()).unwrap().is_empty(),
+            "worker stderr: {}",
+            entry.path().display()
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires trusted FFmpeg and a production worker; deliberately refuses the PCM worker"]
+fn linux_client_keeps_video_when_the_pcm_broker_cannot_start() {
+    video_survives_sound_failure(true);
+}
+
+#[test]
+#[ignore = "requires an owned cold Pulse null sink with its default two-second buffer"]
+fn linux_client_keeps_video_when_the_audio_clock_stalls() {
+    assert_eq!(
+        std::env::var("KETTLE_TEST_STALLED_AUDIO").as_deref(),
+        Ok("1")
+    );
+    video_survives_sound_failure(false);
+}
+
+fn video_survives_sound_failure(missing_broker: bool) {
+    let path = PathBuf::from(
+        std::env::var_os("KETTLE_TEST_PCM_WORKER").expect("explicit production worker"),
+    );
+    let clip = PathBuf::from(
+        std::env::var_os("KETTLE_TEST_PCM_CLIP").expect("explicit ticks.mp4 fixture"),
+    );
+    let logs = Logs::new("kettle-native-no-audio-");
+    let children = Arc::new(Mutex::new(Vec::new()));
+    let client = WorkerClient::new(
+        BuildId::from_embedded(env!("CARGO_PKG_VERSION"), env!("KETTLE_SOURCE_HASH")).unwrap(),
+        Box::new(Platform {
+            unavailable_broker: missing_broker,
+            attempts: std::sync::atomic::AtomicUsize::new(0),
+            path,
+            children: Arc::clone(&children),
+            logs: logs.path().to_path_buf(),
+            traces: Arc::clone(&logs.traces),
+        }),
+    );
+    let request = PlayOpen {
+        source: Source::user_pull(
+            NativePath::from_path(&clip).unwrap(),
+            GuiActionWitness::from_explicit_gui_action(),
+        ),
+        max_width: 64,
+        max_height: 36,
+        start_ms: 0,
+        max_fps_milli: 30_000,
+        audio: AudioRequest::On,
+    };
+    let session = client.play(&request, Box::new(|| {})).unwrap();
+    wait(&session, |s| {
+        matches!(
+            s,
+            SessionStatus::Open {
+                state: PlayState::Paused,
+                ..
+            }
+        )
+    });
+    assert_eq!(
+        session.audio(),
+        Some(if missing_broker {
+            AudioStatus::Unavailable
+        } else {
+            AudioStatus::Ready
+        })
+    );
+    session.play();
+    if !missing_broker {
+        let until = Instant::now() + Duration::from_secs(2);
+        while session.audio() == Some(AudioStatus::Ready) {
+            session.keep();
+            assert!(Instant::now() < until, "stalled clock did not fall back");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    let until = Instant::now() + Duration::from_secs(8);
+    let mut last = None;
+    loop {
+        session.keep();
+        if let Some(frame) = session.take_frame() {
+            last = Some(frame.pts_ms);
+        }
+        assert_eq!(session.audio(), Some(AudioStatus::Unavailable));
+        match session.status() {
+            SessionStatus::Open {
+                state: PlayState::Ended,
+                ..
+            } => break,
+            SessionStatus::Failed(code) => panic!("video fallback failed: {code:?}"),
+            _ => {}
+        }
+        assert!(Instant::now() < until, "silent fallback did not finish");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(last, Some(3900));
+    drop(session);
+    let until = Instant::now() + Duration::from_secs(3);
+    loop {
+        let live = children
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|pid| Path::new(&format!("/proc/{pid}")).exists());
+        if !live {
+            break;
+        }
+        assert!(
+            Instant::now() < until,
+            "decoder outlived its silent fallback"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        children.lock().unwrap().len(),
+        if missing_broker { 1 } else { 2 }
+    );
+}
+
+#[test]
+#[ignore = "requires native PulseAudio service, trusted FFmpeg, and a production worker"]
+fn linux_client_keeps_the_last_picture_while_longer_audio_finishes() {
+    let path = PathBuf::from(
+        std::env::var_os("KETTLE_TEST_PCM_WORKER").expect("explicit production worker"),
+    );
+    let clip = PathBuf::from(
+        std::env::var_os("KETTLE_TEST_PCM_LONG_CLIP").expect("explicit long-audio.mp4 fixture"),
+    );
+    let logs = Logs::new("kettle-native-audio-tail-");
+    let children = Arc::new(Mutex::new(Vec::new()));
+    let client = WorkerClient::new(
+        BuildId::from_embedded(env!("CARGO_PKG_VERSION"), env!("KETTLE_SOURCE_HASH")).unwrap(),
+        Box::new(Platform {
+            unavailable_broker: false,
+            attempts: std::sync::atomic::AtomicUsize::new(0),
+            path,
+            children: Arc::clone(&children),
+            logs: logs.path().to_path_buf(),
+            traces: Arc::clone(&logs.traces),
+        }),
+    );
+    let request = PlayOpen {
+        source: Source::user_pull(
+            NativePath::from_path(&clip).unwrap(),
+            GuiActionWitness::from_explicit_gui_action(),
+        ),
+        max_width: 64,
+        max_height: 36,
+        start_ms: 3500,
+        max_fps_milli: 30_000,
+        audio: AudioRequest::Muted,
+    };
+    let session = client.play(&request, Box::new(|| {})).unwrap();
+    wait(&session, |s| {
+        matches!(
+            s,
+            SessionStatus::Open {
+                state: PlayState::Paused,
+                ..
+            }
+        )
+    });
+    assert_eq!(session.audio(), Some(AudioStatus::Ready));
+    session.play();
+    let started = Instant::now();
+    let mut last = None;
+    loop {
+        session.keep();
+        assert_eq!(session.audio(), Some(AudioStatus::Ready));
+        if let Some(frame) = session.take_frame() {
+            last = Some(frame.pts_ms);
+        }
+        match session.status() {
+            SessionStatus::Open {
+                state: PlayState::Ended,
+                ..
+            } => break,
+            SessionStatus::Failed(code) => {
+                panic!("valid audio tail failed: {code:?}, last={last:?}")
+            }
+            _ => {}
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(12),
+            "audio tail did not end"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(last, Some(3900));
+    assert!(
+        started.elapsed() >= Duration::from_secs(6),
+        "audio tail was cut short"
+    );
+    drop(session);
+    let until = Instant::now() + Duration::from_secs(3);
+    while children
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|pid| Path::new(&format!("/proc/{pid}")).exists())
+    {
+        assert!(
+            Instant::now() < until,
+            "audio-tail workers outlived their session"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(children.lock().unwrap().len(), 2);
+}
+
+#[test]
+#[ignore = "requires native PulseAudio service, trusted FFmpeg, and a production worker"]
+fn linux_client_seeks_pcm_between_frame_boundaries() {
+    let path = PathBuf::from(
+        std::env::var_os("KETTLE_TEST_PCM_WORKER").expect("explicit production worker"),
+    );
+    let logs = Logs::new("kettle-native-pcm-seeks-");
+    let clip = logs.path().join("seek.mov");
+    let generated = std::process::Command::new("/usr/bin/ffmpeg")
+        .args([
+            "-v",
+            "error",
+            "-nostdin",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=640x360:r=30:d=4",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=f=1000:d=4:r=48000",
+            "-c:v",
+            "libx264",
+            "-threads",
+            "1",
+            "-g",
+            "30",
+            "-bf",
+            "0",
+            "-c:a",
+            "pcm_s16le",
+            "-shortest",
+        ])
+        .arg(&clip)
+        .output()
+        .unwrap();
+    assert!(generated.status.success(), "fixture: {generated:?}");
+    let children = Arc::new(Mutex::new(Vec::new()));
+    let client = WorkerClient::new(
+        BuildId::from_embedded(env!("CARGO_PKG_VERSION"), env!("KETTLE_SOURCE_HASH")).unwrap(),
+        Box::new(Platform {
+            unavailable_broker: false,
+            attempts: std::sync::atomic::AtomicUsize::new(0),
+            path,
+            children: Arc::clone(&children),
+            logs: logs.path().to_path_buf(),
+            traces: Arc::clone(&logs.traces),
+        }),
+    );
+    for start_ms in [2100, 2133, 2166, 2233, 2366] {
+        eprintln!("native PCM seek {start_ms}");
+        let session = client
+            .play(
+                &PlayOpen {
+                    source: Source::user_pull(
+                        NativePath::from_path(&clip).unwrap(),
+                        GuiActionWitness::from_explicit_gui_action(),
+                    ),
+                    max_width: 332,
+                    max_height: 187,
+                    start_ms,
+                    max_fps_milli: 30_000,
+                    audio: AudioRequest::Muted,
+                },
+                Box::new(|| {}),
+            )
+            .unwrap();
+        session.play();
+        wait(&session, |s| {
+            matches!(
+                s,
+                SessionStatus::Open {
+                    state: PlayState::Playing,
+                    ..
+                }
+            )
+        });
+        next(&session, start_ms + 150);
+        drop(session);
+        let until = Instant::now() + Duration::from_secs(8);
+        while children
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|pid| Path::new(&format!("/proc/{pid}")).exists())
+        {
+            assert!(Instant::now() < until, "seek workers did not close");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}

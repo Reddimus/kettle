@@ -70,8 +70,8 @@ impl Direction {
     fn permits(self, kind: u8) -> bool {
         match self {
             Self::ExternalToParent => kind == 3,
-            Self::ParentToWorker => matches!(kind, 1 | 4 | 8 | 9),
-            Self::WorkerToParent => matches!(kind, 2 | 5 | 6 | 7 | 10 | 11 | 12 | 13),
+            Self::ParentToWorker => matches!(kind, 1 | 4 | 8 | 9 | 14),
+            Self::WorkerToParent => matches!(kind, 2 | 5 | 6 | 7 | 10 | 11 | 12 | 13 | 14),
         }
     }
 }
@@ -97,6 +97,8 @@ pub enum Frame {
     /// Its sound changed from what Opened said: it stopped, or could not
     /// start.
     AudioState(AudioStatus),
+    /// Private decoded-PCM broker traffic; never accepted from external tools.
+    Pcm(pcm::Message),
 }
 impl Frame {
     pub fn kind(&self) -> u8 {
@@ -114,6 +116,7 @@ impl Frame {
             Self::VideoFrame(_) => VIDEO_FRAME,
             Self::PlayState(_) => 12,
             Self::AudioState(_) => 13,
+            Self::Pcm(_) => 14,
         }
     }
     pub fn validate(&self) -> Result<(), ValidationError> {
@@ -126,6 +129,7 @@ impl Frame {
                 Ok(())
             }
             Self::PlayOpen(open) => open.validate(),
+            Self::Pcm(message) => message.validate(),
             Self::Opened(opened) => opened.validate(),
             Self::VideoFrame(frame) => frame.validate(),
             Self::Job(j) => validate_worker_job(j),
@@ -379,6 +383,20 @@ pub fn read_frame_within(
     };
     let (_, len) = header_prefix(&head, direction)?;
     read_rest(reader, head, len, direction, max_frame_bytes).map(Some)
+}
+
+/// Playback accepts one-byte commands and, on Linux, fixed-size PCM feedback.
+/// Other frame kinds retain the command cap before any payload is read.
+pub fn read_play_control(
+    reader: &mut impl Read,
+    pcm_feedback: bool,
+) -> Result<Option<Frame>, WireError> {
+    let Some(head) = read_header(reader)? else {
+        return Ok(None);
+    };
+    let (kind, len) = header_prefix(&head, Direction::ParentToWorker)?;
+    let limit = HEADER_BYTES + if pcm_feedback && kind == 14 { 64 } else { 1 };
+    read_rest(reader, head, len, Direction::ParentToWorker, limit).map(Some)
 }
 /// A frame's header, or `None` at end of file before its first byte.
 fn read_header(reader: &mut impl Read) -> Result<Option<[u8; HEADER_BYTES]>, WireError> {
@@ -734,6 +752,42 @@ fn put_frame(w: &mut Writer, frame: &Frame) -> Result<(), WireError> {
             PlayState::Ended => 2,
         }),
         Frame::AudioState(status) => w.u8(audio_status_byte(*status)),
+        Frame::Pcm(message) => match message {
+            pcm::Message::Open(open) => {
+                w.u8(0)?;
+                w.u64(open.generation)?;
+                w.u64(open.start_frame)?;
+                w.u64(open.end_frame)?;
+                w.u8(u8::from(open.muted))
+            }
+            pcm::Message::Block(block) => {
+                w.u8(1)?;
+                w.u64(block.generation)?;
+                w.u64(block.sequence)?;
+                w.u64(block.at_frame)?;
+                w.blob(&block.samples)
+            }
+            pcm::Message::End {
+                generation,
+                sequence,
+            } => {
+                w.u8(2)?;
+                w.u64(*generation)?;
+                w.u64(*sequence)
+            }
+            pcm::Message::Feedback(feedback) => {
+                w.u8(3)?;
+                w.u64(feedback.generation)?;
+                w.u64(feedback.consumed)?;
+                w.u8(u8::from(feedback.played_frame.is_some()))?;
+                if let Some(frame) = feedback.played_frame {
+                    w.u64(frame)?;
+                }
+                w.u32(feedback.age_us)?;
+                w.u8(u8::from(feedback.done))?;
+                w.u8(u8::from(feedback.failed))
+            }
+        },
         Frame::ExternalRequest(j) => {
             w.kind(j.kind)?;
             match &j.source {
@@ -1397,6 +1451,60 @@ fn parse_frame(r: &mut Reader<'_>, kind: u8) -> Result<Frame, WireError> {
             _ => return Err(WireError::UnknownEnum),
         }),
         13 => Frame::AudioState(audio_status(r.u8()?)?),
+        14 => {
+            let message = match r.u8()? {
+                0 => {
+                    let open = pcm::Open {
+                        generation: r.u64()?,
+                        start_frame: r.u64()?,
+                        end_frame: r.u64()?,
+                        muted: r.flag()?,
+                    };
+                    let message = pcm::Message::Open(open);
+                    message.validate()?;
+                    message
+                }
+                1 => {
+                    let (generation, sequence, at_frame) = (r.u64()?, r.u64()?, r.u64()?);
+                    let samples = r.blob(pcm::BYTES)?;
+                    if !pcm::valid_block_fields(generation, sequence, at_frame, samples) {
+                        return Err(ValidationError::BadParams.into());
+                    }
+                    pcm::Message::Block(pcm::Block {
+                        generation,
+                        sequence,
+                        at_frame,
+                        samples: r.bytes_owned(samples)?,
+                    })
+                }
+                2 => {
+                    let message = pcm::Message::End {
+                        generation: r.u64()?,
+                        sequence: r.u64()?,
+                    };
+                    message.validate()?;
+                    message
+                }
+                3 => {
+                    let generation = r.u64()?;
+                    let consumed = r.u64()?;
+                    let played_frame = if r.flag()? { Some(r.u64()?) } else { None };
+                    let feedback = pcm::Feedback {
+                        generation,
+                        consumed,
+                        played_frame,
+                        age_us: r.u32()?,
+                        done: r.flag()?,
+                        failed: r.flag()?,
+                    };
+                    let message = pcm::Message::Feedback(feedback);
+                    message.validate()?;
+                    message
+                }
+                _ => return Err(WireError::UnknownEnum),
+            };
+            Frame::Pcm(message)
+        }
         _ => return Err(WireError::UnknownEnum),
     })
 }

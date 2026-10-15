@@ -45,8 +45,8 @@ pub trait VideoDecoder {
 /// A video decoder that also plays: it opens a held video for a session.
 pub trait VideoPlayer {
     /// Open `input` as `request` asks, by `deadline`: what the session will
-    /// show, and its frames. Nothing is decoded past the first frame until
-    /// the session plays.
+    /// show, and its frames. Implementations may prebuffer a bounded amount;
+    /// presentation remains paused until the session plays.
     fn play(
         &self,
         input: VideoInput<'_>,
@@ -84,6 +84,8 @@ impl PlayRequest {
 /// An opened session: what it shows, and where its frames come from.
 pub struct Playback {
     pub opened: Opened,
+    /// Known end of the video track; audio may continue after it.
+    pub video_end_ms: Option<u64>,
     pub frames: Box<dyn FrameSource>,
     /// The video's sound, decoded from the start asked for, when the session
     /// asked for sound and this player can decode it; Opened then says

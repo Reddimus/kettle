@@ -12,6 +12,8 @@ use kettle_media_native::audio_out::{
     BUFFER_FRAMES, BUFFERS, MAX_LATENCY, Output, Unavailable, latency,
 };
 
+use kettle_test_support::poll_until as clock_within;
+
 /// A muted output, or `None` on a machine with none.
 fn output() -> Option<Output> {
     match Output::open(true) {
@@ -44,23 +46,6 @@ fn clock_started(output: &mut Output) -> bool {
     true
 }
 
-/// Device timestamps can be temporarily unavailable across a queue transition.
-fn clock_within(
-    within: Duration,
-    mut poll: impl FnMut() -> Option<(f64, Instant)>,
-) -> Option<(f64, Instant)> {
-    let until = Instant::now() + within;
-    loop {
-        if let Some(clock) = poll() {
-            return Some(clock);
-        }
-        if Instant::now() >= until {
-            return None;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
-
 #[test]
 fn a_delayed_clock_is_observed_without_inventing_one() {
     let at = Instant::now();
@@ -69,7 +54,10 @@ fn a_delayed_clock_is_observed_without_inventing_one() {
         clock_within(Duration::from_secs(1), || replies.next().flatten()),
         Some((17.0, at))
     );
-    assert_eq!(clock_within(Duration::ZERO, || None), None);
+    assert_eq!(
+        clock_within(Duration::ZERO, || None::<(f64, Instant)>),
+        None
+    );
 }
 
 fn clock(output: &mut Output, playing: bool, phase: &str) -> (f64, Instant) {

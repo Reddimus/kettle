@@ -1091,6 +1091,69 @@ reading its queued RenderParse failure; a failed heartbeat stops writes but
 still requires the exact terminal reply and exit. Reinstating the unchecked
 heartbeat fails at runtime. Frame order and completion assertions remain.
 
+Linux PCM coverage checks that sample data and EOF never renew the command
+lease, bounded metadata and queues, common stream timestamps,
+credit and generation validation, stale-clock withholding, partial PCM reads,
+and the combined worker footprint. `read_play_control` keeps ordinary commands
+at their one-byte cap while admitting fixed-size feedback.
+
+Build the worker and native tests from one frozen checkout: even a test-source
+change updates their shared build hash. For a direct Linux playback check:
+
+```sh
+cargo build --locked --profile media-worker -p kettle-media-worker
+KETTLE_TEST_PCM_WORKER="$PWD/target/media-worker/kettle-media-worker" \
+KETTLE_TEST_PCM_CLIP="$PWD/crates/kettle-media-native/tests/fixtures/video/ticks.mp4" \
+KETTLE_TEST_PCM_LONG_CLIP="$PWD/crates/kettle-media-native/tests/fixtures/video/long-audio.mp4" \
+cargo test --locked -p kettle-media-worker --test native_audio -- \
+  --ignored --skip linux_client_keeps_video_when_the_audio_clock_stalls --test-threads=1
+```
+
+These require trusted `/usr/bin/ffmpeg` and a live PulseAudio-compatible service.
+They cover two simultaneous sessions, pause/resume/mute, commands sent during
+opening, seeks between frame/sample boundaries, audio outlasting video,
+owned worker closure, and video continuing when the broker cannot start. The
+PCM-only boundary fixture checks the confined broker with Play arriving before
+its first PCM packet.
+The native FFmpeg suite checks shared timestamps,
+leading audio, continuous tone samples, codec padding and video paced by PCM
+instead of unbounded draining. Relocated binaries can name the fixture directory
+with `KETTLE_TEST_VIDEO_FIXTURES`.
+
+The [native audio workflow](../.github/workflows/linux-audio.yml) builds the
+worker independently, then runs mandatory output, decoder, playback and broker tests
+through `scripts/check-linux-audio.py`. It rejects skips, retains raw logs and
+results, and closes only an audio service it started. Native playback failures
+print bounded protocol summaries with receipt times before deleting their
+private test logs; samples, pixels and paths are omitted. An existing service is
+preserved. An owned Pulse fixture first checks silent-video fallback against
+the null sink's default two-second startup buffer, then checks successful
+playback with its `norewinds=1` 50 ms mode. The one-second stalled-clock bound
+stays unchanged. The cold-sink case is reported unrun when reusing a service.
+The Ubuntu 26.04 ARM check also exercised a Matroska audio tail with
+and without its track-end tag. These checks verify service playback, not
+physical speakers. The native output test also feeds continuous PCM for 600 ms
+and rejects withheld writable credit. Portable tests bound negotiated storage
+and write credit. Hardware presentation time includes device latency and must
+not throttle stream writes. Nix package-content checks require the helper's Pulse
+runtime library and search path. `check-lane-media-smoke.py --require-audio` checks native
+play/pause and seek through the UI; `--mode overlay` exercises the centered
+viewer with the same assertions. Both retain screenshots and failure logs.
+
+Native macOS clock fixtures share a bounded poll for observed timestamps
+instead of taking one sample after a fixed sleep. The polling regression fails
+when the first unavailable timestamp is treated as final.
+The empty and partial PCM startup regressions failed before priming the first
+output piece. Pending startup keeps the one-second failure bound, and Pause
+resets that wait without starting the device.
+The command-lease regression failed on a real encoded PCM block before the
+unconditional renewal was removed; heartbeat and Close remain positive controls.
+The PCM regressions were red-checked by removing the window, generation,
+clock freshness/progress/ordering, parent timestamp aging, partial-piece,
+combined footprint, command-size, heartbeat, retired-window and opening-command
+fixes. The PCM movie seek regression failed on an overlapping packet before
+replacing floating-point timestamp subtraction with integer output samples. Ordinary commands still fail from their header alone when oversized.
+
 Playback sessions cross the same binary. With `test-faults`, a file whose
 MP4 box is followed by `kettle-media-worker-test-video` and a frame count,
 rate and size plays through a stand-in decoder that fills frame N with N:

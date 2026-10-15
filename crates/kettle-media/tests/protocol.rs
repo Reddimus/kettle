@@ -958,13 +958,13 @@ fn a_replys_source_goes_with_its_kind() {
     assert!(decode(&bytes, Direction::WorkerToParent).is_err());
 }
 
-/// Neither end reads the other version's frames: a version 6 worker or
+/// Neither end reads the other version's frames: a version 7 worker or
 /// parent is restarted, never half understood, and so is a newer one.
 #[test]
 fn version_skew_either_way_is_restart_required() {
-    assert_eq!(PROTOCOL_VERSION, 7);
+    assert_eq!(PROTOCOL_VERSION, 8);
     for (_, direction, golden) in vectors() {
-        for version in [1u16, 2, 3, 4, 5, 6, 8] {
+        for version in [1u16, 2, 3, 4, 5, 6, 7, 9] {
             let mut skewed = bytes(golden);
             skewed[4..6].copy_from_slice(&version.to_le_bytes());
             assert_eq!(

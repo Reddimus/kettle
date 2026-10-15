@@ -131,7 +131,9 @@ Click a card or choose **Open media shelf** to open a centered viewer inside
 its split, with padding around it. The terminal keeps its size. Press Esc
 or click outside to close; choose **Pin** to keep the preview beside the
 terminal. Zoom pictures, browse diagrams, or press Play for video. Nothing
-plays automatically. Set `media-open-mode = lane` for the previous layout.
+plays automatically. Linux video sound needs FFmpeg and a running PulseAudio
+15+ compatible service (including PipeWire). Set `media-open-mode = lane` for
+the previous layout.
 
 ![An SVG chart in Kettle's centered viewer on Ubuntu](docs/images/media-viewer.png)
 
