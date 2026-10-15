@@ -1762,6 +1762,52 @@ struct ExecProcessTree {
     session: Option<LinuxSession>,
 }
 
+/// Whether every process in `group` is listed and has exited. A member
+/// Kettle may not inspect, such as another user's, counts as still running.
+#[cfg(target_os = "macos")]
+fn process_group_has_only_exited_members(group: libc::pid_t) -> bool {
+    let mut members = [0 as libc::pid_t; 256];
+    let size = libc::c_int::try_from(std::mem::size_of_val(&members)).unwrap_or(0);
+    // SAFETY: `members` is a live buffer of `size` bytes; the call writes at
+    // most that many and returns how many pids it wrote.
+    let count = unsafe { libc::proc_listpgrppids(group, members.as_mut_ptr().cast(), size) };
+    let Ok(count) = usize::try_from(count) else {
+        return false;
+    };
+    // A full buffer may have left members out.
+    if count == 0 || count >= members.len() {
+        return false;
+    }
+    members[..count].iter().all(|&pid| member_has_exited(pid))
+}
+
+/// Whether the listed group member `pid` has exited. macOS answers `ESRCH`
+/// for a zombie it still lists, and `EPERM` for another user's process.
+#[cfg(target_os = "macos")]
+fn member_has_exited(pid: libc::pid_t) -> bool {
+    /// `pbi_status` of a process that has exited and awaits its parent.
+    const SZOMB: u32 = 5;
+    let size = std::mem::size_of::<libc::proc_bsdinfo>();
+    // SAFETY: an all-zero `proc_bsdinfo` is a valid value of this plain C
+    // struct of integers and byte arrays.
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    // SAFETY: `info` is a live buffer of exactly `size` bytes for this
+    // flavor; the call writes at most that many and returns how many.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            std::ptr::from_mut(&mut info).cast(),
+            size as libc::c_int,
+        )
+    };
+    if written > 0 {
+        return info.pbi_status == SZOMB;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
 impl ExecProcessTree {
     fn attach(term: &Terminal) -> Self {
         let root = term.child_pid();
@@ -1816,6 +1862,14 @@ impl ExecProcessTree {
                 let result = unsafe { libc::kill(-group, libc::SIGKILL) };
                 if result != 0 {
                     let error = std::io::Error::last_os_error();
+                    #[cfg(target_os = "macos")]
+                    if error.raw_os_error() == Some(libc::EPERM)
+                        && process_group_has_only_exited_members(group)
+                    {
+                        // macOS refuses to signal a group of zombies: the
+                        // processes have exited and only await reaping.
+                        return complete;
+                    }
                     if error.raw_os_error() != Some(libc::ESRCH) {
                         let _ = writeln!(
                             std::io::stderr(),
