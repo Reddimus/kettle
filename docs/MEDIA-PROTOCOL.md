@@ -473,10 +473,13 @@ both binaries of one source answer with one `BuildId`. On Linux and macOS:
 The reply is the job rendered by `kettle-media-render` (below), or its fixed
 failure. Exit codes 4, 8 and 9 mean what they mean for the video-preview worker. On
 other platforms the binary exits 8 at once, and nothing starts it there. The
-worker is built with the workspace but not packaged or started yet; the
-release profile pins it at `opt-level = 3`. The feature `test-faults` lets a
-test job make it panic, for the panic test, or pause either side of its
-classification, for the deadline tests; no shipped build enables it.
+worker is shipped on Linux and macOS as the required `kettle-media-worker`
+executable beside `kettle` (in `Contents/MacOS` in the macOS bundle), and
+started for production media jobs. It is built separately with the
+`media-worker` profile (`opt-level = 3`, `panic = "unwind"`).
+The feature `test-faults` lets a test job make it panic, for the panic test,
+or pause either side of its classification, for the deadline tests; no shipped
+build enables it.
 
 ## A playback session
 

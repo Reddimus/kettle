@@ -123,7 +123,13 @@ kettle_completion_clear() {
   print -rn -- $'\e]777;kettle-completion;1;clear;'"$__kettle_completion_generation"$'\a'
 }
 autoload -Uz add-zsh-hook
-__kettle_precmd()  { kettle_completion_clear; print -Pn '\e]133;D;%?\a\e]133;A\a'; __kettle_osc7; }
+__kettle_precmd() {
+  local command_status=$?
+  kettle_completion_clear
+  printf '\e]133;D;%d\a\e]133;A\a' "$command_status"
+  __kettle_osc7
+  return 0
+}
 __kettle_preexec() { print -Pn '\e]133;C\a'; }
 add-zsh-hook precmd __kettle_precmd
 add-zsh-hook preexec __kettle_preexec

@@ -12,18 +12,43 @@ is governed by the project [Code of Conduct](CODE_OF_CONDUCT.md). For
 confidential vulnerability reports see [`SECURITY.md`](SECURITY.md)
 instead.
 
-## Anatomy of a change
+## Quick start
 
-Unix distribution builds require two separate commands:
+You need Rust 1.95 or newer and [just](https://just.systems). Linux also needs
+the packages under [source builds](docs/INSTALL.md#from-source).
+
+```sh
+git clone https://github.com/Reddimus/kettle
+cd kettle
+just run        # build Kettle and its media worker, then open it
+just test       # the workspace tests
+just gauntlet   # format, Clippy, tests and docs: what every PR must pass
+```
+
+A pull request needs:
+
+- one bounded change, with a test that fails without it;
+- a line in `CHANGELOG.md` under `Unreleased`, unless nothing user-visible
+  changed;
+- commits titled `<crate>: <imperative>`, such as
+  `kettle-ui: Keep pinned previews open while searching`;
+- a green `just gauntlet`. A release or dependency change also needs
+  `just gauntlet-strict`.
+
+Release builds take two commands, because the media worker has its own
+profile:
 
 ```sh
 cargo build --locked --release -p kettle
 cargo build --locked --profile media-worker -p kettle-media-worker
 ```
 
-Keep the worker invocation separate to preserve its unwind profile and codec
-feature set. The Linux installer handles both outputs; a terminal-only Cargo
-install leaves media unavailable. See [Installation](docs/INSTALL.md#from-source).
+The Linux installer installs both; a terminal-only Cargo install leaves media
+unavailable. See [Installation](docs/INSTALL.md#from-source).
+
+The rest of this file explains how a good change is shaped.
+
+## Anatomy of a change
 
 Each change has the same shape:
 
@@ -79,14 +104,7 @@ Each change has the same shape:
 5. **Run the gate locally.**
    ```sh
    cargo fmt --all              # rewrite in place
-   cargo fmt --all --check      # then assert no further drift — local
-                                # rustfmt may be older than CI's, and the
-                                # *check* form is what CI runs. The local
-                                # `--check` step exists because a past
-                                # release shipped fmt-clean locally and
-                                # failed CI — keeping both invocations
-                                # in lockstep makes the local gate match
-                                # the CI gate exactly.
+   cargo fmt --all --check      # what CI runs
    cargo clippy --workspace --all-targets -- -D warnings
    cargo test --workspace
    RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps

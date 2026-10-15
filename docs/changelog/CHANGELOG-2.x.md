@@ -2412,7 +2412,7 @@ fixes verified a second time against their diffs). 59 findings confirmed, 52
 shipped here; the remainder — two god-file splits and five cross-crate
 follow-ups — are tracked in
 [docs/AUDIT-DEFERRED.md](../AUDIT-DEFERRED.md). Full write-up in
-[docs/AUDIT-2026-07-23-FULL.md](../AUDIT-2026-07-23-FULL.md).
+[docs/AUDIT-2026-07-23-FULL.md](https://github.com/Reddimus/kettle/blob/v5.0.1/docs/AUDIT-2026-07-23-FULL.md).
 
   ### Fixed
   - **Windows control-plane peer authentication was a no-op.**

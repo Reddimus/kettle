@@ -511,6 +511,7 @@ git clone https://github.com/Reddimus/kettle
 cd kettle
 cargo build --locked --release -p kettle
 cargo build --locked --profile media-worker -p kettle-media-worker
+cp target/media-worker/kettle-media-worker target/release/kettle-media-worker
 ./target/release/kettle
 ```
 

@@ -276,7 +276,7 @@ after 500 ms quiet; output-interrupted explicit navigation waits for a user
 retry. These choices preserve responsive infinite/large scrollback while
 fixing the old failure to highlight negative-line history and ordinary
 soft-wrapped matches. See
-[AUDIT-2026-07-22-SEARCH.md](AUDIT-2026-07-22-SEARCH.md) for the frame evidence
+[AUDIT-2026-07-22-SEARCH.md](https://github.com/Reddimus/kettle/blob/v5.0.1/docs/AUDIT-2026-07-22-SEARCH.md) (at v5.0.1) for the frame evidence
 and baseline reproduction.
 
 ### `terminatorlib/terminal_popup_menu.py` — right-click menu

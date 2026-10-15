@@ -97,7 +97,11 @@ class Kettle < Formula
       # Per-platform docs that ship in the release archives (LICENSE,
       # NOTICE, README, CHANGELOG, shell-integration/) — drop them
       # under share/doc so users have an offline reference.
-      doc_dir = OS.mac? ? "Contents/Resources" : "."
+      doc_dir = "."
+      if OS.mac?
+        doc_dir = buildpath/"kettle-docs"
+        FileUtils.cp_r prefix/"kettle.app/Contents/Resources", doc_dir
+      end
       %w[LICENSE NOTICE README.md CHANGELOG.md].each do |f|
         next unless File.exist?("#{doc_dir}/#{f}")
 
@@ -118,6 +122,9 @@ class Kettle < Formula
     # vendored or tarball build prints `kettle X.Y.Z`. Homebrew can bump
     # the formula independently of the upstream release, so match the
     # `kettle X.Y.Z` shape rather than an exact version.
+    if OS.mac?
+      system "/usr/bin/codesign", "--verify", "--deep", "--strict", prefix/"kettle.app"
+    end
     assert_match(/^kettle [0-9]+\.[0-9]+\.[0-9]+/, shell_output("#{bin}/kettle --version"))
   end
 end

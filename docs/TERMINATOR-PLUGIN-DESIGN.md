@@ -77,12 +77,8 @@ kettle.add_url_handler('github_pr',
   'https://github.com/[^/]+/[^/]+/pull/(%d+)',
   function(url)
     kettle.notify('Matched GitHub pull request', url)
-    -- Requires `lua-sandbox = trusted`; safe mode omits os.execute.
-    os.execute('xdg-open ' .. url)
-    -- `true` says "I opened it" — without it kettle treats the handler
-    -- as having declined and opens the URL a second time. Returning a
-    -- string instead would hand kettle a rewritten URL to open.
-    return true
+    -- Let kettle validate and open the URL without a shell.
+    return url
   end
 )
 

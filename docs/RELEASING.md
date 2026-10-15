@@ -321,6 +321,7 @@ Run this from a trusted source checkout so the public key comes from the
 repository, not from the release being verified:
 
 ```bash
+set -euo pipefail
 tag=vX.Y.Z
 repo_root=$(git rev-parse --show-toplevel)
 public_key="$repo_root/packaging/update-public.pem"
@@ -343,6 +344,11 @@ gh release download "$tag" --repo Reddimus/kettle --dir "$verify_dir"
   test "$(wc -c < "$signature" | tr -d '[:space:]')" -eq 64
   openssl pkeyutl -verify -rawin -pubin -inkey "$public_key" \
     -in "$payload" -sigfile "$signature"
+  python3 "$repo_root/scripts/make-update-manifest.py" \
+    --verify-existing kettle-update-manifest.json --tag "$tag" \
+    --asset x86_64-unknown-linux-gnu=kettle-linux-x86_64.tar.gz \
+    --asset aarch64-unknown-linux-gnu=kettle-linux-aarch64.tar.gz \
+    --asset universal-apple-darwin=kettle-macos-universal.zip
 )
 ```
 

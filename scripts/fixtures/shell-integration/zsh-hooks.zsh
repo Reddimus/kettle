@@ -30,4 +30,19 @@ if [[ "$PS1" != $'%{\e]133;B\a%}USER> ' ]]; then
   exit 1
 fi
 
+typeset output
+typeset -i command_status hook_status
+for command_status in 0 7 130; do
+  output=$(
+    (exit "$command_status")
+    __kettle_precmd
+  )
+  hook_status=$?
+  if (( hook_status != 0 )) ||
+     [[ "$output" != *$'\e]133;D;'"$command_status"$'\a\e]133;A\a'* ]]; then
+    print -u2 -- "kettle precmd lost command status $command_status"
+    exit 1
+  fi
+done
+
 print -r -- 'KETTLE_ZSH_HOOKS_OK'
