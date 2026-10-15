@@ -1122,7 +1122,9 @@ Linux cards use an explicit Kettle launch, not a vendor signature. Kettle
 holds the native executable, checks its running process and parent, and binds
 it to the pane's original process generation. Moving the tab keeps that
 binding; closing the agent or restarting its pane invalidates it. Codex's
-native install and known npm native-child layout are supported. Unknown
+native install and `npm install -g @openai/codex` are supported; files a
+user's own private group may write (Ubuntu's default umask 002) count as the
+user's. Unknown
 versions, layouts and invocation forms keep shelf delivery.
 
 On Linux, Claude Code previews also offer a `claude` function in new zsh and

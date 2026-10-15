@@ -164,10 +164,7 @@ mod tests {
     fn card_profiles_accept_only_tested_hook_versions() {
         assert!(card_version(InlineTarget::CodexHook, "codex-cli 0.162.0\n"));
         assert!(card_version(InlineTarget::CodexHook, "codex-cli 0.162.7"));
-        for output in [
-            "2.1.280 (Claude Code)\n",
-            "2.1.300 (Claude Code)",
-        ] {
+        for output in ["2.1.280 (Claude Code)\n", "2.1.300 (Claude Code)"] {
             assert!(card_version(InlineTarget::ClaudeHook, output), "{output}");
         }
         for output in [
@@ -204,7 +201,7 @@ mod tests {
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
-pub use linux::{ExecutableStamp, HeldExecutable};
+pub use linux::{ExecutableStamp, HeldExecutable, owned_and_writable_by_owner_alone};
 
 mod pickup;
 pub use pickup::{PICKUP_LIFETIME, PickupBook, PickupPermit};

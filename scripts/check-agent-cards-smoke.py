@@ -49,9 +49,11 @@ def npm_fixture(root, agent, node):
     program = native / "vendor" / triple / "bin/codex"
     program.parent.mkdir(parents=True)
     shutil.copy2(agent, program)
-    for directory, name in ((package, "@openai/codex"), (native, f"@openai/codex-linux-{architecture}")):
+    # npm installs the native package through an alias, so its own
+    # package.json names @openai/codex at the platform version.
+    for directory, version in ((package, "0.162.0"), (native, f"0.162.0-linux-{architecture}")):
         metadata = directory / "package.json"
-        metadata.write_text(json.dumps({"name": name, "version": "0.162.0"}))
+        metadata.write_text(json.dumps({"name": "@openai/codex", "version": version}))
         metadata.chmod(0o600)
     child = f"../../codex-linux-{architecture}/vendor/{triple}/bin/codex"
     wrapper.write_text(

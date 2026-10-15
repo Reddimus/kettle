@@ -150,13 +150,94 @@ impl AsFd for HeldExecutable {
 }
 
 fn acceptable(metadata: &Metadata) -> bool {
-    // SAFETY: geteuid has no preconditions.
-    let user = unsafe { libc::geteuid() };
     metadata.is_file()
         && (64..=MAX_EXECUTABLE_BYTES).contains(&metadata.len())
-        && (metadata.uid() == user || metadata.uid() == 0)
-        && metadata.mode() & 0o6022 == 0
+        && owned_and_writable_by_owner_alone(metadata)
         && metadata.mode() & 0o111 != 0
+}
+
+/// Whether a file belongs to this user or root, has no set-id bits, and
+/// only its owner can write it. Group write counts as the owner's alone when
+/// the group is the owner's private group: Debian and Ubuntu give each user
+/// one and default to umask 002, so `npm install -g` and other user installs
+/// leave files group-writable. Debian's OpenSSH accepts the same.
+pub fn owned_and_writable_by_owner_alone(metadata: &Metadata) -> bool {
+    // SAFETY: geteuid has no preconditions.
+    let user = unsafe { libc::geteuid() };
+    let mode = metadata.mode();
+    (metadata.uid() == user || metadata.uid() == 0)
+        && mode & 0o6002 == 0
+        && (mode & 0o020 == 0 || private_group_of(metadata.uid(), metadata.gid()))
+}
+
+/// The owner and group facts the private-group rule reads.
+#[derive(Debug, PartialEq, Eq)]
+struct GroupFacts<'a> {
+    owner_name: &'a [u8],
+    owner_primary_gid: u32,
+    gid: u32,
+    group_name: &'a [u8],
+    group_has_members: bool,
+}
+
+/// A user private group: the owner's primary group, named after the owner,
+/// listing no supplementary members.
+fn is_private_group(facts: &GroupFacts) -> bool {
+    facts.owner_primary_gid == facts.gid
+        && facts.group_name == facts.owner_name
+        && !facts.group_has_members
+}
+
+/// [`is_private_group`] for `owner` and `gid` as the system's user and group
+/// databases name them. An entry that cannot be read counts as shared.
+fn private_group_of(owner: u32, gid: u32) -> bool {
+    const BUFFER: usize = 16 * 1024;
+    let mut user_buffer = vec![0 as libc::c_char; BUFFER];
+    let mut group_buffer = vec![0 as libc::c_char; BUFFER];
+    // SAFETY: zeroed POD records the reentrant lookups fill in.
+    let mut user: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut group: libc::group = unsafe { std::mem::zeroed() };
+    let mut user_found = std::ptr::null_mut();
+    let mut group_found = std::ptr::null_mut();
+    // SAFETY: each buffer outlives the records that point into it, and its
+    // length is passed alongside it.
+    let looked_up = unsafe {
+        libc::getpwuid_r(
+            owner,
+            &mut user,
+            user_buffer.as_mut_ptr(),
+            BUFFER,
+            &mut user_found,
+        ) == 0
+            && !user_found.is_null()
+            && libc::getgrgid_r(
+                gid,
+                &mut group,
+                group_buffer.as_mut_ptr(),
+                BUFFER,
+                &mut group_found,
+            ) == 0
+            && !group_found.is_null()
+    };
+    if !looked_up || user.pw_name.is_null() || group.gr_name.is_null() {
+        return false;
+    }
+    // SAFETY: the lookups succeeded, so the names are NUL-terminated strings
+    // in the buffers, and `gr_mem` is a NULL-terminated array or null.
+    let (owner_name, group_name, group_has_members) = unsafe {
+        (
+            std::ffi::CStr::from_ptr(user.pw_name).to_bytes(),
+            std::ffi::CStr::from_ptr(group.gr_name).to_bytes(),
+            !group.gr_mem.is_null() && !(*group.gr_mem).is_null(),
+        )
+    };
+    is_private_group(&GroupFacts {
+        owner_name,
+        owner_primary_gid: user.pw_gid,
+        gid,
+        group_name,
+        group_has_members,
+    })
 }
 
 fn native_header(header: &[u8; 64]) -> bool {
@@ -239,14 +320,55 @@ mod tests {
         );
     }
 
+    /// Group write is the owner's alone only in the owner's private group:
+    /// its primary group, named after it, listing no members.
+    #[test]
+    fn only_a_user_private_group_counts_as_the_owners() {
+        let private = GroupFacts {
+            owner_name: b"kevin",
+            owner_primary_gid: 1000,
+            gid: 1000,
+            group_name: b"kevin",
+            group_has_members: false,
+        };
+        assert!(is_private_group(&private));
+        for shared in [
+            GroupFacts {
+                gid: 100,
+                ..private
+            },
+            GroupFacts {
+                group_name: b"staff",
+                ..private
+            },
+            GroupFacts {
+                group_has_members: true,
+                ..private
+            },
+            GroupFacts {
+                owner_primary_gid: 100,
+                ..private
+            },
+        ] {
+            assert!(!is_private_group(&shared), "{shared:?}");
+        }
+    }
+
     #[test]
     fn scripts_writable_files_and_oversized_files_are_refused() {
         let root = kettle_test_support::private_tempdir("kettle-agent-input");
         let path = root.path().join("agent");
         write(&path, b"#!/bin/sh\nexit 0\n", 0o755);
         assert!(HeldExecutable::open(&path).is_err(), "script");
+        write(&path, &elf(), 0o757);
+        assert!(HeldExecutable::open(&path).is_err(), "other writable");
         write(&path, &elf(), 0o775);
-        assert!(HeldExecutable::open(&path).is_err(), "group writable");
+        let metadata = std::fs::metadata(&path).unwrap();
+        assert_eq!(
+            HeldExecutable::open(&path).is_ok(),
+            private_group_of(metadata.uid(), metadata.gid()),
+            "group writable only through the owner's private group"
+        );
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o4755)).unwrap();
         assert!(HeldExecutable::open(&path).is_err(), "set-id");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();

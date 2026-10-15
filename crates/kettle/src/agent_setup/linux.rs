@@ -114,14 +114,17 @@ fn resolve(
         return None;
     }
     let (triple, leaf) = triple()?;
-    let optional = format!("@openai/{leaf}");
+    // npm installs the native package through an alias, `@openai/codex-linux-
+    // arm64` for `@openai/codex@0.162.1-linux-arm64`, so its own package.json
+    // names `@openai/codex` at the platform version.
+    let platform_version = format!("{version}-{}", leaf.trim_start_matches("codex-"));
     let candidates = [
         root.join("node_modules/@openai").join(leaf),
         root.parent()?.join(leaf),
     ];
     let native = candidates
         .into_iter()
-        .filter(|candidate| package(candidate, &optional, version))
+        .filter(|candidate| package(candidate, "@openai/codex", &platform_version))
         .find_map(|candidate| {
             HeldExecutable::open(&candidate.join("vendor").join(triple).join("bin/codex")).ok()
         })
@@ -171,12 +174,9 @@ fn small_file(path: &Path, limit: usize) -> Option<Vec<u8>> {
         .open(path)
         .ok()?;
     let metadata = file.metadata().ok()?;
-    // SAFETY: geteuid has no preconditions.
-    let user = unsafe { libc::geteuid() };
     if !metadata.is_file()
         || metadata.len() > limit as u64
-        || metadata.mode() & 0o6022 != 0
-        || (metadata.uid() != user && metadata.uid() != 0)
+        || !kettle_ctl::agent_launch::owned_and_writable_by_owner_alone(&metadata)
     {
         return None;
     }
@@ -280,6 +280,52 @@ mod tests {
             launch.launcher.as_ref().unwrap().path(),
             bin.join("node").canonicalize().unwrap()
         );
+        assert_eq!(
+            launch.command("codex").unwrap().get_program(),
+            script.canonicalize().unwrap()
+        );
+    }
+
+    /// The layout `npm install -g @openai/codex` produces: a bin symlink to
+    /// the wrapper, and the native package nested under an alias whose
+    /// package.json names `@openai/codex` at the platform version.
+    #[test]
+    fn a_global_npm_install_binds_its_aliased_native_package() {
+        let root = kettle_test_support::private_tempdir("kettle-agent-npm-global");
+        let bin = root.path().join("bin");
+        let package = root.path().join("lib/node_modules/@openai/codex");
+        let script = package.join("bin/codex.js");
+        write(&script, b"#!/usr/bin/env node\n", 0o755);
+        write(
+            &package.join("package.json"),
+            br#"{"name":"@openai/codex","version":"0.162.1"}"#,
+            0o644,
+        );
+        let (triple, leaf) = triple().unwrap();
+        let optional = package.join("node_modules/@openai").join(leaf);
+        let platform = leaf.trim_start_matches("codex-");
+        write(
+            &optional.join("package.json"),
+            format!(r#"{{"name":"@openai/codex","version":"0.162.1-{platform}"}}"#).as_bytes(),
+            0o644,
+        );
+        let native = optional.join("vendor").join(triple).join("bin/codex");
+        write(&native, &elf(), 0o755);
+        write(&bin.join("node"), &elf(), 0o755);
+        std::os::unix::fs::symlink(
+            "../lib/node_modules/@openai/codex/bin/codex.js",
+            bin.join("codex"),
+        )
+        .unwrap();
+        let launch = resolve(
+            "codex",
+            InlineTarget::CodexHook,
+            "codex-cli 0.162.1",
+            bin.as_os_str(),
+            root.path(),
+        )
+        .expect("global npm launch");
+        assert_eq!(launch.native.path(), native.canonicalize().unwrap());
         assert_eq!(
             launch.command("codex").unwrap().get_program(),
             script.canonicalize().unwrap()
