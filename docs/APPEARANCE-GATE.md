@@ -5,6 +5,37 @@ before the release-cut pull request merges. Unit and image tests can prove the
 material policy; they cannot prove what AppKit actually draws. This file records
 each run, including what did not run and why.
 
+## 5.1.0 cut - 2026-10-15
+
+macOS 27.0.1, M5 Max. Universal ad-hoc bundle built from `91e58265` (the
+release tree before its version bump), with the Xcode 26 icon files from CI
+run `38799607492`. Both architectures are present (`lipo`: x86_64, arm64).
+
+**The live run did not happen.** The console session was locked for the whole
+window this cut had: `loginwindow` held secure input and no app could become
+active, so no window could become key. Captures of a window that is not key
+show neither its content nor its theme-matched caption, and macOS will not
+enter native fullscreen for an inactive app, so nothing from that attempt is
+evidence.
+
+What stands in for it, and why it is enough for this release only:
+
+- The macOS window code is the code 5.0.1's live run passed. Since v5.0.1,
+  `window_attributes` and `apply_post_create` are unchanged, the material,
+  fullscreen, cursor-layer and display modules are unchanged, and the first
+  frame on a new window still redraws, then requests a redraw, as before;
+  only Wayland's path changed.
+- CI's macOS 26 "macOS native fullscreen and caption" job passed on this tree
+  with a live window: light startup caption beside the traffic lights, native
+  and programmatic fullscreen round trips, and borderless resize.
+- The same native titlebar check passed three times on this Mac earlier the
+  same day, on the tree that added this release's window and session fixes.
+- `just macos-update-smoke` passed against the published v5.0.1 archive.
+
+Not run: the blur, opacity and borderless captures, light startup under Dark
+by eye, live Reduce Transparency, Dock/Finder/app-switcher icons, and HiDPI or
+physical Intel hardware. Run them on the next cut that changes window chrome.
+
 ## 5.0.1 cut - 2026-10-13
 
 macOS 27.0.1, M5 Max, 1920x1080 at 1x. Universal ad-hoc bundle built from
