@@ -1360,8 +1360,9 @@ u32::MAX x1 are `RenderResource` in under a second, before any pixel buffer
 exists. A two-frame GIF returns its first frame. A fully transparent pixel
 whose hidden color is white comes back all zero beside a half-transparent one
 kept as it was, and downscaling an opaque blue edge next to transparent white
-keeps it pure blue. An 8x8 box fits a 4x2 image at 8x4; a crop in box
-coordinates is transparent where the centered image does not reach; a box
+keeps it pure blue. A 4x4 box fits an 8x4 image at 4x2; a 16x16 box
+keeps it at its native 8x4, since raster images are never enlarged. A crop in
+box coordinates is transparent where the centered image does not reach; a box
 over the rendered edge or a crop outside it is `BadParams`. A file's digest
 covers its bytes and the open file's identity, the same bytes inline carry
 none, and a video probe is `UnsupportedMedia` for now.

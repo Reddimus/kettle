@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -41,6 +42,41 @@ class MediaInstallTests(unittest.TestCase):
             capture_output=True,
             text=True,
             timeout=30,
+        )
+
+    def test_documented_source_build_launches_with_a_sibling_worker(self):
+        source = self.root / "source"
+        release = source / "target/release"
+        worker = source / "target/media-worker/kettle-media-worker"
+        fake_bin = source / "fake-bin"
+        for directory in (release, worker.parent, fake_bin):
+            directory.mkdir(parents=True)
+        worker.write_bytes(self.worker.read_bytes())
+        worker.chmod(0o755)
+        terminal = release / "kettle"
+        terminal.write_text(
+            '#!/bin/sh\nset -eu\n'
+            'test -x "$(dirname "$0")/kettle-media-worker"\n',
+            encoding="ascii",
+        )
+        terminal.chmod(0o755)
+        cargo = fake_bin / "cargo"
+        cargo.write_text("#!/bin/sh\nexit 0\n", encoding="ascii")
+        cargo.chmod(0o755)
+        recipe = (ROOT / "docs/INSTALL.md").read_text().split(
+            "## From source\n", 1
+        )[1].split("```sh\n", 1)[1].split("\n```", 1)[0].split(
+            "\ncd kettle\n", 1
+        )[1]
+        environment = os.environ.copy()
+        environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
+        result = subprocess.run(
+            ["bash", "-c", recipe], cwd=source, env=environment,
+            capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            (release / "kettle-media-worker").read_bytes(), worker.read_bytes()
         )
 
     def test_installs_and_removes_both_binaries(self):
@@ -86,6 +122,30 @@ class MediaInstallTests(unittest.TestCase):
         self.assertNotEqual(check("legacy-5.0.0").returncode, 0)
         target.unlink()
         self.assertNotEqual(check("removed").returncode, 0)
+
+    @unittest.skipUnless(sys.platform == "linux" and shutil.which("just"), "requires just on Linux")
+    def test_local_install_recipes_build_both_binaries(self):
+        expected = [
+            "cargo build --locked --release -p kettle",
+            "cargo build --locked --profile media-worker -p kettle-media-worker",
+        ]
+        for recipe in ("install-local", "install-recording"):
+            with self.subTest(recipe=recipe):
+                result = subprocess.run(
+                    ["just", "--justfile", str(ROOT / "Justfile"), "--dry-run", recipe],
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                commands = result.stderr.splitlines()
+                self.assertEqual(commands[:2], expected)
+                self.assertTrue(commands[2].startswith("./scripts/install.sh --skip-build"))
+                self.assertEqual(
+                    sum(command.startswith("cargo build ") for command in commands),
+                    2,
+                )
 
     def test_missing_worker_leaves_prefix_untouched(self):
         self.worker.unlink()

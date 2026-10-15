@@ -457,9 +457,12 @@ size, codec, length and whether it has sound, and a screen reader hears the
 same. Nothing plays on its own and nothing makes a sound: a card never
 starts a video. The lane's `▶` (Space while it holds the keyboard;
 `perform_action` `video_play`) plays the video in the lane in a sandboxed
-worker of its own, with its sound where its decoder plays one (AVFoundation
-on macOS; ffmpeg plays the picture only): `‖` pauses it, the bar under the
-picture shows where it is and a press or drag moves it there, `♪` (M while
+worker of its own. On Linux, trusted ffmpeg decodes picture and sound; a
+separate PCM broker plays the sound through a PulseAudio-compatible service.
+If output is unavailable, video continues silently with an Unavailable notice.
+On macOS, AVFoundation plays sound; external ffmpeg playback remains silent.
+`‖` pauses it, the bar under the picture shows where it is and a press or
+drag moves it there, `♪` (M while
 the lane holds the keyboard; `perform_action` `video_mute`) mutes the sound
 or lets it be heard, and the footer says when it plays muted, why it plays
 without sound, or why it stopped. `perform_action` `preview_play`
@@ -486,7 +489,8 @@ moves does not count.
 When no decoder reads a video, its notice says the user can install ffmpeg
 (`brew install ffmpeg` on macOS, the system's packages on Linux); Kettle
 never installs it.
-Clicking an inline card opens its pane's lane on that card's item. A card
+Clicking an inline card opens that card's item in the configured preview
+presentation (`media-open-mode`). A card
 takes a primary press, and its release, before anything else in the window
 except open dialogs and the lanes, so the program behind it sees neither.
 The release opens the item when it lands on the same card and no dialog has
@@ -522,9 +526,12 @@ Nothing a program prints opens another app.
 focused pane, and picking its label opens it; text in a card's rows is its
 marks, so it gets no label of its own. Screen readers see each card as a
 button named for its item's title, kind, size and sender, as the lane
-names it (never by its card id), and pressing it opens the lane. Neither
+names it (never by its card id), and pressing it opens the preview. Neither
 opens anything while a dialog or a menu is up. Only the user, or full control, opens
-it, and `kettle ctl send_keys` still writes to the pane's terminal beneath. `list_panes` reports each pane's shelf as
+it. The default centered viewer takes keyboard ownership: `send_keys` and
+`send_text` to any pane in that window return `busy` and write nothing until
+it is closed. Use `dispatch_ui_key` for viewer controls, including `escape`
+to close it. `list_panes` reports each pane's shelf as
 `media_shelf`: item, generation, title, kind, size, warnings, `verified`,
 `from_user` (the user previewed it from the pane), the
 `sender` of an unverified item (`executable`, `pid` and `signer`, null when
@@ -699,7 +706,8 @@ error; Kettle never falls back to the focused pane/window for that request.
 
 `list_tabs`, `list_panes`, `read_screen`, and `read_cells` are paged. Pass
 `limit` (1–4096); when `truncated` is true, repeat the same fully parameterized
-call with both the returned `next_cursor` and `snapshot`. The snapshot token
+call with `cursor` set to the returned `next_cursor` and `snapshot` set to the
+returned `snapshot`. The snapshot token
 binds to parameters such as `pane` and `scrollback_lines`; dropping them changes
 the result being paged. A `stale_snapshot` error means live terminal state
 changed between pages and the read must restart. Small results remain one page.

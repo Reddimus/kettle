@@ -8,6 +8,7 @@ import hashlib
 import importlib.util
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -87,6 +88,90 @@ class ManifestTests(unittest.TestCase):
             path.write_bytes((target + "\n").encode("ascii"))
             result.append((target, path))
         return result
+
+    def test_documented_verification_binds_archives_and_stops_on_failure(self):
+        for command in ("bash", "openssl", "shasum", "python3"):
+            if shutil.which(command) is None:
+                self.skipTest(f"{command} is required by the documented recipe")
+        recipe = (ROOT / "docs/RELEASING.md").read_text().split(
+            "## Verify the published artifacts\n", 1
+        )[1].split("```bash\n", 1)[1].split("\n```", 1)[0]
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repository = root / "repo"
+            downloads = root / "downloads"
+            for directory in ("packaging", "scripts", "tmp"):
+                (repository / directory).mkdir(parents=True)
+            downloads.mkdir()
+            shutil.copy2(SCRIPT, repository / "scripts" / SCRIPT.name)
+            assets = self.assets(downloads)
+            manifest = downloads / "kettle-update-manifest.json"
+            manifest.write_bytes(MODULE.encode_manifest(MODULE.build_manifest(
+                "v4.1.0", "2026-07-26T10:00:00-07:00", assets
+            )))
+
+            def openssl(*arguments):
+                result = subprocess.run(
+                    ["openssl", *map(str, arguments)],
+                    capture_output=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr.decode())
+                return result.stdout
+
+            key = root / "private.pem"
+            openssl("genpkey", "-algorithm", "ED25519", "-out", key)
+            (repository / "packaging/update-public.pem").write_bytes(
+                openssl("pkey", "-in", key, "-pubout")
+            )
+            payload = root / "payload"
+            payload.write_bytes(b"kettle-update-manifest-v1\0" + manifest.read_bytes())
+            signature = downloads / "kettle-update-manifest.json.sig"
+            signature.write_bytes(base64.b64encode(openssl(
+                "pkeyutl", "-sign", "-rawin", "-inkey", key, "-in", payload
+            )) + b"\n")
+
+            def refresh_sidecars():
+                for path in list(downloads.iterdir()):
+                    if not path.name.endswith(".sha256"):
+                        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                        path.with_name(path.name + ".sha256").write_text(
+                            f"{digest}  {path.name}\n", encoding="ascii"
+                        )
+
+            def verify(tag="v4.1.0"):
+                preamble = (
+                    'fixture_repo=$1\nfixture_assets=$2\n'
+                    'export TMPDIR="$fixture_repo/tmp"\n'
+                    'git() { printf "%s\\n" "$fixture_repo"; }\n'
+                    'gh() { for destination; do :; done; '
+                    'cp "$fixture_assets"/* "$destination"; }\n'
+                )
+                return subprocess.run(
+                    ["bash", "-c", preamble + recipe.replace("tag=vX.Y.Z", f"tag={tag}"),
+                     "verify-doc", str(repository), str(downloads)],
+                    capture_output=True, text=True, timeout=30,
+                )
+
+            refresh_sidecars()
+            result = verify()
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            for target, archive in assets:
+                with self.subTest(target=target):
+                    original = archive.read_bytes()
+                    archive.write_bytes(b"x" * len(original))
+                    refresh_sidecars()
+                    result = verify()
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    archive.write_bytes(original)
+            refresh_sidecars()
+            self.assertNotEqual(verify("v4.1.1").returncode, 0)
+            (downloads / (manifest.name + ".sha256")).write_text(
+                f"{'0' * 64}  {manifest.name}\n", encoding="ascii"
+            )
+            self.assertNotEqual(verify().returncode, 0)
+            signature.write_bytes(base64.b64encode(b"x" * 64) + b"\n")
+            refresh_sidecars()
+            self.assertNotEqual(verify().returncode, 0)
 
     def test_manifest_is_complete_deterministic_and_hashed(self):
         with tempfile.TemporaryDirectory() as raw:

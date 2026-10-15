@@ -44,6 +44,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Report each zsh command's real exit status to Kettle, so failed commands
+  are marked and notified again; zsh's prompt hook always reported 0.
+- Build the media worker in `just install-local`, `just install-recording` and
+  the source-install steps, so a local build can show media.
+- Keep the Homebrew-installed macOS app's code signature intact when the
+  formula copies its documentation.
+
 - Resize the terminal grid before telling the program, so a program that
   redraws at once is never parsed against the old size.
 - Finish a pane's exit on time when a background process keeps writing to its

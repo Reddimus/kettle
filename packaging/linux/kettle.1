@@ -295,11 +295,13 @@ global hotkey to
 for one-key drop-down access.
 .TP
 .BI \-\-profile \ NAME
-Launch with the named profile. Profiles live in the
-config file as
-.B profile = name=...
-entries — argv-supplied profile overrides the default-startup one
-without editing the config.
+Launch with the configuration file
+.I <config-dir>/profiles/<NAME>.config
+instead of the default
+.IR <config-dir>/config .
+Create the profile file using the same configuration syntax.
+.B \-\-config
+takes precedence if both flags are given.
 .TP
 .BI \-\-layout \ NAME
 Restore a named saved layout on startup. Layouts are stored

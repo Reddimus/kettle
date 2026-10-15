@@ -720,7 +720,7 @@ uninstall:
 # `--skip-build` after the `release` dependency keeps local deployment from
 # compiling the same release binary twice.
 [linux]
-install-local: release
+install-local: release media-worker
     ./scripts/install.sh --skip-build
     @echo "local install synced to the current release build"
 
@@ -729,8 +729,7 @@ install-local: release
 # now ships in every build, so this is a normal release build — equivalently,
 # set `record = on` + `record-dir` in the config file.
 [linux]
-install-recording RECORD_DIR=(env_var("HOME") / ".cache/kettle/records"):
-    cargo build --release -p kettle
+install-recording RECORD_DIR=(env_var("HOME") / ".cache/kettle/records"): release media-worker
     ./scripts/install.sh --skip-build --record-dir={{quote(RECORD_DIR)}}
     @printf 'recording install synced to %s\n' {{quote(RECORD_DIR)}}
 
