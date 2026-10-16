@@ -7705,7 +7705,7 @@ impl Renderer {
             have_search = true;
             let bar_h = ch + 10.0;
             search_rect = (0.0, sh - bar_h, sw, bar_h);
-            quads.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[5], 0.96));
+            push_input_bar(&mut quads, search_rect, theme, theme.palette[5]);
             let label = format!("  ⌘ {q}_   {}", overlay.palette_hint);
             let label = fit_single_line_label(&label, overlay_label_cols(sw, cw));
             self.search_buffer.set_metrics(metrics);
@@ -7733,7 +7733,7 @@ impl Renderer {
             have_search = true;
             let bar_h = ch + 10.0;
             search_rect = (0.0, sh - bar_h, sw, bar_h);
-            quads.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[5], 0.96));
+            push_input_bar(&mut quads, search_rect, theme, theme.palette[5]);
             let label = format!(
                 "{}{q}_   {}",
                 theme_picker_prefix(&overlay.tr),
@@ -7765,7 +7765,7 @@ impl Renderer {
             have_search = true;
             let bar_h = ch + 10.0;
             search_rect = (0.0, sh - bar_h, sw, bar_h);
-            quads.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[6], 0.96));
+            push_input_bar(&mut quads, search_rect, theme, theme.palette[6]);
             let label = format!(
                 "  ▤ {} {q}_   {}",
                 overlay.tr.text(Text::PickerLayoutPrompt),
@@ -7794,7 +7794,7 @@ impl Renderer {
             have_search = true;
             let bar_h = ch + 10.0;
             search_rect = (0.0, sh - bar_h, sw, bar_h);
-            quads.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[4], 0.96));
+            push_input_bar(&mut quads, search_rect, theme, theme.palette[4]);
             let label = format!("  ssh ❯ {q}_   {}", overlay.ssh_hint);
             let label = fit_single_line_label(&label, overlay_label_cols(sw, cw));
             self.search_buffer.set_metrics(metrics);
@@ -7819,18 +7819,11 @@ impl Renderer {
             // Terminator parity, edit-title overlay UX:
             // a thin bar in app chrome mirroring the shape of the
             // palette + ssh-input overlays without covering terminal rows.
-            // Uses palette[3] (yellow) so it's visually distinct
-            // from the palette (5) and ssh (4) bars.
+            // Its palette[3] edge tells it from the palette (5) and ssh (4)
+            // bars; the fill is the shared readable neutral.
             have_search = true;
             search_rect = edit.rect;
-            quads.push(rect(
-                edit.rect.0,
-                edit.rect.1,
-                edit.rect.2,
-                edit.rect.3,
-                theme.palette[3],
-                0.96,
-            ));
+            push_input_bar(&mut quads, edit.rect, theme, theme.palette[3]);
             let label = format!(
                 "{}{}_   {}",
                 title_edit_prefix(&edit.label),
@@ -7986,10 +7979,7 @@ impl Renderer {
                 bottom_search_h,
             );
             search_rect = (0.0, bar_y, sw, bar_h);
-            let (banner_bg, banner_accent) = update_banner_chrome_colors(theme);
-            quads.push(rect(0.0, bar_y, sw, bar_h, banner_bg, 0.96));
-            quads.push(rect(0.0, bar_y, sw, 2.0, banner_accent, 1.0));
-            quads.push(rect(0.0, bar_y, 4.0, bar_h, banner_accent, 1.0));
+            push_input_bar(&mut quads, search_rect, theme, theme.palette[2]);
             let label = update_banner_label(&overlay.tr, tag, url);
             let label = fit_single_line_label(&label, overlay_label_cols(sw, cw));
             self.search_buffer.set_metrics(metrics);
@@ -16156,10 +16146,31 @@ pub fn update_banner_top_with_reserved(
     surface_h - banner_h - bottom_tabbar_h - bottom_status_h - bottom_reserved_h
 }
 
-fn update_banner_chrome_colors(theme: &kettle_config::Theme) -> (Rgb, Rgb) {
-    let bg = color::with_min_contrast(theme.palette[8], theme.foreground, 4.5);
-    let accent = color::with_min_contrast(theme.palette[2], bg, 3.0);
-    (bg, accent)
+/// The fill and edge of a bar that asks for input, and of the update banner.
+/// The fill is a neutral the theme's own foreground reads on at WCAG AA
+/// (4.5:1); the edge is the bar's `accent`, kept at the 3:1 minimum for
+/// non-text UI against that fill. Each bar keeps its own accent, so the
+/// palette, the pickers and the title editor still look different.
+fn input_bar_colors(theme: &kettle_config::Theme, accent: Rgb) -> (Rgb, Rgb) {
+    let fill = color::with_min_contrast(theme.palette[8], theme.foreground, 4.5);
+    let edge = color::with_min_contrast(accent, fill, 3.0);
+    (fill, edge)
+}
+
+/// Queue an input bar at `(x, y, w, h)`: the opaque fill from
+/// [`input_bar_colors`] with 2px top and 4px left edges. Opaque because the
+/// contrast is computed against the fill alone; content showing through would
+/// change it.
+fn push_input_bar(
+    quads: &mut Vec<QuadInstance>,
+    (x, y, w, h): (f32, f32, f32, f32),
+    theme: &kettle_config::Theme,
+    accent: Rgb,
+) {
+    let (fill, edge) = input_bar_colors(theme, accent);
+    quads.push(rect(x, y, w, h, fill, 1.0));
+    quads.push(rect(x, y, w, 2.0, edge, 1.0));
+    quads.push(rect(x, y, 4.0, h, edge, 1.0));
 }
 
 /// Back-compat wrapper for external `capture_png` callers. Always renders
@@ -22988,6 +22999,45 @@ mod title_fit_tests {
         );
     }
 
+    /// Every bar that asks for input keeps the theme foreground readable on
+    /// its fill, and its accent edge visible against it, in every bundled
+    /// theme and for every accent slot a bar uses.
+    #[test]
+    fn input_bars_are_readable_in_every_bundled_theme() {
+        let mut checked = 0;
+        for name in kettle_config::Theme::list() {
+            let theme = kettle_config::Theme::by_name(name);
+            for slot in [2, 3, 4, 5, 6] {
+                let (fill, edge) = super::input_bar_colors(&theme, theme.palette[slot]);
+                let text = color::contrast_ratio(theme.foreground, fill);
+                assert!(
+                    text + 1e-6 >= 4.5,
+                    "input bar text in {name:?} with accent palette[{slot}] is {text:.2}:1"
+                );
+                let edge_ratio = color::contrast_ratio(edge, fill);
+                assert!(
+                    edge_ratio + 1e-6 >= 3.0,
+                    "input bar edge in {name:?} with accent palette[{slot}] is {edge_ratio:.2}:1"
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked >= 5 * 500,
+            "the bundled theme set must be checked: {checked}"
+        );
+    }
+
+    /// The reported case: Dracula's foreground on its yellow, the title
+    /// editor's old fill, is unreadable; on the shared fill it is not.
+    #[test]
+    fn the_title_editor_reads_in_dracula() {
+        let theme = kettle_config::Theme::by_name("Dracula");
+        assert!(color::contrast_ratio(theme.foreground, theme.palette[3]) < 2.0);
+        let (fill, _) = super::input_bar_colors(&theme, theme.palette[3]);
+        assert!(color::contrast_ratio(theme.foreground, fill) + 1e-6 >= 4.5);
+    }
+
     /// On the exact shipped default, not whatever `Theme::default()` happens
     /// to be, the raw theme foreground fails on the confirm bar and the
     /// helper's output passes.
@@ -23018,6 +23068,45 @@ mod title_fit_tests {
     #[test]
     fn the_renderer_actually_consumes_the_contrast_and_bell_helpers() {
         let src = production_source();
+        for (bar, wiring) in [
+            (
+                "palette and theme picker",
+                "push_input_bar(&mut quads, search_rect, theme, theme.palette[5]);",
+            ),
+            (
+                "layout picker",
+                "push_input_bar(&mut quads, search_rect, theme, theme.palette[6]);",
+            ),
+            (
+                "ssh picker",
+                "push_input_bar(&mut quads, search_rect, theme, theme.palette[4]);",
+            ),
+            (
+                "update banner",
+                "push_input_bar(&mut quads, search_rect, theme, theme.palette[2]);",
+            ),
+            (
+                "title editor",
+                "push_input_bar(&mut quads, edit.rect, theme, theme.palette[3]);",
+            ),
+        ] {
+            assert!(
+                src.contains(wiring),
+                "the {bar} must paint through push_input_bar"
+            );
+        }
+        assert_eq!(
+            src.matches("push_input_bar(&mut quads, search_rect, theme, theme.palette[5]);")
+                .count(),
+            2,
+            "the command palette and the theme picker both paint the shared bar"
+        );
+        for slot in 2..=6 {
+            assert!(
+                !src.contains(&format!("theme.palette[{slot}], 0.96")),
+                "no input bar may go back to a translucent raw palette[{slot}] fill"
+            );
+        }
         assert!(
             src.contains("let bar_fg = confirm_bar_text_color(theme);"),
             "the confirm bar must take its text color from confirm_bar_text_color"
@@ -23760,9 +23849,7 @@ mod settings_hit_test_tests {
 
 #[cfg(test)]
 mod update_banner_top_tests {
-    use super::{
-        color, update_banner_chrome_colors, update_banner_top, update_banner_top_with_reserved,
-    };
+    use super::{color, input_bar_colors, update_banner_top, update_banner_top_with_reserved};
 
     /// Drift guard. The passive update banner must stack above any
     /// BOTTOM-anchored tab / status bar so it neither paints over nor steals
@@ -23789,7 +23876,7 @@ mod update_banner_top_tests {
     #[test]
     fn chrome_colors_are_readable_without_full_green_background() {
         let theme = kettle_config::Theme::default();
-        let (bg, accent) = update_banner_chrome_colors(&theme);
+        let (bg, accent) = input_bar_colors(&theme, theme.palette[2]);
 
         assert_ne!(
             bg, theme.palette[2],

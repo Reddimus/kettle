@@ -44,6 +44,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Make the title editor, command palette, theme, layout and SSH pickers
+  readable in every bundled theme: they now share the update banner's neutral
+  fill, which the theme's text reads on at WCAG AA, with each bar's accent
+  color on its edges. Renaming a pane in Dracula drew white on yellow at 1.08:1.
 - Keep the saved workspace when a restored second window fails to open, and
   pass a Settings click to its confirmation dialog.
 - Resize sibling windows when the update banner changes, and refresh what a
