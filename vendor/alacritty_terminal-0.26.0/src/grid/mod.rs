@@ -312,16 +312,18 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             self.update_history(limit);
         }
 
-        // Update display offset when not pinned to active area.
-        if self.display_offset != 0 {
-            self.display_offset = min(self.display_offset + positions, self.max_scroll_limit);
-        }
-
         // Only rotate the entire history if the active region starts at the top.
         if region.start == 0 {
             // Create scrollback for the new lines.
             let history_before = self.history_size();
             self.increase_scroll_limit(positions);
+
+            // Keep a scrolled-back viewport on the same rows. Only this branch
+            // adds history, so a partial region leaves the offset alone, and
+            // the offset never passes the history there is.
+            if self.display_offset != 0 {
+                self.display_offset = min(self.display_offset + positions, self.history_size());
+            }
             let history_added = self.history_size().saturating_sub(history_before);
             let evicted = positions.saturating_sub(history_added);
             self.history_origin = self.history_origin.saturating_add(evicted as u64);

@@ -918,8 +918,13 @@ impl<T> Term<T> {
                 .flags
                 .contains(Flags::LEADING_WIDE_CHAR_SPACER)
             && include_wrapped_wide
+            && line < self.bottommost_line()
         {
-            text.push(self.grid[line - 1i32][Column(0)].c);
+            let cell = &self.grid[line + 1i32][Column(0)];
+            text.push(cell.c);
+            for c in cell.zerowidth().into_iter().flatten() {
+                text.push(*c);
+            }
         }
 
         text
@@ -1348,6 +1353,27 @@ impl<T> Term<T> {
         self.damage_cursor();
     }
 
+    fn erase_cells(&mut self, line: Line, mut start: Column, mut end: Column) {
+        if start >= end {
+            return;
+        }
+
+        let columns = self.columns();
+        let bg = self.grid.cursor.template.bg;
+        let row = &mut self.grid[line];
+        if start > 0 && row[start].flags.contains(Flags::WIDE_CHAR_SPACER) {
+            start -= 1;
+        }
+        if end < columns && row[end - 1].flags.contains(Flags::WIDE_CHAR) {
+            end += 1;
+        }
+
+        self.damage.damage_line(line.0 as usize, start.0, end.0 - 1);
+        for cell in &mut row[start..end] {
+            *cell = bg.into();
+        }
+    }
+
     /// Write `c` to the cell at the cursor position.
     #[inline(always)]
     fn write_at_cursor(&mut self, c: char) {
@@ -1619,7 +1645,10 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline]
     fn goto_col(&mut self, col: usize) {
         trace!("Going to column: {col}");
-        self.goto(self.grid.cursor.point.line.0, col)
+        self.damage_cursor();
+        self.grid.cursor.point.column = cmp::min(Column(col), self.last_column());
+        self.damage_cursor();
+        self.grid.cursor.input_needs_wrap = false;
     }
 
     #[inline]
@@ -1655,18 +1684,36 @@ impl<T: EventListener> Handler for Term<T> {
     fn move_up(&mut self, lines: usize) {
         trace!("Moving up: {lines}");
 
-        let line = self.grid.cursor.point.line - lines;
-        let column = self.grid.cursor.point.column;
-        self.goto(line.0, column.0)
+        // Under origin mode the top margin stops the cursor, unless it is
+        // already above it (DECRC does not restore DECOM).
+        let line = self.grid.cursor.point.line;
+        let top = if self.mode.contains(TermMode::ORIGIN) && line >= self.scroll_region.start {
+            self.scroll_region.start
+        } else {
+            Line(0)
+        };
+        self.damage_cursor();
+        self.grid.cursor.point.line = cmp::max(line - lines, top);
+        self.damage_cursor();
+        self.grid.cursor.input_needs_wrap = false;
     }
 
     #[inline]
     fn move_down(&mut self, lines: usize) {
         trace!("Moving down: {lines}");
 
-        let line = self.grid.cursor.point.line + lines;
-        let column = self.grid.cursor.point.column;
-        self.goto(line.0, column.0)
+        // Under origin mode the bottom margin stops the cursor, unless it is
+        // already below it.
+        let line = self.grid.cursor.point.line;
+        let bottom = if self.mode.contains(TermMode::ORIGIN) && line < self.scroll_region.end {
+            self.scroll_region.end - 1
+        } else {
+            self.bottommost_line()
+        };
+        self.damage_cursor();
+        self.grid.cursor.point.line = cmp::min(line + lines, bottom);
+        self.damage_cursor();
+        self.grid.cursor.input_needs_wrap = false;
     }
 
     #[inline]
@@ -1918,16 +1965,16 @@ impl<T: EventListener> Handler for Term<T> {
     fn move_down_and_cr(&mut self, lines: usize) {
         trace!("Moving down and cr: {lines}");
 
-        let line = self.grid.cursor.point.line + lines;
-        self.goto(line.0, 0)
+        self.move_down(lines);
+        self.carriage_return();
     }
 
     #[inline]
     fn move_up_and_cr(&mut self, lines: usize) {
         trace!("Moving up and cr: {lines}");
 
-        let line = self.grid.cursor.point.line - lines;
-        self.goto(line.0, 0)
+        self.move_up(lines);
+        self.carriage_return();
     }
 
     /// Insert tab at cursor position.
@@ -2097,14 +2144,8 @@ impl<T: EventListener> Handler for Term<T> {
         let start = cursor.point.column;
         let end = cmp::min(start + count, Column(self.columns()));
 
-        // Cleared cells have current background color set.
-        let bg = self.grid.cursor.template.bg;
         let line = cursor.point.line;
-        self.damage.damage_line(line.0 as usize, start.0, end.0);
-        let row = &mut self.grid[line];
-        for cell in &mut row[start..end] {
-            *cell = bg.into();
-        }
+        self.erase_cells(line, start, end);
     }
 
     #[inline]
@@ -2212,7 +2253,6 @@ impl<T: EventListener> Handler for Term<T> {
         trace!("Clearing line: {mode:?}");
 
         let cursor = &self.grid.cursor;
-        let bg = cursor.template.bg;
         let point = cursor.point;
 
         let (left, right) = match mode {
@@ -2222,13 +2262,7 @@ impl<T: EventListener> Handler for Term<T> {
             ansi::LineClearMode::All => (Column(0), Column(self.columns())),
         };
 
-        self.damage
-            .damage_line(point.line.0 as usize, left.0, right.0 - 1);
-
-        let row = &mut self.grid[point.line];
-        for cell in &mut row[left..right] {
-            *cell = bg.into();
-        }
+        self.erase_cells(point.line, left, right);
 
         let range = self.grid.cursor.point.line..=self.grid.cursor.point.line;
         self.selection = self.selection.take().filter(|s| !s.intersects_range(range));
@@ -2328,7 +2362,6 @@ impl<T: EventListener> Handler for Term<T> {
     fn clear_screen(&mut self, mode: ansi::ClearMode) {
         trace!("Clearing screen: {mode:?}");
         let erase_display = matches!(&mode, ansi::ClearMode::All);
-        let bg = self.grid.cursor.template.bg;
 
         let screen_lines = self.screen_lines();
 
@@ -2337,25 +2370,21 @@ impl<T: EventListener> Handler for Term<T> {
                 let cursor = self.grid.cursor.point;
 
                 // If clearing more than one line.
-                if cursor.line > 1 {
+                if cursor.line > 0 {
                     // Fully clear all lines before the current line.
                     self.grid.reset_region(..cursor.line);
                 }
 
                 // Clear up to the current column in the current line.
                 let end = cmp::min(cursor.column + 1, Column(self.columns()));
-                for cell in &mut self.grid[cursor.line][..end] {
-                    *cell = bg.into();
-                }
+                self.erase_cells(cursor.line, Column(0), end);
 
                 let range = Line(0)..=cursor.line;
                 self.selection = self.selection.take().filter(|s| !s.intersects_range(range));
             }
             ansi::ClearMode::Below => {
                 let cursor = self.grid.cursor.point;
-                for cell in &mut self.grid[cursor.line][cursor.column..] {
-                    *cell = bg.into();
-                }
+                self.erase_cells(cursor.line, cursor.column, Column(self.columns()));
 
                 if (cursor.line.0 as usize) < screen_lines - 1 {
                     self.grid.reset_region((cursor.line + 1)..);
@@ -3927,6 +3956,43 @@ mod tests {
     }
 
     #[test]
+    fn selection_includes_wrapped_wide_glyph_and_combining_marks() {
+        let size = TermSize::new(5, 3);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut processor: Processor = Processor::new();
+        processor.advance(&mut term, "X\r\nabcd\u{754c}\u{301}".as_bytes());
+
+        let mut selection = Selection::new(
+            SelectionType::Simple,
+            Point::new(Line(1), Column(0)),
+            Side::Left,
+        );
+        selection.update(Point::new(Line(1), Column(4)), Side::Right);
+        term.selection = Some(selection);
+        assert_eq!(term.selection_to_string(), Some("abcd\u{754c}\u{301}".into()));
+
+        let end = Point::new(Line(2), Column(1));
+        term.selection.as_mut().unwrap().update(end, Side::Right);
+        assert_eq!(term.selection_to_string(), Some("abcd\u{754c}\u{301}".into()));
+    }
+
+    #[test]
+    fn wrapped_wide_spacer_without_a_following_row_is_safe() {
+        let size = TermSize::new(5, 3);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        term.grid_mut()[Line(2)][Column(4)]
+            .flags
+            .insert(Flags::LEADING_WIDE_CHAR_SPACER | Flags::WRAPLINE);
+        assert_eq!(
+            term.bounds_to_string(
+                Point::new(Line(2), Column(0)),
+                Point::new(Line(2), Column(4)),
+            ),
+            "    ",
+        );
+    }
+
+    #[test]
     fn simple_selection_works() {
         let size = TermSize::new(5, 5);
         let mut term = Term::new(Config::default(), &size, VoidListener);
@@ -4815,13 +4881,14 @@ mod tests {
         );
         term.damage.reset(num_cols);
 
+        // Columns 0 to 4: the damage covers the erased cells, no more.
         term.erase_chars(5);
         assert_eq!(
             term.damage.lines[7],
             LineDamageBounds {
                 line: 7,
                 left: 0,
-                right: 5
+                right: 4
             }
         );
         term.damage.reset(num_cols);

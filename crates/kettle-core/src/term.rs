@@ -13327,6 +13327,17 @@ mod conformance {
     }
 
     #[test]
+    fn erase_display_above_on_second_row_clears_first_row() {
+        let (mut t, mut p) = harness(10, 3);
+        feed(&mut t, &mut p, b"TOP\r\nBOTTOM\r\nKEEP");
+        feed(&mut t, &mut p, b"\x1b[2;1H\x1b[1J");
+        assert_eq!(row_text(&t, 0), "");
+        assert_eq!(row_text(&t, 1), " OTTOM");
+        assert_eq!(row_text(&t, 2), "KEEP");
+        assert_eq!(t.grid().cursor.point, Point::new(Line(1), Column(0)));
+    }
+
+    #[test]
     fn erase_line_and_display() {
         let (mut t, mut p) = harness(10, 3);
         feed(&mut t, &mut p, b"ABCDEFG");
@@ -13457,6 +13468,46 @@ mod conformance {
         feed(&mut t2, &mut p2, b"abcd");
         assert_eq!(row_text(&t2, 0), "abc");
         assert_eq!(row_text(&t2, 1), "d");
+    }
+
+    #[test]
+    fn origin_mode_relative_moves_do_not_reapply_top_margin() {
+        let (mut t, mut p) = harness(10, 24);
+        feed(&mut t, &mut p, b"\x1b[5;20r\x1b[?6h");
+        assert_eq!(t.grid().cursor.point, Point::new(Line(4), Column(0)));
+
+        let cases: &[(&[u8], i32, usize)] = &[
+            (b"\x1b[2G", 4, 1),
+            (b"\x1b[2B", 6, 1),
+            (b"\x1b[A", 5, 1),
+            (b"\x1b[2E", 7, 0),
+            (b"\x1b[F", 6, 0),
+            (b"\x1b[999A", 4, 0),
+            (b"\x1b[999B", 19, 0),
+            (b"\x1b[999E", 19, 0),
+            (b"\x1b[999F", 4, 0),
+            (b"\x1b[999G", 4, 9),
+        ];
+        for &(sequence, line, column) in cases {
+            feed(&mut t, &mut p, sequence);
+            assert_eq!(
+                t.grid().cursor.point,
+                Point::new(Line(line), Column(column))
+            );
+        }
+
+        feed(&mut t, &mut p, b"\x1b[?6l\x1b[3;3H\x1b[999A");
+        assert_eq!(t.grid().cursor.point, Point::new(Line(0), Column(2)));
+        feed(&mut t, &mut p, b"\x1b[999B");
+        assert_eq!(t.grid().cursor.point, Point::new(Line(23), Column(2)));
+
+        // DECRC does not restore DECOM, so the cursor can sit above the top
+        // margin under origin mode. Moving up there must not pull it down
+        // to the margin.
+        feed(&mut t, &mut p, b"\x1b[2;1H\x1b7\x1b[?6h\x1b8\x1b[A");
+        assert_eq!(t.grid().cursor.point, Point::new(Line(0), Column(0)));
+        feed(&mut t, &mut p, b"\x1b[B");
+        assert_eq!(t.grid().cursor.point, Point::new(Line(1), Column(0)));
     }
 
     #[test]
@@ -13706,6 +13757,34 @@ mod conformance {
             CursorShape::Block,
             "DEC ?25 h restores the previous shape"
         );
+    }
+
+    #[test]
+    fn partial_erases_clear_both_halves_of_wide_characters() {
+        let sequences: &[&[u8]] = &[
+            b"\r\x1b[X",
+            b"\x1b[2G\x1b[X",
+            b"\r\x1b[1K",
+            b"\x1b[2G\x1b[K",
+            b"\r\x1b[1J",
+            b"\x1b[2G\x1b[J",
+        ];
+        for &sequence in sequences {
+            let (mut t, mut p) = harness(4, 2);
+            feed(&mut t, &mut p, "\u{4e16}".as_bytes());
+            feed(&mut t, &mut p, sequence);
+            for column in 0..2 {
+                let cell = &t.grid()[Point::new(Line(0), Column(column))];
+                assert_eq!(cell.c, ' ');
+                assert!(
+                    !cell
+                        .flags
+                        .intersects(Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER)
+                );
+            }
+            feed(&mut t, &mut p, b"\rab");
+            assert_eq!(row_text(&t, 0), "ab");
+        }
     }
 
     #[test]
