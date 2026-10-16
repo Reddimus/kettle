@@ -155,6 +155,20 @@ fn record(outcome: &mut Outcome, chunk: Chunk, limits: &GraphicsLimits) {
         Chunk::VirtualImage { img, .. } | Chunk::RelativePlacement { img, .. } => images.push(img),
         Chunk::Animation { imgs, .. } => images.extend(imgs),
         Chunk::Completion(update) => completion_update(update),
+        Chunk::ImageQuota(request) => {
+            // What the request decides, not its allocations' addresses.
+            let images: Vec<_> = request
+                .images
+                .iter()
+                .map(|image| (image.key, image.created))
+                .collect();
+            outcome.chunks.push((
+                outcome.engine.len(),
+                outcome.raw.len(),
+                format!("ImageQuota plan {:?} images {images:?}", request.plan(&[])),
+            ));
+            return;
+        }
         _ => {}
     }
     let mut description = format!("{chunk:?}");

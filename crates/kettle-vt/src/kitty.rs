@@ -1410,7 +1410,11 @@ impl KittyState {
             .chain(self.rel.keys())
             .map(|&(id, _)| id)
             .collect();
-        for (&id, img) in &self.store {
+        // In id order, so the same images make the same request: the maps'
+        // own order differs from one extractor to the next.
+        let mut stored: Vec<_> = self.store.iter().collect();
+        stored.sort_unstable_by_key(|&(&id, _)| id);
+        for (&id, img) in stored {
             let key = QuotaKey {
                 inactive,
                 image: QuotaIdentity::Named(id),
@@ -1422,7 +1426,9 @@ impl KittyState {
                 .owners
                 .push(QuotaOwner::new(key, img, placed.contains(&id)));
         }
-        for (&id, frames) in &self.frames {
+        let mut animated: Vec<_> = self.frames.iter().collect();
+        animated.sort_unstable_by_key(|&(&id, _)| id);
+        for (&id, frames) in animated {
             let key = QuotaKey {
                 inactive,
                 image: QuotaIdentity::Named(id),
