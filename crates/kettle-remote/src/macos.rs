@@ -8,11 +8,11 @@
 //! asks about.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::{
-    MAX_PROC_FILE_BYTES, MAX_PROC_SCAN_DURATION, MAX_PROC_TREE_NODES, MAX_PROC_TREE_TOTAL_BYTES,
-    ProcessTree, parse_kern_procargs2,
+    MAX_PROC_FILE_BYTES, MAX_PROC_TREE_NODES, MAX_PROC_TREE_TOTAL_BYTES, ProcessTree,
+    parse_kern_procargs2,
 };
 
 const INITIAL_CHILD_SLOTS: usize = 64;
@@ -28,6 +28,8 @@ pub(crate) struct MacProcessTree {
     /// Reused `proc_listchildpids` buffer.
     child_slots: Vec<libc::pid_t>,
     bytes_read: u64,
+    /// The last walk stopped because its time budget ran out.
+    pub(crate) timed_out: bool,
 }
 
 struct MacProcessEntry {
@@ -51,16 +53,22 @@ impl MacProcessTree {
     /// Walk the descendants of `roots`. Returns false when a node, byte, or
     /// time bound cut the walk short; the caller then keeps its last complete
     /// snapshot.
+    #[cfg(test)]
     pub(crate) fn refresh_roots(&mut self, roots: &[u32]) -> bool {
-        self.refresh_roots_with_clock(roots, Instant::now)
+        self.refresh_roots_within(roots, super::MAX_PROC_SCAN_DURATION)
+    }
+
+    pub(crate) fn refresh_roots_within(&mut self, roots: &[u32], budget: Duration) -> bool {
+        self.refresh_roots_with_clock(roots, budget, Instant::now)
     }
 
     fn refresh_roots_with_clock(
         &mut self,
         roots: &[u32],
+        budget: Duration,
         mut now: impl FnMut() -> Instant,
     ) -> bool {
-        let deadline = now() + MAX_PROC_SCAN_DURATION;
+        let deadline = now() + budget;
         self.entries.clear();
         self.partial_roots.clear();
         let mut queue: VecDeque<_> = roots.iter().copied().map(|pid| (pid, None)).collect();
@@ -121,6 +129,7 @@ impl MacProcessTree {
             self.entries.insert(pid, MacProcessEntry { parent, argv });
         }
         self.bytes_read = total_bytes;
+        self.timed_out = !complete && now() >= deadline;
         complete
     }
 
@@ -287,6 +296,7 @@ impl ProcessTree for MacProcessTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::MAX_PROC_SCAN_DURATION;
     use std::process::{Command, Stdio};
 
     /// Kills the listed pids when a test ends, including on a failed
@@ -469,16 +479,20 @@ mod tests {
         let mut tree = MacProcessTree::default();
         // Pids are bounded well below this on macOS (`PID_MAX` is 99998).
         let start = Instant::now();
-        assert!(tree.refresh_roots_with_clock(&[999_999], || start));
+        assert!(tree.refresh_roots_with_clock(&[999_999], MAX_PROC_SCAN_DURATION, || start));
         assert!(tree.all_pids().is_empty());
+        assert!(!tree.timed_out);
         let mut started = false;
-        assert!(!tree.refresh_roots_with_clock(&[999_999], || {
-            if std::mem::replace(&mut started, true) {
-                start + MAX_PROC_SCAN_DURATION
-            } else {
-                start
-            }
-        }));
+        assert!(
+            !tree.refresh_roots_with_clock(&[999_999], MAX_PROC_SCAN_DURATION, || {
+                if std::mem::replace(&mut started, true) {
+                    start + MAX_PROC_SCAN_DURATION
+                } else {
+                    start
+                }
+            })
+        );
+        assert!(tree.timed_out, "a walk that ran out of time says so");
     }
 
     #[test]
