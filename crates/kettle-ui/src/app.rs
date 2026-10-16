@@ -2580,6 +2580,11 @@ pub enum UserEvent {
     UpdateFailed {
         message: String,
     },
+    /// A newer version than this process runs is installed, or committed and
+    /// waiting for its own version to start. Only a restart picks it up.
+    UpdateRestartPending {
+        installed: String,
+    },
     /// The recurring in-session update timer fired; re-run the due check with
     /// the current config so a long-lived window keeps itself current.
     UpdateCheckTick,
@@ -9383,6 +9388,8 @@ pub struct App {
     /// `Some((tag, url))` while the "a newer kettle release is
     /// available" banner is showing. Esc dismisses; Enter opens the URL.
     update_available: Option<(String, String)>,
+    /// The installed version last logged as waiting for a restart.
+    logged_restart_pending: Option<String>,
     /// The full version string the About panel shows —
     /// the bin crate passes its `KETTLE_VERSION` (version + git hash, exactly
     /// what `--version` prints); falls back to the bare crate version.
@@ -10363,6 +10370,7 @@ impl App {
             lua_engine,
             lua_startup_fired: false,
             update_available: None,
+            logged_restart_pending: None,
             version_line: startup_version,
             torn_drag: None,
             last_session_sweep: None,
@@ -18977,6 +18985,7 @@ impl App {
         crate::update_check::maybe_spawn_check(
             self.proxy.clone(),
             env!("CARGO_PKG_VERSION"),
+            self.startup.update_install.clone(),
             self.cfg.update_policy,
             self.cfg.update_check_interval_hours,
         );
@@ -19172,10 +19181,22 @@ impl App {
                     &message,
                 );
             }
+            UserEvent::UpdateRestartPending { installed } => {
+                // No notice yet: the update chip will show it. Log each
+                // version once rather than on every hourly check.
+                if self.logged_restart_pending.as_deref() != Some(installed.as_str()) {
+                    log::info!(
+                        "kettle {installed} is installed; this process runs {} until it restarts",
+                        env!("CARGO_PKG_VERSION")
+                    );
+                    self.logged_restart_pending = Some(installed);
+                }
+            }
             UserEvent::UpdateCheckTick => {
                 crate::update_check::maybe_spawn_check(
                     self.proxy.clone(),
                     env!("CARGO_PKG_VERSION"),
+                    self.startup.update_install.clone(),
                     self.cfg.update_policy,
                     self.cfg.update_check_interval_hours,
                 );

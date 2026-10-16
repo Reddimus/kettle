@@ -211,6 +211,9 @@ pub struct Options {
     /// and no worker starts until something asks. `None` reports media as
     /// not configured.
     pub media: Option<std::sync::Arc<kettle_media::client::WorkerClient>>,
+    /// The install this process started from, found before an update could
+    /// replace its executable. Update checks use it (#574).
+    pub update_install: kettle_update::InstallSnapshot,
 }
 
 /// Launch kettle with default startup (blocks until all windows close).

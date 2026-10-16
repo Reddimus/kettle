@@ -8,6 +8,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- A window left open across an update no longer announces the version that
+  update installed, and no longer reports "update failed" for it on macOS
+  (#574). Dismissing an update notice no longer stops `update-policy = auto`
+  from installing that release.
 - A Linux update never installs a release that is not newer than the installed
   version. A window left open across an update could otherwise download the
   release it was replaced by and install it again, or put an older one back.

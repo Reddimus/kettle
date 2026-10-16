@@ -9,7 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use kettle_config::UpdatePolicy;
-use kettle_update::{CheckOutcome, FeedClient};
+use kettle_update::decision::{Decision, Latest, Policy, decide};
+use kettle_update::{CheckOutcome, FeedClient, InstallSnapshot};
 use serde::{Deserialize, Serialize};
 use winit::event_loop::EventLoopProxy;
 
@@ -19,17 +20,68 @@ const MAX_CACHE_BYTES: usize = 256 * 1024;
 const PACKAGED: bool = option_env!("KETTLE_PACKAGED").is_some();
 static CHECK_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum UpdateDelivery {
+/// What a check does after deciding, before any install attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Step {
     Install,
-    Notify,
+    Announce,
+    RestartPending(kettle_update::Version),
+    Nothing,
 }
 
-fn update_delivery(policy: &UpdatePolicy, has_asset: bool) -> UpdateDelivery {
-    if matches!(policy, UpdatePolicy::Auto) && has_asset {
-        UpdateDelivery::Install
-    } else {
-        UpdateDelivery::Notify
+/// A dismissal hides an announcement only: it never stops `auto` from
+/// installing, and the restart notice has its own lifetime.
+fn next_step(decision: Decision, dismissed: impl FnOnce() -> bool) -> Step {
+    match decision {
+        Decision::UpToDate => Step::Nothing,
+        Decision::RestartPending { installed } => Step::RestartPending(installed),
+        Decision::Install => Step::Install,
+        Decision::Announce { .. } if dismissed() => Step::Nothing,
+        Decision::Announce { .. } => Step::Announce,
+    }
+}
+
+/// What a failed install attempt means for this process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InstallFailure {
+    /// Another process installed this or a newer version first, or an
+    /// update is waiting for its own version to start.
+    RestartPending(kettle_update::Version),
+    /// Kettle cannot install here, as startup already found: point the user
+    /// at the release instead.
+    Announce,
+    /// Another process is installing right now; the next check catches up.
+    Quiet,
+    Failed,
+}
+
+fn classify(
+    error: &kettle_update::UpdateError,
+    running: &kettle_update::Version,
+    proven_at_startup: bool,
+) -> InstallFailure {
+    use kettle_update::UpdateError;
+    let newer = |version: kettle_update::Version| {
+        if &version > running {
+            InstallFailure::RestartPending(version)
+        } else {
+            InstallFailure::Quiet
+        }
+    };
+    match error {
+        UpdateError::AwaitingRestart { target } => {
+            kettle_update::Version::parse(target).map_or(InstallFailure::Failed, newer)
+        }
+        UpdateError::Rollback { installed, .. } => newer(installed.clone()),
+        UpdateError::UpdateLocked => InstallFailure::Quiet,
+        // Startup found an install it manages, so losing it now is a fault,
+        // not a reason to send the user to the release page.
+        UpdateError::UnmanagedInstall(_) | UpdateError::UnsupportedPlatform
+            if !proven_at_startup =>
+        {
+            InstallFailure::Announce
+        }
+        _ => InstallFailure::Failed,
     }
 }
 
@@ -143,12 +195,22 @@ fn save_cache(cache: &UpdateCache) {
 pub fn maybe_spawn_check(
     proxy: EventLoopProxy<UserEvent>,
     current: &'static str,
+    install: InstallSnapshot,
     policy: UpdatePolicy,
     interval_hours: u32,
 ) {
     if PACKAGED || policy == UpdatePolicy::Off {
         return;
     }
+    let Ok(running) = kettle_update::Version::parse(current) else {
+        log::warn!("update-check: invalid running version {current:?}");
+        return;
+    };
+    let check_policy = if policy == UpdatePolicy::Auto {
+        Policy::Auto
+    } else {
+        Policy::Notify
+    };
     // Floored at 1h so a misconfigured 0 can't turn into a busy network loop.
     let interval_secs = u64::from(interval_hours.max(1)).saturating_mul(3600);
     if CHECK_IN_FLIGHT.swap(true, Ordering::AcqRel) {
@@ -197,77 +259,104 @@ pub fn maybe_spawn_check(
             }
             save_cache(&cache);
 
-            match outcome {
-                Ok(CheckOutcome::UpToDate { .. }) => {}
-                Err(error) => log::warn!("update check failed: {error}"),
-                Ok(CheckOutcome::UpdateAvailable(update)) => {
-                    if is_dismissed(&update.tag) {
-                        return;
+            let latest_update = match outcome {
+                Ok(CheckOutcome::UpToDate { .. }) => None,
+                Ok(CheckOutcome::UpdateAvailable(update)) => Some(update),
+                Err(error) => {
+                    log::warn!("update check failed: {error}");
+                    return;
+                }
+            };
+            // The installed version and journal, read now: another process
+            // may have installed an update since this one started (#574).
+            let local = install.local_state();
+            let decision = decide(
+                &running,
+                install.kind(),
+                &local,
+                check_policy,
+                latest_update.as_ref().map(|update| Latest {
+                    version: &update.version,
+                    has_asset: update.asset.is_some(),
+                }),
+            );
+            let restart_pending = |installed: kettle_update::Version| {
+                let _ = proxy.send_event(UserEvent::UpdateRestartPending {
+                    installed: installed.to_string(),
+                });
+            };
+            let step = next_step(decision, || {
+                latest_update
+                    .as_ref()
+                    .is_some_and(|update| is_dismissed(&update.tag))
+            });
+            let Some(update) = latest_update else {
+                if let Step::RestartPending(installed) = step {
+                    restart_pending(installed);
+                }
+                return;
+            };
+            let announce = |update: kettle_update::AvailableUpdate| {
+                let _ = proxy.send_event(UserEvent::UpdateAvailable {
+                    tag: update.tag,
+                    url: update.release_url,
+                });
+            };
+            match step {
+                Step::Nothing => {}
+                Step::RestartPending(installed) => restart_pending(installed),
+                Step::Announce => {
+                    if matches!(policy, UpdatePolicy::Auto) {
+                        log::info!(
+                            "automatic update is not available for this install or platform; notifying instead"
+                        );
                     }
-                    if update_delivery(&policy, update.asset.is_some())
-                        == UpdateDelivery::Install
-                    {
-                        match kettle_update::install_update(&client, &update) {
-                            Ok(outcome) => {
-                                let staged = matches!(
-                                    outcome.disposition,
-                                    kettle_update::InstallDisposition::Staged { .. }
-                                );
-                                // One-time heads-up that auto-update is on and
-                                // how to opt out — fired on the first automatic
-                                // install only (oh-my-zsh style informational
-                                // note, never a blocking prompt). Reuse the
-                                // `cache` already loaded + persisted above (with
-                                // the fresh last_check/latest_tag) rather than a
-                                // second load — a failed reload would wipe that
-                                // throttle state and spuriously re-announce.
-                                let first_time = !cache.auto_update_announced;
-                                if first_time {
-                                    cache.auto_update_announced = true;
-                                    save_cache(&cache);
-                                }
-                                let _ = proxy.send_event(UserEvent::UpdateInstalled {
-                                    tag: update.tag,
-                                    staged,
-                                    first_time,
-                                });
-                            }
-                            Err(kettle_update::UpdateError::UnmanagedInstall(reason)) => {
-                                log::info!(
-                                    "automatic update skipped for unmanaged install: {reason}"
-                                );
-                                let _ = proxy.send_event(UserEvent::UpdateAvailable {
-                                    tag: update.tag,
-                                    url: update.release_url,
-                                });
-                            }
-                            Err(kettle_update::UpdateError::UnsupportedPlatform) => {
-                                log::info!(
-                                    "automatic update is unsupported on this platform; notifying instead"
-                                );
-                                let _ = proxy.send_event(UserEvent::UpdateAvailable {
-                                    tag: update.tag,
-                                    url: update.release_url,
-                                });
-                            }
-                            Err(error) => {
-                                let _ = proxy.send_event(UserEvent::UpdateFailed {
-                                    message: error.to_string(),
-                                });
-                            }
+                    announce(update);
+                }
+                Step::Install => match install.install(&client, &update) {
+                    Ok(outcome) => {
+                        let staged = matches!(
+                            outcome.disposition,
+                            kettle_update::InstallDisposition::Staged { .. }
+                        );
+                        // One-time heads-up that auto-update is on and how to
+                        // opt out, on the first automatic install only. Reuse
+                        // the `cache` already loaded and persisted above, with
+                        // the fresh last_check/latest_tag, rather than a second
+                        // load: a failed reload would wipe that throttle state
+                        // and spuriously re-announce.
+                        let first_time = !cache.auto_update_announced;
+                        if first_time {
+                            cache.auto_update_announced = true;
+                            save_cache(&cache);
                         }
-                    } else {
-                        if matches!(policy, UpdatePolicy::Auto) {
-                            log::info!(
-                                "automatic update has no artifact for this platform; notifying instead"
-                            );
-                        }
-                        let _ = proxy.send_event(UserEvent::UpdateAvailable {
+                        let _ = proxy.send_event(UserEvent::UpdateInstalled {
                             tag: update.tag,
-                            url: update.release_url,
+                            staged,
+                            first_time,
                         });
                     }
-                }
+                    Err(error) => match classify(&error, &running, install.proven_at_startup()) {
+                        InstallFailure::RestartPending(installed) => {
+                            log::info!("update {}: {error}", update.tag);
+                            restart_pending(installed);
+                        }
+                        InstallFailure::Announce => {
+                            log::info!("automatic update skipped: {error}");
+                            if !is_dismissed(&update.tag) {
+                                announce(update);
+                            }
+                        }
+                        InstallFailure::Quiet => {
+                            log::info!("update {} not installed now: {error}", update.tag);
+                        }
+                        InstallFailure::Failed => {
+                            let _ = proxy.send_event(UserEvent::UpdateFailed {
+                                message: error.to_string(),
+                            });
+                        }
+                    },
+                },
             }
         });
 }
@@ -343,9 +432,10 @@ pub fn run_blocking_check(current: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use kettle_config::UpdatePolicy;
+    use kettle_update::UpdateError;
+    use kettle_update::decision::Decision;
 
-    use super::{CheckLockAttempt, UpdateCache, UpdateDelivery, is_due, update_delivery};
+    use super::{CheckLockAttempt, InstallFailure, Step, UpdateCache, classify, is_due, next_step};
 
     /// The daily default (`update-check-interval-hours = 24`) in seconds.
     const DAY: u64 = 24 * 60 * 60;
@@ -369,19 +459,67 @@ mod tests {
         assert!(!super::is_dismissed_with("v5.0.3", load));
     }
 
+    fn v(text: &str) -> kettle_update::Version {
+        kettle_update::Version::parse(text).unwrap()
+    }
+
+    /// Every process shares the dismissed tag, so a stale window dismissing
+    /// "v5.1.0 available" used to stop every process from installing it.
     #[test]
-    fn automatic_policy_notifies_when_the_platform_has_no_artifact() {
+    fn a_dismissed_tag_does_not_block_an_automatic_install() {
+        assert_eq!(next_step(Decision::Install, || true), Step::Install);
+        let announce = Decision::Announce {
+            restart_pending: None,
+        };
+        assert_eq!(next_step(announce.clone(), || true), Step::Nothing);
+        assert_eq!(next_step(announce, || false), Step::Announce);
         assert_eq!(
-            update_delivery(&UpdatePolicy::Auto, false),
-            UpdateDelivery::Notify
+            next_step(
+                Decision::RestartPending {
+                    installed: v("5.1.0")
+                },
+                || true
+            ),
+            Step::RestartPending(v("5.1.0"))
         );
+    }
+
+    #[test]
+    fn a_managed_install_error_is_a_failure_not_an_announcement() {
+        let running = v("5.0.0");
+        let unmanaged = UpdateError::UnmanagedInstall("cannot resolve bin/kettle (deleted)".into());
+        assert_eq!(classify(&unmanaged, &running, true), InstallFailure::Failed);
         assert_eq!(
-            update_delivery(&UpdatePolicy::Auto, true),
-            UpdateDelivery::Install
+            classify(&unmanaged, &running, false),
+            InstallFailure::Announce
         );
+    }
+
+    #[test]
+    fn an_install_race_lost_to_another_process_is_restart_pending() {
+        let running = v("5.0.0");
+        let rollback = UpdateError::Rollback {
+            candidate: v("5.1.0"),
+            installed: v("5.1.0"),
+        };
         assert_eq!(
-            update_delivery(&UpdatePolicy::Notify, true),
-            UpdateDelivery::Notify
+            classify(&rollback, &running, true),
+            InstallFailure::RestartPending(v("5.1.0"))
+        );
+        let awaiting = UpdateError::AwaitingRestart {
+            target: "5.1.0".into(),
+        };
+        assert_eq!(
+            classify(&awaiting, &running, true),
+            InstallFailure::RestartPending(v("5.1.0"))
+        );
+    }
+
+    #[test]
+    fn update_locked_is_not_a_failure() {
+        assert_eq!(
+            classify(&UpdateError::UpdateLocked, &v("5.0.0"), true),
+            InstallFailure::Quiet
         );
     }
 
