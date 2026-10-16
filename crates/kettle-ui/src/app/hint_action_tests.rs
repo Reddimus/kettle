@@ -621,6 +621,28 @@ fn file_links_are_gated_by_their_pane() {
     assert_eq!(width(&undecodable), 25);
 }
 
+#[test]
+fn agent_guide_matches_the_local_multiplexer_preview_gate() {
+    let shell = argv(&["zsh"]);
+    for client in ["tmux", "screen", "zellij"] {
+        let foreground = argv(&[client]);
+        let origin = path_origin(false, &shell, Some(&foreground));
+        assert_eq!(origin, PathOrigin::Local, "{client}");
+        assert_eq!(
+            link_gate("file:///tmp/preview.png", Some(origin)),
+            LinkGate::Open,
+            "{client}"
+        );
+    }
+    let guide = include_str!("../../../../docs/AGENT.md")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(guide.contains("tmux, screen and zellij"));
+    assert!(guide.contains("no additional confirmation before reading the selected local file"));
+    assert!(!guide.contains("one from behind tmux or screen is asked about first"));
+}
+
 /// Every link taken from terminal output goes through `open_pane_link`:
 /// `open_url` is called only from there and for Kettle's own release
 /// page.

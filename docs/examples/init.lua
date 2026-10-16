@@ -40,8 +40,8 @@ print("kettle theme:      " .. kettle.theme())
 -------------------------------------------------------------------------------
 -- 2. Custom URL handlers (Terminator parity: `url_handlers.py`).
 --
--- Register a pattern → callback. When kettle's pane-content URL
--- detector matches the pattern, the callback runs BEFORE the
+-- Register a pattern -> callback. When a detected, allowed pane-content
+-- URL matches the pattern, the callback runs BEFORE the
 -- default open-in-browser path. The callback receives the matched
 -- text and must return one of:
 --   - a string URL (kettle opens it via the OS / custom handler)
@@ -53,41 +53,36 @@ print("kettle theme:      " .. kettle.theme())
 -- exists to enhance a link, so a broken one must never be the reason
 -- a link stops working.
 --
--- The Launchpad / APT examples below port the Terminator
--- `url_handlers.py` defaults so a kettle user can opt into the
--- same Ubuntu-flavored URL recognition.
+-- These recipes upgrade detectable HTTP links to HTTPS.
+-- Registration does not extend URL detection or the scheme allowlist.
+-- Kettle skips a pattern whose worst-case matching work is too high, and
+-- counts each `+`, `*` and `-` as a repeat, so keep those few.
 -------------------------------------------------------------------------------
 
--- Launchpad bug references: `LP: #12345` → bugs.launchpad.net.
+-- Launchpad bug links, such as http://bugs.launchpad.net/bugs/12345.
 kettle.add_url_handler(
     "launchpad_bug",
-    "%f[%w][lL][pP]:?%s?#?(%d+)",
+    "^http://bugs%.launchpad%.net/bugs/%d+$",
     function(text)
-        local num = text:match("(%d+)")
-        if num then
-            return "https://bugs.launchpad.net/bugs/" .. num
-        end
+        return (text:gsub("^http:", "https:"))
     end
 )
 
--- Launchpad branch refs: `lp:terminator/trunk` → code.launchpad.net.
+-- Launchpad branch links, such as http://code.launchpad.net/+branch/terminator/trunk.
 kettle.add_url_handler(
     "launchpad_code",
-    "%f[%w][lL][pP]:[a-z0-9][a-z0-9%+.%-/]+",
+    "^http://code%.launchpad%.net/.branch/[%w%p]+$",
     function(text)
-        local branch = text:gsub("^[lL][pP]:", "")
-        return "https://code.launchpad.net/+branch/" .. branch
+        return (text:gsub("^http:", "https:"))
     end
 )
 
--- APT URLs: `apt://gimp` → trigger `apt://` system handler. The
--- system OS opener handles `apt:` schemes natively on Ubuntu /
--- Debian.
+-- Ubuntu package links, such as http://packages.ubuntu.com/gimp.
 kettle.add_url_handler(
-    "apt",
-    "apt:[^%s]+",
+    "ubuntu_package",
+    "^http://packages%.ubuntu%.com/[%w%p]+$",
     function(text)
-        return text
+        return (text:gsub("^http:", "https:"))
     end
 )
 

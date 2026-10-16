@@ -2264,39 +2264,43 @@ mod tests {
         assert_eq!(eng.eval_str("return claimed_hits").unwrap(), "1");
     }
 
-    /// A failing handler must not stop a LATER one from claiming the URL —
-    /// `continue`, not `return`. Two plugins can register overlapping
-    /// patterns, and the first one being broken must not disable the second.
-    /// The shape every handler in `docs/examples/init.lua` uses: match some
-    /// text, return a REWRITTEN URL, and kettle opens that instead.
-    ///
-    /// Every example we ship (`LP: #12345` → Launchpad, `lp:branch` →
-    /// code.launchpad, `apt://gimp`) relies on this. If the returned string
-    /// were discarded, copying the documented file would give dead links.
     #[test]
-    fn a_handler_that_rewrites_the_url_gets_that_url_opened() {
+    fn documented_url_handlers_receive_detectable_safe_urls() {
         let eng = LuaEngine::new("Default").expect("init");
-        // Lifted from docs/examples/init.lua.
-        eng.eval_str(
-            "kettle.add_url_handler('launchpad_bug', '%f[%w][lL][pP]:?%s?#?(%d+)',
-                 function(text)
-                     local num = text:match('(%d+)')
-                     if num then
-                         return 'https://bugs.launchpad.net/bugs/' .. num
-                     end
-                 end)",
-        )
-        .expect("eval");
+        let handlers = include_str!("../../../docs/examples/init.lua")
+            .lines()
+            .skip_while(|line| !line.starts_with("-- 2."))
+            .take_while(|line| !line.starts_with("-- 3."))
+            .collect::<Vec<_>>()
+            .join("\n");
+        eng.eval_str(&handlers).expect("documented handlers");
+        for (url, target) in [
+            (
+                "http://bugs.launchpad.net/bugs/12345",
+                "https://bugs.launchpad.net/bugs/12345",
+            ),
+            (
+                "http://code.launchpad.net/+branch/terminator/trunk",
+                "https://code.launchpad.net/+branch/terminator/trunk",
+            ),
+            (
+                "http://packages.ubuntu.com/gimp",
+                "https://packages.ubuntu.com/gimp",
+            ),
+        ] {
+            let hints = kettle_core::hints::detect(&[url]);
+            assert_eq!(hints.len(), 1, "{url}");
+            assert_eq!(hints[0].kind, kettle_core::hints::Kind::Url);
+            assert_eq!(hints[0].text, url);
+            assert!(kettle_core::links::is_safe_url(&hints[0].text));
+            assert_eq!(
+                eng.try_url_handler(&hints[0].text),
+                UrlHandlerOutcome::Open(target.to_string())
+            );
+            assert!(kettle_core::links::is_safe_url(target));
+        }
         assert_eq!(
-            eng.try_url_handler("LP: #12345"),
-            UrlHandlerOutcome::Open("https://bugs.launchpad.net/bugs/12345".to_string()),
-            "a rewritten URL must reach the opener, not be thrown away"
-        );
-
-        // A handler whose branch does not fire returns nil, which declines —
-        // the original text is left to kettle rather than being swallowed.
-        assert_eq!(
-            eng.try_url_handler("LP: none"),
+            eng.try_url_handler("https://unhandled.example/"),
             UrlHandlerOutcome::Fallthrough
         );
     }

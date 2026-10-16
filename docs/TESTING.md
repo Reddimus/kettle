@@ -814,10 +814,11 @@ Screen-lifecycle fixtures prove that primary and alternate Kitty stores can
 reuse one image id without collision; mode 47 preserves the alternate store
 across both boundaries; mode 1047 preserves it on entry and clears it on
 exit; mode 1049 clears it on entry and preserves it on exit. ED 2 is
-active-buffer-only and RIS clears both stores. Saturation fixtures pin that a
-transmission the full image store refuses still draws but advertises no image
-id (and that its `U=1` virtual form is refused outright), and compositing
-fixtures pin straight-alpha source-over against a transparent and a partly
+active-buffer-only and RIS clears both stores. Saturation fixtures pin eviction
+of eligible older images while preserving the new image's named identity,
+subsequent addressability, and `U=1` virtual placement. When reclamation cannot
+satisfy admission, the upload is refused without producing a placement.
+Compositing fixtures pin straight-alpha source-over against a transparent and a partly
 transparent destination, not only an opaque one, plus the zero-alpha
 short-circuit the blend's divisor depends on.
 

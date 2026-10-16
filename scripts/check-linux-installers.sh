@@ -177,6 +177,30 @@ assert_uninstalled_prefix() {
     || fail "self-update ownership marker survived uninstall"
 }
 
+assert_config_hint_bootstraps_fresh_account() {
+  local prefix=$1
+  local install_output=$2
+  local config_home="${tmp_root}/config-home"
+  local hint
+  hint=$(sed -n '/^    kettle .*config/s/^    //p' "${install_output}")
+  [ -n "${hint}" ] || fail "installer omitted its config hint"
+  mkdir -m 700 "${config_home}"
+  env HOME="${config_home}" XDG_CONFIG_HOME="${config_home}/.config" \
+    PATH="${prefix}/bin:${PATH}" bash --noprofile --norc -c "${hint}" \
+    > "${tmp_root}/config-hint.out" \
+    || fail "config hint failed on a fresh account"
+  local config="${config_home}/.config/kettle/config"
+  cmp -s docs/kettle.example.config "${config}" \
+    || fail "config hint did not write the default config"
+  printf '%s\n' 'font-size = 19' > "${config}"
+  env HOME="${config_home}" XDG_CONFIG_HOME="${config_home}/.config" \
+    PATH="${prefix}/bin:${PATH}" bash --noprofile --norc -c "${hint}" \
+    > "${tmp_root}/config-hint-repeat.out" \
+    || fail "config hint failed with an existing config"
+  [ "$(cat "${config}")" = 'font-size = 19' ] \
+    || fail "config hint overwrote an existing config"
+}
+
 direct_prefix="${tmp_root}/direct"
 mkdir -p "${direct_prefix}/unrelated"
 printf '%s' 'unrelated prefix content' > "${direct_prefix}/unrelated/must-survive.txt"
@@ -185,6 +209,7 @@ grep -q "To uninstall: ${direct_prefix}/share/kettle/install.sh --uninstall" \
   "${tmp_root}/direct-install.out" \
   || fail "direct installer did not print prefix-aware uninstall hint"
 assert_installed_prefix "$direct_prefix" "local-dev"
+assert_config_hint_bootstraps_fresh_account "$direct_prefix" "${tmp_root}/direct-install.out"
 "${direct_prefix}/share/kettle/install.sh" --uninstall > "${tmp_root}/direct-uninstall.out"
 assert_uninstalled_prefix "$direct_prefix"
 [ "$(cat "${direct_prefix}/unrelated/must-survive.txt")" = 'unrelated prefix content' ] \

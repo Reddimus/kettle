@@ -203,12 +203,55 @@ def check_zsh(executable: str) -> None:
     print(f"zsh maximum completion payload fixture: PASS ({elapsed:.2f}s)")
 
 
+def check_bash_command_markers(executable: str, version: bytes) -> None:
+    match = re.search(rb"version (\d+)\.(\d+)", version)
+    array_supported = match is not None and tuple(map(int, match.groups())) >= (5, 1)
+    prompts = ["PROMPT_COMMAND='printf KETTLE_PROMPT_HOOK; false # user hook'"]
+    if array_supported:
+        prompts.append("PROMPT_COMMAND=('printf KETTLE_PROMPT_HOOK' false)")
+    for prompt in prompts:
+        program = (
+            f"PS1=''; {prompt}\n"
+            'source "$1"\n'
+            "printf KETTLE_COMMAND_ONE; :; false\n"
+            "\n"
+            "printf KETTLE_COMMAND_TWO; :; false\n"
+            "exit 0\n"
+        )
+        result = subprocess.run(
+            [
+                executable, "--noprofile", "--norc", "-i", "-s", "--",
+                str(INTEGRATION / "kettle.bash"),
+            ],
+            input=program.encode("ascii"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+            check=False,
+        )
+        marks = re.findall(rb"\x1b\]133;[CD][^\x07]*\x07", result.stdout)
+        expected = [
+            b"\x1b]133;D;0\x07",
+            OSC_C, OSC_D_1, OSC_D_1,
+            OSC_C, OSC_D_1,
+            OSC_C,
+        ]
+        if result.returncode != 0 or marks != expected:
+            raise RuntimeError(
+                "Bash command markers included prompt processing or split a command: "
+                f"{prompt!r}: {marks!r}; stderr={result.stderr!r}"
+            )
+    print("Bash command timing markers fixture: PASS")
+
+
 def check_bash(executable: str, require_32: bool) -> None:
     version = run([executable, "--version"], "Bash version probe").splitlines()[0]
     if require_32 and b"version 3.2" not in version:
         raise RuntimeError(
             f"macOS fixture must use the shipped Bash 3.2, got {version!r}"
         )
+
+    check_bash_command_markers(executable, version)
 
     locale_probe = subprocess.run(
         [executable, "--noprofile", "--norc", "-c", "locale -a"],
