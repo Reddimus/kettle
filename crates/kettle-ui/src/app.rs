@@ -11773,7 +11773,7 @@ impl App {
     fn drain_events(&mut self, ws: &mut WindowState) {
         self.sync_session_log_failures(ws);
         let mut bell = false;
-        // Pane ids that fired `TermEvent::Bell` this drain
+        // Pane ids that rang the bell this drain
         // pass — latched onto their containing tabs *after* the
         // iter_mut() loop so we don't double-borrow mux.panes.
         let mut bell_panes: Vec<u64> = Vec::new();
@@ -11809,6 +11809,14 @@ impl App {
                 while let Ok(chunk) = out_rx.try_recv() {
                     output_chunks.push((pane_id, chunk));
                 }
+            }
+            // Bells are latched by the terminal, not queued with the events
+            // below. Terminator parity (terminatorlib/config.py:103
+            // `force_no_bell`): silence every bell flavor regardless of
+            // cfg.bell mode.
+            if pane.term.take_bell() && !self.cfg.force_no_bell {
+                bell = true;
+                bell_panes.push(pane_id);
             }
             while let Ok(ev) = pane.rx.try_recv() {
                 match ev {
@@ -11954,16 +11962,7 @@ impl App {
                         ws.blink_on = true;
                         ws.last_blink = std::time::Instant::now();
                     }
-                    // Terminator parity (terminatorlib/
-                    // config.py:103 `force_no_bell`): silence every
-                    // bell flavor regardless of cfg.bell mode. The
-                    // match-guard combines the variant + the cfg
-                    // check so a future tweak doesn't fight clippy's
-                    // collapsible-if lint.
-                    TermEvent::Bell if !self.cfg.force_no_bell => {
-                        bell = true;
-                        bell_panes.push(pane_id);
-                    }
+                    // Latched by the terminal and taken above.
                     TermEvent::Bell => {}
                     // Terminator parity (terminatorlib/config.py:118
                     // `exit_action`): when the shell exits, close the pane,

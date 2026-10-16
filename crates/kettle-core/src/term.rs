@@ -4622,6 +4622,8 @@ pub struct Terminal {
     /// holds the terminal lock. It instead marks the pane failed so the UI can
     /// tear it down explicitly without unbounded memory or silent reply loss.
     event_overflowed: Arc<AtomicBool>,
+    /// Bells latched by the event proxy since the UI last took them.
+    bell_pending: Arc<AtomicBool>,
     /// Live OSC 52 write policy shared with the terminal event proxy. DA1
     /// extension 52 is emitted only while this is true.
     osc52_copy_allowed: Arc<AtomicBool>,
@@ -6817,6 +6819,7 @@ impl Terminal {
             event_overflowed.clone(),
         );
         let lifecycle_pending = proxy.lifecycle_pending();
+        let bell_pending = proxy.bell_pending();
         // Seed the engine's *default* cursor style from the user config; the
         // engine seeds `cursor_style` lazily from this, and programs can flip
         // both fields at runtime — `?12 h/l` for blinking (honored live via
@@ -8057,6 +8060,7 @@ impl Terminal {
             applied_pty_geometry: geometry,
             output_wake,
             event_overflowed,
+            bell_pending,
             osc52_copy_allowed,
             out_gen,
         })
@@ -9370,6 +9374,12 @@ impl Terminal {
     /// as though reply-bearing events were delivered.
     pub fn event_queue_overflowed(&self) -> bool {
         self.event_overflowed.load(Ordering::Acquire)
+    }
+
+    /// Whether the program rang the bell since the last call. Bells are
+    /// latched rather than queued, so any number of them is one bell here.
+    pub fn take_bell(&self) -> bool {
+        self.bell_pending.swap(false, Ordering::AcqRel)
     }
 
     /// Has the child process exited?

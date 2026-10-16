@@ -162,6 +162,9 @@ pub struct EventProxy {
     lifecycle_pending: Arc<AtomicBool>,
     osc52_copy_allowed: Arc<AtomicBool>,
     overflowed: Arc<AtomicBool>,
+    /// A bell rang since the owner last took it. Bells are latched here, not
+    /// queued: see [`EventProxy::send_event`].
+    bell_pending: Arc<AtomicBool>,
 }
 
 impl EventProxy {
@@ -175,6 +178,7 @@ impl EventProxy {
             // policy retain Kettle's default copy-enabled behavior.
             osc52_copy_allowed: Arc::new(AtomicBool::new(true)),
             overflowed: Arc::new(AtomicBool::new(false)),
+            bell_pending: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -215,17 +219,33 @@ impl EventProxy {
             lifecycle_pending: Arc::new(AtomicBool::new(false)),
             osc52_copy_allowed,
             overflowed,
+            bell_pending: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub(crate) fn lifecycle_pending(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.lifecycle_pending)
     }
+
+    pub(crate) fn bell_pending(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.bell_pending)
+    }
 }
 
 impl EventListener for EventProxy {
     fn send_event(&self, event: TermEvent) {
         if self.overflowed.load(Ordering::Acquire) {
+            return;
+        }
+        if matches!(event, TermEvent::Bell) {
+            // A bell carries nothing, and the UI treats several as one, so it
+            // is latched rather than queued. Output full of BEL bytes, such
+            // as `cat` of a binary file, would otherwise fill the bounded
+            // queue below, and a full queue fails the pane.
+            if !self.bell_pending.swap(true, Ordering::AcqRel) {
+                self.lifecycle_pending.store(true, Ordering::Release);
+                (self.waker)();
+            }
             return;
         }
         let event = match event {
@@ -254,8 +274,9 @@ impl EventListener for EventProxy {
             }
             Err(crossbeam_channel::TrySendError::Full(_)) => {
                 // The parser calls this while holding the terminal mutex, so
-                // blocking here would deadlock the UI renderer. A full bounded
-                // semantic queue is therefore an explicit fail-pane condition:
+                // blocking here would deadlock the UI renderer. What reaches
+                // the queue is replies and lifecycle events, never bells, so a
+                // full bounded semantic queue is an explicit fail-pane condition:
                 // retain no unbounded overflow, drop no reply silently while
                 // pretending the pane is healthy, and wake the owner to tear
                 // the hostile/stalled pane down.
@@ -290,15 +311,54 @@ mod tests {
 
         proxy.send_event(TermEvent::Wakeup);
         assert!(lifecycle_pending.swap(false, Ordering::AcqRel));
-        proxy.send_event(TermEvent::Bell);
+        proxy.send_event(TermEvent::ResetTitle);
         assert!(lifecycle_pending.swap(false, Ordering::AcqRel));
 
         // Both events arrive on the channel in order…
         assert!(matches!(rx.try_recv(), Ok(TermEvent::Wakeup)));
-        assert!(matches!(rx.try_recv(), Ok(TermEvent::Bell)));
+        assert!(matches!(rx.try_recv(), Ok(TermEvent::ResetTitle)));
         assert!(rx.try_recv().is_err());
         // …and the waker fired once per event.
         assert_eq!(woke.load(Ordering::SeqCst), 2);
+    }
+
+    /// Output full of BEL bytes, such as `cat` of a binary file, is one
+    /// latched bell, not a full queue: only replies and lifecycle events can
+    /// fill the bounded queue and fail the pane.
+    #[test]
+    fn a_bell_flood_is_latched_and_cannot_fail_the_pane() {
+        let (tx, rx) = crossbeam_channel::bounded(1024);
+        let woke = Arc::new(AtomicUsize::new(0));
+        let woke_for_callback = woke.clone();
+        let waker: super::Waker = Arc::new(move || {
+            woke_for_callback.fetch_add(1, Ordering::SeqCst);
+        });
+        let output_wake = Arc::new(OutputWakeGate::new(waker.clone()));
+        let overflowed = Arc::new(AtomicBool::new(false));
+        let proxy = EventProxy::with_output_wake_osc52_and_overflow(
+            tx,
+            waker,
+            output_wake,
+            Arc::new(AtomicBool::new(true)),
+            overflowed.clone(),
+        );
+        let bell = proxy.bell_pending();
+
+        for _ in 0..10_000 {
+            proxy.send_event(TermEvent::Bell);
+        }
+        assert!(!overflowed.load(Ordering::Acquire));
+        assert!(rx.is_empty());
+        assert!(bell.swap(false, Ordering::AcqRel));
+        assert_eq!(woke.load(Ordering::SeqCst), 1, "a run of bells wakes once");
+
+        for _ in 0..1025 {
+            proxy.send_event(TermEvent::PtyWrite("\x1b[0n".into()));
+        }
+        assert!(
+            overflowed.load(Ordering::Acquire),
+            "replies still fail closed"
+        );
     }
 
     #[test]
@@ -344,12 +404,12 @@ mod tests {
             overflowed.clone(),
         );
 
-        proxy.send_event(TermEvent::Bell);
+        proxy.send_event(TermEvent::ResetTitle);
         proxy.send_event(TermEvent::Title("hostile flood".into()));
         proxy.send_event(TermEvent::PtyWrite("must not allocate an overflow".into()));
 
         assert!(overflowed.load(Ordering::Acquire));
-        assert!(matches!(rx.try_recv(), Ok(TermEvent::Bell)));
+        assert!(matches!(rx.try_recv(), Ok(TermEvent::ResetTitle)));
         assert!(rx.try_recv().is_err());
         assert_eq!(
             woke.load(Ordering::SeqCst),
@@ -465,8 +525,8 @@ mod tests {
         assert_eq!(woke.load(Ordering::SeqCst), 1);
 
         proxy.send_event(TermEvent::Wakeup);
-        proxy.send_event(TermEvent::Bell);
-        assert!(matches!(rx.try_recv(), Ok(TermEvent::Bell)));
+        proxy.send_event(TermEvent::ResetTitle);
+        assert!(matches!(rx.try_recv(), Ok(TermEvent::ResetTitle)));
         assert!(rx.try_recv().is_err());
         assert_eq!(
             woke.load(Ordering::SeqCst),
