@@ -298,8 +298,8 @@ struct Cli {
     #[arg(long = "working-directory", short = 'd', value_name = "DIR")]
     working_directory: Option<std::path::PathBuf>,
 
-    /// Start a separate Kettle process even when a primary bare-launch process
-    /// is available. Any launch with explicit arguments already starts
+    /// Start a separate Kettle process even when a primary process of this
+    /// build is available. Any launch with explicit arguments already starts
     /// separately; this flag is the explicit escape hatch for an otherwise
     /// default launch.
     #[arg(long)]

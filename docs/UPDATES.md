@@ -11,8 +11,10 @@ kettle --update           Convenience alias for interactive `kettle update`
 
 There is intentionally no `-u` shorthand: short flags are easy to trigger by
 mistake and are difficult to reserve permanently. Updates never restart running
-windows. Linux commits the replacement immediately and existing processes keep
-their mapped image.
+windows: they keep running their version until they close. Linux commits the
+replacement immediately, and the next launch starts the new version in its own
+process. On macOS a Dock click returns to the running app, so the new version
+starts once Kettle quits.
 
 > **Historical Windows bootstrap for v2.35:** releases before v2.35 did not include the
 > out-of-process helper/run-lock protocol and could not reliably replace a
@@ -133,13 +135,13 @@ is held.
 
 The default is `auto`: Kettle keeps itself current in the background. It checks
 at most once per day (tunable), and when a newer signed release is found it
-installs it. Linux applies it immediately while running windows keep the old
-mapped image until they exit. The first launch only
+installs it. Linux applies it immediately; running windows keep the old version
+until they exit, and the next launch uses the new one. The first launch only
 creates the throttle state and performs no network request; the first automatic
 install shows a one-time notification explaining how to opt out.
 
 ```ini
-# default: install in the background, use after next restart
+# default: install in the background, use on the next launch
 update-policy = auto
 # only show a passive new-version banner
 update-policy = notify
@@ -152,8 +154,9 @@ update-check-interval-hours = 24
 ```
 
 A window left open for many days is re-checked on an hourly in-session timer
-(still bounded by the configured interval), so it stays current without a
-restart. The legacy `update-check = true|false` setting remains compatible and
+(still bounded by the configured interval), so a long-running process still
+installs new releases. It keeps running its own version until it exits, and it
+never announces or reinstalls a version that is already installed. The legacy `update-check = true|false` setting remains compatible and
 maps to `notify|off`. If both settings exist, `update-policy` wins regardless of
 order. Builds produced with `KETTLE_PACKAGED` disable automatic checks so a
 downstream distribution can own update policy. Explicit CLI checks still work.
@@ -197,7 +200,7 @@ The signed manifest binds each supported target to an exact archive name, byte
 length, and SHA-256 digest. It also binds the stable version/tag and an RFC 3339
 publication time. A manifest more than 90 days old or more than 24 hours in the
 future is rejected, and installation always requires the candidate version to
-be strictly newer than the running or actually installed version. A previously
+be strictly newer than both the running and the installed version. A previously
 valid signed document therefore cannot be replayed indefinitely or used for a
 downgrade.
 
