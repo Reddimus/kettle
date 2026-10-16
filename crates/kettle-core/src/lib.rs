@@ -35,6 +35,11 @@ pub use diagram_copy::{
     DiagramCopyError, MAX_COPIED_DIAGRAMS, MAX_DIAGRAM_COPY_BYTES, diagram_sources,
 };
 pub mod event;
+/// Entry points for the fuzz targets (see fuzz/Cargo.toml).
+#[cfg(any(test, feature = "fuzzing"))]
+pub mod fuzzing {
+    pub use crate::term::fuzzing::term;
+}
 pub mod grid_text;
 mod inline_text;
 pub use inline_text::scrub_card_markers;

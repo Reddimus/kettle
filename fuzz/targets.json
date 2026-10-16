@@ -1,5 +1,6 @@
 {
   "targets": [
+    { "name": "term", "crates": ["kettle-core"], "nightly": 1200, "sunday": 3600 },
     { "name": "vt", "crates": ["kettle-vt"], "nightly": 1200, "sunday": 3600 },
     { "name": "images", "crates": ["kettle-vt"], "nightly": 600 },
     { "name": "wire", "crates": ["kettle-media"], "nightly": 1200 },

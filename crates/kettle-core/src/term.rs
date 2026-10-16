@@ -36,6 +36,9 @@ use crate::images::{
 use crate::persistence::{AsyncFileWriter, AsyncWriterStatus};
 use crate::shell_startup::ShellStartup;
 
+#[cfg(any(test, feature = "fuzzing"))]
+pub(crate) mod fuzzing;
+
 const PTY_READ_BUFFER_BYTES: usize = 64 * 1024;
 const PTY_PUMP_QUEUE_DEPTH: usize = 4;
 /// Pending [`Terminal::apply_local_output`] requests per pane.
@@ -18373,18 +18376,16 @@ mod image_lifecycle_tests {
         }
     }
 
+    use super::fuzzing::{SyncGraphicsHarness, registries};
     use super::{
-        Animations, BufferGraphicsState, DeferredGraphicsJournal, GraphicsActionContext,
-        GraphicsEvent, GraphicsEventBatch, GraphicsRegistries, GraphicsScroll,
-        GraphicsScrollDirection, ImageHistoryPruner, Images, InactiveGraphics,
-        PTY_PUMP_QUEUE_DEPTH, Placement, PtyGeometry, RelEntry, Relatives, SharedTerm,
-        SyncFlushContext, SyncGraphicsContext, SyncGraphicsDispatch, TermSize,
-        VersionedPtyGeometry, VirtualEntry, Virtuals, advance_terminal_bytes,
-        advance_terminal_bytes_with_commit_hook, apply_graphics_batch, apply_graphics_chunk_at,
-        apply_graphics_event, apply_sync_dispatch, chunk_needs_graphics_gate,
-        clear_reflowed_regular_placements, commit_local_geometry, finish_deferred_sync,
-        receive_pty_chunk, recompute_kitty_placements, scroll_regular_placements,
-        send_graphics_reply,
+        DeferredGraphicsJournal, GraphicsActionContext, GraphicsEvent, GraphicsEventBatch,
+        GraphicsRegistries, GraphicsScroll, GraphicsScrollDirection, ImageHistoryPruner, Images,
+        PTY_PUMP_QUEUE_DEPTH, Placement, PtyGeometry, RelEntry, SharedTerm, SyncFlushContext,
+        SyncGraphicsContext, SyncGraphicsDispatch, TermSize, VersionedPtyGeometry, VirtualEntry,
+        advance_terminal_bytes_with_commit_hook, apply_graphics_batch, apply_graphics_event,
+        apply_sync_dispatch, chunk_needs_graphics_gate, clear_reflowed_regular_placements,
+        commit_local_geometry, finish_deferred_sync, receive_pty_chunk, recompute_kitty_placements,
+        scroll_regular_placements,
     };
     use crate::event::{OutputWakeGate, TermEvent};
     use crate::{EventProxy, ImageData, Waker};
@@ -18393,7 +18394,6 @@ mod image_lifecycle_tests {
     use alacritty_terminal::term::Config as TermConfig;
     use alacritty_terminal::vte::ansi::{Processor, SYNC_MARKER_CAPACITY};
     use kettle_vt::{Chunk, Extractor, PlacementParams};
-    use std::collections::HashMap;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -18440,151 +18440,6 @@ mod image_lifecycle_tests {
             v: 0,
             z: 0,
             params: PlacementParams::default(),
-        }
-    }
-
-    fn registries() -> (Images, Virtuals, Animations, Relatives, InactiveGraphics) {
-        (
-            Arc::new(Mutex::new(Vec::new())),
-            Arc::new(Mutex::new(HashMap::new())),
-            Arc::new(Mutex::new(HashMap::new())),
-            Arc::new(Mutex::new(HashMap::new())),
-            Arc::new(Mutex::new(BufferGraphicsState::default())),
-        )
-    }
-
-    struct SyncGraphicsHarness {
-        term: SharedTerm,
-        replies: crossbeam_channel::Receiver<TermEvent>,
-        proxy: EventProxy,
-        processor: Processor,
-        extractor: Extractor,
-        deferred: DeferredGraphicsJournal,
-        active_alternate: bool,
-        images: Images,
-        virtuals: Virtuals,
-        anims: Animations,
-        relatives: Relatives,
-        inactive: InactiveGraphics,
-        geometry: Arc<Mutex<VersionedPtyGeometry>>,
-    }
-
-    impl SyncGraphicsHarness {
-        fn new() -> Self {
-            let (tx, replies) = crossbeam_channel::unbounded();
-            let proxy = EventProxy::new(tx, Arc::new(|| {}));
-            let term = Arc::new(Mutex::new(Term::new(
-                TermConfig::default(),
-                &TermSize {
-                    columns: 8,
-                    screen_lines: 4,
-                },
-                proxy.clone(),
-            )));
-            let (images, virtuals, anims, relatives, inactive) = registries();
-            Self {
-                term,
-                replies,
-                proxy,
-                processor: Processor::new(),
-                extractor: Extractor::new(),
-                deferred: DeferredGraphicsJournal::new(),
-                active_alternate: false,
-                images,
-                virtuals,
-                anims,
-                relatives,
-                inactive,
-                geometry: Arc::new(Mutex::new(VersionedPtyGeometry {
-                    geometry: PtyGeometry::new(8, 4, 80, 40),
-                    generation: 0,
-                })),
-            }
-        }
-
-        fn feed(&mut self, bytes: &[u8]) {
-            let Self {
-                term,
-                replies: _,
-                proxy,
-                processor,
-                extractor,
-                deferred,
-                active_alternate,
-                images,
-                virtuals,
-                anims,
-                relatives,
-                inactive,
-                geometry,
-            } = self;
-            extractor.feed_with(bytes, |extractor, chunk| match chunk {
-                Chunk::GraphicsReply(reply) => send_graphics_reply(proxy, reply),
-                Chunk::Pass(bytes) => {
-                    let mut context = SyncGraphicsContext {
-                        active_alternate,
-                        deferred,
-                        registries: GraphicsRegistries {
-                            inactive,
-                            images,
-                            virtuals,
-                            anims,
-                            relatives,
-                        },
-                        actions: GraphicsActionContext {
-                            inactive,
-                            images,
-                            virtuals,
-                            anims,
-                            relatives,
-                            geometry,
-                            proxy,
-                        },
-                        extractor,
-                    };
-                    advance_terminal_bytes(processor, term, &bytes, &mut context);
-                }
-                Chunk::DeferredGraphics(graphics) => deferred.defer(processor, graphics),
-                chunk => {
-                    let mut term = term.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                    assert!(
-                        apply_graphics_chunk_at(
-                            &mut term,
-                            chunk,
-                            GraphicsActionContext {
-                                inactive,
-                                images,
-                                virtuals,
-                                anims,
-                                relatives,
-                                geometry,
-                                proxy,
-                            },
-                            extractor,
-                        ),
-                        "unexpected non-graphics extractor chunk"
-                    );
-                }
-            });
-        }
-
-        fn active_ids(&self) -> Vec<u32> {
-            self.images
-                .lock()
-                .unwrap()
-                .iter()
-                .filter_map(|placement| placement.id)
-                .collect()
-        }
-
-        fn inactive_ids(&self) -> Vec<u32> {
-            self.inactive
-                .lock()
-                .unwrap()
-                .placements
-                .iter()
-                .filter_map(|placement| placement.id)
-                .collect()
         }
     }
 
@@ -19750,6 +19605,7 @@ mod image_lifecycle_tests {
             geometry,
             replies: _,
             proxy,
+            ..
         } = &mut harness;
         let mut on_graphics = |dispatch: SyncGraphicsDispatch<'_>| {
             assert_eq!(

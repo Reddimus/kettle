@@ -19,6 +19,8 @@ workspace = true
 # (`kettle exec --record`). Pulls in serde_json for JSON escaping and fs4 for
 # cross-platform active-cast locks.
 asciicast = ["dep:serde_json", "dep:fs4"]
+# The entry points the fuzz targets (fuzz/) call. Never in a shipped build.
+fuzzing = []
 
 [dependencies]
 unicode-width.workspace = true
