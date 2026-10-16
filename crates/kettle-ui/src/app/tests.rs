@@ -6843,15 +6843,20 @@ fn process_status_cannot_reap_a_pane_before_the_ordered_pty_exit() {
         .nth(1)
         .and_then(|body| body.split("\n    fn ").next())
         .expect("drain_events body");
-    let exit_arm = drain
-        .split("TermEvent::Exit => {")
+    let exit_latch = drain
+        .split("if !pane.closed && pane.term.take_exited() {")
         .nth(1)
-        .and_then(|body| body.split("TermEvent::ChildExit(_) => {").next())
-        .expect("ordered Exit arm");
+        .and_then(|body| body.split("\n            }\n").next())
+        .expect("ordered exit latch");
     assert!(
-        exit_arm.contains("apply_pane_exit_action(") && exit_arm.contains("self.cfg.exit_action"),
-        "the reader's ordered Exit event must latch reaping and apply \
-             exit-action policy"
+        exit_latch.contains("apply_pane_exit_action(")
+            && exit_latch.contains("self.cfg.exit_action"),
+        "the reader's ordered exit must latch reaping and apply exit-action policy"
+    );
+    assert!(
+        drain.find("while let Ok(ev) = pane.rx.try_recv() {")
+            < drain.find("if !pane.closed && pane.term.take_exited() {"),
+        "exit policy applies after the replies queued before the exit"
     );
 
     let status_arm = drain

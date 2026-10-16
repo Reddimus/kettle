@@ -15944,10 +15944,11 @@ mod teardown_tests {
                 match ev {
                     // Answer the child's terminal queries so it can finish.
                     TermEvent::PtyWrite(s) => term.write(s.as_bytes()),
-                    TermEvent::Exit | TermEvent::ChildExit(_) => saw_exit_event = true,
+                    TermEvent::ChildExit(_) => saw_exit_event = true,
                     _ => {}
                 }
             }
+            saw_exit_event |= term.take_exited();
             if let Some(c) = term.child_exit_code() {
                 break c;
             }
@@ -16910,12 +16911,11 @@ mod teardown_tests {
         let mut saw_exit = false;
         while std::time::Instant::now() < deadline && !saw_exit {
             while let Ok(event) = rx.try_recv() {
-                match event {
-                    TermEvent::PtyWrite(reply) => term.write(reply.as_bytes()),
-                    TermEvent::Exit => saw_exit = true,
-                    _ => {}
+                if let TermEvent::PtyWrite(reply) = event {
+                    term.write(reply.as_bytes());
                 }
             }
+            saw_exit |= term.take_exited();
             if cleanup.0.is_none()
                 && let Some(screen) = term.screen_text(0)
                 && let Some(pid) = screen
