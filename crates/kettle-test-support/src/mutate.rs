@@ -8,7 +8,7 @@
 //! The sweeps' seeds are also the fuzz targets' starting corpus: with
 //! `KETTLE_FUZZ_CORPUS` naming a directory, [`save_seeds`] writes each
 //! sweep's seeds there under its target's name (see
-//! `.github/workflows/media-fuzz.yml`).
+//! `.github/workflows/fuzz.yml`).
 
 use std::path::Path;
 

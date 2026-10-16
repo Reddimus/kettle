@@ -3657,15 +3657,27 @@ lockfile, so the product's builds and audits never include libFuzzer;
 on stable on macOS and Linux, so a change to what they call shows before the
 nightly run (on Windows the recipe only says the targets are Unix-only). A
 render that panics inside a guarded library call unwinds to the guard, as it
-does in the worker; any other panic aborts. `.github/workflows/media-fuzz.yml`
-runs each target for 15 minutes a night on a pinned nightly, for a minute on
-a pull request that changes the harness, and as long as a dispatch asks, up
-to an hour. It
-seeds each corpus from the sweeps (`KETTLE_FUZZ_CORPUS` names the directory
-they write to), uses the dictionaries in `fuzz/dict`, and keeps a target's
-crash, leak, out-of-memory or hang input as an artifact; a failed night opens
-one issue, or comments on the open one. To run one locally, with that nightly
-and `cargo install cargo-fuzz --version 0.13.2 --locked`:
+does in the worker; any other panic aborts.
+
+`.github/workflows/fuzz.yml` runs every target in `fuzz/targets.json` on a
+pinned nightly:
+
+- each night, for the target's nightly time (10 or 20 minutes); Sundays run
+  some targets for an hour and minimize every corpus;
+- for a minute on a pull request that changes a target or what it fuzzes;
+- on dispatch, the targets named (all when none are) for as long as asked,
+  up to five hours.
+
+Each run starts from the corpus the last night or dispatch kept, plus the
+sweeps' seeds (`KETTLE_FUZZ_CORPUS` names the directory they write to). It
+uses the dictionaries in `fuzz/dict`, and keeps a target's crash, leak,
+out-of-memory or hang input as an artifact; a failed night opens one issue,
+or comments on the open one. `scripts/fuzz-plan.py` turns the table into the
+run's matrix and refuses a table that disagrees with `fuzz/Cargo.toml`.
+`just fuzz-guard` tests it and checks that no shipped binary is built with a
+crate's `fuzzing` feature; CI and the release pretest run the same check. To
+run a target locally, with that nightly and
+`cargo install cargo-fuzz --version 0.13.2 --locked`:
 
 ```sh
 KETTLE_FUZZ_CORPUS=$PWD/fuzz/corpus cargo test -p kettle-media -p kettle-media-render -p kettle-media-native --lib fuzzing
@@ -5651,7 +5663,7 @@ retained compile/regression checks on **windows**:
 
 - `fmt --check`, `build --all-targets`, `clippy -D warnings`,
   `cargo test --workspace` on every OS.
-- `.github/workflows/media-fuzz.yml` fuzzes the media parsers each night
+- `.github/workflows/fuzz.yml` runs the fuzz targets each night
   (see Media fuzzing).
 - `cargo doc --no-deps` with `RUSTDOCFLAGS=-D warnings` (Linux only —
   catches broken intra-doc-links, malformed examples; rustdoc is

@@ -1,0 +1,9 @@
+{
+  "targets": [
+    { "name": "wire", "crates": ["kettle-media"], "nightly": 1200 },
+    { "name": "session", "crates": ["kettle-media"], "nightly": 600 },
+    { "name": "sniff", "crates": ["kettle-media"], "nightly": 600 },
+    { "name": "render", "crates": ["kettle-media-render"], "nightly": 1200, "sunday": 3600 },
+    { "name": "ffprobe", "crates": ["kettle-media-native"], "nightly": 600 }
+  ]
+}

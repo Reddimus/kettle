@@ -274,6 +274,11 @@ jobs:
       - name: Release preparation script
         if: runner.os != 'Windows'
         run: python3 scripts/test-release.py
+      - name: Fuzzing guards
+        # The fuzz run planner and its target table, and no shipped binary
+        # built with a crate's `fuzzing` entry points.
+        if: runner.os == 'Linux'
+        run: just fuzz-guard
       - name: Inner package manifest generator and verifier
         # Extraction is a native filesystem security boundary. Run its portable
         # fixtures on every runner so macOS aliases and Windows path semantics
