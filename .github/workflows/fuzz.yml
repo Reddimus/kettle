@@ -45,9 +45,12 @@ on:
 permissions:
   contents: read
 
+# Each event type queues on its own, and only a pull request's newer push
+# cancels its older run: a nightly must not cancel a dispatched campaign, or
+# the reverse, which would also skip the failure report.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   plan:
