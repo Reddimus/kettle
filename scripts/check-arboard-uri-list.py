@@ -27,10 +27,12 @@ def main():
         "--target-dir", "target/vendor-check", "-p", "arboard",
     ]
     run("test", *common, "--lib", "platform::linux::")
+    # The INCR test takes the clipboard, so it runs only on a private X
+    # server; on a desktop the run above skips it.
     if shutil.which("xvfb-run") and shutil.which("xclip"):
         subprocess.run(
-            ["xvfb-run", "-a", "cargo", "test", *common, "--lib", "platform::linux::x11::incr_tests",
-             "--", "--nocapture"],
+            ["xvfb-run", "-a", "env", "KETTLE_X11_CLIPBOARD_TEST=1", "cargo", "test", *common,
+             "--lib", "platform::linux::x11::incr_tests", "--", "--nocapture"],
             cwd=ROOT, check=True, timeout=600,
         )
     else:

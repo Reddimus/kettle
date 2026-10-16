@@ -593,15 +593,18 @@ impl Inner {
 			.reply()
 			.map_err(into_unknown)?;
 
+		// Every segment, the empty last one included, carries the
+		// transfer's type (ICCCM 2.7.2).
+		if reply.type_ != target_format {
+			incr.mismatch = true;
+		}
 		// log::trace!("Received segment. value_len {}", reply.value_len,);
 		if reply.value_len == 0 {
 			// This indicates that all the data has been sent.
 			return Ok(true);
 		}
-		if reply.type_ == target_format {
+		if !incr.mismatch {
 			incr.data.extend(reply.value);
-		} else {
-			incr.mismatch = true;
 		}
 
 		// Let's reset our timeout, since we received a valid chunk.
@@ -1202,34 +1205,45 @@ impl Drop for Clipboard {
 mod incr_tests {
 	use super::*;
 	use std::io::Write;
-	use std::process::{Command, Stdio};
+	use std::process::{Child, Command, Stdio};
 
-	/// xclip sends text of 1 MiB or more in INCR segments typed as its own
-	/// target, whatever target was asked for. A paste asks for a file list
-	/// first, which once left xclip waiting forever on a segment nobody
-	/// deleted, so the text read after it timed out for every format.
-	/// Needs an X display and xclip; CI runs it under `xvfb-run`.
+	/// Kills and reaps the clipboard owner however the test ends.
+	struct Owner(Child);
+
+	impl Drop for Owner {
+		fn drop(&mut self) {
+			let _ = self.0.kill();
+			let _ = self.0.wait();
+		}
+	}
+
+	/// xclip sends text past its INCR threshold (1 MiB on a default X
+	/// server) in INCR segments typed as its own target, whatever target was
+	/// asked for. A paste asks for a file list first, which once left xclip
+	/// waiting forever on a segment nobody deleted, so the text read after it
+	/// timed out for every format.
+	///
+	/// It takes the clipboard, so it runs only when
+	/// `KETTLE_X11_CLIPBOARD_TEST=1`, which scripts/check-arboard-uri-list.py
+	/// sets inside `xvfb-run`; it then needs xclip.
 	#[test]
 	fn an_incr_owner_that_sends_another_type_is_drained() {
-		let has_xclip = Command::new("xclip")
-			.arg("-version")
-			.stdout(Stdio::null())
-			.stderr(Stdio::null())
-			.status()
-			.is_ok();
-		if std::env::var_os("DISPLAY").is_none() || !has_xclip {
-			eprintln!("SKIP: needs an X display and xclip");
+		if std::env::var_os("KETTLE_X11_CLIPBOARD_TEST").as_deref() != Some("1".as_ref()) {
+			eprintln!("SKIP: set KETTLE_X11_CLIPBOARD_TEST=1 on a private X server");
 			return;
 		}
-		let text = "kettle paste line\n".repeat((2 << 20) / 18);
-		let mut owner = Command::new("xclip")
-			.args(["-selection", "clipboard", "-quiet"])
-			.stdin(Stdio::piped())
-			.stdout(Stdio::null())
-			.stderr(Stdio::null())
-			.spawn()
-			.expect("start xclip");
-		owner.stdin.take().expect("xclip stdin").write_all(text.as_bytes()).expect("feed xclip");
+		// Far past any server's INCR threshold, so every request is INCR.
+		let text = "kettle paste line\n".repeat((16 << 20) / 18);
+		let mut owner = Owner(
+			Command::new("xclip")
+				.args(["-selection", "clipboard", "-quiet"])
+				.stdin(Stdio::piped())
+				.stdout(Stdio::null())
+				.stderr(Stdio::null())
+				.spawn()
+				.expect("start xclip"),
+		);
+		owner.0.stdin.take().expect("xclip stdin").write_all(text.as_bytes()).expect("feed xclip");
 		std::thread::sleep(Duration::from_millis(500));
 		let clipboard = Clipboard::new().expect("X11 clipboard");
 
@@ -1237,11 +1251,10 @@ mod incr_tests {
 		let files = clipboard.get_file_list(LinuxClipboardKind::Clipboard);
 		let read = clipboard.get_text(LinuxClipboardKind::Clipboard);
 		let elapsed = started.elapsed();
-		let _ = owner.kill();
-		let _ = owner.wait();
+		drop(owner);
 
 		assert!(files.is_err(), "text is not a file list");
 		assert_eq!(read.expect("the text after the refused file list").len(), text.len());
-		assert!(elapsed < Duration::from_secs(2), "took {elapsed:?}");
+		assert!(elapsed < Duration::from_secs(5), "took {elapsed:?}");
 	}
 }
