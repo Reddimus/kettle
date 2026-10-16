@@ -2606,13 +2606,48 @@ fn load_windows_package(
     VerifiedPackage::from_files(files, update, expected_package_manifest)
 }
 
+/// The most a package's tar stream may decompress to: its file data, two
+/// blocks of header and padding per entry and the end marker, and 1 MiB for
+/// the path and PAX extension records a release carries. The `tar` crate
+/// reads an extension record whole before yielding the entry it describes,
+/// past every per-entry check, so this bound is what limits those records.
+#[cfg(target_os = "linux")]
+const MAX_TAR_STREAM_BYTES: u64 =
+    MAX_UNPACKED_BYTES + (MAX_ARCHIVE_ENTRIES as u64 + 1) * 1024 + 1024 * 1024;
+
 #[cfg(target_os = "linux")]
 fn load_linux_package(
     archive: &[u8],
     update: &AvailableUpdate,
 ) -> Result<VerifiedPackage, UpdateError> {
+    load_linux_package_within(archive, update, MAX_TAR_STREAM_BYTES)
+}
+
+/// [`load_linux_package`] with the decompressed stream bounded at `limit`.
+/// Reaching the bound refuses the archive, whatever the entry being read:
+/// a stream cut there could otherwise end on a block boundary and read as a
+/// complete, shorter archive.
+#[cfg(target_os = "linux")]
+fn load_linux_package_within(
+    archive: &[u8],
+    update: &AvailableUpdate,
+    limit: u64,
+) -> Result<VerifiedPackage, UpdateError> {
     let decoder = flate2::read::GzDecoder::new(std::io::Cursor::new(archive));
-    let mut tar = tar::Archive::new(decoder);
+    let mut tar = tar::Archive::new(std::io::Read::take(decoder, limit));
+    let files = read_linux_package_files(&mut tar);
+    if tar.into_inner().limit() == 0 {
+        return Err(UpdateError::UnsafeArchive(
+            "unpacked data exceeds the safety limit".into(),
+        ));
+    }
+    VerifiedPackage::from_files(files?, update, None)
+}
+
+#[cfg(target_os = "linux")]
+fn read_linux_package_files(
+    tar: &mut tar::Archive<impl std::io::Read>,
+) -> Result<Vec<VerifiedPackageFile>, UpdateError> {
     let mut count = 0_usize;
     let mut total = 0_u64;
     let mut seen = ArchivePaths::default();
@@ -2718,7 +2753,7 @@ fn load_linux_package(
             mode: Some(mode),
         });
     }
-    VerifiedPackage::from_files(files, update, None)
+    Ok(files)
 }
 
 #[cfg(any(windows, target_os = "macos", test))]
@@ -5659,15 +5694,21 @@ fn validate_backup_tree(
                 "backup tree contains an unjournaled file {relative}"
             )));
         };
-        if !seen.insert(key) {
+        if !seen.insert(key.clone()) {
             return Err(UpdateError::Transaction(
                 "backup tree contains a case-aliased duplicate".into(),
             ));
         }
         let size = file.metadata()?.len();
-        total = total
-            .checked_add(size)
-            .ok_or_else(|| UpdateError::Transaction("backup size overflow".into()))?;
+        // The quota is the previous files', as the preflight that admitted
+        // the transaction counted them; the marker is read above within its
+        // own 4 KiB bound. Counting it too refused, at startup, a backup the
+        // preflight had accepted, and the error kept Kettle from starting.
+        if key != BACKUP_MARKER_FILE.to_ascii_lowercase() {
+            total = total
+                .checked_add(size)
+                .ok_or_else(|| UpdateError::Transaction("backup size overflow".into()))?;
+        }
         if total > MAX_UNPACKED_BYTES {
             return Err(UpdateError::Transaction(
                 "backup tree exceeds the safety limit".into(),
@@ -7101,6 +7142,58 @@ mod tests {
             VerifiedPackage::from_files(package("kettle", b"mutated", false), &fake_update(), None)
                 .is_err()
         );
+    }
+
+    /// A backup holding exactly the quota of previous files validates beside
+    /// its marker: the preflight that admitted the transaction counted only
+    /// the files, and a refusal here would keep Kettle from starting.
+    #[cfg(any(windows, target_os = "linux"))]
+    #[test]
+    fn a_backup_at_the_quota_validates_beside_its_marker() {
+        let root = test_tempdir();
+        let name = ".kettle-update-backup-1-2";
+        let backup_dir = root.path().join(name);
+        fs::create_dir(&backup_dir).unwrap();
+        let marker = BackupMarker {
+            schema: JOURNAL_SCHEMA,
+            product: "kettle".into(),
+            transaction_id: "1-2".into(),
+        };
+        fs::write(
+            backup_dir.join(BACKUP_MARKER_FILE),
+            serde_json::to_vec_pretty(&marker).unwrap(),
+        )
+        .unwrap();
+        fs::File::create(backup_dir.join("value"))
+            .unwrap()
+            .set_len(MAX_UNPACKED_BYTES)
+            .unwrap();
+        let journal = Journal {
+            schema: JOURNAL_SCHEMA,
+            transaction_id: "1-2".into(),
+            target_version: "99.0.0".into(),
+            phase: JournalPhase::Applying,
+            backup_dir: name.into(),
+            created_directories: std::collections::BTreeMap::new(),
+            // Backing up: the size is checked, the contents are not hashed.
+            entries: vec![JournalEntry {
+                relative: "value".into(),
+                existed: true,
+                previous_unix_mode: None,
+                previous_size: Some(MAX_UNPACKED_BYTES),
+                previous_sha256: Some("0".repeat(64)),
+                replacement_size: 1,
+                replacement_sha256: "0".repeat(64),
+                state: JournalEntryState::BackingUp,
+            }],
+        };
+        validate_backup_tree(root.path(), &backup_dir, &journal).unwrap();
+
+        fs::File::create(backup_dir.join("value"))
+            .unwrap()
+            .set_len(MAX_UNPACKED_BYTES + 1)
+            .unwrap();
+        assert!(validate_backup_tree(root.path(), &backup_dir, &journal).is_err());
     }
 
     #[cfg(any(windows, target_os = "linux"))]
@@ -9236,6 +9329,41 @@ mod tests {
         };
 
         assert!(error.to_string().contains("sparse files are forbidden"));
+    }
+
+    /// A PAX extension record is read whole by the `tar` crate before any
+    /// per-entry check sees it, so the decompressed stream's own bound is
+    /// what refuses an oversized one, before it is allocated in full.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_archive_extension_records_count_against_the_stream_bound() {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        {
+            let mut archive = tar::Builder::new(&mut encoder);
+            let comment = vec![b'x'; 2 * 1024 * 1024];
+            archive
+                .append_pax_extensions([("comment", comment.as_slice())])
+                .unwrap();
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_mode(0o644);
+            header.set_size(4);
+            header.set_cksum();
+            archive
+                .append_data(&mut header, "kettle/payload", b"data".as_slice())
+                .unwrap();
+            archive.finish().unwrap();
+        }
+        let archive = encoder.finish().unwrap();
+
+        let error = match load_linux_package_within(&archive, &fake_update(), 1024 * 1024) {
+            Err(error) => error,
+            Ok(_) => panic!("an oversized extension record was accepted"),
+        };
+        assert!(
+            error.to_string().contains("exceeds the safety limit"),
+            "{error}"
+        );
     }
 
     #[cfg(target_os = "linux")]
