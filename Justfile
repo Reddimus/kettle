@@ -363,6 +363,16 @@ macos-avsync-self-test:
 script-fixture-self-test:
     python3 scripts/perf/kettle-live-probes-self-test.py
     python3 scripts/test-menu-screenshot.py
+    python3 scripts/check-stress-live.py --self-test
+
+# Live stress: binary floods, resize storms, hundreds of tabs, huge pastes
+# and titles, config churn and parallel control clients against a debug
+# build. Each scenario must leave Kettle alive and answering; see the script.
+# Needs a desktop session; S6 borrows and restores the clipboard.
+[unix]
+stress-live *scenarios:
+    cargo build --locked -p kettle
+    python3 scripts/check-stress-live.py --kettle target/debug/kettle --out-dir target/diagnostics/stress-live {{scenarios}}
 
 # Pin the eligibility rule in macos-compare.sh's embedded scorer: Kettle-only
 # measurements cannot count as competitive evidence. The fixture is GUI-free
