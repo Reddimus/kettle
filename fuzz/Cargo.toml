@@ -18,10 +18,13 @@ members = ["."]
 
 [dependencies]
 libfuzzer-sys = "0.4.13"
+kettle-config = { path = "../crates/kettle-config", features = ["fuzzing"] }
 kettle-core = { path = "../crates/kettle-core", features = ["fuzzing"] }
+kettle-ctl = { path = "../crates/kettle-ctl", features = ["fuzzing"] }
 kettle-media = { path = "../crates/kettle-media", features = ["fuzzing"] }
 kettle-media-native = { path = "../crates/kettle-media-native", features = ["fuzzing"] }
 kettle-media-render = { path = "../crates/kettle-media-render", features = ["fuzzing"] }
+kettle-update = { path = "../crates/kettle-update", features = ["fuzzing"] }
 kettle-vt = { path = "../crates/kettle-vt", features = ["fuzzing"] }
 
 # The product workspace's `[patch.crates-io]` does not reach this one, so a
@@ -90,6 +93,27 @@ bench = false
 [[bin]]
 name = "term"
 path = "fuzz_targets/term.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ctl"
+path = "fuzz_targets/ctl.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "update"
+path = "fuzz_targets/update.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config"
+path = "fuzz_targets/config.rs"
 test = false
 doc = false
 bench = false

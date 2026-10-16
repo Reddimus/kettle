@@ -11,6 +11,10 @@ description = "Signed release-feed verification and transactional self-update su
 [lints]
 workspace = true
 
+[features]
+# The entry points the fuzz targets (fuzz/) call. Never in a shipped build.
+fuzzing = []
+
 [dependencies]
 # default-features = false drops 0.23's new default-on `simd-unsafe` feature:
 # hand-written core::arch AVX2/NEON kernels for both encode and decode. Kettle

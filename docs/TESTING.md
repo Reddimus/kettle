@@ -3619,13 +3619,13 @@ Two mermaid traps it catches:
   message text (`OSC 133;A`) truncates the line. Write `#59;`.
 - Quotes inside a node label must be `&quot;`, not `\"`.
 
-## Media fuzzing
+## Fuzzing
 
-What the media worker parses from untrusted bytes has one entry point each,
-called both by an in-process sweep in every test run and by a cargo-fuzz
-target (`fuzz/`) each night. The renderer's and ffprobe's are built only on
-macOS and Linux, where the worker runs; Windows builds neither, and neither
-sweep runs there.
+What Kettle parses from untrusted bytes has one entry point each, called
+both by an in-process sweep in every test run and by a cargo-fuzz target
+(`fuzz/`) each night. The renderer's and ffprobe's are built only on macOS
+and Linux, where the worker runs; Windows builds neither, and neither sweep
+runs there.
 
 | Target | Entry point | What must hold |
 | --- | --- | --- |
@@ -3634,6 +3634,12 @@ sweep runs there.
 | `sniff` | `kettle_media::fuzzing::sniff` | a video's first bytes sniff without a panic or a read past them, whatever length the file is said to have (the answer may change with it: an atom of size zero runs to the end of the file) |
 | `render` | `kettle_media_render::fuzzing::render` | a job the parent could send, of the kind its first byte picks, rendered into a 64-pixel box: no panic outside a guarded library call, and a render that passes the parent's reply checks, fits its box, is the kind asked for and encodes as the worker writes it |
 | `ffprobe` | `kettle_media_native::fuzzing::ffprobe` | ffprobe's description and packet list and ffmpeg's codec list, split at NUL bytes, parse or fail: a description's picture within bounds, turned by a quarter turn, with a frame of at most a thousand seconds; a packet list sorted, distinct and holding its keyframes, every frame it finds for a time one of its own |
+| `vt` | `kettle_vt::fuzzing::vt` | a script of PTY reads and extractor calls, read whole and in pieces, gives the same engine bytes, raw bytes and chunks at the same places; bytes with no ESC pass through untouched; every image is the size it says and within its limits; the graphics account is back to zero once the extractor is gone |
+| `images` | `kettle_vt::fuzzing::images` | Sixel, iTerm2 and Kitty decoding, the completion protocol and the placeholder marks: images within their limits, completion lists within the protocol's caps with no unsafe characters, an inline marker that decodes encodes back to itself |
+| `term` | `kettle_core::fuzzing::term` | a pane's PTY pipeline through resizes, scrollback, scrolling, selection and search: cursor and grid in bounds, links, hints and matches inside the grid and within their caps, selected text within its cap, replies in proportion to what was sent |
+| `ctl` | `kettle_ctl::fuzzing::ctl` | a request stream finds the same newline read in pieces; a request line, `show` request or activation request that parses writes back as itself; pages stay within their limit |
+| `update` | `kettle_update::fuzzing::update` | no manifest verifies under the release key; one signed with a test key and accepted has unique, safely named, bounded assets with a lowercase SHA-256, and any flipped bit voids it; an accepted archive path has only plain relative components |
+| `config` | `kettle_config::fuzzing::config` | a config file reads the same with or without a UTF-8 byte-order mark and with CRLF as with LF; a key bind or color that parses parses again from how Kettle writes it |
 
 The sweeps (`mutated_frames_never_break_the_decoder` and the rest in each
 crate's `fuzzing` module) build their cases with
@@ -5664,7 +5670,7 @@ retained compile/regression checks on **windows**:
 - `fmt --check`, `build --all-targets`, `clippy -D warnings`,
   `cargo test --workspace` on every OS.
 - `.github/workflows/fuzz.yml` runs the fuzz targets each night
-  (see Media fuzzing).
+  (see Fuzzing).
 - `cargo doc --no-deps` with `RUSTDOCFLAGS=-D warnings` (Linux only —
   catches broken intra-doc-links, malformed examples; rustdoc is
   platform-agnostic so one runner suffices).

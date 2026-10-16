@@ -17,6 +17,8 @@
 
 pub mod color;
 pub mod font;
+#[cfg(any(test, feature = "fuzzing"))]
+pub mod fuzzing;
 pub mod fuzzy;
 pub mod keybinds;
 pub mod palette;

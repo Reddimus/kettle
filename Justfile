@@ -96,10 +96,10 @@ media-protocol-test:
     cargo clippy --locked -p kettle-media-worker --all-targets --features test-faults -- -D warnings
     cargo test --locked -p kettle-media-worker --features test-faults
 
-# The media fuzz targets (fuzz/, a workspace of its own) format, compile and
-# lint on stable with the entry points' feature on, so a change to what they
-# call shows here rather than in the nightly fuzz run. Running them needs a
-# nightly and cargo-fuzz (docs/TESTING.md, Media fuzzing). The renderer the
+# The fuzz targets (fuzz/, a workspace of its own) format, compile and lint
+# on stable with the entry points' feature on, so a change to what they call
+# shows here rather than in the nightly fuzz run. Running them needs a
+# nightly and cargo-fuzz (docs/TESTING.md, Fuzzing). The media renderer the
 # targets call is Unix-only.
 [unix]
 fuzz-check:

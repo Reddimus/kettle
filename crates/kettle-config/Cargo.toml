@@ -14,6 +14,10 @@ description = "kettle: configuration parsing, themes, key bindings, and fuzzy ma
 [lints]
 workspace = true
 
+[features]
+# The entry points the fuzz targets (fuzz/) call. Never in a shipped build.
+fuzzing = []
+
 [dependencies]
 kettle-ctl.workspace = true
 bitflags = "2.11.1"

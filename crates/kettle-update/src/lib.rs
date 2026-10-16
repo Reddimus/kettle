@@ -7,6 +7,11 @@
 
 pub mod decision;
 mod feed;
+#[cfg(all(
+    any(test, feature = "fuzzing"),
+    any(windows, target_os = "linux", target_os = "macos")
+))]
+pub mod fuzzing;
 mod install;
 #[cfg(target_os = "macos")]
 mod macos;

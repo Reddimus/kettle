@@ -83,7 +83,7 @@ impl PresenceEntry {
         }
     }
 
-    fn is_valid(&self) -> bool {
+    pub(crate) fn is_valid(&self) -> bool {
         self.v == 1
             && self.pid != 0
             && self.rgb.len() == 7
