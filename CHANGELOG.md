@@ -31,6 +31,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Kettle froze for about 16 seconds and pasted nothing.
 - Tabs in a side tab bar (`tab-position = left` or `right`) reorder by
   dragging, as they do in a top or bottom bar.
+- A left or right tab bar with more tabs than fit the window's height now
+  scrolls with `⌃ ⌄` buttons and the mouse wheel and keeps the active tab in
+  view. The active tab used to be drawn below the window, with `+` on top of
+  another tab.
+- Editing a tab title with a left or right tab bar no longer draws the first
+  tab's name through the editor; the tabs move down a row while it is open.
+- In a window too narrow for one tab between the tab bar's scroll arrows, the
+  active tab narrows to fit instead of covering the arrows and `+`.
 - Update notifications: each release is announced, installed or reported as
   failed with at most one desktop notification across every Kettle process,
   and none of them requests the user's attention any more. A failed automatic

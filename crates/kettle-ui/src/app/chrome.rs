@@ -204,14 +204,13 @@ impl App {
         );
         // Tabs scrolled out of view are parked off-screen (kept in the segment
         // list, idx-indexed, so reorder / dock / ghost logic is undisturbed).
-        const OFFSCREEN_X: f32 = -100_000.0;
         let now = std::time::Instant::now();
         let silence = std::time::Duration::from_millis(self.cfg.tab_silence_threshold_ms);
         let segments: Vec<TabSeg> = labels
             .iter()
             .enumerate()
             .map(|(i, label)| {
-                let x = layout.xs.get(i).copied().flatten().unwrap_or(OFFSCREEN_X);
+                let x = layout.xs.get(i).copied().flatten().unwrap_or(PARKED_TAB);
                 // Per-tab activity dot. Active tabs short-circuit to
                 // Normal (the focused-tab accent already signals "you are here").
                 let activity = ws
@@ -243,12 +242,14 @@ impl App {
                     layout.width
                 };
                 let rect = (x, y, seg_w, height);
-                let close =
-                    tab_close_rect(x + seg_w - height, y, height, self.cfg.close_button_on_tab);
+                // A tab narrowed below its close button's width has no room
+                // for one: the button would reach past it onto the arrows.
+                let closable = self.cfg.close_button_on_tab && seg_w >= height;
+                let close = tab_close_rect(x + seg_w - height, y, height, closable);
                 TabSeg {
                     idx: i,
                     rect,
-                    title_rect: tab_title_rect(rect, close, self.cfg.close_button_on_tab),
+                    title_rect: tab_title_rect(rect, close, closable),
                     // ✕ hit zone = the trailing `height`-wide square.
                     close,
                     title: label.text.clone(),
@@ -328,19 +329,63 @@ impl App {
     }
 
     /// Tab-bar layout for `TabBarPos::Left` / `Right`. Stacks segments
-    /// vertically, each `cfg.tab_bar_width` × `tab_bar_h`. The new-tab `+`
-    /// button follows the last tab, clamped to the bottom of the strip.
+    /// vertically, each `cfg.tab_bar_width` × `tab_bar_h`, with the new-tab
+    /// `+` below them. Rows that do not fit scroll; see [`side_tab_rows`].
     pub(super) fn tab_bar_vertical(&self, ws: &WindowState, band: Rect, height: f32) -> TabBar {
         let (strip_x, _, strip_w, sh) = band;
         let labels = ws.mux.tab_labels(&self.ui_text);
         let active = ws.mux.active;
         let now = std::time::Instant::now();
         let silence = std::time::Duration::from_millis(self.cfg.tab_silence_threshold_ms);
+        // While a title is edited, its editor takes the window's top row
+        // across both the strip and the panes; the strip starts below it.
+        let lead = self.vertical_title_edit_h(ws);
+        let strip_rows = ((sh - lead) / height).floor().max(0.0) as usize;
+        // The update chip takes the strip's last row; the tabs, the scroll
+        // arrows and `+` share the rows above it. A strip with no row to
+        // spare for it shows none.
+        let update_chip = self
+            .update_notice()
+            .filter(|_| strip_rows >= 2)
+            .and_then(|notice| {
+                let cell_w = Self::cell_size(ws).map_or(9.0, |(cw, _)| cw);
+                let inner = strip_w - 2.0 * UPDATE_CHIP_INSET;
+                let fits = |label: &str| update_chip_width(label, cell_w) <= inner;
+                let full = crate::update_notice::chip_label(&notice, false, &self.ui_text);
+                let short = if fits(&full) {
+                    false
+                } else if fits(&crate::update_notice::chip_label(
+                    &notice,
+                    true,
+                    &self.ui_text,
+                )) {
+                    true
+                } else {
+                    return None;
+                };
+                let rect = (
+                    strip_x + UPDATE_CHIP_INSET,
+                    sh - height + UPDATE_CHIP_INSET,
+                    inner,
+                    height - 2.0 * UPDATE_CHIP_INSET,
+                );
+                Some(self.update_chip(ws, &notice, rect, short))
+            });
+        let rows = strip_rows - usize::from(update_chip.is_some());
+        let layout = side_tab_rows(labels.len(), active, rows);
+        let row_y = |row: usize| lead + row as f32 * height;
+        // Rows scrolled out of view are parked off-screen, kept in the segment
+        // list as the horizontal bar keeps its own.
+        let shown = layout.first..layout.first + layout.shown;
         let segments: Vec<TabSeg> = labels
             .iter()
             .enumerate()
             .map(|(i, label)| {
-                let seg_y = i as f32 * height;
+                let seg_y = if shown.contains(&i) {
+                    row_y(layout.top + i - layout.first)
+                } else {
+                    PARKED_TAB
+                };
                 let activity = ws
                     .mux
                     .tabs
@@ -382,38 +427,19 @@ impl App {
                 }
             })
             .collect();
-        // The update chip takes the strip's last row and the `+` button stops
-        // above it; otherwise `+` follows the last tab, clamped to the bottom.
-        let update_chip = self.update_notice().and_then(|notice| {
-            let cell_w = Self::cell_size(ws).map_or(9.0, |(cw, _)| cw);
-            let inner = strip_w - 2.0 * UPDATE_CHIP_INSET;
-            let fits = |label: &str| update_chip_width(label, cell_w) <= inner;
-            let full = crate::update_notice::chip_label(&notice, false, &self.ui_text);
-            let short = if fits(&full) {
-                false
-            } else if fits(&crate::update_notice::chip_label(
-                &notice,
-                true,
-                &self.ui_text,
-            )) {
-                true
-            } else {
-                return None;
-            };
-            let rect = (
-                strip_x + UPDATE_CHIP_INSET,
-                sh - height + UPDATE_CHIP_INSET,
-                inner,
-                height - 2.0 * UPDATE_CHIP_INSET,
-            );
-            Some(self.update_chip(ws, &notice, rect, short))
-        });
-        let plus_bottom = if update_chip.is_some() {
-            sh - 2.0 * height
+        // `+` is left out of a strip with no row to spare for it.
+        let plus_y = if layout.plus < rows {
+            row_y(layout.plus)
         } else {
-            sh - height
+            PARKED_TAB
         };
-        let plus_y = (labels.len() as f32 * height).min(plus_bottom).max(0.0);
+        let arrow = |row: usize| {
+            if layout.arrows {
+                (strip_x, row_y(row), strip_w, height)
+            } else {
+                (0.0, 0.0, 0.0, 0.0)
+            }
+        };
         TabBar {
             height,
             // `y` is the *band start* (top of the strip) for the
@@ -441,9 +467,11 @@ impl App {
             },
             tear_lift: self.tear_lift_for(ws),
             // Re-dock: horizontal insertion line across the strip at the docked
-            // tab's landing slot.
+            // tab's landing slot, or at the near edge of the rows shown when
+            // that slot is scrolled out of view.
             insert_marker: ws.dock_preview.map(|idx| {
-                let iy = (idx.min(labels.len()) as f32 * height)
+                let slot = idx.min(labels.len()).clamp(shown.start, shown.end);
+                let iy = row_y(layout.top + slot - layout.first)
                     .min(sh - kettle_render::tab_drag::INSERT_MARKER_PX)
                     .max(0.0);
                 (
@@ -455,9 +483,10 @@ impl App {
             }),
             // Tear-off UX: the dock-highlight canvas is the whole vertical strip.
             band,
-            // Vertical bars don't overflow-scroll (yet), so they have no arrows.
-            scroll_left: (0.0, 0.0, 0.0, 0.0),
-            scroll_right: (0.0, 0.0, 0.0, 0.0),
+            // `⌃` above the rows shown and `⌄` below them step to the previous
+            // and next tab, which scrolls the strip.
+            scroll_left: arrow(0),
+            scroll_right: arrow(layout.plus.saturating_sub(1)),
             update_chip,
         }
     }

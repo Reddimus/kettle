@@ -2282,12 +2282,12 @@ pub struct TabBar {
     /// `insert_marker` is latched. UI-computed, same geometry-free
     /// contract as `insert_marker`.
     pub band: Rect4,
-    /// `‹` scroll-left button rect, present (non-zero) only when the
-    /// horizontal tab bar overflows (more tabs than fit at `tab_min_width`).
-    /// Clicking it reveals tabs scrolled off the left. `(0,0,0,0)` when the bar
-    /// fits or for vertical bars.
+    /// The back scroll button: `‹` at the start of a top or bottom bar, `⌃`
+    /// above the rows of a side bar. Present (non-zero) only while the bar
+    /// overflows; clicking it steps to the previous tab, which scrolls the
+    /// bar. `(0,0,0,0)` when every tab fits.
     pub scroll_left: Rect4,
-    /// `›` scroll-right button rect (see `scroll_left`).
+    /// The forward scroll button, `›` or `⌄` (see `scroll_left`).
     pub scroll_right: Rect4,
     /// The update chip at the bar's trailing end, if an update notice is
     /// active and the bar has room for it.
@@ -2836,8 +2836,8 @@ pub struct Renderer {
     new_tab_arrow_text: String,
     /// Last label shaped into `update_chip_buffer`.
     update_chip_text: String,
-    /// Last text shaped into the `‹` / `›` overflow scroll-arrow
-    /// buffers (constant glyphs → the gate holds after frame 1).
+    /// Last text shaped into the overflow scroll-arrow buffers; it changes
+    /// only when the bar moves between a side and the top or bottom.
     scroll_left_text: String,
     scroll_right_text: String,
     status_bar_text: String,
@@ -2942,9 +2942,9 @@ pub struct Renderer {
     /// (drawn left of `+`) so it lands precisely in `new_tab_menu` and the `+`
     /// stays put in `new_tab`. Unused when the dropdown is disabled.
     new_tab_arrow_buffer: TextBuffer,
-    /// `‹` / `›` tab-bar overflow scroll-arrow glyphs, each in its own
-    /// buffer (constant glyph, shaped once). Drawn only when the horizontal tab
-    /// bar overflows (more tabs than fit at `tab_min_width`).
+    /// The tab bar's overflow scroll-arrow glyphs (`‹ ›` across a top or
+    /// bottom bar, `⌃ ⌄` down a side one), each in its own buffer, reshaped
+    /// only when the glyph changes. Drawn only while the bar overflows.
     scroll_left_buffer: TextBuffer,
     scroll_right_buffer: TextBuffer,
     /// Single shared `✕` glyph buffer reused for every tab's close
@@ -8100,21 +8100,23 @@ impl Renderer {
                 self.update_chip_buffer
                     .shape_until_scroll(&mut self.font_system, false);
             }
-            // Overflow scroll-arrow glyphs `‹` / `›`, each shaped in its own
-            // buffer and sized to its button rect. Present only when the
-            // horizontal tab bar overflows.
+            // Overflow scroll-arrow glyphs, `‹` / `›` across a top or bottom
+            // bar and `⌃` / `⌄` down a side one, each shaped in its own buffer
+            // and sized to its button rect. Present only while the bar
+            // overflows.
+            let (back, forward) = scroll_arrow_glyphs(cfg.tab_bar_pos.is_vertical());
             if tabbar.scroll_left.2 > 0.0 {
                 self.scroll_left_buffer.set_metrics(metrics);
                 self.scroll_left_buffer
-                    .set_size(Some(tabbar.scroll_left.2), Some(tabbar.height));
-                if self.scroll_left_text != " ‹" {
+                    .set_size(Some(tabbar.scroll_left.2), Some(tabbar.scroll_left.3));
+                if self.scroll_left_text != back {
                     self.scroll_left_buffer.set_text(
-                        " ‹",
+                        back,
                         &Attrs::new().family(Family::Name(&family)),
                         Shaping::Advanced,
                         None,
                     );
-                    self.scroll_left_text = " ‹".into();
+                    self.scroll_left_text = back.into();
                 }
                 self.scroll_left_buffer
                     .shape_until_scroll(&mut self.font_system, false);
@@ -8122,15 +8124,15 @@ impl Renderer {
             if tabbar.scroll_right.2 > 0.0 {
                 self.scroll_right_buffer.set_metrics(metrics);
                 self.scroll_right_buffer
-                    .set_size(Some(tabbar.scroll_right.2), Some(tabbar.height));
-                if self.scroll_right_text != " ›" {
+                    .set_size(Some(tabbar.scroll_right.2), Some(tabbar.scroll_right.3));
+                if self.scroll_right_text != forward {
                     self.scroll_right_buffer.set_text(
-                        " ›",
+                        forward,
                         &Attrs::new().family(Family::Name(&family)),
                         Shaping::Advanced,
                         None,
                     );
-                    self.scroll_right_text = " ›".into();
+                    self.scroll_right_text = forward.into();
                 }
                 self.scroll_right_buffer
                     .shape_until_scroll(&mut self.font_system, false);
@@ -9368,37 +9370,36 @@ impl Renderer {
                     custom_glyphs: &[],
                 });
             }
-            // Overflow scroll-arrow glyphs `‹` / `›` at the strip edges.
-            if tabbar.scroll_left.2 > 0.0 {
-                let (ax, _, aw, _) = tabbar.scroll_left;
-                areas.push(TextArea {
-                    buffer: &self.scroll_left_buffer,
-                    left: ax + 4.0,
-                    top: tabbar.y + 4.0,
-                    scale: 1.0,
-                    bounds: TextBounds {
+            // Overflow scroll-arrow glyphs: `‹` / `›` at the ends of a top or
+            // bottom strip, `⌃` / `⌄` centered in their rows on a side one.
+            let vertical = cfg.tab_bar_pos.is_vertical();
+            for (rect, buffer) in [
+                (tabbar.scroll_left, &self.scroll_left_buffer),
+                (tabbar.scroll_right, &self.scroll_right_buffer),
+            ] {
+                if rect.2 <= 0.0 {
+                    continue;
+                }
+                let (ax, _, aw, _) = rect;
+                let (left, top, bounds) = if vertical {
+                    let glyph_w = buffer.layout_runs().next().map_or(cw, |run| run.line_w);
+                    let (left, top) = centered_text_origin(rect, (glyph_w, ch));
+                    (left, top, text_bounds_for_rect(rect))
+                } else {
+                    let bounds = TextBounds {
                         left: ax as i32,
                         top: ty,
                         right: (ax + aw) as i32,
                         bottom: tb,
-                    },
-                    default_color: GColor::rgb(fg.r, fg.g, fg.b),
-                    custom_glyphs: &[],
-                });
-            }
-            if tabbar.scroll_right.2 > 0.0 {
-                let (ax, _, aw, _) = tabbar.scroll_right;
+                    };
+                    (ax + 4.0, tabbar.y + 4.0, bounds)
+                };
                 areas.push(TextArea {
-                    buffer: &self.scroll_right_buffer,
-                    left: ax + 4.0,
-                    top: tabbar.y + 4.0,
+                    buffer,
+                    left,
+                    top,
                     scale: 1.0,
-                    bounds: TextBounds {
-                        left: ax as i32,
-                        top: ty,
-                        right: (ax + aw) as i32,
-                        bottom: tb,
-                    },
+                    bounds,
                     default_color: GColor::rgb(fg.r, fg.g, fg.b),
                     custom_glyphs: &[],
                 });
@@ -9788,6 +9789,8 @@ impl Renderer {
             self.status_bar_text.hash(&mut h);
             self.tab_close_text.hash(&mut h);
             self.new_tab_arrow_text.hash(&mut h);
+            self.scroll_left_text.hash(&mut h);
+            self.scroll_right_text.hash(&mut h);
             self.update_chip_text.hash(&mut h);
             self.resize_overlay_text.hash(&mut h);
             self.ime_text.hash(&mut h);
@@ -14797,6 +14800,16 @@ const NEW_TAB_PLUS_GLYPH: &str = "+";
 /// Keeping this independent of the font's advance and the tab-bar height is
 /// what makes visually different symbols such as `▾` and `+` share one optical
 /// center without hard-coded spaces or padding that drift across fonts/scales.
+/// The tab bar's overflow arrows, back and forward: chevrons across a top or
+/// bottom bar, and their upright forms down a side one.
+fn scroll_arrow_glyphs(vertical: bool) -> (&'static str, &'static str) {
+    if vertical {
+        ("⌃", "⌄")
+    } else {
+        (" ‹", " ›")
+    }
+}
+
 fn centered_text_origin(rect: Rect4, text_size: (f32, f32)) -> (f32, f32) {
     let (x, y, w, h) = rect;
     let (text_w, text_h) = text_size;
@@ -22288,6 +22301,22 @@ mod completion_panel_tests {
             .and_then(|rest| rest.split("let chrome_changed =").next())
             .expect("retained chrome hash body");
         assert!(hash.contains("self.update_chip_text.hash(&mut h);"));
+    }
+
+    /// A side bar's overflow arrows point along it, and since one buffer
+    /// holds either glyph, the text counts toward the chrome's damage key.
+    #[test]
+    fn side_bar_scroll_arrows_point_along_the_strip() {
+        assert_eq!(crate::scroll_arrow_glyphs(false), (" ‹", " ›"));
+        assert_eq!(crate::scroll_arrow_glyphs(true), ("⌃", "⌄"));
+        let source = production_source();
+        let hash = source
+            .split("let chrome_hash = {")
+            .nth(1)
+            .and_then(|rest| rest.split("let chrome_changed =").next())
+            .expect("retained chrome hash body");
+        assert!(hash.contains("self.scroll_left_text.hash(&mut h);"));
+        assert!(hash.contains("self.scroll_right_text.hash(&mut h);"));
     }
 
     #[test]

@@ -15183,6 +15183,197 @@ fn tab_strip_layout_fills_and_overflows() {
     );
 }
 
+/// A side tab bar shows the active tab and `+` however many tabs there are.
+/// It once stacked every tab from the top and clamped `+` to the bottom row,
+/// so past a screenful the active tab was drawn below the window and `+`
+/// covered a tab.
+#[test]
+fn side_tab_rows_keep_the_active_tab_and_plus_in_view() {
+    use super::{SideTabRows, side_tab_rows};
+    let fits = |n| SideTabRows {
+        first: 0,
+        shown: n,
+        top: 0,
+        plus: n,
+        arrows: false,
+    };
+    // Every tab and `+` fit: tabs from the top, `+` right below the last.
+    assert_eq!(side_tab_rows(3, 2, 13), fits(3));
+    assert_eq!(side_tab_rows(12, 11, 13), fits(12));
+    // One more and the strip scrolls: `⌃`, ten tabs, `⌄`, then `+` on the
+    // last row, with the window ending at the active tab past page one.
+    let scrolled = |first| SideTabRows {
+        first,
+        shown: 10,
+        top: 1,
+        plus: 12,
+        arrows: true,
+    };
+    assert_eq!(side_tab_rows(13, 0, 13), scrolled(0));
+    assert_eq!(side_tab_rows(13, 9, 13), scrolled(0));
+    assert_eq!(side_tab_rows(13, 10, 13), scrolled(1));
+    assert_eq!(side_tab_rows(13, 12, 13), scrolled(3));
+    // Too short for the arrows: the active tab and `+`.
+    assert_eq!(
+        side_tab_rows(5, 4, 2),
+        SideTabRows {
+            first: 4,
+            shown: 1,
+            top: 0,
+            plus: 1,
+            arrows: false,
+        }
+    );
+    for n in 1..48 {
+        for rows in 0..20 {
+            for active in 0..n {
+                let l = side_tab_rows(n, active, rows);
+                assert!(
+                    (l.first..l.first + l.shown).contains(&active) && l.first + l.shown <= n,
+                    "{n} tabs, {rows} rows, active {active}: {l:?}"
+                );
+                if rows < 2 {
+                    // One row or less: the active tab alone, `+` left out.
+                    assert!(
+                        l.shown == 1 && l.plus >= rows,
+                        "{n} tabs, {rows} rows: {l:?}"
+                    );
+                    continue;
+                }
+                assert!(l.plus < rows, "{n} tabs, {rows} rows: + below the strip");
+                let arrow_rows = usize::from(l.arrows);
+                assert_eq!(l.top, arrow_rows);
+                assert!(
+                    l.top + l.shown + arrow_rows <= l.plus,
+                    "{n} tabs, {rows} rows: + or ⌄ covers a tab: {l:?}"
+                );
+            }
+        }
+    }
+}
+
+/// The side bar lays its rows out through `side_tab_rows` and parks the tabs
+/// it does not show, rather than stacking every tab from the top.
+#[test]
+fn the_side_tab_bar_places_rows_through_side_tab_rows() {
+    let src = production_source();
+    let body = src
+        .split("fn tab_bar_vertical(")
+        .nth(1)
+        .and_then(|rest| rest.split("\n    fn ").next())
+        .expect("tab_bar_vertical body");
+    assert!(body.contains("let layout = side_tab_rows(labels.len(), active, rows);"));
+    assert!(body.contains("row_y(layout.top + i - layout.first)"));
+    assert!(!body.contains("i as f32 * height"));
+    // A title editor takes the top row of the window, strip included, so the
+    // rows start below it rather than under it.
+    assert!(body.contains("let lead = self.vertical_title_edit_h(ws);"));
+    assert!(body.contains("let row_y = |row: usize| lead + row as f32 * height;"));
+    assert!(body.contains("let strip_rows = ((sh - lead) / height).floor()"));
+    // `+` and the update chip are left out of a strip with no row for them.
+    assert!(body.contains("let plus_y = if layout.plus < rows {"));
+    assert!(body.contains(".filter(|_| strip_rows >= 2)"));
+    // A narrowed horizontal tab has no close button reaching past it.
+    let horizontal = src
+        .split("fn tab_bar(&self, ws: &WindowState) -> TabBar {")
+        .nth(1)
+        .and_then(|rest| rest.split("\n    fn ").next())
+        .expect("tab_bar body");
+    assert!(horizontal.contains("let closable = self.cfg.close_button_on_tab && seg_w >= height;"));
+}
+
+fn parked_strip(vertical: bool) -> Vec<kettle_render::TabSeg> {
+    // Ten tabs, 2..=4 on screen and the rest parked, as an overflowing bar
+    // lays them out.
+    (0..10)
+        .map(|idx| {
+            let at = if (2..=4).contains(&idx) {
+                (idx - 2) as f32 * 30.0 + 24.0
+            } else {
+                super::PARKED_TAB
+            };
+            let rect = if vertical {
+                (0.0, at, 160.0, 30.0)
+            } else {
+                (at, 0.0, 30.0, 24.0)
+            };
+            kettle_render::TabSeg {
+                idx,
+                rect,
+                title_rect: rect,
+                close: (0.0, 0.0, 0.0, 0.0),
+                title: format!("tab-{idx}"),
+                path: None,
+                active: idx == 2,
+                activity: kettle_render::TabActivity::Normal,
+            }
+        })
+        .collect()
+}
+
+/// A drag past the last tab on screen stops there, and a drop lands right
+/// after it, on either bar axis. Both once reached the hidden last tab: a
+/// drag onto `⌄` or `›` moved the tab to the very end, and a drop appended
+/// after every hidden tab.
+#[test]
+fn dragging_and_docking_stop_at_the_tabs_on_screen() {
+    use super::{dock_insertion_tab, tab_drag_target_index};
+    for vertical in [true, false] {
+        let segs = parked_strip(vertical);
+        let at = |main: f32| if vertical { (80.0, main) } else { (main, 12.0) };
+        let (x, y) = at(24.0 + 3.0 * 30.0 + 10.0);
+        assert_eq!(tab_drag_target_index(x, y, &segs), 4, "past the last shown");
+        let (x, y) = at(5.0);
+        assert_eq!(
+            tab_drag_target_index(x, y, &segs),
+            2,
+            "before the first shown"
+        );
+        let (x, y) = at(24.0 + 30.0 + 5.0);
+        assert_eq!(tab_drag_target_index(x, y, &segs), 3);
+
+        assert_eq!(
+            dock_insertion_tab(&segs, vertical, 24.0 + 2.0 * 30.0 + 20.0),
+            Some(5)
+        );
+        assert_eq!(dock_insertion_tab(&segs, vertical, 24.0 + 5.0), Some(2));
+        assert_eq!(
+            dock_insertion_tab(&segs, vertical, 24.0 + 30.0 + 20.0),
+            Some(4)
+        );
+    }
+    assert_eq!(dock_insertion_tab(&[], true, 10.0), None);
+}
+
+/// A strip with less than `tab-min-width` between its scroll arrows still
+/// keeps the active tab between them. It was once drawn at full width over
+/// `›`, `▾` and `+` in a window about 120 px wide.
+#[test]
+fn an_overflowing_tab_strip_keeps_its_tabs_between_the_arrows() {
+    use super::tab_strip_layout;
+    for strip in [12.0_f32, 30.0, 71.5, 100.0, 167.0, 400.0, 1000.0] {
+        for n in [2_usize, 5, 40] {
+            for active in [0, n / 2, n - 1] {
+                let l = tab_strip_layout(n, active, strip, 48.5, 24.25, 120.0, true);
+                let Some(right) = l.arrow_right else {
+                    continue;
+                };
+                let arrow_w = strip - right;
+                assert!(l.xs[active].is_some(), "{strip} px, {n} tabs: active shown");
+                for (i, x) in l.xs.iter().enumerate() {
+                    let Some(x) = *x else { continue };
+                    let w = if i + 1 == n { l.last_width } else { l.width };
+                    assert!(
+                        x >= arrow_w - 0.01 && x + w <= right + 0.01,
+                        "{strip} px, {n} tabs, active {active}: tab {i} at {x}..{} leaves {arrow_w}..{right}",
+                        x + w
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// The 2-tab boundary must line up with a centered vertical pane split so
 /// the split divider visually continues the tab boundary. With the trailing
 /// `▾`/`+` reservation, tabs divide the FULL bar width and only the last tab
