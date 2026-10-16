@@ -11,12 +11,15 @@ impl App {
             return false;
         };
         let size = window.inner_size();
-        let (cw, ch) = self.cell_px(ws);
+        let (cw, ch) = (
+            self.overlay_text_cell_width(ws),
+            self.overlay_text_line_height(ws),
+        );
         confirm_dialog_button_hit(
             &dialog.buttons,
             (ws.cursor.x as f32, ws.cursor.y as f32),
             (size.width as f32, size.height as f32),
-            (cw as f32, ch as f32),
+            (cw, ch),
             &self.ui_text,
         )
         .is_some()
@@ -26,12 +29,15 @@ impl App {
         let dialog = ws.confirm_dialog.as_ref()?;
         let window = ws.window.as_ref()?;
         let size = window.inner_size();
-        let (cw, ch) = self.cell_px(ws);
+        let (cw, ch) = (
+            self.overlay_text_cell_width(ws),
+            self.overlay_text_line_height(ws),
+        );
         let idx = confirm_dialog_button_hit(
             &dialog.buttons,
             (ws.cursor.x as f32, ws.cursor.y as f32),
             (size.width as f32, size.height as f32),
-            (cw as f32, ch as f32),
+            (cw, ch),
             &self.ui_text,
         )?;
         match dialog.buttons.get(idx)? {
@@ -194,6 +200,7 @@ impl App {
             label_cols,
             value_cols,
             active_category: cat,
+            background_page: active.name == kettle_i18n::Text::SettingsCategoryBackground,
             rows: active
                 .fields
                 .iter()

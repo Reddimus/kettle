@@ -520,6 +520,9 @@ impl MappedRing {
     /// A new buffer of `size` bytes, mapped at creation. wgpu maps a
     /// `MAP_WRITE` buffer directly rather than through a staging copy.
     fn create(&self, device: &wgpu::Device, size: u64) -> Option<MappedSlot> {
+        if size > device.limits().max_buffer_size {
+            return None;
+        }
         let charge = match &self.budget {
             Some(budget) => Some(budget.reserve_gpu(usize::try_from(size).ok()?)?),
             None => None,

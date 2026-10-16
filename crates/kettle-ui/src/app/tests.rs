@@ -1,5 +1,32 @@
 const EN_TEXT: kettle_i18n::Translator = kettle_i18n::Translator::new(kettle_i18n::Language::En);
 
+/// Confirmation buttons are hit-tested with the metrics the renderer paints
+/// them with: the chrome font's advance and line height, not the terminal
+/// cell. With `cell-width = 0.5` the two differ by half, and a click on empty
+/// space could confirm a destructive action.
+#[test]
+fn confirmation_hits_use_the_painted_chrome_metrics() {
+    let source = include_str!("modals.rs");
+    for function in [
+        "pub(super) fn confirm_button_hovered(",
+        "pub(super) fn confirm_button_click_result(",
+    ] {
+        let body = source
+            .split_once(function)
+            .unwrap()
+            .1
+            .split("confirm_dialog_button_hit(")
+            .next()
+            .unwrap();
+        assert!(
+            body.contains(concat!("self.overlay_text_", "cell_width(ws)"))
+                && body.contains(concat!("self.overlay_text_", "line_height(ws)"))
+                && !body.contains("cell_px("),
+            "{function}"
+        );
+    }
+}
+
 #[test]
 fn failed_additional_window_restore_preserves_source_session() {
     let src = super::production_source();

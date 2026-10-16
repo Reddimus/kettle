@@ -4190,40 +4190,15 @@ fn confirm_dialog_button_hit(
     if buttons.is_empty() || window_w <= 0.0 || window_h <= 0.0 || cell_w <= 0.0 || cell_h <= 0.0 {
         return None;
     }
-
-    let bar_h = cell_h + 10.0;
-    let bar_y = window_h - bar_h;
-    if py < bar_y || py >= window_h {
-        return None;
-    }
-
-    let gap_cells = 2usize;
-    let buttons_cells = buttons
+    let geometry = kettle_render::ConfirmBarGeometry::new((window_w, window_h), (cell_w, cell_h));
+    let widths: Vec<_> = buttons
         .iter()
         .map(|button| confirm_dialog_button_cells(button, tr))
-        .sum::<usize>()
-        + gap_cells.saturating_mul(buttons.len().saturating_sub(1));
-    // Use the renderer's exact painted budget: one column narrower than the
-    // window to allow for glyph overhang and fractional cell metrics.
-    let cols = kettle_render::confirm_bar_columns(window_w, cell_w);
-    if buttons_cells == 0 || buttons_cells > cols {
-        return None;
-    }
-
-    let mut x_cells = cols - buttons_cells;
-    for (idx, button) in buttons.iter().enumerate() {
-        let w_cells = confirm_dialog_button_cells(button, tr);
-        let x0 = x_cells as f32 * cell_w;
-        let x1 = (x_cells + w_cells) as f32 * cell_w;
-        if px >= x0 && px < x1 {
-            return Some(idx);
-        }
-        x_cells += w_cells;
-        if idx + 1 < buttons.len() {
-            x_cells += gap_cells;
-        }
-    }
-    None
+        .collect();
+    geometry
+        .button_rects(&widths)
+        .iter()
+        .position(|&(x, y, w, h)| px >= x && px < x + w && py >= y && py < y + h)
 }
 
 /// Pure: which tab segment's close-button (`✕`) rect contains the cursor,
