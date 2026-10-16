@@ -289,7 +289,11 @@ Multiple selected files paste as space-separated quoted paths. Paths are quoted
 for the focused pane's shell (POSIX single-quote, PowerShell `''`, or `cmd`
 double-quote), and when the pane runs **WSL** a Windows path is translated to
 its `/mnt/c/…` (or in-distro `/home/…` for a `\\wsl.localhost\…` share) form so
-the Linux-side agent can open it. There is no video decoder in either client;
+the Linux-side agent can open it. A name no quoting can carry exactly is not
+pasted, and a notice says so: one holding a control character (the terminal
+acts on it before the shell sees it), one that is not Unicode, or, for `cmd`,
+one holding `%` or `!`, which `cmd` expands inside double quotes. There is no
+video decoder in either client;
 the path lets the agent read the video's frames with `kettle_video_frames` (full
 MCP) or `kettle video-frames` (any shell).
 

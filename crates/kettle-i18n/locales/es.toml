@@ -242,6 +242,7 @@ notify_body_drop_unreadable = "No se pudieron leer los archivos soltados. Suelta
 notify_body_image_gone = "El archivo de imagen pegado ya no está disponible."
 notify_body_input_backpressured = "No se pudo entregar la entrada porque un proceso hijo no la acepta con suficiente rapidez. Si está activo el envío de la entrada a varios paneles, es posible que algunos ya la hayan recibido; comprobarlo antes de reintentar."
 notify_body_input_failed = "Falló el canal de entrada del panel. Kettle cerrará el panel afectado."
+notify_body_path_not_typed = "Un nombre de archivo no se puede escribir tal cual en este shell, así que no se pegó nada."
 notify_body_input_oversize = "La entrada superó el límite de seguridad por mensaje de Kettle y no se entregó. Si está activo el envío de la entrada a varios paneles, comprobar los demás paneles antes de reintentar."
 notify_body_keybind_modifier = "Mantener presionada Ctrl, Alt o Shift mientras se pulsa la tecla (o asignar una tecla F)."
 notify_body_lua_not_delivered = "El panel de destino ({pane}) de un send_text de Lua en cola se cerró antes de entregar el comando. El comando se descartó y no se redirigió."

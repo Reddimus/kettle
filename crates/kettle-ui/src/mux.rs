@@ -4783,6 +4783,19 @@ pub(crate) fn quote_path_for(kind: PaneShellKind, s: &str) -> String {
     }
 }
 
+/// Whether `path` can be typed into a pane running `argv` exactly as it is.
+/// No quoting protects a control character, which the terminal acts on
+/// before the shell sees it: Ctrl+U erases the line, and a newline submits
+/// it. A name that is not Unicode would arrive as a different name. And cmd
+/// expands `%` and, with delayed expansion, `!` inside double quotes.
+pub(crate) fn path_types_exactly(argv: &[String], path: &std::path::Path) -> bool {
+    let Some(text) = path.to_str() else {
+        return false;
+    };
+    !text.chars().any(char::is_control)
+        && !(shell_kind_for_argv(argv) == PaneShellKind::Cmd && text.contains(['%', '!']))
+}
+
 /// Format OS file paths (from a clipboard file-list or a drag-drop) into text
 /// to feed the focused pane: translate to the pane's WSL path when it runs
 /// WSL, quote each for the pane's shell family, and space-join multiple paths.
@@ -7420,6 +7433,48 @@ mod node_tests {
                 launch_cwd(s(command), Some("/current".into())),
                 (expected, None)
             );
+        }
+    }
+
+    /// A control character is acted on by the terminal before any shell
+    /// quoting applies, so no shell takes one. cmd expands `%` and `!` inside
+    /// its double quotes; the other shells take both.
+    #[test]
+    fn path_types_exactly_refuses_what_quoting_cannot_carry() {
+        use std::path::Path;
+        let s = |a: &[&str]| a.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let shells = [
+            s(&["/bin/sh"]),
+            s(&["pwsh.exe"]),
+            s(&["cmd.exe"]),
+            s(&["wsl.exe"]),
+        ];
+        for argv in &shells {
+            for name in [
+                "\u{15}touch PWNED #\n",
+                "a\tb",
+                "a\rb",
+                "\u{1b}[2J",
+                "\u{7f}",
+                "\u{85}",
+            ] {
+                assert!(
+                    !path_types_exactly(argv, Path::new(name)),
+                    "{argv:?} {name:?}"
+                );
+            }
+            assert!(path_types_exactly(argv, Path::new("/tmp/clip 'v2'.mp4")));
+        }
+        for name in [r"C:\tmp\%USERNAME%.txt", r"C:\tmp\wow!.txt"] {
+            assert!(!path_types_exactly(&s(&["cmd.exe"]), Path::new(name)));
+            assert!(path_types_exactly(&s(&["pwsh.exe"]), Path::new(name)));
+            assert!(path_types_exactly(&s(&["wsl.exe"]), Path::new(name)));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt as _;
+            let lossy = Path::new(std::ffi::OsStr::from_bytes(b"/tmp/\xffname"));
+            assert!(!path_types_exactly(&s(&["/bin/sh"]), lossy));
         }
     }
 

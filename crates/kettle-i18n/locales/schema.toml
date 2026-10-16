@@ -429,6 +429,9 @@ context = "crates/kettle-ui/src/app.rs: desktop notification body. Safety warnin
 [messages.notify_body_input_failed]
 context = "crates/kettle-ui/src/app.rs: desktop notification body."
 
+[messages.notify_body_path_not_typed]
+context = "crates/kettle-ui/src/app/paste.rs: desktop notification body when a dropped or pasted file name holds a control character, is not Unicode, or holds % or ! for cmd. Nothing was pasted."
+
 [messages.notify_body_input_oversize]
 context = "crates/kettle-ui/src/app.rs: desktop notification body. Safety warning."
 
