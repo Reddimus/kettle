@@ -4138,6 +4138,50 @@ mod tests {
         assert_eq!(budget.usage().0, 8);
     }
 
+    /// The same images make the same quota request, listed in id order. The
+    /// request once listed them in hash-map order, which differs from one
+    /// extractor to the next. Found by the `vt` fuzz target.
+    #[test]
+    fn a_quota_request_lists_its_images_in_id_order() {
+        let request = |_: usize| {
+            let budget = crate::GraphicsBudget::isolated(crate::GraphicsLimits {
+                image_bytes: 4,
+                retained_bytes: 32,
+                ..crate::GraphicsLimits::default()
+            })
+            .unwrap();
+            let mut extractor = Extractor::with_budget(budget);
+            for id in 1..=8 {
+                extractor
+                    .kitty_mut()
+                    .feed(&format!("a=t,i={id},f=32,s=1,v=1;AQID/w=="));
+            }
+            let mut found = None;
+            extractor.feed_with(b"\x1b_Ga=t,i=9,f=32,s=1,v=1;BQYH/w==\x1b\\", |_, chunk| {
+                if let Chunk::ImageQuota(request) = chunk {
+                    found = Some(request);
+                }
+            });
+            found.expect("a full store asks for room")
+        };
+        let first = request(0);
+        // Images 1 to 8 were created in id order, so id order is creation order.
+        let created: Vec<u64> = first.images.iter().map(|image| image.created).collect();
+        assert_eq!(created.len(), 8);
+        assert!(created.is_sorted(), "images out of id order: {created:?}");
+        let keys = |request: &crate::quota::QuotaRequest| {
+            format!(
+                "{:?}",
+                request
+                    .images
+                    .iter()
+                    .map(|image| image.key)
+                    .collect::<Vec<_>>()
+            )
+        };
+        assert_eq!(keys(&first), keys(&request(1)));
+    }
+
     #[test]
     fn releasing_a_retired_snapshot_before_planning_preserves_existing_roots() {
         let budget = crate::GraphicsBudget::isolated(crate::GraphicsLimits {
