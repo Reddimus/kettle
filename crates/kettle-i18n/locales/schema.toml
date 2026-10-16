@@ -20,9 +20,6 @@ context = "crates/kettle-ui/src/app/menus.rs open_about_panel: About panel row."
 [messages.about_open_release]
 context = "crates/kettle-ui/src/app/menus.rs open_about_panel: About panel row. The page of an available update's release."
 
-[messages.about_update_available]
-context = "crates/kettle-ui/src/app/menus.rs open_about_panel: About panel row. tag is a release tag such as v5.0.0, verbatim."
-args = [{ name = "tag", type = "str" }]
 
 [messages.about_update_unknown]
 context = "crates/kettle-ui/src/app/menus.rs open_about_panel: About panel row. No update check has finished."
@@ -1573,16 +1570,80 @@ context = "crates/kettle-ui/src/settings.rs read(): Settings value."
 context = "crates/kettle-ui/src/mux.rs tab_labels: tab bar label of a tab with no title and no known directory. number counts tabs from 1. Lowercase, like the English."
 args = [{ name = "number", type = "u64" }]
 
+[messages.update_chip_available]
+context = "crates/kettle-ui/src/app/chrome.rs update_chip_label: the update chip in the tab bar, a new release. Keep it short. tag is a release tag such as v5.2.0."
+args = [{ name = "tag", type = "str" }]
+
+[messages.update_chip_restart]
+context = "crates/kettle-ui/src/app/chrome.rs update_chip_label: the update chip when a newer version is installed than this window runs. Keep it short. tag is a release tag."
+args = [{ name = "tag", type = "str" }]
+
+[messages.update_chip_failed]
+context = "crates/kettle-ui/src/app/chrome.rs update_chip_label: the update chip after automatic installs failed. Keep it short."
+
+[messages.update_fact_available]
+context = "crates/kettle-ui/src/update_notice.rs fact_rows: menu and About row. tag is a release tag; 'versión' is feminine."
+args = [{ name = "tag", type = "str" }]
+
+[messages.update_fact_installed]
+context = "crates/kettle-ui/src/update_notice.rs fact_rows: menu and About row. installed and running are release tags."
+args = [{ name = "installed", type = "str" }, { name = "running", type = "str" }]
+
+[messages.update_fact_failed]
+context = "crates/kettle-ui/src/update_notice.rs fact_rows: menu and About row after automatic installs failed. tag is a release tag."
+args = [{ name = "tag", type = "str" }]
+
+[messages.update_fact_installing]
+context = "crates/kettle-ui/src/update_notice.rs fact_rows: About row while update-policy = auto installs a release. tag is a release tag."
+args = [{ name = "tag", type = "str" }]
+
+[messages.update_fact_off]
+context = "crates/kettle-ui/src/update_notice.rs fact_rows: About row when update-policy = off."
+
+[messages.update_fact_up_to_date]
+context = "crates/kettle-ui/src/update_notice.rs fact_rows: About row. tag is the latest release, which this window runs."
+args = [{ name = "tag", type = "str" }]
+
+[messages.update_restart_new_launches]
+context = "crates/kettle-ui/src/update_notice.rs fact_rows: after the installed-version row, Linux and Windows. tag is a release tag."
+args = [{ name = "tag", type = "str" }]
+
+[messages.update_restart_quit_macos]
+context = "crates/kettle-ui/src/update_notice.rs fact_rows: after the installed-version row on macOS, where a Dock click returns to the running app. tag is a release tag."
+args = [{ name = "tag", type = "str" }]
+
+[messages.update_menu_whats_new]
+context = "crates/kettle-ui/src/app/menus.rs open_update_menu: menu row that opens the release page. tag is a release tag."
+args = [{ name = "tag", type = "str" }]
+
+[messages.update_menu_dismiss]
+context = "crates/kettle-ui/src/app/menus.rs open_update_menu: menu row that hides the update notice."
+
+[messages.about_update_install_cli]
+context = "crates/kettle-ui/src/update_notice.rs fact_rows: About row for an install Kettle manages. Keep `kettle update` exactly."
+
+[messages.palette_open_update]
+context = "crates/kettle-ui/src/app.rs palette_entries: command palette row while an update notice is active. tag is a release tag."
+args = [{ name = "tag", type = "str" }]
+
+[messages.palette_dismiss_update]
+context = "crates/kettle-ui/src/app.rs palette_entries: command palette row while an update notice is active."
+
+[messages.update_a11y_restart]
+context = "crates/kettle-ui/src/app/accessibility.rs: screen-reader name of the update chip when a newer version is installed. tag is a release tag."
+args = [{ name = "tag", type = "str" }]
+
+[messages.update_a11y_failed]
+context = "crates/kettle-ui/src/app/accessibility.rs: screen-reader name of the update chip after automatic installs failed. tag is a release tag."
+args = [{ name = "tag", type = "str" }]
+
+[messages.menu_a11y_update]
+context = "crates/kettle-ui/src/app.rs: screen-reader name of the update chip's menu."
+
 [messages.update_a11y_available]
 context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader name of the update banner. tag is a version such as v5.0.0."
 args = [{ name = "tag", type = "str" }]
 
-[messages.update_a11y_open]
-context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader description of the update banner, which opens the release page in a browser."
-
-[messages.update_banner]
-context = "crates/kettle-render/src/lib.rs: passive banner at the bottom of the window when a newer release exists. kettle is the product name, kept lowercase; tag is a version; url is the release page. Keep the four spaces before the parenthesis."
-args = [{ name = "tag", type = "str" }, { name = "url", type = "str" }]
 
 [messages.window_title_gpu_lost]
 context = "crates/kettle-ui/src/app.rs redraw: window title while Kettle recovers from a lost GPU device (a driver reset). kettle is the product name, kept lowercase; keep the hyphen separators."

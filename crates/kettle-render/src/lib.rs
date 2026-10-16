@@ -536,6 +536,7 @@ mod context_menu_row_width_tests {
             scroll_offset: 0,
             panel_w_clamped: 237.5,
             panel_h_clamped: 0.0,
+            a11y_label: None,
         };
         assert_eq!(context_menu_panel_width(&menu, 9.6), 237.5);
     }
@@ -592,6 +593,7 @@ mod context_menu_row_width_tests {
             scroll_offset: 0,
             panel_w_clamped: 1.0,
             panel_h_clamped: 1.0,
+            a11y_label: None,
         };
         let theme = kettle_config::Theme::default();
         let quads = menu_chrome_quads(&menu, &theme, kettle_config::Rgb::new(1, 2, 3), 8.0, 16.0);
@@ -720,7 +722,6 @@ fn text_overlay_requires_continuous_prepare(overlay: &Overlay) -> bool {
         || overlay.confirm_dialog.is_some()
         || overlay.settings.is_some()
         || overlay.resize_overlay.is_some()
-        || overlay.update_available.is_some()
 }
 
 /// Disabled and secondary menu text: 45% foreground over the panel
@@ -770,6 +771,8 @@ pub struct ContextMenu {
     /// position the ▲/▼ arrows. Zero means "no clamp", in which
     /// case the renderer falls back to the natural panel height.
     pub panel_h_clamped: f32,
+    /// What a screen reader calls the menu, when it is not the terminal's.
+    pub a11y_label: Option<String>,
 }
 
 /// Width shared by context-menu buffer preparation, text placement, chrome,
@@ -1221,11 +1224,6 @@ pub struct Overlay {
     /// transient size chip should paint (the app owns the timing; the
     /// renderer just draws a centered `cols×rows` chip above everything).
     pub resize_overlay: Option<(u16, u16)>,
-    /// `Some((tag, url))` while the "a newer kettle release is
-    /// available" banner is showing. Rendered as a passive, lowest-priority
-    /// bottom bar — any real modal (search/palette/…) takes the bar instead,
-    /// and it returns when they close. Dismissed with Esc, opened with Enter.
-    pub update_available: Option<(String, String)>,
     /// Terminator parity (drag a terminal elsewhere in its tab): `Some(rect)`
     /// while a live pane drag has a drop target latched. The rect is the half
     /// of the target pane the dropped terminal would take, washed in accent
@@ -2010,11 +2008,6 @@ pub fn media_paste_receipt_geometry(
         openable: receipt.openable,
         compact: true,
     })
-}
-
-/// The passive update banner's text before it is fitted to the window.
-fn update_banner_label(tr: &Translator, tag: &str, url: &str) -> String {
-    format!("  ⬆ {}", tr.update_banner(tag, url))
 }
 
 /// Detail columns an expanded remote card needs: its widest warning line in
@@ -7975,60 +7968,6 @@ impl Renderer {
                     None,
                 );
                 self.search_buffer_text = key;
-            }
-            self.search_buffer
-                .shape_until_scroll(&mut self.font_system, false);
-        } else if let Some((tag, url)) = &overlay.update_available {
-            // Passive "newer release available" banner — lowest
-            // priority, so any real modal above takes the bar and this returns
-            // when they close. The full strip uses readable chrome; a small
-            // green accent carries the update cue without making foreground text
-            // fight a bright background.
-            have_search = true;
-            let bar_h = ch + 10.0;
-            // Stack above a bottom-anchored tab / status bar
-            // so the passive banner doesn't paint over (or, with the App's
-            // matching hit-test, steal clicks from) it. `status.y > 0` marks a
-            // bottom status bar (top sits at y == 0).
-            let bottom_tabbar_h = if matches!(cfg.tab_bar_pos, kettle_config::TabBarPos::Bottom) {
-                tabbar.height
-            } else {
-                0.0
-            };
-            let bottom_status_h = if status.height > 0.0 && status.y > 0.0 {
-                status.height
-            } else {
-                0.0
-            };
-            let bottom_search_h = overlay
-                .search
-                .as_ref()
-                .map(|search| search_bar_geometry(sw, sh, cw, ch, &search.tr).reserved_height)
-                .unwrap_or(0.0);
-            let bar_y = update_banner_top_with_reserved(
-                sh,
-                bar_h,
-                bottom_tabbar_h,
-                bottom_status_h,
-                bottom_search_h,
-            );
-            search_rect = (0.0, bar_y, sw, bar_h);
-            push_input_bar(&mut quads, search_rect, theme, theme.palette[2]);
-            let label = update_banner_label(&overlay.tr, tag, url);
-            let label = fit_single_line_label(&label, overlay_label_cols(sw, cw));
-            self.search_buffer.set_metrics(metrics);
-            self.search_buffer.set_size(Some(sw), Some(bar_h));
-            // Same equality gate as the other chrome buffers. Only one arm of
-            // this `if`/`else if` chain runs per frame, so a single cache is
-            // enough (see `search_buffer_text`'s doc comment).
-            if self.search_buffer_text != label {
-                self.search_buffer.set_text(
-                    &label,
-                    &Attrs::new().family(Family::Name(&family)),
-                    Shaping::Advanced,
-                    None,
-                );
-                self.search_buffer_text = label;
             }
             self.search_buffer
                 .shape_until_scroll(&mut self.font_system, false);
@@ -16182,45 +16121,33 @@ pub enum DebugScene {
     BellFlash,
 }
 
-/// Top edge (px from the surface top) of the passive "update available"
-/// banner, given the surface height, the banner's own height, and the heights
-/// of any **bottom-anchored** tab / status bars it must stack above.
-///
-/// The banner is a non-modal bottom strip. When the tab bar or status bar sits
-/// at the bottom (`tab-bar-position = bottom` / `status-bar = bottom`), a
-/// banner flush at `surface_h - banner_h` would paint over that bar and steal
-/// its clicks, so it stacks above the bottom chrome instead. Pure + shared so
-/// the renderer's draw and the App's hit-test agree to the pixel; pass `0.0`
-/// for chrome that isn't bottom-anchored.
-pub fn update_banner_top(
-    surface_h: f32,
-    banner_h: f32,
-    bottom_tabbar_h: f32,
-    bottom_status_h: f32,
-) -> f32 {
-    update_banner_top_with_reserved(surface_h, banner_h, bottom_tabbar_h, bottom_status_h, 0.0)
-}
-
-/// Search-aware form of [`update_banner_top`]. `bottom_reserved_h` is the rich
-/// search lane's `SearchBarGeometry::reserved_height` (or zero while closed).
-/// Keeping the original four-argument helper as a wrapper preserves external
-/// callers while new draw/hit-test paths can keep Search as the bottommost
-/// strip and stack the passive update banner above it.
-pub fn update_banner_top_with_reserved(
-    surface_h: f32,
-    banner_h: f32,
-    bottom_tabbar_h: f32,
-    bottom_status_h: f32,
-    bottom_reserved_h: f32,
-) -> f32 {
-    surface_h - banner_h - bottom_tabbar_h - bottom_status_h - bottom_reserved_h
-}
-
-/// The fill and edge of a bar that asks for input, and of the update banner.
+/// The fill and edge of a bar that asks for input, and of the update chip.
 /// The fill is a neutral the theme's own foreground reads on at WCAG AA
 /// (4.5:1); the edge is the bar's `accent`, kept at the 3:1 minimum for
 /// non-text UI against that fill. Each bar keeps its own accent, so the
 /// palette, the pickers and the title editor still look different.
+fn input_bar_colors(theme: &kettle_config::Theme, accent: Rgb) -> (Rgb, Rgb) {
+    let fill = color::with_min_contrast(theme.palette[8], theme.foreground, 4.5);
+    let edge = color::with_min_contrast(accent, fill, 3.0);
+    (fill, edge)
+}
+
+/// Queue an input bar at `(x, y, w, h)`: the opaque fill from
+/// [`input_bar_colors`] with 2px top and 4px left edges. Opaque because the
+/// contrast is computed against the fill alone; content showing through would
+/// change it.
+fn push_input_bar(
+    quads: &mut Vec<QuadInstance>,
+    (x, y, w, h): (f32, f32, f32, f32),
+    theme: &kettle_config::Theme,
+    accent: Rgb,
+) {
+    let (fill, edge) = input_bar_colors(theme, accent);
+    quads.push(rect(x, y, w, h, fill, 1.0));
+    quads.push(rect(x, y, w, 2.0, edge, 1.0));
+    quads.push(rect(x, y, 4.0, h, edge, 1.0));
+}
+
 /// The update chip's opaque fill and its edge: the input-bar colors, with
 /// the theme's red for a failure.
 fn update_chip_colors(theme: &kettle_config::Theme, tone: UpdateChipTone) -> (Rgb, Rgb) {
@@ -16246,28 +16173,6 @@ fn push_update_chip(
     quads.push(rect(x, y + h - line, w, line, edge, 1.0));
     quads.push(rect(x, y, line, h, edge, 1.0));
     quads.push(rect(x + w - line, y, line, h, edge, 1.0));
-}
-
-fn input_bar_colors(theme: &kettle_config::Theme, accent: Rgb) -> (Rgb, Rgb) {
-    let fill = color::with_min_contrast(theme.palette[8], theme.foreground, 4.5);
-    let edge = color::with_min_contrast(accent, fill, 3.0);
-    (fill, edge)
-}
-
-/// Queue an input bar at `(x, y, w, h)`: the opaque fill from
-/// [`input_bar_colors`] with 2px top and 4px left edges. Opaque because the
-/// contrast is computed against the fill alone; content showing through would
-/// change it.
-fn push_input_bar(
-    quads: &mut Vec<QuadInstance>,
-    (x, y, w, h): (f32, f32, f32, f32),
-    theme: &kettle_config::Theme,
-    accent: Rgb,
-) {
-    let (fill, edge) = input_bar_colors(theme, accent);
-    quads.push(rect(x, y, w, h, fill, 1.0));
-    quads.push(rect(x, y, w, 2.0, edge, 1.0));
-    quads.push(rect(x, y, 4.0, h, edge, 1.0));
 }
 
 /// Back-compat wrapper for external `capture_png` callers. Always renders
@@ -16883,6 +16788,7 @@ pub fn capture_png_with_annotation(
                 scroll_offset: 0,
                 panel_w_clamped: 0.0,
                 panel_h_clamped: 0.0,
+                a11y_label: None,
             };
             menu_q.extend(menu_chrome_quads(
                 &menu,
@@ -19904,6 +19810,7 @@ mod pane_buffer_lifecycle_tests {
             scroll_offset: 0,
             panel_w_clamped: 240.0,
             panel_h_clamped: 120.0,
+            a11y_label: None,
         };
         let foreground = kettle_config::Rgb::new(220, 220, 220);
         let background = kettle_config::Rgb::new(20, 20, 20);
@@ -22246,25 +22153,6 @@ mod completion_panel_tests {
         }
     }
 
-    #[test]
-    fn the_update_banner_follows_the_ui_language() {
-        let url = "https://github.com/Reddimus/kettle/releases/tag/v5.0.0";
-        assert_eq!(
-            super::update_banner_label(&kettle_i18n::Translator::default(), "v5.0.0", url),
-            format!("  ⬆ kettle v5.0.0 available — {url}    (click: open · right-click: dismiss)")
-        );
-        assert_eq!(
-            super::update_banner_label(
-                &kettle_i18n::Translator::new(kettle_i18n::Language::Es),
-                "v5.0.0",
-                url
-            ),
-            format!(
-                "  ⬆ kettle v5.0.0 disponible — {url}    (clic: abrir · clic derecho: descartar)"
-            )
-        );
-    }
-
     /// At the standard size every line of the card shows whole in each
     /// language: the title, the size line, the path or poster line, and the
     /// remote warning.
@@ -23220,8 +23108,8 @@ mod title_fit_tests {
                 "push_input_bar(&mut quads, search_rect, theme, theme.palette[4]);",
             ),
             (
-                "update banner",
-                "push_input_bar(&mut quads, search_rect, theme, theme.palette[2]);",
+                "update chip",
+                "push_update_chip(&mut quads, chip, theme);",
             ),
             (
                 "title editor",
@@ -23982,54 +23870,6 @@ mod settings_hit_test_tests {
 
         assert_eq!(super::display_width(&fitted), 22);
         assert!(fitted.ends_with('…'));
-    }
-}
-
-#[cfg(test)]
-mod update_banner_top_tests {
-    use super::{color, input_bar_colors, update_banner_top, update_banner_top_with_reserved};
-
-    /// Drift guard. The passive update banner must stack above any
-    /// BOTTOM-anchored tab / status bar so it neither paints over nor steals
-    /// clicks from it. The renderer (draw) and the App (hit-test) share this
-    /// pure helper, so they can't drift apart.
-    #[test]
-    fn stacks_above_bottom_chrome() {
-        // No bottom chrome → flush at the surface bottom (1000 - 30).
-        assert_eq!(update_banner_top(1000.0, 30.0, 0.0, 0.0), 970.0);
-        // Bottom tab bar (28) → banner clears it.
-        assert_eq!(update_banner_top(1000.0, 30.0, 28.0, 0.0), 942.0);
-        // Bottom status bar (20) → banner clears it.
-        assert_eq!(update_banner_top(1000.0, 30.0, 0.0, 20.0), 950.0);
-        // Both at the bottom → banner clears the stack of both.
-        assert_eq!(update_banner_top(1000.0, 30.0, 28.0, 20.0), 922.0);
-        // Rich Search stays bottommost; the banner also clears its responsive
-        // reserved lane while preserving the legacy helper above.
-        assert_eq!(
-            update_banner_top_with_reserved(1000.0, 30.0, 28.0, 20.0, 60.0),
-            862.0
-        );
-    }
-
-    #[test]
-    fn chrome_colors_are_readable_without_full_green_background() {
-        let theme = kettle_config::Theme::default();
-        let (bg, accent) = input_bar_colors(&theme, theme.palette[2]);
-
-        assert_ne!(
-            bg, theme.palette[2],
-            "the full banner background must not be the bright green update accent"
-        );
-        assert!(
-            color::contrast_ratio(bg, theme.foreground) + 1e-6 >= 4.5,
-            "banner text contrast should meet WCAG AA; bg={bg:?} fg={:?} ratio={}",
-            theme.foreground,
-            color::contrast_ratio(bg, theme.foreground)
-        );
-        assert!(
-            color::contrast_ratio(accent, bg) + 1e-6 >= 3.0,
-            "the accent strip should remain visible against the banner background"
-        );
     }
 }
 

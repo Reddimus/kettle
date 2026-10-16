@@ -3145,26 +3145,16 @@ fn ui_geometry_exposes_modal_accessibility_and_settings_scroll_without_values() 
 
 #[test]
 fn about_never_claims_current_without_a_verified_result() {
+    // No record and no install facts: About says the status is unknown
+    // rather than up to date.
+    let tr = kettle_i18n::Translator::new(kettle_i18n::Language::En);
+    assert!(
+        crate::update_notice::fact_rows(&crate::update_notice::UpdateFacts::default(), &tr)
+            .is_empty()
+    );
     assert_eq!(
-        super::about_update_status_label(
-            None,
-            &kettle_i18n::Translator::new(kettle_i18n::Language::En)
-        ),
+        tr.text(kettle_i18n::Text::AboutUpdateUnknown),
         "Update status unknown"
-    );
-    assert_eq!(
-        super::about_update_status_label(
-            Some("v9.9.9"),
-            &kettle_i18n::Translator::new(kettle_i18n::Language::En)
-        ),
-        "Update available: v9.9.9"
-    );
-    assert_eq!(
-        super::about_update_status_label(
-            Some("v9.9.9"),
-            &kettle_i18n::Translator::new(kettle_i18n::Language::Es)
-        ),
-        "Actualización disponible: v9.9.9"
     );
 }
 
@@ -11036,6 +11026,7 @@ fn picker_candidates_are_vertical_rows_and_selection_scrolls_into_view() {
         20,
         &kettle_config::keybinds::defaults(),
         &kettle_i18n::Translator::new(kettle_i18n::Language::En),
+        None,
     );
     let menu = picker_context_menu(list, (320.0, 160.0), (8.0, 16.0))
         .expect("a 320x160 surface fits a picker row above its input lane");
@@ -11130,6 +11121,7 @@ fn picker_overlay_projection_installs_the_vertical_context_menu() {
                 3,
                 &kettle_config::keybinds::defaults(),
                 &kettle_i18n::Translator::new(kettle_i18n::Language::En),
+                None,
             )),
             None,
             None,
@@ -14603,7 +14595,6 @@ fn title_edit_overlay_is_wide_enough_to_show_the_input() {
             tab_bar_h: row_h,
             status_bar_h: status_h,
             vertical_title_edit_h: row_h,
-            ..ContentBands::default()
         },
         TabBarPos::Right,
         StatusBarMode::Top,
@@ -14823,86 +14814,32 @@ fn content_rect_for_carves_out_tab_and_status_bands() {
     );
 }
 
+/// #576: no update state may resize a pane. The chip lives in the tab bar's
+/// own band, the bar's height ignores it, and nothing that applies or
+/// dismisses a notice queues a resize.
 #[test]
-fn update_banner_queues_resizes_for_current_and_sibling_windows() {
-    let mut current = WindowState::new(2, Mux::new());
-    let mut windows = std::collections::BTreeMap::from([
-        (1, WindowState::new(1, Mux::new())),
-        (3, WindowState::new(3, Mux::new())),
-    ]);
-    assert!(!current.pending_resize);
-    assert!(windows.values().all(|ws| !ws.pending_resize));
-
-    App::queue_window_resizes(std::iter::once(&mut current).chain(windows.values_mut()));
-
-    assert!(current.pending_resize);
-    assert!(windows.values().all(|ws| ws.pending_resize));
-    assert!(current.renderer.is_none());
-    assert!(windows.values().all(|ws| ws.renderer.is_none()));
-
+fn no_update_state_changes_content_rect() {
     let src = production_source();
-    let flat: String = src.split_whitespace().collect();
-    let flat = flat.replace(",);", ");");
-    for value in ["Some((tag,url))", "None"] {
-        let transition = format!(
-            "self.update_available={value};Self::queue_window_resizes(std::iter::once(&mut*ws).chain(self.windows.values_mut()));"
-        );
-        assert!(flat.contains(&transition), "banner transition: {value}");
+    let body = |name: &str| {
+        src.split(name)
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .unwrap_or_else(|| panic!("{name} exists"))
+            .to_string()
+    };
+    for name in [
+        "fn apply_update_facts(",
+        "fn dismiss_update_notice(",
+        "fn open_update_release(",
+        "fn request_update_facts(",
+    ] {
+        let body = body(name);
+        for call in ["pending_resize", ".resize(", "queue_window_resizes"] {
+            assert!(!body.contains(call), "{name} must not resize ({call})");
+        }
     }
-}
-
-#[test]
-fn content_rect_for_carves_out_update_banner_band() {
-    use super::{ContentBands, content_rect_for_with_strip};
-    use kettle_config::{StatusBarMode, TabBarPos};
-
-    // Top tab bar plus update banner: normal top chrome remains at the top;
-    // the passive update banner reserves a bottom band so the terminal grid
-    // does not render underneath it.
-    let r = content_rect_for_with_strip(
-        (800, 600),
-        ContentBands {
-            tab_bar_h: 24.0,
-            status_bar_h: 16.0,
-            update_banner_h: 26.0,
-            ..ContentBands::default()
-        },
-        TabBarPos::Top,
-        StatusBarMode::Off,
-        180.0,
-    );
-    assert_eq!(r, (0.0, 24.0, 800.0, 550.0));
-
-    // Bottom tab + bottom status + update banner stack together at the
-    // bottom; the content height loses all three bands.
-    let r = content_rect_for_with_strip(
-        (800, 600),
-        ContentBands {
-            tab_bar_h: 24.0,
-            status_bar_h: 16.0,
-            update_banner_h: 26.0,
-            ..ContentBands::default()
-        },
-        TabBarPos::Bottom,
-        StatusBarMode::Bottom,
-        180.0,
-    );
-    assert_eq!(r, (0.0, 0.0, 800.0, 534.0));
-
-    // Vertical tab strips still carve the x-axis, while the banner claims
-    // only a y-axis band.
-    let r = content_rect_for_with_strip(
-        (800, 600),
-        ContentBands {
-            tab_bar_h: 24.0,
-            update_banner_h: 26.0,
-            ..ContentBands::default()
-        },
-        TabBarPos::Left,
-        StatusBarMode::Off,
-        180.0,
-    );
-    assert_eq!(r, (180.0, 0.0, 620.0, 574.0));
+    assert!(!body("fn tab_bar_h(").contains("update"));
+    assert!(!src.contains("update_banner_h"));
 }
 
 /// Drift guard. `session_screenshot_path` is the
@@ -15640,4 +15577,117 @@ fn pick_light_dark_target_round_trips() {
     );
     // Neither set: no-op.
     assert_eq!(pick_light_dark_target("anything", "", ""), None);
+}
+
+/// #576: the chip shows its full label while every tab keeps its minimum
+/// width, the short one while one tab still does, and nothing otherwise.
+#[test]
+fn update_chip_fit_full_short_none() {
+    use super::update_chip_fit;
+    let (full, short) = ("Update v5.2.0", "⬆ v5.2.0");
+    // 13 + 2 cells of 10 px, plus a 3 px inset on each side.
+    let full_slot = 156.0;
+    let short_slot = 106.0;
+    assert_eq!(
+        update_chip_fit(1000.0, 48.0, 4, 120.0, 10.0, full, short),
+        Some((full_slot, false))
+    );
+    assert_eq!(
+        update_chip_fit(1000.0, 48.0, 12, 120.0, 10.0, full, short),
+        Some((short_slot, true))
+    );
+    assert_eq!(
+        update_chip_fit(250.0, 48.0, 1, 120.0, 10.0, full, short),
+        None
+    );
+}
+
+#[test]
+fn update_chip_hit_and_menu_anchor_follow_the_bar() {
+    use super::{update_chip_hit_rect, update_chip_menu_anchor};
+    use kettle_config::TabBarPos;
+    let chip = (700.0, 3.0, 150.0, 18.0);
+    assert_eq!(update_chip_hit_rect(chip), (697.0, 0.0, 156.0, 24.0));
+    assert_eq!(update_chip_menu_anchor(chip, TabBarPos::Top), (700.0, 21.0));
+    assert_eq!(
+        update_chip_menu_anchor(chip, TabBarPos::Bottom),
+        (700.0, 3.0)
+    );
+    assert_eq!(update_chip_menu_anchor(chip, TabBarPos::Left), (850.0, 3.0));
+}
+
+/// A press on the chip must reach it before the tab bar's button gate, in
+/// the window and in `kettle ctl send_mouse`, or a right click would open
+/// the terminal's menu and a left click could start a tab drag.
+#[test]
+fn both_press_paths_route_the_chip_before_the_button_gate() {
+    let src = production_source();
+    let gate = "if tab_bar_pointer_region_contains(&bar, px, py) && (bcode == 0 || bcode == 1) {";
+    let mut checked = 0;
+    for (at, _) in src.match_indices(gate) {
+        let before = &src[..at];
+        let start = before
+            .rfind("let bar = self.tab_bar(ws);")
+            .expect("the bar is built first");
+        assert!(
+            before[start..].contains("self.press_update_chip(ws, &bar, px, py, bcode)"),
+            "the chip is routed before this gate"
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, 2, "the window and ctl press paths");
+}
+
+/// The chip is a button under the window root with a Click action; it never
+/// takes the screen reader's focus from the terminal.
+#[test]
+fn chip_node_never_takes_focus_and_click_opens_menu() {
+    let src = production_source();
+    let node = src
+        .split("// The update chip: a button under the window root")
+        .nth(1)
+        .and_then(|rest| {
+            rest.split("nodes.push((ACCESSIBILITY_UPDATE_CHIP_ID, node));")
+                .next()
+        })
+        .expect("the chip's accessibility node");
+    assert!(node.contains("node.add_action(AccessibilityAction::Click);"));
+    assert!(!node.contains("focus =") && !node.contains("set_focus"));
+    let action = src
+        .split("if request.target_node == ACCESSIBILITY_UPDATE_CHIP_ID {")
+        .nth(1)
+        .and_then(|rest| rest.split("return;").next())
+        .expect("the chip's action");
+    assert!(action.contains("self.open_update_menu(ws, anchor);"));
+}
+
+#[test]
+fn ctl_reports_update_notice_not_modal() {
+    let src = production_source();
+    assert!(!src.contains("\"update_available\""));
+    assert!(src.contains("fields.insert(\"update_notice\".into(), update_notice.into());"));
+    assert!(src.contains("tab_bar.insert(\"update_chip\".into(), update_chip.into());"));
+}
+
+/// While an update notice is active the palette lists its release notes and
+/// Dismiss, findable in English from any language; otherwise neither.
+#[test]
+fn update_rows_present_iff_notice_active() {
+    let es = kettle_i18n::Translator::new(kettle_i18n::Language::Es);
+    let notice = crate::update_notice::Notice {
+        kind: crate::update_notice::NoticeKind::Available,
+        tag: "v5.2.0".into(),
+    };
+    let actions = |notice| {
+        super::palette_entries(notice, &es)
+            .into_iter()
+            .map(|(_, action)| action)
+            .collect::<Vec<_>>()
+    };
+    assert!(!actions(None).contains(&Action::OpenUpdate));
+    let with = actions(Some(&notice));
+    assert!(with.contains(&Action::OpenUpdate) && with.contains(&Action::DismissUpdate));
+    let entries = super::palette_entries(Some(&notice), &es);
+    let ranked = kettle_config::palette::rank_entries("release notes", &entries, &es);
+    assert_eq!(entries[ranked[0]].1, Action::OpenUpdate);
 }

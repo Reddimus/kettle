@@ -14,7 +14,7 @@ mod snapshot;
 pub mod worker_package;
 
 pub use feed::{
-    AvailableUpdate, CheckOutcome, FeedClient, Manifest, ManifestAsset, UpdateError,
+    AvailableUpdate, CheckOutcome, FeedClient, Manifest, ManifestAsset, UpdateError, release_url,
     verify_manifest,
 };
 pub use install::{

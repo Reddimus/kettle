@@ -509,7 +509,6 @@ pub fn maybe_spawn_check(
                 let notify = mutate_cache(|cache| cache.note_available(&update.tag));
                 let _ = proxy.send_event(UserEvent::UpdateAvailable {
                     tag: update.tag,
-                    url: update.release_url,
                     notify,
                 });
             };
@@ -585,6 +584,91 @@ pub fn maybe_spawn_check(
 /// connection does not; the next check simply tries again.
 fn failure_counts(error: &kettle_update::UpdateError) -> bool {
     !matches!(error, kettle_update::UpdateError::Request(_))
+}
+
+/// What is true about updates for this process, from the shared record and
+/// the install found at startup. Reads small local files, and on macOS runs
+/// `PlistBuddy`; never the network. Call it off the UI thread.
+pub(crate) fn read_facts(
+    install: &InstallSnapshot,
+    policy: UpdatePolicy,
+    current: &str,
+) -> crate::update_notice::UpdateFacts {
+    let Ok(running) = kettle_update::Version::parse(current) else {
+        return crate::update_notice::UpdateFacts::default();
+    };
+    facts_from(
+        &load_cache().unwrap_or_default(),
+        &install.local_state(),
+        install.kind(),
+        policy,
+        &running,
+    )
+}
+
+fn facts_from(
+    record: &UpdateCache,
+    local: &kettle_update::decision::LocalState,
+    kind: kettle_update::decision::InstallKind,
+    policy: UpdatePolicy,
+    running: &kettle_update::Version,
+) -> crate::update_notice::UpdateFacts {
+    use crate::update_notice::{Release, ReleaseState, UpdateFacts};
+    use kettle_update::decision::{InstallKind, InstalledVersion};
+    let installed_newer = match decide(running, kind, local, Policy::Notify, None) {
+        Decision::RestartPending { installed } => Some(format!("v{installed}")),
+        _ => None,
+    };
+    let installed = match (kind, &local.installed) {
+        (InstallKind::Managed, InstalledVersion::Known(version)) if version > running => version,
+        _ => running,
+    };
+    let latest = record
+        .latest_tag
+        .as_deref()
+        .and_then(|tag| tag_version(tag).map(|version| (tag, version)));
+    let release = latest
+        .as_ref()
+        .filter(|(_, version)| version > installed)
+        .map(|(tag, _)| {
+            let state = if record.failure_tag.as_deref() == Some(*tag)
+                && record.failure_count >= FAILURES_BEFORE_NOTICE
+            {
+                ReleaseState::Failed
+            } else if record.last_outcome == Some(LastOutcome::Installing) {
+                ReleaseState::Installing
+            } else {
+                ReleaseState::Available
+            };
+            Release {
+                tag: (*tag).to_string(),
+                state,
+            }
+        });
+    let up_to_date = latest
+        .filter(|(_, version)| version <= running && installed_newer.is_none())
+        .map(|(tag, _)| tag.to_string());
+    UpdateFacts {
+        off: policy == UpdatePolicy::Off,
+        running: format!("v{running}"),
+        release,
+        installed_newer,
+        up_to_date,
+        managed: kind == InstallKind::Managed,
+        dismissed_available: record.dismissed_version.clone(),
+        dismissed_failed: record.dismissed_failed.clone(),
+    }
+}
+
+/// Records the dismissal of a failed update's notice for every process; see
+/// [`record_dismissed`].
+pub fn record_dismissed_failed(tag: &str) {
+    let tag = tag.to_string();
+    let _ = std::thread::Builder::new()
+        .name("kettle-update-dismiss".into())
+        .spawn(move || {
+            with_locked_cache(|cache| cache.dismissed_failed = Some(tag));
+        });
 }
 
 /// Cadence at which the in-session timer re-attempts a due check. Decoupled

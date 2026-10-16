@@ -84,6 +84,7 @@ mod settings;
 // crate-internal `UserEvent`); the `kettle` bin reaches the synchronous
 // `--check-update` path via the public `check_for_update_cli` wrapper below.
 mod update_check;
+mod update_notice;
 mod video_preview;
 mod wall_clock;
 // OSC 9;4 taskbar progress (pwsh 7 / Windows Terminal parity).

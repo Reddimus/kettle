@@ -160,15 +160,54 @@ pub fn commands() -> Vec<(Text, Action)> {
 /// command name from the docs still finds its command. Ties (and an empty
 /// query) preserve registry order, so the palette is stable as you type.
 pub fn rank(query: &str, cmds: &[(Text, Action)], tr: &Translator) -> Vec<usize> {
+    let entries: Vec<(PaletteLabel, Action)> = cmds
+        .iter()
+        .map(|(label, action)| (PaletteLabel::Text(*label), action.clone()))
+        .collect();
+    rank_entries(query, &entries, tr)
+}
+
+/// A palette row's label: catalogue text, or text built at run time, such
+/// as one naming a release, with its English form so a query in English
+/// still finds it in another language.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PaletteLabel {
+    Text(Text),
+    Dynamic { shown: String, english: String },
+}
+
+impl PaletteLabel {
+    /// The label in `tr`'s language.
+    pub fn shown<'a>(&'a self, tr: &Translator) -> &'a str {
+        match self {
+            Self::Text(text) => tr.text(*text),
+            Self::Dynamic { shown, .. } => shown,
+        }
+    }
+
+    fn english<'a>(&'a self, english: &Translator) -> &'a str {
+        match self {
+            Self::Text(text) => english.text(*text),
+            Self::Dynamic { english, .. } => english,
+        }
+    }
+}
+
+/// [`rank`] over rows that may carry run-time labels.
+pub fn rank_entries(
+    query: &str,
+    entries: &[(PaletteLabel, Action)],
+    tr: &Translator,
+) -> Vec<usize> {
     let english = Translator::new(Language::En);
     let alias = tr.language() != Language::En;
-    let mut scored: Vec<(usize, i32)> = cmds
+    let mut scored: Vec<(usize, i32)> = entries
         .iter()
         .enumerate()
         .filter_map(|(i, (label, _))| {
-            let shown = fuzzy::score(query, tr.text(*label));
+            let shown = fuzzy::score(query, label.shown(tr));
             let english = alias
-                .then(|| fuzzy::score(query, english.text(*label)))
+                .then(|| fuzzy::score(query, label.english(&english)))
                 .flatten();
             shown.max(english).map(|s| (i, s))
         })
@@ -237,10 +276,9 @@ mod tests {
             // enumerate and nothing a fixed row could send. Reachable by
             // keybind, which is the point of it.
             SendText(String::new()),
-            // The update-banner actions only do anything
-            // while the update banner is on screen (a no-op + debug log
-            // otherwise), so they'd be dead rows in the palette most of the
-            // time. They stay bindable for keyboard access to the banner.
+            // The update notice's two actions name a release, so they are
+            // not in this static list: the app adds them, labelled with the
+            // tag, only while a notice is active (`palette_entries`).
             OpenUpdate,
             DismissUpdate,
         ];
@@ -642,6 +680,23 @@ mod tests {
                     "{action:?}: {}",
                     tr.text(*label)
                 );
+            }
+        }
+    }
+
+    /// `rank` is `rank_entries` over catalogue labels: same order for every
+    /// query, in both languages.
+    #[test]
+    fn rank_entries_matches_rank_for_static_labels() {
+        let cmds = commands();
+        let entries: Vec<_> = cmds
+            .iter()
+            .map(|(label, action)| (PaletteLabel::Text(*label), action.clone()))
+            .collect();
+        for language in [Language::En, Language::Es] {
+            let tr = Translator::new(language);
+            for query in ["", "split", "tab", "pane", "zzz"] {
+                assert_eq!(rank(query, &cmds, &tr), rank_entries(query, &entries, &tr));
             }
         }
     }

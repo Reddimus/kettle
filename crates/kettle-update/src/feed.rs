@@ -77,6 +77,15 @@ pub enum UpdateError {
     Zip(#[from] zip::result::ZipError),
 }
 
+/// The release page for a tag such as `v5.2.0`, or `None` for anything else,
+/// so a tag read back from a file can never send the browser elsewhere.
+pub fn release_url(tag: &str) -> Option<String> {
+    let version = Version::parse(tag.strip_prefix('v')?).ok()?;
+    Some(format!(
+        "https://github.com/Reddimus/kettle/releases/tag/v{version}"
+    ))
+}
+
 /// Signed stable-channel metadata. Unknown/new layouts require a schema bump so
 /// an old updater fails closed instead of guessing at security-sensitive fields.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -369,10 +378,9 @@ fn evaluate_manifest(
         .map(|asset| format!("{}/{}/{}", prefix, manifest.tag, asset.name));
     Ok(CheckOutcome::UpdateAvailable(AvailableUpdate {
         version: latest,
-        release_url: format!(
-            "https://github.com/Reddimus/kettle/releases/tag/{}",
-            manifest.tag
-        ),
+        release_url: release_url(&manifest.tag).ok_or_else(|| {
+            UpdateError::MalformedManifest("the release tag is not a version".into())
+        })?,
         download_url,
         tag: manifest.tag,
         asset,

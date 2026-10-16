@@ -1144,8 +1144,6 @@ impl App {
             Some("hint_mode")
         } else if diagnostic_overlay.context_menu.is_some() {
             Some("context_menu")
-        } else if diagnostic_overlay.update_available.is_some() {
-            Some("update_available")
         } else {
             None
         };
@@ -1208,6 +1206,23 @@ impl App {
                 })
             })
             .collect();
+        let update_chip = bar.update_chip.as_ref().map(|chip| {
+            serde_json::json!({
+                "rect": rect_json(chip.rect),
+                "label": chip.label,
+            })
+        });
+        let update_notice = self.update_notice().map(|notice| {
+            serde_json::json!({
+                "state": match notice.kind {
+                    crate::update_notice::NoticeKind::Available => "available",
+                    crate::update_notice::NoticeKind::RestartPending => "restart_pending",
+                    crate::update_notice::NoticeKind::Failed => "failed",
+                },
+                "tag": notice.tag,
+                "facts": crate::update_notice::fact_rows(&self.update_facts, &self.ui_text),
+            })
+        });
         let mut geometry = serde_json::json!({
                 "window": target.seq,
                 "window_focused": target.window_focused,
@@ -1335,6 +1350,12 @@ impl App {
                 "cursor_blink": self.cursor_blink_diagnostics(target),
         });
         if let serde_json::Value::Object(fields) = &mut geometry {
+            if let Some(serde_json::Value::Object(tab_bar)) = fields.get_mut("tab_bar") {
+                tab_bar.insert("update_chip".into(), update_chip.into());
+            }
+            // The update notice in its own field, so live smokes can check its
+            // state without reading the chip's words.
+            fields.insert("update_notice".into(), update_notice.into());
             fields.insert(
                 "fullscreen".into(),
                 serde_json::Value::Bool(
@@ -2064,6 +2085,9 @@ impl App {
             return true;
         }
         if self.press_card(ws, px, py, bcode) {
+            return true;
+        }
+        if self.press_update_chip(ws, &bar, px, py, bcode) {
             return true;
         }
         if tab_bar_pointer_region_contains(&bar, px, py) && (bcode == 0 || bcode == 1) {

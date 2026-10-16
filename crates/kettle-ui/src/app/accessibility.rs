@@ -519,6 +519,26 @@ impl App {
             children.push(ACCESSIBILITY_MEDIA_RECEIPT_DISMISS_ID);
             nodes.push((ACCESSIBILITY_MEDIA_RECEIPT_DISMISS_ID, dismiss));
         }
+        // The update chip: a button under the window root, never the focus,
+        // so a screen reader stays on the terminal. Its name is stable for a
+        // given notice, so the polite announcement comes once when it appears.
+        if let Some(notice) = self.update_notice()
+            && let Some(chip) = self.tab_bar(ws).update_chip
+        {
+            let mut node = Node::new(Role::Button);
+            node.set_label(crate::update_notice::a11y_label(&notice, &self.ui_text));
+            node.set_live(accesskit::Live::Polite);
+            node.add_action(AccessibilityAction::Click);
+            let (x, y, width, height) = chip.rect;
+            node.set_bounds(accesskit::Rect::new(
+                f64::from(x),
+                f64::from(y),
+                f64::from(x + width),
+                f64::from(y + height),
+            ));
+            children.push(ACCESSIBILITY_UPDATE_CHIP_ID);
+            nodes.push((ACCESSIBILITY_UPDATE_CHIP_ID, node));
+        }
         let surface = ws
             .window
             .as_ref()
@@ -673,7 +693,12 @@ impl App {
             hint.label.hash(&mut hasher);
             hint.dim.hash(&mut hasher);
         }
-        overlay.update_available.hash(&mut hasher);
+        self.update_notice().hash(&mut hasher);
+        if let Some(chip) = self.tab_bar(ws).update_chip {
+            for component in [chip.rect.0, chip.rect.1, chip.rect.2, chip.rect.3] {
+                component.to_bits().hash(&mut hasher);
+            }
+        }
         let projected_completion = overlay.completion.as_ref();
         projected_completion.is_some().hash(&mut hasher);
         if let Some(completion) = projected_completion {
@@ -851,6 +876,15 @@ impl App {
                 if let Some(window) = &ws.window {
                     window.request_redraw();
                 }
+            }
+            return;
+        }
+        if request.target_node == ACCESSIBILITY_UPDATE_CHIP_ID {
+            if request.action == AccessibilityAction::Click
+                && let Some(chip) = self.tab_bar(ws).update_chip
+            {
+                let anchor = update_chip_menu_anchor(chip.rect, self.cfg.tab_bar_pos);
+                self.open_update_menu(ws, anchor);
             }
             return;
         }

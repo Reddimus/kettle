@@ -1,4 +1,4 @@
-//! The tab bar, status bar and update banner: their sizes, hit tests and drawing.
+//! The tab bar, its update chip, and the status bar: sizes, hit tests and drawing.
 
 use super::*;
 
@@ -19,21 +19,10 @@ impl App {
         cursor_in_status_bar_band(ws.cursor.y as f32, h, sh as f32, self.cfg.status_bar)
     }
 
-    pub(super) fn cursor_in_update_banner(&self, ws: &WindowState) -> bool {
-        let Some((x, y, w, h)) = self.update_banner_rect(ws) else {
-            return false;
-        };
-        let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
-        px >= x && px < x + w && py >= y && py < y + h
-    }
-
     /// Combined chrome-band hit-test. True when the cursor is over the tab
-    /// bar, the status bar, or the update banner, which all belong in the
-    /// "OS arrow cursor" group.
+    /// bar or the status bar, which belong in the "OS arrow cursor" group.
     pub(super) fn cursor_in_chrome_band(&self, ws: &WindowState) -> bool {
-        self.cursor_in_tab_bar(ws)
-            || self.cursor_in_status_bar(ws)
-            || self.cursor_in_update_banner(ws)
+        self.cursor_in_tab_bar(ws) || self.cursor_in_status_bar(ws)
     }
 
     pub(super) fn cursor_in_tab_bar(&self, ws: &WindowState) -> bool {
@@ -96,52 +85,12 @@ impl App {
         }
     }
 
-    /// Height of the passive update banner while it is visible. The renderer
-    /// uses the same `cell_h + 10px` formula, so the PTY grid, pixels, and
-    /// hit-test agree instead of letting the banner cover the bottom row.
-    pub(super) fn update_banner_h(&self, ws: &WindowState) -> f32 {
-        // Renderer chrome gives an active Search lane priority over this
-        // passive notice. Match that precedence in PTY sizing instead of
-        // reserving an invisible extra strip between content and Search.
-        if self.update_available.is_some() && !ws.search.open {
-            ws.renderer
-                .as_ref()
-                .map(|r| r.cell_h + 10.0)
-                .unwrap_or(26.0)
-        } else {
-            0.0
-        }
-    }
-
     pub(super) fn vertical_title_edit_h(&self, ws: &WindowState) -> f32 {
         if self.cfg.tab_bar_pos.is_vertical() && ws.editing_title.is_some() {
             self.tab_bar_h(ws)
         } else {
             0.0
         }
-    }
-
-    pub(super) fn update_banner_rect(&self, ws: &WindowState) -> Option<Rect> {
-        self.update_available.as_ref()?;
-        let (sw, sh) = ws.renderer.as_ref()?.surface_size();
-        let banner_h = self.update_banner_h(ws);
-        if banner_h <= 0.0 {
-            return None;
-        }
-        let bottom_tabbar_h = if matches!(self.cfg.tab_bar_pos, TabBarPos::Bottom) {
-            self.tab_bar_h(ws)
-        } else {
-            0.0
-        };
-        let bottom_status_h = if matches!(self.cfg.status_bar, kettle_config::StatusBarMode::Bottom)
-        {
-            self.status_bar_h(ws)
-        } else {
-            0.0
-        };
-        let y =
-            kettle_render::update_banner_top(sh as f32, banner_h, bottom_tabbar_h, bottom_status_h);
-        Some((0.0, y, sw as f32, banner_h))
     }
 
     pub(super) fn tab_bar(&self, ws: &WindowState) -> TabBar {
@@ -206,11 +155,39 @@ impl App {
             0.0
         };
         let button_w = plus_w + arrow_w;
-        // The drag-to-reorder handler derives its strip width from
-        // the same helper, so the two can't disagree on where segments end.
-        let strip = tab_segment_strip_width(sw, plus_w, arrow_w);
+        // The update chip sits between the tabs and the buttons, in a slot
+        // the tabs give up; the bar's height and everything else stay put.
+        let cell_w = Self::cell_size(ws).map_or(9.0, |(cw, _)| cw);
+        let chip = self.update_notice().and_then(|notice| {
+            let full = crate::update_notice::chip_label(&notice, false, &self.ui_text);
+            let short = crate::update_notice::chip_label(&notice, true, &self.ui_text);
+            let (slot, short) = update_chip_fit(
+                sw,
+                button_w,
+                n,
+                self.cfg.tab_min_width,
+                cell_w,
+                &full,
+                &short,
+            )?;
+            Some((notice, slot, short))
+        });
+        let chip_slot = chip.as_ref().map_or(0.0, |(_, slot, _)| *slot);
+        // Every consumer of segment geometry reads it from this bar, so the
+        // drag-to-reorder handler and the click hit-test agree on where
+        // segments end.
+        let strip = (tab_segment_strip_width(sw, plus_w, arrow_w) - chip_slot).max(plus_w);
         let (arrow_rect, plus_rect) =
             split_new_tab_button((sw - button_w, y, button_w, height), arrow_w);
+        let update_chip = chip.map(|(notice, slot, short)| {
+            let rect = (
+                sw - button_w - slot + UPDATE_CHIP_INSET,
+                y + UPDATE_CHIP_INSET,
+                slot - 2.0 * UPDATE_CHIP_INSET,
+                height - 2.0 * UPDATE_CHIP_INSET,
+            );
+            self.update_chip(ws, &notice, rect, short)
+        });
         // Tabs divide the strip evenly and fill the bar; once they would
         // shrink below `tab_min_width` the bar overflows and — when `scroll_tabbar`
         // — scrolls with `‹ ›` arrows, showing only whole tabs (active kept in
@@ -220,7 +197,7 @@ impl App {
             n,
             active,
             strip,
-            button_w,
+            button_w + chip_slot,
             height,
             self.cfg.tab_min_width,
             self.cfg.scroll_tabbar,
@@ -325,7 +302,7 @@ impl App {
             band,
             scroll_left: to_btn(layout.arrow_left),
             scroll_right: to_btn(layout.arrow_right),
-            update_chip: None,
+            update_chip,
         }
     }
 
@@ -405,8 +382,38 @@ impl App {
                 }
             })
             .collect();
-        // `+` button at the bottom of the strip.
-        let plus_y = (labels.len() as f32 * height).min(sh - height);
+        // The update chip takes the strip's last row and the `+` button stops
+        // above it; otherwise `+` follows the last tab, clamped to the bottom.
+        let update_chip = self.update_notice().and_then(|notice| {
+            let cell_w = Self::cell_size(ws).map_or(9.0, |(cw, _)| cw);
+            let inner = strip_w - 2.0 * UPDATE_CHIP_INSET;
+            let fits = |label: &str| update_chip_width(label, cell_w) <= inner;
+            let full = crate::update_notice::chip_label(&notice, false, &self.ui_text);
+            let short = if fits(&full) {
+                false
+            } else if fits(&crate::update_notice::chip_label(
+                &notice,
+                true,
+                &self.ui_text,
+            )) {
+                true
+            } else {
+                return None;
+            };
+            let rect = (
+                strip_x + UPDATE_CHIP_INSET,
+                sh - height + UPDATE_CHIP_INSET,
+                inner,
+                height - 2.0 * UPDATE_CHIP_INSET,
+            );
+            Some(self.update_chip(ws, &notice, rect, short))
+        });
+        let plus_bottom = if update_chip.is_some() {
+            sh - 2.0 * height
+        } else {
+            sh - height
+        };
+        let plus_y = (labels.len() as f32 * height).min(plus_bottom).max(0.0);
         TabBar {
             height,
             // `y` is the *band start* (top of the strip) for the
@@ -451,7 +458,7 @@ impl App {
             // Vertical bars don't overflow-scroll (yet), so they have no arrows.
             scroll_left: (0.0, 0.0, 0.0, 0.0),
             scroll_right: (0.0, 0.0, 0.0, 0.0),
-            update_chip: None,
+            update_chip,
         }
     }
 
@@ -503,22 +510,134 @@ impl App {
         kettle_render::StatusBar { height: h, y, text }
     }
 
-    /// Act on the update banner: dismiss it (recording the tag so it
-    /// won't re-nag) and, when `open` is true, open the release page first.
-    /// Returns `false` when no banner is showing (the caller decides whether
-    /// that's a no-op or worth a debug log). Shared by the banner mouse
-    /// handler and the `OpenUpdate` / `DismissUpdate` keyboard
-    /// actions so all three paths stay in lockstep.
-    pub(super) fn act_on_update_banner(&mut self, ws: &mut WindowState, open: bool) -> bool {
-        let Some((tag, url)) = self.update_available.clone() else {
+    /// The update notice this process shows, if any.
+    pub(super) fn update_notice(&self) -> Option<crate::update_notice::Notice> {
+        crate::update_notice::active_notice(&self.update_facts, self.update_restart_dismissed)
+    }
+
+    /// The render-side chip for `notice` at `rect`.
+    fn update_chip(
+        &self,
+        ws: &WindowState,
+        notice: &crate::update_notice::Notice,
+        rect: kettle_render::Rect4,
+        short: bool,
+    ) -> kettle_render::UpdateChip {
+        kettle_render::UpdateChip {
+            rect,
+            label: crate::update_notice::chip_label(notice, short, &self.ui_text),
+            tone: if notice.kind == crate::update_notice::NoticeKind::Failed {
+                kettle_render::UpdateChipTone::Failed
+            } else {
+                kettle_render::UpdateChipTone::Notice
+            },
+            hovered: ws.hovered_update_chip,
+        }
+    }
+
+    /// Read the update facts again, off the UI thread: the shared record,
+    /// the installed version and the journal, never the network. Focus
+    /// changes ask at most every ten seconds; `force` skips that.
+    pub(super) fn request_update_facts(&mut self, force: bool) {
+        let now = std::time::Instant::now();
+        if !force
+            && self
+                .update_facts_requested
+                .is_some_and(|at| now.duration_since(at) < UPDATE_FACTS_THROTTLE)
+        {
+            return;
+        }
+        self.update_facts_requested = Some(now);
+        let proxy = self.proxy.clone();
+        let install = self.startup.update_install.clone();
+        let policy = self.cfg.update_policy;
+        let _ = std::thread::Builder::new()
+            .name("kettle-update-facts".into())
+            .spawn(move || {
+                let facts =
+                    crate::update_check::read_facts(&install, policy, env!("CARGO_PKG_VERSION"));
+                let _ = proxy.send_event(UserEvent::UpdateFacts(Box::new(facts)));
+            });
+    }
+
+    /// Show new update facts. Nothing is resized: the chip lives in the tab
+    /// bar's own band.
+    pub(super) fn apply_update_facts(
+        &mut self,
+        ws: &mut WindowState,
+        facts: crate::update_notice::UpdateFacts,
+    ) {
+        if self.update_facts != facts {
+            self.update_facts = facts;
+            self.redraw_for_update_notice(ws);
+        }
+    }
+
+    fn redraw_for_update_notice(&mut self, ws: &mut WindowState) {
+        for window in std::iter::once(&mut *ws).chain(self.windows.values_mut()) {
+            window.accessibility_pending = true;
+            if let Some(w) = &window.window {
+                w.request_redraw();
+            }
+        }
+    }
+
+    /// Open the release page of the active notice. Opening does not dismiss
+    /// it. False when no notice is active.
+    pub(super) fn open_update_release(&mut self, ws: &mut WindowState) -> bool {
+        let Some(url) = self
+            .update_notice()
+            .and_then(|notice| crate::update_notice::release_url(&notice.tag))
+        else {
             return false;
         };
-        if open {
-            self.open_url(ws, &url, LinkSource::Kettle);
+        self.open_url(ws, &url, LinkSource::Kettle);
+        true
+    }
+
+    /// Dismiss the active notice: Available and Failed for every process,
+    /// per tag; Restart pending for this process until it exits. False when
+    /// no notice is active.
+    pub(super) fn dismiss_update_notice(&mut self, ws: &mut WindowState) -> bool {
+        use crate::update_notice::NoticeKind;
+        let Some(notice) = self.update_notice() else {
+            return false;
+        };
+        match notice.kind {
+            NoticeKind::Available => {
+                crate::update_check::record_dismissed(&notice.tag);
+                self.update_facts.dismissed_available = Some(notice.tag);
+            }
+            NoticeKind::Failed => {
+                crate::update_check::record_dismissed_failed(&notice.tag);
+                self.update_facts.dismissed_failed = Some(notice.tag);
+            }
+            NoticeKind::RestartPending => self.update_restart_dismissed = true,
         }
-        crate::update_check::record_dismissed(&tag);
-        self.update_available = None;
-        Self::queue_window_resizes(std::iter::once(&mut *ws).chain(self.windows.values_mut()));
+        self.redraw_for_update_notice(ws);
+        true
+    }
+
+    /// A left or right click on the update chip opens its menu; a middle
+    /// click is swallowed so it neither closes a tab nor pastes. Checked
+    /// before every other tab-bar target.
+    pub(super) fn press_update_chip(
+        &mut self,
+        ws: &mut WindowState,
+        bar: &TabBar,
+        px: f32,
+        py: f32,
+        bcode: u8,
+    ) -> bool {
+        let Some(chip) = &bar.update_chip else {
+            return false;
+        };
+        if !rect_contains(update_chip_hit_rect(chip.rect), px, py) {
+            return false;
+        }
+        if matches!(bcode, 0 | 2) {
+            self.open_update_menu(ws, update_chip_menu_anchor(chip.rect, self.cfg.tab_bar_pos));
+        }
         true
     }
 }
