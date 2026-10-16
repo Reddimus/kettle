@@ -203,6 +203,11 @@ impl PaneInputResult {
         self == Self::Queued
     }
 
+    #[inline]
+    pub fn is_failed(self) -> bool {
+        self == Self::Failed
+    }
+
     /// Worst-outcome-wins, so a broadcast reports the most serious thing that
     /// happened to any of its targets. `pub(crate)` because a cross-window
     /// broadcast merges results from several muxes in `App`.
@@ -413,6 +418,8 @@ struct PtyInputQueue {
     reply_tx: Sender<QueuedPtyInput>,
     queued_user_bytes: Arc<AtomicUsize>,
     queued_reply_bytes: Arc<AtomicUsize>,
+    /// Replies dropped since one last queued: see [`Self::enqueue_reply`].
+    dropped_replies: AtomicUsize,
     failed: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     waker: Waker,
@@ -449,6 +456,7 @@ impl PtyInputQueue {
             reply_tx,
             queued_user_bytes,
             queued_reply_bytes,
+            dropped_replies: AtomicUsize::new(0),
             failed,
             stop,
             waker,
@@ -467,6 +475,7 @@ impl PtyInputQueue {
             reply_tx,
             queued_user_bytes: Arc::new(AtomicUsize::new(0)),
             queued_reply_bytes: Arc::new(AtomicUsize::new(0)),
+            dropped_replies: AtomicUsize::new(0),
             failed: Arc::new(AtomicBool::new(false)),
             stop: Arc::new(AtomicBool::new(false)),
             waker,
@@ -501,8 +510,13 @@ impl PtyInputQueue {
         )
     }
 
+    /// Queue a terminal reply for the program to read. The lane fills only
+    /// when the program has stopped reading its input, as when `cat` prints a
+    /// binary file full of queries, so a reply that finds it full is one
+    /// nothing is waiting for: it is dropped, and memory stays bounded by the
+    /// lane's depth and byte budget. Only a writer that is gone fails the pane.
     fn enqueue_reply(&self, bytes: Arc<[u8]>) -> PaneInputResult {
-        self.enqueue(
+        let result = self.enqueue(
             &self.reply_tx,
             &self.queued_reply_bytes,
             (
@@ -511,8 +525,26 @@ impl PtyInputQueue {
             ),
             PTY_INPUT_QUEUE_DEPTH,
             bytes,
-            true,
-        )
+            false,
+        );
+        match result {
+            // A run of drops ends once the program has read everything queued
+            // before this reply, not each time one slot frees.
+            PaneInputResult::Queued if self.reply_tx.len() <= 1 => {
+                let dropped = self.dropped_replies.swap(0, Ordering::AcqRel);
+                if dropped > 0 {
+                    log::warn!("dropped {dropped} terminal replies the program did not read");
+                }
+            }
+            PaneInputResult::Queued => {}
+            PaneInputResult::Backpressured | PaneInputResult::Oversize => {
+                if self.dropped_replies.fetch_add(1, Ordering::AcqRel) == 0 {
+                    log::warn!("dropping terminal replies: the program is not reading its input");
+                }
+            }
+            PaneInputResult::ReadOnly | PaneInputResult::Failed => {}
+        }
+        result
     }
 
     /// Queue `bytes` on a lane: refused past `max_message_bytes` for one
@@ -1036,7 +1068,9 @@ impl Pane {
     }
 
     /// Queue a terminal-protocol reply or report irrespective of read-only
-    /// mode. Failure is sticky and causes the pane to be torn down.
+    /// mode. A reply the program is not reading is dropped; failure (the
+    /// input worker is gone, or Kettle built an oversized reply) is sticky and
+    /// causes the pane to be torn down.
     pub fn queue_protocol_reply(&self, bytes: &[u8]) -> PaneInputResult {
         if bytes.len() > MAX_PROTOCOL_REPLY_MESSAGE_BYTES {
             self.pty_input.fail();
@@ -5017,6 +5051,7 @@ mod node_tests {
             reply_tx,
             queued_user_bytes: queued_user_bytes.clone(),
             queued_reply_bytes: Arc::new(AtomicUsize::new(0)),
+            dropped_replies: AtomicUsize::new(0),
             failed: Arc::new(AtomicBool::new(false)),
             stop: Arc::new(AtomicBool::new(false)),
             waker: Arc::new(|| {}),
@@ -5069,6 +5104,7 @@ mod node_tests {
             reply_tx,
             queued_user_bytes: queued_user_bytes.clone(),
             queued_reply_bytes: Arc::new(AtomicUsize::new(0)),
+            dropped_replies: AtomicUsize::new(0),
             failed: Arc::new(AtomicBool::new(false)),
             stop: Arc::new(AtomicBool::new(false)),
             waker: Arc::new(|| {}),
@@ -5140,7 +5176,7 @@ mod node_tests {
     }
 
     #[test]
-    fn pty_input_queues_preserve_paste_contract_and_fail_replies_closed() {
+    fn pty_input_queues_preserve_paste_contract_and_drop_unread_replies() {
         let (user_tx, user_rx) = crossbeam_channel::bounded(PTY_INPUT_QUEUE_DEPTH);
         let (reply_tx, reply_rx) = crossbeam_channel::bounded(PTY_INPUT_QUEUE_DEPTH);
         let queued_user_bytes = Arc::new(AtomicUsize::new(0));
@@ -5153,6 +5189,7 @@ mod node_tests {
             reply_tx,
             queued_user_bytes: queued_user_bytes.clone(),
             queued_reply_bytes: queued_reply_bytes.clone(),
+            dropped_replies: AtomicUsize::new(0),
             failed: failed.clone(),
             stop: Arc::new(AtomicBool::new(false)),
             waker: Arc::new(move || {
@@ -5196,19 +5233,45 @@ mod node_tests {
             queue.enqueue_reply(Arc::from(vec![b'r'; MAX_PROTOCOL_REPLY_MESSAGE_BYTES])),
             PaneInputResult::Queued
         );
+        // A full reply lane means the program stopped reading its input
+        // (`cat` of a binary file full of queries): the reply is dropped and
+        // the pane stays up, its memory still bounded by the lane.
         assert_eq!(
             queue.enqueue_reply(Arc::from(&b"y"[..])),
-            PaneInputResult::Failed,
-            "protocol reply byte-budget exhaustion must fail closed"
+            PaneInputResult::Backpressured,
+            "a reply past the byte budget is dropped, not fatal"
         );
-        assert!(failed.load(Ordering::Acquire));
-        assert_eq!(wakes.load(Ordering::Acquire), 1);
+        assert!(!failed.load(Ordering::Acquire));
+        assert_eq!(wakes.load(Ordering::Acquire), 0);
+        assert_eq!(queue.dropped_replies.load(Ordering::Acquire), 1);
+        drop(reply_rx.try_recv());
+        for _ in 0..PTY_INPUT_QUEUE_DEPTH {
+            assert_eq!(
+                queue.enqueue_reply(Arc::from(&b"\x1b[?6c"[..])),
+                PaneInputResult::Queued
+            );
+        }
+        assert_eq!(queue.dropped_replies.load(Ordering::Acquire), 0);
         assert_eq!(
-            queue.enqueue_reply(Arc::from(&b"z"[..])),
-            PaneInputResult::Failed,
-            "failure must remain sticky"
+            queue.enqueue_reply(Arc::from(&b"\x1b[?6c"[..])),
+            PaneInputResult::Backpressured,
+            "a reply past the lane's depth is dropped, not fatal"
         );
-        assert_eq!(wakes.load(Ordering::Acquire), 1, "wake only on the edge");
+        assert!(!failed.load(Ordering::Acquire));
+        // One freed slot does not end the run of drops, so the log does not
+        // flap while the program keeps ignoring its input.
+        drop(reply_rx.try_recv());
+        assert_eq!(
+            queue.enqueue_reply(Arc::from(&b"\x1b[?6c"[..])),
+            PaneInputResult::Queued
+        );
+        assert_eq!(queue.dropped_replies.load(Ordering::Acquire), 1);
+        while reply_rx.try_recv().is_ok() {}
+        assert_eq!(
+            queue.enqueue_reply(Arc::from(&b"\x1b[?6c"[..])),
+            PaneInputResult::Queued
+        );
+        assert_eq!(queue.dropped_replies.load(Ordering::Acquire), 0);
 
         drop(user_rx);
         drop(reply_rx);

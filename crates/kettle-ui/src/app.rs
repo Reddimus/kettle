@@ -11852,7 +11852,7 @@ impl App {
                         );
                     }
                     TermEvent::PtyWrite(s) => {
-                        if !pane.queue_protocol_reply(s.as_bytes()).is_queued() {
+                        if pane.queue_protocol_reply(s.as_bytes()).is_failed() {
                             log::error!("closing pane {pane_id}: bounded PTY input queue failed");
                             pane.closed = true;
                             break;
@@ -11906,7 +11906,7 @@ impl App {
                         // way).
                         let text = clamp_osc52(&text, OSC52_MAX);
                         let reply = fmt(text);
-                        if !pane.queue_protocol_reply(reply.as_bytes()).is_queued() {
+                        if pane.queue_protocol_reply(reply.as_bytes()).is_failed() {
                             log::error!("closing pane {pane_id}: bounded PTY input queue failed");
                             pane.closed = true;
                             break;
@@ -11925,7 +11925,7 @@ impl App {
                             pixel_height,
                             &*fmt,
                         );
-                        if !pane.queue_protocol_reply(reply.as_bytes()).is_queued() {
+                        if pane.queue_protocol_reply(reply.as_bytes()).is_failed() {
                             log::error!("closing pane {pane_id}: bounded PTY input queue failed");
                             pane.closed = true;
                             break;
@@ -11943,7 +11943,7 @@ impl App {
                             kettle_render::reply_for_query(idx, &self.cfg.theme, t.colors(), &*fmt)
                         });
                         if let Some(s) = reply
-                            && !pane.queue_protocol_reply(s.as_bytes()).is_queued()
+                            && pane.queue_protocol_reply(s.as_bytes()).is_failed()
                         {
                             log::error!("closing pane {pane_id}: bounded PTY input queue failed");
                             pane.closed = true;
