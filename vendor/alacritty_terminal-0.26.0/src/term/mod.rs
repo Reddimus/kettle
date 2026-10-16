@@ -2113,11 +2113,11 @@ impl<T: EventListener> Handler for Term<T> {
         let cursor = &self.grid.cursor;
         let bg = cursor.template.bg;
 
-        // Ensure deleting within terminal bounds.
-        let count = cmp::min(count, columns);
-
+        // Delete at most the cells from the cursor to the end of the line, so
+        // the cleared tail never reaches back before the cursor.
         let start = cursor.point.column.0;
-        let end = cmp::min(start + count, columns - 1);
+        let count = cmp::min(count, columns - start);
+        let end = start + count;
         let num_cells = columns - end;
 
         let line = cursor.point.line;

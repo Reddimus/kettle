@@ -22,6 +22,22 @@ impl GridCell for usize {
     }
 }
 
+// The widest deltas stop at the ends of history instead of overflowing.
+#[test]
+fn scroll_display_extreme_deltas_clamp_to_history() {
+    let mut grid = Grid::<usize>::new(2, 1, 2);
+    let region = Line(0)..Line(2);
+    grid.scroll_up::<usize>(&region, 1);
+    grid.scroll_up::<usize>(&region, 1);
+    assert_eq!(grid.history_size(), 2);
+
+    grid.scroll_display(Scroll::Delta(1));
+    grid.scroll_display(Scroll::Delta(i32::MAX));
+    assert_eq!(grid.display_offset(), 2);
+    grid.scroll_display(Scroll::Delta(i32::MIN));
+    assert_eq!(grid.display_offset(), 0);
+}
+
 // Scroll up moves lines upward.
 #[test]
 fn scroll_up() {

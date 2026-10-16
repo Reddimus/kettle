@@ -201,7 +201,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
     pub fn scroll_display(&mut self, scroll: Scroll) {
         self.display_offset = match scroll {
             Scroll::Delta(count) => min(
-                max((self.display_offset as i32) + count, 0) as usize,
+                self.display_offset.saturating_add_signed(count as isize),
                 self.history_size(),
             ),
             Scroll::PageUp => min(self.display_offset + self.lines, self.history_size()),

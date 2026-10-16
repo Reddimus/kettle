@@ -109,6 +109,12 @@ date. Recheck that before upgrading a crate or dropping a patch.
   keeps the cursor's row fixed, so splitting a pane scrolled its visible lines
   away while the rows under the prompt stayed empty. Two `grid/tests.rs`
   cases cover wrapping above and below the cursor.
+  DCH (`CSI Ps P`) deletes at most the cells from the cursor to the end of
+  the line. Upstream clamps the count to the line width instead, so a count
+  past the end of the line also cleared cells before the cursor.
+  `Grid::scroll_display` adds a signed delta with saturation, so a wheel
+  delta near `i32::MAX` stops at the top of history instead of overflowing.
+  Upstream `master` still had both bugs on 2026-10-16.
 - Upstream status, checked 2026-09-30: crates.io's newest `alacritty_terminal`
   is still 0.26.0, published 2026-04-06. Alacritty's `master`, at `d692748d`
   from 2026-08-31, is `0.26.1-dev`. Since
