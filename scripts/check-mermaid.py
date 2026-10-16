@@ -29,6 +29,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 MERMAID_CLI = "@mermaid-js/mermaid-cli@11"
@@ -84,6 +85,13 @@ def skip_or_fail(reason: str) -> int:
     return 1 if required else 0
 
 
+LAUNCH_ATTEMPTS = 3
+
+
+def is_launch_failure(output: str) -> bool:
+    return "ChromeLauncher" in output or "Failed to launch" in output
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -112,17 +120,27 @@ def main() -> int:
         tmpdir = Path(tmp)
         # mermaid-cli reads its browser settings from a config file; passing the
         # executable explicitly avoids depending on a puppeteer download.
-        config = tmpdir / "puppeteer.json"
-        config.write_text(
-            json.dumps(
-                {
-                    "executablePath": chrome,
-                    "headless": True,
-                    "args": ["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
-                }
-            ),
-            encoding="utf-8",
-        )
+        def write_config(attempt: int) -> Path:
+            # A fresh profile per attempt, so a browser that died on launch
+            # leaves no lock behind for the retry.
+            config = tmpdir / f"puppeteer-{attempt}.json"
+            config.write_text(
+                json.dumps(
+                    {
+                        "executablePath": chrome,
+                        "headless": True,
+                        "args": [
+                            "--no-sandbox",
+                            "--disable-gpu",
+                            "--disable-dev-shm-usage",
+                            f"--user-data-dir={tmpdir / f'profile-{attempt}'}",
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return config
+
         for source in files:
             # One invocation per FILE, not per block: mermaid-cli's Markdown mode
             # compiles every block in a single browser launch. Launching once per
@@ -131,24 +149,36 @@ def main() -> int:
             staged = tmpdir / source.name
             staged.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
             rendered = tmpdir / f"rendered-{source.name}"
-            result = subprocess.run(
-                [
-                    "npx", "--yes", MERMAID_CLI,
-                    "-i", str(staged),
-                    "-o", str(rendered),
-                    "-p", str(config),
-                    "-q",
-                ],
-                capture_output=True,
-                text=True,
-                cwd=tmpdir,
-            )
+            # A browser that fails to start is the runner's problem, not the
+            # diagram's: retry the launch with backoff. A diagram that fails
+            # to render fails at once.
+            for attempt in range(LAUNCH_ATTEMPTS):
+                result = subprocess.run(
+                    [
+                        "npx", "--yes", MERMAID_CLI,
+                        "-i", str(staged),
+                        "-o", str(rendered),
+                        "-p", str(write_config(attempt)),
+                        "-q",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    cwd=tmpdir,
+                )
+                output = (result.stderr or "") + (result.stdout or "")
+                if result.returncode == 0 or not is_launch_failure(output):
+                    break
+                if attempt + 1 < LAUNCH_ATTEMPTS:
+                    time.sleep(2 ** (attempt + 1))
             if result.returncode == 0:
                 print(f"  ok   {source}")
                 continue
-            output = (result.stderr or "") + (result.stdout or "")
-            if "ChromeLauncher" in output or "Failed to launch" in output:
-                return skip_or_fail(f"mermaid-cli could not launch {chrome}")
+            if is_launch_failure(output):
+                for line in output.strip().splitlines()[-15:]:
+                    print(f"    {line}", file=sys.stderr)
+                return skip_or_fail(
+                    f"mermaid-cli could not launch {chrome} in {LAUNCH_ATTEMPTS} attempts"
+                )
             failures.append((source, output.strip()))
             print(f"  FAIL {source}")
 

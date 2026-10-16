@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import importlib.util
 import json
 import os
@@ -186,7 +187,16 @@ def fixture(
         temporary.replace(state)
 
     def enter() -> None:
-        tty.setraw(0)
+        while True:
+            try:
+                tty.setraw(0)
+                break
+            except termios.error as error:
+                # In the background this stops with SIGTTOU. Linux restarts
+                # the call once `fg` resumes the process; macOS fails it
+                # with EINTR instead, so try again.
+                if error.args[0] != errno.EINTR:
+                    raise
         if alternate:
             write(b"\x1b[?1049h")
         write(b"\x1b[>1u\r\nJOB_CLIENT_READY\r\n")
@@ -227,8 +237,15 @@ def fixture(
                     if broken:
                         enter()
                     signal.raise_signal(signal.SIGTSTP)
-                    while not broken_background and os.tcgetpgrp(0) != os.getpgrp():
-                        signal.raise_signal(signal.SIGSTOP)
+                    # Resumed by `bg`, a well-behaved client must not take the
+                    # terminal back. enter() starts with tcsetattr, and the
+                    # kernel stops a background process that calls it with
+                    # SIGTTOU, checking ownership at that instant. A
+                    # check-then-SIGSTOP loop raced `fg`: the client could
+                    # see itself in the background, lose the CPU while the
+                    # shell ran `fg`, then stop itself in the foreground.
+                    # The broken-background control ignores SIGTTOU, so its
+                    # enter() succeeds in the background as before.
                     if not broken:
                         enter()
                     generation += 1
