@@ -264,7 +264,7 @@ fn decode_field(field: &str, max_bytes: usize) -> Option<String> {
 /// part of a candidate. Joiners and variation selectors remain valid for emoji;
 /// only Unicode controls, line and paragraph separators, and the bidi marks
 /// that can reorder neighboring text are refused.
-fn unsafe_display_scalar(value: char) -> bool {
+pub(crate) fn unsafe_display_scalar(value: char) -> bool {
     value.is_control()
         || matches!(
             value,

@@ -21,6 +21,7 @@ libfuzzer-sys = "0.4.13"
 kettle-media = { path = "../crates/kettle-media", features = ["fuzzing"] }
 kettle-media-native = { path = "../crates/kettle-media-native", features = ["fuzzing"] }
 kettle-media-render = { path = "../crates/kettle-media-render", features = ["fuzzing"] }
+kettle-vt = { path = "../crates/kettle-vt", features = ["fuzzing"] }
 
 # The product workspace's `[patch.crates-io]` does not reach this one, so a
 # vendored fix the targets build must be patched here too, or they fuzz the
@@ -64,6 +65,20 @@ bench = false
 [[bin]]
 name = "ffprobe"
 path = "fuzz_targets/ffprobe.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "vt"
+path = "fuzz_targets/vt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "images"
+path = "fuzz_targets/images.rs"
 test = false
 doc = false
 bench = false

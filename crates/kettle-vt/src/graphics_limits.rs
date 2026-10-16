@@ -296,7 +296,7 @@ impl GraphicsBudget {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fuzzing"))]
     pub(crate) fn usage(&self) -> (usize, usize, usize, usize) {
         (
             self.process.cpu.load(Ordering::Acquire),

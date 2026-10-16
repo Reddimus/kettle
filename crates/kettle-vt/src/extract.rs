@@ -785,7 +785,7 @@ impl Extractor {
         Self::with_budget(budget)
     }
 
-    fn with_budget(budget: GraphicsBudget) -> Self {
+    pub(crate) fn with_budget(budget: GraphicsBudget) -> Self {
         Extractor {
             mode: Mode::Pass,
             pass: Vec::with_capacity(8192),
