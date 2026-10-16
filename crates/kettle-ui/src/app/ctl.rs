@@ -2,6 +2,60 @@
 
 use super::*;
 
+/// One page of a `read_screen` snapshot: lines `page.offset..end` of `total`,
+/// within `MAX_CTL_TEXT_PAGE_BYTES`. A first line longer than that is cut at a
+/// character boundary (`text_truncated`). `whole` returns every line instead.
+struct ScreenPage {
+    text: String,
+    end: usize,
+    total: usize,
+    text_truncated: bool,
+}
+
+fn screen_page(screen: &str, page: &kettle_ctl::protocol::PageRequest, whole: bool) -> ScreenPage {
+    let total = screen.split_inclusive('\n').count();
+    if whole {
+        return ScreenPage {
+            text: screen.to_owned(),
+            end: total,
+            total,
+            text_truncated: false,
+        };
+    }
+    let start = page.offset.min(total);
+    let desired_end = start.saturating_add(page.limit).min(total);
+    let mut end = start;
+    let mut text = String::new();
+    let mut text_truncated = false;
+    for line in screen
+        .split_inclusive('\n')
+        .skip(start)
+        .take(desired_end - start)
+    {
+        if !text.is_empty() && text.len().saturating_add(line.len()) > MAX_CTL_TEXT_PAGE_BYTES {
+            break;
+        }
+        if text.is_empty() && line.len() > MAX_CTL_TEXT_PAGE_BYTES {
+            let mut byte_end = MAX_CTL_TEXT_PAGE_BYTES;
+            while !line.is_char_boundary(byte_end) {
+                byte_end -= 1;
+            }
+            text.push_str(&line[..byte_end]);
+            text_truncated = true;
+            end += 1;
+            break;
+        }
+        text.push_str(line);
+        end += 1;
+    }
+    ScreenPage {
+        text,
+        end,
+        total,
+        text_truncated,
+    }
+}
+
 impl App {
     /// Start the control server if the policy allows anything, the first pane
     /// exists, and no start has been tried. A failed start is logged and not
@@ -147,7 +201,7 @@ impl App {
             }
             Method::ListTabs => self.ctl_list_tabs(ws, req),
             Method::ListPanes => self.ctl_list_panes(ws, req),
-            Method::ReadScreen => self.ctl_read_screen(ws, req),
+            Method::ReadScreen => self.ctl_read_screen(ws, req, request.internal_probe()),
             Method::ReadCells => self.ctl_read_cells(ws, req),
             Method::UiGeometry => self.ctl_ui_geometry(ws, req),
             Method::Screenshot => {
@@ -454,10 +508,15 @@ impl App {
     }
 
     /// `read_screen`: a plain-text snapshot of a pane (default: focused).
+    /// `read_screen`. A `wait_for` probe (`internal_probe`) gets the whole
+    /// snapshot in one answer, so it matches text past the first page; the
+    /// snapshot is already bounded by `MAX_CTL_SCREEN_SNAPSHOT_BYTES`, and the
+    /// answer never leaves this process.
     pub(super) fn ctl_read_screen(
         &mut self,
         ws: &mut WindowState,
         req: &kettle_ctl::protocol::Request,
+        internal_probe: bool,
     ) -> kettle_ctl::protocol::Response {
         use kettle_ctl::protocol::{PageRequest, Response, error_codes as ec};
         let page = match PageRequest::from_params(&req.params) {
@@ -637,34 +696,12 @@ impl App {
                 "screen changed between pages; restart without cursor/snapshot",
             );
         }
-        let total = s.text.split_inclusive('\n').count();
-        let start = page.offset.min(total);
-        let desired_end = start.saturating_add(page.limit).min(total);
-        let mut end = start;
-        let mut text = String::new();
-        let mut text_truncated = false;
-        for line in s
-            .text
-            .split_inclusive('\n')
-            .skip(start)
-            .take(desired_end - start)
-        {
-            if !text.is_empty() && text.len().saturating_add(line.len()) > MAX_CTL_TEXT_PAGE_BYTES {
-                break;
-            }
-            if text.is_empty() && line.len() > MAX_CTL_TEXT_PAGE_BYTES {
-                let mut byte_end = MAX_CTL_TEXT_PAGE_BYTES;
-                while !line.is_char_boundary(byte_end) {
-                    byte_end -= 1;
-                }
-                text.push_str(&line[..byte_end]);
-                text_truncated = true;
-                end += 1;
-                break;
-            }
-            text.push_str(line);
-            end += 1;
-        }
+        let ScreenPage {
+            text,
+            end,
+            total,
+            text_truncated,
+        } = screen_page(&s.text, &page, internal_probe);
         let truncated = end < total;
         Response::ok(
             req.id,
@@ -3074,5 +3111,42 @@ impl App {
             MAX_CTL_COMMAND_OUTPUT_BYTES,
         );
         (output, head_dropped || byte_truncated)
+    }
+}
+
+#[cfg(test)]
+mod screen_page_tests {
+    use super::*;
+
+    fn default_page() -> kettle_ctl::protocol::PageRequest {
+        kettle_ctl::protocol::PageRequest::from_params(&serde_json::json!({})).unwrap()
+    }
+
+    /// A `wait_for` probe sees the whole snapshot. A client page stops at
+    /// `DEFAULT_PAGE_ITEMS` lines or `MAX_CTL_TEXT_PAGE_BYTES`, so text past
+    /// either was never matched.
+    #[test]
+    fn a_wait_for_probe_reads_past_the_first_page() {
+        let many_lines = format!(
+            "{}needle\n",
+            "x\n".repeat(kettle_ctl::protocol::DEFAULT_PAGE_ITEMS)
+        );
+        let many_bytes = format!("{}\nneedle\n", "y".repeat(MAX_CTL_TEXT_PAGE_BYTES));
+        for screen in [many_lines, many_bytes] {
+            let client = screen_page(&screen, &default_page(), false);
+            assert!(!client.text.contains("needle"));
+            assert!(client.end < client.total);
+
+            let probe = screen_page(&screen, &default_page(), true);
+            assert_eq!(probe.text, screen);
+            assert_eq!(probe.end, probe.total);
+        }
+        // And `handle_ctl_request` passes the probe flag through. Split, so
+        // this line does not match itself.
+        let source = include_str!("ctl.rs");
+        assert!(source.contains(concat!(
+            "self.ctl_read_screen(ws, req, ",
+            "request.internal_probe())"
+        )));
     }
 }
