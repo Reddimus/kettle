@@ -527,13 +527,15 @@ impl LuaEngine {
         // top-level invocation exceeds `max_fires` fires it errors out,
         // unwinding the runaway script. User Lua can't disable it — mlua's
         // `StdLib::ALL_SAFE` excludes the `debug` library (so `debug.sethook`
-        // is unreachable), and the hook is set from the Rust side here.
+        // is unreachable), and the hook is set from the Rust side here. It is
+        // the global hook: mlua removes a thread hook from any coroutine it
+        // did not create, so a loop inside `coroutine.wrap` ran unbounded.
         let hook_fires = Arc::new(AtomicU64::new(0));
         let budget_tripped = Arc::new(AtomicBool::new(false));
         {
             let fires = hook_fires.clone();
             let tripped = budget_tripped.clone();
-            lua.set_hook(
+            lua.set_global_hook(
                 mlua::HookTriggers::new().every_nth_instruction(HOOK_INSTRUCTION_INTERVAL),
                 move |_lua, _debug| {
                     let n = fires.fetch_add(1, Ordering::Relaxed) + 1;
@@ -556,6 +558,45 @@ impl LuaEngine {
                 },
             )
             .context("install Lua instruction-budget hook")?;
+        }
+        // The hook's error can be caught. A script that retries a runaway
+        // under pcall in a loop would catch it at every fire and never stop,
+        // so each protected call re-raises an exhausted budget once it
+        // returns. The wrappers are Lua functions, so a coroutine can still
+        // yield through pcall and xpcall. A finalizer (`__gc`) also swallows
+        // the error, as a warning; no wrapper reaches that.
+        let tripped = budget_tripped.clone();
+        let check_budget = lua.create_function(move |_, ()| {
+            if tripped.load(Ordering::Relaxed) {
+                Err(mlua::Error::RuntimeError(
+                    "kettle: Lua instruction budget exhausted".to_string(),
+                ))
+            } else {
+                Ok(())
+            }
+        })?;
+        let wrap: mlua::Function = lua
+            .load(
+                "local pack, unpack = table.pack, table.unpack
+                 return function(call, check)
+                     return function(...)
+                         local result = pack(call(...))
+                         check()
+                         return unpack(result, 1, result.n)
+                     end
+                 end",
+            )
+            .eval()?;
+        for (table, name) in [
+            (lua.globals(), "pcall"),
+            (lua.globals(), "xpcall"),
+            (lua.globals().get::<mlua::Table>("coroutine")?, "resume"),
+        ] {
+            let protected: mlua::Function = table.get(name)?;
+            table.set(
+                name,
+                wrap.call::<mlua::Function>((protected, check_budget.clone()))?,
+            )?;
         }
         let pending: Arc<Mutex<PendingQueue>> = Arc::new(Mutex::new(PendingQueue::default()));
         let kettle_tbl = lua.create_table().context("create kettle table")?;
@@ -1868,6 +1909,98 @@ mod tests {
     /// force-aborted by the instruction-budget hook instead of wedging the
     /// thread forever. The test dials the budget down so the abort happens in a
     /// few million instructions (sub-second) rather than the ~128 M prod cap.
+    #[test]
+    fn repeated_protected_runaways_cannot_swallow_the_budget() {
+        const CHILD: &str = "KETTLE_LUA_PROTECTED_RUNAWAY";
+        if let Ok(protected) = std::env::var(CHILD) {
+            let eng = LuaEngine::new_with_max_hook_fires("Default", 2).expect("init");
+            assert_eq!(
+                eng.eval_str("local ok, v = pcall(function() return 42 end); return ok and v")
+                    .unwrap(),
+                "42"
+            );
+            assert_eq!(
+                eng.eval_str("local ok = pcall(error, 'ordinary'); return ok")
+                    .unwrap(),
+                "false"
+            );
+            assert_eq!(
+                eng.eval_str(
+                    "local ok, v = xpcall(error, function() return 'handled' end); return v"
+                )
+                .unwrap(),
+                "handled"
+            );
+            assert_eq!(
+                eng.eval_str(
+                    "local ok, v = coroutine.resume(coroutine.create(function() return 42 end)); return ok and v"
+                ).unwrap(),
+                "42"
+            );
+            assert_eq!(
+                eng.eval_str(
+                    "local co = coroutine.create(function()
+                         return pcall(function() return coroutine.yield(42) end)
+                     end)
+                     local ok, v = coroutine.resume(co)
+                     local ok2, a, b = coroutine.resume(co, 99)
+                     return ok and v == 42 and ok2 and a and b == 99"
+                )
+                .unwrap(),
+                "true"
+            );
+            let body = match protected.as_str() {
+                "pcall" => "pcall(function() while true do end end)",
+                "xpcall" => "xpcall(function() while true do end end, function(e) return e end)",
+                "resume" => "coroutine.resume(coroutine.create(function() while true do end end))",
+                "wrap" => "pcall(coroutine.wrap(function() while true do end end))",
+                _ => panic!("unknown protected call"),
+            };
+            eng.eval_str(&format!(
+                "good_runs = 0; kettle.on('bell', function() while true do {body} end end); \
+                 kettle.on('bell', function() good_runs = good_runs + 1 end)"
+            ))
+            .unwrap();
+            eng.fire_event(&LuaEvent::Bell(1));
+            eng.fire_event(&LuaEvent::Bell(2));
+            assert_eq!(eng.eval_str("return good_runs").unwrap(), "2");
+            assert_eq!(
+                eng.drain_commands()
+                    .iter()
+                    .filter(|command| {
+                        matches!(command, LuaCommand::CallbackStopped { dropped: 1, .. })
+                    })
+                    .count(),
+                1
+            );
+            return;
+        }
+        for protected in ["pcall", "xpcall", "resume", "wrap"] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "lua::tests::repeated_protected_runaways_cannot_swallow_the_budget",
+                ])
+                .env(CHILD, protected)
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn isolated Lua regression");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    assert!(status.success(), "{protected}: {status}");
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("{protected} swallowed repeated budget errors");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+
     #[test]
     fn runaway_script_aborted_by_instruction_budget() {
         // ≈2 M instructions before abort (2 hook fires × 1 M interval).

@@ -198,6 +198,44 @@ impl ImageData {
         })
     }
 
+    /// Replace uniquely owned pixels using their reservation and a fresh
+    /// allocation key. On refusal, return the original image and new pixels.
+    pub fn try_replace_with_budget(
+        mut self,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+        budget: &GraphicsBudget,
+    ) -> Result<(ImageData, Vec<u8>), (ImageData, Vec<u8>)> {
+        if width == 0
+            || height == 0
+            || width > MAX_IMAGE_DIM
+            || height > MAX_IMAGE_DIM
+            || rgba_bytes(width, height) != Some(rgba.len())
+            || rgba.len() > budget.limits().image_bytes
+        {
+            return Err((self, rgba));
+        }
+        let mut buffer = match Arc::try_unwrap(self.rgba) {
+            Ok(buffer) => buffer,
+            Err(old) => {
+                self.rgba = old;
+                return Err((self, rgba));
+            }
+        };
+        if !buffer.reservation.try_move_to_scope(budget)
+            || !buffer.reservation.try_grow_to(rgba.len())
+        {
+            self.rgba = Arc::new(buffer);
+            return Err((self, rgba));
+        }
+        let pixels = std::mem::replace(&mut buffer.pixels, rgba);
+        self.width = width;
+        self.height = height;
+        self.rgba = Arc::new(buffer);
+        Ok((self, pixels))
+    }
+
     /// The pixels back, when this is their only owner: what a caller that
     /// fills a buffer per frame reuses for the next one, its account's
     /// reservation released. Shared pixels stay with their other owners.
