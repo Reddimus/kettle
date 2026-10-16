@@ -29,6 +29,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 - On X11, paste text of 1 MiB or more that `xclip` put on the clipboard.
   Kettle froze for about 16 seconds and pasted nothing.
+- Tabs in a side tab bar (`tab-position = left` or `right`) reorder by
+  dragging, as they do in a top or bottom bar.
 - Update notifications: each release is announced, installed or reported as
   failed with at most one desktop notification across every Kettle process,
   and none of them requests the user's attention any more. A failed automatic

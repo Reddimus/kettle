@@ -19762,46 +19762,17 @@ impl App {
                         .focus_at(area, ws.cursor.x as f32, ws.cursor.y as f32);
                     self.note_focus_change(ws, pre);
                 }
-                // Drag-to-reorder tabs (kitty / iTerm2 /
-                // Ghostty parity). When a left-button press in the tab
-                // bar armed `tab_drag_active`, walk the bar geometry,
-                // compute the target index under the cursor, and swap
-                // the active tab toward it via `move_active_tab`
-                // (the pure swap-with-clamp helper).
-                // Horizontal bars only. Mapping cursor.x onto a vertically
-                // stacked strip would silently shuffle tabs during any drag
-                // (vertical drag-reorder remains deferred).
-                if let Some((ox, oy)) = ws.tab_drag_press {
-                    let dx = ws.cursor.x as f32 - ox;
-                    let dy = ws.cursor.y as f32 - oy;
-                    if (dx * dx + dy * dy).sqrt()
-                        > tab_reorder_drag_threshold_px(self.tab_bar_h(ws))
-                    {
-                        ws.tab_drag_press = None;
-                        ws.tab_pressed_idx = None;
-                    }
-                }
+                // Drag-to-reorder tabs (kitty / iTerm2 / Ghostty parity), on
+                // every tab bar position: once a left press in the bar has
+                // moved past the click slop, the active tab follows the
+                // segment under the cursor.
+                self.promote_tab_drag_if_needed(ws);
                 if ws.tab_drag_active
                     && ws.tab_drag_press.is_none()
-                    && !self.cfg.tab_bar_pos.is_vertical()
+                    && self.reorder_active_tab_for_cursor(ws)
+                    && let Some(w) = &ws.window
                 {
-                    let bar = self.tab_bar(ws);
-                    if bar.height > 0.0 && !bar.segments.is_empty() {
-                        // Use the same rendered segment
-                        // rects that click hit-testing and painting use.
-                        let target = tab_drag_target_index(
-                            ws.cursor.x as f32,
-                            ws.cursor.y as f32,
-                            &bar.segments,
-                        );
-                        let delta = target as i32 - ws.mux.active as i32;
-                        if delta != 0 && ws.mux.move_active_tab(delta) {
-                            ws.mux.touch_active_tab_seen();
-                            if let Some(w) = &ws.window {
-                                w.request_redraw();
-                            }
-                        }
-                    }
+                    w.request_redraw();
                 }
                 // Terminator parity: a titlebar press that has since moved far
                 // enough is a pane drag. Recompute the drop target every move
