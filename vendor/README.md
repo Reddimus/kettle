@@ -422,6 +422,12 @@ them.
   multiline paste prompt. Encoded `%0D` filename bytes remain intact.
   The Linux and macOS image readers also use the current `image::ImageReader`
   name for the same type, avoiding deprecated aliases in warnings-denied builds.
+- Patch: read X11 INCR segments as any type, so each one is deleted and the
+  owner can send the next. xclip answers every target with its own type; asked
+  for a file list first, as a paste does, its 1 MiB+ transfer was left waiting
+  on an undeleted segment, and the text read after it timed out (4 s for each
+  of six formats). A transfer of another type is drained, then refused. Upstream
+  `master` reads segments the same old way (checked 2026-10-16).
 - Upstream: backport the decoder line from
   [b4e0616](https://github.com/1Password/arboard/commit/b4e061622caa1356425f81073d9685166017c7f9).
   On 2026-10-14 the latest published version was still 3.6.1. The upstream
@@ -430,9 +436,11 @@ them.
   standalone examples and their tools. Only example target stanzas are removed
   from the normalized manifest; test dependencies and optional features remain.
 - Validation: `just vendor-clipboard-check` runs the retained display-free Linux
-  tests, the CRLF/encoded-CR regression, formatting and warnings-denied Clippy.
+  tests, the CRLF/encoded-CR regression, formatting and warnings-denied Clippy,
+  and the INCR regression against a real xclip under `xvfb-run` when both are
+  installed (PR CI installs them).
   Nautilus copy/paste is a separate native GNOME check. Other platforms retain
   their upstream implementations and product CI coverage.
 
 Remove this copy and its root patch entry when a released arboard includes the
-CRLF decoder correction.
+CRLF decoder correction and reads INCR segments of any type.
