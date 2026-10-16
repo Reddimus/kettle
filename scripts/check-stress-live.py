@@ -18,9 +18,9 @@ the control API, and must leave it alive with no panic in its log, answering
       refused within its deadline, and three good files must still render
   S10 64 parallel control clients, 20 requests each
 
-S6 uses the system clipboard and restores it afterwards. S9 needs a working
-media worker, on macOS a signed one (`just macos-avsync` signs it). Run on macOS or a
-Linux desktop session:
+S6 uses the system clipboard (pbcopy, wl-copy or xclip) and restores it
+afterwards. S9 needs a working media worker, on macOS a signed one (`just
+macos-avsync` signs it). Run on macOS or a Linux desktop session:
 
   scripts/check-stress-live.py --kettle target/debug/kettle --out-dir DIR [S1 S3 ...]
 
@@ -202,23 +202,34 @@ def s4_close_mid_flood(live):
     return {"panes_left": len(live.json_ctl("list_panes").get("panes", [])), "worst_get_state_after_s": probe_during(live, 2)}
 
 
+def clipboard_commands():
+    """The system clipboard's (copy, paste) commands: pbcopy on macOS,
+    wl-copy under Wayland, else xclip."""
+    if sys.platform == "darwin":
+        return ["pbcopy"], ["pbpaste"]
+    if os.environ.get("WAYLAND_DISPLAY"):
+        return ["wl-copy"], ["wl-paste", "--no-newline"]
+    return ["xclip", "-selection", "clipboard"], ["xclip", "-selection", "clipboard", "-o"]
+
+
 def s6_paste(live):
-    saved = subprocess.run(["pbpaste"], capture_output=True).stdout
+    copy, paste = clipboard_commands()
+    saved = subprocess.run(paste, capture_output=True).stdout
     try:
         live.ctl("send_text", params={"text": "cat > /dev/null\r"}); time.sleep(0.5)
         big = b"kettle paste line\n" * (64 * 1024 * 1024 // 18)
-        subprocess.run(["pbcopy"], input=big, check=True)
+        subprocess.run(copy, input=big, check=True)
         live.json_ctl("perform_action", {"action": "paste"})
         worst = probe_during(live, 8)
         live.ctl("send_keys", params={"keys": ["ctrl+c"]}); time.sleep(0.5)
         live.ctl("send_text", params={"text": "cat -v\r"}); time.sleep(0.5)
-        subprocess.run(["pbcopy"], input=b"before\x1b[201~after-end-marker\n", check=True)
+        subprocess.run(copy, input=b"before\x1b[201~after-end-marker\n", check=True)
         live.json_ctl("perform_action", {"action": "paste"}); time.sleep(1)
         screen = live.json_ctl("read_screen").get("text", "")
         live.ctl("send_keys", params={"keys": ["ctrl+c"]}); time.sleep(0.3)
         return {"worst_get_state_during_s": worst, "end_marker_echo": [l for l in screen.splitlines() if "after-end-marker" in l][:3]}
     finally:
-        subprocess.run(["pbcopy"], input=saved, check=False)
+        subprocess.run(copy, input=saved, check=False)
 
 
 def s8_theme_language_churn(live):
