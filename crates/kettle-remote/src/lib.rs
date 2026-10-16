@@ -4,8 +4,7 @@
 //! [`detect_remote_with`] and [`RemoteScanner`] walk a pane's process tree for
 //! them, and [`clone_session_command`] builds the command of the menu item
 //! that reconnects to a detected session; the UI words that item. See
-//! [`TERMINATOR-REMOTE-DESIGN.md`](../../../docs/TERMINATOR-REMOTE-DESIGN.md)
-//! for the design.
+//! docs/ARCHITECTURE.md, Terminator-parity subsystems, for integration.
 
 // Unsafe code is confined to the macOS libproc walk in `macos.rs`, which
 // allows it for that module alone.
@@ -252,7 +251,6 @@ impl ProcessTree for sysinfo::System {
 }
 
 /// Detect the remote-session context for the pane rooted at `child_pid`.
-/// See [`TERMINATOR-REMOTE-DESIGN.md`](../../../docs/TERMINATOR-REMOTE-DESIGN.md).
 ///
 /// Walks the process tree breadth-first from `child_pid` (the process
 /// kettle spawned, itself included) and returns the first
@@ -2058,8 +2056,7 @@ fn shell_single_quote(s: &str) -> String {
 
 /// SSH-session detector. Takes a process's argv (as the process-tree walk
 /// supplies it) and returns `Some(Ssh { host, user, options })` if the argv
-/// shape matches an `ssh` invocation, else `None`. See
-/// [`TERMINATOR-REMOTE-DESIGN.md`](../../../docs/TERMINATOR-REMOTE-DESIGN.md).
+/// shape matches an `ssh` invocation, else `None`.
 ///
 /// Recognized `argv[0]` values: `ssh`, `sshpass`. (`autossh` is a
 /// reasonable extension; deferred to follow-up.)
@@ -2299,9 +2296,8 @@ fn ssh_option_selects_endpoint(option: &str) -> bool {
     )
 }
 
-/// Phase 4 of [`TERMINATOR-REMOTE-DESIGN.md`](
-/// ../../../docs/TERMINATOR-REMOTE-DESIGN.md): Container-session
-/// detector. Recognizes the four common container-exec argv shapes:
+/// Detect supported container-exec command lines and retain endpoint-selecting options.
+/// Recognizes the four common container-exec argv shapes:
 ///
 ///   - `docker exec [-it] <container> <cmd> [args …]`
 ///   - `podman exec [-it] <container> <cmd> [args …]`

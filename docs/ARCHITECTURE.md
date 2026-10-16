@@ -43,6 +43,10 @@ graph TD
     mrender["kettle-media-render<br/>held-handle source loads · raster decode under caps<br/>SVG sanitize · admission · resvg · straight RGBA<br/>no unsafe code"] --> media
 ```
 
+Build `kettle-media-worker` in a separate Cargo invocation with
+`--profile media-worker` so GUI clipboard codec features do not unify into the
+worker's codec graph.
+
 `kettle-media` defines the media protocol for agent visuals: bounded jobs and
 results, the effective theme, caps, source authorization (an external request
 can only carry an attested path; a GUI user pull needs an explicit action
@@ -224,11 +228,9 @@ copy of the first. The client's `render` runs one job in a
 fresh worker under startup and job deadlines, with the worker in its own
 process group, killed before it is reaped; `render_with_control` adds
 cancellation and one absolute deadline its caller owns. Nothing in the GUI
-calls them yet. The byte layouts, digest
-framing, availability codes and decisions are in
-[MEDIA-PROTOCOL.md](MEDIA-PROTOCOL.md).
-The campaign's ownership, distribution decisions and remaining acceptance
-boundaries are recorded in [AGENT-VISUALS-DESIGN.md](AGENT-VISUALS-DESIGN.md).
+calls them yet. Worker protocol and admission limits are documented in
+[MEDIA-PROTOCOL.md](MEDIA-PROTOCOL.md); installation recovery is documented in
+[UPDATES.md](UPDATES.md).
 
 `kettle-i18n` holds Kettle-owned UI text. Its build script reads
 `locales/schema.toml`, `en.toml` and `es.toml`, validates them, and generates
@@ -1591,8 +1593,9 @@ pending remote commands, and older agent files.
   transient offscreen target before swapchain acquisition, copies that texture
   in the same submission when a drawable exists (or in its own submission when
   it does not), then hands the staging buffer to one bounded worker for finite
-  GPU-wait intervals, mapping, and conversion. The target,
-  staging buffer, and their separate process-budget reservations are admitted
+  GPU waits (at most two, each bounded to five seconds), mapping, and conversion.
+  Each screenshot target and padded readback allocation is capped at 256 MiB.
+  The target, staging buffer, and their separate process-budget reservations are admitted
   before encoding and travel with that job until submission completion or
   device loss; one wait timeout retains rather than undercounts them, while two
   consecutive timeouts classify the shared device as wedged and enter ordinary
@@ -3076,8 +3079,13 @@ path, plus pure-unit coverage of the kitty decoder / placeholder /
 animation / relative logic, the fuzzy matcher and command palette.
 See [TESTING.md](TESTING.md) for the per-crate breakdown
 (run `cargo test --workspace` for today's count — it grows ~1/cycle).
-Comparative analysis behind these choices (with citations) is in
-[RESEARCH.md](RESEARCH.md) and [UX-COMPARISON.md](UX-COMPARISON.md).
+
+Leave macOS Ctrl+Option+Arrow available to VoiceOver. Keep Cmd+[ and Cmd+] out
+of the default pane-navigation bindings while the keybind grammar lacks
+physical-key triggers that could avoid keyboard-layout and zoom conflicts.
+
+Keep bundled shell integration MIT-compatible: implement OSC 7/133 behavior
+from the protocols rather than copying GPL-derived shell scripts.
 
 The main solid-quad instance remains deliberately minimal because terminal
 cell backgrounds dominate it. Pane outlines that meet a decorated macOS
@@ -3097,9 +3105,7 @@ before their window drops; fullscreen startup leaves AppKit's first restore alon
 
 ## Terminator-parity subsystems
 
-Four major subsystems modeled after GNOME Terminator. Each has its own
-design doc under `docs/TERMINATOR-*.md`; the architectural integration is
-summarized here. The per-pane right-click context menu supports
+The per-pane right-click context menu supports
 hover-to-highlight, disabled-row hiding, scrollable submenus, mnemonics +
 typeahead, and atomic config write-back via `persist_config_toggle`; its
 **Preferences ▸** submenu wires 13 runtime toggles. `--check-config` echoes
@@ -3138,7 +3144,11 @@ Other additions:
   BFS scratch, idle windows receive explicit redraw/title events, and
   Split/Duplicate consumes the cached foreground-shell result rather than
   walking processes on the input path. The public full-snapshot API remains
-  available for one-shot callers.
+  available for one-shot callers. Treat detected process arguments as untrusted:
+  validate fields against their specific character sets and a 512-byte limit,
+  then shell-quote every dynamic value in the reconnect command. Reject control
+  characters again when building the command because the UI submits it to a live
+  shell.
 - **named-broadcast-groups subsystem** (`BroadcastScope` enum with
   per-tab / per-window / cross-tab named scopes).
 - **right-click drill-in submenu UX** (Theme + Profile + Preferences).
@@ -3147,9 +3157,19 @@ Other additions:
   editor** — a keyboard-navigable preferences panel with live persist + reload
   (see the dedicated subsection below).
 
-See [`docs/TERMINATOR-AUDIT.md`](TERMINATOR-AUDIT.md) for the full
-Terminator parity inventory; see [CHANGELOG.md](../CHANGELOG.md) for the
-change-by-change history.
+Theme scheduling never queries IP geolocation or OS location services; solar
+schedules use explicitly configured coordinates. Evaluate schedules from the
+current wall clock so sleep does not turn them into elapsed-time countdowns.
+
+Close-confirmation dialogs open with Cancel focused, and Enter activates the
+focused button. While a dialog is open, consume its keyboard input before
+application bindings or terminal input so another close chord cannot bypass it.
+
+Use the tab rectangles produced by `App::tab_bar` for painting, hit-testing and
+reorder targets. Do not reconstruct tab indices from an independently calculated
+equal-width strip.
+
+See [CHANGELOG.md](../CHANGELOG.md) for the change-by-change history.
 
 ### Plugin system
 
@@ -3169,12 +3189,17 @@ io.open, etc); `trusted` mode opt-in. Neither of those is a containment
 boundary — `kettle.send_text` types into the shell and a newline runs the
 line — so `restricted` is the level for a plugin you have not read: it
 refuses `send_text` and `exec_action` and leaves the rest working. See
-[`docs/TERMINATOR-PLUGIN-DESIGN.md`](TERMINATOR-PLUGIN-DESIGN.md).
+[PLUGINS.md](PLUGINS.md) for the Lua API.
 The auto-loaded `init.lua` therefore shares the implicit-config trust policy:
 its requested and resolved directories and opened leaf must reject untrusted
 mutation. `--lua-script FILE` is explicit provenance and may intentionally run
 a project-local or shared script. Both paths read once through a held handle
 with a 4 MiB cap, so a path replacement cannot bypass the size decision.
+
+Limit native Lua URL-pattern matching to a conservative work estimate of
+2,000,000 units across the handler chain because the Lua instruction hook cannot
+interrupt `string.match`. Skip malformed or over-budget patterns and continue
+considering later handlers.
 
 ### Settings overlay + interactive keybind editor
 
@@ -3231,8 +3256,7 @@ window title). Layout:
 Three color variants based on broadcast state: transmit (focused
 source), receive (group member), inactive (idle). Click on the bar
 focuses the pane; click again opens `EditPaneTitle`. `EditPaneGroup`
-action edits the broadcast-group label. See
-[`docs/TERMINATOR-PANE-TITLEBAR-DESIGN.md`](TERMINATOR-PANE-TITLEBAR-DESIGN.md).
+action edits the broadcast-group label.
 
 ### Background image
 
@@ -3247,7 +3271,7 @@ flowchart LR
 
 Decoded at config-load (one-shot), kept in a path-keyed cache, rendered
 via the cell-image pipeline. UV-modes + align-horiz/vert configurable.
-See [`docs/TERMINATOR-BG-IMAGE-DESIGN.md`](TERMINATOR-BG-IMAGE-DESIGN.md).
+See [CONFIG.md](CONFIG.md) for wallpaper settings.
 
 ### Detachable tabs (Chromium-style live tear-off + re-dock)
 
@@ -3384,9 +3408,7 @@ Kettle no longer sends cross-process
 handoffs (Unix SCM_RIGHTS socketpair + the JSON-file fallback), which
 respawned shells rather than moving live PTYs. The deprecated `--tab-handoff`
 and `--tab-handoff-fd` flags remain only to receive a handoff from an older
-Kettle. See
-[`docs/TERMINATOR-DETACHABLE-TABS-DESIGN.md`](TERMINATOR-DETACHABLE-TABS-DESIGN.md)
-for the historical multi-process design this replaced.
+Kettle.
 
 ### Session restore
 

@@ -3385,9 +3385,7 @@ impl Drop for TriggerCommandSlot<'_> {
     }
 }
 
-/// Phase 4 of [`TERMINATOR-CONFIRM-DIALOG-DESIGN.md`](
-/// ../../../docs/TERMINATOR-CONFIRM-DIALOG-DESIGN.md): which named
-/// key was pressed in the confirm-modal keyboard handler. Lifted out
+/// Named keys handled by the confirmation-dialog state machine. Lifted out
 /// of winit's `NamedKey` so the pure helper isn't coupled to a UI
 /// framework type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3518,14 +3516,8 @@ fn confirm_dialog_keypress(
     }
 }
 
-/// Phase 3 of [`TERMINATOR-VERTICAL-TABS-DESIGN.md`](
-/// ../../../docs/TERMINATOR-VERTICAL-TABS-DESIGN.md): default
-/// strip width for vertical (Left / Right) tab bars when the
-/// config doesn't supply one. The `cfg.tab_bar_width`
-/// config key supersedes this in production; this constant is
-/// the documented Firefox-sidebar-style fallback (180 px) the
-/// unit-tested layout helpers use when
-/// invoked without an app-level cfg handle.
+/// Fallback vertical-strip width used by layout helpers; production uses
+/// cfg.tab_bar_width.
 #[allow(dead_code)] // doc-only reference + layout-helper test fixture; production uses cfg.tab_bar_width
 pub const VERTICAL_TAB_STRIP_W: f32 = 180.0;
 
@@ -3670,9 +3662,8 @@ fn content_rect_for_with_strip(
     (left_offset, top_offset, content_w, content_h)
 }
 
-/// Build the per-pane screenshot path ([`TERMINATOR-TERMINALSHOT-DESIGN.md`](
-/// ../../../docs/TERMINATOR-TERMINALSHOT-DESIGN.md)). Lives under
-/// `<cache>/kettle/shots/` (mirrors the `session_log_path` scheme below); falls
+/// Build the default focused-pane screenshot path under the cache directory.
+/// Uses `<cache>/kettle/shots/` (mirrors the `session_log_path` scheme below); falls
 /// back to `./kettle-shots/` when no cache dir resolves.
 ///
 /// File name shape: `kettle-<unix-secs>-<pid>.png`. `Action::TakeScreenshot`
@@ -7434,12 +7425,8 @@ enum ContextMenuItem {
         /// Reconnect commands run in a fresh local pane.
         new_pane: bool,
     },
-    /// Terminator parity, per
-    /// [`TERMINATOR-THEME-SUBMENU-DESIGN.md`](
-    /// ../../../docs/TERMINATOR-THEME-SUBMENU-DESIGN.md):
-    /// recursive variant carrying a nested item list. The row
-    /// renders with a trailing "▸", and clicking it drills in,
-    /// replacing the visible items instead of opening a flyout.
+    /// A submenu row carries a nested item list; activation replaces the visible
+    /// menu level.
     Submenu {
         label: String,
         // Consumed by the drill-in dispatch
@@ -7533,9 +7520,7 @@ pub enum TitleEditScope {
     Group,
 }
 
-/// Which panes a `Group` edit's typed name applies to. See
-/// [`TERMINATOR-NAMED-GROUPS-DESIGN.md`](
-/// ../../../docs/TERMINATOR-NAMED-GROUPS-DESIGN.md).
+/// Group assignment scope for the title-edit overlay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GroupBulkScope {
     /// Default: just the pane focused when the overlay opens (existing
@@ -7741,11 +7726,7 @@ pub enum DropPanes {
     No,
 }
 
-/// The action a confirmed modal dispatches when the user accepts. Used by
-/// the `ask_before_closing` flow (`Action::CloseWindow` / `CloseTab` /
-/// `ClosePane`) and keybind rebind conflicts. See
-/// [`TERMINATOR-CONFIRM-DIALOG-DESIGN.md`](
-/// ../../../docs/TERMINATOR-CONFIRM-DIALOG-DESIGN.md).
+/// Deferred actions for close confirmation and keybind conflicts.
 #[allow(clippy::enum_variant_names)] // close-family prefix is intentional
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
@@ -7822,10 +7803,7 @@ pub(crate) struct ContextMenuState {
     /// parent's items are pushed here and replaced by the submenu's
     /// items. Esc / "Back" pops back to the parent.
     ///
-    /// Menus nest one level deep today (see "no nested-nested
-    /// submenus" in [`TERMINATOR-THEME-SUBMENU-DESIGN.md`](
-    /// ../../../docs/TERMINATOR-THEME-SUBMENU-DESIGN.md)), but the
-    /// stack works at any depth.
+    /// The stack supports arbitrary depth; current built-in menus are shallow.
     drill_stack: Vec<Vec<ContextMenuItem>>,
     /// Scroll offset for long submenus (Theme has ~512 entries).
     /// `panel_h` is clamped to fit the surface, the visible window
@@ -16166,17 +16144,6 @@ impl App {
         }
     }
 
-    /// Phase 5 of [`TERMINATOR-AUTO-THEME-DESIGN.md`](
-    /// ../../../docs/TERMINATOR-AUTO-THEME-DESIGN.md): poll the
-    /// clock-schedule (when `cfg.theme_schedule` is `Some(Clock { … })`)
-    /// and flip the theme between `light_theme` and `dark_theme` on
-    /// boundary crossings.
-    ///
-    /// Cheap: a few u32 comparisons via
-    /// `schedule_decision_clock`, run from `redraw()` per tick.
-    /// State on `App::last_schedule_decision` means a single
-    /// boundary fires the swap once; a follow-up could stretch the
-    /// throttling further if needed.
     /// Terminator plugin parity (`LuaEvent::PaneFocus`).
     /// Detect focus boundary crossings —
     /// from any source (keybind, mouse click, new tab, close tab,
@@ -16287,12 +16254,8 @@ impl App {
         }
     }
 
-    /// Phase 6 of [`TERMINATOR-REMOTE-DESIGN.md`](
-    /// ../../../docs/TERMINATOR-REMOTE-DESIGN.md): periodic poll of
-    /// every pane's process tree to detect SSH / Docker / Podman / kubectl
-    /// sessions. Throttled to ~5 Hz; submissions overwrite an older queued
-    /// request and the bounded scan runs entirely on its worker. A skipped
-    /// poll still runs when the window ends, so the last `cd` is always seen.
+    /// Submit coalesced background process scans at most every 200 ms and apply
+    /// completed remote-context changes.
     ///
     /// When the worker's snapshot shows a new or changed detection, the
     /// pane's title becomes `format_remote_title(...)`. When the detection
@@ -21546,11 +21509,9 @@ impl App {
                 self.hide_mouse_cursor(ws);
                 let text = event.text.as_ref().map(|s| s.as_str());
 
-                // Phase 5 of TERMINATOR-CONFIRM-DIALOG-DESIGN.md:
-                // confirm-modal key handler. Tab/Shift+Tab/←→ move focus,
-                // Enter activates the focused button, and Esc closes the
-                // modal without dispatching. The modal is exclusive, so
-                // non-nav keys are swallowed.
+                // The confirmation modal owns keyboard input; non-navigation keys are consumed.
+                // Tab/Shift+Tab and arrows move focus; Enter activates the focused button.
+                // Esc closes the modal without dispatching.
                 if ws.confirm_dialog.is_some() {
                     if !modal_repeat_is_inert(
                         ModalRepeat::ConfirmDialog,

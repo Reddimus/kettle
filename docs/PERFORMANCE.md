@@ -1280,10 +1280,9 @@ at the configured half-period deadline.
 
 ### Known follow-ups (tracked)
 
-- Throughput row-level damage + persistent GPU cell buffers (capture/upload only
-  changed rows, shrinking the per-frame snapshot lock-hold that contends with
-  the PTY parser under flood — the Ghostty architecture; see
-  docs/UX-COMPARISON.md). v2.21.0 landed the *idle*-side damage gate (skip
+- Throughput row-level damage + persistent GPU cell buffers: capture and upload
+  only changed rows, shrinking the per-frame snapshot lock-hold that contends
+  with the PTY parser under flood. v2.21.0 landed the *idle*-side damage gate (skip
   `prepare` when nothing changed); the *flood*-side capture/upload damage is the
   remaining piece and the lever most likely to close the throughput gap.
 - Glyph-atlas growth under sustained unicode flood (the post-flood WS

@@ -513,7 +513,7 @@ in `docs/AUDIT-2026-08-07-FULL.md`.
 
     The mouse gesture itself is not implemented: it needs drop-target
     hit-testing and a drag preview, which is interaction design rather than tree
-    surgery, and `docs/TERMINATOR-AUDIT.md` says so rather than implying the row
+    surgery, and [`docs/TERMINATOR-AUDIT.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-AUDIT.md) says so rather than implying the row
     is closed.
 
   ### Fixed
@@ -1389,7 +1389,7 @@ in `docs/AUDIT-2026-08-07-FULL.md`.
   - **Infinite scrollback displayed as `0`** in the Settings panel.
 
   ### Documentation
-  - `docs/TERMINATOR-AUDIT.md`: corrected five claims that no source supported —
+  - [`docs/TERMINATOR-AUDIT.md`](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/TERMINATOR-AUDIT.md): corrected five claims that no source supported —
     `hide_titlebar`, `tab_max_width`, and `use_login_shell` are not Terminator
     options at any SHA; `maybe_confirm_then` exists only in this feature's design
     pseudocode and changelog entry, never in a Rust source; and
@@ -3387,7 +3387,7 @@ follow-ups — are tracked in
     PNGs, the macOS `.iconset`, the 7-resolution Windows `.ico`, and the embedded
     winit window icon).
   - **Docs + showcase images aligned to the TokyoNight Night default.** The v2.28.0
-    default-theme switch left README / CONFIG / UX-COMPARISON / TESTING and the
+    default-theme switch left README / CONFIG / [UX-COMPARISON](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/UX-COMPARISON.md) / TESTING and the
     architecture diagram still describing Catppuccin Mocha; these now read
     TokyoNight Night, and the hero/showcase screenshots are re-rendered in it.
 
@@ -3970,7 +3970,7 @@ follow-ups — are tracked in
   claims adversarially cross-checked against kettle source); the full
   ranked matrix — 39 now / 54 backlog / 37 reject, with next-cycle
   headliners like the kitty keyboard protocol and the terminal-reply
-  layer — landed in docs/UX-COMPARISON.md. Shipped from the "now" tier:
+  layer — landed in [docs/UX-COMPARISON.md](https://github.com/Reddimus/kettle/blob/v5.1.0/docs/UX-COMPARISON.md). Shipped from the "now" tier:
 
   - **Resize overlay** (Ghostty `resize-overlay`) — a transient centered
     `cols×rows` chip while the window is resized. `always | never |

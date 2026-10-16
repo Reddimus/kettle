@@ -1211,11 +1211,7 @@ pub struct Overlay {
     /// top of everything else so an overlapping pane border doesn't
     /// occlude the menu.
     pub context_menu: Option<ContextMenu>,
-    /// `Some` while a confirmation is pending (see
-    /// [`TERMINATOR-CONFIRM-DIALOG-DESIGN.md`](
-    /// ../../../docs/TERMINATOR-CONFIRM-DIALOG-DESIGN.md)). The renderer
-    /// paints it as a bottom bar holding the prompt and the button row, and
-    /// marks the button at `focus_idx`.
+    /// Renderer projection of the confirmation dialog's prompt, buttons and focused index.
     pub confirm_dialog: Option<ConfirmDialogOverlay>,
     /// `Some` while the in-app settings overlay is open. Painted
     /// centered, above panes but below the confirm dialog.
@@ -3137,9 +3133,9 @@ pub struct Renderer {
     /// behind-window blur. The scene is rendered over this near-opaque clear;
     /// offscreen screenshots deliberately keep their configured alpha.
     live_background_opacity_floor: Option<f32>,
-    /// Phase 3 of
-    /// [`TERMINATOR-TERMINALSHOT-DESIGN.md`](../../../docs/TERMINATOR-TERMINALSHOT-DESIGN.md):
-    /// when `Some`, the next `render_frame` call renders the prepared scene to
+    /// Pending live-scene screenshot request; completion runs through the bounded
+    /// capture worker.
+    /// When `Some`, the next `render_frame` call renders the prepared scene to
     /// a bounded offscreen texture, copies it into a staging buffer, and
     /// dispatches a PNG encode off-thread. `App::dispatch` for
     /// `Action::TakeScreenshot` sets this via `set_pending_screenshot()` after
@@ -5749,8 +5745,7 @@ impl Renderer {
 
     pub fn resize(&mut self, width: u32, height: u32) {
         self.last_scene = None;
-        // Terminator parity, bg-image (phase 8 of
-        // docs/TERMINATOR-BG-IMAGE-DESIGN.md): no texture work is needed here.
+        // Resize recomputes wallpaper geometry without re-decoding its cached source frames.
         // `bg_image_cache` stores the DECODED image, not a window-sized
         // texture, and every frame recomputes the image rect from the current
         // surface dims (see `background_image_rect`), so a resize takes effect
@@ -7112,11 +7107,8 @@ impl Renderer {
                     pv.focused,
                     tabbar.broadcast,
                 );
-                // Terminator parity, titlebar Bucket-D phase 9 of
-                // TERMINATOR-PANE-TITLEBAR-DESIGN.md: title_at_bottom flips
-                // the bar from the top of the pane to the bottom. Terminal
-                // content uses `pane_grid_origin`, so the reserved strip moves
-                // with the title instead of leaving a phantom top inset.
+                // title_at_bottom selects the titlebar edge; terminal geometry comes from
+                // the shared pane partition.
                 let bar_y = if cfg.title_at_bottom {
                     ry + rh - bw - pane_titlebar_h
                 } else {
@@ -7887,11 +7879,9 @@ impl Renderer {
             self.search_buffer
                 .shape_until_scroll(&mut self.font_system, false);
         } else if let Some(dlg) = &overlay.confirm_dialog {
-            // Phase 3 of TERMINATOR-CONFIRM-DIALOG-DESIGN.md: a bottom-bar
-            // projection of the modal, without a centered panel or backdrop.
-            // The bar gives immediate modal feedback with prompt, visible
-            // button labels, and a focus indicator. The UI hit-test path
-            // mirrors this text layout so keyboard and mouse activation
+            // Render confirmation as a bottom bar with visible buttons and a focus indicator.
+            // The UI hit-test path mirrors this text layout so keyboard and
+            // mouse activation
             // dispatch through the same confirmation state machine.
             have_search = true;
             search_text_on_menu = true;
@@ -9206,9 +9196,8 @@ impl Renderer {
                 });
             }
         }
-        // Terminator parity, phase 3 of TERMINATOR-PANE-TITLEBAR-DESIGN.md:
-        // per-pane title text. Push TextAreas for the `pane_titlebar_buffers`
-        // shaped earlier in this pass.
+        // Render per-pane titlebar chrome for split panes. Push TextAreas for the
+        // `pane_titlebar_buffers` shaped earlier in this pass.
         if pane_titlebar_h > 0.0 {
             for (i, pv) in panes.iter().enumerate() {
                 let (rx, ry, rw, rh) = pv.rect;
@@ -15030,10 +15019,8 @@ mod pane_window_corner_tests {
 ///   cell-local) phases each cell's 4 segments into its half of that period,
 ///   so a run of undercurl cells shows one continuous wave. A smooth sine
 ///   would need a dedicated shader/SDF path in `quad.rs`, but the zigzag is
-///   still visibly distinct from a straight line. docs/RESEARCH.md +
-///   docs/TESTING.md hold undercurl to a "must work" bar for Neovim/AstroNvim
-///   LSP diagnostics (`DiagnosticUnderlineError`/`SpellBad` etc. bind
-///   `gui=undercurl`).
+///   still visibly distinct from a straight line. Undercurl must remain visible
+///   for Neovim/AstroNvim diagnostic underlines; see docs/TESTING.md.
 /// - DOTTED_UNDERLINE / DASHED_UNDERLINE tile short marks with gaps across
 ///   the cell (sparser + shorter marks for dotted, longer + denser for
 ///   dashed). They phase on the absolute `x` pixel position rather than `col`,
@@ -16183,8 +16170,8 @@ pub(crate) const SCREENSHOT_DEMO_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// right. Content is synthetic; the rendering pipeline is identical to the
 /// live one.
 ///
-/// `kettle --screenshot <out.png>` renders `Default`, the base frame with no
-/// overlay, to produce the showcase images embedded in `docs/UX-COMPARISON.md`.
+/// Render the synthetic showcase scene used by offscreen screenshot checks.
+/// `kettle --screenshot <out.png>` renders `Default`, the base frame with no overlay.
 /// `ContextMenu` adds a synthetic right-click context menu over the pane so the
 /// menu's render path can be visually verified without opening the windowed
 /// app; it is visible only via the `kettle --screenshot-menu PATH` CLI flag.

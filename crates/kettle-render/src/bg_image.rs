@@ -17,7 +17,7 @@
 //!   - Format unsupported → log::warn, return None.
 //!   - Decode failed → log::warn, return None.
 //!
-//! Design doc: docs/TERMINATOR-BG-IMAGE-DESIGN.md.
+//! See docs/ARCHITECTURE.md, Background image, for integration.
 
 /// Decompression-bomb defense for the user-configured
 /// `background-image` path. The bg-image source is a config-file
@@ -122,8 +122,7 @@ pub fn bg_next_frame_ms(gaps: &[u32], elapsed_ms: u128) -> Option<u64> {
 /// one-time startup cost (background_image config rarely
 /// changes mid-session).
 ///
-/// A wgpu-side Gaussian shader (the docs/TERMINATOR-BG-IMAGE-DESIGN.md phase 9
-/// design) would give the same look at negligible per-frame cost.
+/// CPU blur runs once at decode time; rendering needs no per-frame blur shader.
 fn box_blur(img: &mut BgImage, radius: u32) -> bool {
     if radius == 0 || img.width == 0 || img.height == 0 {
         return true;
