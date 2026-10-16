@@ -21,6 +21,12 @@ kettle-media = { path = "../crates/kettle-media", features = ["fuzzing"] }
 kettle-media-native = { path = "../crates/kettle-media-native", features = ["fuzzing"] }
 kettle-media-render = { path = "../crates/kettle-media-render", features = ["fuzzing"] }
 
+# The product workspace's `[patch.crates-io]` does not reach this one, so a
+# vendored fix the targets build must be patched here too, or they fuzz the
+# released crate. See vendor/README.md.
+[patch.crates-io]
+merman-core = { path = "../vendor/merman-core-0.8.0" }
+
 [profile.release]
 # Symbols for a crash's stack, and overflow checks as the tests have them.
 debug = 1

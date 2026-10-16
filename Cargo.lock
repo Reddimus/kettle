@@ -2729,8 +2729,6 @@ dependencies = [
 [[package]]
 name = "merman-core"
 version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8375d78a1c09f5ad1c847d8d18658f5dbe4221c31b9eb56d4a3dc121184f9d4"
 dependencies = [
  "cssparser 0.38.0",
  "euclid",

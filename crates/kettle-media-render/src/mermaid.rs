@@ -316,4 +316,50 @@ mod tests {
         invalid.source = Source::Bytes(Vec::new());
         assert_eq!(render(&invalid), Err(FailureCode::UnsupportedMedia));
     }
+
+    /// A `%%` comment marker with nothing after it, alone on a line or
+    /// ending the source, survives Mermaid's comment stripping and reaches
+    /// each diagram's own lexer. merman's sequence lexer once matched the
+    /// line feed before it as a comment it never consumed, and spun past
+    /// every deadline (#584). Every bundled diagram, both ways, has to come
+    /// back. Rendered with no deadline, so a case cannot pass by running out
+    /// of time before it reaches the lexer.
+    #[test]
+    fn bare_comment_markers_never_hang_a_diagram() {
+        let fixtures =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mermaid");
+        let mut paths: Vec<_> = std::fs::read_dir(&fixtures)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "mmd"))
+            .collect();
+        paths.sort();
+        assert!(paths.len() >= 30, "{} diagram fixtures", paths.len());
+        for path in paths {
+            let text = std::fs::read_to_string(&path).unwrap();
+            let (header, body) = text.split_once('\n').unwrap();
+            let body = body.trim_end();
+            for source in [
+                format!("{header}\n%%\n{body}\n"),
+                format!("{header}\n{body}\n%%"),
+            ] {
+                let mut job = job(&source);
+                job.target.width = 64;
+                job.target.height = 64;
+                let (sender, receiver) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let snapshot = source::load(&job.source, MAX_MERMAID_BYTES).unwrap();
+                    let _ = sender.send(render_loaded(&job, &snapshot, OperationControl::new()));
+                });
+                let result = receiver.recv_timeout(Duration::from_secs(60));
+                let Ok(result) = result else {
+                    panic!("{} hung on {source:?}", path.display());
+                };
+                // The diagram that hung is a valid one, so it must render.
+                if path.ends_with("sequence.mmd") {
+                    assert!(result.is_ok(), "{source:?}: {:?}", result.err());
+                }
+            }
+        }
+    }
 }
