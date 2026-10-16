@@ -3712,12 +3712,23 @@ fn first_shown_tab(n: usize, active: usize, count: usize) -> usize {
     }
 }
 
+/// Where a tab bar parks the tabs it does not show: far off-screen on its
+/// main axis, kept in the segment list so indices stay put.
+const PARKED_TAB: f32 = -100_000.0;
+
+/// Whether a rendered tab segment is on screen rather than parked.
+fn tab_shown(seg: &kettle_render::TabSeg) -> bool {
+    seg.rect.0 > PARKED_TAB / 2.0 && seg.rect.1 > PARKED_TAB / 2.0
+}
+
 /// Rows of a side tab bar with `rows` rows for its tabs and `+` (the update
 /// chip's row not counted). While every tab and `+` fit, the tabs stack from
 /// the top and `+` follows the last. Otherwise `⌃` and `⌄` rows bracket as
 /// many whole tabs as fit, chosen by [`first_shown_tab`] so the active tab is
 /// always shown, with `+` below `⌄`. A strip too short for the arrows shows
-/// the active tab and `+` alone. Pure, like [`tab_strip_layout`].
+/// the active tab and `+` alone, and one with a single row (or less) the
+/// active tab alone: `plus` is then `rows` or more, a row the strip lacks.
+/// Pure, like [`tab_strip_layout`].
 #[derive(Debug, PartialEq)]
 struct SideTabRows {
     /// The first tab shown, and how many are shown from it.
@@ -7630,8 +7641,9 @@ pub(crate) struct ContextMenuState {
 /// using the same rendered segment rects that hit-testing and painting use.
 /// Used by the drag-to-reorder handler — the user grabs a tab,
 /// drags, and the bar reorders to keep the dragged segment under the cursor.
-/// Clamped to the first/last rendered segment so a cursor that overshoots
-/// either edge still produces a valid target. Returns 0 for an empty bar.
+/// Clamped to the first/last segment on screen (scrolled-out tabs are never
+/// targets) so a cursor that overshoots either edge still produces a valid
+/// target. Returns 0 for an empty bar.
 fn tab_drag_target_index(
     cursor_x: f32,
     cursor_y: f32,
@@ -7648,7 +7660,11 @@ fn tab_drag_target_index(
     // Testing `cursor_x` alone would break vertical bars, where every segment
     // shares one x span and the first one would always match.
     let vertical = segments.iter().any(|seg| seg.rect.1 != first.rect.1);
-    for seg in segments {
+    // Only tabs on screen are targets: a pointer past the last one shown
+    // (onto a scroll arrow or `+`) stops there rather than at a hidden tab.
+    let mut last_shown = None;
+    for seg in segments.iter().filter(|seg| tab_shown(seg)) {
+        last_shown = Some(seg.idx);
         let (x, y, w, h) = seg.rect;
         let (cursor, end) = if vertical {
             (cursor_y, y + h)
@@ -7659,7 +7675,9 @@ fn tab_drag_target_index(
             return seg.idx;
         }
     }
-    segments.last().map(|seg| seg.idx).unwrap_or(0)
+    last_shown
+        .or_else(|| segments.last().map(|seg| seg.idx))
+        .unwrap_or(0)
 }
 
 /// Pixel distance a held tab press must move before Kettle promotes the click
@@ -7728,6 +7746,30 @@ fn dock_insertion_index(seg_mids: &[f32], cursor: f32) -> usize {
         .iter()
         .position(|&m| cursor < m)
         .unwrap_or(seg_mids.len())
+}
+
+/// The tab index a torn-off tab dropped at `cursor` (main-axis coordinate)
+/// lands at, among the tabs on screen: before the first whose midpoint is
+/// past the cursor, else right after the last one shown, never after tabs
+/// scrolled out of view. `None` for a bar with no tab on screen.
+fn dock_insertion_tab(
+    segments: &[kettle_render::TabSeg],
+    vertical: bool,
+    cursor: f32,
+) -> Option<usize> {
+    let shown: Vec<&kettle_render::TabSeg> = segments.iter().filter(|seg| tab_shown(seg)).collect();
+    let mids: Vec<f32> = shown
+        .iter()
+        .map(|seg| {
+            let (x, y, w, h) = seg.rect;
+            if vertical { y + h * 0.5 } else { x + w * 0.5 }
+        })
+        .collect();
+    let slot = dock_insertion_index(&mids, cursor);
+    match shown.get(slot) {
+        Some(seg) => Some(seg.idx),
+        None => shown.last().map(|seg| seg.idx + 1),
+    }
 }
 
 /// Width of the strip that horizontal tab segments tile across, given the

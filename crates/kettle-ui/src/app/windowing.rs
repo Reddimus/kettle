@@ -871,20 +871,11 @@ impl App {
         }
         let bar = self.tab_bar(w);
         let vertical = self.cfg.tab_bar_pos.is_vertical();
-        if bar.height > 0.0 && !bar.segments.is_empty() {
-            let mids: Vec<f32> = bar
-                .segments
-                .iter()
-                .map(|s| {
-                    let (x, y, sw_, sh_) = s.rect;
-                    if vertical {
-                        y + sh_ * 0.5
-                    } else {
-                        x + sw_ * 0.5
-                    }
-                })
-                .collect();
-            Some(dock_insertion_index(&mids, if vertical { cy } else { cx }))
+        let slot = (bar.height > 0.0)
+            .then(|| dock_insertion_tab(&bar.segments, vertical, if vertical { cy } else { cx }))
+            .flatten();
+        if slot.is_some() {
+            slot
         } else {
             // Hidden bar (single-tab auto, preview not applied yet): use
             // the geometry the bar WILL have once the preview materializes

@@ -2282,12 +2282,12 @@ pub struct TabBar {
     /// `insert_marker` is latched. UI-computed, same geometry-free
     /// contract as `insert_marker`.
     pub band: Rect4,
-    /// `‹` scroll-left button rect, present (non-zero) only when the
-    /// horizontal tab bar overflows (more tabs than fit at `tab_min_width`).
-    /// Clicking it reveals tabs scrolled off the left. `(0,0,0,0)` when the bar
-    /// fits or for vertical bars.
+    /// The back scroll button: `‹` at the start of a top or bottom bar, `⌃`
+    /// above the rows of a side bar. Present (non-zero) only while the bar
+    /// overflows; clicking it steps to the previous tab, which scrolls the
+    /// bar. `(0,0,0,0)` when every tab fits.
     pub scroll_left: Rect4,
-    /// `›` scroll-right button rect (see `scroll_left`).
+    /// The forward scroll button, `›` or `⌄` (see `scroll_left`).
     pub scroll_right: Rect4,
     /// The update chip at the bar's trailing end, if an update notice is
     /// active and the bar has room for it.
@@ -2836,8 +2836,8 @@ pub struct Renderer {
     new_tab_arrow_text: String,
     /// Last label shaped into `update_chip_buffer`.
     update_chip_text: String,
-    /// Last text shaped into the `‹` / `›` overflow scroll-arrow
-    /// buffers (constant glyphs → the gate holds after frame 1).
+    /// Last text shaped into the overflow scroll-arrow buffers; it changes
+    /// only when the bar moves between a side and the top or bottom.
     scroll_left_text: String,
     scroll_right_text: String,
     status_bar_text: String,
@@ -2942,9 +2942,9 @@ pub struct Renderer {
     /// (drawn left of `+`) so it lands precisely in `new_tab_menu` and the `+`
     /// stays put in `new_tab`. Unused when the dropdown is disabled.
     new_tab_arrow_buffer: TextBuffer,
-    /// `‹` / `›` tab-bar overflow scroll-arrow glyphs, each in its own
-    /// buffer (constant glyph, shaped once). Drawn only when the horizontal tab
-    /// bar overflows (more tabs than fit at `tab_min_width`).
+    /// The tab bar's overflow scroll-arrow glyphs (`‹ ›` across a top or
+    /// bottom bar, `⌃ ⌄` down a side one), each in its own buffer, reshaped
+    /// only when the glyph changes. Drawn only while the bar overflows.
     scroll_left_buffer: TextBuffer,
     scroll_right_buffer: TextBuffer,
     /// Single shared `✕` glyph buffer reused for every tab's close

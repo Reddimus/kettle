@@ -204,14 +204,13 @@ impl App {
         );
         // Tabs scrolled out of view are parked off-screen (kept in the segment
         // list, idx-indexed, so reorder / dock / ghost logic is undisturbed).
-        const OFFSCREEN_X: f32 = -100_000.0;
         let now = std::time::Instant::now();
         let silence = std::time::Duration::from_millis(self.cfg.tab_silence_threshold_ms);
         let segments: Vec<TabSeg> = labels
             .iter()
             .enumerate()
             .map(|(i, label)| {
-                let x = layout.xs.get(i).copied().flatten().unwrap_or(OFFSCREEN_X);
+                let x = layout.xs.get(i).copied().flatten().unwrap_or(PARKED_TAB);
                 // Per-tab activity dot. Active tabs short-circuit to
                 // Normal (the focused-tab accent already signals "you are here").
                 let activity = ws
@@ -243,12 +242,14 @@ impl App {
                     layout.width
                 };
                 let rect = (x, y, seg_w, height);
-                let close =
-                    tab_close_rect(x + seg_w - height, y, height, self.cfg.close_button_on_tab);
+                // A tab narrowed below its close button's width has no room
+                // for one: the button would reach past it onto the arrows.
+                let closable = self.cfg.close_button_on_tab && seg_w >= height;
+                let close = tab_close_rect(x + seg_w - height, y, height, closable);
                 TabSeg {
                     idx: i,
                     rect,
-                    title_rect: tab_title_rect(rect, close, self.cfg.close_button_on_tab),
+                    title_rect: tab_title_rect(rect, close, closable),
                     // ✕ hit zone = the trailing `height`-wide square.
                     close,
                     title: label.text.clone(),
@@ -336,42 +337,45 @@ impl App {
         let active = ws.mux.active;
         let now = std::time::Instant::now();
         let silence = std::time::Duration::from_millis(self.cfg.tab_silence_threshold_ms);
-        // The update chip takes the strip's last row; the tabs, the scroll
-        // arrows and `+` share the rows above it.
-        let update_chip = self.update_notice().and_then(|notice| {
-            let cell_w = Self::cell_size(ws).map_or(9.0, |(cw, _)| cw);
-            let inner = strip_w - 2.0 * UPDATE_CHIP_INSET;
-            let fits = |label: &str| update_chip_width(label, cell_w) <= inner;
-            let full = crate::update_notice::chip_label(&notice, false, &self.ui_text);
-            let short = if fits(&full) {
-                false
-            } else if fits(&crate::update_notice::chip_label(
-                &notice,
-                true,
-                &self.ui_text,
-            )) {
-                true
-            } else {
-                return None;
-            };
-            let rect = (
-                strip_x + UPDATE_CHIP_INSET,
-                sh - height + UPDATE_CHIP_INSET,
-                inner,
-                height - 2.0 * UPDATE_CHIP_INSET,
-            );
-            Some(self.update_chip(ws, &notice, rect, short))
-        });
         // While a title is edited, its editor takes the window's top row
         // across both the strip and the panes; the strip starts below it.
         let lead = self.vertical_title_edit_h(ws);
-        let rows = (((sh - lead) / height).floor().max(0.0) as usize)
-            .saturating_sub(usize::from(update_chip.is_some()));
+        let strip_rows = ((sh - lead) / height).floor().max(0.0) as usize;
+        // The update chip takes the strip's last row; the tabs, the scroll
+        // arrows and `+` share the rows above it. A strip with no row to
+        // spare for it shows none.
+        let update_chip = self
+            .update_notice()
+            .filter(|_| strip_rows >= 2)
+            .and_then(|notice| {
+                let cell_w = Self::cell_size(ws).map_or(9.0, |(cw, _)| cw);
+                let inner = strip_w - 2.0 * UPDATE_CHIP_INSET;
+                let fits = |label: &str| update_chip_width(label, cell_w) <= inner;
+                let full = crate::update_notice::chip_label(&notice, false, &self.ui_text);
+                let short = if fits(&full) {
+                    false
+                } else if fits(&crate::update_notice::chip_label(
+                    &notice,
+                    true,
+                    &self.ui_text,
+                )) {
+                    true
+                } else {
+                    return None;
+                };
+                let rect = (
+                    strip_x + UPDATE_CHIP_INSET,
+                    sh - height + UPDATE_CHIP_INSET,
+                    inner,
+                    height - 2.0 * UPDATE_CHIP_INSET,
+                );
+                Some(self.update_chip(ws, &notice, rect, short))
+            });
+        let rows = strip_rows - usize::from(update_chip.is_some());
         let layout = side_tab_rows(labels.len(), active, rows);
         let row_y = |row: usize| lead + row as f32 * height;
         // Rows scrolled out of view are parked off-screen, kept in the segment
         // list as the horizontal bar keeps its own.
-        const OFFSCREEN_Y: f32 = -100_000.0;
         let shown = layout.first..layout.first + layout.shown;
         let segments: Vec<TabSeg> = labels
             .iter()
@@ -380,7 +384,7 @@ impl App {
                 let seg_y = if shown.contains(&i) {
                     row_y(layout.top + i - layout.first)
                 } else {
-                    OFFSCREEN_Y
+                    PARKED_TAB
                 };
                 let activity = ws
                     .mux
@@ -423,7 +427,12 @@ impl App {
                 }
             })
             .collect();
-        let plus_y = row_y(layout.plus);
+        // `+` is left out of a strip with no row to spare for it.
+        let plus_y = if layout.plus < rows {
+            row_y(layout.plus)
+        } else {
+            PARKED_TAB
+        };
         let arrow = |row: usize| {
             if layout.arrows {
                 (strip_x, row_y(row), strip_w, height)
