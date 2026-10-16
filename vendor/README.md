@@ -147,9 +147,18 @@ upstream release that contains all of these fixes.
   holding those between left-to-right and right-to-left text failed the
   assertion. The line is now laid out in its first paragraph's direction. The
   change is `src/shape.rs` only, +6 -14, identical to upstream's.
-- Upstream status, checked 2026-09-30: `1e0074c8` is on pop-os/cosmic-text's
-  `main`, and crates.io's newest `cosmic-text` is still 0.19.0, published
-  2026-04-22, before that commit.
+- Local change: backports pop-os/cosmic-text commit
+  `59089955e1b8` ("chore: bump fontdb to 0.24; drop ttf-parser cargo deny
+  clause", 2026-07-30): `[dependencies.fontdb]` goes from `0.23` to `0.24`.
+  fontdb 0.24 reads font tables itself, so the unmaintained `ttf-parser`
+  (RUSTSEC-2026-0192, #36) leaves the graph, and the text stack shares the
+  fontdb that usvg already uses. The commit's other files, upstream's
+  `deny.toml` and examples, are not vendored. The media worker is built on its
+  own (`-p kettle-media-worker`), so it still gets none of fontdb's file or
+  system-font features.
+- Upstream status, checked 2026-10-16: both commits are on
+  pop-os/cosmic-text's `main`, and crates.io's newest `cosmic-text` is still
+  0.19.0, published 2026-04-22, before either.
 - Excluded: the registry marker, generated lockfile, upstream CI metadata and
   helper scripts, the README and its screenshots, the bundled test fonts,
   samples, the integration tests and benchmarks that read them, and
@@ -159,10 +168,8 @@ upstream release that contains all of these fixes.
   the local manifest.
 - Validation: unlike the crates below, this one is not a member of
   `vendor/Cargo.toml`. As a member, its optional editor and `no_std` features
-  would pull `syntect` and friends into `vendor/Cargo.lock`, and its required
-  `fontdb` brings `ttf-parser`; the vendor audit deliberately admits no
-  exceptions, while the product audit already carries the scoped `ttf-parser`
-  one (`scripts/check-ttf-parser-scope.sh`). The product workspace compiles the
+  would pull `syntect` and friends into `vendor/Cargo.lock`, and the vendor
+  audit deliberately admits no exceptions. The product workspace compiles the
   crate through `[patch.crates-io]`, and `kettle-render`'s
   `paragraph_separator_shaping_tests` shape such lines through both `Buffer`
   and `BufferLine`; they fail against the unpatched release. The retained
@@ -170,7 +177,7 @@ upstream release that contains all of these fixes.
   run from a scratch workspace member.
 
 Remove the `[patch.crates-io]` entry and this directory after upgrading to a
-cosmic-text release that contains `1e0074c8`.
+cosmic-text release that contains both commits.
 
 ## `vte-0.15.0`
 

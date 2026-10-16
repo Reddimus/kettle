@@ -15433,10 +15433,10 @@ fn macos_skips_the_window_icon_decode() {
 
 /// Drift guard: the winit dependency must enable Wayland CSD via
 /// `wayland-csd-adwaita-notitle`, the sctk-adwaita variant with NO text
-/// renderer, and never the `ab_glyph`/`crossfont` variants, while
-/// RUSTSEC-2026-0192 keeps `ttf-parser` scoped to the glyphon stack.
-/// scripts/check-ttf-parser-scope.sh proves the graph side; this pins the
-/// manifest side so `cargo test` catches a feature edit before CI.
+/// renderer, and never the `ab_glyph`/`crossfont` variants, which would bring
+/// back the unmaintained `ttf-parser` (RUSTSEC-2026-0192). `deny.toml` bans it
+/// from the graph; this pins the manifest side so `cargo test` catches a
+/// feature edit before CI.
 /// Dropping the feature entirely would regress GNOME Wayland to
 /// smithay-client-toolkit's FallbackFrame (flat gray bar, filled-square
 /// close button, no Adwaita styling).

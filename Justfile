@@ -134,7 +134,7 @@ deny:
 # retains two narrowly guarded upstream exceptions; the vendor graph has no
 # product exceptions. Missing cargo-audit is a hard command failure.
 audit:
-    cargo audit --db target/advisory-db --url https://github.com/RustSec/advisory-db.git --ignore RUSTSEC-2026-0192 --ignore RUSTSEC-2026-0253
+    cargo audit --db target/advisory-db --url https://github.com/RustSec/advisory-db.git --ignore RUSTSEC-2026-0253
     cargo audit --db target/advisory-db --url https://github.com/RustSec/advisory-db.git --file vendor/Cargo.lock
 
 # `cargo machete` — finds unused workspace dependencies. CI runs
@@ -217,18 +217,11 @@ mermaid-check:
 macos-update-smoke TAG="":
     ./scripts/check-macos-update-smoke.sh {{TAG}}
 
-# Guard the temporary RUSTSEC-2026-0192 ignore. This must pass while #36 is
-# open, and should print the "remove ignores" instruction once upstream makes
-# `ttf-parser` disappear from the tree.
-[unix]
-ttf-parser-scope:
-    ./scripts/check-ttf-parser-scope.sh
-
 # Guard the accepted RUSTSEC-2026-0253 warning while #207 is open. The
 # affected `LruCache::pop()` method is not used by glyphon 0.12.0, but any
 # dependency-path or reviewed-version change fails until reachability is
-# reassessed. Unlike the older ttf-parser guard, resolution also fails with
-# cleanup instructions so an obsolete advisory ignore cannot linger silently.
+# reassessed. Resolution also fails with cleanup instructions, so an obsolete
+# advisory ignore cannot linger silently.
 [unix]
 lru-scope:
     ./scripts/check-lru-scope.sh
@@ -400,9 +393,9 @@ gauntlet: live-ui-helper-selftest native-titlebar-self-test wayland-first-frame-
 # supplements the current-OS vendor check with Linux + Windows native vendor
 # legs.
 [unix]
-gauntlet-strict: gauntlet vendor-check deny audit ttf-parser-scope lru-scope machete tracked-audit mermaid-check release-script-test
+gauntlet-strict: gauntlet vendor-check deny audit lru-scope machete tracked-audit mermaid-check release-script-test
     @echo ""
-    @echo "STRICT GAUNTLET PASSED — core, patched crates, RustSec product/vendor audits, release preparation, ttf-parser/lru scopes, deny, machete, tracked-file audit, and mermaid rendering are green."
+    @echo "STRICT GAUNTLET PASSED — core, patched crates, RustSec product/vendor audits, release preparation, the lru scope, deny (with the ttf-parser ban), machete, tracked-file audit, and mermaid rendering are green."
 
 # The FULL CI-equivalent gate: gauntlet-strict plus every packaging,
 # installer, update-manifest, and GPU-render check ci.yml runs that

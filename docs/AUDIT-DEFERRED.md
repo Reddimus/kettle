@@ -5,18 +5,6 @@ are marked explicitly; historical measurements are not current acceptance.
 
 ## Large / structural
 
-- **RUSTSEC-2026-0192 upstream exit for `ttf-parser`.** Issue
-  Reddimus/kettle#36 stays open until `ttf-parser` disappears from the dependency
-  graph. The only accepted temporary path is `glyphon → cosmic-text → fontdb`;
-  `scripts/check-ttf-parser-scope.py` guards that scope in CI. Upstream tracking:
-  RazrFalcon/fontdb#90, pop-os/cosmic-text#352, pop-os/cosmic-text#526, and
-  grovesNL/glyphon#123. Rechecked 2026-10-12: published versions remain
-  `cosmic-text 0.19.0` and `glyphon 0.12.0`. Cosmic-text's `main` now uses
-  `fontdb 0.24` after #526 merged, but no release contains that change. Next recheck: 2026-10-19, or the next
-  upstream release. The local cosmic-text copy retains only its required bidi fix. Close this
-  after an upstream release, updating the text-rendering stack, confirming
-  `cargo tree -i ttf-parser` reports no matches, and removing
-  RUSTSEC-2026-0192 ignores from `deny.toml` and `.github/workflows/audit.yml`.
 - **RUSTSEC-2026-0253 upstream exit for `lru`.** Issue Reddimus/kettle#207
   tracks the `lru 0.16.4` unsoundness warning until glyphon accepts a fixed
   release (`lru >=0.18.2`). The reviewed product path is only

@@ -126,7 +126,7 @@ Each change has the same shape:
    workflows so a stale dependency-ignore entry is caught
    at the local pre-flight. `just gauntlet-strict` chains `gauntlet` with the
    release-cut supply-chain and vendor gates: `vendor-check`, `deny`, `audit`,
-   `ttf-parser-scope`, `lru-scope`, `machete`, `tracked-audit`,
+   `lru-scope`, `machete`, `tracked-audit`,
    `mermaid-check`, and `release-script-test`.
    The supported Linux and macOS jobs run the same gate. A retained Windows
    job compiles and tests portable and conditional code, but does not claim a
