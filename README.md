@@ -129,8 +129,8 @@ just gauntlet   # the checks to pass before a pull request
 - [Getting started](docs/GETTING-STARTED.md), [Installation](docs/INSTALL.md)
   and [Updates](docs/UPDATES.md)
 - [Configuration](docs/CONFIG.md) and [Settings](docs/SETTINGS.md)
-- [Shell integration](docs/SHELL-INTEGRATION.md) and
-  [Automation and MCP](docs/AGENT.md)
+- [Shell integration](docs/SHELL-INTEGRATION.md),
+  [Automation and MCP](docs/AGENT.md) and [Lua plugins](docs/PLUGINS.md)
 - [Architecture](docs/ARCHITECTURE.md), [Testing](docs/TESTING.md) and
   [Releasing](docs/RELEASING.md)
 - [Security](SECURITY.md) and [Changelog](CHANGELOG.md)
