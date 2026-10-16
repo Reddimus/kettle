@@ -160,6 +160,8 @@ pub enum ProcessStart {
         /// A failed Windows update was quarantined (or could not yet be
         /// quarantined) so the intact prior binary could continue starting.
         warning: Option<String>,
+        /// The install this process started from, for its update checks.
+        install: crate::InstallSnapshot,
     },
     /// A verified update is pending. A helper was started (or is already
     /// waiting), so this process must exit without dropping the shared run
@@ -637,13 +639,15 @@ pub fn prepare_process_start() -> Result<ProcessStart, UpdateError> {
     {
         let install = match detect_managed_install() {
             Ok(install) => install,
-            Err(_) => {
+            Err(error) => {
                 return Ok(ProcessStart::Ready {
                     guard: RunningInstallGuard { _lock: None },
                     warning: None,
+                    install: crate::InstallSnapshot::unmanaged(&error),
                 });
             }
         };
+        let snapshot = crate::InstallSnapshot::managed(install.clone());
         match acquire_startup_recovery_lock(&install.prefix)? {
             // Every path below this needs to write the prefix too, starting
             // with the shared running lock. A user who cannot create the
@@ -654,6 +658,7 @@ pub fn prepare_process_start() -> Result<ProcessStart, UpdateError> {
                 return Ok(ProcessStart::Ready {
                     guard: RunningInstallGuard { _lock: None },
                     warning: None,
+                    install: snapshot,
                 });
             }
             StartupRecovery::Busy => {}
@@ -722,28 +727,38 @@ pub fn prepare_process_start() -> Result<ProcessStart, UpdateError> {
                 _lock: Some(running_lock),
             },
             warning,
+            install: snapshot,
         })
     }
     #[cfg(target_os = "linux")]
     {
-        if let Ok(executable) = std::env::current_exe() {
-            let running_version = semver::Version::parse(env!("CARGO_PKG_VERSION"))
-                .expect("the crate package version is valid semver");
-            prepare_linux_process_start_at(&executable, &running_version)?;
-        }
+        let install = match std::env::current_exe() {
+            Ok(executable) => {
+                let running_version = semver::Version::parse(env!("CARGO_PKG_VERSION"))
+                    .expect("the crate package version is valid semver");
+                prepare_linux_process_start_at(&executable, &running_version)?
+            }
+            Err(error) => crate::InstallSnapshot::unmanaged(&UpdateError::Io(error)),
+        };
         Ok(ProcessStart::Ready {
             guard: RunningInstallGuard {},
             warning: None,
+            install,
         })
     }
     #[cfg(target_os = "macos")]
     {
-        if let Ok(executable) = std::env::current_exe() {
-            crate::macos::sweep_leftovers_beside(&executable);
-        }
+        let install = match std::env::current_exe() {
+            Ok(executable) => {
+                crate::macos::sweep_leftovers_beside(&executable);
+                crate::InstallSnapshot::bundle_at(&executable)
+            }
+            Err(error) => crate::InstallSnapshot::unmanaged(&UpdateError::Io(error)),
+        };
         Ok(ProcessStart::Ready {
             guard: RunningInstallGuard {},
             warning: None,
+            install,
         })
     }
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
@@ -751,6 +766,7 @@ pub fn prepare_process_start() -> Result<ProcessStart, UpdateError> {
         Ok(ProcessStart::Ready {
             guard: RunningInstallGuard {},
             warning: None,
+            install: crate::InstallSnapshot::default(),
         })
     }
 }
@@ -801,21 +817,22 @@ fn acquire_startup_recovery_lock(prefix: &Path) -> Result<StartupRecovery, Updat
 fn prepare_linux_process_start_at(
     executable: &Path,
     running_version: &semver::Version,
-) -> Result<(), UpdateError> {
+) -> Result<crate::InstallSnapshot, UpdateError> {
     let install = match locate_managed_install_at(executable) {
         Ok(install) => install,
-        Err(_) => return Ok(()),
+        Err(error) => return Ok(crate::InstallSnapshot::unmanaged(&error)),
     };
+    let snapshot = crate::InstallSnapshot::managed(install.clone());
     let StartupRecovery::Held(_update_lock) = acquire_startup_recovery_lock(&install.prefix)?
     else {
-        return Ok(());
+        return Ok(snapshot);
     };
     confirm_committed_transaction(&install.prefix, running_version)?;
     recover_transaction(&install.prefix)?;
     if let Err(error) = bootstrap_linux_worker(&install, running_version) {
         log::warn!("media worker installation deferred: {error}");
     }
-    Ok(())
+    Ok(snapshot)
 }
 
 #[cfg(target_os = "linux")]
@@ -1207,7 +1224,7 @@ fn locate_managed_install_at(executable: &Path) -> Result<ManagedInstall, Update
     let executable = executable.canonicalize().map_err(|e| {
         UpdateError::UnmanagedInstall(format!("cannot resolve {}: {e}", executable.display()))
     })?;
-    let target = current_target().ok_or(UpdateError::UnsupportedPlatform)?;
+    current_target().ok_or(UpdateError::UnsupportedPlatform)?;
 
     #[cfg(windows)]
     let (prefix, marker_path) = {
@@ -1247,7 +1264,77 @@ fn locate_managed_install_at(executable: &Path) -> Result<ManagedInstall, Update
     #[cfg(target_os = "linux")]
     let _trusted_prefix = open_trusted_linux_install_prefix(&prefix)?;
 
-    let bytes = read_bounded_regular(&marker_path, 16 * 1024).map_err(|e| {
+    read_install_marker(&marker_path)?;
+    Ok(ManagedInstall {
+        prefix,
+        executable,
+        marker_path,
+    })
+}
+
+/// Reads and validates the installer marker at `marker_path`: schema,
+/// product, owner, this build's target, a recorded version, and the stable
+/// channel. Every failure is an [`UpdateError::UnmanagedInstall`].
+/// The version the installer marker at `marker_path` records, for update
+/// decisions. Any marker the installer would not accept is unreadable.
+#[cfg(any(windows, target_os = "linux"))]
+pub(crate) fn installed_version_at(marker_path: &Path) -> crate::decision::InstalledVersion {
+    use crate::decision::InstalledVersion;
+    match read_install_marker(marker_path) {
+        Ok(marker) if marker.version == "unknown" => InstalledVersion::Unknown,
+        Ok(marker) => semver::Version::parse(&marker.version)
+            .map_or(InstalledVersion::Unreadable, InstalledVersion::Known),
+        Err(_) => InstalledVersion::Unreadable,
+    }
+}
+
+/// The state of the update journal under `prefix`, for update decisions. It
+/// neither validates nor recovers the journal: the install path does that
+/// under its lock. Anything but a missing or a committed journal reads as an
+/// update to recover.
+#[cfg(target_os = "linux")]
+pub(crate) fn journal_state_at(prefix: &Path) -> crate::decision::JournalState {
+    use crate::decision::JournalState;
+    let bytes = match read_bounded_regular(&prefix.join(".kettle-update-journal.json"), 1024 * 1024)
+    {
+        Ok(bytes) => bytes,
+        Err(UpdateError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            return JournalState::Clear;
+        }
+        Err(_) => return JournalState::Incomplete,
+    };
+    match serde_json::from_slice::<Journal>(&bytes) {
+        Ok(journal)
+            if journal.schema == JOURNAL_SCHEMA && journal.phase == JournalPhase::Committed =>
+        {
+            semver::Version::parse(&journal.target_version)
+                .map_or(JournalState::Incomplete, |target| {
+                    JournalState::CommittedUnconfirmed { target }
+                })
+        }
+        _ => JournalState::Incomplete,
+    }
+}
+
+/// Installs `update` into an install found when this process started. Its
+/// executable may since have been replaced, so the prefix and marker are
+/// checked again here, and the install path reads the provenance under its
+/// lock.
+#[cfg(target_os = "linux")]
+pub(crate) fn install_into_captured(
+    client: &FeedClient,
+    update: &AvailableUpdate,
+    install: &ManagedInstall,
+) -> Result<InstallOutcome, UpdateError> {
+    let _trusted_prefix = open_trusted_linux_install_prefix(&install.prefix)?;
+    read_install_marker(&install.marker_path)?;
+    install_update_into(client, update, install)
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn read_install_marker(marker_path: &Path) -> Result<InstallMarker, UpdateError> {
+    let target = current_target().ok_or(UpdateError::UnsupportedPlatform)?;
+    let bytes = read_bounded_regular(marker_path, 16 * 1024).map_err(|e| {
         UpdateError::UnmanagedInstall(format!(
             "{} is missing or unreadable ({e}); update through the package manager or installer that owns this executable",
             marker_path.display()
@@ -1290,11 +1377,7 @@ fn locate_managed_install_at(executable: &Path) -> Result<ManagedInstall, Update
             marker.channel
         )));
     }
-    Ok(ManagedInstall {
-        prefix,
-        executable,
-        marker_path,
-    })
+    Ok(marker)
 }
 
 #[cfg(any(windows, target_os = "linux"))]
@@ -1373,8 +1456,15 @@ fn install_update_into(
             "selected artifact does not match this platform".to_string(),
         ));
     }
-    let _lock = prepare_update_transaction(install, &running_version)?;
+    #[cfg(target_os = "linux")]
+    {
+        install_linux_update_with_download(install, update, &running_version, || {
+            client.download_bytes(update)
+        })
+    }
 
+    #[cfg(windows)]
+    let _lock = prepare_update_transaction(install, &running_version)?;
     #[cfg(windows)]
     let transaction_id = unique_suffix();
     #[cfg(windows)]
@@ -1405,39 +1495,56 @@ fn install_update_into(
         }
         windows_result
     }
+}
 
-    #[cfg(target_os = "linux")]
-    let archive = {
-        let bytes = client.download_bytes(update)?;
-        verify_sha256_bytes(&bytes, &asset.sha256)?;
-        bytes
-    };
-    #[cfg(target_os = "linux")]
+/// The Linux half of [`install_update_into`], with the download passed in so
+/// tests can run it without a feed.
+///
+/// The running version was checked before this; under the update lock the
+/// candidate must also be newer than the installed one. Another process may
+/// have installed a newer release since this one started, and without the
+/// check it would put the older candidate back. A marker that records
+/// `unknown` has no installed version to compare.
+#[cfg(target_os = "linux")]
+fn install_linux_update_with_download(
+    install: &ManagedInstall,
+    update: &AvailableUpdate,
+    running_version: &semver::Version,
+    download: impl FnOnce() -> Result<Vec<u8>, UpdateError>,
+) -> Result<InstallOutcome, UpdateError> {
+    let asset = update
+        .asset
+        .as_ref()
+        .ok_or(UpdateError::UnsupportedPlatform)?;
+    let _lock = prepare_update_transaction(install, running_version)?;
+    let marker = read_install_marker(&install.marker_path)?;
+    if let Ok(installed) = semver::Version::parse(&marker.version) {
+        require_strict_upgrade(&update.version, &installed)?;
+    }
+    let archive = download()?;
+    verify_sha256_bytes(&archive, &asset.sha256)?;
     let package = load_linux_package(&archive, update)?;
 
-    #[cfg(target_os = "linux")]
-    {
-        let mut transaction = Transaction::begin(&install.prefix, &update.version.to_string())?;
-        let result = apply_verified_linux_update(&mut transaction, &package, install, update);
-        match result {
-            Ok(()) => transaction.commit()?,
-            Err(error) => {
-                if let Err(rollback) = transaction.rollback() {
-                    return Err(UpdateError::Transaction(format!(
-                        "{error}; rollback also failed: {rollback}"
-                    )));
-                }
-                return Err(error);
+    let mut transaction = Transaction::begin(&install.prefix, &update.version.to_string())?;
+    let result = apply_verified_linux_update(&mut transaction, &package, install, update);
+    match result {
+        Ok(()) => transaction.commit()?,
+        Err(error) => {
+            if let Err(rollback) = transaction.rollback() {
+                return Err(UpdateError::Transaction(format!(
+                    "{error}; rollback also failed: {rollback}"
+                )));
             }
+            return Err(error);
         }
-
-        refresh_platform_integration(install);
-        Ok(InstallOutcome {
-            version: update.version.clone(),
-            executable: install.executable.clone(),
-            disposition: InstallDisposition::Applied,
-        })
     }
+
+    refresh_platform_integration(install);
+    Ok(InstallOutcome {
+        version: update.version.clone(),
+        executable: install.executable.clone(),
+        disposition: InstallDisposition::Applied,
+    })
 }
 
 #[cfg(any(windows, target_os = "linux"))]
@@ -5086,10 +5193,9 @@ fn recover_transaction(prefix: &Path) -> Result<(), UpdateError> {
         preflight: None,
     };
     if transaction.journal.phase == JournalPhase::Committed {
-        Err(UpdateError::Transaction(format!(
-            "committed update {} is awaiting startup confirmation before its last-known-good backup is discarded",
-            transaction.journal.target_version
-        )))
+        Err(UpdateError::AwaitingRestart {
+            target: transaction.journal.target_version.clone(),
+        })
     } else {
         transaction.rollback()
     }
@@ -7327,6 +7433,10 @@ mod tests {
         }
         let error = recover_transaction(root.path()).unwrap_err();
         assert!(error.to_string().contains("awaiting startup confirmation"));
+        assert!(
+            matches!(&error, UpdateError::AwaitingRestart { target } if target == "99.0.0"),
+            "a committed, unconfirmed update is restart pending, not a failure: {error:?}"
+        );
         assert!(root.path().join(".kettle-update-journal.json").is_file());
         assert!(fs::read_dir(root.path()).unwrap().any(|entry| {
             entry
@@ -7532,6 +7642,7 @@ mod tests {
                 let result = if recovery {
                     let version = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
                     prepare_linux_process_start_at(&worker_prefix.join("bin/kettle"), &version)
+                        .map(drop)
                 } else {
                     let mut tx = Transaction::begin(&worker_prefix, "99.0.0").unwrap();
                     tx.preflight_destinations(&[relative])
@@ -7742,6 +7853,258 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn test_linux_package_tar(version: &str) -> Vec<u8> {
         test_linux_package_tar_with(version, &[], &[])
+    }
+
+    /// #574: a window left open across an update must never announce,
+    /// download or reinstall the version that update installed. The child
+    /// runs from `prefix/bin/kettle` and captures its install the way startup
+    /// does. The parent then replaces `bin/kettle` and the marker by rename,
+    /// as an update does, after which the child's executable reads
+    /// `(deleted)` and can no longer be located. Three cases: the update is
+    /// committed but unconfirmed, it is confirmed, and an even newer release
+    /// arrives.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stale_linux_process_after_rename_replace_never_reinstalls_or_announces() {
+        for case in ["unconfirmed", "confirmed", "newer"] {
+            let root = test_tempdir();
+            let prefix = root.path().join("install");
+            create_linux_install_dir_all(&prefix, &prefix.join("bin"));
+            create_linux_install_dir_all(&prefix, &prefix.join("share/kettle"));
+            fs::copy(std::env::current_exe().unwrap(), prefix.join("bin/kettle")).unwrap();
+            fs::write(
+                prefix.join("share/kettle/install.json"),
+                marker_json(env!("CARGO_PKG_VERSION")).unwrap(),
+            )
+            .unwrap();
+            seed_linux_install_provenance(&prefix);
+            let captured = root.path().join("captured");
+            let replaced = root.path().join("replaced");
+            let mut child = std::process::Command::new(prefix.join("bin/kettle"))
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "install::tests::stale_linux_process_child",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env("KETTLE_TEST_STALE_CASE", case)
+                .env("KETTLE_TEST_STALE_CAPTURED", &captured)
+                .env("KETTLE_TEST_STALE_REPLACED", &replaced)
+                .spawn()
+                .unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while !captured.exists() {
+                assert!(
+                    child.try_wait().unwrap().is_none(),
+                    "{case}: the child exited before capturing its install"
+                );
+                assert!(std::time::Instant::now() < deadline, "{case}: no capture");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            {
+                let mut tx = Transaction::begin(&prefix, "99.0.0").unwrap();
+                tx.install_bytes(Path::new("bin/kettle"), b"installed-kettle", Some(0o755))
+                    .unwrap();
+                tx.install_bytes(
+                    Path::new("share/kettle/install.json"),
+                    marker_json("99.0.0").unwrap().as_bytes(),
+                    Some(0o644),
+                )
+                .unwrap();
+                tx.journal.phase = JournalPhase::Committed;
+                tx.persist_journal().unwrap();
+                std::mem::forget(tx);
+            }
+            if case != "unconfirmed" {
+                assert!(
+                    confirm_committed_transaction(&prefix, &semver::Version::new(99, 0, 0))
+                        .unwrap()
+                );
+                seed_linux_install_provenance(&prefix);
+            }
+            fs::write(&replaced, b"").unwrap();
+            let status = loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    break status;
+                }
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    panic!("{case}: the child did not finish");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            };
+            assert!(status.success(), "{case}: the stale process misbehaved");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "run by stale_linux_process_after_rename_replace_never_reinstalls_or_announces"]
+    fn stale_linux_process_child() {
+        use crate::decision::{
+            Decision, InstallKind, InstalledVersion, JournalState, Latest, Policy, decide,
+        };
+        let Ok(case) = std::env::var("KETTLE_TEST_STALE_CASE") else {
+            return;
+        };
+        let captured = PathBuf::from(std::env::var_os("KETTLE_TEST_STALE_CAPTURED").unwrap());
+        let replaced = PathBuf::from(std::env::var_os("KETTLE_TEST_STALE_REPLACED").unwrap());
+        let running = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+        let snapshot =
+            prepare_linux_process_start_at(&std::env::current_exe().unwrap(), &running).unwrap();
+        assert_eq!(snapshot.kind(), InstallKind::Managed);
+        fs::write(&captured, b"").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !replaced.exists() {
+            assert!(std::time::Instant::now() < deadline, "never replaced");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let executable = fs::read_link("/proc/self/exe").unwrap();
+        assert!(
+            executable.to_string_lossy().ends_with(" (deleted)"),
+            "{executable:?}"
+        );
+        // What every check used to do now fails: the issue's trigger.
+        assert!(detect_managed_install().is_err());
+
+        let installed = semver::Version::new(99, 0, 0);
+        let install = snapshot.managed_install().unwrap();
+        let local = snapshot.local_state();
+        assert_eq!(local.installed, InstalledVersion::Known(installed.clone()));
+        let latest = |version| {
+            Some(Latest {
+                version,
+                has_asset: true,
+            })
+        };
+        let mut update = fake_update();
+        match case.as_str() {
+            "unconfirmed" => {
+                assert_eq!(
+                    local.journal,
+                    JournalState::CommittedUnconfirmed {
+                        target: installed.clone()
+                    }
+                );
+                for policy in [Policy::Notify, Policy::Auto] {
+                    assert_eq!(
+                        decide(
+                            &running,
+                            InstallKind::Managed,
+                            &local,
+                            policy,
+                            latest(&installed)
+                        ),
+                        Decision::RestartPending {
+                            installed: installed.clone()
+                        }
+                    );
+                }
+                let error = install_linux_update_with_download(install, &update, &running, || {
+                    panic!("an update awaiting restart must not download")
+                })
+                .unwrap_err();
+                assert!(
+                    matches!(error, UpdateError::AwaitingRestart { .. }),
+                    "{error:?}"
+                );
+            }
+            "confirmed" => {
+                assert_eq!(local.journal, JournalState::Clear);
+                for policy in [Policy::Notify, Policy::Auto] {
+                    assert_eq!(
+                        decide(
+                            &running,
+                            InstallKind::Managed,
+                            &local,
+                            policy,
+                            latest(&installed)
+                        ),
+                        Decision::RestartPending {
+                            installed: installed.clone()
+                        }
+                    );
+                }
+                let error = install_linux_update_with_download(install, &update, &running, || {
+                    panic!("the installed version must not download again")
+                })
+                .unwrap_err();
+                assert!(matches!(error, UpdateError::Rollback { .. }), "{error:?}");
+            }
+            "newer" => {
+                let newer = semver::Version::new(100, 0, 0);
+                assert_eq!(
+                    decide(
+                        &running,
+                        InstallKind::Managed,
+                        &local,
+                        Policy::Auto,
+                        latest(&newer)
+                    ),
+                    Decision::Install
+                );
+                let archive = test_linux_package_tar("100.0.0");
+                update.version = newer.clone();
+                update.tag = "v100.0.0".into();
+                update.asset.as_mut().unwrap().sha256 = sha256_bytes(&archive);
+                install_linux_update_with_download(install, &update, &running, || {
+                    Ok(archive.clone())
+                })
+                .unwrap();
+                assert_eq!(
+                    installed_version_at(&install.marker_path),
+                    InstalledVersion::Known(newer)
+                );
+            }
+            other => panic!("unknown case {other}"),
+        }
+    }
+
+    /// Under the update lock the candidate must be newer than the installed
+    /// version as well as the running one. Another process may have
+    /// installed a newer release since this one checked, and this one would
+    /// otherwise put the older candidate back (#574).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_update_refuses_a_candidate_not_newer_than_the_installed_marker() {
+        let root = test_tempdir();
+        let prefix = root.path().join("install");
+        create_linux_install_dir_all(&prefix, &prefix.join("share/kettle"));
+        let marker_path = prefix.join("share/kettle/install.json");
+        fs::write(&marker_path, marker_json("99.0.0").unwrap()).unwrap();
+        seed_linux_install_provenance(&prefix);
+        let install = ManagedInstall {
+            prefix: prefix.clone(),
+            executable: prefix.join("bin/kettle"),
+            marker_path: marker_path.clone(),
+        };
+        let running = semver::Version::new(1, 0, 0);
+
+        let error = install_linux_update_with_download(&install, &fake_update(), &running, || {
+            panic!("a candidate the install already has must not be downloaded")
+        })
+        .unwrap_err();
+        assert!(
+            matches!(error, UpdateError::Rollback { .. }),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            fs::read_to_string(&marker_path).unwrap(),
+            marker_json("99.0.0").unwrap()
+        );
+
+        // A marker that records `unknown` leaves only the running-version
+        // check, so the newer candidate goes on to download.
+        fs::write(&marker_path, marker_json("unknown").unwrap()).unwrap();
+        seed_linux_install_provenance(&prefix);
+        let mut downloaded = false;
+        let _ = install_linux_update_with_download(&install, &fake_update(), &running, || {
+            downloaded = true;
+            Err(UpdateError::UnsupportedPlatform)
+        });
+        assert!(downloaded);
     }
 
     #[cfg(target_os = "linux")]

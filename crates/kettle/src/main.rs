@@ -1134,7 +1134,11 @@ fn main() -> anyhow::Result<()> {
     let bare_gui_launch = is_bare_gui_argv(std::env::args_os());
     let (_running_install_guard, startup_update_warning) =
         match kettle_update::prepare_process_start()? {
-            kettle_update::ProcessStart::Ready { guard, warning } => (guard, warning),
+            kettle_update::ProcessStart::Ready {
+                guard,
+                warning,
+                install: _,
+            } => (guard, warning),
             kettle_update::ProcessStart::PendingUpdate { guard } => {
                 eprintln!(
                     "A verified Kettle update is waiting for running windows to close; exiting this old build."

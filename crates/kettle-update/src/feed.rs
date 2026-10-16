@@ -63,6 +63,12 @@ pub enum UpdateError {
     MissingArchiveFile(String),
     #[error("update transaction failed: {0}")]
     Transaction(String),
+    /// A committed update waits for a process of its version to start and
+    /// confirm it. A restart finishes it; it is not a failure.
+    #[error(
+        "committed update {target} is awaiting startup confirmation before its last-known-good backup is discarded"
+    )]
+    AwaitingRestart { target: String },
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]

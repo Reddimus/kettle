@@ -899,9 +899,15 @@ fn require_live_bundle_upgrade(
             "the bundle path changed while updating".into(),
         ));
     }
+    let installed = read_bundle_version(&live.marker_path)?;
+    require_strict_upgrade(candidate, &installed)
+}
+
+/// The `CFBundleShortVersionString` an app bundle's `Info.plist` records.
+pub(crate) fn read_bundle_version(info_plist: &Path) -> Result<semver::Version, UpdateError> {
     let output = Command::new("/usr/libexec/PlistBuddy")
         .args(["-c", "Print :CFBundleShortVersionString"])
-        .arg(&live.marker_path)
+        .arg(info_plist)
         .output()?;
     if !output.status.success() {
         return Err(UpdateError::UnmanagedInstall(format!(
@@ -909,9 +915,17 @@ fn require_live_bundle_upgrade(
             first_line(&String::from_utf8_lossy(&output.stderr))
         )));
     }
-    let installed = semver::Version::parse(String::from_utf8_lossy(&output.stdout).trim())
-        .map_err(|error| UpdateError::InvalidCurrentVersion(error.to_string()))?;
-    require_strict_upgrade(candidate, &installed)
+    semver::Version::parse(String::from_utf8_lossy(&output.stdout).trim())
+        .map_err(|error| UpdateError::InvalidCurrentVersion(error.to_string()))
+}
+
+/// The app bundle `executable` sits in, by path shape alone: no signature
+/// check, so it is cheap enough for startup.
+pub(crate) fn bundle_of(executable: &Path) -> Option<PathBuf> {
+    match enclosing_bundle(executable) {
+        BundleShape::Bundle(bundle) => Some(bundle),
+        _ => None,
+    }
 }
 
 /// Download, verify, and swap in a new bundle.
