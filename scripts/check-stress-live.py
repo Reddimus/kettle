@@ -16,7 +16,8 @@ the control API, and must leave it alive with no panic in its log, answering
   S9  hostile media through `kettle show` (corrupt, empty, huge and bomb
       images, SVG, Mermaid and video, a FIFO, a symlink loop); each must be
       refused within its deadline, and three good files must still render
-  S10 64 parallel control clients, 20 requests each
+  S10 64 parallel control clients, 20 requests each; the 8-connection cap
+      may refuse some, but none may fail any other way
 
 S6 uses the system clipboard (pbcopy, wl-copy or xclip) and restores it
 afterwards. S9 needs a working media worker, on macOS a signed one (`just
@@ -179,18 +180,27 @@ def s7_titles(live):
     return {"worst_get_state_during_s": worst, "title_lengths": [len(t) for t in titles]}
 
 
+# The control server serves 8 connections at a time and closes any past that
+# without reading them, so a client sees its connection closed before a reply.
+REFUSED_AT_CAP = ("Broken pipe", "Connection reset", "connection closed", "UnexpectedEof")
+
+
 def s10_ctl_storm(live):
-    errors = []; ok = [0]
+    errors = []; refused = [0]; ok = [0]
     def loop():
         for _ in range(20):
             try:
                 live.json_ctl("get_state"); ok[0] += 1
             except BaseException as error:
-                errors.append(str(error)[:120])
+                if any(mark in str(error) for mark in REFUSED_AT_CAP):
+                    refused[0] += 1
+                else:
+                    errors.append(str(error)[:120])
     threads = [threading.Thread(target=loop) for _ in range(64)]
     for t in threads: t.start()
     for t in threads: t.join()
-    return {"ctl_ok": ok[0], "ctl_errors": len(errors), "first_error": errors[0] if errors else None}
+    return {"ctl_ok": ok[0], "ctl_refused_at_cap": refused[0], "ctl_errors": len(errors),
+            "first_error": errors[0] if errors else None}
 
 
 def s4_close_mid_flood(live):
