@@ -13040,6 +13040,38 @@ fn a_vertical_tab_strip_reorders_by_the_axis_it_is_actually_stacked_on() {
     assert_eq!(tab_drag_target_index(-999.0, 42.0, &stacked), 1);
 }
 
+/// Side tab bars reorder by drag like top and bottom ones. Both pointer paths
+/// once skipped the reorder for `tab-position = left` / `right`, a leftover
+/// from before `tab_drag_target_index` read the strip's axis off its segments.
+#[test]
+fn every_tab_bar_position_reorders_by_drag() {
+    let src = production_source();
+    let native_move = src
+        .split("WindowEvent::CursorMoved { position, .. } => {")
+        .nth(1)
+        .and_then(|body| body.split("WindowEvent::").next())
+        .expect("native CursorMoved arm");
+    let ctl_move = src
+        .split("fn ctl_mouse_move(")
+        .nth(1)
+        .and_then(|body| body.split("\n    fn ").next())
+        .expect("ctl_mouse_move body");
+    for (label, body) in [("native move", native_move), ("ctl move", ctl_move)] {
+        let reorder = body
+            .find("self.reorder_active_tab_for_cursor(ws)")
+            .unwrap_or_else(|| panic!("{label} reorders through the shared helper"));
+        let gate = &body[body[..reorder].rfind("if ").expect("a reorder gate")..reorder];
+        assert!(
+            gate.contains("ws.tab_drag_active") && gate.contains("ws.tab_drag_press.is_none()"),
+            "{label} reorders only a promoted tab drag"
+        );
+        assert!(
+            !gate.contains("is_vertical"),
+            "{label} reorders on every tab bar position"
+        );
+    }
+}
+
 #[test]
 fn tab_title_rect_excludes_visible_close_button() {
     use super::tab_title_rect;

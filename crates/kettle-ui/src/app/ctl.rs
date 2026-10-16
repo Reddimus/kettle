@@ -2001,8 +2001,7 @@ impl App {
             return;
         }
         self.promote_tab_drag_if_needed(ws);
-        if ws.tab_drag_active && ws.tab_drag_press.is_none() && !self.cfg.tab_bar_pos.is_vertical()
-        {
+        if ws.tab_drag_active && ws.tab_drag_press.is_none() {
             self.reorder_active_tab_for_cursor(ws);
         }
         // `None` is xterm's "no button" code 3, which with the motion bit is

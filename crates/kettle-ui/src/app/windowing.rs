@@ -54,16 +54,21 @@ impl App {
         }
     }
 
-    pub(super) fn reorder_active_tab_for_cursor(&mut self, ws: &mut WindowState) {
+    /// Move the active tab to the segment under the cursor, hit-testing the
+    /// same rendered segments that clicks and painting use, on whichever axis
+    /// the bar is stacked. Returns whether the tab moved.
+    pub(super) fn reorder_active_tab_for_cursor(&mut self, ws: &mut WindowState) -> bool {
         let bar = self.tab_bar(ws);
         if bar.height <= 0.0 || bar.segments.is_empty() {
-            return;
+            return false;
         }
         let target = tab_drag_target_index(ws.cursor.x as f32, ws.cursor.y as f32, &bar.segments);
         let delta = target as i32 - ws.mux.active as i32;
-        if delta != 0 && ws.mux.move_active_tab(delta) {
+        let moved = delta != 0 && ws.mux.move_active_tab(delta);
+        if moved {
             ws.mux.touch_active_tab_seen();
         }
+        moved
     }
 
     /// Window attributes shared by window 1 (`resumed_inner`) and
