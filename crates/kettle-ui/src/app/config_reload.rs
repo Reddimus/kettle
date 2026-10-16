@@ -360,6 +360,9 @@ impl App {
         self.reconcile_codex_shell();
         crate::dev_record::apply_retention_config(&self.cfg);
         self.sync_lua_active_theme();
+        // A reloaded `update-policy` changes what the update notice says, so
+        // read its facts now rather than at the next focus or hourly tick.
+        self.request_update_facts(true);
         font_size_changed
     }
 

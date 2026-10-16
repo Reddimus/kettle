@@ -3450,6 +3450,26 @@ fn output_continuation_keeps_progress_and_defers_a_definitive_miss() {
     assert!(retry_at.is_none());
 }
 
+/// Turning updates off in Settings, or any other reload, refreshes the update
+/// notice at once. It once waited for the next focus change or hourly tick,
+/// so a focused window kept its chip for up to an hour.
+#[test]
+fn a_config_reload_refreshes_the_update_notice() {
+    let src = production_source();
+    let body = src
+        .split("fn load_reloaded_config(&mut self) -> bool {")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("load_reloaded_config body");
+    let assigned = body
+        .find("self.cfg = new;")
+        .expect("the new config is applied");
+    let refreshed = body
+        .find("self.request_update_facts(true);")
+        .expect("a reload refreshes the update notice");
+    assert!(assigned < refreshed, "facts are read with the new policy");
+}
+
 #[test]
 fn watched_reload_loads_once_then_applies_every_window() {
     let src = production_source();
