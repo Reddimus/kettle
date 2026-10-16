@@ -331,7 +331,9 @@ dot/space aliases before Win32 normalization can erase them. Neither policy
 overwrites or follows an existing leaf. A writable export parent can still
 rename or remove the staging name or published pathname; the open file object
 remains the one Kettle created. Unix cleanup uses the held private staging
-directory and never unlinks a published export pathname. Cleanup failure is
+directory and never unlinks a published export pathname. Empty staging
+directories are removed only under a verified trusted parent; a concurrently
+writable parent retains the empty reservation. Cleanup failure is
 reported, but the pathname is not
 a durable capability. This policy is not a substitute for private-state storage
 and is never used implicitly.
@@ -2353,7 +2355,11 @@ permits. The checked Kettle launcher passes held ELF descriptors over the
 private display connection before exec. The GUI duplicates only that peer's
 descriptors and binds the launch PID/start, executable identity and original
 pane child. The npm route additionally checks Node and its immediate native
-child. This is owner-enabled local provenance, not vendor authentication.
+child. Executable and npm metadata checks inspect access ACLs through the
+open descriptor before accepting private-group write bits. Named users other
+than the owner or root, and named groups other than that private group, must
+have no effective write grant. This is owner-enabled local provenance, not
+vendor authentication.
 
 Rendering retains a launch witness and rechecks it before registering a card.
 Hook pickup consumes its permit before checking the current native parent and

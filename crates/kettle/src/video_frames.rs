@@ -390,22 +390,20 @@ fn unpredictable() -> u64 {
 }
 
 /// A new private file in `directory` under a hidden, unpredictable name
-/// beside `name`, made by this call and by nothing else.
+/// beside `name`, made by this call and by nothing else. Created as a
+/// user-selected export, so on macOS it never inherits an ACL from the
+/// folder that would let another user read the frames.
 fn create_private(
     directory: &Path,
     name: &std::ffi::OsStr,
 ) -> Result<(PathBuf, std::fs::File), OutputRefusal> {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     for _ in 0..16 {
         let mut candidate = std::ffi::OsString::from(".");
         candidate.push(name);
         candidate.push(format!(".{:016x}.tmp", unpredictable()));
         let path = directory.join(candidate);
-        match options.open(&path) {
-            Ok(file) => return Ok((path, file)),
+        match kettle_state::create_user_selected_file_new(&path) {
+            Ok(file) => return Ok((path, file.persist())),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(_) => return Err(OutputRefusal::Unwritable),
         }
@@ -443,6 +441,8 @@ fn write_out(out: &Path, input: &Path, bytes: &[u8]) -> Result<(), OutputRefusal
         .and_then(|()| file.sync_all())
         .and_then(|()| std::fs::rename(&temporary, out));
     if written.is_err() {
+        // By name, which is safe here: no one else can change an entry in a
+        // folder that is not shared.
         let _ = std::fs::remove_file(&temporary);
         return Err(OutputRefusal::Unwritable);
     }
@@ -761,6 +761,40 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp"))
             .collect();
         assert!(leftovers.is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn exported_sheet_does_not_inherit_read_acl() {
+        let directory = kettle_test_support::private_tempdir("kettle-video-output-acl-");
+        let folder = directory.path().join("out");
+        std::fs::create_dir(&folder).unwrap();
+        let status = std::process::Command::new("/bin/chmod")
+            .args(["+a", "everyone allow read,file_inherit"])
+            .arg(&folder)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let listing = |path: &Path| {
+            let output = std::process::Command::new("/bin/ls")
+                .arg("-le")
+                .arg(path)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            String::from_utf8(output.stdout).unwrap()
+        };
+        let inherited = folder.join("inherited");
+        std::fs::write(&inherited, b"fixture").unwrap();
+        assert!(listing(&inherited).contains("allow read"));
+        assert!(!shared(&folder).unwrap());
+
+        let input = directory.path().join("clip.webm");
+        std::fs::write(&input, b"video").unwrap();
+        let out = folder.join("frames.jpg");
+        write_out(&out, &input, b"jpeg").unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), b"jpeg");
+        assert!(!listing(&out).contains("allow read"));
     }
 
     #[cfg(unix)]

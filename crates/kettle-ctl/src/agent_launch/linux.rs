@@ -1,6 +1,6 @@
 use std::fs::{File, Metadata, OpenOptions};
 use std::io;
-use std::os::fd::{AsFd, BorrowedFd};
+use std::os::fd::{AsFd, AsRawFd as _, BorrowedFd};
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::{FileExt as _, MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
@@ -63,7 +63,7 @@ impl HeldExecutable {
 
     fn from_file(file: File, path: PathBuf) -> io::Result<Self> {
         let metadata = file.metadata()?;
-        if !acceptable(&metadata) {
+        if !acceptable(&file, &metadata) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "unsupported executable",
@@ -149,10 +149,10 @@ impl AsFd for HeldExecutable {
     }
 }
 
-fn acceptable(metadata: &Metadata) -> bool {
+fn acceptable(file: &File, metadata: &Metadata) -> bool {
     metadata.is_file()
         && (64..=MAX_EXECUTABLE_BYTES).contains(&metadata.len())
-        && owned_and_writable_by_owner_alone(metadata)
+        && owned_and_writable_by_owner_alone(file, metadata)
         && metadata.mode() & 0o111 != 0
 }
 
@@ -161,13 +161,51 @@ fn acceptable(metadata: &Metadata) -> bool {
 /// the group is the owner's private group: Debian and Ubuntu give each user
 /// one and default to umask 002, so `npm install -g` and other user installs
 /// leave files group-writable. Debian's OpenSSH accepts the same.
-pub fn owned_and_writable_by_owner_alone(metadata: &Metadata) -> bool {
+pub fn owned_and_writable_by_owner_alone(file: &File, metadata: &Metadata) -> bool {
     // SAFETY: geteuid has no preconditions.
     let user = unsafe { libc::geteuid() };
     let mode = metadata.mode();
     (metadata.uid() == user || metadata.uid() == 0)
         && mode & 0o6002 == 0
-        && (mode & 0o020 == 0 || private_group_of(metadata.uid(), metadata.gid()))
+        && (mode & 0o020 == 0
+            || (private_group_of(metadata.uid(), metadata.gid())
+                && access_acl_allows_owner_write(file, metadata)))
+}
+
+fn access_acl_allows_owner_write(file: &File, metadata: &Metadata) -> bool {
+    // Linux exposes the ACL mask in the group bits; a private owning group
+    // does not account for named users and groups covered by that mask.
+    let mut acl = vec![0u8; 64 * 1024];
+    // SAFETY: the descriptor is live and the buffer has the supplied capacity.
+    let size = unsafe {
+        libc::fgetxattr(
+            file.as_raw_fd(),
+            c"system.posix_acl_access".as_ptr(),
+            acl.as_mut_ptr().cast(),
+            acl.len(),
+        )
+    };
+    if size < 0 {
+        return matches!(
+            io::Error::last_os_error().raw_os_error(),
+            Some(libc::ENODATA | libc::EOPNOTSUPP)
+        );
+    }
+    let size = size as usize;
+    if size < 4 || acl[..4] != 2u32.to_le_bytes() || !(size - 4).is_multiple_of(8) {
+        return false;
+    }
+    acl[4..size].chunks_exact(8).all(|entry| {
+        let tag = u16::from_le_bytes([entry[0], entry[1]]);
+        let permissions = u16::from_le_bytes([entry[2], entry[3]]);
+        let id = u32::from_le_bytes([entry[4], entry[5], entry[6], entry[7]]);
+        match tag {
+            0x02 if permissions & 2 != 0 => id == metadata.uid() || id == 0,
+            0x08 if permissions & 2 != 0 => id == metadata.gid(),
+            0x01 | 0x02 | 0x04 | 0x08 | 0x10 | 0x20 => true,
+            _ => false,
+        }
+    })
 }
 
 /// The owner and group facts the private-group rule reads.
@@ -351,6 +389,62 @@ mod tests {
             },
         ] {
             assert!(!is_private_group(&shared), "{shared:?}");
+        }
+    }
+
+    #[test]
+    fn access_acl_writers_cannot_use_the_private_group_exception() {
+        let root = kettle_test_support::private_tempdir("kettle-agent-acl");
+        let path = root.path().join("agent");
+        write(&path, &elf(), 0o775);
+        let file = File::open(&path).unwrap();
+        let metadata = file.metadata().unwrap();
+        let other_user = if metadata.uid() == 1 { 2 } else { 1 };
+        for (tag, id) in [
+            (0x02u16, other_user),
+            (0x08, metadata.gid().wrapping_add(1)),
+        ] {
+            for mask in [7u16, 5] {
+                let mut entries = vec![
+                    (0x01u16, 7u16, u32::MAX),
+                    (0x04, 5, u32::MAX),
+                    (0x10, mask, u32::MAX),
+                    (0x20, 5, u32::MAX),
+                ];
+                entries.insert(if tag == 0x02 { 1 } else { 2 }, (tag, 7, id));
+                let mut acl = 2u32.to_le_bytes().to_vec();
+                for (tag, permissions, id) in entries {
+                    acl.extend_from_slice(&tag.to_le_bytes());
+                    acl.extend_from_slice(&permissions.to_le_bytes());
+                    acl.extend_from_slice(&id.to_le_bytes());
+                }
+                // SAFETY: the descriptor and ACL buffer remain live for the call.
+                let result = unsafe {
+                    libc::fsetxattr(
+                        file.as_raw_fd(),
+                        c"system.posix_acl_access".as_ptr(),
+                        acl.as_ptr().cast(),
+                        acl.len(),
+                        0,
+                    )
+                };
+                if result != 0 {
+                    let error = io::Error::last_os_error();
+                    if error.raw_os_error() == Some(libc::EOPNOTSUPP) {
+                        eprintln!("access ACLs are unsupported; skipped");
+                        return;
+                    }
+                    panic!("install access ACL: {error}");
+                }
+                let metadata = file.metadata().unwrap();
+                assert_eq!(metadata.mode() & 0o020 != 0, mask == 7);
+                if mask == 7 {
+                    assert!(!access_acl_allows_owner_write(&file, &metadata));
+                    assert!(HeldExecutable::open(&path).is_err());
+                } else {
+                    assert!(HeldExecutable::open(&path).is_ok(), "masked write grant");
+                }
+            }
         }
     }
 

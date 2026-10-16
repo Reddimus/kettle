@@ -188,8 +188,17 @@ impl StagedUserSelectedFile {
                 ))
             }),
             Ok(CreatedFilePublication::Renamed) => {
-                drop(staged.persist());
-                Ok(())
+                #[cfg(unix)]
+                {
+                    staged
+                        .discard()
+                        .map_err(StagedFilePublishError::after_publication)
+                }
+                #[cfg(not(unix))]
+                {
+                    drop(staged.persist());
+                    Ok(())
+                }
             }
             Err(error) if error.destination_may_exist => {
                 let error = with_cleanup_error(error.error, staged.discard(), "staged export");
@@ -269,13 +278,12 @@ impl io::Seek for StagedUserSelectedFile {
     }
 }
 
-/// A newly created user-selected file whose path is removed if publication is
-/// abandoned before [`persist`](Self::persist).
+/// A newly created user-selected file with a platform-specific cleanup guard.
 ///
-/// This keeps the platform-specific parent/handle capability alive across the
-/// caller's write. [`discard`](Self::discard) reports cleanup failure; dropping
-/// the guard makes the same identity-matched attempt on a best-effort basis.
-/// Neither path ever removes a replacement entry.
+/// Staged Unix payloads are removed through a held private directory. Directly
+/// created visible Unix exports are retained on discard because pathname
+/// deletion cannot be conditional on identity. Windows removes the created
+/// object through its handle. Neither policy removes a replacement file.
 pub struct CreatedUserSelectedFile {
     file: Option<File>,
     cleanup: Option<CreatedFileCleanup>,
@@ -307,7 +315,7 @@ impl CreatedUserSelectedFile {
             .expect("created file is present until persist")
     }
 
-    /// Remove the exact created leaf and report whether cleanup succeeded.
+    /// Retire private staging, or retain a directly created Unix export.
     pub fn discard(mut self) -> io::Result<()> {
         let cleanup = self.cleanup.take();
         let result = match (cleanup, self.file.as_ref()) {
@@ -520,11 +528,28 @@ fn create_private_dirs_impl(directory: &Path) -> io::Result<()> {
         cursor = path.parent();
     }
 
+    // The directories the creates below add, innermost first. A save is
+    // durable only once each new directory's entry is in its parent, so each
+    // parent is synced at the end.
+    let missing: Vec<&Path> = directory
+        .ancestors()
+        .take_while(|path| std::fs::symlink_metadata(path).is_err())
+        .collect();
+    let sync_new_entries = || -> io::Result<()> {
+        for created in missing.iter().rev() {
+            if let Some(parent) = created.parent() {
+                unix::sync_directory_path(parent)?;
+            }
+        }
+        Ok(())
+    };
+
     let Some(owned) = owned else {
         if let Some(parent) = directory.parent() {
             private(parent)?;
         }
-        return private(directory);
+        private(directory)?;
+        return sync_new_entries();
     };
 
     if let Some(root) = owned.parent() {
@@ -553,7 +578,7 @@ fn create_private_dirs_impl(directory: &Path) -> io::Result<()> {
     for path in repair.iter().rev() {
         repair_private_dir_mode(path)?;
     }
-    Ok(())
+    sync_new_entries()
 }
 
 /// Set one existing directory to `0700`, through a file descriptor rather than
@@ -629,9 +654,9 @@ pub fn create_private_file_new(path: &Path) -> io::Result<File> {
 /// This is for exports such as an explicitly named screenshot; private Kettle
 /// state must continue to use [`create_private_file_new`].
 ///
-/// The returned guard removes the exact created leaf if it is dropped before
-/// [`CreatedUserSelectedFile::persist`], so an encoder failure does not strand
-/// a partial file that blocks retry. A writable parent can rename or remove the
+/// On Unix, the returned guard retains the visible leaf on failure; use
+/// [`stage_user_selected_file_new`] when partial output must be cleaned up.
+/// A writable parent can rename or remove the
 /// new directory entry as soon as the instantaneous entry verification ends,
 /// including before this function returns and while the caller writes the
 /// file. That is inherent in exporting into a directory controlled by another
@@ -698,12 +723,21 @@ fn stage_user_selected_file_new_with_mode(
             write!(&mut suffix, "{byte:02x}").expect("writing to String cannot fail");
         }
         let staged_path = parent.join(format!(".kettle-export-{suffix}.tmp"));
+        #[cfg(unix)]
+        match unix::stage_user_selected_file_at(&staged_path, &destination, hard_link_mode) {
+            Ok(Some(staged)) => return Ok(staged),
+            Ok(None) => continue,
+            Err(error) => return Err(error),
+        }
+        #[cfg(not(unix))]
         let (file, cleanup) = match create_user_selected_file_new_impl(&staged_path) {
             Ok(created) => created,
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error),
         };
+        #[cfg(not(unix))]
         let staged = CreatedUserSelectedFile::new(file, cleanup);
+        #[cfg(not(unix))]
         match create_user_selected_file_publish_impl(
             &staged_path,
             &destination,
@@ -856,16 +890,6 @@ fn create_private_file_new_impl(path: &Path) -> io::Result<File> {
 #[cfg(unix)]
 fn create_user_selected_file_new_impl(path: &Path) -> io::Result<(File, CreatedFileCleanup)> {
     unix::create_user_selected_file_new(path)
-}
-
-#[cfg(unix)]
-fn create_user_selected_file_publish_impl(
-    staged: &Path,
-    destination: &Path,
-    file: &File,
-    hard_link_mode: HardLinkMode,
-) -> io::Result<CreatedFilePublish> {
-    unix::create_user_selected_file_publish(staged, destination, file, hard_link_mode)
 }
 
 #[cfg(unix)]
@@ -1761,7 +1785,32 @@ pub(crate) mod unix {
         Ok(unsafe { File::from_raw_fd(fd) })
     }
 
+    #[cfg(test)]
+    std::thread_local! {
+        /// The directories synced on this thread, by device and inode, while
+        /// a test records them.
+        pub(super) static DIRECTORY_SYNCS: std::cell::RefCell<Option<Vec<(u64, u64)>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// Sync the directory at `path`, opened without following a symlink.
+    pub(super) fn sync_directory_path(path: &Path) -> io::Result<()> {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let directory = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)?;
+        sync_directory(&directory)
+    }
+
     fn sync_directory(directory: &File) -> io::Result<()> {
+        #[cfg(test)]
+        DIRECTORY_SYNCS.with(|syncs| {
+            if let Some(syncs) = syncs.borrow_mut().as_mut() {
+                let metadata = directory.metadata().expect("inspect synced directory");
+                syncs.push((metadata.dev(), metadata.ino()));
+            }
+        });
         #[cfg(any(target_os = "linux", target_os = "android"))]
         {
             open_readable_directory(directory)?.sync_all()
@@ -2307,6 +2356,12 @@ pub(crate) mod unix {
                 "refusing to harden a private file with multiple hard links",
             ));
         }
+        #[cfg(all(test, target_os = "macos"))]
+        BEFORE_PRIVATE_HARDEN.with(|hook| {
+            if let Some(hook) = hook.get() {
+                hook(file);
+            }
+        });
         #[cfg(target_os = "macos")]
         macos_acl::clear_extended_acl(file)?;
         if !private_mode_needs_hardening(metadata.mode()) {
@@ -2323,6 +2378,12 @@ pub(crate) mod unix {
         }
     }
 
+    #[cfg(all(test, target_os = "macos"))]
+    std::thread_local! {
+        pub(super) static BEFORE_PRIVATE_HARDEN: std::cell::Cell<Option<fn(&File)>> =
+            const { std::cell::Cell::new(None) };
+    }
+
     pub(super) fn create_private_file_new(path: &Path, append: bool) -> io::Result<File> {
         create_parent_dirs(path)?;
         let guard = PrivateParentGuard::new(path)?;
@@ -2332,6 +2393,22 @@ pub(crate) mod unix {
         } else {
             libc::O_RDWR
         };
+        #[cfg(target_os = "macos")]
+        let file = {
+            if entry_stat(guard.directory(), &guard.leaf)?.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "private file already exists",
+                ));
+            }
+            create_user_selected_file_without_acl_window(
+                guard.directory(),
+                &c_name(&guard.leaf, "private file name")?,
+                path,
+                access,
+            )?
+        };
+        #[cfg(not(target_os = "macos"))]
         let file = open_at(&guard, path, access | libc::O_CREAT | libc::O_EXCL, 0o600)?;
         let result = (|| {
             require_user_owned_regular(&file, path)?;
@@ -2358,46 +2435,157 @@ pub(crate) mod unix {
         create_user_selected_file_new_with(path, || {})
     }
 
-    pub(super) fn create_user_selected_file_publish(
-        staged: &Path,
+    pub(super) fn stage_user_selected_file_at(
+        staged_path: &Path,
         destination: &Path,
+        hard_link_mode: HardLinkMode,
+    ) -> io::Result<Option<StagedUserSelectedFile>> {
+        let parent_path = destination
+            .parent()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "export has no parent"))?;
+        let parent = open_user_selected_parent(parent_path)?;
+        let staging_name = staged_path.file_name().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "staging has no file name")
+        })?;
+        let staging_c = c_name(staging_name, "export staging directory")?;
+        // The reservation stays empty until both its mode and ACL are private.
+        if unsafe { libc::mkdirat(parent.as_raw_fd(), staging_c.as_ptr(), 0o700) } != 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::AlreadyExists {
+                return Ok(None);
+            }
+            return Err(error);
+        }
+        // A restrictive umask can take the owner's own read bit off the new
+        // directory, and then it cannot be opened. Only its owner can change
+        // its mode, and the descriptor's owner is checked below.
+        // SAFETY: the held parent and NUL-terminated leaf are valid.
+        let _ = unsafe {
+            libc::fchmodat(
+                parent.as_raw_fd(),
+                staging_c.as_ptr(),
+                0o700,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        let fd = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                staging_c.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let directory = unsafe { File::from_raw_fd(fd) };
+        if directory.metadata()?.uid() != current_user() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "export staging directory has the wrong owner",
+            ));
+        }
+        if unsafe { libc::fchmod(directory.as_raw_fd(), 0o700) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        #[cfg(target_os = "macos")]
+        macos_acl::clear_extended_acl(&directory)?;
+        let directory_identity = FileIdentity::from_metadata(&directory.metadata()?);
+        let cleanup_directory = directory.try_clone()?;
+        let cleanup_guard = PrivateParentGuard::new(staged_path).ok().filter(|guard| {
+            guard.directory().metadata().ok().is_some_and(|metadata| {
+                parent.metadata().ok().is_some_and(|parent_metadata| {
+                    FileIdentity::from_metadata(&metadata)
+                        == FileIdentity::from_metadata(&parent_metadata)
+                })
+            })
+        });
+        let staging_name = staging_name.to_os_string();
+        let cleanup: CreatedFileCleanup = Box::new(move |_| {
+            let payload = c_name(OsStr::new("payload"), "staging payload")?;
+            if unsafe { libc::unlinkat(cleanup_directory.as_raw_fd(), payload.as_ptr(), 0) } != 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() != io::ErrorKind::NotFound {
+                    return Err(error);
+                }
+            }
+            sync_directory(&cleanup_directory)?;
+            // A writable parent cannot support conditional removal of even
+            // an empty directory. Retain the empty reservation in that case.
+            if let Some(guard) = cleanup_guard
+                && guard.verify_directory().is_ok()
+                && entry_stat(guard.directory(), &staging_name)?
+                    .is_some_and(|stat| FileIdentity::from_stat(&stat) == directory_identity)
+            {
+                if unsafe {
+                    libc::unlinkat(
+                        guard.directory().as_raw_fd(),
+                        staging_c.as_ptr(),
+                        libc::AT_REMOVEDIR,
+                    )
+                } != 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
+                sync_directory(guard.directory())?;
+            }
+            Ok(())
+        });
+        let payload = c_name(OsStr::new("payload"), "staging payload")?;
+        let fd = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                payload.as_ptr(),
+                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                PRIVATE_FILE_MODE as libc::c_uint,
+            )
+        };
+        if fd < 0 {
+            return Err(with_cleanup_error(
+                io::Error::last_os_error(),
+                cleanup(&directory),
+                "staged export",
+            ));
+        }
+        let file = unsafe { File::from_raw_fd(fd) };
+        let staged = CreatedUserSelectedFile::new(file, cleanup);
+        require_user_owned_regular(&staged, staged_path)?;
+        restrict_private_object(&staged)?;
+        let current_parent = open_user_selected_parent(parent_path)?;
+        if FileIdentity::from_metadata(&current_parent.metadata()?)
+            != FileIdentity::from_metadata(&parent.metadata()?)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "user-selected output parent changed during staging",
+            ));
+        }
+        let destination_leaf = destination.file_name().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "export has no file name")
+        })?;
+        let publish = create_user_selected_file_publish(
+            directory,
+            parent,
+            OsString::from("payload"),
+            destination_leaf.to_os_string(),
+            &staged,
+            hard_link_mode,
+        )?;
+        Ok(Some(StagedUserSelectedFile::new(staged, publish)))
+    }
+
+    fn create_user_selected_file_publish(
+        source_parent: File,
+        parent: File,
+        staged_leaf: OsString,
+        destination_leaf: OsString,
         file: &File,
         hard_link_mode: HardLinkMode,
     ) -> io::Result<CreatedFilePublish> {
-        let staged = std::path::absolute(staged)?;
-        let destination = std::path::absolute(destination)?;
-        let staged_parent = staged.parent().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "staged export has no parent")
-        })?;
-        if destination.parent() != Some(staged_parent) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "staged export and destination must share one parent",
-            ));
-        }
-        let staged_leaf = staged
-            .file_name()
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "staged export has no file name",
-                )
-            })?
-            .to_os_string();
-        let destination_leaf = destination
-            .file_name()
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "export destination has no file name",
-                )
-            })?
-            .to_os_string();
         let staged_c = c_name(&staged_leaf, "staged export file name")?;
         let destination_c = c_name(&destination_leaf, "export destination file name")?;
-        let parent = open_user_selected_parent(staged_parent)?;
         let expected = FileIdentity::from_metadata(&file.metadata()?);
-        let staged_matches = entry_stat(&parent, &staged_leaf)?
+        let staged_matches = entry_stat(&source_parent, &staged_leaf)?
             .is_some_and(|stat| FileIdentity::from_stat(&stat) == expected);
         if !staged_matches {
             return Err(io::Error::new(
@@ -2411,18 +2599,9 @@ pub(crate) mod unix {
                 "export destination already exists",
             ));
         }
-        let current_parent = open_user_selected_parent(staged_parent)?;
-        if FileIdentity::from_metadata(&current_parent.metadata()?)
-            != FileIdentity::from_metadata(&parent.metadata()?)
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "user-selected output parent changed before publication",
-            ));
-        }
         Ok(Box::new(move |file: &File| {
             if FileIdentity::from_metadata(&file.metadata()?) != expected
-                || !entry_stat(&parent, &staged_leaf)?
+                || !entry_stat(&source_parent, &staged_leaf)?
                     .is_some_and(|stat| FileIdentity::from_stat(&stat) == expected)
             {
                 return Err(io::Error::new(
@@ -2440,7 +2619,7 @@ pub(crate) mod unix {
                     HardLinkMode::Native => {
                         if unsafe {
                             libc::linkat(
-                                parent.as_raw_fd(),
+                                source_parent.as_raw_fd(),
                                 staged_c.as_ptr(),
                                 parent.as_raw_fd(),
                                 destination_c.as_ptr(),
@@ -2463,7 +2642,7 @@ pub(crate) mod unix {
                     #[cfg(any(target_os = "linux", target_os = "android"))]
                     let renamed = unsafe {
                         libc::renameat2(
-                            parent.as_raw_fd(),
+                            source_parent.as_raw_fd(),
                             staged_c.as_ptr(),
                             parent.as_raw_fd(),
                             destination_c.as_ptr(),
@@ -2484,7 +2663,7 @@ pub(crate) mod unix {
                         const RENAME_EXCL: libc::c_uint = 0x0000_0004;
                         unsafe {
                             renameatx_np(
-                                parent.as_raw_fd(),
+                                source_parent.as_raw_fd(),
                                 staged_c.as_ptr(),
                                 parent.as_raw_fd(),
                                 destination_c.as_ptr(),
@@ -2552,6 +2731,7 @@ pub(crate) mod unix {
         parent: &File,
         leaf_c: &CString,
         path: &Path,
+        access: libc::c_int,
     ) -> io::Result<File> {
         unsafe extern "C" {
             fn renameatx_np(
@@ -2598,6 +2778,18 @@ pub(crate) mod unix {
                 }
                 return Err(error);
             }
+            // A restrictive umask can take the owner's own read bit off the
+            // new directory, and then it cannot be opened. Only its owner can
+            // change its mode, and the descriptor is checked below anyway.
+            // SAFETY: the held parent and NUL-terminated leaf are valid.
+            let _ = unsafe {
+                libc::fchmodat(
+                    parent.as_raw_fd(),
+                    staging_c.as_ptr(),
+                    0o700,
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            };
 
             let stage_fd = unsafe {
                 libc::openat(
@@ -2653,11 +2845,7 @@ pub(crate) mod unix {
                     libc::openat(
                         staging.as_raw_fd(),
                         payload_c.as_ptr(),
-                        libc::O_RDWR
-                            | libc::O_CREAT
-                            | libc::O_EXCL
-                            | libc::O_NOFOLLOW
-                            | libc::O_CLOEXEC,
+                        access | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
                         PRIVATE_FILE_MODE as libc::c_uint,
                     )
                 };
@@ -2707,20 +2895,7 @@ pub(crate) mod unix {
                     ));
                 }
                 Ok(file) => {
-                    if let Err(error) = staging_cleanup {
-                        let expected = FileIdentity::from_metadata(&file.metadata()?);
-                        let published = entry_stat(parent, path.file_name().unwrap_or_default())?
-                            .is_some_and(|stat| FileIdentity::from_stat(&stat) == expected);
-                        let final_cleanup = if published
-                            && unsafe { libc::unlinkat(parent.as_raw_fd(), leaf_c.as_ptr(), 0) }
-                                != 0
-                        {
-                            Err(io::Error::last_os_error())
-                        } else {
-                            Ok(())
-                        };
-                        return Err(with_cleanup_error(error, final_cleanup, "published output"));
-                    }
+                    staging_cleanup?;
                     return Ok(file);
                 }
             }
@@ -2758,7 +2933,8 @@ pub(crate) mod unix {
         let parent_identity = FileIdentity::from_metadata(&parent.metadata()?);
         after_parent_open();
         #[cfg(target_os = "macos")]
-        let file = create_user_selected_file_without_acl_window(&parent, &leaf_c, &path)?;
+        let file =
+            create_user_selected_file_without_acl_window(&parent, &leaf_c, &path, libc::O_RDWR)?;
         #[cfg(not(target_os = "macos"))]
         let file = {
             // SAFETY: the held directory and NUL-terminated leaf are valid, and
@@ -2802,48 +2978,8 @@ pub(crate) mod unix {
             }
             Ok(())
         })();
-        if let Err(error) = result {
-            let linked = entry_stat(&parent, leaf)
-                .ok()
-                .flatten()
-                .is_some_and(|stat| {
-                    file.metadata().ok().is_some_and(|metadata| {
-                        FileIdentity::from_stat(&stat) == FileIdentity::from_metadata(&metadata)
-                    })
-                });
-            if linked {
-                // SAFETY: `parent` is held and `leaf_c` is NUL-terminated. The
-                // identity check above prevents deleting a replacement entry.
-                unsafe {
-                    libc::unlinkat(parent.as_raw_fd(), leaf_c.as_ptr(), 0);
-                }
-            }
-            return Err(error);
-        }
-        let cleanup_leaf = leaf.to_os_string();
-        let cleanup_identity = FileIdentity::from_metadata(&file.metadata()?);
-        let cleanup: CreatedFileCleanup = Box::new(move |file: &File| {
-            let linked = entry_stat(&parent, &cleanup_leaf)?.is_some_and(|stat| {
-                file.metadata().ok().is_some_and(|metadata| {
-                    FileIdentity::from_stat(&stat) == cleanup_identity
-                        && FileIdentity::from_metadata(&metadata) == cleanup_identity
-                })
-            });
-            if linked {
-                let cleanup_leaf = c_name(&cleanup_leaf, "user-selected output file name")?;
-                // SAFETY: `parent` is retained by this cleanup capability and
-                // the identity check above excludes a replacement entry.
-                if unsafe { libc::unlinkat(parent.as_raw_fd(), cleanup_leaf.as_ptr(), 0) } != 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                // The destination link was made durable by publication. Make
-                // retirement of the staging sibling durable as well before a
-                // successful publish is reported.
-                sync_directory(&parent)?;
-            }
-            Ok(())
-        });
-        Ok((file, cleanup))
+        result?;
+        Ok((file, Box::new(|_| Ok(()))))
     }
 
     pub(super) fn open_existing_private_file(path: &Path, append: bool) -> io::Result<File> {
@@ -5773,6 +5909,7 @@ mod tests {
         staged.write_all(b"complete").unwrap();
         staged.publish().unwrap();
         assert_eq!(std::fs::read(&destination).unwrap(), b"complete");
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
 
         let racing_destination = root.path().join("racing.png");
         let mut staged = stage_user_selected_file_new_with_mode(
@@ -5887,6 +6024,68 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn direct_export_discard_retains_the_visible_entry() {
+        let root = crate::test_tempdir();
+        let path = root.path().join("partial.png");
+        let mut file = create_user_selected_file_new(&path).unwrap();
+        file.write_all(b"partial").unwrap();
+        file.discard().unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), b"partial");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_discard_retains_an_empty_reservation_in_a_writable_parent() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = crate::test_tempdir();
+        let exports = root.path().join("exports");
+        std::fs::create_dir(&exports).unwrap();
+        std::fs::set_permissions(&exports, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let destination = exports.join("shot.png");
+        let mut staged =
+            stage_user_selected_file_new_with(&destination, || Ok([0xab; 16])).unwrap();
+        staged.write_all(b"partial").unwrap();
+        staged.discard().unwrap();
+
+        let reservation = exports.join(format!(".kettle-export-{}.tmp", "ab".repeat(16)));
+        assert!(reservation.is_dir());
+        assert_eq!(std::fs::read_dir(reservation).unwrap().count(), 0);
+        assert!(!destination.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_discard_uses_the_held_private_directory() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = crate::test_tempdir();
+        let destination = root.path().join("shot.png");
+        let reservation = root
+            .path()
+            .join(format!(".kettle-export-{}.tmp", "ab".repeat(16)));
+        let mut staged =
+            stage_user_selected_file_new_with(&destination, || Ok([0xab; 16])).unwrap();
+        staged.write_all(b"partial").unwrap();
+        assert!(reservation.is_dir());
+        assert_eq!(
+            reservation.metadata().unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        let displaced = root.path().join("displaced");
+        std::fs::rename(&reservation, &displaced).unwrap();
+        std::fs::create_dir(&reservation).unwrap();
+        let replacement = reservation.join("payload");
+        std::fs::write(&replacement, b"replacement").unwrap();
+
+        staged.discard().unwrap();
+        assert_eq!(std::fs::read(replacement).unwrap(), b"replacement");
+        assert!(!displaced.join("payload").exists());
+        assert!(!destination.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn user_selected_file_fails_if_the_held_parent_is_displaced() {
         let root = crate::test_tempdir();
         let exports = root.path().join("exports");
@@ -5908,8 +6107,8 @@ mod tests {
             "the child open must not re-resolve through the replacement parent"
         );
         assert!(
-            !displaced.join("shot.png").exists(),
-            "a failed postcondition must remove the exact file through the held parent"
+            displaced.join("shot.png").exists(),
+            "a visible Unix export must be retained on a failed postcondition"
         );
     }
 
@@ -5969,6 +6168,52 @@ mod tests {
             !unix::macos_acl::has_any_extended_acl(&file).unwrap(),
             "a 0600 screenshot with an inherited read ACE is not owner-only"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn private_creation_has_no_inherited_acl_before_first_hardening() {
+        use std::io::{Seek as _, SeekFrom};
+
+        let root = crate::test_tempdir();
+        let parent = root.path().join("searchable");
+        std::fs::create_dir(&parent).unwrap();
+        let status = std::process::Command::new("/bin/chmod")
+            .args(["+a", "everyone allow read,file_inherit"])
+            .arg(&parent)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let inherited = parent.join("inherited");
+        std::fs::write(&inherited, b"fixture").unwrap();
+        assert!(unix::macos_acl::has_any_extended_acl(&File::open(inherited).unwrap()).unwrap());
+
+        struct ResetHook;
+        impl Drop for ResetHook {
+            fn drop(&mut self) {
+                unix::BEFORE_PRIVATE_HARDEN.with(|hook| hook.set(None));
+            }
+        }
+        unix::BEFORE_PRIVATE_HARDEN.with(|hook| {
+            hook.set(Some(|file| {
+                assert!(
+                    !unix::macos_acl::has_any_extended_acl(file).unwrap(),
+                    "the inode must be ACL-free before its first hardening"
+                );
+            }));
+        });
+        let _reset = ResetHook;
+        let path = parent.join("remote.cmd");
+        let mut file = open_private_file_append(&path).unwrap();
+        file.write_all(b"first").unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(b"second").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"firstsecond");
+        assert_eq!(
+            create_private_file_new(&path).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(std::fs::read(path).unwrap(), b"firstsecond");
     }
 
     #[cfg(target_os = "macos")]
@@ -6790,6 +7035,38 @@ mod tests {
             existing.metadata().unwrap().permissions().mode() & 0o777,
             0o775
         );
+    }
+
+    /// Every directory `create_private_dirs` adds is synced into its parent,
+    /// so a save reported durable survives a power loss with its directory.
+    #[cfg(unix)]
+    #[test]
+    fn private_directory_creation_syncs_every_new_entry() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let root = crate::test_tempdir();
+        for directory in [
+            root.path().join("config/layouts"),
+            root.path().join("kettle/sessions/old"),
+        ] {
+            unix::DIRECTORY_SYNCS.with(|syncs| *syncs.borrow_mut() = Some(Vec::new()));
+            let result = create_private_dirs(&directory);
+            let synced = unix::DIRECTORY_SYNCS.with(|syncs| syncs.borrow_mut().take().unwrap());
+            result.unwrap();
+            let mut parent = directory.parent();
+            while let Some(path) = parent.filter(|path| *path != root.path().parent().unwrap()) {
+                let metadata = path.metadata().unwrap();
+                assert!(
+                    synced.contains(&(metadata.dev(), metadata.ino())),
+                    "the new entry in {} must be synced",
+                    path.display()
+                );
+                if path == root.path() {
+                    break;
+                }
+                parent = path.parent();
+            }
+        }
     }
 
     #[cfg(unix)]
