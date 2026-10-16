@@ -98,6 +98,14 @@ thread_local! {
 
 // Some clipboard items, like images, may take a very long time to produce a
 // `SelectionNotify`. Multiple seconds long.
+/// An INCR transfer being read: the segments of the requested type, and
+/// whether any segment had another.
+#[derive(Default)]
+struct IncrRead {
+	data: Vec<u8>,
+	mismatch: bool,
+}
+
 const LONG_TIMEOUT_DUR: Duration = Duration::from_millis(4000);
 const SHORT_TIMEOUT_DUR: Duration = Duration::from_millis(10);
 
@@ -356,7 +364,7 @@ impl Inner {
 
 		trace!("Finished `convert_selection`");
 
-		let mut incr_data: Vec<u8> = Vec::new();
+		let mut incr = IncrRead::default();
 		let mut using_incr = false;
 
 		let mut timeout_end = Instant::now() + LONG_TIMEOUT_DUR;
@@ -378,7 +386,7 @@ impl Inner {
 						reader,
 						target_format,
 						&mut using_incr,
-						&mut incr_data,
+						&mut incr.data,
 						event,
 					)?;
 					match result {
@@ -400,12 +408,15 @@ impl Inner {
 						reader,
 						target_format,
 						using_incr,
-						&mut incr_data,
+						&mut incr,
 						&mut timeout_end,
 						event,
 					)?;
 					if result {
-						return Ok(incr_data);
+						if incr.mismatch {
+							return Err(Error::unknown("incorrect type received from clipboard"));
+						}
+						return Ok(incr.data);
 					}
 				}
 				_ => log::trace!("An unexpected event arrived while reading the clipboard."),
@@ -550,13 +561,13 @@ impl Inner {
 		}
 	}
 
-	/// Returns Ok(true) when the incr_data is ready
+	/// Returns Ok(true) when the transfer in `incr` is complete
 	fn handle_read_property_notify(
 		&self,
 		reader: &XContext,
 		target_format: u32,
 		using_incr: bool,
-		incr_data: &mut Vec<u8>,
+		incr: &mut IncrRead,
 		timeout_end: &mut Instant,
 		event: PropertyNotifyEvent,
 	) -> Result<bool> {
@@ -568,19 +579,33 @@ impl Inner {
 			// now preparing the data
 			return Ok(false);
 		}
+		// Read each segment as any type, so the property is always deleted:
+		// the owner sends the next segment only after that. Asked for one type
+		// and sent another (xclip answers every target with its own), the
+		// server neither returns nor deletes the segment, the empty reply
+		// reads as the end of the transfer, and the owner waits forever,
+		// unable to answer the next request. Such a transfer is drained and
+		// then refused.
 		let reply = reader
 			.conn
-			.get_property(true, event.window, event.atom, target_format, 0, u32::MAX / 4)
+			.get_property(true, event.window, event.atom, AtomEnum::ANY, 0, u32::MAX / 4)
 			.map_err(into_unknown)?
 			.reply()
 			.map_err(into_unknown)?;
 
+		// Every segment, the empty last one included, carries the
+		// transfer's type (ICCCM 2.7.2).
+		if reply.type_ != target_format {
+			incr.mismatch = true;
+		}
 		// log::trace!("Received segment. value_len {}", reply.value_len,);
 		if reply.value_len == 0 {
 			// This indicates that all the data has been sent.
 			return Ok(true);
 		}
-		incr_data.extend(reply.value);
+		if !incr.mismatch {
+			incr.data.extend(reply.value);
+		}
 
 		// Let's reset our timeout, since we received a valid chunk.
 		*timeout_end = Instant::now() + SHORT_TIMEOUT_DUR;
@@ -1173,5 +1198,63 @@ impl Drop for Clipboard {
 				}
 			}
 		}
+	}
+}
+
+#[cfg(test)]
+mod incr_tests {
+	use super::*;
+	use std::io::Write;
+	use std::process::{Child, Command, Stdio};
+
+	/// Kills and reaps the clipboard owner however the test ends.
+	struct Owner(Child);
+
+	impl Drop for Owner {
+		fn drop(&mut self) {
+			let _ = self.0.kill();
+			let _ = self.0.wait();
+		}
+	}
+
+	/// xclip sends text past its INCR threshold (1 MiB on a default X
+	/// server) in INCR segments typed as its own target, whatever target was
+	/// asked for. A paste asks for a file list first, which once left xclip
+	/// waiting forever on a segment nobody deleted, so the text read after it
+	/// timed out for every format.
+	///
+	/// It takes the clipboard, so it runs only when
+	/// `KETTLE_X11_CLIPBOARD_TEST=1`, which scripts/check-arboard-uri-list.py
+	/// sets inside `xvfb-run`; it then needs xclip.
+	#[test]
+	fn an_incr_owner_that_sends_another_type_is_drained() {
+		if std::env::var_os("KETTLE_X11_CLIPBOARD_TEST").as_deref() != Some("1".as_ref()) {
+			eprintln!("SKIP: set KETTLE_X11_CLIPBOARD_TEST=1 on a private X server");
+			return;
+		}
+		// Far past any server's INCR threshold, so every request is INCR.
+		let text = "kettle paste line\n".repeat((16 << 20) / 18);
+		let mut owner = Owner(
+			Command::new("xclip")
+				.args(["-selection", "clipboard", "-quiet"])
+				.stdin(Stdio::piped())
+				.stdout(Stdio::null())
+				.stderr(Stdio::null())
+				.spawn()
+				.expect("start xclip"),
+		);
+		owner.0.stdin.take().expect("xclip stdin").write_all(text.as_bytes()).expect("feed xclip");
+		std::thread::sleep(Duration::from_millis(500));
+		let clipboard = Clipboard::new().expect("X11 clipboard");
+
+		let started = Instant::now();
+		let files = clipboard.get_file_list(LinuxClipboardKind::Clipboard);
+		let read = clipboard.get_text(LinuxClipboardKind::Clipboard);
+		let elapsed = started.elapsed();
+		drop(owner);
+
+		assert!(files.is_err(), "text is not a file list");
+		assert_eq!(read.expect("the text after the refused file list").len(), text.len());
+		assert!(elapsed < Duration::from_secs(5), "took {elapsed:?}");
 	}
 }
