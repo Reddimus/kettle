@@ -5,6 +5,7 @@
 //! then verifies the selected archive's size and SHA-256 before extraction.
 //! Installation is restricted to layouts carrying an official installer marker.
 
+pub mod decision;
 mod feed;
 mod install;
 #[cfg(target_os = "macos")]
