@@ -5,8 +5,8 @@ here only when a released dependency has a correctness defect on Kettle's
 supported path and no fixed upstream release is available.
 
 The patched packages remain outside the product workspace, but
-`vendor/Cargo.toml` groups them, all but `cosmic-text` (see its section), into
-a validation-only workspace.
+`vendor/Cargo.toml` groups them, all but `cosmic-text` and `merman-core` (see
+their sections), into a validation-only workspace.
 `vendor/Cargo.lock` is committed so direct package tests never resolve a fresh
 dependency graph; package-local `Cargo.lock` files and `target/` directories
 remain generated noise and must not be committed. Run every retained unit
@@ -178,6 +178,40 @@ upstream release that contains all of these fixes.
 
 Remove the `[patch.crates-io]` entry and this directory after upgrading to a
 cosmic-text release that contains both commits.
+
+## `merman-core-0.8.0`
+
+- Source: crates.io `merman-core` 0.8.0.
+- Upstream revision recorded in the crate's `.cargo_vcs_info.json`.
+- License: MIT OR Apache-2.0; both upstream license files, the README, and the
+  third-party notices and licenses for the Mermaid code it ports are retained.
+  The README's one relative link is rewritten as an absolute link to
+  upstream's `v0.8.0` tag so that it resolves here.
+- Local change: the sequence lexer's `lex_comment` no longer starts a
+  `[^\}]%%` comment on a line feed. It matched one, then stopped at that same
+  line feed without consuming anything, and `next_token` looped on it forever,
+  outside the operation deadline. A sequence diagram with a bare `%%` line, or
+  ending in `%%` with no newline, hung the worker until its watchdog killed it
+  (#584, found by the `render` fuzz target). Mermaid's grammar lists its
+  `[\n]+` NEWLINE rule first, so the line feed is now a newline and the `%%`
+  after it an ordinary comment. The change is
+  `src/diagrams/sequence/lexer/scanner.rs` only, +4 -0.
+- Upstream status, checked 2026-10-16: the same code is on Latias94/merman's
+  `main` and in crates.io's newest `merman-core`, 0.9.0.
+- Excluded: the registry marker, generated lockfile and the integration tests
+  under `tests/`. Their `[[test]]` stanzas are removed from the local manifest.
+- Validation: not a member of `vendor/Cargo.toml`, for the reason
+  `cosmic-text` is not: its dependency graph would enter `vendor/Cargo.lock`.
+  The product workspace compiles it through `[patch.crates-io]`, and so does
+  `fuzz/Cargo.toml`, whose separate workspace the root patch does not reach.
+  `kettle-media-render`'s `bare_comment_markers_never_hang_a_diagram` renders
+  every bundled diagram fixture with a bare `%%` line and with a trailing
+  `%%`; it hangs against the unpatched release. merman's own unit tests read
+  fixtures from upstream's repository, outside the published crate, so they
+  do not build from this copy.
+
+Remove both `[patch.crates-io]` entries and this directory after upgrading to
+a merman release that contains the fix.
 
 ## `vte-0.15.0`
 

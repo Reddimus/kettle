@@ -30,3 +30,7 @@ crates/kettle-media-render/tests/fixtures/mermaid/*.mmd -text
 # Terminal captures for copied-diagram normalization, kept exactly as they
 # were selected or copied: most end where the selection did, mid-line.
 crates/kettle-core/tests/fixtures/diagram-copy/** -text
+
+# merman-core's sankey tests parse CSV rows that end in spaces; the vendored
+# source keeps them as upstream ships it.
+vendor/merman-core-0.8.0/src/diagrams/sankey.rs -text

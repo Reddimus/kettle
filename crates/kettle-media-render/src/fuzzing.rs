@@ -191,6 +191,8 @@ mod tests {
         for markdown in [
             &b"# Notes\n\n```mermaid\nflowchart TD\n  A --> B\n```\n"[..],
             b"Two:\n\n```mermaid\npie\n  \"a\" : 1\n  \"b\" : 2\n```\n\ntext\n\n~~~mermaid\nsequenceDiagram\n  A->>B: hi\n~~~\n",
+            // A bare `%%` line once hung the sequence lexer (#584).
+            b"~~~mermaid\nsequenceDiagram\n  A->>B: hi\n%%\n  B->>A: ok\n~~~\n",
         ] {
             seeds_for(&[AUTO, MARKDOWN], markdown, &mut seeds);
         }
