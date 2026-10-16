@@ -5120,10 +5120,9 @@ fn recover_transaction(prefix: &Path) -> Result<(), UpdateError> {
         preflight: None,
     };
     if transaction.journal.phase == JournalPhase::Committed {
-        Err(UpdateError::Transaction(format!(
-            "committed update {} is awaiting startup confirmation before its last-known-good backup is discarded",
-            transaction.journal.target_version
-        )))
+        Err(UpdateError::AwaitingRestart {
+            target: transaction.journal.target_version.clone(),
+        })
     } else {
         transaction.rollback()
     }
@@ -7361,6 +7360,10 @@ mod tests {
         }
         let error = recover_transaction(root.path()).unwrap_err();
         assert!(error.to_string().contains("awaiting startup confirmation"));
+        assert!(
+            matches!(&error, UpdateError::AwaitingRestart { target } if target == "99.0.0"),
+            "a committed, unconfirmed update is restart pending, not a failure: {error:?}"
+        );
         assert!(root.path().join(".kettle-update-journal.json").is_file());
         assert!(fs::read_dir(root.path()).unwrap().any(|entry| {
             entry
