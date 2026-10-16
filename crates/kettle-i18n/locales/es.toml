@@ -262,6 +262,7 @@ notify_body_session_log_overloaded = "El registro del panel {pane} se detuvo por
 notify_body_session_log_start_failed = "No se pudo iniciar la escritura del registro del panel."
 notify_body_session_log_stop_failed = "El registro del panel no se pudo detener correctamente."
 notify_body_update_available = "{tag} — hacer clic en el aviso de kettle para abrir la página de la versión"
+notify_body_update_failed = "Kettle no pudo instalar {tag}. Lo intentará de nuevo en la próxima comprobación."
 notify_body_update_installed = "{tag} está instalada y se usará la próxima vez que se inicie Kettle. Las ventanas ya abiertas conservan su versión actual."
 notify_body_update_installed_first = "{tag} está instalada y se usará la próxima vez que se inicie Kettle. Las ventanas ya abiertas conservan su versión actual. kettle se mantiene actualizado automáticamente; para desactivarlo, poner `update-policy = off` en la configuración."
 notify_body_update_staged = "{tag} se instalará cuando se cierren todas las ventanas de Kettle"

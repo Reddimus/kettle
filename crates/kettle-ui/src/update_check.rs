@@ -118,23 +118,171 @@ fn try_acquire_file_lock(path: &std::path::Path) -> std::io::Result<CheckLockAtt
     }
 }
 
+/// The record every Kettle process sharing a config directory reads and
+/// writes, in `update-check.json`. Every field has a default, so older files
+/// load; fields a newer Kettle adds survive a rewrite through `extra`. A
+/// still-running older version rewrites the file with its own fields only,
+/// which can cost one duplicate notification.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct UpdateCache {
     #[serde(default)]
     last_check: u64,
+    /// The latest release the feed reported, even when it is not newer.
     #[serde(default)]
     latest_tag: Option<String>,
+    /// What the last check decided about `latest_tag`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_outcome: Option<LastOutcome>,
+    /// The tag whose "available" notice was dismissed.
     #[serde(default)]
     dismissed_version: Option<String>,
+    /// The tag whose "failed" notice was dismissed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dismissed_failed: Option<String>,
     /// Set once the first automatic (`update-policy = auto`) install has been
     /// announced, so the one-time "Kettle now keeps itself up to date; disable
     /// with `update-policy = off`" heads-up fires exactly once per install.
     #[serde(default)]
     auto_update_announced: bool,
+    /// The newest tag a desktop notification was sent for, per kind, so each
+    /// kind is sent at most once per tag by all processes together.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    notified_available: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    notified_failed: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    notified_installed: Option<String>,
+    /// Counted install failures, all for `failure_tag`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    failure_tag: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    failure_count: u32,
+    /// Fields from a newer Kettle, kept when this one rewrites the file.
+    #[serde(flatten)]
+    extra: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
+/// What the last check decided.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum LastOutcome {
+    UpToDate,
+    Available,
+    Installing,
+    RestartPending,
+    Failed,
+}
+
+/// The first launch only seeds the throttle and skips the check. True when
+/// it did; false when the record could not be written, because then every
+/// launch would take this branch and none would ever check.
+fn seed_first_run(
+    cache: &mut UpdateCache,
+    now: u64,
+    save: impl FnOnce(&UpdateCache) -> bool,
+) -> bool {
+    cache.last_check = now;
+    save(cache)
+}
+
+fn is_zero(count: &u32) -> bool {
+    *count == 0
+}
+
+/// How many counted failures of one release make it worth telling the user.
+/// At the default daily interval the notice comes on the third day.
+const FAILURES_BEFORE_NOTICE: u32 = 3;
+
+impl UpdateCache {
+    fn note_up_to_date(&mut self, latest_tag: String) {
+        self.latest_tag = Some(latest_tag);
+        self.last_outcome = Some(LastOutcome::UpToDate);
+    }
+
+    /// Records an announced release; true when this is the first notice of
+    /// it, or of a newer one, from any process.
+    fn note_available(&mut self, tag: &str) -> bool {
+        self.latest_tag = Some(tag.into());
+        self.last_outcome = Some(LastOutcome::Available);
+        claim(&mut self.notified_available, tag)
+    }
+
+    fn note_restart_pending(&mut self) {
+        self.last_outcome = Some(LastOutcome::RestartPending);
+    }
+
+    fn note_installing(&mut self, tag: &str) {
+        self.latest_tag = Some(tag.into());
+        self.last_outcome = Some(LastOutcome::Installing);
+    }
+
+    /// Records a finished install: `(notify, first_time)`. Success clears
+    /// the failure count.
+    fn note_installed(&mut self, tag: &str) -> (bool, bool) {
+        self.failure_tag = None;
+        self.failure_count = 0;
+        self.last_outcome = Some(LastOutcome::UpToDate);
+        let first_time = !self.auto_update_announced;
+        self.auto_update_announced = true;
+        (claim(&mut self.notified_installed, tag), first_time)
+    }
+
+    /// Counts a failed install of `tag` unless the error says nothing about
+    /// the release, such as a dropped connection. Returns `Some(notify)` once
+    /// the failures are worth a notice; a new tag starts the count again.
+    fn note_failure(&mut self, tag: &str, counts: bool) -> Option<bool> {
+        if counts {
+            if self.failure_tag.as_deref() == Some(tag) {
+                self.failure_count = self.failure_count.saturating_add(1);
+            } else {
+                self.failure_tag = Some(tag.into());
+                self.failure_count = 1;
+            }
+        }
+        if self.failure_tag.as_deref() != Some(tag) || self.failure_count < FAILURES_BEFORE_NOTICE {
+            return None;
+        }
+        self.last_outcome = Some(LastOutcome::Failed);
+        Some(claim(&mut self.notified_failed, tag))
+    }
+}
+
+/// Moves `seen` to `tag` if `tag` is newer; true when it did. A notice is then
+/// sent once per tag, and never again for an older one.
+fn claim(seen: &mut Option<String>, tag: &str) -> bool {
+    let newer = match (seen.as_deref().and_then(tag_version), tag_version(tag)) {
+        (Some(seen), Some(tag)) => tag > seen,
+        (_, Some(_)) => true,
+        (_, None) => seen.as_deref() != Some(tag),
+    };
+    if newer {
+        *seen = Some(tag.into());
+    }
+    newer
+}
+
+fn tag_version(tag: &str) -> Option<kettle_update::Version> {
+    kettle_update::Version::parse(tag.strip_prefix('v').unwrap_or(tag)).ok()
+}
+
+/// The longest a UI-side write waits for a check that holds the record's lock
+/// through a download.
+const RECORD_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// A day, the most a recorded check may lie in the future before it counts as
+/// due anyway.
+const DAY_SECS: u64 = 24 * 60 * 60;
+
 fn is_due(now: u64, last_check: u64, interval_secs: u64) -> bool {
-    interval_secs != 0 && last_check != 0 && now.saturating_sub(last_check) >= interval_secs
+    if interval_secs == 0 || last_check == 0 {
+        return false;
+    }
+    // A check recorded in the future, by a clock that ran ahead or a damaged
+    // file, would otherwise hold off every check until the clock caught up.
+    if last_check > now.saturating_add(DAY_SECS) {
+        return true;
+    }
+    now.saturating_sub(last_check) >= interval_secs
 }
 
 fn now_secs() -> u64 {
@@ -152,7 +300,11 @@ fn cache_path() -> Option<std::path::PathBuf> {
 }
 
 fn load_cache() -> Option<UpdateCache> {
-    let file = kettle_state::open_trusted_file_read(&cache_path()?).ok()?;
+    load_cache_at(&cache_path()?)
+}
+
+fn load_cache_at(path: &std::path::Path) -> Option<UpdateCache> {
+    let file = kettle_state::open_trusted_file_read(path).ok()?;
     let size = file.metadata().ok()?.len();
     read_cache(file, size)
 }
@@ -172,18 +324,70 @@ fn read_cache(reader: impl Read, size: u64) -> Option<UpdateCache> {
     serde_json::from_slice(&bytes).ok()
 }
 
-fn save_cache(cache: &UpdateCache) {
-    let Some(path) = cache_path() else { return };
+/// Writes the record; false when it could not.
+fn save_cache(cache: &UpdateCache) -> bool {
+    cache_path().is_some_and(|path| save_cache_at(&path, cache))
+}
+
+fn save_cache_at(path: &std::path::Path, cache: &UpdateCache) -> bool {
     if let Some(parent) = path.parent()
         && kettle_state::create_private_dirs(parent).is_err()
     {
-        return;
+        return false;
     }
     let Ok(json) = serde_json::to_vec_pretty(cache) else {
-        return;
+        return false;
     };
-    if let Err(error) = kettle_update::write_atomic_file(&path, &json) {
-        log::warn!("update-check: could not persist cache: {error}");
+    match kettle_update::write_atomic_file(path, &json) {
+        Ok(()) => true,
+        Err(error) => {
+            log::warn!("update-check: could not persist cache: {error}");
+            false
+        }
+    }
+}
+
+/// Reads, changes and writes the record. Callers hold `update-check.lock`, so
+/// reading again right before the write keeps another process's change, such
+/// as a dismissal, instead of overwriting it with an older copy.
+fn mutate_cache<T>(change: impl FnOnce(&mut UpdateCache) -> T) -> T {
+    match cache_path() {
+        Some(path) => mutate_cache_at(&path, change),
+        None => change(&mut UpdateCache::default()),
+    }
+}
+
+fn mutate_cache_at<T>(path: &std::path::Path, change: impl FnOnce(&mut UpdateCache) -> T) -> T {
+    let mut cache = load_cache_at(path).unwrap_or_default();
+    let result = change(&mut cache);
+    save_cache_at(path, &cache);
+    result
+}
+
+/// Runs `change` on the record under `update-check.lock`, waiting up to
+/// `RECORD_LOCK_WAIT` for a check that holds it; false when it could not.
+fn with_locked_cache(change: impl FnOnce(&mut UpdateCache)) -> bool {
+    let Some(path) = cache_path() else {
+        return false;
+    };
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    if kettle_state::create_private_dirs(parent).is_err() {
+        return false;
+    }
+    match kettle_state::ExclusiveFileLock::acquire_timeout(
+        &parent.join("update-check.lock"),
+        RECORD_LOCK_WAIT,
+    ) {
+        Ok(_lock) => {
+            mutate_cache_at(&path, change);
+            true
+        }
+        Err(error) => {
+            log::warn!("update-check: could not record a change: {error}");
+            false
+        }
     }
 }
 
@@ -234,34 +438,38 @@ pub fn maybe_spawn_check(
     let now = now_secs();
     let mut cache = load_cache().unwrap_or_default();
     if cache.last_check == 0 {
-        cache.last_check = now;
-        save_cache(&cache);
-        return;
-    }
-    if !is_due(now, cache.last_check, interval_secs) {
+        if seed_first_run(&mut cache, now, save_cache) {
+            return;
+        }
+        log::warn!("update-check: the record is not writable; checking without it");
+    } else if !is_due(now, cache.last_check, interval_secs) {
         return;
     }
     // Persist the throttle before starting network I/O. The process guard and
     // OS file lock make the read/update decision exclusive across every window
     // and process sharing this config directory.
-    cache.last_check = now;
-    save_cache(&cache);
+    mutate_cache(|cache| cache.last_check = now);
     let _ = std::thread::Builder::new()
         .name("kettle-update-check".into())
         .spawn(move || {
             let _in_flight = in_flight;
             let client = FeedClient::new();
             let outcome = client.check(current);
-            let mut cache = load_cache().unwrap_or_default();
-            cache.last_check = now_secs();
-            if let Ok(CheckOutcome::UpdateAvailable(update)) = &outcome {
-                cache.latest_tag = Some(update.tag.clone());
-            }
-            save_cache(&cache);
-
             let latest_update = match outcome {
-                Ok(CheckOutcome::UpToDate { .. }) => None,
-                Ok(CheckOutcome::UpdateAvailable(update)) => Some(update),
+                Ok(CheckOutcome::UpToDate { latest }) => {
+                    mutate_cache(|cache| {
+                        cache.last_check = now_secs();
+                        cache.note_up_to_date(format!("v{latest}"));
+                    });
+                    None
+                }
+                Ok(CheckOutcome::UpdateAvailable(update)) => {
+                    mutate_cache(|cache| {
+                        cache.last_check = now_secs();
+                        cache.latest_tag = Some(update.tag.clone());
+                    });
+                    Some(update)
+                }
                 Err(error) => {
                     log::warn!("update check failed: {error}");
                     return;
@@ -281,6 +489,7 @@ pub fn maybe_spawn_check(
                 }),
             );
             let restart_pending = |installed: kettle_update::Version| {
+                mutate_cache(UpdateCache::note_restart_pending);
                 let _ = proxy.send_event(UserEvent::UpdateRestartPending {
                     installed: installed.to_string(),
                 });
@@ -297,9 +506,11 @@ pub fn maybe_spawn_check(
                 return;
             };
             let announce = |update: kettle_update::AvailableUpdate| {
+                let notify = mutate_cache(|cache| cache.note_available(&update.tag));
                 let _ = proxy.send_event(UserEvent::UpdateAvailable {
                     tag: update.tag,
                     url: update.release_url,
+                    notify,
                 });
             };
             match step {
@@ -313,52 +524,67 @@ pub fn maybe_spawn_check(
                     }
                     announce(update);
                 }
-                Step::Install => match install.install(&client, &update) {
-                    Ok(outcome) => {
-                        let staged = matches!(
-                            outcome.disposition,
-                            kettle_update::InstallDisposition::Staged { .. }
-                        );
-                        // One-time heads-up that auto-update is on and how to
-                        // opt out, on the first automatic install only. Reuse
-                        // the `cache` already loaded and persisted above, with
-                        // the fresh last_check/latest_tag, rather than a second
-                        // load: a failed reload would wipe that throttle state
-                        // and spuriously re-announce.
-                        let first_time = !cache.auto_update_announced;
-                        if first_time {
-                            cache.auto_update_announced = true;
-                            save_cache(&cache);
-                        }
-                        let _ = proxy.send_event(UserEvent::UpdateInstalled {
-                            tag: update.tag,
-                            staged,
-                            first_time,
-                        });
-                    }
-                    Err(error) => match classify(&error, &running, install.proven_at_startup()) {
-                        InstallFailure::RestartPending(installed) => {
-                            log::info!("update {}: {error}", update.tag);
-                            restart_pending(installed);
-                        }
-                        InstallFailure::Announce => {
-                            log::info!("automatic update skipped: {error}");
-                            if !is_dismissed(&update.tag) {
-                                announce(update);
-                            }
-                        }
-                        InstallFailure::Quiet => {
-                            log::info!("update {} not installed now: {error}", update.tag);
-                        }
-                        InstallFailure::Failed => {
-                            let _ = proxy.send_event(UserEvent::UpdateFailed {
-                                message: error.to_string(),
+                Step::Install => {
+                    mutate_cache(|cache| cache.note_installing(&update.tag));
+                    match install.install(&client, &update) {
+                        Ok(outcome) => {
+                            let staged = matches!(
+                                outcome.disposition,
+                                kettle_update::InstallDisposition::Staged { .. }
+                            );
+                            let (notify, first_time) =
+                                mutate_cache(|cache| cache.note_installed(&update.tag));
+                            let _ = proxy.send_event(UserEvent::UpdateInstalled {
+                                tag: update.tag,
+                                staged,
+                                first_time,
+                                notify,
                             });
                         }
-                    },
-                },
+                        Err(error) => {
+                            match classify(&error, &running, install.proven_at_startup()) {
+                                InstallFailure::RestartPending(installed) => {
+                                    log::info!("update {}: {error}", update.tag);
+                                    restart_pending(installed);
+                                }
+                                InstallFailure::Announce => {
+                                    log::info!("automatic update skipped: {error}");
+                                    if !is_dismissed(&update.tag) {
+                                        announce(update);
+                                    }
+                                }
+                                InstallFailure::Quiet => {
+                                    log::info!(
+                                        "update {} not installed now: {error}",
+                                        update.tag
+                                    );
+                                }
+                                InstallFailure::Failed => {
+                                    // The raw error can hold paths and is not
+                                    // translated: it goes to the log only.
+                                    log::warn!("automatic update to {} failed: {error}", update.tag);
+                                    let counts = failure_counts(&error);
+                                    if let Some(notify) = mutate_cache(|cache| {
+                                        cache.note_failure(&update.tag, counts)
+                                    }) {
+                                        let _ = proxy.send_event(UserEvent::UpdateFailed {
+                                            tag: update.tag,
+                                            notify,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         });
+}
+
+/// Whether a failed install says something about the release. A dropped
+/// connection does not; the next check simply tries again.
+fn failure_counts(error: &kettle_update::UpdateError) -> bool {
+    !matches!(error, kettle_update::UpdateError::Request(_))
 }
 
 /// Cadence at which the in-session timer re-attempts a due check. Decoupled
@@ -400,19 +626,25 @@ fn is_dismissed_with(tag: &str, load: impl FnOnce() -> Option<String>) -> bool {
     load().as_deref() == Some(tag)
 }
 
+/// Records the dismissal of `tag`'s notice. A check can hold the record's lock
+/// through a whole download, so this waits for it on a short-lived thread
+/// instead of the caller's; the caller hides the notice at once.
 pub fn record_dismissed(tag: &str) {
-    let mut cache = load_cache().unwrap_or_default();
-    cache.dismissed_version = Some(tag.to_string());
-    save_cache(&cache);
+    let tag = tag.to_string();
+    let _ = std::thread::Builder::new()
+        .name("kettle-update-dismiss".into())
+        .spawn(move || {
+            with_locked_cache(|cache| cache.dismissed_version = Some(tag));
+        });
 }
 
 pub fn run_blocking_check(current: &str) -> String {
     match FeedClient::new().check(current) {
         Ok(CheckOutcome::UpdateAvailable(update)) => {
-            let mut cache = load_cache().unwrap_or_default();
-            cache.last_check = now_secs();
-            cache.latest_tag = Some(update.tag.clone());
-            save_cache(&cache);
+            with_locked_cache(|cache| {
+                cache.last_check = now_secs();
+                cache.latest_tag = Some(update.tag.clone());
+            });
             let guidance = if update.asset.is_none() {
                 "this platform has no release artifact; open the release page for supported packages"
             } else if kettle_update::detect_managed_install().is_ok() {
@@ -435,7 +667,10 @@ mod tests {
     use kettle_update::UpdateError;
     use kettle_update::decision::Decision;
 
-    use super::{CheckLockAttempt, InstallFailure, Step, UpdateCache, classify, is_due, next_step};
+    use super::{
+        CheckLockAttempt, InstallFailure, LastOutcome, Step, UpdateCache, classify, is_due,
+        next_step,
+    };
 
     /// The daily default (`update-check-interval-hours = 24`) in seconds.
     const DAY: u64 = 24 * 60 * 60;
@@ -540,6 +775,7 @@ mod tests {
             latest_tag: Some("v2.35.0".into()),
             dismissed_version: Some("v2.35.0".into()),
             auto_update_announced: true,
+            ..UpdateCache::default()
         };
         let json = serde_json::to_string(&cache).unwrap();
         let back: UpdateCache = serde_json::from_str(&json).unwrap();
@@ -550,6 +786,143 @@ mod tests {
         assert_eq!(partial.last_check, 42);
         assert_eq!(partial.latest_tag, None);
         assert!(!partial.auto_update_announced);
+    }
+
+    #[test]
+    fn a_check_recorded_in_the_future_is_due() {
+        let now = 1_000_000_000;
+        assert!(is_due(now, now + DAY + 1, DAY));
+        assert!(is_due(now, u64::MAX, DAY));
+        // Clock skew within a day still waits.
+        assert!(!is_due(now, now + 60, DAY));
+    }
+
+    #[test]
+    fn an_unwritable_record_does_not_skip_every_check() {
+        let mut cache = UpdateCache::default();
+        assert!(super::seed_first_run(&mut cache, 42, |_| true));
+        let mut cache = UpdateCache::default();
+        assert!(!super::seed_first_run(&mut cache, 42, |_| false));
+    }
+
+    #[test]
+    fn old_cache_loads_and_unknown_fields_survive_rewrite() {
+        let cache: UpdateCache = serde_json::from_str(
+            r#"{"last_check":42,"dismissed_version":"v5.1.0","from_a_newer_kettle":{"n":7}}"#,
+        )
+        .unwrap();
+        assert_eq!(cache.dismissed_version.as_deref(), Some("v5.1.0"));
+        let written = serde_json::to_value(&cache).unwrap();
+        assert_eq!(written["from_a_newer_kettle"]["n"], 7);
+    }
+
+    /// Several processes check and notify; each kind of notice goes out once
+    /// per tag, and never again for an older one.
+    #[test]
+    fn a_tag_is_notified_once_per_state_across_writers() {
+        let dir = crate::test_tempdir();
+        let path = dir.path().join("update-check.json");
+        let lock = dir.path().join("update-check.lock");
+        let writers: Vec<_> = (0..4)
+            .map(|_| {
+                let path = path.clone();
+                let lock = lock.clone();
+                std::thread::spawn(move || {
+                    let _held = kettle_state::ExclusiveFileLock::acquire(&lock).unwrap();
+                    super::mutate_cache_at(&path, |cache| cache.note_available("v5.2.0"))
+                })
+            })
+            .collect();
+        let notified = writers
+            .into_iter()
+            .map(|writer| writer.join().unwrap())
+            .filter(|notify| *notify)
+            .count();
+        assert_eq!(notified, 1, "exactly one writer sends the notice");
+        let mut cache = super::load_cache_at(&path).unwrap();
+        assert_eq!(cache.notified_available.as_deref(), Some("v5.2.0"));
+        assert!(!cache.note_available("v5.2.0"));
+        assert!(!cache.note_available("v5.1.9"));
+        assert!(cache.note_available("v5.2.1"));
+    }
+
+    #[test]
+    fn third_counted_failure_for_one_tag_is_failed() {
+        let mut cache = UpdateCache::default();
+        assert_eq!(cache.note_failure("v5.2.0", true), None);
+        assert_eq!(cache.note_failure("v5.2.0", true), None);
+        assert_eq!(cache.note_failure("v5.2.0", true), Some(true));
+        assert_eq!(cache.last_outcome, Some(LastOutcome::Failed));
+        // Notified once per tag.
+        assert_eq!(cache.note_failure("v5.2.0", true), Some(false));
+    }
+
+    #[test]
+    fn new_tag_or_success_resets_count() {
+        let mut cache = UpdateCache::default();
+        cache.note_failure("v5.2.0", true);
+        cache.note_failure("v5.2.0", true);
+        assert_eq!(cache.note_failure("v5.2.1", true), None);
+        assert_eq!(cache.failure_count, 1);
+        cache.note_installed("v5.2.1");
+        assert_eq!(cache.failure_count, 0);
+        assert_eq!(cache.failure_tag, None);
+    }
+
+    #[test]
+    fn locked_feed_and_network_errors_do_not_count() {
+        assert!(!super::failure_counts(&UpdateError::Request(
+            "timed out".into()
+        )));
+        assert!(super::failure_counts(&UpdateError::HashMismatch));
+        let mut cache = UpdateCache::default();
+        for _ in 0..5 {
+            assert_eq!(cache.note_failure("v5.2.0", false), None);
+        }
+        assert_eq!(cache.failure_count, 0);
+    }
+
+    /// A check holds the record's lock through a download. A dismissal
+    /// written before its update of the record must survive it: the check
+    /// reads the record again right before writing.
+    #[test]
+    fn a_dismissal_written_mid_check_survives() {
+        let dir = crate::test_tempdir();
+        let path = dir.path().join("update-check.json");
+        super::mutate_cache_at(&path, |cache| cache.last_check = 42);
+        super::mutate_cache_at(&path, |cache| {
+            cache.dismissed_version = Some("v5.2.0".into());
+        });
+        super::mutate_cache_at(&path, |cache| cache.note_available("v5.2.0"));
+        let cache = super::load_cache_at(&path).unwrap();
+        assert_eq!(cache.dismissed_version.as_deref(), Some("v5.2.0"));
+        assert_eq!(cache.last_check, 42);
+    }
+
+    #[test]
+    fn up_to_date_records_latest_tag() {
+        let mut cache = UpdateCache::default();
+        cache.note_up_to_date("v5.1.0".into());
+        assert_eq!(cache.latest_tag.as_deref(), Some("v5.1.0"));
+        assert_eq!(cache.last_outcome, Some(LastOutcome::UpToDate));
+    }
+
+    /// An update is never urgent enough to ask for the user's attention.
+    #[test]
+    fn no_update_event_requests_attention() {
+        let source = kettle_test_support::production_source(include_str!("app.rs"));
+        for event in [
+            "UserEvent::UpdateAvailable {",
+            "UserEvent::UpdateInstalled {",
+            "UserEvent::UpdateFailed {",
+        ] {
+            let arm = source
+                .split(event)
+                .nth(1)
+                .and_then(|rest| rest.split("            UserEvent::").next())
+                .unwrap_or_else(|| panic!("{event} has a handler"));
+            assert!(!arm.contains("request_user_attention"), "{event}");
+        }
     }
 
     #[test]

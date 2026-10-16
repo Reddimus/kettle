@@ -2566,6 +2566,9 @@ pub enum UserEvent {
     UpdateAvailable {
         tag: String,
         url: String,
+        /// First notice of this tag from any process: send the desktop
+        /// notification.
+        notify: bool,
     },
     /// An automatic update completed. Existing windows keep running the
     /// current image; the next kettle launch uses the installed release.
@@ -2575,10 +2578,13 @@ pub enum UserEvent {
         tag: String,
         staged: bool,
         first_time: bool,
+        notify: bool,
     },
-    /// An automatic update failed after a newer signed release was found.
+    /// Automatic installs of `tag` failed often enough to say so. The raw
+    /// errors are in the log only.
     UpdateFailed {
-        message: String,
+        tag: String,
+        notify: bool,
     },
     /// A newer version than this process runs is installed, or committed and
     /// waiting for its own version to start. Only a restart picks it up.
@@ -19166,40 +19172,35 @@ impl App {
             UserEvent::ReloadConfig => {}
             UserEvent::RemoteCommand => self.drain_remote_commands(ws),
             UserEvent::Ctl => self.drain_ctl(ws, _el),
-            UserEvent::UpdateAvailable { tag, url } => {
+            UserEvent::UpdateAvailable { tag, url, notify } => {
                 if crate::update_check::is_dismissed(&tag) {
                     return;
                 }
-                // A newer release exists. Show the dismissable
-                // bottom-bar banner, fire one desktop toast, and nudge the
-                // taskbar/dock so the user notices even if kettle is unfocused.
-                fire_notify(
-                    self.ui_text
-                        .text(kettle_i18n::Text::NotifyTitleUpdateAvailable),
-                    &self.ui_text.notify_body_update_available(&tag),
-                );
+                // A newer release exists. Show the dismissable banner and, the
+                // first time any process announces this tag, one desktop
+                // notification. An update is never urgent enough to request
+                // the user's attention.
+                if notify {
+                    fire_notify(
+                        self.ui_text
+                            .text(kettle_i18n::Text::NotifyTitleUpdateAvailable),
+                        &self.ui_text.notify_body_update_available(&tag),
+                    );
+                }
                 self.update_available = Some((tag, url));
                 Self::queue_window_resizes(
                     std::iter::once(&mut *ws).chain(self.windows.values_mut()),
                 );
-                if let Some(w) = &ws.window {
-                    // Only raise OS attention (+ latch the tracker)
-                    // when unfocused — mirroring the bell path — so
-                    // `attention_active` keeps meaning "a flash is actually
-                    // outstanding". FlashWindowEx is a no-op on the foreground
-                    // window anyway, and latching the flag while focused would
-                    // leave it set until an unrelated defocus/refocus.
-                    if !ws.window_focused {
-                        w.request_user_attention(Some(UserAttentionType::Informational));
-                        ws.attention_active = true;
-                    }
-                }
             }
             UserEvent::UpdateInstalled {
                 tag,
                 staged,
                 first_time,
+                notify,
             } => {
+                if !notify {
+                    return;
+                }
                 let tr = &self.ui_text;
                 let title = tr.text(if staged {
                     kettle_i18n::Text::NotifyTitleUpdateStaged
@@ -19216,13 +19217,14 @@ impl App {
                 };
                 fire_notify(title, &body);
             }
-            UserEvent::UpdateFailed { message } => {
-                log::warn!("automatic update failed: {message}");
-                fire_notify(
-                    self.ui_text
-                        .text(kettle_i18n::Text::NotifyTitleUpdateFailed),
-                    &message,
-                );
+            UserEvent::UpdateFailed { tag, notify } => {
+                if notify {
+                    fire_notify(
+                        self.ui_text
+                            .text(kettle_i18n::Text::NotifyTitleUpdateFailed),
+                        &self.ui_text.notify_body_update_failed(&tag),
+                    );
+                }
             }
             UserEvent::UpdateRestartPending { installed } => {
                 // No notice yet: the update chip will show it. Log each

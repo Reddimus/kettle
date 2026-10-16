@@ -8,6 +8,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Update notifications: each release is announced, installed or reported as
+  failed with at most one desktop notification across every Kettle process,
+  and none of them requests the user's attention any more. A failed automatic
+  install is reported, in your language, only after it failed on three
+  checks; the raw error goes to the log.
+- Update checks no longer stop when the system clock was ahead at the last
+  check, or when `update-check.json` cannot be written.
+- Dismissing an update notice in one window is no longer undone by a check
+  running in another.
 - A window left open across an update no longer announces the version that
   update installed, and no longer reports "update failed" for it on macOS
   (#574). Dismissing an update notice no longer stops `update-policy = auto`

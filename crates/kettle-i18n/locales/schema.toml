@@ -503,6 +503,10 @@ context = "crates/kettle-ui/src/app.rs: desktop notification body."
 context = "crates/kettle-ui/src/app.rs: desktop notification body. tag is a release tag such as v5.0.0."
 args = [{ name = "tag", type = "str" }]
 
+[messages.notify_body_update_failed]
+context = "crates/kettle-ui/src/app.rs: desktop notification body after automatic installs of a release failed several times. tag is a release tag."
+args = [{ name = "tag", type = "str" }]
+
 [messages.notify_body_update_installed]
 context = "crates/kettle-ui/src/app.rs: desktop notification body. tag is a release tag; 'versión' is feminine."
 args = [{ name = "tag", type = "str" }]
