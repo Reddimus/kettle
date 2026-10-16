@@ -19201,15 +19201,15 @@ impl App {
         if let Some((width, height)) = startup_surface {
             attrs = attrs.with_inner_size(winit::dpi::PhysicalSize::new(width, height));
         }
-        if let Some(geometry) = restore_plan
+        if let Some(surface) = restore_plan
             .as_ref()
-            .and_then(|(_, geometries)| geometries.first())
-            .copied()
-            .flatten()
+            .and_then(|(_, surfaces)| surfaces.first())
         {
-            attrs = attrs
-                .with_position(winit::dpi::PhysicalPosition::new(geometry.x, geometry.y))
-                .with_inner_size(winit::dpi::PhysicalSize::new(geometry.w, geometry.h));
+            let (width, height) = surface.size;
+            attrs = attrs.with_inner_size(winit::dpi::PhysicalSize::new(width, height));
+            if let Some((x, y)) = surface.position {
+                attrs = attrs.with_position(winit::dpi::PhysicalPosition::new(x, y));
+            }
         }
         // Startup is measured, not guessed: the window is created HIDDEN and
         // revealed at the first paint, so everything between here and that
@@ -19437,7 +19437,7 @@ impl App {
             true
         } else {
             match restore_plan.as_ref() {
-                Some((wins, clamped_geometries)) => {
+                Some((wins, surfaces)) => {
                     // The theme is config-governed (the config `theme =` line,
                     // with the compile-time default as fallback) and persisted
                     // via `persist_pref`. Restore never applies a
@@ -19477,14 +19477,21 @@ impl App {
                             ));
                         }
                         if !rest.is_empty() {
-                            for (index, sw) in rest.iter().enumerate() {
+                            for (sw, surface) in rest.iter().zip(&surfaces[1..]) {
                                 let sw = crate::session::SWindow {
                                     tabs: sw.tabs.to_vec(),
                                     active: sw.active,
-                                    geometry: clamped_geometries.get(index + 1).copied().flatten(),
+                                    geometry: surface.geometry(),
                                 };
+                                let size =
+                                    winit::dpi::PhysicalSize::new(surface.size.0, surface.size.1);
                                 if self
-                                    .open_window(event_loop, WindowOpen::Restore(sw), None, None)
+                                    .open_window(
+                                        event_loop,
+                                        WindowOpen::Restore(sw),
+                                        None,
+                                        Some(size),
+                                    )
                                     .is_err()
                                 {
                                     self.stash_unrestorable_session(

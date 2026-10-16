@@ -324,7 +324,7 @@ fn reload_metadata_errors_are_not_missing_configs() {
 fn failed_additional_window_restore_preserves_source_session() {
     let src = super::production_source();
     let restore = src
-        .split_once("for (index, sw) in rest.iter().enumerate() {")
+        .split_once("for (sw, surface) in rest.iter().zip(&surfaces[1..]) {")
         .unwrap()
         .1
         .split("// Focus comes home to window 1")
