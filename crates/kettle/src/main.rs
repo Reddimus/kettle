@@ -1132,13 +1132,13 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(kettle_ui::run_media_preview_worker());
     }
     let bare_gui_launch = is_bare_gui_argv(std::env::args_os());
-    let (_running_install_guard, startup_update_warning) =
+    let (_running_install_guard, startup_update_warning, update_install) =
         match kettle_update::prepare_process_start()? {
             kettle_update::ProcessStart::Ready {
                 guard,
                 warning,
-                install: _,
-            } => (guard, warning),
+                install,
+            } => (guard, warning, install),
             kettle_update::ProcessStart::PendingUpdate { guard } => {
                 eprintln!(
                     "A verified Kettle update is waiting for running windows to close; exiting this old build."
@@ -1940,6 +1940,7 @@ fn main() -> anyhow::Result<()> {
         // `=false`, and empty leave it off.
         record_raw_input,
         media: media_client().map(std::sync::Arc::new),
+        update_install,
     })
 }
 

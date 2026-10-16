@@ -23,6 +23,7 @@ pub use install::{
     prepare_managed_install_for_update, prepare_process_start, run_pending_update_helper,
     write_atomic_file,
 };
+pub use semver::Version;
 pub use snapshot::InstallSnapshot;
 
 /// The Apple Developer team that signs every official macOS build: the app
