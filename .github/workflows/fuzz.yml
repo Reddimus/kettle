@@ -41,6 +41,8 @@ on:
       - "crates/kettle-test-support/src/mutate.rs"
       - "crates/*/src/fuzzing.rs"
       - "crates/*/src/fuzzing/**"
+      # kettle-core's harness sits in a submodule, src/term/fuzzing.rs.
+      - "crates/*/src/**/fuzzing.rs"
 
 permissions:
   contents: read
