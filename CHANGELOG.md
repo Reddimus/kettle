@@ -6,6 +6,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+
+- A Linux update never installs a release that is not newer than the installed
+  version. A window left open across an update could otherwise download the
+  release it was replaced by and install it again, or put an older one back.
+
 ### Changed
 
 - Drop the unmaintained `ttf-parser` (RUSTSEC-2026-0192). The vendored
