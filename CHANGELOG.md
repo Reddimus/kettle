@@ -6,6 +6,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Changed
+
+- Drop the unmaintained `ttf-parser` (RUSTSEC-2026-0192). The vendored
+  cosmic-text backports upstream's move to fontdb 0.24, which reads font
+  tables itself, and `deny.toml` now bans the crate.
+
 ## [5.1.0] — 2026-10-15
 
 ### Added

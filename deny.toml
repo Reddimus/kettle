@@ -36,15 +36,6 @@ db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "warn"
 ignore = [
-  # RUSTSEC-2026-0192 (`ttf-parser` unmaintained) remains through
-  # `glyphon → cosmic-text → fontdb`. The avoidable `winit →
-  # sctk-adwaita → ab_glyph` path stays disabled, because sctk-adwaita
-  # comes in for GNOME Wayland titlebar decorations only via winit's
-  # `wayland-csd-adwaita-notitle` feature, which carries NO text
-  # renderer and therefore no ab_glyph/ttf-parser edge
-  # (scripts/check-ttf-parser-scope.sh verifies the graph). Remove
-  # this once glyphon ships a compatible fontdb-free stack.
-  "RUSTSEC-2026-0192",
   # RUSTSEC-2026-0253 is an unsoundness warning in `lru 0.16.4`'s
   # `LruCache::pop()`. The only product consumer is glyphon 0.12.0, whose
   # Copy key cannot panic on drop and which never calls that method. The
@@ -99,10 +90,14 @@ confidence-threshold = 0.93
 multiple-versions = "warn"
 wildcards = "deny"
 highlight = "all"
-# No crates are banned outright today. List entries here when a
-# crate becomes unmaintained / vulnerable / replaced — same shape
-# `cargo deny check` flags for review.
-deny = []
+# Crates that must not come back. List an entry when a crate becomes
+# unmaintained, vulnerable or replaced.
+deny = [
+  # RUSTSEC-2026-0192: unmaintained. fontdb 0.24 dropped it (the vendored
+  # cosmic-text backports that bump), and winit's sctk-adwaita titlebar is
+  # built without a text renderer, so nothing needs it (#36).
+  { crate = "ttf-parser", reason = "unmaintained (RUSTSEC-2026-0192)" },
+]
 
 [sources]
 # crates.io only. Git deps and unknown registries are refused.

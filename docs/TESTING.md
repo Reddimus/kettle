@@ -35,9 +35,9 @@ just gauntlet-strict
 
 The strict gate includes the normal gauntlet, direct patched-crate validation,
 RustSec advisory scans of the product and vendor lock graphs, the scoped
-`ttf-parser` and `lru` exception guards, dependency-policy checks,
-unused-dependency checks, and the tracked-file ledger. Both guards fail when
-their reviewed inverse path changes; the `lru` guard also pins the upstream
+`lru` exception guard, dependency-policy checks (including the `ttf-parser`
+ban), unused-dependency checks, and the tracked-file ledger. The `lru` guard
+fails when its reviewed inverse path changes, and also pins the upstream
 crates.io sources and versions whose API reachability was reviewed for
 RUSTSEC-2026-0253. It reads
 locked Cargo metadata without a platform filter, so target-specific Windows
@@ -266,9 +266,9 @@ committed `vendor/Cargo.lock` pin the direct-test dependency graph for `vte`,
 `alacritty_terminal`, `portable-pty`, and `arboard`.
 
 `cosmic-text` is the exception: it stays outside that workspace, because its
-optional editor features and `fontdb`'s `ttf-parser` would put unmaintained
-crates into a graph whose audit admits no exceptions. The product build compiles
-it, the product audit covers it under the scoped `ttf-parser` exception, and
+optional editor features would put unmaintained crates into a graph whose audit
+admits no exceptions. The product build compiles it, the product audit covers
+it, and
 `kettle-render`'s `paragraph_separator_shaping_tests` exercise its patch on every
 CI platform. `vendor/README.md` records how its upstream unit tests were run.
 `just deny` checks licenses, sources, and banned crates in both lock graphs;
@@ -5822,8 +5822,8 @@ retained compile/regression checks on **windows**:
 
 Separate workflows:
 
-- `.github/workflows/audit.yml` — pull requests run the editable ttf-parser and
-  lru scope guards and both `cargo audit` scans in a read-only job whose
+- `.github/workflows/audit.yml` — pull requests run the editable lru scope
+  guard and both `cargo audit` scans in a read-only job whose
   checkout does not persist credentials. Pushes to `main` and the daily
   06:00 UTC schedule run `rustsec/audit-check` in a separate trusted job;
   Checks/issues writes are job-scoped and the token is passed only to the
