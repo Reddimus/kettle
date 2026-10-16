@@ -195,7 +195,7 @@ fn access_acl_allows_owner_write(file: &File, metadata: &Metadata) -> bool {
     if size < 4 || acl[..4] != 2u32.to_le_bytes() || !(size - 4).is_multiple_of(8) {
         return false;
     }
-    acl[4..size].chunks_exact(8).all(|entry| {
+    acl[4..size].as_chunks::<8>().0.iter().all(|entry| {
         let tag = u16::from_le_bytes([entry[0], entry[1]]);
         let permissions = u16::from_le_bytes([entry[2], entry[3]]);
         let id = u32::from_le_bytes([entry[4], entry[5], entry[6], entry[7]]);
