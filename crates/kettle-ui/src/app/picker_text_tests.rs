@@ -200,8 +200,9 @@ fn picker_rows_and_empty_states_follow_the_ui_language() {
 
     let empty = layout_picker_list("", 0, &[], &ES);
     assert_eq!(empty.rows[0].label, "No hay diseños guardados");
-    // The command is the same in every language.
-    assert_eq!(empty.rows[0].hint, "kettle --layout NAME");
+    // The command stays as typed; only the workspace name's placeholder is
+    // translated.
+    assert_eq!(empty.rows[0].hint, "kettle --layout NOMBRE");
     assert_eq!(
         layout_picker_list("", 0, &[], &EN).rows[0].hint,
         "kettle --layout NAME"

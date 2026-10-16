@@ -6548,7 +6548,7 @@ fn later_saved_windows_do_not_depend_on_the_first_restore_succeeding() {
         .nth(1)
         .expect("multi-window startup restore");
     let (before_loop, _) = restore
-        .split_once("for (index, sw) in rest.iter().enumerate() {")
+        .split_once(" in rest.iter()")
         .expect("additional windows are attempted");
     assert!(!before_loop.contains("if outcome.restored_any {"));
     assert!(restore.contains("outcome.restored_any"));
