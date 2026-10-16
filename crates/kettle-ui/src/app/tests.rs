@@ -6835,6 +6835,24 @@ fn the_pane_bell_indicator_is_wired_to_real_pane_state() {
     );
 }
 
+/// An OSC 52 read answers with every write the program made before it,
+/// including one latched after the drain took the pane's writes.
+#[test]
+fn an_osc52_read_applies_earlier_writes_first() {
+    let src = production_source();
+    let load = src
+        .split("TermEvent::ClipboardLoad(target, fmt) => {")
+        .nth(1)
+        .and_then(|body| {
+            body.split("TermEvent::TextAreaSizeRequest(fmt) => {")
+                .next()
+        })
+        .expect("ClipboardLoad arm");
+    let applied = load.find("self.store_osc52_writes(pane.term.take_clipboard_stores());");
+    let read = load.find("get_osc52_clipboard(");
+    assert!(applied.is_some() && applied < read, "{applied:?} {read:?}");
+}
+
 #[test]
 fn process_status_cannot_reap_a_pane_before_the_ordered_pty_exit() {
     let src = production_source();
@@ -6844,7 +6862,7 @@ fn process_status_cannot_reap_a_pane_before_the_ordered_pty_exit() {
         .and_then(|body| body.split("\n    fn ").next())
         .expect("drain_events body");
     let exit_latch = drain
-        .split("if !pane.closed && pane.term.take_exited() {")
+        .split("if exited && !pane.closed {")
         .nth(1)
         .and_then(|body| body.split("\n            }\n").next())
         .expect("ordered exit latch");
@@ -6853,10 +6871,16 @@ fn process_status_cannot_reap_a_pane_before_the_ordered_pty_exit() {
             && exit_latch.contains("self.cfg.exit_action"),
         "the reader's ordered exit must latch reaping and apply exit-action policy"
     );
+    // The exit latch is read before the pane's other latches and queue, and
+    // acted on after them: output the reader published before the exit is
+    // never left behind it.
+    let read = drain.find("let exited = pane.term.take_exited();");
+    let taken = drain.find("pane.term.take_title()");
+    let queue = drain.find("while let Ok(ev) = pane.rx.try_recv() {");
+    let applied = drain.find("if exited && !pane.closed {");
     assert!(
-        drain.find("while let Ok(ev) = pane.rx.try_recv() {")
-            < drain.find("if !pane.closed && pane.term.take_exited() {"),
-        "exit policy applies after the replies queued before the exit"
+        read.is_some() && read < taken && taken < queue && queue < applied,
+        "exit read first, applied last: {read:?} {taken:?} {queue:?} {applied:?}"
     );
 
     let status_arm = drain

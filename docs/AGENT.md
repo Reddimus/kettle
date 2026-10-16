@@ -199,8 +199,8 @@ forwarded. A child that floods queries without reading replies therefore fails
 closed with exit 125 instead of blocking timeout or cancellation. The semantic
 VT-event queue is independently bounded at 1024 events. State events (bells,
 titles, cursor blinking, OSC 52 writes, exit) are latched rather than queued,
-the newest kept, and a reply that finds the queue full is dropped, so terminal
-output alone cannot fail the command. Reply admission
+the newest kept, and a reply that finds the queue full is dropped, so a flood
+of state events cannot fail the command. Reply admission
 and each incremental Unix VEOF attempt are ordered by a short nonblocking gate,
 so an admitted terminal reply cannot be overtaken by a stale EOF decision. A
 query generated only after the kernel accepted a VEOF cannot retroactively

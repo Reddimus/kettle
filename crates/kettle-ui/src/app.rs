@@ -11770,6 +11770,29 @@ impl App {
         }
     }
 
+    /// Copy a pane's latched OSC 52 writes to the system clipboard, oldest
+    /// first, when the config allows programs to copy.
+    fn store_osc52_writes(&mut self, writes: Vec<(ClipboardType, String)>) {
+        for (target, s) in writes {
+            // Normalize complete card clusters before clipping so a
+            // byte limit cannot leave a partial placeholder behind.
+            if self.cfg.osc52.can_copy()
+                && let Some(cb) = &mut self.clipboard
+            {
+                match prepare_osc52_copy(s, OSC52_MAX) {
+                    Ok(text) => {
+                        if let Err(error) = set_osc52_clipboard(cb, target, text) {
+                            log::warn!(
+                                "clipboard write failed (OSC 52 {target:?} target): {error}"
+                            );
+                        }
+                    }
+                    Err(error) => log::warn!("OSC 52: could not prepare text: {error}"),
+                }
+            }
+        }
+    }
+
     fn drain_events(&mut self, ws: &mut WindowState) {
         self.sync_session_log_failures(ws);
         let mut bell = false;
@@ -11802,6 +11825,11 @@ impl App {
                 while pane.rx.try_recv().is_ok() {}
                 continue;
             }
+            // Read the exit latch before anything else: the reader sets it
+            // after the last of the PTY's output, so everything that output
+            // latched or queued is taken below, before exit policy applies.
+            // An exit latched after this read waits for the next drain.
+            let exited = pane.term.take_exited();
             // Drain the optional output sidechannel before regular events.
             if let Some(out_rx) = &pane.output_rx {
                 while let Ok(chunk) = out_rx.try_recv() {
@@ -11867,24 +11895,7 @@ impl App {
                 ws.blink_on = true;
                 ws.last_blink = std::time::Instant::now();
             }
-            for (target, s) in pane.term.take_clipboard_stores() {
-                // Normalize complete card clusters before clipping so a
-                // byte limit cannot leave a partial placeholder behind.
-                if self.cfg.osc52.can_copy()
-                    && let Some(cb) = &mut self.clipboard
-                {
-                    match prepare_osc52_copy(s, OSC52_MAX) {
-                        Ok(text) => {
-                            if let Err(error) = set_osc52_clipboard(cb, target, text) {
-                                log::warn!(
-                                    "clipboard write failed (OSC 52 {target:?} target): {error}"
-                                );
-                            }
-                        }
-                        Err(error) => log::warn!("OSC 52: could not prepare text: {error}"),
-                    }
-                }
-            }
+            self.store_osc52_writes(pane.term.take_clipboard_stores());
             while let Ok(ev) = pane.rx.try_recv() {
                 match ev {
                     TermEvent::PtyWrite(s) => {
@@ -11895,6 +11906,9 @@ impl App {
                         }
                     }
                     TermEvent::ClipboardLoad(target, fmt) => {
+                        // A write latched since the take above was made before
+                        // this read: apply it first, so the program reads it.
+                        self.store_osc52_writes(pane.term.take_clipboard_stores());
                         // OSC 52 read lets a (remote) program exfiltrate the
                         // clipboard; denied by default — reply empty so the
                         // protocol stays well-formed without leaking.
@@ -11990,12 +12004,12 @@ impl App {
             // respawns the same argv and cwd in a new tab.
             // Close (default): mark closed.
             //
-            // The reader latches the exit only after the last of the PTY's
-            // output crossed the parser, and the replies queued before it were
-            // handled above. `Mux::reap` keys off this instead of polling the
-            // process, so a fast child cannot disappear before its final
-            // output or exit policy is applied.
-            if !pane.closed && pane.term.take_exited() {
+            // `exited` was read before this pane's latches and queue, so its
+            // final title, clipboard writes and replies were handled above.
+            // `Mux::reap` keys off this instead of polling the process, so a
+            // fast child cannot disappear before its final output or exit
+            // policy is applied.
+            if exited && !pane.closed {
                 apply_pane_exit_action(
                     self.cfg.exit_action,
                     pane_id,

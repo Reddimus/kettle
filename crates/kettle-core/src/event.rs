@@ -167,8 +167,10 @@ pub(crate) struct LatchedEvents {
     cursor_blinking_changed: AtomicBool,
     exited: AtomicBool,
     title: Mutex<Option<TitleChange>>,
-    /// OSC 52 writes, the newest for each target: clipboard, then selection.
-    clipboard: Mutex<[Option<String>; 2]>,
+    /// OSC 52 writes, the newest for each target, oldest first: where both
+    /// targets are one system clipboard (macOS, Windows), the newer write
+    /// must be applied last.
+    clipboard: Mutex<Vec<(ClipboardType, String)>>,
 }
 
 impl LatchedEvents {
@@ -189,15 +191,7 @@ impl LatchedEvents {
     }
 
     pub(crate) fn take_clipboard_stores(&self) -> Vec<(ClipboardType, String)> {
-        let mut stores = self.clipboard.lock().unwrap_or_else(|e| e.into_inner());
-        let [clipboard, selection] = &mut *stores;
-        [
-            (ClipboardType::Clipboard, clipboard.take()),
-            (ClipboardType::Selection, selection.take()),
-        ]
-        .into_iter()
-        .filter_map(|(target, text)| Some((target, text?)))
-        .collect()
+        std::mem::take(&mut *self.clipboard.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     /// Latch `event` if it is one of the latched kinds. Returns whether it
@@ -223,8 +217,9 @@ impl LatchedEvents {
                 .is_none(),
             TermEvent::ClipboardStore(target, text) => {
                 let mut stores = self.clipboard.lock().unwrap_or_else(|e| e.into_inner());
-                let first = stores.iter().all(Option::is_none);
-                stores[usize::from(target == ClipboardType::Selection)] = Some(text);
+                let first = stores.is_empty();
+                stores.retain(|(kept, _)| *kept != target);
+                stores.push((target, text));
                 first
             }
             other => return Err(other),
@@ -467,6 +462,22 @@ mod tests {
             ]
         );
         assert!(latched.take_clipboard_stores().is_empty());
+        // Writes come back oldest first: where both targets are one system
+        // clipboard, the newer must be applied last.
+        for (target, text) in [
+            (ClipboardType::Clipboard, "a"),
+            (ClipboardType::Selection, "b"),
+            (ClipboardType::Clipboard, "c"),
+        ] {
+            proxy.send_event(TermEvent::ClipboardStore(target, text.into()));
+        }
+        assert_eq!(
+            latched.take_clipboard_stores(),
+            vec![
+                (ClipboardType::Selection, "b".into()),
+                (ClipboardType::Clipboard, "c".into()),
+            ]
+        );
 
         // A reset after a title wins, as the newer request.
         proxy.send_event(TermEvent::Title("gone".into()));

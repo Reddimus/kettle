@@ -69,6 +69,12 @@ def failures(row):
         problems.append(f"orphaned children {row['sleep_1000_left']}")
     if any(length > MAX_TITLE_CHARS for length in row.get("title_lengths", [])):
         problems.append("a title past its cap")
+    if "end_marker_echo" in row:
+        echo = row["end_marker_echo"]
+        if not any("after-end-marker" in line for line in echo):
+            problems.append("the pasted text did not arrive")
+        if any("[201~" in line for line in echo):
+            problems.append("a pasted bracketed-paste end marker reached the program")
     if row.get("show_timeouts") or row.get("show_unexpected"):
         problems.append(f"show: {row.get('show_timeouts')} timed out, {row.get('show_unexpected')} unexpected")
     if row.get("ctl_errors"):
@@ -182,7 +188,7 @@ def s7_titles(live):
 
 # The control server serves 8 connections at a time and closes any past that
 # without reading them, so a client sees its connection closed before a reply.
-REFUSED_AT_CAP = ("Broken pipe", "Connection reset", "connection closed", "UnexpectedEof")
+REFUSED_AT_CAP = ("Broken pipe", "Connection reset", "closed the connection", "connection closed")
 
 
 def s10_ctl_storm(live):
@@ -222,7 +228,34 @@ def clipboard_commands():
     return ["xclip", "-selection", "clipboard"], ["xclip", "-selection", "clipboard", "-o"]
 
 
+TEXT_CLIPBOARD_TYPES = {
+    "«class utf8»", "«class ut16»", "string", "Unicode text",
+    "UTF8_STRING", "STRING", "TEXT", "COMPOUND_TEXT", "TARGETS", "TIMESTAMP", "MULTIPLE",
+    "SAVE_TARGETS", "text/plain", "text/plain;charset=utf-8",
+}
+
+
+def clipboard_holds_only_text():
+    """Whether putting the clipboard's text back afterwards loses nothing."""
+    try:
+        if sys.platform == "darwin":
+            info = subprocess.run(["osascript", "-e", "clipboard info"], capture_output=True,
+                                  text=True, timeout=10, check=True).stdout
+            kinds = [part.strip() for part in info.split(",")][0::2]
+        elif os.environ.get("WAYLAND_DISPLAY"):
+            kinds = subprocess.run(["wl-paste", "--list-types"], capture_output=True, text=True,
+                                   timeout=10).stdout.split()
+        else:
+            kinds = subprocess.run(["xclip", "-selection", "clipboard", "-o", "-t", "TARGETS"],
+                                   capture_output=True, text=True, timeout=10).stdout.split()
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return all(kind in TEXT_CLIPBOARD_TYPES for kind in kinds if kind)
+
+
 def s6_paste(live):
+    if not clipboard_holds_only_text():
+        return {"skipped": "the clipboard holds more than text, which S6 could not put back"}
     copy, paste = clipboard_commands()
     saved = subprocess.run(paste, capture_output=True).stdout
     try:
@@ -316,7 +349,8 @@ def media_cases(root):
 
 def s9_media(live):
     timeouts, unexpected = [], []
-    for name, (path, mermaid, renders) in media_cases(live.cfg.parent / "s9-media").items():
+    # Absolute: the pane's shell starts in its own directory, not this one.
+    for name, (path, mermaid, renders) in media_cases((live.cfg.parent / "s9-media").resolve()).items():
         token = f"S9-{name}"
         flag = "--mermaid " if mermaid else ""
         live.ctl("send_text", params={"text": f"clear; '{live.kettle}' show {flag}'{path}' >/dev/null 2>&1; echo {token} rc=$?\r"})
@@ -389,6 +423,7 @@ def run(lui, kettle, out, name):
 def self_test():
     passing = {"alive": True, "panic": False, "get_state_s": 0.01, "echo_s": 0.02}
     assert failures(passing) == []
+    assert failures({**passing, "end_marker_echo": ["beforeafter-end-marker"]}) == []
     for broken, why in [
         ({"alive": False}, "kettle exited"),
         ({"panic": True}, "a panic"),
@@ -401,6 +436,8 @@ def self_test():
         ({"ctl_errors": 3}, "control errors"),
         ({"error": "SystemExit: server closed the connection"}, "error"),
         ({"show_timeouts": ["16k.png"]}, "show"),
+        ({"end_marker_echo": ["before^[[201~after-end-marker"]}, "end marker"),
+        ({"end_marker_echo": []}, "did not arrive"),
         ({"show_unexpected": ["ok.png rc=1"]}, "show"),
     ]:
         result = failures({**passing, **broken})
