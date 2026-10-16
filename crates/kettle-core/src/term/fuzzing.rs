@@ -427,6 +427,25 @@ mod tests {
         }
     }
 
+    /// The `term` target's first CI run: a scroll region below the top row,
+    /// scrolled while the view was scrolled back, moved the display offset
+    /// past the history, and link detection then read a row that was not
+    /// there (`positive < self.len` in the grid's storage).
+    #[test]
+    fn a_partial_scroll_region_keeps_a_scrolled_back_view_in_history() {
+        let crash: [&[u8]; 8] = [
+            b"\x8d\x87\x1b\xff\xff1337;File=\xff)[3;2r\x1b[?6h\x1b[10Bdown\x1b",
+            b"[0;0\x94\x94\x94\x94\x94\x94\x94\x94\x94[r\xff\x01\x09\x05\xff",
+            b"\x02\x01\x00\xff\x03\xc8\x00\xff\x04\x01\x03\xff\x05\x01\x00\x1b",
+            b"[3;\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+            b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+            b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+            b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x004r\x1b[\xff\xff",
+            b"\x10\x00\x00\x11\x00Bdgo.toml  src3\x001\x01;5r\x1b[?6l\x1b[r",
+        ];
+        term(&crash.concat());
+    }
+
     /// The checks are live: a cursor outside its grid fails them.
     #[test]
     fn a_cursor_outside_its_grid_fails_the_check() {
