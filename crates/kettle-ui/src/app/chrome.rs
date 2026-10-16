@@ -186,6 +186,7 @@ impl App {
                 band,
                 scroll_left: (0.0, 0.0, 0.0, 0.0),
                 scroll_right: (0.0, 0.0, 0.0, 0.0),
+                update_chip: None,
             };
         }
         let labels = ws.mux.tab_labels(&self.ui_text);
@@ -324,6 +325,7 @@ impl App {
             band,
             scroll_left: to_btn(layout.arrow_left),
             scroll_right: to_btn(layout.arrow_right),
+            update_chip: None,
         }
     }
 
@@ -449,6 +451,7 @@ impl App {
             // Vertical bars don't overflow-scroll (yet), so they have no arrows.
             scroll_left: (0.0, 0.0, 0.0, 0.0),
             scroll_right: (0.0, 0.0, 0.0, 0.0),
+            update_chip: None,
         }
     }
 

@@ -2296,6 +2296,29 @@ pub struct TabBar {
     pub scroll_left: Rect4,
     /// `›` scroll-right button rect (see `scroll_left`).
     pub scroll_right: Rect4,
+    /// The update chip at the bar's trailing end, if an update notice is
+    /// active and the bar has room for it.
+    pub update_chip: Option<UpdateChip>,
+}
+
+/// An update notice in the tab bar. The UI fits the label and places the
+/// chip; it never changes the size of anything else.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UpdateChip {
+    /// The painted chip, inset inside its slot.
+    pub rect: Rect4,
+    /// The text shown, already fitted to `rect`.
+    pub label: String,
+    pub tone: UpdateChipTone,
+    pub hovered: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpdateChipTone {
+    /// A release is available, or installed and waiting for a restart.
+    Notice,
+    /// Installing a release failed.
+    Failed,
 }
 
 impl TabBar {
@@ -2317,6 +2340,7 @@ impl TabBar {
             band: (0.0, 0.0, 0.0, 0.0),
             scroll_left: (0.0, 0.0, 0.0, 0.0),
             scroll_right: (0.0, 0.0, 0.0, 0.0),
+            update_chip: None,
         }
     }
 }
@@ -2817,6 +2841,8 @@ pub struct Renderer {
     tab_close_text: String,
     tabbar_text: String,
     new_tab_arrow_text: String,
+    /// Last label shaped into `update_chip_buffer`.
+    update_chip_text: String,
     /// Last text shaped into the `‹` / `›` overflow scroll-arrow
     /// buffers (constant glyphs → the gate holds after frame 1).
     scroll_left_text: String,
@@ -2918,6 +2944,7 @@ pub struct Renderer {
     media_receipt_dismiss_buffer: TextBuffer,
     media_receipt_badge_buffer: TextBuffer,
     tabbar_buffer: TextBuffer,
+    update_chip_buffer: TextBuffer,
     /// The `▾` new-tab dropdown-arrow glyph, in its own buffer
     /// (drawn left of `+`) so it lands precisely in `new_tab_menu` and the `+`
     /// stays put in `new_tab`. Unused when the dropdown is disabled.
@@ -5400,6 +5427,7 @@ impl Renderer {
         // Physical-pixel metrics — logical font size × DPI scale.
         let metrics = metrics_for(font_size, scale);
         let tabbar_buffer = TextBuffer::new(&mut font_system, metrics);
+        let update_chip_buffer = TextBuffer::new(&mut font_system, metrics);
         let new_tab_arrow_buffer = TextBuffer::new(&mut font_system, metrics);
         let scroll_left_buffer = TextBuffer::new(&mut font_system, metrics);
         let scroll_right_buffer = TextBuffer::new(&mut font_system, metrics);
@@ -5544,6 +5572,7 @@ impl Renderer {
             tab_close_text: String::new(),
             tabbar_text: String::new(),
             new_tab_arrow_text: String::new(),
+            update_chip_text: String::new(),
             scroll_left_text: String::new(),
             scroll_right_text: String::new(),
             status_bar_text: String::new(),
@@ -5580,6 +5609,7 @@ impl Renderer {
             media_receipt_dismiss_buffer,
             media_receipt_badge_buffer,
             tabbar_buffer,
+            update_chip_buffer,
             new_tab_arrow_buffer,
             scroll_left_buffer,
             scroll_right_buffer,
@@ -6301,6 +6331,7 @@ impl Renderer {
                 self.tab_close_text.clear();
                 self.tabbar_text.clear();
                 self.new_tab_arrow_text.clear();
+                self.update_chip_text.clear();
                 self.status_bar_text.clear();
                 self.resize_overlay_text.clear();
                 // The overlay text caches are touched only while their overlay
@@ -6830,6 +6861,9 @@ impl Renderer {
                 nx + nw - 2.0
             };
             quads.push(rect(cap_x, ny, 2.0, nh, accent, 1.0));
+            if let Some(chip) = &tabbar.update_chip {
+                push_update_chip(&mut quads, chip, theme);
+            }
             // Drag-in-progress ghost. While the user holds a
             // left button down on the tab bar, paint a
             // translucent overlay copy of the active segment centered
@@ -8110,6 +8144,23 @@ impl Renderer {
                 self.new_tab_arrow_buffer
                     .shape_until_scroll(&mut self.font_system, false);
             }
+            // The update chip's label, shaped only when it changes.
+            if let Some(chip) = &tabbar.update_chip {
+                self.update_chip_buffer.set_metrics(metrics);
+                self.update_chip_buffer
+                    .set_size(Some(chip.rect.2), Some(tabbar.height));
+                if self.update_chip_text != chip.label {
+                    self.update_chip_buffer.set_text(
+                        &chip.label,
+                        &Attrs::new().family(Family::Name(&family)),
+                        Shaping::Advanced,
+                        None,
+                    );
+                    self.update_chip_text.clone_from(&chip.label);
+                }
+                self.update_chip_buffer
+                    .shape_until_scroll(&mut self.font_system, false);
+            }
             // Overflow scroll-arrow glyphs `‹` / `›`, each shaped in its own
             // buffer and sized to its button rect. Present only when the
             // horizontal tab bar overflows.
@@ -9360,6 +9411,24 @@ impl Renderer {
                     custom_glyphs: &[],
                 });
             }
+            if let Some(chip) = &tabbar.update_chip {
+                let label_w = self
+                    .update_chip_buffer
+                    .layout_runs()
+                    .next()
+                    .map_or(0.0, |run| run.line_w);
+                let (left, top) = centered_text_origin(chip.rect, (label_w, ch));
+                let text = theme.foreground;
+                areas.push(TextArea {
+                    buffer: &self.update_chip_buffer,
+                    left,
+                    top,
+                    scale: 1.0,
+                    bounds: text_bounds_for_rect(chip.rect),
+                    default_color: GColor::rgb(text.r, text.g, text.b),
+                    custom_glyphs: &[],
+                });
+            }
             // Overflow scroll-arrow glyphs `‹` / `›` at the strip edges.
             if tabbar.scroll_left.2 > 0.0 {
                 let (ax, _, aw, _) = tabbar.scroll_left;
@@ -9780,6 +9849,7 @@ impl Renderer {
             self.status_bar_text.hash(&mut h);
             self.tab_close_text.hash(&mut h);
             self.new_tab_arrow_text.hash(&mut h);
+            self.update_chip_text.hash(&mut h);
             self.resize_overlay_text.hash(&mut h);
             self.ime_text.hash(&mut h);
             prepared_text_areas_damage_key(&areas).hash(&mut h);
@@ -16151,6 +16221,33 @@ pub fn update_banner_top_with_reserved(
 /// (4.5:1); the edge is the bar's `accent`, kept at the 3:1 minimum for
 /// non-text UI against that fill. Each bar keeps its own accent, so the
 /// palette, the pickers and the title editor still look different.
+/// The update chip's opaque fill and its edge: the input-bar colors, with
+/// the theme's red for a failure.
+fn update_chip_colors(theme: &kettle_config::Theme, tone: UpdateChipTone) -> (Rgb, Rgb) {
+    let accent = match tone {
+        UpdateChipTone::Notice => theme.palette[2],
+        UpdateChipTone::Failed => theme.palette[1],
+    };
+    input_bar_colors(theme, accent)
+}
+
+/// Queue the update chip: an opaque fill with a one-pixel edge, two when
+/// hovered.
+fn push_update_chip(
+    quads: &mut Vec<QuadInstance>,
+    chip: &UpdateChip,
+    theme: &kettle_config::Theme,
+) {
+    let (fill, edge) = update_chip_colors(theme, chip.tone);
+    let (x, y, w, h) = chip.rect;
+    let line = if chip.hovered { 2.0 } else { 1.0 };
+    quads.push(rect(x, y, w, h, fill, 1.0));
+    quads.push(rect(x, y, w, line, edge, 1.0));
+    quads.push(rect(x, y + h - line, w, line, edge, 1.0));
+    quads.push(rect(x, y, line, h, edge, 1.0));
+    quads.push(rect(x + w - line, y, line, h, edge, 1.0));
+}
+
 fn input_bar_colors(theme: &kettle_config::Theme, accent: Rgb) -> (Rgb, Rgb) {
     let fill = color::with_min_contrast(theme.palette[8], theme.foreground, 4.5);
     let edge = color::with_min_contrast(accent, fill, 3.0);
@@ -22292,6 +22389,19 @@ mod completion_panel_tests {
         }
     }
 
+    /// The chip's label is cached and shaped only when it changes, so it
+    /// must count toward the retained chrome's damage key.
+    #[test]
+    fn chip_text_is_in_the_chrome_hash() {
+        let source = production_source();
+        let hash = source
+            .split("let chrome_hash = {")
+            .nth(1)
+            .and_then(|rest| rest.split("let chrome_changed =").next())
+            .expect("retained chrome hash body");
+        assert!(hash.contains("self.update_chip_text.hash(&mut h);"));
+    }
+
     #[test]
     fn media_receipt_text_enters_the_retained_chrome_damage_key() {
         let source = production_source();
@@ -23002,6 +23112,34 @@ mod title_fit_tests {
     /// Every bar that asks for input keeps the theme foreground readable on
     /// its fill, and its accent edge visible against it, in every bundled
     /// theme and for every accent slot a bar uses.
+    /// The update chip's text reads at 4.5:1 and its edge at 3:1 against
+    /// its opaque fill, in every bundled theme and for both tones.
+    #[test]
+    fn update_chip_is_readable_in_every_bundled_theme() {
+        let mut checked = 0;
+        for name in kettle_config::Theme::list() {
+            let theme = kettle_config::Theme::by_name(name);
+            for tone in [super::UpdateChipTone::Notice, super::UpdateChipTone::Failed] {
+                let (fill, edge) = super::update_chip_colors(&theme, tone);
+                let text = color::contrast_ratio(theme.foreground, fill);
+                assert!(
+                    text + 1e-6 >= 4.5,
+                    "{name:?} {tone:?}: chip text is {text:.2}:1"
+                );
+                let edge_ratio = color::contrast_ratio(edge, fill);
+                assert!(
+                    edge_ratio + 1e-6 >= 3.0,
+                    "{name:?} {tone:?}: chip edge is {edge_ratio:.2}:1"
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked >= 2 * 500,
+            "only {checked} theme and tone pairs checked"
+        );
+    }
+
     #[test]
     fn input_bars_are_readable_in_every_bundled_theme() {
         let mut checked = 0;
