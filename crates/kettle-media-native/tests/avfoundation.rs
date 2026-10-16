@@ -279,10 +279,12 @@ fn a_session_rejects_display_transforms_it_cannot_copy() {
         // A version 0 tkhd has 40 bytes of fields before its matrix.
         let matrix_at = track + 44;
         for (slot, value) in bytes[matrix_at..matrix_at + 36]
-            .chunks_exact_mut(4)
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
             .zip(matrix)
         {
-            slot.copy_from_slice(&i32::to_be_bytes(value));
+            *slot = i32::to_be_bytes(value);
         }
         let clip = Clip::of(&bytes);
         let (poster, _) = take(&AvFoundation, &clip, &[2000], (32, 32));
