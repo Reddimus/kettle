@@ -928,6 +928,61 @@ mod tests {
         }
     }
 
+    /// A full disk fails the write partway: `atomic_replace` returns the
+    /// error, leaves the old file as it was, and leaves no staged file
+    /// behind. A child process stands in for the disk, with a file-size limit
+    /// below the write and `SIGXFSZ` ignored, so the write fails with `EFBIG`.
+    #[cfg(unix)]
+    #[test]
+    fn a_write_that_runs_out_of_room_changes_nothing() {
+        const CHILD: &str = "KETTLE_STATE_EFBIG_CHILD";
+        if let Some(destination) = std::env::var_os(CHILD) {
+            // SAFETY: setrlimit and signal take plain values and affect only
+            // this child process, which exits as soon as the write returns.
+            unsafe {
+                let limit = libc::rlimit {
+                    rlim_cur: 4096,
+                    rlim_max: 4096,
+                };
+                assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &limit), 0);
+                libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+            }
+            let error = atomic_replace(
+                Path::new(&destination),
+                &vec![b'x'; 64 * 1024],
+                AtomicWriteOptions::PRIVATE,
+            )
+            .expect_err("a write past the file-size limit fails");
+            std::process::exit(if error.raw_os_error() == Some(libc::EFBIG) {
+                0
+            } else {
+                3
+            });
+        }
+        let root = test_tempdir();
+        let destination = root.path().join("state.json");
+        atomic_replace(&destination, b"before", AtomicWriteOptions::PRIVATE).unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::a_write_that_runs_out_of_room_changes_nothing",
+                "--test-threads=1",
+            ])
+            .env(CHILD, &destination)
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "the child's write did not fail with EFBIG: {status}"
+        );
+        assert_eq!(fs::read(&destination).unwrap(), b"before");
+        let names: Vec<_> = fs::read_dir(root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["state.json"], "a staged file was left behind");
+    }
+
     #[test]
     fn a_permission_error_is_not_a_retired_lock() {
         let denied = io::Error::from(io::ErrorKind::PermissionDenied);
