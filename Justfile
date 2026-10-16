@@ -931,6 +931,11 @@ split-titlebar-smoke:
 text-presentation-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release text-presentation
 
+# The update notice is a tab-bar chip: it never resizes a pane, its menu opens
+# on a right click, and Dismiss records the tag for every process (#576).
+update-chip-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release update-chip
+
 # Split a pane, close the split by letting its own shell exit, and prove the
 # surviving pane's grid AND tty winsize come back to their pre-split values.
 # The tree work is unit-tested in mux.rs and both reap sites are pinned by a
