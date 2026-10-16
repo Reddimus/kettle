@@ -10,6 +10,7 @@ mod feed;
 mod install;
 #[cfg(target_os = "macos")]
 mod macos;
+mod snapshot;
 pub mod worker_package;
 
 pub use feed::{
@@ -22,6 +23,7 @@ pub use install::{
     prepare_managed_install_for_update, prepare_process_start, run_pending_update_helper,
     write_atomic_file,
 };
+pub use snapshot::InstallSnapshot;
 
 /// The Apple Developer team that signs every official macOS build: the app
 /// bundle the updater installs, and the media worker inside it. The release
