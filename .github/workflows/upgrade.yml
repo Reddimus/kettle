@@ -1,0 +1,127 @@
+# upgrade — install a published release the way a user does, then update it
+# to the newest one with `kettle update`.
+#
+# Release.yml calls this after it publishes, so every release is upgraded to
+# on x86_64 and arm64 Linux and on macOS from the release before it. It
+# proves the published assets and feed work end to end; it cannot stop a
+# release, which is already public by then, so a failure means a quick
+# follow-up release. Dispatch it to rerun a pair, or to dry-run this
+# workflow itself against two existing releases.
+#
+# - Linux: install `from` with its own online installer into a private
+#   prefix, run `kettle update --yes`, require `to`, require a second update
+#   to find nothing newer, then uninstall and require an empty prefix.
+# - macOS: scripts/check-macos-update-smoke.sh swaps `to`'s notarized
+#   bundle in place and checks Gatekeeper still accepts it.
+name: upgrade
+
+on:
+  workflow_call:
+    inputs:
+      to:
+        description: The newest published release, the one to update to
+        type: string
+        required: true
+      from:
+        description: The release to start from (the one before `to` when empty)
+        type: string
+        required: false
+        default: ""
+  workflow_dispatch:
+    inputs:
+      to:
+        description: The newest published release, the one to update to (vX.Y.Z)
+        required: true
+      from:
+        description: The release to start from (the one before `to` when empty)
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: upgrade (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TO: ${{ inputs.to }}
+      FROM: ${{ inputs.from }}
+    steps:
+      - name: Pick the two releases
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          [[ "$TO" =~ $tag ]] || { echo "::error::to must be vX.Y.Z, not '$TO'"; exit 1; }
+          # `kettle update` installs the newest release, so `to` must be it.
+          newest=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)
+          if [ "$newest" != "$TO" ]; then
+            echo "::error::$TO is not the newest release ($newest)"
+            exit 1
+          fi
+          if [ -z "$FROM" ]; then
+            FROM=$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts \
+              --exclude-pre-releases --limit 50 --json tagName --jq '.[].tagName' \
+              | { grep -E "$tag" || true; } | sort -V | grep -B1 -Fx "$TO" | head -1)
+          fi
+          [[ "$FROM" =~ $tag && "$FROM" != "$TO" ]] || { echo "::error::no release before $TO"; exit 1; }
+          echo "FROM=$FROM" >> "$GITHUB_ENV"
+          echo "PREFIX=$RUNNER_TEMP/kettle" >> "$GITHUB_ENV"
+          echo "Upgrading $FROM to $TO"
+      - name: Install the older release with its own installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 --retry 5 --retry-all-errors -fsSL \
+            "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$FROM/scripts/install-online.sh" \
+            -o "$RUNNER_TEMP/install-online.sh"
+          KETTLE_VERSION="$FROM" KETTLE_PREFIX="$PREFIX" sh "$RUNNER_TEMP/install-online.sh"
+          "$PREFIX/bin/kettle" --version | tee "$RUNNER_TEMP/before.txt"
+          grep -Fqw "${FROM#v}" "$RUNNER_TEMP/before.txt"
+      - name: Update it to the newest release
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$PREFIX/bin/kettle" update --yes
+          "$PREFIX/bin/kettle" --version | tee "$RUNNER_TEMP/after.txt"
+          grep -Fqw "${TO#v}" "$RUNNER_TEMP/after.txt"
+      - name: A second update finds nothing newer
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$PREFIX/bin/kettle" update --yes | tee "$RUNNER_TEMP/again.txt"
+          grep -Fq "is already up to date" "$RUNNER_TEMP/again.txt"
+      - name: Uninstalling leaves nothing behind
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$PREFIX/share/kettle/install.sh" --uninstall
+          left=$(find "$PREFIX" -mindepth 1 ! -type d -print)
+          if [ -n "$left" ]; then
+            echo "::error::uninstall left files in the prefix"
+            echo "$left"
+            exit 1
+          fi
+
+  macos:
+    name: upgrade (macos-latest)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TO: ${{ inputs.to }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.to }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - name: Swap the notarized bundle in and check its seal
+        run: scripts/check-macos-update-smoke.sh "$TO"
