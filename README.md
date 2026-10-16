@@ -31,9 +31,9 @@ builds and uninstalling. Windows packages ended with 3.3.0
 ([older releases](docs/VERSION-HISTORY.md)).
 
 Kettle updates itself: by default it checks the signed release feed once a
-day and installs a newer release for your next restart. Run
-`kettle --check-update` to check now, or set `update-policy = notify` (banner
-only) or `update-policy = off` (no automatic network request).
+day and installs a newer release for your next launch. Run
+`kettle --check-update` to check now, or set `update-policy = notify` (a chip
+in the tab bar only) or `update-policy = off` (no automatic network request).
 
 ## Get started
 

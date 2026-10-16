@@ -143,7 +143,7 @@ install shows a one-time notification explaining how to opt out.
 ```ini
 # default: install in the background, use on the next launch
 update-policy = auto
-# only show a passive new-version banner
+# only show the update chip in the tab bar
 update-policy = notify
 # no automatic network request
 update-policy = off
@@ -152,6 +152,16 @@ update-policy = off
 # daily; floored at 1). `update-policy = off` disables checking regardless.
 update-check-interval-hours = 24
 ```
+
+When there is something to say, a chip at the end of the tab bar says it:
+**Update v5.2.0** for a release you can install, **Restart for v5.2.0** when a
+newer version is installed than this window runs, and **Update failed** after
+automatic installs of a release failed on three checks. Either click opens a
+menu with what is true, the release notes, and Dismiss. Dismissing a release or
+a failure hides it in every window until a newer one arrives; dismissing a
+restart notice lasts until that window's process exits. Each release sends at
+most one desktop notification, and none asks for your attention. With the tab
+bar hidden there is no chip: About and the command palette say the same.
 
 A window left open for many days is re-checked on an hourly in-session timer
 (still bounded by the configured interval), so a long-running process still

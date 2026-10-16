@@ -615,7 +615,7 @@ fn terminal_links_open_through_their_pane() {
         assert!(
             [
                 "open_pane_link",
-                "act_on_update_banner",
+                "open_update_release",
                 "dispatch_confirm_action_arms"
             ]
             .contains(&caller.as_str()),

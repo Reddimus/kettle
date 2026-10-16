@@ -6,16 +6,6 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
-### Fixed
-
-- A window left open across an update no longer announces the version that
-  update installed, and no longer reports "update failed" for it on macOS
-  (#574). Dismissing an update notice no longer stops `update-policy = auto`
-  from installing that release.
-- A Linux update never installs a release that is not newer than the installed
-  version. A window left open across an update could otherwise download the
-  release it was replaced by and install it again, or put an older one back.
-
 ### Changed
 
 - After an update, launching Kettle opens a window in the new version instead
@@ -23,13 +13,36 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   (#575). While the old version still runs, the new one leaves the restorable
   session, pending remote commands and the old agent files to it. On macOS a
   Dock click still returns to the running app.
-
+- Update notices are a small chip at the end of the tab bar instead of a
+  full-width banner, so no pane is resized when one appears or goes (#576).
+  It reads "Update v5.2.0", "Restart for v5.2.0" or "Update failed", and
+  either click opens a menu with the facts, the release notes and Dismiss.
+  `open_update` and `dismiss_update` work from the command palette while a
+  notice is active, About lists what is true about updates, and a screen
+  reader can reach the chip without it taking focus from the terminal.
+  Opening the release notes no longer dismisses the notice.
 - Drop the unmaintained `ttf-parser` (RUSTSEC-2026-0192). The vendored
   cosmic-text backports upstream's move to fontdb 0.24, which reads font
   tables itself, and `deny.toml` now bans the crate.
 
 ### Fixed
 
+- Update notifications: each release is announced, installed or reported as
+  failed with at most one desktop notification across every Kettle process,
+  and none of them requests the user's attention any more. A failed automatic
+  install is reported, in your language, only after it failed on three
+  checks; the raw error goes to the log.
+- Update checks no longer stop when the system clock was ahead at the last
+  check, or when `update-check.json` cannot be written.
+- Dismissing an update notice in one window is no longer undone by a check
+  running in another.
+- A window left open across an update no longer announces the version that
+  update installed, and no longer reports "update failed" for it on macOS
+  (#574). Dismissing an update notice no longer stops `update-policy = auto`
+  from installing that release.
+- A Linux update never installs a release that is not newer than the installed
+  version. A window left open across an update could otherwise download the
+  release it was replaced by and install it again, or put an older one back.
 - Keep remote and working-directory labels current on a busy machine. A
   process scan that runs out of time is now retried with a longer budget,
   instead of publishing nothing until the next poll.

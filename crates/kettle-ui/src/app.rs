@@ -55,6 +55,8 @@ const ACCESSIBILITY_SEARCH_STATUS_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID_MA
 const ACCESSIBILITY_COMPLETION_ID_MASK: u64 = 1 << 60;
 const ACCESSIBILITY_COMPLETION_CONTAINER_ID: NodeId = NodeId(ACCESSIBILITY_COMPLETION_ID_MASK);
 const ACCESSIBILITY_MEDIA_RECEIPT_ID: NodeId = NodeId(1 << 59);
+/// The tab bar's update chip.
+const ACCESSIBILITY_UPDATE_CHIP_ID: NodeId = NodeId((1 << 59) + 2);
 const ACCESSIBILITY_MEDIA_RECEIPT_DISMISS_ID: NodeId = NodeId((1 << 59) | 1);
 const ACCESSIBILITY_MODAL_ID_MASK: u64 = 1 << 58;
 /// Inline cards on screen, each by its placement's instance number, which
@@ -1671,7 +1673,11 @@ fn modal_accessibility_projection(
             projection.nodes.push((id, node));
         }
         let mut node = Node::new(Role::Menu);
-        node.set_label(tr.text(kettle_i18n::Text::MenuA11yTerminal));
+        node.set_label(
+            menu.a11y_label
+                .clone()
+                .unwrap_or_else(|| tr.text(kettle_i18n::Text::MenuA11yTerminal).to_string()),
+        );
         node.set_children(children);
         node.set_bounds(full_bounds);
         projection.roots.push(container_id);
@@ -1802,19 +1808,6 @@ fn modal_accessibility_projection(
         projection.nodes.push((container_id, dialog));
         if projection.focus.is_none() {
             projection.focus = Some(input_id);
-        }
-    }
-
-    if let Some((tag, _)) = overlay.update_available.as_ref() {
-        let id = accessibility_modal_id(9, 0);
-        let mut node = Node::new(Role::Button);
-        node.set_label(tr.update_a11y_available(tag));
-        node.set_description(tr.text(kettle_i18n::Text::UpdateA11yOpen));
-        node.set_live(accesskit::Live::Polite);
-        projection.roots.push(id);
-        projection.nodes.push((id, node));
-        if projection.focus.is_none() {
-            projection.focus = Some(id);
         }
     }
 
@@ -2557,16 +2550,16 @@ pub enum UserEvent {
     /// A lane's video playback has something new: a frame, or a change of
     /// state. Coalesced by the session until the lane looks.
     LanePlayback,
-    /// The background update-check thread found a newer GitHub
-    /// release. Carries the tag (e.g. `v2.6.0`) + the release-page URL so the
-    /// UI can show a passive bottom banner. The banner is mouse-driven
-    /// (left-click opens the release page + dismisses, right-click dismisses);
-    /// keyboard users can bind the `open_update` / `dismiss_update` actions —
-    /// it stays non-modal so it never steals the terminal's keys.
+    /// The background update check announced a newer release, by tag (e.g.
+    /// `v5.2.0`). The tab bar's update chip shows it.
     UpdateAvailable {
         tag: String,
-        url: String,
+        /// First notice of this tag from any process: send the desktop
+        /// notification.
+        notify: bool,
     },
+    /// Fresh update facts, read off the UI thread.
+    UpdateFacts(Box<crate::update_notice::UpdateFacts>),
     /// An automatic update completed. Existing windows keep running the
     /// current image; the next kettle launch uses the installed release.
     /// `first_time` is set on the first automatic install so the UI can show a
@@ -2575,10 +2568,13 @@ pub enum UserEvent {
         tag: String,
         staged: bool,
         first_time: bool,
+        notify: bool,
     },
-    /// An automatic update failed after a newer signed release was found.
+    /// Automatic installs of `tag` failed often enough to say so. The raw
+    /// errors are in the log only.
     UpdateFailed {
-        message: String,
+        tag: String,
+        notify: bool,
     },
     /// A newer version than this process runs is installed, or committed and
     /// waiting for its own version to start. Only a restart picks it up.
@@ -3457,7 +3453,6 @@ fn content_rect_for(
 struct ContentBands {
     tab_bar_h: f32,
     status_bar_h: f32,
-    update_banner_h: f32,
     vertical_title_edit_h: f32,
 }
 
@@ -3493,8 +3488,7 @@ fn content_rect_for_with_strip(
             bands.status_bar_h
         } else {
             0.0
-        })
-        + bands.update_banner_h.max(0.0);
+        });
     let left_offset = if tb_on_left { strip_w } else { 0.0 };
     let right_offset = if tb_on_right { strip_w } else { 0.0 };
     let content_h = (sh - top_offset - bot_offset).max(1.0);
@@ -3722,10 +3716,17 @@ fn split_new_tab_button(
 enum NewTabHoverTarget {
     Menu,
     Plus,
+    UpdateChip,
 }
 
 fn new_tab_hover_target(bar: &TabBar, x: f32, y: f32) -> Option<NewTabHoverTarget> {
-    if bar.new_tab_menu.2 > 0.0 && rect_contains(bar.new_tab_menu, x, y) {
+    if bar
+        .update_chip
+        .as_ref()
+        .is_some_and(|chip| rect_contains(update_chip_hit_rect(chip.rect), x, y))
+    {
+        Some(NewTabHoverTarget::UpdateChip)
+    } else if bar.new_tab_menu.2 > 0.0 && rect_contains(bar.new_tab_menu, x, y) {
         Some(NewTabHoverTarget::Menu)
     } else if rect_contains(bar.new_tab, x, y) {
         Some(NewTabHoverTarget::Plus)
@@ -7678,6 +7679,60 @@ fn tab_segment_strip_width(surface_w: f32, plus_w: f32, arrow_w: f32) -> f32 {
     (surface_w - plus_w - arrow_w).max(plus_w)
 }
 
+/// The space between the update chip and the edges of its slot.
+const UPDATE_CHIP_INSET: f32 = 3.0;
+
+/// The shortest a focus change waits before reading the update facts again.
+const UPDATE_FACTS_THROTTLE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The chip's width for `label`: its text plus a cell of padding each side.
+fn update_chip_width(label: &str, cell_w: f32) -> f32 {
+    (unicode_width::UnicodeWidthStr::width(label) as f32 + 2.0) * cell_w
+}
+
+/// The update chip's slot on a horizontal bar `surface_w` wide with `tabs`
+/// tabs and `button_w` of trailing buttons: the full label while every tab
+/// keeps at least `min_tab_w`, else the short one while one tab still does,
+/// else none. Returns `(slot width, short)`.
+fn update_chip_fit(
+    surface_w: f32,
+    button_w: f32,
+    tabs: usize,
+    min_tab_w: f32,
+    cell_w: f32,
+    full: &str,
+    short: &str,
+) -> Option<(f32, bool)> {
+    let slot = |label: &str| update_chip_width(label, cell_w) + 2.0 * UPDATE_CHIP_INSET;
+    let full_slot = slot(full);
+    if (surface_w - button_w - full_slot) / tabs.max(1) as f32 >= min_tab_w {
+        return Some((full_slot, false));
+    }
+    let short_slot = slot(short);
+    (surface_w - button_w - short_slot >= min_tab_w).then_some((short_slot, true))
+}
+
+/// The chip's click target: its whole slot, inset included.
+fn update_chip_hit_rect((x, y, w, h): kettle_render::Rect4) -> kettle_render::Rect4 {
+    (
+        x - UPDATE_CHIP_INSET,
+        y - UPDATE_CHIP_INSET,
+        w + 2.0 * UPDATE_CHIP_INSET,
+        h + 2.0 * UPDATE_CHIP_INSET,
+    )
+}
+
+/// Where the chip's menu opens: under a top bar, over a bottom bar, and
+/// beside a side strip, toward the window.
+fn update_chip_menu_anchor((x, y, w, h): kettle_render::Rect4, position: TabBarPos) -> (f32, f32) {
+    match position {
+        TabBarPos::Top => (x, y + h),
+        TabBarPos::Bottom => (x, y),
+        TabBarPos::Left => (x + w, y),
+        TabBarPos::Right => (x, y),
+    }
+}
+
 /// The ✕ hit zone for one tab segment, or an EMPTY rect when the button is
 /// configured off.
 ///
@@ -8129,20 +8184,49 @@ fn picker_hint(tr: &kettle_i18n::Translator, hints: &[(&str, kettle_i18n::Text)]
 
 const PICKER_MAX_VISIBLE_ROWS: usize = 8;
 
+/// The palette's rows: every command, then, while an update notice is
+/// active, its release notes and Dismiss.
+fn palette_entries(
+    notice: Option<&crate::update_notice::Notice>,
+    tr: &kettle_i18n::Translator,
+) -> Vec<(kettle_config::palette::PaletteLabel, Action)> {
+    use kettle_config::palette::PaletteLabel;
+    let mut entries: Vec<_> = kettle_config::palette::commands()
+        .into_iter()
+        .map(|(label, action)| (PaletteLabel::Text(label), action))
+        .collect();
+    if let Some(notice) = notice {
+        let english = kettle_i18n::Translator::new(kettle_i18n::Language::En);
+        entries.push((
+            PaletteLabel::Dynamic {
+                shown: tr.palette_open_update(&notice.tag),
+                english: english.palette_open_update(&notice.tag),
+            },
+            Action::OpenUpdate,
+        ));
+        entries.push((
+            PaletteLabel::Text(kettle_i18n::Text::PaletteDismissUpdate),
+            Action::DismissUpdate,
+        ));
+    }
+    entries
+}
+
 fn command_picker_list(
     query: &str,
     selected: usize,
     bindings: &Bindings,
     tr: &kettle_i18n::Translator,
+    notice: Option<&crate::update_notice::Notice>,
 ) -> PickerList {
-    let commands = kettle_config::palette::commands();
-    let ranked = kettle_config::palette::rank(query, &commands, tr);
+    let commands = palette_entries(notice, tr);
+    let ranked = kettle_config::palette::rank_entries(query, &commands, tr);
     let rows = ranked
         .iter()
         .map(|&index| {
             let (label, action) = &commands[index];
             ContextMenuRow {
-                label: tr.text(*label).to_string(),
+                label: label.shown(tr).to_string(),
                 separator: false,
                 enabled: true,
                 hint: kettle_config::keybinds::hint_label(bindings, action).unwrap_or_default(),
@@ -8461,6 +8545,7 @@ fn picker_context_menu(
         scroll_offset,
         panel_w_clamped: panel.0,
         panel_h_clamped: panel.1,
+        a11y_label: None,
     })
 }
 
@@ -9391,7 +9476,12 @@ pub struct App {
     lua_startup_fired: bool,
     /// `Some((tag, url))` while the "a newer kettle release is
     /// available" banner is showing. Esc dismisses; Enter opens the URL.
-    update_available: Option<(String, String)>,
+    /// What is true about updates for this process; see `update_notice`.
+    update_facts: crate::update_notice::UpdateFacts,
+    /// This process dismissed its restart notice, until it exits.
+    update_restart_dismissed: bool,
+    /// When the update facts were last asked for, to throttle focus refreshes.
+    update_facts_requested: Option<std::time::Instant>,
     /// The installed version last logged as waiting for a restart.
     logged_restart_pending: Option<String>,
     /// Primaries of other builds still running, found at election.
@@ -9434,13 +9524,6 @@ pub struct App {
 /// is skipped when the serialized text matches what is already on disk, so a
 /// sweep over an unchanged workspace costs one serialization and no I/O.
 const SESSION_SWEEP: std::time::Duration = std::time::Duration::from_secs(2);
-
-fn about_update_status_label(available_tag: Option<&str>, tr: &kettle_i18n::Translator) -> String {
-    available_tag.map_or_else(
-        || tr.text(kettle_i18n::Text::AboutUpdateUnknown).to_string(),
-        |tag| tr.about_update_available(tag),
-    )
-}
 
 /// The right-click row that reopens a detected remote session. Users, hosts,
 /// runtimes and containers are shown as detected.
@@ -10387,7 +10470,9 @@ impl App {
             lua_command_retry: AutomationRetry::default(),
             lua_engine,
             lua_startup_fired: false,
-            update_available: None,
+            update_facts: crate::update_notice::UpdateFacts::default(),
+            update_restart_dismissed: false,
+            update_facts_requested: None,
             logged_restart_pending: None,
             other_builds,
             executable: std::env::current_exe().and_then(std::fs::canonicalize).ok(),
@@ -10667,6 +10752,7 @@ impl App {
             ws.hovered_close_idx,
             ws.hovered_new_tab,
             ws.hovered_new_tab_menu,
+            ws.hovered_update_chip,
         );
         ws.hovered_close_idx =
             hovered_close_button(&bar.segments, ws.cursor.x as f32, ws.cursor.y as f32);
@@ -10674,11 +10760,13 @@ impl App {
         let new_tab_hover = new_tab_hover_target(&bar, cursor_x, cursor_y);
         ws.hovered_new_tab = new_tab_hover == Some(NewTabHoverTarget::Plus);
         ws.hovered_new_tab_menu = new_tab_hover == Some(NewTabHoverTarget::Menu);
+        ws.hovered_update_chip = new_tab_hover == Some(NewTabHoverTarget::UpdateChip);
         if prior_hover
             != (
                 ws.hovered_close_idx,
                 ws.hovered_new_tab,
                 ws.hovered_new_tab_menu,
+                ws.hovered_update_chip,
             )
             && let Some(window) = &ws.window
         {
@@ -10686,7 +10774,8 @@ impl App {
         }
         let close_hover = tab_close_hover_icon(ws.hovered_close_idx.is_some());
         let new_tab_hover_icon =
-            (ws.hovered_new_tab || ws.hovered_new_tab_menu).then_some(CursorIcon::Pointer);
+            (ws.hovered_new_tab || ws.hovered_new_tab_menu || ws.hovered_update_chip)
+                .then_some(CursorIcon::Pointer);
         let confirm_hover = if self.confirm_button_hovered(ws) {
             Some(CursorIcon::Pointer)
         } else {
@@ -11133,7 +11222,6 @@ impl App {
         ContentBands {
             tab_bar_h: self.tab_bar_h(ws),
             status_bar_h: self.status_bar_h(ws),
-            update_banner_h: self.update_banner_h(ws),
             vertical_title_edit_h: self.vertical_title_edit_h(ws),
         }
     }
@@ -12571,6 +12659,7 @@ impl App {
                     *selected,
                     &self.cfg.keybinds,
                     tr,
+                    self.update_notice().as_ref(),
                 )),
             ),
             None => (None, String::new(), None),
@@ -12791,7 +12880,6 @@ impl App {
                 context_menu,
                 confirm_dialog: confirm_dialog_early,
                 settings: settings_overlay,
-                update_available: self.update_available.clone(),
                 pane_drop_hint,
             };
         }
@@ -12911,7 +12999,6 @@ impl App {
             context_menu,
             confirm_dialog,
             settings: settings_overlay,
-            update_available: self.update_available.clone(),
             pane_drop_hint,
         }
     }
@@ -14099,15 +14186,6 @@ impl App {
         }
     }
 
-    fn queue_window_resizes<'a>(windows: impl Iterator<Item = &'a mut WindowState>) {
-        for ws in windows {
-            ws.pending_resize = true;
-            if let Some(window) = &ws.window {
-                window.request_redraw();
-            }
-        }
-    }
-
     fn handle_action(
         &mut self,
         ws: &mut WindowState,
@@ -15143,18 +15221,17 @@ impl App {
                     ws.mux.touch_active_tab_seen();
                 }
             }
-            // Keyboard equivalents of clicking the
-            // update banner — `OpenUpdate` opens the release page + dismisses,
-            // `DismissUpdate` just dismisses. Both no-op (debug-logged) when no
-            // banner is showing, so a bound key is harmless the rest of the time.
+            // The update chip's two menu rows, for bindings and the palette.
+            // Both are a debug-logged no-op while no notice is active, so a
+            // bound key is harmless the rest of the time.
             Action::OpenUpdate => {
-                if !self.act_on_update_banner(ws, true) {
-                    log::debug!("open_update: no update banner is showing");
+                if !self.open_update_release(ws) {
+                    log::debug!("open_update: no update notice is active");
                 }
             }
             Action::DismissUpdate => {
-                if !self.act_on_update_banner(ws, false) {
-                    log::debug!("dismiss_update: no update banner is showing");
+                if !self.dismiss_update_notice(ws) {
+                    log::debug!("dismiss_update: no update notice is active");
                 }
             }
             // Terminator parity: the Edit-title overlay. Each action opens it
@@ -19033,6 +19110,7 @@ impl App {
             self.cfg.update_check_interval_hours,
         );
         crate::update_check::spawn_update_check_timer(self.proxy.clone());
+        self.request_update_facts(true);
         // Warm the shell-detection cache (wsl.exe /
         // vswhere probes, bounded ~2s each) off the UI thread so the first
         // dropdown open / Ctrl+Shift+N press doesn't pay it.
@@ -19166,40 +19244,30 @@ impl App {
             UserEvent::ReloadConfig => {}
             UserEvent::RemoteCommand => self.drain_remote_commands(ws),
             UserEvent::Ctl => self.drain_ctl(ws, _el),
-            UserEvent::UpdateAvailable { tag, url } => {
-                if crate::update_check::is_dismissed(&tag) {
-                    return;
+            UserEvent::UpdateAvailable { tag, notify } => {
+                // The first time any process announces this tag, one desktop
+                // notification; the chip shows it everywhere. An update is
+                // never urgent enough to request the user's attention.
+                if notify && !crate::update_check::is_dismissed(&tag) {
+                    fire_notify(
+                        self.ui_text
+                            .text(kettle_i18n::Text::NotifyTitleUpdateAvailable),
+                        &self.ui_text.notify_body_update_available(&tag),
+                    );
                 }
-                // A newer release exists. Show the dismissable
-                // bottom-bar banner, fire one desktop toast, and nudge the
-                // taskbar/dock so the user notices even if kettle is unfocused.
-                fire_notify(
-                    self.ui_text
-                        .text(kettle_i18n::Text::NotifyTitleUpdateAvailable),
-                    &self.ui_text.notify_body_update_available(&tag),
-                );
-                self.update_available = Some((tag, url));
-                Self::queue_window_resizes(
-                    std::iter::once(&mut *ws).chain(self.windows.values_mut()),
-                );
-                if let Some(w) = &ws.window {
-                    // Only raise OS attention (+ latch the tracker)
-                    // when unfocused — mirroring the bell path — so
-                    // `attention_active` keeps meaning "a flash is actually
-                    // outstanding". FlashWindowEx is a no-op on the foreground
-                    // window anyway, and latching the flag while focused would
-                    // leave it set until an unrelated defocus/refocus.
-                    if !ws.window_focused {
-                        w.request_user_attention(Some(UserAttentionType::Informational));
-                        ws.attention_active = true;
-                    }
-                }
+                self.request_update_facts(true);
             }
+            UserEvent::UpdateFacts(facts) => self.apply_update_facts(ws, *facts),
             UserEvent::UpdateInstalled {
                 tag,
                 staged,
                 first_time,
+                notify,
             } => {
+                self.request_update_facts(true);
+                if !notify {
+                    return;
+                }
                 let tr = &self.ui_text;
                 let title = tr.text(if staged {
                     kettle_i18n::Text::NotifyTitleUpdateStaged
@@ -19216,13 +19284,15 @@ impl App {
                 };
                 fire_notify(title, &body);
             }
-            UserEvent::UpdateFailed { message } => {
-                log::warn!("automatic update failed: {message}");
-                fire_notify(
-                    self.ui_text
-                        .text(kettle_i18n::Text::NotifyTitleUpdateFailed),
-                    &message,
-                );
+            UserEvent::UpdateFailed { tag, notify } => {
+                self.request_update_facts(true);
+                if notify {
+                    fire_notify(
+                        self.ui_text
+                            .text(kettle_i18n::Text::NotifyTitleUpdateFailed),
+                        &self.ui_text.notify_body_update_failed(&tag),
+                    );
+                }
             }
             UserEvent::UpdateRestartPending { installed } => {
                 // No notice yet: the update chip will show it. Log each
@@ -19234,6 +19304,7 @@ impl App {
                     );
                     self.logged_restart_pending = Some(installed);
                 }
+                self.request_update_facts(true);
             }
             UserEvent::UpdateCheckTick => {
                 crate::update_check::maybe_spawn_check(
@@ -19243,6 +19314,8 @@ impl App {
                     self.cfg.update_policy,
                     self.cfg.update_check_interval_hours,
                 );
+                // Another process may have installed, dismissed or failed.
+                self.request_update_facts(true);
             }
             // Every Dock row maps onto an action kettle already has, so this
             // reuses the keybind path wholesale — including NewWindow's
@@ -19493,6 +19566,7 @@ impl App {
                 ws.hovered_close_idx = None;
                 ws.hovered_new_tab = false;
                 ws.hovered_new_tab_menu = false;
+                ws.hovered_update_chip = false;
                 ws.search.hovered_control = None;
                 // No card is under a pointer that left.
                 ws.native_pointer = None;
@@ -20004,22 +20078,9 @@ impl App {
                 // Tab-bar interactions (left = switch / close-✕ / new-+;
                 // middle = close that tab).
                 let bar = self.tab_bar(ws);
-                // The update banner is the bottom bar when shown.
-                // Left-click opens the release page (+ records the dismissal so
-                // it won't re-nag); right-click dismisses without opening. Only
-                // reachable with no modal open (the gate above returned for
-                // those) — exactly when the banner is actually on screen.
-                if let Some((bx, by, bw, bh)) = self.update_banner_rect(ws)
-                    && px >= bx
-                    && px < bx + bw
-                    && py >= by
-                    && py < by + bh
-                    && (bcode == 0 || bcode == 2)
-                {
-                    // Left-click opens + dismisses; right-click only
-                    // dismisses. Shared with the keyboard `OpenUpdate` /
-                    // `DismissUpdate` actions.
-                    self.act_on_update_banner(ws, bcode == 0);
+                // The update chip first: a press there must neither start a
+                // tab drag nor open the terminal's context menu.
+                if self.press_update_chip(ws, &bar, px, py, bcode) {
                     return;
                 }
                 let in_bar = |r: kettle_render::Rect4, px: f32, py: f32| {
@@ -20629,10 +20690,13 @@ impl App {
                 ws.os_focus_known = true;
                 if f {
                     ws.frame_recovery.expedite(std::time::Instant::now());
+                    // Another process may have installed or dismissed an
+                    // update while this one was in the background.
+                    self.request_update_facts(false);
                 }
                 // Track the OS focus in `focused_seq` so window-less events
-                // (RemoteCommand, ctl "focused-window" ops, the UpdateAvailable
-                // banner) and the agent-facing focused_window/to_window JSON
+                // (RemoteCommand, ctl "focused-window" ops, update notices)
+                // and the agent-facing focused_window/to_window JSON
                 // route to the window the user actually clicked — not whichever
                 // window was last opened or ctl-focused. `ws.seq` is this
                 // window's BTreeMap key; finish_window_dispatch re-inserts it

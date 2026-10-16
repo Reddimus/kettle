@@ -576,6 +576,7 @@ impl App {
         // hint, so leaving one of these armed would make the cached snapshot
         // stale without changing output_generation.
         self.finish_selection_gesture(ws);
+        ws.context_menu_a11y_label = None;
         ws.scrollbar_drag_offset = None;
         ws.dragging_split = None;
         self.release_held_buttons(ws, |_| true);
@@ -756,16 +757,21 @@ impl App {
         use kettle_i18n::Text as T;
         let tr = self.ui_text;
         let v = &self.version_line;
-        let mut items = vec![
-            ContextMenuItem::Info {
-                label: format!("kettle {v}"),
-            },
-            ContextMenuItem::Info {
-                label: about_update_status_label(
-                    self.update_available.as_ref().map(|(tag, _)| tag.as_str()),
-                    &tr,
-                ),
-            },
+        let mut items = vec![ContextMenuItem::Info {
+            label: format!("kettle {v}"),
+        }];
+        let facts = crate::update_notice::fact_rows(&self.update_facts, &tr);
+        if facts.is_empty() {
+            items.push(ContextMenuItem::Info {
+                label: tr.text(T::AboutUpdateUnknown).to_string(),
+            });
+        }
+        items.extend(
+            facts
+                .into_iter()
+                .map(|label| ContextMenuItem::Info { label }),
+        );
+        items.extend([
             ContextMenuItem::Separator,
             ContextMenuItem::UrlItem {
                 label: tr.text(T::AboutCopyVersion),
@@ -779,11 +785,16 @@ impl App {
                 how: UrlHow::Open,
                 pane: None,
             },
-        ];
-        if let Some((_, url)) = &self.update_available {
+        ]);
+        if let Some(url) = self
+            .update_facts
+            .release
+            .as_ref()
+            .and_then(|release| crate::update_notice::release_url(&release.tag))
+        {
             items.push(ContextMenuItem::UrlItem {
                 label: tr.text(T::AboutOpenRelease),
-                url: url.clone(),
+                url,
                 how: UrlHow::Open,
                 pane: None,
             });
@@ -797,6 +808,35 @@ impl App {
             })
             .unwrap_or((800.0, 600.0));
         self.show_context_menu(ws, items, sw * 0.5 - 140.0, sh * 0.4);
+    }
+
+    /// Open the update chip's menu at `(px, py)`: a disabled row for each
+    /// fact, then the release page and Dismiss. There is no one-click
+    /// dismiss.
+    pub(super) fn open_update_menu(&mut self, ws: &mut WindowState, (px, py): (f32, f32)) {
+        let Some(notice) = self.update_notice() else {
+            return;
+        };
+        self.close_all_modals(ws);
+        let tr = self.ui_text;
+        let mut items: Vec<ContextMenuItem> =
+            crate::update_notice::fact_rows(&self.update_facts, &tr)
+                .into_iter()
+                .map(|label| ContextMenuItem::Info { label })
+                .collect();
+        items.push(ContextMenuItem::Separator);
+        items.push(ContextMenuItem::DynamicItem {
+            label: tr.update_menu_whats_new(&notice.tag),
+            action: Action::OpenUpdate,
+            enabled: crate::update_notice::release_url(&notice.tag).is_some(),
+        });
+        items.push(ContextMenuItem::Item {
+            label: tr.text(kettle_i18n::Text::UpdateMenuDismiss),
+            action: Action::DismissUpdate,
+            enabled: true,
+        });
+        self.show_context_menu(ws, items, px, py);
+        ws.context_menu_a11y_label = Some(tr.text(kettle_i18n::Text::MenuA11yUpdate).to_string());
     }
 
     /// Open the new-tab `▾` dropdown at
@@ -1277,6 +1317,7 @@ impl App {
             scroll_offset: menu.scroll_offset,
             panel_w_clamped,
             panel_h_clamped,
+            a11y_label: ws.context_menu_a11y_label.clone(),
         })
     }
 

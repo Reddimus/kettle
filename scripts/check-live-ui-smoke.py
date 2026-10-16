@@ -18748,6 +18748,109 @@ def run_line_edit_chords(kettle: str, root: Path) -> Path:
     return out
 
 
+def run_update_chip(kettle: str, root: Path) -> Path:
+    """An update notice is a chip in the tab bar and never resizes a pane (#576).
+
+    The update record is written into a private `XDG_CONFIG_HOME`, so the
+    notice comes from what the check would have recorded, without the
+    network. A right click opens the chip's menu, and its Dismiss row hides
+    the notice and records the dismissal for every process; the pane keeps
+    its size throughout.
+    """
+    out = root / f"update-chip-{time.strftime('%Y%m%d-%H%M%S')}"
+    out.mkdir(parents=True, exist_ok=True)
+    xdg = out / "xdg"
+    (xdg / "kettle").mkdir(parents=True, exist_ok=True)
+    os.chmod(xdg, 0o700)
+    os.chmod(xdg / "kettle", 0o700)
+    record = xdg / "kettle" / "update-check.json"
+    cfg = out / "config"
+    cfg.write_text(
+        "\n".join(
+            [
+                "agent-server = full",
+                "tab-bar = always",
+                "restore-session = false",
+                "update-policy = notify",
+                "update-check-interval-hours = 24",
+                "window-width = 100",
+                "window-height = 24",
+            ]
+        )
+        + "\n"
+    )
+    env = {"XDG_CONFIG_HOME": str(xdg)}
+
+    def grid(live: "LiveKettle") -> List[Tuple[object, object]]:
+        panes = live.json_ctl("list_panes").get("panes", [])
+        return [(pane.get("cols"), pane.get("rows")) for pane in panes]
+
+    def until(live: "LiveKettle", check, what: str, timeout: float = 15.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            geometry = live.json_ctl("ui_geometry")
+            value = check(geometry)
+            if value:
+                return value
+            time.sleep(0.1)
+        raise SystemExit(f"update-chip smoke: {what}")
+
+    with LiveKettle(kettle, cfg, out / "baseline.log", extra_env=env) as live:
+        until(live, lambda g: g.get("tab_bar", {}).get("height"), "no tab bar")
+        baseline = grid(live)
+        if until(live, lambda g: "update_notice" in g, "no update_notice field") and (
+            live.json_ctl("ui_geometry").get("update_notice") is not None
+        ):
+            raise SystemExit("update-chip smoke: a notice without any record")
+
+    record.write_text(
+        json.dumps(
+            {"last_check": int(time.time()), "latest_tag": "v99.0.0", "last_outcome": "available"}
+        )
+    )
+    os.chmod(record, 0o600)
+    with LiveKettle(kettle, cfg, out / "kettle.log", extra_env=env) as live:
+        notice = until(live, lambda g: g.get("update_notice"), "the notice never appeared")
+        if (notice.get("state"), notice.get("tag")) != ("available", "v99.0.0"):
+            raise SystemExit(f"update-chip smoke: unexpected notice {notice!r}")
+        chip = live.json_ctl("ui_geometry")["tab_bar"]["update_chip"]
+        if not str(chip.get("label", "")).endswith("v99.0.0"):
+            raise SystemExit(f"update-chip smoke: unexpected chip {chip!r}")
+        if grid(live) != baseline:
+            raise SystemExit(f"update-chip smoke: the notice resized a pane {grid(live)!r}")
+        rect = chip["rect"]
+        x = rect["x"] + rect["width"] / 2
+        y = rect["y"] + rect["height"] / 2
+        live.ctl("send_mouse", params={"event": "press", "x": x, "y": y, "button": "right"})
+        live.ctl("send_mouse", params={"event": "release", "x": x, "y": y, "button": "right"})
+        rows = until(
+            live,
+            lambda g: (g.get("context_menu") or {}).get("rows"),
+            "the chip's menu never opened",
+        )
+        dismiss = next((row for row in rows if row.get("label") == "Dismiss"), None)
+        if dismiss is None:
+            raise SystemExit(f"update-chip smoke: no Dismiss row in {rows!r}")
+        rect = dismiss["rect"]
+        x = rect["x"] + 5
+        y = rect["y"] + rect["height"] / 2
+        live.ctl("send_mouse", params={"event": "press", "x": x, "y": y, "button": "left"})
+        live.ctl("send_mouse", params={"event": "release", "x": x, "y": y, "button": "left"})
+        until(
+            live,
+            lambda g: "update_notice" in g and g["update_notice"] is None,
+            "Dismiss left the notice up",
+        )
+        if grid(live) != baseline:
+            raise SystemExit(f"update-chip smoke: dismissing resized a pane {grid(live)!r}")
+    deadline = time.monotonic() + 5.0
+    while json.loads(record.read_text()).get("dismissed_version") != "v99.0.0":
+        if time.monotonic() > deadline:
+            raise SystemExit("update-chip smoke: the dismissal was not recorded")
+        time.sleep(0.1)
+    return out
+
+
 def run_text_presentation(kettle: str, root: Path) -> Path:
     """A codepoint Unicode renders as text must not come from a colour face.
 
@@ -20581,6 +20684,7 @@ def main() -> int:
             "raw-paste",
             "steady-uploads",
             "text-presentation",
+            "update-chip",
             "zoom-keybind",
             "line-edit-chords",
             "alt-arrow-zoom",
@@ -20721,6 +20825,9 @@ def main() -> int:
         else:
             out = run_text_presentation(args.kettle, root)
             print(f"text-presentation smoke: OK artifacts={out}")
+    if args.case in ("update-chip", "all"):
+        out = run_update_chip(args.kettle, root)
+        print(f"update-chip smoke: OK artifacts={out}")
     if args.case in ("split-exit-resize", "all"):
         out = run_split_exit_resize(args.kettle, root)
         print(f"split-exit-resize smoke: OK artifacts={out}")

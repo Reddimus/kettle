@@ -242,7 +242,7 @@ protocol text never pass through it. Settings, the command palette, the theme,
 layout and SSH pickers, the right-click menu with its Preferences submenu, the new-tab
 dropdown, the About panel, the close, paste and key-rebind confirmations, the
 title editors, the search bar, the completion card, the paste receipts, the
-update banner, the screen-reader names, Kettle's desktop notifications, the
+update chip, the screen-reader names, Kettle's desktop notifications, the
 macOS Dock menu and the macOS menu bar's application menu are on it. The
 application menu is Kettle's own (`macos_menu`): winit builds an English one
 as the app finishes launching, before the first `resumed`, and Kettle's
@@ -372,7 +372,7 @@ the per-pane output drain. Its subsystems are `impl App` blocks in
 | `paste` | text, file and screenshot pastes, the paste queue, the receipt |
 | `search`, `menus`, `modals` | the search bar; context menus; Settings, the palette and other dialogs |
 | `windowing` | opening and closing windows, tear-off, docking, tab transfer |
-| `pointer`, `chrome` | mouse reporting, wheel and selection; the tab bar, status bar and banner |
+| `pointer`, `chrome` | mouse reporting, wheel and selection; the tab bar, its update chip, and the status bar |
 | `accessibility` | the accessibility tree and its actions |
 | `config_reload`, `sessions`, `gpu_recovery` | reloads and themes; session save and restore; GPU loss |
 
@@ -1739,7 +1739,7 @@ whole scrollback buffer:
 - **`kettle-render` owns layout and drawing.** One responsive bottom lane uses
   one row on wide windows and as many additional rows as needed on narrow
   windows, so every control remains present without painting over pane cells,
-  the status bar, or update banner. Highlight
+  or the status bar. Highlight
   projection consumes sorted signed spans in a single pass with the visible
   cells (`O(cells + spans)`). The active result uses the theme search colors;
   nearby results use the normal selection treatment. The bar intentionally

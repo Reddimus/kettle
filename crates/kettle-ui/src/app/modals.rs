@@ -923,7 +923,7 @@ impl App {
         text: Option<&str>,
         event_loop: &ActiveEventLoop,
     ) {
-        let cmds = kettle_config::palette::commands();
+        let cmds = palette_entries(self.update_notice().as_ref(), &self.ui_text);
         let Some((q, sel)) = ws.palette_input.as_mut() else {
             return;
         };
@@ -937,19 +937,19 @@ impl App {
                 *sel = 0;
             }
             Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::Tab) => {
-                let n = kettle_config::palette::rank(q, &cmds, &self.ui_text).len();
+                let n = kettle_config::palette::rank_entries(q, &cmds, &self.ui_text).len();
                 if n > 0 {
                     *sel = (*sel + 1) % n;
                 }
             }
             Key::Named(NamedKey::ArrowUp) => {
-                let n = kettle_config::palette::rank(q, &cmds, &self.ui_text).len();
+                let n = kettle_config::palette::rank_entries(q, &cmds, &self.ui_text).len();
                 if n > 0 {
                     *sel = (*sel + n - 1) % n;
                 }
             }
             Key::Named(NamedKey::Enter) => {
-                let ranked = kettle_config::palette::rank(q, &cmds, &self.ui_text);
+                let ranked = kettle_config::palette::rank_entries(q, &cmds, &self.ui_text);
                 let action = ranked.get(*sel).map(|&i| cmds[i].1.clone());
                 ws.palette_input = None;
                 if let Some(a) = action {
@@ -966,7 +966,7 @@ impl App {
                     && !ws.mods.alt_key()
                     && matches!(s.as_str(), "j" | "k" | "n" | "p") =>
             {
-                let n = kettle_config::palette::rank(q, &cmds, &self.ui_text).len();
+                let n = kettle_config::palette::rank_entries(q, &cmds, &self.ui_text).len();
                 if n > 0 {
                     *sel = match s.as_str() {
                         "j" | "n" => (*sel + 1) % n,

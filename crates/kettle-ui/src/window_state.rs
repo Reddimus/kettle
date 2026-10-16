@@ -1138,6 +1138,11 @@ pub(crate) struct WindowState {
     /// actually changes; `tab_bar()` forwards it to the renderer.
     pub(crate) hovered_new_tab: bool,
     pub(crate) hovered_new_tab_menu: bool,
+    /// The pointer is over the tab bar's update chip.
+    pub(crate) hovered_update_chip: bool,
+    /// What a screen reader calls the open context menu, when it is not the
+    /// terminal's. Each new menu resets it.
+    pub(crate) context_menu_a11y_label: Option<String>,
     /// Vi-mode (Alacritty parity): `Some(ViState)` while kettle is
     /// intercepting keys for vi-style navigation.
     pub(crate) vi_mode: Option<ViState>,
@@ -1550,6 +1555,8 @@ impl WindowState {
             hovered_close_idx: None,
             hovered_new_tab: false,
             hovered_new_tab_menu: false,
+            hovered_update_chip: false,
+            context_menu_a11y_label: None,
             vi_mode: None,
             scaled_zoom_prev_font_size: None,
             last_emitted_focus: None,
