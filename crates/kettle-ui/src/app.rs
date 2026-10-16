@@ -3668,11 +3668,17 @@ fn tab_strip_layout(
             arrow_right: None,
         };
     }
-    // Overflow: tabs at `min_w`, arrows reserve both ends, whole tabs only.
-    let width = min_w;
+    // Overflow: tabs at `min_w`, arrows reserve both ends, whole tabs only. A
+    // strip with less than `min_w` between its arrows still shows the active
+    // tab, narrowed to that room, rather than drawn over the arrows and buttons.
     let arrow_w = arrow_w.clamp(1.0, strip / 2.0);
-    let visible_w = (strip - 2.0 * arrow_w).max(width);
-    let count = ((visible_w / width).floor() as usize).clamp(1, n);
+    let room = (strip - 2.0 * arrow_w).max(0.0);
+    let width = min_w.min(room);
+    let count = if width > 0.0 {
+        ((room / width).floor() as usize).clamp(1, n)
+    } else {
+        1
+    };
     let first = first_shown_tab(n, active, count);
     let x0 = arrow_w;
     let xs = (0..n)

@@ -362,10 +362,13 @@ impl App {
             );
             Some(self.update_chip(ws, &notice, rect, short))
         });
-        let rows = ((sh / height).floor().max(0.0) as usize)
+        // While a title is edited, its editor takes the window's top row
+        // across both the strip and the panes; the strip starts below it.
+        let lead = self.vertical_title_edit_h(ws);
+        let rows = (((sh - lead) / height).floor().max(0.0) as usize)
             .saturating_sub(usize::from(update_chip.is_some()));
         let layout = side_tab_rows(labels.len(), active, rows);
-        let row_y = |row: usize| row as f32 * height;
+        let row_y = |row: usize| lead + row as f32 * height;
         // Rows scrolled out of view are parked off-screen, kept in the segment
         // list as the horizontal bar keeps its own.
         const OFFSCREEN_Y: f32 = -100_000.0;

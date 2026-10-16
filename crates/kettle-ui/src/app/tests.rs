@@ -15258,6 +15258,40 @@ fn the_side_tab_bar_places_rows_through_side_tab_rows() {
     assert!(body.contains("row_y(layout.top + i - layout.first)"));
     assert!(body.contains("let plus_y = row_y(layout.plus);"));
     assert!(!body.contains("i as f32 * height"));
+    // A title editor takes the top row of the window, strip included, so the
+    // rows start below it rather than under it.
+    assert!(body.contains("let lead = self.vertical_title_edit_h(ws);"));
+    assert!(body.contains("let row_y = |row: usize| lead + row as f32 * height;"));
+    assert!(body.contains("(((sh - lead) / height).floor()"));
+}
+
+/// A strip with less than `tab-min-width` between its scroll arrows still
+/// keeps the active tab between them. It was once drawn at full width over
+/// `›`, `▾` and `+` in a window about 120 px wide.
+#[test]
+fn an_overflowing_tab_strip_keeps_its_tabs_between_the_arrows() {
+    use super::tab_strip_layout;
+    for strip in [12.0_f32, 30.0, 71.5, 100.0, 167.0, 400.0, 1000.0] {
+        for n in [2_usize, 5, 40] {
+            for active in [0, n / 2, n - 1] {
+                let l = tab_strip_layout(n, active, strip, 48.5, 24.25, 120.0, true);
+                let Some(right) = l.arrow_right else {
+                    continue;
+                };
+                let arrow_w = strip - right;
+                assert!(l.xs[active].is_some(), "{strip} px, {n} tabs: active shown");
+                for (i, x) in l.xs.iter().enumerate() {
+                    let Some(x) = *x else { continue };
+                    let w = if i + 1 == n { l.last_width } else { l.width };
+                    assert!(
+                        x >= arrow_w - 0.01 && x + w <= right + 0.01,
+                        "{strip} px, {n} tabs, active {active}: tab {i} at {x}..{} leaves {arrow_w}..{right}",
+                        x + w
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// The 2-tab boundary must line up with a centered vertical pane split so
