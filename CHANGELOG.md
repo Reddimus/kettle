@@ -12,6 +12,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   cosmic-text backports upstream's move to fontdb 0.24, which reads font
   tables itself, and `deny.toml` now bans the crate.
 
+### Fixed
+
+- Keep remote and working-directory labels current on a busy machine. A
+  process scan that runs out of time is now retried with a longer budget,
+  instead of publishing nothing until the next poll.
+
 ## [5.1.0] — 2026-10-15
 
 ### Added

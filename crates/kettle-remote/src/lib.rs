@@ -342,18 +342,38 @@ impl RemoteScanner {
     /// which matters because the app polls on redraw. Other platforms retain
     /// the cross-platform sysinfo snapshot.
     pub fn refresh_roots(&mut self, roots: &[u32]) -> bool {
+        self.refresh_roots_within(roots, MAX_PROC_SCAN_DURATION)
+    }
+
+    /// [`refresh_roots`](Self::refresh_roots) with a time budget other than
+    /// the default. Linux and macOS give up at `budget`; other platforms take
+    /// one full snapshot and ignore it.
+    pub fn refresh_roots_within(&mut self, roots: &[u32], budget: std::time::Duration) -> bool {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            let complete = self.rooted.refresh_roots(roots);
+            let complete = self.rooted.refresh_roots_within(roots, budget);
             self.index = build_children_index(&self.rooted);
             self.use_rooted = true;
             complete
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
-            let _ = roots;
+            let _ = (roots, budget);
             self.refresh();
             true
+        }
+    }
+
+    /// Whether the last rooted refresh stopped because its time budget ran
+    /// out, rather than at a size bound that more time would not lift.
+    pub fn last_scan_timed_out(&self) -> bool {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            self.use_rooted && self.rooted.timed_out
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            false
         }
     }
 
@@ -525,6 +545,7 @@ impl RemoteScanWorker {
             .spawn(move || {
                 let mut scanner = RemoteScanner::new();
                 let mut roots = Vec::new();
+                let mut budget = MAX_PROC_SCAN_DURATION;
                 while wakes.recv().is_ok() {
                     loop {
                         let Some(mut targets) = worker_pending
@@ -537,7 +558,11 @@ impl RemoteScanWorker {
                         normalize_probe_targets(&mut targets);
                         roots.clear();
                         roots.extend(targets.iter().map(|target| target.pid));
-                        if !scanner.refresh_roots(&roots) {
+                        let complete = scan_with_retries(&mut budget, |budget| {
+                            let complete = scanner.refresh_roots_within(&roots, budget);
+                            (complete, scanner.last_scan_timed_out())
+                        });
+                        if !complete {
                             continue;
                         }
                         let mut probes = std::collections::HashMap::with_capacity(targets.len());
@@ -610,6 +635,30 @@ impl RemoteScanWorker {
     }
 }
 
+/// Runs `scan` with `budget`, which returns whether the scan completed and
+/// whether it stopped because time ran out. A timed-out scan is retried at once
+/// with twice the budget, up to [`MAX_PROC_SCAN_RETRY_DURATION`], and the budget
+/// stays raised for the next request until a scan completes. On a loaded
+/// machine the default budget can expire on every attempt, and a scan that
+/// publishes nothing leaves every pane's label stale. A scan cut short by a
+/// size bound is not retried: more time would not finish it.
+fn scan_with_retries(
+    budget: &mut std::time::Duration,
+    mut scan: impl FnMut(std::time::Duration) -> (bool, bool),
+) -> bool {
+    loop {
+        let (complete, timed_out) = scan(*budget);
+        if complete {
+            *budget = MAX_PROC_SCAN_DURATION;
+            return true;
+        }
+        if !timed_out || *budget >= MAX_PROC_SCAN_RETRY_DURATION {
+            return false;
+        }
+        *budget = (*budget * 2).min(MAX_PROC_SCAN_RETRY_DURATION);
+    }
+}
+
 fn normalize_probe_targets(targets: &mut Vec<RemoteProbeTarget>) {
     targets.sort_unstable_by_key(|target| target.pid);
     let mut write = 0_usize;
@@ -636,8 +685,10 @@ const MAX_PROC_TREE_NODES: usize = MAX_REMOTE_PROBE_TARGETS;
 const MAX_PROC_TASKS_PER_PROCESS: usize = 1024;
 #[cfg(target_os = "linux")]
 const MAX_PROC_TASK_FILE_READS: usize = 1024;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 const MAX_PROC_SCAN_DURATION: std::time::Duration = std::time::Duration::from_millis(25);
+/// The longest a retried scan may run. The scan has its own thread, so a
+/// loaded machine trades a little background time for labels that update.
+const MAX_PROC_SCAN_RETRY_DURATION: std::time::Duration = std::time::Duration::from_millis(200);
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
 const MAX_PROC_ARGS_PER_PROCESS: usize = 256;
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
@@ -947,6 +998,8 @@ struct LinuxProcessTree {
     proc_root: std::path::PathBuf,
     bytes_read: u64,
     task_files_read: usize,
+    /// The last walk stopped because its time budget ran out.
+    timed_out: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -957,8 +1010,13 @@ struct LinuxProcessEntry {
 
 #[cfg(target_os = "linux")]
 impl LinuxProcessTree {
-    fn refresh_roots(&mut self, roots: &[u32]) -> bool {
-        self.refresh_from(std::path::Path::new("/proc"), roots)
+    fn refresh_roots_within(&mut self, roots: &[u32], budget: std::time::Duration) -> bool {
+        self.refresh_from_within(std::path::Path::new("/proc"), roots, budget)
+    }
+
+    #[cfg(test)]
+    fn refresh_from(&mut self, proc_root: &std::path::Path, roots: &[u32]) -> bool {
+        self.refresh_from_within(proc_root, roots, MAX_PROC_SCAN_DURATION)
     }
 
     /// Synchronous procfs walk backing `refresh_roots`, which the remote scan
@@ -971,10 +1029,15 @@ impl LinuxProcessTree {
     /// the selected foreground process instead of being kept for every entry.
     /// Together these stop a pathological or hostile descendant subtree from
     /// costing multiple GiB of retained memory or synchronous I/O.
-    fn refresh_from(&mut self, proc_root: &std::path::Path, roots: &[u32]) -> bool {
+    fn refresh_from_within(
+        &mut self,
+        proc_root: &std::path::Path,
+        roots: &[u32],
+        budget: std::time::Duration,
+    ) -> bool {
         use std::collections::{HashSet, VecDeque};
 
-        let deadline = std::time::Instant::now() + MAX_PROC_SCAN_DURATION;
+        let deadline = std::time::Instant::now() + budget;
         self.entries.clear();
         self.partial_roots.clear();
         self.proc_root.clear();
@@ -1095,6 +1158,7 @@ impl LinuxProcessTree {
         }
         self.bytes_read = total_bytes;
         self.task_files_read = task_files_read;
+        self.timed_out = !complete && std::time::Instant::now() >= deadline;
         complete
     }
 }
@@ -2953,6 +3017,22 @@ mod tests {
         let parsed = parse_proc_argv(&vec![0; MAX_PROC_ARGS_PER_PROCESS + 1]);
         assert_eq!(parsed.argv.len(), MAX_PROC_ARGS_PER_PROCESS);
         assert!(!parsed.complete);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_proc_scanner_reports_a_walk_that_ran_out_of_time() {
+        let root = kettle_test_support::private_tempdir("kettle-proc-budget-");
+        let dir = root.path().join("10");
+        std::fs::create_dir_all(dir.join("task").join("10")).unwrap();
+        std::fs::write(dir.join("cmdline"), b"bash\0").unwrap();
+        std::fs::write(dir.join("task").join("10").join("children"), b"").unwrap();
+
+        let mut tree = LinuxProcessTree::default();
+        assert!(!tree.refresh_from_within(root.path(), &[10], std::time::Duration::ZERO));
+        assert!(tree.timed_out, "a walk with no time left says it ran out");
+        assert!(tree.refresh_from_within(root.path(), &[10], std::time::Duration::from_secs(60)));
+        assert!(!tree.timed_out);
     }
 
     #[cfg(target_os = "linux")]
@@ -5623,20 +5703,40 @@ mod tests {
         );
     }
 
-    /// The worker publishes nothing for a scan that ran past its 25 ms
-    /// budget, and waits for the next request; the app asks again on its
-    /// next poll. So does this test: on a loaded machine walking this test
-    /// process's threads can take longer than one budget.
+    /// The worker publishes a snapshot for a live process. A scan that runs
+    /// out of time is retried with a longer budget, and the test asks again
+    /// the way the app's next poll would; sixty seconds only catches a hang.
+    /// It probes a `sleep` child rather than this many-threaded test process,
+    /// whose own task walk is the slow part on a loaded runner.
     #[test]
     fn background_probe_worker_returns_a_current_process_snapshot() {
-        let worker = RemoteScanWorker::spawn().unwrap();
+        #[cfg(unix)]
+        struct Reap(std::process::Child);
+        #[cfg(unix)]
+        impl Drop for Reap {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        #[cfg(unix)]
+        let child = Reap(
+            std::process::Command::new("sleep")
+                .arg("60")
+                .spawn()
+                .expect("spawn a probe child"),
+        );
+        #[cfg(unix)]
+        let pid = child.0.id();
+        #[cfg(not(unix))]
         let pid = std::process::id();
+        let worker = RemoteScanWorker::spawn().unwrap();
         let target = RemoteProbeTarget {
             pid,
             foreground_pid: Some(pid),
             allow_native_cwd: false,
         };
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         loop {
             worker.submit(vec![target]);
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -5646,9 +5746,54 @@ mod tests {
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "background remote scan did not publish within five seconds"
+                "background remote scan did not publish within a minute"
             );
         }
+    }
+
+    #[test]
+    fn a_timed_out_scan_is_retried_with_twice_the_budget() {
+        let mut budget = MAX_PROC_SCAN_DURATION;
+        let mut tried = Vec::new();
+        let complete = scan_with_retries(&mut budget, |budget| {
+            tried.push(budget.as_millis());
+            (budget >= std::time::Duration::from_millis(100), true)
+        });
+        assert!(complete);
+        assert_eq!(tried, [25, 50, 100]);
+        assert_eq!(
+            budget, MAX_PROC_SCAN_DURATION,
+            "a completed scan resets the budget"
+        );
+    }
+
+    #[test]
+    fn a_scan_that_keeps_timing_out_stops_at_the_ceiling_and_starts_there_next_time() {
+        let mut budget = MAX_PROC_SCAN_DURATION;
+        let mut tried = Vec::new();
+        assert!(!scan_with_retries(&mut budget, |budget| {
+            tried.push(budget.as_millis());
+            (false, true)
+        }));
+        assert_eq!(tried, [25, 50, 100, 200]);
+        tried.clear();
+        assert!(!scan_with_retries(&mut budget, |budget| {
+            tried.push(budget.as_millis());
+            (false, true)
+        }));
+        assert_eq!(tried, [200], "the next request starts at the raised budget");
+    }
+
+    #[test]
+    fn a_scan_cut_short_by_a_size_bound_is_not_retried() {
+        let mut budget = MAX_PROC_SCAN_DURATION;
+        let mut attempts = 0;
+        assert!(!scan_with_retries(&mut budget, |_| {
+            attempts += 1;
+            (false, false)
+        }));
+        assert_eq!(attempts, 1);
+        assert_eq!(budget, MAX_PROC_SCAN_DURATION);
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -5675,7 +5820,8 @@ mod tests {
             allow_native_cwd: false,
         };
         let worker = RemoteScanWorker::spawn().unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        // Only catches a hang; a slow scan is retried with a longer budget.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         let published = loop {
             worker.submit(vec![target(long), target(short)]);
             std::thread::sleep(std::time::Duration::from_millis(50));
