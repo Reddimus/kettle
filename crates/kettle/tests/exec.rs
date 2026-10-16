@@ -2133,7 +2133,10 @@ fn exec_query_reply_flood_without_stdin_cannot_defeat_timeout() {
 
 #[cfg(unix)]
 #[test]
-fn exec_semantic_event_flood_fails_closed_without_defeating_timeout() {
+/// Output that repeats state events (bells, titles) is latched, the newest
+/// kept, so it cannot fill the event queue: the run reaches its own timeout.
+/// It once overflowed the 1,024-message queue and failed with exit 125.
+fn exec_semantic_event_flood_is_latched_and_keeps_the_timeout() {
     let helper = std::env::current_exe().expect("resolve integration-test helper");
     let helper = helper.to_str().expect("integration-test path is UTF-8");
     let (code, out, err, elapsed) = run_no_stdin_command(
@@ -2148,12 +2151,12 @@ fn exec_semantic_event_flood_fails_closed_without_defeating_timeout() {
         &[("KETTLE_EXEC_EVENT_FLOOD_HELPER", "1")],
     );
     assert_eq!(
-        code, 125,
-        "semantic event flood did not fail closed; stderr: {err}; stdout: {out:?}"
+        code, 124,
+        "a semantic event flood must run to the timeout; stderr: {err}; stdout: {out:?}"
     );
     assert!(
-        err.contains("PTY semantic event queue exceeded its 1024-message bound"),
-        "missing bounded-event diagnostic: {err:?}"
+        !err.contains("event queue"),
+        "a latched flood is not a queue failure: {err:?}"
     );
     assert!(
         elapsed < Duration::from_secs(10),
@@ -2167,9 +2170,12 @@ fn pty_semantic_event_flood_helper() {
     if std::env::var_os("KETTLE_EXEC_EVENT_FLOOD_HELPER").is_none() {
         return;
     }
-    // Every byte is one semantic event. This makes the queue-overflow fixture
-    // independent of the platform's PTY read granularity.
-    let flood = vec![b'\x07'; 20_000];
+    // Every bell byte and title is one semantic event, far past the queue's
+    // 1,024, whatever the platform's PTY read granularity.
+    let mut flood = vec![b'\x07'; 20_000];
+    for i in 0..5_000 {
+        flood.extend_from_slice(format!("\x1b]0;title {i}\x07").as_bytes());
+    }
     std::io::stdout().write_all(&flood).unwrap();
     std::io::stdout().flush().unwrap();
     std::thread::sleep(Duration::from_secs(30));

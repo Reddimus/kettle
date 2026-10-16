@@ -1132,6 +1132,8 @@ fn run_exec_engine_with_recording_poll(
     #[cfg(windows)]
     let mut pty_close_started_at: Option<Instant> = None;
     let mut last_lifecycle_trace = started;
+    // The newest title the child set, held until output is ready to take it.
+    let mut pending_title: Option<String> = None;
 
     loop {
         // Evaluate both externally imposed stop conditions before touching any
@@ -1286,16 +1288,25 @@ fn run_exec_engine_with_recording_poll(
                 false
             }
         };
-        let event_backlog = if event_output_ready {
+        // Headless exec has no clipboard sink and advertises no DA1 extension
+        // 52, so latched OSC 52 writes are discarded here.
+        drop(term.take_clipboard_stores());
+        // Titles are latched, the newest kept, so a run of them is one title
+        // event. Held until output is ready, and counted as backlog until
+        // then so completion cannot drop it.
+        if let Some(kettle_core::TitleChange::Set(title)) = term.take_title() {
+            pending_title = Some(title);
+        }
+        if event_output_ready
+            && let Some(title) = pending_title.take()
+            && let Err(error) = output.title(title)
+        {
+            output_failure = Some(error);
+        }
+        let event_backlog = if event_output_ready && output_failure.is_none() {
             drain_event_slice_until(&rx, |ev| {
                 match ev {
                     TermEvent::PtyWrite(s) => queue_reply(s.as_bytes()),
-                    TermEvent::Title(t) => {
-                        if let Err(error) = output.title(t) {
-                            output_failure = Some(error);
-                            return false;
-                        }
-                    }
                     TermEvent::TextAreaSizeRequest(fmt) => {
                         let (pixel_width, pixel_height) = term.pty_pixel_size();
                         let reply = kettle_render::reply_for_text_area_size(
@@ -1317,20 +1328,9 @@ fn run_exec_engine_with_recording_poll(
                             queue_reply(s.as_bytes());
                         }
                     }
-                    // Headless exec has no clipboard sink and advertises no DA1
-                    // extension 52. Discard writes explicitly at this boundary.
-                    TermEvent::ClipboardStore(_, _) => {}
                     // OSC 52 read: deny (reply empty so the protocol stays
                     // well-formed without leaking a clipboard to a headless child).
                     TermEvent::ClipboardLoad(_, fmt) => queue_reply(fmt("").as_bytes()),
-                    TermEvent::Exit | TermEvent::ChildExit(_) => {
-                        // This event is a PTY/parser lifecycle notification,
-                        // not a portable non-reaping process-status query.
-                        // In particular, a leaked Unix slave prevents it from
-                        // arriving at all. The explicit status observation
-                        // below owns `child_gone_at` on every lifecycle turn.
-                        log::debug!("kettle exec handling terminal-exit event");
-                    }
                     _ => {}
                 }
                 match output.ready() {
@@ -1342,7 +1342,7 @@ fn run_exec_engine_with_recording_poll(
                 }
             })
         } else {
-            !rx.is_empty()
+            !rx.is_empty() || pending_title.is_some()
         };
         if let Some(error) = output_failure {
             return stop_after_output_failure(
@@ -1357,13 +1357,6 @@ fn run_exec_engine_with_recording_poll(
         }
         if trace_lifecycle {
             log::debug!("kettle exec lifecycle event slice returned: backlog={event_backlog}");
-        }
-        if term.event_queue_overflowed() {
-            pty_writer_error.get_or_insert_with(|| {
-                format!(
-                    "PTY semantic event queue exceeded its {PTY_EVENT_QUEUE_DEPTH}-message bound"
-                )
-            });
         }
         let fatal_pty_error = pty_writer_error;
         let mut stdin_forwarding_error = None;
@@ -4665,7 +4658,7 @@ mod tests {
                 "-c".into(),
                 "printf '%s' \"$1\"".into(),
                 "kettle-exec-test".into(),
-                "\x1b]0;t\x07".repeat(count),
+                (0..count).map(|i| format!("\x1b]0;t{i}\x07")).collect(),
             ],
             None,
         );
@@ -4687,8 +4680,14 @@ mod tests {
             .iter()
             .filter(|event| event["event"] == "title")
             .collect::<Vec<_>>();
-        assert_eq!(titles.len(), count);
-        assert!(titles.iter().all(|event| event["data"] == "t"));
+        // A run of titles is latched, the newest kept, so it arrives as one
+        // or a few events; the last one is never lost to completion.
+        assert!(
+            (1..=count).contains(&titles.len()),
+            "{} titles",
+            titles.len()
+        );
+        assert_eq!(titles.last().unwrap()["data"], format!("t{}", count - 1));
         assert_eq!(events.last().unwrap()["event"], "exit");
     }
 

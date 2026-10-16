@@ -11796,10 +11796,8 @@ impl App {
         // post-drain handler can process them with a fresh borrow.
         let mut pending_restarts_local: Vec<u64> = Vec::new();
         for (&pane_id, pane) in ws.mux.panes.iter_mut() {
-            if pane.term.event_queue_overflowed() || pane.pty_input_failed() {
-                log::error!(
-                    "closing pane {pane_id}: bounded terminal event/input transport failed"
-                );
+            if pane.pty_input_failed() {
+                log::error!("closing pane {pane_id}: its PTY input transport failed");
                 pane.closed = true;
                 while pane.rx.try_recv().is_ok() {}
                 continue;
@@ -11818,62 +11816,82 @@ impl App {
                 bell = true;
                 bell_panes.push(pane_id);
             }
-            while let Ok(ev) = pane.rx.try_recv() {
-                match ev {
-                    TermEvent::Title(t) => {
-                        // Ignore the bogus full-exe-path title conhost/
-                        // ConPTY injects at startup for a native Windows shell —
-                        // keeping the "kettle" placeholder so the tab/window/pane
-                        // label falls back to the working directory (the OSC 7/9;9
-                        // cwd, else the natively-polled cwd) instead of showing an
-                        // ugly `…\pwsh.exe` path. Only a still-placeholder pane is
-                        // checked; ANY genuine OSC 2 title (incl. a later one from
-                        // the shell's own prompt) is stored and permanently ends
-                        // suppression, so a program-set title is never lost.
-                        if pane.title_is_placeholder && is_conhost_startup_title(&t, &pane.argv) {
-                            // keep the placeholder seed; do not store the exe path
-                        } else {
-                            apply_shell_title(
-                                &mut pane.title,
-                                &mut pane.title_is_placeholder,
-                                &mut pane.title_origin,
-                                &mut pane.title_before_remote,
-                                Some(&t),
-                            );
-                        }
-                    }
-                    TermEvent::ResetTitle => {
+            // Titles, cursor-blink switches and OSC 52 writes are latched by
+            // the terminal too, the newest kept, so a program repeating them
+            // cannot fill the event queue. They are taken before the queue
+            // below, so a program that writes the clipboard and then reads it
+            // back sees its write.
+            match pane.term.take_title() {
+                Some(kettle_core::TitleChange::Set(t)) => {
+                    // Ignore the bogus full-exe-path title conhost/
+                    // ConPTY injects at startup for a native Windows shell —
+                    // keeping the "kettle" placeholder so the tab/window/pane
+                    // label falls back to the working directory (the OSC 7/9;9
+                    // cwd, else the natively-polled cwd) instead of showing an
+                    // ugly `…\pwsh.exe` path. Only a still-placeholder pane is
+                    // checked; ANY genuine OSC 2 title (incl. a later one from
+                    // the shell's own prompt) is stored and permanently ends
+                    // suppression, so a program-set title is never lost.
+                    if pane.title_is_placeholder && is_conhost_startup_title(&t, &pane.argv) {
+                        // keep the placeholder seed; do not store the exe path
+                    } else {
                         apply_shell_title(
                             &mut pane.title,
                             &mut pane.title_is_placeholder,
                             &mut pane.title_origin,
                             &mut pane.title_before_remote,
-                            None,
+                            Some(&t),
                         );
                     }
+                }
+                Some(kettle_core::TitleChange::Reset) => {
+                    apply_shell_title(
+                        &mut pane.title,
+                        &mut pane.title_is_placeholder,
+                        &mut pane.title_origin,
+                        &mut pane.title_before_remote,
+                        None,
+                    );
+                }
+                None => {}
+            }
+            if pane.term.take_cursor_blinking_changed() {
+                // DEC mode 12 (`CSI ?12 h/l`) just flipped. The next
+                // redraw picks up the new state from
+                // `Terminal::cursor_blinking()`, but reset the blink
+                // phase now so *blink-on* starts visible and
+                // *blink-off* makes the cursor solid right away, not on
+                // whatever half-period we'd otherwise land in. It is
+                // program output, so it does not restart the blink
+                // timeout; only typing, focus, and settings do.
+                ws.blink_on = true;
+                ws.last_blink = std::time::Instant::now();
+            }
+            for (target, s) in pane.term.take_clipboard_stores() {
+                // Normalize complete card clusters before clipping so a
+                // byte limit cannot leave a partial placeholder behind.
+                if self.cfg.osc52.can_copy()
+                    && let Some(cb) = &mut self.clipboard
+                {
+                    match prepare_osc52_copy(s, OSC52_MAX) {
+                        Ok(text) => {
+                            if let Err(error) = set_osc52_clipboard(cb, target, text) {
+                                log::warn!(
+                                    "clipboard write failed (OSC 52 {target:?} target): {error}"
+                                );
+                            }
+                        }
+                        Err(error) => log::warn!("OSC 52: could not prepare text: {error}"),
+                    }
+                }
+            }
+            while let Ok(ev) = pane.rx.try_recv() {
+                match ev {
                     TermEvent::PtyWrite(s) => {
                         if pane.queue_protocol_reply(s.as_bytes()).is_failed() {
                             log::error!("closing pane {pane_id}: bounded PTY input queue failed");
                             pane.closed = true;
                             break;
-                        }
-                    }
-                    TermEvent::ClipboardStore(target, s) => {
-                        // Normalize complete card clusters before clipping so a
-                        // byte limit cannot leave a partial placeholder behind.
-                        if self.cfg.osc52.can_copy()
-                            && let Some(cb) = &mut self.clipboard
-                        {
-                            match prepare_osc52_copy(s, OSC52_MAX) {
-                                Ok(text) => {
-                                    if let Err(error) = set_osc52_clipboard(cb, target, text) {
-                                        log::warn!(
-                                            "clipboard write failed (OSC 52 {target:?} target): {error}"
-                                        );
-                                    }
-                                }
-                                Err(error) => log::warn!("OSC 52: could not prepare text: {error}"),
-                            }
                         }
                     }
                     TermEvent::ClipboardLoad(target, fmt) => {
@@ -11950,53 +11968,40 @@ impl App {
                             break;
                         }
                     }
-                    TermEvent::CursorBlinkingChange => {
-                        // DEC mode 12 (`CSI ?12 h/l`) just flipped. The next
-                        // redraw picks up the new state from
-                        // `Terminal::cursor_blinking()`, but reset the blink
-                        // phase now so *blink-on* starts visible and
-                        // *blink-off* makes the cursor solid right away, not on
-                        // whatever half-period we'd otherwise land in. It is
-                        // program output, so it does not restart the blink
-                        // timeout; only typing, focus, and settings do.
-                        ws.blink_on = true;
-                        ws.last_blink = std::time::Instant::now();
-                    }
-                    // Latched by the terminal and taken above.
-                    TermEvent::Bell => {}
-                    // Terminator parity (terminatorlib/config.py:118
-                    // `exit_action`): when the shell exits, close the pane,
-                    // restart the shell, or hold the dead shell visible so the
-                    // user can read its final output and scrollback.
-                    //
-                    // Hold: don't mark closed; the pane shows its last output
-                    // until the user closes it (Ctrl+Shift+W).
-                    // Restart: mark closed and queue the pane id so this loop
-                    // never double-borrows ws.mux; the post-drain handler
-                    // respawns the same argv and cwd in a new tab.
-                    // Close (default): mark closed.
-                    TermEvent::Exit => {
-                        // The reader emits this only after preceding PTY bytes
-                        // have crossed its bounded parser queue. `Mux::reap`
-                        // keys off this latch instead of polling the process,
-                        // so a fast child cannot disappear before its final
-                        // output or exit policy is applied.
-                        apply_pane_exit_action(
-                            self.cfg.exit_action,
-                            pane_id,
-                            pane,
-                            &mut pending_restarts_local,
-                        );
-                    }
                     TermEvent::ChildExit(_) => {
                         // Process status is advisory, not a pane-lifecycle
                         // boundary. alacritty_terminal can publish ChildExit
-                        // before its final PTY drain; only the ordered Exit
-                        // event above may apply exit policy or make this pane
+                        // before its final PTY drain; only the exit latch
+                        // below may apply exit policy or make this pane
                         // reapable.
                     }
                     _ => {}
                 }
+            }
+            // Terminator parity (terminatorlib/config.py:118
+            // `exit_action`): when the shell exits, close the pane,
+            // restart the shell, or hold the dead shell visible so the
+            // user can read its final output and scrollback.
+            //
+            // Hold: don't mark closed; the pane shows its last output
+            // until the user closes it (Ctrl+Shift+W).
+            // Restart: mark closed and queue the pane id so this loop
+            // never double-borrows ws.mux; the post-drain handler
+            // respawns the same argv and cwd in a new tab.
+            // Close (default): mark closed.
+            //
+            // The reader latches the exit only after the last of the PTY's
+            // output crossed the parser, and the replies queued before it were
+            // handled above. `Mux::reap` keys off this instead of polling the
+            // process, so a fast child cannot disappear before its final
+            // output or exit policy is applied.
+            if !pane.closed && pane.term.take_exited() {
+                apply_pane_exit_action(
+                    self.cfg.exit_action,
+                    pane_id,
+                    pane,
+                    &mut pending_restarts_local,
+                );
             }
             #[cfg(windows)]
             if !pane.exit_observed
@@ -12051,10 +12056,8 @@ impl App {
                     }
                 }
             }
-            if pane.term.event_queue_overflowed() || pane.pty_input_failed() {
-                log::error!(
-                    "closing pane {pane_id}: bounded terminal event/input transport failed"
-                );
+            if pane.pty_input_failed() {
+                log::error!("closing pane {pane_id}: its PTY input transport failed");
                 pane.closed = true;
                 while pane.rx.try_recv().is_ok() {}
             }
