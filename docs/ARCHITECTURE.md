@@ -1688,6 +1688,13 @@ pending remote commands, and older agent files.
   4 KiB, and version, filename identity, PID, owner start-time token, and
   `#rrggbb` fields are validated before a claim participates in color
   selection.
+  Creation, color updates, and removal use one presence writer with at most
+  1,024 admitted claims and one pending color per claim. Preview updates replace
+  pending colors without waiting for disk; local ownership and renderer changes
+  stay synchronous. Closing cancels pending colors; reopening the same filename
+  reuses its slot so an old removal cannot erase the replacement claim.
+  Admission or worker-start failure keeps local ownership working without a
+  cross-process claim.
   `accent-color = theme|off|none` opts out; a hex value pins one color.
 
 ## Search architecture

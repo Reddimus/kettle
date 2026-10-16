@@ -23,7 +23,7 @@ pub(crate) enum RecoveryAction {
     Attempt { attempt_index: u32 },
 }
 
-/// Pure device-loss scheduler. `attempt_index` is zero-based and maps directly
+/// Device-loss scheduler. `attempt_index` is zero-based and maps directly
 /// to `kettle_render::escalation_for_attempt`.
 #[derive(Debug, Default)]
 pub(crate) struct RecoveryState {
@@ -46,9 +46,12 @@ impl RecoveryState {
         }
     }
 
-    pub(crate) fn failed(&mut self, now: Instant, backoff: Duration) {
+    // A blocking rebuild must not consume the pause before the next attempt.
+    pub(crate) fn failed(&mut self, backoff: Duration) -> Instant {
+        let completed = Instant::now();
         self.attempts = self.attempts.saturating_add(1);
-        self.next_at = Some(now.checked_add(backoff).unwrap_or(now));
+        self.next_at = Some(completed.checked_add(backoff).unwrap_or(completed));
+        completed
     }
 
     pub(crate) fn recovered(&mut self) {
@@ -376,15 +379,41 @@ mod tests {
             state.poll(base + settle, settle),
             RecoveryAction::Attempt { attempt_index: 0 }
         );
-        state.failed(base + settle, Duration::from_millis(500));
+        let completed = state.failed(Duration::from_millis(500));
         assert_eq!(
-            state.poll(base + Duration::from_millis(1200), settle),
+            state.poll(completed + Duration::from_millis(500), settle),
             RecoveryAction::Attempt { attempt_index: 1 }
         );
         state.recovered();
         assert_eq!(
             state.poll(base + Duration::from_secs(2), settle),
             RecoveryAction::Wait(settle)
+        );
+    }
+
+    #[test]
+    fn slow_recovery_failure_gets_a_full_backoff() {
+        let started = Instant::now() - Duration::from_secs(5);
+        let mut state = RecoveryState::default();
+        assert_eq!(
+            state.poll(started, Duration::ZERO),
+            RecoveryAction::Wait(Duration::ZERO)
+        );
+        assert_eq!(
+            state.poll(started, Duration::ZERO),
+            RecoveryAction::Attempt { attempt_index: 0 }
+        );
+        let before_completion = Instant::now();
+        let backoff = Duration::from_millis(500);
+        let completed = state.failed(backoff);
+        assert!(completed >= before_completion);
+        assert_eq!(
+            state.poll(completed, Duration::ZERO),
+            RecoveryAction::Wait(backoff)
+        );
+        assert_eq!(
+            state.poll(completed + backoff, Duration::ZERO),
+            RecoveryAction::Attempt { attempt_index: 1 }
         );
     }
 

@@ -2777,6 +2777,11 @@ removing the theme-color update to a live claim, and omitting the client/frame
 inset from the drag anchor. Each failed its regression test at runtime. These
 pure tests do not replace the native dispatch check below.
 
+The presence publisher tests use private temporary claims and a blocked writer
+backend. They cover bounded admission, coalescing theme previews while local
+accents update immediately, closing during an in-flight write, and reopening
+that filename without losing the replacement claim. They need no native window.
+
 Run `scripts/check-tab-window-transfer.py --kettle <binary> --worker <worker>
 --out <new-directory>` under an isolated Linux X server; add `--language es`
 for the Spanish chooser. It uses native keyboard and pointer input to cover an
@@ -4177,8 +4182,11 @@ and files; the old construction failed under umask `002` before the correction.
 
 `just dock-menu-smoke` drives the real Dock. It reads the menu back through
 accessibility, requires the New Window and New Tab rows plus at least one
-open-window title above them, then clicks New Window and requires the window
-count to reach two over the control plane. Screenshots play no part: the Dock
+open-window title above them, minimizes the sole window, and clicks New Tab.
+It requires one additional tab, the same window restored, and application focus
+before clicking New Window and requiring two windows over the control plane.
+The portable Dock wiring test pins restoration before action dispatch.
+Screenshots play no part: the Dock
 is filtered out of automation captures at the allowlist level, which is why
 five release runs recorded in `APPEARANCE-GATE.md` could not judge the Dock
 from a screen capture. Accessibility enumeration is a different surface and

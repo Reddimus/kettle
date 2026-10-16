@@ -27,6 +27,7 @@ const MAX_PREVIEW_WIDTH: u32 = 256;
 const MAX_PREVIEW_HEIGHT: u32 = 160;
 const MAX_PREVIEW_BYTES: usize = MAX_PREVIEW_WIDTH as usize * MAX_PREVIEW_HEIGHT as usize * 4;
 const WORKER_TIMEOUT: Duration = Duration::from_secs(2);
+const WORKER_CLEANUP: Duration = Duration::from_millis(100);
 const WORKER_TIMEOUT_EXIT: i32 = 4;
 const WORKER_WATCHDOG_SETUP_EXIT: i32 = 8;
 /// The worker is another build than its parent (an update replaced the
@@ -626,10 +627,88 @@ fn read_bounded_preview(reader: &mut impl std::io::Read) -> std::io::Result<Vec<
     Ok(output)
 }
 
-fn stop_and_reap_child(child: &mut std::process::Child) -> bool {
-    match child.kill() {
-        Ok(()) => child.wait().is_ok(),
-        Err(_) => matches!(child.try_wait(), Ok(Some(_))),
+struct UnreapedPreviewChildren {
+    children: Vec<std::process::Child>,
+    reaper_running: bool,
+}
+
+fn retain_preview_child(child: std::process::Child) {
+    static UNREAPED: std::sync::Mutex<UnreapedPreviewChildren> =
+        std::sync::Mutex::new(UnreapedPreviewChildren {
+            children: Vec::new(),
+            reaper_running: false,
+        });
+    let mut pending = UNREAPED.lock().unwrap_or_else(|error| error.into_inner());
+    pending.children.push(child);
+    if pending.reaper_running {
+        return;
+    }
+    let reaper = std::thread::Builder::new()
+        .name("kettle-video-preview-reaper".to_owned())
+        .spawn(|| {
+            loop {
+                let mut pending = UNREAPED.lock().unwrap_or_else(|error| error.into_inner());
+                pending
+                    .children
+                    .retain_mut(|child| !matches!(child.try_wait(), Ok(Some(_))));
+                if pending.children.is_empty() {
+                    pending.reaper_running = false;
+                    return;
+                }
+                drop(pending);
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
+    pending.reaper_running = reaper.is_ok();
+}
+
+fn preview_cleanup_until(until: std::time::Instant, mut finished: impl FnMut() -> bool) -> bool {
+    loop {
+        if finished() {
+            return true;
+        }
+        let now = std::time::Instant::now();
+        if now >= until {
+            return false;
+        }
+        std::thread::sleep((until - now).min(Duration::from_millis(5)));
+    }
+}
+
+fn join_preview_thread<T>(
+    thread: std::thread::JoinHandle<T>,
+    until: std::time::Instant,
+) -> Option<std::thread::Result<T>> {
+    preview_cleanup_until(until, || thread.is_finished()).then(|| thread.join())
+}
+
+trait PreviewChildCleanup {
+    fn stop(&mut self);
+    fn reaped(&mut self) -> bool;
+    fn retain(self);
+}
+
+impl PreviewChildCleanup for std::process::Child {
+    fn stop(&mut self) {
+        let _ = self.kill();
+    }
+    fn reaped(&mut self) -> bool {
+        matches!(self.try_wait(), Ok(Some(_)))
+    }
+    fn retain(self) {
+        retain_preview_child(self);
+    }
+}
+
+fn stop_and_reap_child(mut child: impl PreviewChildCleanup) -> bool {
+    child.stop();
+    if preview_cleanup_until(std::time::Instant::now() + WORKER_CLEANUP, || {
+        child.reaped()
+    }) {
+        true
+    } else {
+        child.retain();
+        false
     }
 }
 
@@ -639,9 +718,8 @@ fn run_preview_child(path: &Path, deadline: std::time::Instant) -> PreviewChildO
 }
 
 /// One check of `path`, waited for until `until`: the request is written
-/// and the reply read on their own threads, so a helper that stalls, before
-/// or after reading, holds this one no longer than `until`, when it is
-/// stopped, which ends both.
+/// and the reply read on their own threads. At `until` a stalled helper is
+/// killed; cleanup bounds the wait for its exit and the pipe threads.
 fn run_preview_child_once(path: &Path, until: std::time::Instant) -> PreviewChildAttempt<Checked> {
     let Some(input) = encode_request(path, build_identity()) else {
         return PreviewChildAttempt::Failed;
@@ -664,7 +742,7 @@ fn run_preview_child_once(path: &Path, until: std::time::Instant) -> PreviewChil
         return PreviewChildAttempt::Failed;
     };
     let (Some(mut stdin), Some(mut stdout)) = (child.stdin.take(), child.stdout.take()) else {
-        return if stop_and_reap_child(&mut child) {
+        return if stop_and_reap_child(child) {
             PreviewChildAttempt::Failed
         } else {
             PreviewChildAttempt::WorkerLost
@@ -672,7 +750,7 @@ fn run_preview_child_once(path: &Path, until: std::time::Instant) -> PreviewChil
     };
     #[cfg(target_os = "macos")]
     if !no_sigpipe(&stdin) {
-        return if stop_and_reap_child(&mut child) {
+        return if stop_and_reap_child(child) {
             PreviewChildAttempt::Failed
         } else {
             PreviewChildAttempt::WorkerLost
@@ -685,7 +763,7 @@ fn run_preview_child_once(path: &Path, until: std::time::Instant) -> PreviewChil
         Ok(writer) => writer,
         Err(error) => {
             log::warn!("video preview writer could not start: {error}");
-            return if stop_and_reap_child(&mut child) {
+            return if stop_and_reap_child(child) {
                 PreviewChildAttempt::Failed
             } else {
                 PreviewChildAttempt::WorkerLost
@@ -699,11 +777,15 @@ fn run_preview_child_once(path: &Path, until: std::time::Instant) -> PreviewChil
         Ok(reader) => reader,
         Err(error) => {
             log::warn!("video preview reader could not start: {error}");
-            if !stop_and_reap_child(&mut child) {
+            if !stop_and_reap_child(child) {
                 return PreviewChildAttempt::WorkerLost;
             }
-            let _ = writer.join();
-            return PreviewChildAttempt::Failed;
+            let cleanup = std::time::Instant::now() + WORKER_CLEANUP;
+            return if join_preview_thread(writer, cleanup).is_some() {
+                PreviewChildAttempt::Failed
+            } else {
+                PreviewChildAttempt::WorkerLost
+            };
         }
     };
     let deadline = until;
@@ -714,29 +796,42 @@ fn run_preview_child_once(path: &Path, until: std::time::Instant) -> PreviewChil
                 std::thread::sleep(Duration::from_millis(10));
             }
             Ok(None) => {
-                if !stop_and_reap_child(&mut child) {
+                if !stop_and_reap_child(child) {
                     return PreviewChildAttempt::WorkerLost;
                 }
-                let _ = writer.join();
-                return match reader.join() {
-                    Ok(Ok(_)) => PreviewChildAttempt::TimedOut,
-                    Ok(Err(_)) | Err(_) => PreviewChildAttempt::Failed,
+                let cleanup = std::time::Instant::now() + WORKER_CLEANUP;
+                if join_preview_thread(writer, cleanup).is_none() {
+                    return PreviewChildAttempt::WorkerLost;
+                }
+                return match join_preview_thread(reader, cleanup) {
+                    Some(Ok(Ok(_))) => PreviewChildAttempt::TimedOut,
+                    Some(Ok(Err(_)) | Err(_)) => PreviewChildAttempt::Failed,
+                    None => PreviewChildAttempt::WorkerLost,
                 };
             }
             Err(_) => {
-                if !stop_and_reap_child(&mut child) {
+                if !stop_and_reap_child(child) {
                     return PreviewChildAttempt::WorkerLost;
                 }
-                // Join only to bound the threads. Whatever they return, the
-                // failed wait already makes this a non-retryable failure.
-                let _ = writer.join();
-                let _ = reader.join();
+                let cleanup = std::time::Instant::now() + WORKER_CLEANUP;
+                if join_preview_thread(writer, cleanup).is_none()
+                    || join_preview_thread(reader, cleanup).is_none()
+                {
+                    return PreviewChildAttempt::WorkerLost;
+                }
                 return PreviewChildAttempt::Failed;
             }
         }
     };
-    let wrote = writer.join().is_ok_and(|wrote| wrote.is_ok());
-    let output = reader.join().ok().and_then(Result::ok);
+    let cleanup = std::time::Instant::now() + WORKER_CLEANUP;
+    let Some(wrote) = join_preview_thread(writer, cleanup) else {
+        return PreviewChildAttempt::WorkerLost;
+    };
+    let Some(output) = join_preview_thread(reader, cleanup) else {
+        return PreviewChildAttempt::WorkerLost;
+    };
+    let wrote = wrote.is_ok_and(|wrote| wrote.is_ok());
+    let output = output.ok().and_then(Result::ok);
     finish_attempt(
         status.success(),
         status.code(),
@@ -1960,7 +2055,7 @@ mod tests {
         assert!(
             body.contains("std::thread::Builder::new()")
                 && body.contains(".name(\"kettle-video-preview-reader\".to_owned())")
-                && spawn_error.contains("stop_and_reap_child(&mut child)")
+                && spawn_error.contains("stop_and_reap_child(child)")
                 && spawn_error.contains("PreviewChildAttempt::WorkerLost"),
             "reader creation must be fallible and poison the queue worker when the child cannot be reaped"
         );
@@ -1983,34 +2078,59 @@ mod tests {
     }
 
     #[test]
-    fn a_parent_timeout_reaps_before_accepting_reader_completion() {
-        let source = kettle_test_support::production_source(include_str!("video_preview.rs"));
-        let body = source
-            .split("fn run_preview_child_once(")
-            .nth(1)
-            .and_then(|rest| rest.split("\nfn encode_request(").next())
-            .expect("run_preview_child_once body");
-        let timeout_arm = body
-            .split("Ok(None) => {")
-            .nth(1)
-            .and_then(|rest| rest.split("\n            Err(_) => {").next())
-            .expect("parent timeout arm");
-        let reap = timeout_arm
-            .find("stop_and_reap_child(&mut child)")
-            .expect("a timed-out child must be reaped");
-        let join = timeout_arm
-            .find("reader.join()")
-            .expect("the pipe reader must be joined");
+    fn a_killed_child_that_stays_alive_is_retained_without_waiting() {
+        use std::cell::Cell;
+        use std::rc::Rc;
 
-        assert!(
-            reap < join,
-            "reap the child before trusting pipe completion"
-        );
-        assert!(
-            timeout_arm.contains("Ok(Ok(_)) => PreviewChildAttempt::TimedOut")
-                && timeout_arm.contains("Ok(Err(_)) | Err(_) => PreviewChildAttempt::Failed"),
-            "only a clean reader completion may make the timeout retryable"
-        );
+        struct Stuck(Rc<Cell<bool>>, Rc<Cell<bool>>);
+
+        impl PreviewChildCleanup for Stuck {
+            fn stop(&mut self) {
+                self.0.set(true);
+            }
+            fn reaped(&mut self) -> bool {
+                assert!(self.0.get());
+                false
+            }
+            fn retain(self) {
+                self.1.set(true);
+            }
+        }
+
+        let stopped = Rc::new(Cell::new(false));
+        let retained = Rc::new(Cell::new(false));
+        let started = std::time::Instant::now();
+        assert!(!stop_and_reap_child(Stuck(
+            stopped.clone(),
+            retained.clone()
+        )));
+        assert!(stopped.get());
+        assert!(retained.get());
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_parent_timeout_does_not_wait_for_inherited_pipes() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = crate::test_tempdir();
+        let helper = dir.path().join("holds-pipe");
+        std::fs::write(&helper, "#!/bin/sh\nsleep 5 &\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (attempt, elapsed) = std::thread::spawn(move || {
+            assert!(block_sigpipe_on_current_thread());
+            STAND_IN.with(|stand_in| *stand_in.borrow_mut() = Some(helper));
+            let started = std::time::Instant::now();
+            let attempt = run_preview_child_once(
+                Path::new("/clip.mp4"),
+                started + Duration::from_millis(300),
+            );
+            (attempt, started.elapsed())
+        })
+        .join()
+        .unwrap();
+        assert_eq!(attempt, PreviewChildAttempt::WorkerLost);
+        assert!(elapsed < Duration::from_secs(3), "waited {elapsed:?}");
     }
 
     #[cfg(unix)]

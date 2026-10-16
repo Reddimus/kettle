@@ -817,6 +817,47 @@ fn lane_previews_item(
     .then_some(())
 }
 
+fn lane_frame(
+    item: &crate::media::ShelfItem,
+    panel: &crate::window_state::PreviewPanel,
+    preview: Option<&crate::media::LanePreview>,
+    playback: Option<&crate::media::LanePlayback>,
+) -> Option<kettle_render::MediaLaneFrame> {
+    lane_previews_item(item, panel)?;
+    if let Some(preview) =
+        preview.filter(|preview| preview.serves(item.id, item.generation) && preview.active())
+    {
+        return preview.frame().map(|frame| kettle_render::MediaLaneFrame {
+            sheet: frame.sheet.clone(),
+            source: frame.source,
+            size: item.size,
+        });
+    }
+    let frame = playback
+        .filter(|playback| playback.serves(item.id, item.generation))?
+        .frame()?;
+    Some(kettle_render::MediaLaneFrame {
+        sheet: frame.clone(),
+        source: (0, 0, frame.width, frame.height),
+        size: item.size,
+    })
+}
+
+fn lane_copy_image(
+    item: &crate::media::ShelfItem,
+    frame: Option<kettle_render::MediaLaneFrame>,
+) -> Option<kettle_core::ImageData> {
+    let Some(frame) = frame else {
+        return item.image().cloned();
+    };
+    let (x, y, width, height) = frame.source;
+    if (x, y, width, height) == (0, 0, frame.sheet.width, frame.sheet.height) {
+        Some(frame.sheet)
+    } else {
+        frame.sheet.crop(x, y, width, height)
+    }
+}
+
 /// The rest the real pointer makes on a lane's picture after `current`:
 /// `hovered` is the lane whose picture it is on, at `at`, at `now`. A rest
 /// is a pointer that stays put, so moving starts it again, until a loop
@@ -1449,6 +1490,33 @@ fn lane_interactive_controls(
         .collect()
 }
 
+fn accessibility_lane_controls_key(
+    lane: &kettle_render::MediaLanePanel,
+    geometry: Option<&kettle_render::MediaLaneGeometry>,
+) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (lane.mode == kettle_render::MediaLaneMode::Source).hash(&mut hasher);
+    lane.pin_label.is_some().hash(&mut hasher);
+    geometry.is_some().hash(&mut hasher);
+    let rect_key =
+        |(x, y, width, height): kettle_render::Rect4| [x, y, width, height].map(f32::to_bits);
+    if let Some(geometry) = geometry {
+        for (part, rect, hit) in lane_controls(geometry) {
+            (part, rect.map(rect_key), lane_control_enabled(lane, hit)).hash(&mut hasher);
+        }
+        geometry.scrubber.map(rect_key).hash(&mut hasher);
+        if geometry.scrubber.is_some() {
+            lane.scrubber
+                .as_ref()
+                .map(|bar| (bar.position_ms, bar.duration_ms))
+                .hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
 fn lane_control_enabled(
     lane: &kettle_render::MediaLanePanel,
     hit: kettle_render::MediaLaneHit,
@@ -1543,6 +1611,28 @@ fn accessibility_confirm_button_index(id: NodeId) -> Option<usize> {
     let first = accessibility_modal_id(1, 1).0;
     let raw = id.0.checked_sub(first)?;
     (raw < (1 << 16) - 1).then_some(raw as usize)
+}
+
+fn accessibility_context_menu_item_index(id: NodeId, ws: &WindowState) -> Option<usize> {
+    if ws.confirm_dialog.is_some()
+        || ws.palette_input.is_some()
+        || ws.theme_picker_input.is_some()
+        || ws.layout_picker_input.is_some()
+        || ws.ssh_input.is_some()
+    {
+        return None;
+    }
+    let raw = id.0.checked_sub(accessibility_modal_id(2, 1).0)?;
+    if raw >= (1 << 16) - 1 {
+        return None;
+    }
+    let index = raw as usize;
+    ws.context_menu
+        .as_ref()?
+        .items
+        .get(index)
+        .is_some_and(item_is_dispatchable)
+        .then_some(index)
 }
 
 struct ModalAccessibilityProjection {
@@ -1665,6 +1755,9 @@ fn modal_accessibility_projection(
             }
             if !row.enabled {
                 node.set_disabled();
+            } else {
+                node.add_action(AccessibilityAction::Focus);
+                node.add_action(AccessibilityAction::Click);
             }
             if index == menu.highlight {
                 highlighted = Some(id);
@@ -7171,6 +7264,8 @@ enum ContextMenuClick {
     /// `menu-item = LABEL = CMD` config entry. Dispatch writes
     /// `CMD\n` to the focused pane's PTY.
     ConfigCommand(String),
+    /// Reopen a detected session in a fresh local pane.
+    ReconnectRemote(String),
     /// Profile picked from the right-click "Profile ▸" submenu.
     /// Dispatch sets `App::config_path` via the profile-path
     /// resolution helper and calls `reload_config`.
@@ -7240,6 +7335,8 @@ enum ContextMenuItem {
     ConfigItem {
         label: String,
         command: String,
+        /// Reconnect commands run in a fresh local pane.
+        new_pane: bool,
     },
     /// Terminator parity, per
     /// [`TERMINATOR-THEME-SUBMENU-DESIGN.md`](
@@ -7760,15 +7857,23 @@ fn tear_lift_ratio(cx: f32, cy: f32, band: (f32, f32, f32, f32), threshold: f32)
 
 /// Re-dock insertion index for a torn-off tab dropped at
 /// `cursor` (main-axis coordinate) given the existing segments' main-axis
-/// midpoints, in order. First segment whose midpoint exceeds the cursor
-/// wins; past every midpoint appends. Distinct from `tab_drag_target_index`
+/// midpoints, in order. Negative midpoints mark hidden segments.
+/// First visible midpoint past the cursor wins; otherwise insert after the
+/// last visible tab. Distinct from `tab_drag_target_index`
 /// (which picks the segment UNDER the cursor for reorder): docking inserts
 /// BETWEEN segments, so a strip of n tabs has n+1 valid slots.
 fn dock_insertion_index(seg_mids: &[f32], cursor: f32) -> usize {
-    seg_mids
-        .iter()
-        .position(|&m| cursor < m)
-        .unwrap_or(seg_mids.len())
+    let mut insertion = 0;
+    for (idx, &mid) in seg_mids.iter().enumerate() {
+        if mid < 0.0 {
+            continue;
+        }
+        if cursor < mid {
+            return idx;
+        }
+        insertion = idx + 1;
+    }
+    insertion
 }
 
 /// The tab index a torn-off tab dropped at `cursor` (main-axis coordinate)
@@ -8767,9 +8872,13 @@ fn item_to_click(item: &ContextMenuItem, idx: usize) -> Option<ContextMenuClick>
             ..
         } => Some(ContextMenuClick::Action(action.clone())),
         ContextMenuItem::LuaItem { lua_idx, .. } => Some(ContextMenuClick::LuaMenuItem(*lua_idx)),
-        ContextMenuItem::ConfigItem { command, .. } => {
-            Some(ContextMenuClick::ConfigCommand(command.clone()))
-        }
+        ContextMenuItem::ConfigItem {
+            command, new_pane, ..
+        } => Some(if *new_pane {
+            ContextMenuClick::ReconnectRemote(command.clone())
+        } else {
+            ContextMenuClick::ConfigCommand(command.clone())
+        }),
         ContextMenuItem::Submenu { .. } => Some(ContextMenuClick::DrillIntoSubmenu(idx)),
         ContextMenuItem::WindowChoice { window, panes, .. } => {
             Some(ContextMenuClick::MoveTabToWindow {
@@ -9669,6 +9778,40 @@ fn remote_reconnect_label(
             runtime, container, ..
         } => tr.menu_reattach(runtime.name(), container),
     }
+}
+
+fn remote_reconnect_item(
+    ctx: &kettle_remote::RemoteContext,
+    tr: &kettle_i18n::Translator,
+) -> Option<ContextMenuItem> {
+    Some(ContextMenuItem::ConfigItem {
+        label: remote_reconnect_label(ctx, tr),
+        command: kettle_remote::clone_session_command(ctx)?,
+        new_pane: true,
+    })
+}
+
+fn reconnect_remote_session(
+    mux: &mut Mux,
+    cfg: &Config,
+    geometry: PtyGeometry,
+    waker: kettle_core::Waker,
+    mut command: String,
+) -> Result<PaneInputResult> {
+    mux.split_with_geometry(
+        Dir::Horizontal,
+        false,
+        cfg,
+        geometry,
+        waker,
+        cfg.shell.iter().cloned().collect(),
+        None,
+    )?;
+    let pane = mux
+        .focused()
+        .ok_or_else(|| anyhow::anyhow!("remote reconnect created no pane"))?;
+    command.push('\n');
+    Ok(pane.feed_input(command.as_bytes()))
 }
 
 /// Which broadcast scope the group chord turns on, from `broadcast-default`.
@@ -11813,6 +11956,14 @@ impl App {
         self.lanes_moved(ws);
     }
 
+    fn restore_scaled_zoom_font(&mut self, ws: &mut WindowState) {
+        if let Some(prev) = ws.scaled_zoom_prev_font_size.take()
+            && let Some(r) = ws.renderer.as_mut()
+        {
+            r.set_font_size(prev);
+        }
+    }
+
     /// Shared zoom transition for `Action::ToggleZoom` and
     /// `Action::ScaledZoom`. Both actions flip the SAME `ws.mux` zoom flag, so
     /// they must share `ws.scaled_zoom_prev_font_size`. Otherwise a plain
@@ -13309,6 +13460,9 @@ impl App {
             // its sidechannel — otherwise the shell's last line is lost from the trace.
             self.flush_recorder_output(ws);
             let reaped = ws.mux.reap();
+            if reaped.layout_changed {
+                ws.dragging_split = None;
+            }
             // `clear_stale_title_edit` mutates `ws.editing_title`, so it is
             // evaluated into a binding rather than placed on the right of the
             // `||` where a reaped layout would short-circuit past it and
@@ -14460,6 +14614,8 @@ impl App {
                         &e,
                         &self.ui_text,
                     );
+                } else {
+                    self.restore_scaled_zoom_font(ws);
                 }
             }
             Action::SplitDown | Action::SplitUp | Action::SplitAuto => {
@@ -14490,6 +14646,8 @@ impl App {
                 };
                 if let Err(e) = res {
                     report_split_failure(if new_first { "up" } else { "down" }, &e, &self.ui_text);
+                } else {
+                    self.restore_scaled_zoom_font(ws);
                 }
             }
             Action::ClosePane => {
@@ -15636,6 +15794,7 @@ impl App {
             // would leave every child process believing its old geometry.
             Action::RotateCw | Action::RotateCcw => {
                 if ws.mux.rotate_layout(action == Action::RotateCw) {
+                    self.restore_scaled_zoom_font(ws);
                     self.resize_all(ws);
                     self.save_session(ws);
                     if let Some(w) = &ws.window {
@@ -19570,6 +19729,13 @@ impl App {
             // fall-back to a new tab when a window cannot be created.
             #[cfg(target_os = "macos")]
             UserEvent::DockCommand(command) => {
+                if command == crate::macos_dock::DockCommand::NewTab
+                    && let Some(w) = &ws.window
+                {
+                    w.set_visible(true);
+                    w.set_minimized(false);
+                    w.focus_window();
+                }
                 self.handle_action(ws, command.action(), _el);
             }
         }
@@ -21557,6 +21723,9 @@ impl App {
         // e.g. a fast `-e cmd` session).
         self.flush_recorder_output(ws);
         let reaped = ws.mux.reap();
+        if reaped.layout_changed {
+            ws.dragging_split = None;
+        }
         // Binding, not an inline call on the right of `||`: see the matching
         // reap in `redraw`.
         let stale_title = clear_stale_title_edit(&ws.mux, &mut ws.editing_title);
@@ -21689,7 +21858,7 @@ impl App {
                                 log::warn!("GPU fault diagnostic write failed: {write_error}");
                             }
                             let backoff = gpu_recovery_backoff(attempt);
-                            self.gpu_recovery.failed(now, backoff);
+                            let now = self.gpu_recovery.failed(backoff);
                             let next = backoff.max(std::time::Duration::from_millis(1));
                             let next =
                                 automation_wait.map_or(next, |automation| automation.min(next));

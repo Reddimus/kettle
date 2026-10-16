@@ -771,6 +771,8 @@ impl App {
             // The play and sound buttons' names follow what they do.
             lane.play.hash(&mut hasher);
             lane.sound.hash(&mut hasher);
+            accessibility_lane_controls_key(lane, self.preview_lane_geometry(ws, lane).as_ref())
+                .hash(&mut hasher);
             let announced = self.lane_announcement(ws, lane.pane);
             media_lane_accessibility(lane, &self.ui_text, announced.as_deref()).hash(&mut hasher);
             let (x, y, width, height) = lane.rect;
@@ -862,6 +864,24 @@ impl App {
                     }
                 }
                 _ => return,
+            }
+            ws.accessibility_pending = true;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+            return;
+        }
+        if let Some(index) = accessibility_context_menu_item_index(request.target_node, ws) {
+            if !matches!(
+                request.action,
+                AccessibilityAction::Focus | AccessibilityAction::Click
+            ) || self.context_menu_geometry(ws).is_none()
+            {
+                return;
+            }
+            self.set_context_menu_highlight(ws, index);
+            if request.action == AccessibilityAction::Click {
+                self.context_menu_activate(ws, event_loop);
             }
             ws.accessibility_pending = true;
             if let Some(window) = &ws.window {
