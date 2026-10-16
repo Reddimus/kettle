@@ -4,6 +4,7 @@
 screenshot_dimensions_too_large = "La captura supera el límite de textura de la GPU; reduce el margen de la ventana o el tamaño de la fuente."
 
 ctl_screenshot_pane_not_visible = "El panel solicitado no está visible."
+ctl_run_command_busy = "El panel ya tiene un comando en ejecución."
 inline_card_pending = "Cargando…"
 inline_card_unavailable = "No disponible"
 inline_card_tip = "Haz clic para abrir"

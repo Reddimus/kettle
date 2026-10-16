@@ -759,7 +759,7 @@ fn parse_proc_argv(bytes: &[u8]) -> ParsedProcArgv {
 /// `None` means the buffer ended before the last argument, so the argv cannot
 /// be trusted.
 #[cfg(any(target_os = "macos", test))]
-fn parse_kern_procargs2(area: &[u8]) -> Option<ParsedProcArgv> {
+fn kern_procargs2_argv(area: &[u8]) -> Option<&[u8]> {
     let (argc, strings) = area.split_first_chunk::<4>()?;
     let argc = usize::try_from(i32::from_ne_bytes(*argc)).ok()?;
     let path_end = strings.iter().position(|&byte| byte == 0)?;
@@ -769,7 +769,12 @@ fn parse_kern_procargs2(area: &[u8]) -> Option<ParsedProcArgv> {
         let len = rest[end..].iter().position(|&byte| byte == 0)?;
         end += len + 1;
     }
-    Some(parse_proc_argv(&rest[..end]))
+    Some(&rest[..end])
+}
+
+#[cfg(test)]
+fn parse_kern_procargs2(area: &[u8]) -> Option<ParsedProcArgv> {
+    Some(parse_proc_argv(kern_procargs2_argv(area)?))
 }
 
 /// Where the arguments start after the executable path. The kernel pads the
@@ -877,6 +882,21 @@ mod kern_procargs2_tests {
         // The kernel truncates silently to the caller's buffer.
         bytes.truncate(bytes.len() - 3);
         assert!(parse_kern_procargs2(&bytes).is_none());
+    }
+
+    #[test]
+    fn raw_argv_span_includes_arguments_discarded_by_decoding() {
+        let oversized = "x".repeat(super::MAX_PROC_ARG_DECODED_BYTES + 1);
+        let args = ["ssh", "-p", oversized.as_str(), "box"];
+        let bytes = area(4, "/usr/bin/ssh", &args, &["A=environment"]);
+        let raw = super::kern_procargs2_argv(&bytes).unwrap();
+        assert_eq!(
+            raw.len(),
+            args.iter().map(|arg| arg.len() + 1).sum::<usize>()
+        );
+        let parsed = parse_kern_procargs2(&bytes).expect("complete raw area");
+        assert!(!parsed.complete);
+        assert_eq!(parsed.argv, ["ssh", "-p"]);
     }
 
     #[test]

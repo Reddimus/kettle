@@ -2834,7 +2834,7 @@ impl App {
     }
 
     /// `run_command`: write `cmd\n` to a pane and defer the reply (stored in a
-    /// `PendingRun`) until the next OSC-133 `CommandFinished` for that pane, or
+    /// `PendingRun`) until its OSC-133 `CommandFinished` generation, or
     /// the deadline. A bad request replies immediately over `reply`.
     pub(super) fn ctl_run_command(
         &mut self,
@@ -2868,6 +2868,23 @@ impl App {
             ));
             return;
         }
+        let command_generation = match Self::ctl_pane_ref(ws, &self.windows, pane) {
+            Some(p) => match p.term.idle_command_generation() {
+                Some(generation) => generation,
+                None => {
+                    let _ = reply.send(Response::err(
+                        req.id,
+                        ec::BUSY,
+                        self.ui_text.text(kettle_i18n::Text::CtlRunCommandBusy),
+                    ));
+                    return;
+                }
+            },
+            None => {
+                let _ = reply.send(Response::err(req.id, ec::NO_SUCH_PANE, "pane vanished"));
+                return;
+            }
+        };
         let timeout_s = req
             .params
             .get("timeout_s")
@@ -2914,6 +2931,7 @@ impl App {
                 conn_id,
                 req_id: req.id,
                 start_line,
+                command_generation,
                 deadline: std::time::Instant::now() + std::time::Duration::from_secs_f64(timeout_s),
                 reply,
             },
@@ -2929,12 +2947,10 @@ impl App {
         pane: u64,
         ev: &kettle_core::CommandFinished,
     ) {
-        let Some(run) = self.pending_runs.remove(&pane) else {
+        let Some(run) = take_pending_run(&mut self.pending_runs, pane, ev) else {
             return;
         };
-        let (captured, line_truncated) = self.ctl_capture_output_since(ws, pane, run.start_line);
-        let (output, byte_truncated) = cap_utf8_bytes(captured, MAX_CTL_COMMAND_OUTPUT_BYTES);
-        let output_truncated = line_truncated || byte_truncated;
+        let (output, output_truncated) = self.ctl_capture_output_since(ws, pane, run.start_line);
         let resp = kettle_ctl::protocol::Response::ok(
             run.req_id,
             serde_json::json!({
@@ -2946,7 +2962,7 @@ impl App {
                 "output_truncated": output_truncated,
             }),
         );
-        let _ = run.reply.send(resp);
+        let _ = run.reply.send(cap_ctl_command_response(resp));
     }
 
     /// Reply `timed_out` to any pending run whose deadline passed
@@ -2986,10 +3002,8 @@ impl App {
             let Some(run) = self.pending_runs.remove(&pane) else {
                 continue;
             };
-            let (captured, line_truncated) =
+            let (output, output_truncated) =
                 self.ctl_capture_output_since(ws, pane, run.start_line);
-            let (output, byte_truncated) = cap_utf8_bytes(captured, MAX_CTL_COMMAND_OUTPUT_BYTES);
-            let output_truncated = line_truncated || byte_truncated;
             let resp = kettle_ctl::protocol::Response::ok(
                 run.req_id,
                 serde_json::json!({
@@ -3002,7 +3016,7 @@ impl App {
                              (kettle --shell-integration <shell>) for exit codes",
                 }),
             );
-            let _ = run.reply.send(resp);
+            let _ = run.reply.send(cap_ctl_command_response(resp));
         }
     }
 
@@ -3040,14 +3054,25 @@ impl App {
             .saturating_sub(start_line)
             .min(MAX_CTL_SCROLLBACK_LINES as u64)
             .max(1) as usize;
-        let s = kettle_core::term::screen_text_of(&term, take);
-        drop(term);
-        let lines: Vec<&str> = s.text.lines().collect();
-        let (start_idx, end_idx, head_dropped) =
-            ctl_capture_bounds(origin, hist, start_line, cursor_abs, lines.len());
+        use kettle_core::Dimensions as _;
+        let take = take.min(hist);
+        let (start_idx, end_idx, head_dropped) = ctl_capture_bounds(
+            origin,
+            hist,
+            start_line,
+            cursor_abs,
+            take + term.screen_lines(),
+        );
         if start_idx >= end_idx {
             return (String::new(), head_dropped);
         }
-        (lines[start_idx..end_idx].join("\n"), head_dropped)
+        let first_row = -(take as i32);
+        let (output, byte_truncated) = kettle_core::grid_text::rows_text_bounded(
+            grid,
+            first_row + start_idx as i32,
+            first_row + end_idx as i32,
+            MAX_CTL_COMMAND_OUTPUT_BYTES,
+        );
+        (output, head_dropped || byte_truncated)
     }
 }

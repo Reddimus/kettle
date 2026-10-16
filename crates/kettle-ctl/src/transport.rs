@@ -438,6 +438,22 @@ impl CtlStream {
             #[cfg(unix)]
             CtlStream::Unix(s) => {
                 use std::os::unix::io::AsRawFd;
+                let mut poll = libc::pollfd {
+                    fd: s.stream.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                let hangup = libc::POLLHUP | libc::POLLERR | libc::POLLNVAL;
+                #[cfg(any(target_os = "linux", target_os = "android"))]
+                let hangup = {
+                    poll.events |= libc::POLLRDHUP;
+                    hangup | libc::POLLRDHUP
+                };
+                // HUP is independent of readability, including unread frames.
+                // SAFETY: poll points to one initialized entry with a live fd.
+                if unsafe { libc::poll(&mut poll, 1, 0) } > 0 && poll.revents & hangup != 0 {
+                    return true;
+                }
                 let mut probe = [0u8; 1];
                 // recv with MSG_PEEK|MSG_DONTWAIT (UnixStream::peek is still
                 // unstable on the MSRV): 0 = orderly EOF (dead); >0 = request
@@ -1588,6 +1604,24 @@ fn unix_peer_pid(fd: std::os::fd::RawFd) -> io::Result<libc::pid_t> {
 pub(crate) mod tests {
     use super::*;
     use std::io::BufRead as _;
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_disconnect_is_detected_behind_unread_pipeline() {
+        let (stream, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut ctl = CtlStream::Unix(UnixStream::new(stream).unwrap());
+        peer.write_all(b"pipelined").unwrap();
+        assert!(!ctl.peer_disconnected());
+        drop(peer);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !ctl.peer_disconnected() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ctl.peer_disconnected(), "unread bytes must not mask hangup");
+        let mut bytes = [0; 9];
+        ctl.read_exact(&mut bytes).unwrap();
+        assert_eq!(&bytes, b"pipelined", "hangup checks must not consume input");
+    }
 
     #[test]
     fn millisecond_deadlines_round_up_only_sub_millisecond_remainders() {

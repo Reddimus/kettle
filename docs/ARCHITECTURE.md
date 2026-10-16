@@ -1636,6 +1636,9 @@ pending remote commands, and older agent files.
   once before applying renderer changes to every window. The latch re-arms
   immediately before the read so a racing genuine edit is not lost. Remote
   commands share an advisory lock between sender append and receiver claim.
+  Processes watching the same spool compete for batches: the first claimant
+  receives each batch, regardless of launch order. Use a distinct
+  `--remote-file` path for each receiving process and its senders to target it.
   Current `--remote-send` writers encode each exact argument as one
   `send-text-json <JSON_STRING>` line, preserving literal backslash escapes,
   LF, CR, NUL, and command-looking text without allowing payload lines to

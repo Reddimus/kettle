@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use super::{
     MAX_PROC_FILE_BYTES, MAX_PROC_TREE_NODES, MAX_PROC_TREE_TOTAL_BYTES, ProcessTree,
-    parse_kern_procargs2,
+    kern_procargs2_argv, parse_proc_argv,
 };
 
 const INITIAL_CHILD_SLOTS: usize = 64;
@@ -221,14 +221,14 @@ impl MacProcessTree {
         if size >= capacity {
             return ArgvRead::Truncated;
         }
-        let Some(parsed) = parse_kern_procargs2(&self.args[..size]) else {
+        let Some(argv) = kern_procargs2_argv(&self.args[..size]) else {
             return ArgvRead::Truncated;
         };
-        let argv_bytes: usize = parsed.argv.iter().map(|arg| arg.len() + 1).sum();
-        *total_bytes = total_bytes.saturating_add(argv_bytes as u64);
+        *total_bytes = total_bytes.saturating_add(argv.len() as u64);
         if *total_bytes > MAX_PROC_TREE_TOTAL_BYTES {
             return ArgvRead::OverBudget;
         }
+        let parsed = parse_proc_argv(argv);
         if !parsed.complete {
             return ArgvRead::Truncated;
         }
@@ -472,6 +472,23 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert!(!tree.partial_roots.contains(&short));
+
+        let expected = ["/bin/sh", "-c", "/bin/sleep 30; true"]
+            .iter()
+            .map(|arg| arg.len() + 1)
+            .sum::<usize>()
+            + (0..300).map(|i| format!("a{i}").len() + 1).sum::<usize>();
+        let mut total = 0;
+        assert!(matches!(
+            tree.read_argv(long, &mut total),
+            ArgvRead::Truncated
+        ));
+        assert_eq!(total, expected as u64);
+        let mut total = MAX_PROC_TREE_TOTAL_BYTES - expected as u64 + 1;
+        assert!(matches!(
+            tree.read_argv(long, &mut total),
+            ArgvRead::OverBudget
+        ));
     }
 
     #[test]

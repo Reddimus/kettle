@@ -4360,6 +4360,7 @@ pub(crate) fn home_dir_fallback(
 /// shell didn't ship one).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandFinished {
+    pub generation: u64,
     pub duration: std::time::Duration,
     pub exit_code: Option<i32>,
 }
@@ -4532,6 +4533,7 @@ pub struct Terminal {
     /// thread updates this; the App reads `command_finished` (below)
     /// to learn that a command completed + how long it took.
     pub output_started_at: Arc<Mutex<Option<std::time::Instant>>>,
+    command_generation: Arc<std::sync::atomic::AtomicU64>,
     /// Per-pane queue of completed-command events.
     /// Populated by the reader thread on OSC 133 D (CommandEnd) when
     /// `output_started_at` is `Some`; drained by the App each tick
@@ -4645,6 +4647,18 @@ pub enum ShellActivity {
     Running,
 }
 
+fn command_admission_generation(
+    started: &Mutex<Option<std::time::Instant>>,
+    generation: &std::sync::atomic::AtomicU64,
+) -> Option<u64> {
+    // The reader publishes the generation and running state under this lock.
+    let started = started.lock().ok()?;
+    if started.is_some() {
+        return None;
+    }
+    Some(generation.load(std::sync::atomic::Ordering::Relaxed))
+}
+
 fn classify_shell_activity(
     seen_prompts: bool,
     tracks_commands: bool,
@@ -4663,6 +4677,21 @@ fn classify_shell_activity(
 #[cfg(test)]
 mod shell_activity_tests {
     use super::{ShellActivity, classify_shell_activity};
+
+    #[test]
+    fn command_admission_rejects_running_shell() {
+        let started = std::sync::Mutex::new(Some(std::time::Instant::now()));
+        let generation = std::sync::atomic::AtomicU64::new(7);
+        assert_eq!(
+            super::command_admission_generation(&started, &generation),
+            None
+        );
+        *started.lock().unwrap() = None;
+        assert_eq!(
+            super::command_admission_generation(&started, &generation),
+            Some(7)
+        );
+    }
 
     #[test]
     fn incomplete_integration_never_claims_idle_or_running() {
@@ -6865,6 +6894,7 @@ impl Terminal {
         // per-pane OSC 133 OutputStart timestamp + completed-command
         // event queue. Reader thread writes; App polls each tick.
         let output_started_at: Arc<Mutex<Option<std::time::Instant>>> = Arc::new(Mutex::new(None));
+        let command_generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let output_start_seen: Arc<std::sync::atomic::AtomicBool> =
             Arc::new(std::sync::atomic::AtomicBool::new(false));
         let output_start_seen_for_struct = output_start_seen.clone();
@@ -6955,6 +6985,7 @@ impl Terminal {
             let graphics_reflow_generation = graphics_reflow_generation.clone();
             let prompts = prompts.clone();
             let output_started_at = output_started_at.clone();
+            let command_generation = command_generation.clone();
             let output_start_seen = output_start_seen.clone();
             let command_finished = command_finished.clone();
             let protocol_notifications = protocol_notifications.clone();
@@ -7800,6 +7831,8 @@ impl Terminal {
                                                 completion.prompt_boundary_pending = true;
                                             }
                                             if let Ok(mut t) = output_started_at.lock() {
+                                                command_generation
+                                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                                 *t = Some(std::time::Instant::now());
                                             }
                                             // `shell_idle` needs a REAL OutputStart source.
@@ -7829,6 +7862,8 @@ impl Terminal {
                                                     q.drain(0..d);
                                                 }
                                                 q.push(CommandFinished {
+                                                    generation: command_generation
+                                                        .load(std::sync::atomic::Ordering::Relaxed),
                                                     duration: started.elapsed(),
                                                     exit_code: code,
                                                 });
@@ -8036,6 +8071,7 @@ impl Terminal {
             graphics_reflow_generation,
             prompts,
             output_started_at,
+            command_generation,
             command_finished,
             protocol_notifications,
             completion: completion_cell,
@@ -8176,6 +8212,11 @@ impl Terminal {
                 .context("cannot read the PTY foreground process group");
         }
         u32::try_from(foreground).context("PTY foreground process group is out of range")
+    }
+
+    /// The last command generation, only when no OSC 133 command is running.
+    pub fn idle_command_generation(&self) -> Option<u64> {
+        command_admission_generation(&self.output_started_at, &self.command_generation)
     }
 
     /// Current command state when OSC 133 supplies enough information to know.

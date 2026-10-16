@@ -946,6 +946,7 @@ fn run_exec_engine(
         cancelled,
         capturing,
         poll_recording_finish,
+        spawn_pty_writer_arbiter,
     )
 }
 
@@ -956,6 +957,13 @@ fn run_exec_engine_with_recording_poll(
     cancelled: Option<&AtomicBool>,
     capturing: bool,
     mut recording_finished: impl FnMut(&mut Option<kettle_core::record::Recorder>, Instant) -> bool,
+    spawn_arbiter: impl FnOnce(
+        PtyStdin,
+        Receiver<Vec<u8>>,
+        Arc<Mutex<()>>,
+        Receiver<StdinPumpEvent>,
+        Sender<StdinPumpResult>,
+    ) -> std::io::Result<()>,
 ) -> i32 {
     if opts.argv.is_empty() {
         return startup_failure(
@@ -965,10 +973,10 @@ fn run_exec_engine_with_recording_poll(
             "kettle exec: no command given".to_string(),
         );
     }
-    // Clamp geometry into a sane PTY range (kettle-core clamps too, but a 0
-    // here would make ConPTY unhappy).
-    opts.cols = opts.cols.clamp(1, u16::MAX);
-    opts.rows = opts.rows.clamp(1, u16::MAX);
+    // Core can widen narrow grids; metadata must describe the effective PTY.
+    let geometry = PtyGeometry::from_cell_size(opts.cols as usize, opts.rows as usize, 8, 16);
+    opts.cols = geometry.columns as u16;
+    opts.rows = geometry.rows as u16;
 
     let cwd = match resolve_exec_cwd(opts.cwd.as_deref()) {
         Ok(cwd) => cwd,
@@ -1021,7 +1029,7 @@ fn run_exec_engine_with_recording_poll(
         // only used for VT state + query answers.
         2000,
         0,
-        PtyGeometry::from_cell_size(opts.cols as usize, opts.rows as usize, 8, 16),
+        geometry,
         false,
         CursorShape::Block,
         None,
@@ -1073,10 +1081,12 @@ fn run_exec_engine_with_recording_poll(
                 std::io::stderr(),
                 "kettle exec: cannot prepare PTY writer arbitration: {error}"
             );
+            process_tree.terminate(&term);
+            let _ = wait_for_exit_code(&term);
             return EXIT_INTERNAL;
         }
     };
-    if let Err(error) = spawn_pty_writer_arbiter(
+    if let Err(error) = spawn_arbiter(
         stdin_handle,
         pty_reply_rx,
         Arc::clone(&pty_reply_gate),
@@ -1087,6 +1097,8 @@ fn run_exec_engine_with_recording_poll(
             std::io::stderr(),
             "kettle exec: cannot start PTY writer arbiter: {error}"
         );
+        process_tree.terminate(&term);
+        let _ = wait_for_exit_code(&term);
         return EXIT_INTERNAL;
     }
     if opts.forward_stdin {
@@ -1095,6 +1107,8 @@ fn run_exec_engine_with_recording_poll(
                 std::io::stderr(),
                 "kettle exec: cannot start stdin forwarding thread: {error}"
             );
+            process_tree.terminate(&term);
+            let _ = wait_for_exit_code(&term);
             return EXIT_INTERNAL;
         }
     } else {
@@ -4436,6 +4450,7 @@ mod tests {
                 cancelled.store(true, Ordering::Release);
                 false
             },
+            spawn_pty_writer_arbiter,
         );
 
         assert!(polled_recording);
@@ -5577,6 +5592,73 @@ mod tests {
         };
         let mut sink = Vec::new();
         assert_eq!(run_exec_with(opts, &|| None, &mut sink), EXIT_INTERNAL);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn pty_writer_start_failure_terminates_the_process_tree() {
+        let directory = kettle_test_support::private_tempdir("kettle-exec-writer-failure-");
+        let pid_file = directory.path().join("descendant.pid");
+        let opts = opts_for(
+            vec![
+                "sh".into(),
+                "-c".into(),
+                "trap '' HUP; sleep 30 & echo $! > \"$1\"; wait".into(),
+                "kettle-exec-test".into(),
+                pid_file.to_string_lossy().into_owned(),
+            ],
+            None,
+        );
+        let mut sink = Vec::new();
+        let mut output = DirectOutput::new(OutputMode::Raw, &mut sink);
+        let mut descendant = None;
+        let code = run_exec_engine_with_recording_poll(
+            opts,
+            &|| None,
+            &mut output,
+            None,
+            false,
+            poll_recording_finish,
+            |_stdin, _replies, _gate, _events, _done| {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while descendant.is_none() && Instant::now() < deadline {
+                    descendant = std::fs::read_to_string(&pid_file)
+                        .ok()
+                        .and_then(|text| text.trim().parse::<u32>().ok());
+                    if descendant.is_none() {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
+                Err(std::io::Error::from_raw_os_error(libc::EAGAIN))
+            },
+        );
+        let pid = descendant.expect("the child must start before the injected failure");
+        let has_exited = || {
+            #[cfg(target_os = "linux")]
+            {
+                linux_process_has_exited(pid)
+            }
+            #[cfg(target_os = "macos")]
+            {
+                member_has_exited(pid as libc::pid_t)
+            }
+        };
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !has_exited() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let exited = has_exited();
+        if !exited {
+            // SAFETY: the fixture announced this positive descendant pid.
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGKILL);
+            }
+        }
+        assert_eq!(code, EXIT_INTERNAL);
+        assert!(
+            exited,
+            "descendant {pid} survived PTY writer startup failure"
+        );
     }
 
     #[test]

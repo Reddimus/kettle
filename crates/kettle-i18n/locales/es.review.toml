@@ -19,6 +19,7 @@
 # expanded and readable, after a rejected 33-file batch left input unchanged.
 [status]
 ctl_screenshot_pane_not_visible = "draft"
+ctl_run_command_busy = "draft"
 screenshot_dimensions_too_large = "draft"
 notify_body_drop_unreadable = "accepted"
 inline_card_pending = "accepted"
