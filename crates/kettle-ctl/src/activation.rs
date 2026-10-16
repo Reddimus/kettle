@@ -409,15 +409,9 @@ fn sweep_other_builds(paths: &ActivationPaths) -> OtherBuilds {
                 for endpoint in other_build_endpoints(paths, build) {
                     remove_own_socket(&endpoint);
                 }
-                #[cfg(unix)]
+                // Windows pipes vanish with their process, so there only the
+                // lock file remains to remove.
                 let _ = lock.remove(&lock_path);
-                // Windows cannot delete a file this process holds open; its
-                // pipes vanish with their process, so only the lock remains.
-                #[cfg(windows)]
-                {
-                    drop(lock);
-                    let _ = std::fs::remove_file(&lock_path);
-                }
             }
             Err(error) => {
                 log::debug!("activation sweep skipped {}: {error}", lock_path.display());

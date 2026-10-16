@@ -743,14 +743,17 @@ impl ExclusiveFileLock {
         }
     }
 
-    /// Removes the lock file while still holding it, then releases it. A
-    /// caller that opened the file before the removal finds it retired
-    /// (see [`is_retired_lock`]) instead of locking a file nobody else can
-    /// see. Removes nothing if `path` no longer names the locked file.
+    /// Removes the lock file, then releases it. A caller that opened the
+    /// file before the removal finds it retired (see [`is_retired_lock`])
+    /// instead of locking a file nobody else can see. Removes nothing if
+    /// `path` no longer names the locked file. Windows cannot delete a file
+    /// that is still open, so there the lock is released first.
     pub fn remove(self, path: &Path) -> io::Result<()> {
         if !private::same_file_identity(&self.file, path)? {
             return Err(retired_lock());
         }
+        #[cfg(windows)]
+        drop(self);
         fs::remove_file(path)
     }
 }
@@ -932,6 +935,9 @@ mod tests {
         assert!(is_retired_lock(&retired_lock()));
     }
 
+    /// Unix only for the second half: Windows cannot replace a file another
+    /// handle holds open.
+    #[cfg(unix)]
     #[test]
     fn removing_a_held_lock_unlinks_only_the_file_it_locked() {
         let root = test_tempdir();
