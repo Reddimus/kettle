@@ -1889,7 +1889,11 @@ fn main() -> anyhow::Result<()> {
             .ok()
             .and_then(|path| path.to_str().map(str::to_string));
         let request = kettle_ctl::activation::ActivationRequest::new(cwd, activation_identity);
-        match kettle_ctl::activation::activate_or_elect(request) {
+        // Each build elects its own primary, so a launch after an update
+        // opens in the newly installed version (#575).
+        let build = kettle_ctl::activation::BuildKey::new(env!("KETTLE_SOURCE_HASH"))
+            .expect("the build script emits a 16-digit hex source hash");
+        match kettle_ctl::activation::activate_or_elect(request, build) {
             Ok(kettle_ctl::activation::ActivationOutcome::Activated) => {
                 if startup_notification_queued {
                     // This secondary process owns the notification worker.
@@ -2960,7 +2964,7 @@ mod tests {
             .find("let startup_notification_queued = queue_startup_update_recovery(")
             .expect("GUI startup must queue the recovery warning");
         let activation_at = src
-            .find("activate_or_elect(request)")
+            .find("activate_or_elect(request, build)")
             .expect("bare GUI activation decision");
         assert!(
             queue_at < activation_at,

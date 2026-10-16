@@ -189,11 +189,68 @@ struct Primary {
 
 /// Cloneable, one-shot handoff from binary election to the UI server startup.
 #[derive(Clone)]
-pub struct PrimaryHandle(Arc<Mutex<Option<Primary>>>);
+pub struct PrimaryHandle {
+    primary: Arc<Mutex<Option<Primary>>>,
+    other_builds: OtherBuilds,
+}
 
 impl std::fmt::Debug for PrimaryHandle {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("PrimaryHandle(..)")
+    }
+}
+
+impl PrimaryHandle {
+    /// Primaries of other builds found running when this one was elected.
+    pub fn other_builds(&self) -> OtherBuilds {
+        self.other_builds.clone()
+    }
+}
+
+/// One build of Kettle: the 16 lowercase hex digits of the source hash it was
+/// built from. Each build elects its own primary, so a launch of a newer
+/// installed build never hands its window to a primary still running an
+/// older one (#575). A source hash, unlike the package version, also tells a
+/// development build from the release of the same version.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BuildKey([u8; 16]);
+
+impl BuildKey {
+    /// `None` unless `hex` is exactly 16 lowercase hex digits.
+    pub fn new(hex: &str) -> Option<Self> {
+        let bytes: [u8; 16] = hex.as_bytes().try_into().ok()?;
+        bytes
+            .iter()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+            .then_some(Self(bytes))
+    }
+
+    fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.0).expect("checked ASCII hex")
+    }
+}
+
+/// Primaries of other builds still running, such as the old version's after
+/// an update. Shared per-user state that two primaries would fight over, such
+/// as the restorable session, waits until they have exited.
+#[derive(Clone, Debug, Default)]
+pub struct OtherBuilds(Arc<Mutex<Vec<PathBuf>>>);
+
+impl OtherBuilds {
+    /// Whether any of them is still running. Checks each lock again, and
+    /// forgets a build once its lock is free.
+    pub fn running(&self) -> bool {
+        let mut locks = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        locks.retain(|lock| {
+            !matches!(
+                kettle_state::ExclusiveFileLock::try_acquire(lock),
+                Ok(Some(_))
+            )
+        });
+        !locks.is_empty()
     }
 }
 
@@ -202,17 +259,26 @@ struct ActivationPaths {
     lock: PathBuf,
     endpoint: String,
     endpoint_dir: Option<PathBuf>,
+    /// The registry directory every build's lock lives in.
+    base: PathBuf,
+    build: BuildKey,
+    #[cfg(unix)]
+    private_temp: PathBuf,
 }
 
-/// Activate an existing primary or atomically elect this process.
-pub fn activate_or_elect(request: ActivationRequest) -> io::Result<ActivationOutcome> {
+/// Activate an existing primary of this build, or atomically elect this
+/// process as its primary.
+pub fn activate_or_elect(
+    request: ActivationRequest,
+    build: BuildKey,
+) -> io::Result<ActivationOutcome> {
     if !request.is_valid() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "invalid activation request",
         ));
     }
-    let paths = activation_paths(&crate::discovery::registry_dir());
+    let paths = activation_paths(&crate::discovery::registry_dir(), build);
     activate_or_elect_at(request, &paths)
 }
 
@@ -262,6 +328,18 @@ fn try_become_primary(
     paths: &ActivationPaths,
     identity: LaunchIdentity,
 ) -> io::Result<Option<PrimaryHandle>> {
+    try_become_primary_with(
+        paths,
+        identity,
+        kettle_state::ExclusiveFileLock::try_acquire,
+    )
+}
+
+fn try_become_primary_with(
+    paths: &ActivationPaths,
+    identity: LaunchIdentity,
+    mut try_lock: impl FnMut(&Path) -> io::Result<Option<kettle_state::ExclusiveFileLock>>,
+) -> io::Result<Option<PrimaryHandle>> {
     let lock_dir = paths.lock.parent().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "activation lock has no parent")
     })?;
@@ -269,15 +347,126 @@ fn try_become_primary(
     if let Some(endpoint_dir) = &paths.endpoint_dir {
         ensure_private_dir(endpoint_dir)?;
     }
-    let Some(lock) = kettle_state::ExclusiveFileLock::try_acquire(&paths.lock)? else {
-        return Ok(None);
+    // A sweep in another process may remove this lock file between our open
+    // and our lock; the next open finds the current file.
+    let mut attempts = 0;
+    let lock = loop {
+        match try_lock(&paths.lock) {
+            Ok(Some(lock)) => break lock,
+            Ok(None) => return Ok(None),
+            Err(error) if kettle_state::is_retired_lock(&error) && attempts < 3 => attempts += 1,
+            Err(error) => return Err(error),
+        }
     };
     let listener = CtlListener::bind(&paths.endpoint)?;
-    Ok(Some(PrimaryHandle(Arc::new(Mutex::new(Some(Primary {
-        listener,
-        _lock: lock,
-        identity,
-    }))))))
+    let other_builds = sweep_other_builds(paths);
+    Ok(Some(PrimaryHandle {
+        primary: Arc::new(Mutex::new(Some(Primary {
+            listener,
+            _lock: lock,
+            identity,
+        }))),
+        other_builds,
+    }))
+}
+
+/// How many registry entries one sweep reads, like the registry walk's cap.
+const MAX_SWEEP_ENTRIES: usize = 256;
+
+/// Removes the activation files of builds that are no longer running and
+/// returns the ones that are. Older Kettle versions used one unkeyed
+/// `activation.lock` for every build; it is swept the same way once its
+/// primary exits.
+///
+/// Whether a build is running is decided by its lock alone, never by name or
+/// age: a lock this process can take has no primary, because a primary holds
+/// its lock for its whole life and binds its endpoint only while holding it.
+/// So any endpoint removed here is dead. The lock file is removed while still
+/// held; a launcher that opened it just before then finds it retired and
+/// retries.
+fn sweep_other_builds(paths: &ActivationPaths) -> OtherBuilds {
+    let Ok(entries) = std::fs::read_dir(&paths.base) else {
+        return OtherBuilds::default();
+    };
+    let mut running = Vec::new();
+    for entry in entries.take(MAX_SWEEP_ENTRIES).flatten() {
+        let name = entry.file_name();
+        let Some(build) = name.to_str().and_then(other_build_of_lock) else {
+            continue;
+        };
+        if build == Some(paths.build) {
+            continue;
+        }
+        let lock_path = entry.path();
+        // Only regular files: never follow a symlink someone left here.
+        if !std::fs::symlink_metadata(&lock_path).is_ok_and(|meta| meta.file_type().is_file()) {
+            continue;
+        }
+        match kettle_state::ExclusiveFileLock::try_acquire(&lock_path) {
+            Ok(None) => running.push(lock_path),
+            Ok(Some(lock)) => {
+                #[cfg(unix)]
+                for endpoint in other_build_endpoints(paths, build) {
+                    remove_own_socket(&endpoint);
+                }
+                #[cfg(unix)]
+                let _ = lock.remove(&lock_path);
+                // Windows cannot delete a file this process holds open; its
+                // pipes vanish with their process, so only the lock remains.
+                #[cfg(windows)]
+                {
+                    drop(lock);
+                    let _ = std::fs::remove_file(&lock_path);
+                }
+            }
+            Err(error) => {
+                log::debug!("activation sweep skipped {}: {error}", lock_path.display());
+            }
+        }
+    }
+    OtherBuilds(Arc::new(Mutex::new(running)))
+}
+
+/// The build an activation lock file belongs to: `Some(None)` for the
+/// unkeyed lock older versions used, `None` for anything else.
+fn other_build_of_lock(name: &str) -> Option<Option<BuildKey>> {
+    if name == "activation.lock" {
+        return Some(None);
+    }
+    let key = name.strip_prefix("activation-")?.strip_suffix(".lock")?;
+    BuildKey::new(key).map(Some)
+}
+
+/// Where another build's endpoint is, or was: in the registry directory, or
+/// in the private temporary directory when that path was too long.
+#[cfg(unix)]
+fn other_build_endpoints(paths: &ActivationPaths, build: Option<BuildKey>) -> [PathBuf; 2] {
+    match build {
+        Some(build) => [
+            paths.base.join(keyed_socket_name(build)),
+            paths
+                .private_temp
+                .join(fallback_socket_name(&paths.base, Some(build))),
+        ],
+        None => [
+            paths.base.join("activation.sock"),
+            paths
+                .private_temp
+                .join(fallback_socket_name(&paths.base, None)),
+        ],
+    }
+}
+
+/// Removes `path` only if it is a socket this user owns.
+#[cfg(unix)]
+fn remove_own_socket(path: &Path) {
+    use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return;
+    };
+    if meta.file_type().is_socket() && meta.uid() == unsafe { libc::geteuid() } {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// Start the primary accept loop. The handler runs once per compatible request
@@ -299,7 +488,7 @@ fn spawn_server_inner(
     worker_started: Arc<dyn Fn() + Send + Sync>,
 ) -> io::Result<()> {
     let primary = handle
-        .0
+        .primary
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take()
@@ -695,39 +884,72 @@ fn read_json_frame<T: for<'de> Deserialize<'de>>(
     }
 }
 
-fn activation_paths(base: &Path) -> ActivationPaths {
+fn activation_paths(base: &Path, build: BuildKey) -> ActivationPaths {
     #[cfg(unix)]
     {
-        activation_paths_with_temp(base, &private_temp_socket_dir())
+        activation_paths_with_temp(base, &private_temp_socket_dir(), build)
     }
     #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStrExt as _;
         let hash = stable_hash(base.as_os_str().encode_wide().flat_map(u16::to_le_bytes));
         ActivationPaths {
-            lock: base.join("activation.lock"),
-            endpoint: format!(r"\\.\pipe\kettle-activation-{hash:016x}"),
+            lock: base.join(keyed_lock_name(build)),
+            endpoint: format!(r"\\.\pipe\kettle-activation-{hash:016x}-{}", build.as_str()),
             endpoint_dir: None,
+            base: base.to_path_buf(),
+            build,
         }
     }
 }
 
-#[cfg(unix)]
-fn activation_paths_with_temp(base: &Path, private_temp_dir: &Path) -> ActivationPaths {
-    use std::os::unix::ffi::OsStrExt as _;
+fn keyed_lock_name(build: BuildKey) -> String {
+    format!("activation-{}.lock", build.as_str())
+}
 
-    let direct = base.join("activation.sock");
+#[cfg(unix)]
+fn keyed_socket_name(build: BuildKey) -> String {
+    format!("activation-{}.sock", build.as_str())
+}
+
+/// The endpoint's name in the private temporary directory when the registry
+/// path is too long for a socket. A fixed 32 bytes, so it fits under macOS's
+/// long per-user `$TMPDIR`. `None` is the unkeyed name older versions used.
+#[cfg(unix)]
+fn fallback_socket_name(base: &Path, build: Option<BuildKey>) -> String {
+    use std::os::unix::ffi::OsStrExt as _;
+    let base_bytes = base.as_os_str().as_bytes().iter().copied();
+    let hash = match build {
+        Some(build) => stable_hash(
+            base_bytes
+                .chain(std::iter::once(0))
+                .chain(build.as_str().bytes()),
+        ),
+        None => stable_hash(base_bytes),
+    };
+    format!("activation-{hash:016x}.sock")
+}
+
+#[cfg(unix)]
+fn activation_paths_with_temp(
+    base: &Path,
+    private_temp_dir: &Path,
+    build: BuildKey,
+) -> ActivationPaths {
+    let direct = base.join(keyed_socket_name(build));
     let endpoint = if unix_socket_path_fits(&direct) {
         direct
     } else {
-        let hash = stable_hash(base.as_os_str().as_bytes().iter().copied());
-        length_safe_unix_socket_path(&format!("activation-{hash:016x}.sock"), private_temp_dir)
+        length_safe_unix_socket_path(&fallback_socket_name(base, Some(build)), private_temp_dir)
     };
     let endpoint_dir = endpoint.parent().map(Path::to_path_buf);
     ActivationPaths {
-        lock: base.join("activation.lock"),
+        lock: base.join(keyed_lock_name(build)),
         endpoint: endpoint.to_string_lossy().into_owned(),
         endpoint_dir,
+        base: base.to_path_buf(),
+        build,
+        private_temp: private_temp_dir.to_path_buf(),
     }
 }
 
@@ -769,8 +991,12 @@ mod tests {
     /// name it `_dir` keep it alive for the test body.
     fn test_paths(label: &str) -> (kettle_test_support::PrivateTempDir, ActivationPaths) {
         let dir = kettle_test_support::private_tempdir(&format!("kettle-activation-{label}-"));
-        let paths = activation_paths(dir.path());
+        let paths = activation_paths(dir.path(), test_build());
         (dir, paths)
+    }
+
+    fn test_build() -> BuildKey {
+        BuildKey::new("0123456789abcdef").unwrap()
     }
 
     struct TestServer {
@@ -807,7 +1033,7 @@ mod tests {
         worker_started: Arc<dyn Fn() + Send + Sync>,
     ) -> io::Result<TestServer> {
         let primary = handle
-            .0
+            .primary
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
@@ -1240,12 +1466,14 @@ mod tests {
         let private_temp = PathBuf::from("/tmp")
             .join("an-unusually-long-tmpdir-component".repeat(5))
             .join("kettle-1234");
-        assert!(!unix_socket_path_fits(&base.join("activation.sock")));
         assert!(!unix_socket_path_fits(
-            &private_temp.join("activation-0123456789abcdef.sock")
+            &base.join(keyed_socket_name(test_build()))
+        ));
+        assert!(!unix_socket_path_fits(
+            &private_temp.join(fallback_socket_name(&base, Some(test_build())))
         ));
 
-        let paths = activation_paths_with_temp(&base, &private_temp);
+        let paths = activation_paths_with_temp(&base, &private_temp, test_build());
         let endpoint = PathBuf::from(&paths.endpoint);
         assert!(
             unix_socket_path_fits(&endpoint),
@@ -1265,10 +1493,10 @@ mod tests {
         let mut raw_base = b"/tmp/".to_vec();
         raw_base.extend(std::iter::repeat_n(0xff, 30));
         let base = PathBuf::from(OsString::from_vec(raw_base));
-        let direct = base.join("activation.sock");
+        let direct = base.join(keyed_socket_name(test_build()));
         assert!(direct.as_os_str().as_bytes().len() <= crate::MAX_UNIX_SOCKET_PATH_BYTES);
         assert!(direct.to_string_lossy().len() > crate::MAX_UNIX_SOCKET_PATH_BYTES);
-        let paths = activation_paths_with_temp(&base, Path::new("/tmp/kettle-test"));
+        let paths = activation_paths_with_temp(&base, Path::new("/tmp/kettle-test"), test_build());
         assert!(unix_socket_path_fits(Path::new(&paths.endpoint)));
         assert_ne!(paths.endpoint, direct.to_string_lossy());
 
@@ -1279,7 +1507,7 @@ mod tests {
         let unchecked = non_utf8_temp.join("activation-0123456789abcdef.sock");
         assert!(unchecked.as_os_str().as_bytes().len() <= crate::MAX_UNIX_SOCKET_PATH_BYTES);
         assert!(unchecked.to_string_lossy().len() > crate::MAX_UNIX_SOCKET_PATH_BYTES);
-        let paths = activation_paths_with_temp(&long_base, &non_utf8_temp);
+        let paths = activation_paths_with_temp(&long_base, &non_utf8_temp, test_build());
         let endpoint = PathBuf::from(&paths.endpoint);
         assert!(unix_socket_path_fits(&endpoint));
         assert!(
@@ -1287,6 +1515,186 @@ mod tests {
                 Path::new("/tmp").join(format!("kettle-{}", unsafe { libc::geteuid() }))
             )
         );
+    }
+
+    fn build(hex_digit: char) -> BuildKey {
+        BuildKey::new(&hex_digit.to_string().repeat(16)).unwrap()
+    }
+
+    #[test]
+    fn a_build_key_is_sixteen_lowercase_hex_digits() {
+        assert!(BuildKey::new("0123456789abcdef").is_some());
+        for bad in [
+            "0123456789ABCDEF",
+            "0123456789abcde",
+            "0123456789abcdef0",
+            "../activation....",
+        ] {
+            assert!(BuildKey::new(bad).is_none(), "{bad}");
+        }
+    }
+
+    /// #575: after an update, a launch of the new build must open in a
+    /// process of that build, not in the old build's primary, and without
+    /// waiting for it.
+    #[test]
+    fn a_launch_of_another_build_opens_its_own_primary_without_waiting() {
+        let dir = kettle_test_support::private_tempdir("kettle-activation-builds-");
+        let old = activation_paths(dir.path(), build('a'));
+        let new = activation_paths(dir.path(), build('b'));
+        let ActivationOutcome::Primary(old_primary) =
+            activate_or_elect_at(request(None), &old).unwrap()
+        else {
+            panic!("the first launch of the old build is its primary");
+        };
+        let old_calls = Arc::new(AtomicU64::new(0));
+        let counted = old_calls.clone();
+        let _old_server = spawn_test_server(old_primary, &old.endpoint, move |_| {
+            counted.fetch_add(1, Ordering::Relaxed);
+            true
+        })
+        .unwrap();
+
+        let started = Instant::now();
+        let outcome = activate_or_elect_at(request(None), &new).unwrap();
+        assert!(
+            matches!(outcome, ActivationOutcome::Primary(_)),
+            "a launch of the new build opened elsewhere: {outcome:?}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(old_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn later_launches_join_the_primary_of_their_own_build() {
+        let dir = kettle_test_support::private_tempdir("kettle-activation-join-");
+        let mut counts = Vec::new();
+        let mut servers = Vec::new();
+        let mut all_paths = Vec::new();
+        for digit in ['a', 'b'] {
+            let paths = activation_paths(dir.path(), build(digit));
+            let ActivationOutcome::Primary(primary) =
+                activate_or_elect_at(request(None), &paths).unwrap()
+            else {
+                panic!("the first launch of each build is its primary");
+            };
+            let calls = Arc::new(AtomicU64::new(0));
+            let counted = calls.clone();
+            servers.push(
+                spawn_test_server(primary, &paths.endpoint, move |_| {
+                    counted.fetch_add(1, Ordering::Relaxed);
+                    true
+                })
+                .unwrap(),
+            );
+            counts.push(calls);
+            all_paths.push(paths);
+        }
+        let outcome = activate_or_elect_at(request(None), &all_paths[1]).unwrap();
+        assert!(matches!(outcome, ActivationOutcome::Activated));
+        assert_eq!(counts[0].load(Ordering::Relaxed), 0);
+        assert_eq!(counts[1].load(Ordering::Relaxed), 1);
+    }
+
+    /// The sweep decides by lock alone: free locks of other builds, and the
+    /// unkeyed one older versions used, go with their sockets; a held lock,
+    /// this build's files and anything unrelated stay.
+    #[cfg(unix)]
+    #[test]
+    fn election_removes_endpoints_left_by_builds_no_longer_running() {
+        // Socket paths are short-limited, so this registry lives directly in
+        // /tmp rather than under a long per-user TMPDIR.
+        struct ShortDir(PathBuf);
+        impl Drop for ShortDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = ShortDir(PathBuf::from(format!(
+            "/tmp/kas-{}-{nanos:x}",
+            std::process::id()
+        )));
+        {
+            use std::os::unix::fs::DirBuilderExt as _;
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&dir.0)
+                .unwrap();
+        }
+        let base = dir.0.as_path();
+        let socket = |name: &str| {
+            let path = base.join(name);
+            // Dropping a bound listener leaves its socket file behind.
+            drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+            path
+        };
+        let lock_file = |name: &str| {
+            let path = base.join(name);
+            drop(
+                kettle_state::ExclusiveFileLock::try_acquire(&path)
+                    .unwrap()
+                    .unwrap(),
+            );
+            path
+        };
+        let legacy = [lock_file("activation.lock"), socket("activation.sock")];
+        let stale = [
+            lock_file("activation-dddddddddddddddd.lock"),
+            socket("activation-dddddddddddddddd.sock"),
+        ];
+        let held_lock_path = lock_file("activation-eeeeeeeeeeeeeeee.lock");
+        let held = kettle_state::ExclusiveFileLock::try_acquire(&held_lock_path)
+            .unwrap()
+            .unwrap();
+        let kept = [
+            held_lock_path.clone(),
+            socket("activation-eeeeeeeeeeeeeeee.sock"),
+            socket("ctl-123.sock"),
+            base.join("notes.txt"),
+        ];
+        std::fs::write(&kept[3], b"not ours").unwrap();
+
+        let paths = activation_paths(base, build('c'));
+        let ActivationOutcome::Primary(primary) =
+            activate_or_elect_at(request(None), &paths).unwrap()
+        else {
+            panic!("the launch is this build's primary");
+        };
+        for path in legacy.iter().chain(&stale) {
+            assert!(!path.exists(), "left behind: {path:?}");
+        }
+        for path in kept.iter().chain([&paths.lock]) {
+            assert!(path.exists(), "removed: {path:?}");
+        }
+        let others = primary.other_builds();
+        assert!(others.running());
+        drop(held);
+        assert!(!others.running());
+    }
+
+    #[test]
+    fn election_retries_a_lock_retired_under_it() {
+        let (_dir, paths) = test_paths("retired");
+        let mut calls = 0;
+        let primary = try_become_primary_with(&paths, LaunchIdentity::default(), |path| {
+            calls += 1;
+            if calls == 1 {
+                // A real retired-lock error: the path stops naming the file
+                // a lock was taken on.
+                let lock = kettle_state::ExclusiveFileLock::try_acquire(path)?.unwrap();
+                std::fs::remove_file(path)?;
+                drop(std::fs::File::create(path)?);
+                return Err(lock.remove(path).unwrap_err());
+            }
+            kettle_state::ExclusiveFileLock::try_acquire(path)
+        })
+        .unwrap();
+        assert!(primary.is_some());
+        assert_eq!(calls, 2);
     }
 
     #[test]
