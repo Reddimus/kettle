@@ -236,6 +236,13 @@ def check_codex(helpers, kettle, config, image, out, codex):
                 "CODEX_HOME": str(home.resolve()),
                 "OPENAI_API_KEY": None,
                 "CODEX_API_KEY": None,
+                # Keep the client off the network: its startup update check
+                # and telemetry then fail at once instead of stalling a slow
+                # runner while the test waits for an attachment.
+                "HTTP_PROXY": "http://127.0.0.1:9",
+                "HTTPS_PROXY": "http://127.0.0.1:9",
+                "ALL_PROXY": "http://127.0.0.1:9",
+                "NO_PROXY": "127.0.0.1,localhost",
             },
         ) as live,
         failure_evidence(live, out, "codex-failure"),
@@ -258,6 +265,12 @@ def check_codex(helpers, kettle, config, image, out, codex):
         for number, (route, keys, thumbnail) in enumerate(routes, 1):
             owner = helpers.set_bitmap_clipboard(image)
             try:
+                # Native keys go to the focused window; a route that starts
+                # while focus is elsewhere tests nothing.
+                wait_for(
+                    lambda: live.json_ctl("ui_geometry").get("window_focused"),
+                    route + " window focus",
+                )
                 native_keys(live, keys)
                 marker = f"[Image #{number}]"
                 wait_for(
@@ -265,6 +278,7 @@ def check_codex(helpers, kettle, config, image, out, codex):
                         marker in helpers.screen_text(live.json_ctl("read_screen"))
                     ),
                     route + " Codex attachment",
+                    timeout=20,
                 )
                 wait_for(
                     lambda thumbnail=thumbnail: (
