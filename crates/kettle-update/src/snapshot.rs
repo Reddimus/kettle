@@ -114,7 +114,7 @@ impl InstallSnapshot {
     }
 
     /// The install found at startup, for tests that drive it directly.
-    #[cfg(all(test, any(windows, target_os = "linux")))]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn managed_install(&self) -> Option<&ManagedInstall> {
         match &self.0 {
             Kind::Managed(install) => Some(install),
