@@ -446,6 +446,24 @@ mod tests {
         term(&crash.concat());
     }
 
+    /// The first hour-long `term` campaign: a block selection whose start
+    /// lands one column past a two-column row read past the row while its
+    /// text was copied.
+    #[test]
+    fn a_block_selection_past_a_narrow_row_copies_safely() {
+        let crash: [&[u8]; 8] = [
+            b"O\xa8\xa8\xa8\xa8\xa8\xa8\xa8\xa8\xa8\xa8\xa8\xa8\xa8\xa8\xa8",
+            b"\xa8\xa8\xa8\xa8\xa8\xa8\xa8\xa8\xa8\xa8\xa8\xa8\xa8\xa8z\xa8",
+            b"\xa8\xa8\xa8\xa8\xa8\xa8B\x13]8\x00\x00\x00\x00;;https:/m/am/a/b",
+            b"?c=d\x0d\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xfb\xff\xff\xff",
+            b"\xff\xff\xff\xff\xff\xff\xff\x01\x00\xdf\x9end e\xcc\x81\xcc\x82",
+            b" combining, \x0a$\xf0\x9f\x91\xa9\xe2w\x8d\xf0 \x9f\x92\x09E\x01",
+            b"\xfd\xfe\xf7\xff\x03\xc8\x00\xff\x04=\x01xe0le.com\x1b\\link\x1b",
+            b"]8;;\x1b\\ \x1b]0l\x1bti;et\x07[c\x1b[>c\x1b[6n\x1b[?6n",
+        ];
+        term(&crash.concat());
+    }
+
     /// The checks are live: a cursor outside its grid fails them.
     #[test]
     fn a_cursor_outside_its_grid_fails_the_check() {
