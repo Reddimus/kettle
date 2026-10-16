@@ -1927,6 +1927,21 @@ fn report_failed_termination(outcome: std::io::Result<()>) -> bool {
 const LINUX_PROC_SCAN_TIME: Duration = Duration::from_millis(500);
 #[cfg(target_os = "linux")]
 const LINUX_PROC_SCAN_PROCESSES: usize = 16_384;
+/// The time one session scan may take. Tests that check the order of
+/// teardown steps rather than their speed raise it, so a loaded runner cannot
+/// turn a slow scan into an unproven freeze (exit 125).
+#[cfg(target_os = "linux")]
+fn linux_proc_scan_time() -> Duration {
+    #[cfg(test)]
+    {
+        let millis = tests::LINUX_PROC_SCAN_TIME_FOR_TESTS.load(Ordering::Relaxed);
+        if millis > 0 {
+            return Duration::from_millis(millis);
+        }
+    }
+    LINUX_PROC_SCAN_TIME
+}
+
 #[cfg(target_os = "linux")]
 struct LinuxProcScanBudget {
     deadline: Instant,
@@ -1938,7 +1953,7 @@ struct LinuxProcScanBudget {
 impl LinuxProcScanBudget {
     fn new() -> Self {
         Self {
-            deadline: Instant::now() + LINUX_PROC_SCAN_TIME,
+            deadline: Instant::now() + linux_proc_scan_time(),
             processes: 0,
             exhausted: false,
         }
@@ -3710,6 +3725,11 @@ fn windows_console_size() -> Option<(u16, u16)> {
 
 #[cfg(test)]
 mod tests {
+    /// Overrides the Linux session-scan budget in milliseconds; 0 keeps the
+    /// production value. See `linux_proc_scan_time`.
+    #[cfg(target_os = "linux")]
+    pub(super) static LINUX_PROC_SCAN_TIME_FOR_TESTS: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
 
     #[test]
     fn a_blocked_writer_takes_the_pending_command_once_its_queue_has_room() {
@@ -6316,6 +6336,10 @@ wait
         if invoked_as_fixture(LINUX_FORK_FIXTURE) {
             return;
         }
+        // This checks that teardown freezes the session before its final
+        // scan, not how fast a runner scans: allow the scan ten seconds.
+        // Raising it only makes other tests' scans more patient.
+        LINUX_PROC_SCAN_TIME_FOR_TESTS.store(10_000, Ordering::Relaxed);
         let helper = std::env::current_exe().expect("resolve the unit-test binary");
         let opts = ExecOpts {
             argv: vec![
@@ -6499,16 +6523,16 @@ wait
         let argv = vec![
             "sh".into(),
             "-c".into(),
-            "printf started; exec sleep 30".into(),
+            "printf started; exec sleep 300".into(),
         ];
         #[cfg(windows)]
-        let argv = vec!["ping".into(), "-n".into(), "30".into(), "127.0.0.1".into()];
+        let argv = vec!["ping".into(), "-n".into(), "300".into(), "127.0.0.1".into()];
         let opts = ExecOpts {
             argv,
             cols: 80,
             rows: 24,
             cwd: None,
-            timeout: Some(Duration::from_secs(30)),
+            timeout: Some(Duration::from_secs(600)),
             mode: OutputMode::StripAnsi,
             record: Some(record.clone()),
             forward_stdin: false,
@@ -6524,7 +6548,9 @@ wait
         let (code, _output) = worker.join().unwrap();
 
         assert_eq!(code, EXIT_CANCELLED);
-        assert!(started.elapsed() < Duration::from_secs(5));
+        // Far below the child's 300 s, so only a kill can finish this soon;
+        // the margin is for a loaded runner, not a speed claim.
+        assert!(started.elapsed() < Duration::from_secs(60));
         let cast = std::fs::read_to_string(&record).unwrap();
         assert!(
             cast.lines()

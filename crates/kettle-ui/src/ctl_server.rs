@@ -2396,36 +2396,52 @@ mod tests {
         assert!(rx.try_recv().is_err(), "failed worker must not register");
     }
 
+    /// Idle peers are reclaimed, and the server serves a fresh request once
+    /// they are gone. The test asserts the contract, not runner speed: a peer
+    /// may expire while others are still being admitted, so both kinds of
+    /// message are collected in one loop, and each expiry must come at least
+    /// `request_idle` after its client connected. Thirty seconds only catches
+    /// a hang.
     #[test]
     fn eight_idle_peers_expire_and_a_fresh_request_is_served() {
+        let request_idle = Duration::from_millis(750);
         let policy = ConnectionPolicy {
-            request_idle: Duration::from_millis(750),
+            request_idle,
             frame_assembly: Duration::from_millis(200),
             write: Duration::from_millis(200),
             response_wait: Duration::from_secs(1),
             subscriber_keepalive: Duration::from_millis(200),
         };
         let (endpoint, rx) = start_test_accept_loop("idle-cap", policy);
-        let mut stalled = Vec::with_capacity(MAX_CONNECTIONS);
-        for _ in 0..MAX_CONNECTIONS {
-            stalled.push(
-                kettle_ctl::transport::connect(&endpoint).expect("connect idle control peer"),
-            );
-            recv_new_conn(&rx, Duration::from_secs(1));
-        }
+        let first_connect = Instant::now();
+        let stalled = (0..MAX_CONNECTIONS)
+            .map(|_| kettle_ctl::transport::connect(&endpoint).expect("connect idle control peer"))
+            .collect::<Vec<_>>();
 
-        let deadline = Instant::now() + Duration::from_secs(3);
-        let mut disconnected = HashSet::new();
-        while disconnected.len() < MAX_CONNECTIONS {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut admitted = HashSet::new();
+        let mut expired = HashSet::new();
+        while admitted.len() < MAX_CONNECTIONS || expired.len() < MAX_CONNECTIONS {
             match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(CtlServerMsg::NewConn { conn_id, .. }) => {
+                    admitted.insert(conn_id);
+                }
                 Ok(CtlServerMsg::Disconnect { conn_id }) => {
-                    disconnected.insert(conn_id);
+                    assert!(
+                        first_connect.elapsed() >= request_idle,
+                        "peer {conn_id} expired before it could have idled for {request_idle:?}"
+                    );
+                    expired.insert(conn_id);
                 }
                 Ok(_) => {}
-                Err(error) => panic!("idle slots were not reclaimed: {error}"),
+                Err(error) => panic!(
+                    "idle slots were not reclaimed: admitted {}, expired {}: {error}",
+                    admitted.len(),
+                    expired.len()
+                ),
             }
         }
-        assert_eq!(disconnected.len(), MAX_CONNECTIONS);
+        assert_eq!(admitted, expired, "every admitted idle peer expires");
         prove_fresh_request_is_served(&endpoint, &rx);
         drop(stalled);
     }
