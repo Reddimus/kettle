@@ -1207,7 +1207,7 @@ fn locate_managed_install_at(executable: &Path) -> Result<ManagedInstall, Update
     let executable = executable.canonicalize().map_err(|e| {
         UpdateError::UnmanagedInstall(format!("cannot resolve {}: {e}", executable.display()))
     })?;
-    let target = current_target().ok_or(UpdateError::UnsupportedPlatform)?;
+    current_target().ok_or(UpdateError::UnsupportedPlatform)?;
 
     #[cfg(windows)]
     let (prefix, marker_path) = {
@@ -1247,7 +1247,21 @@ fn locate_managed_install_at(executable: &Path) -> Result<ManagedInstall, Update
     #[cfg(target_os = "linux")]
     let _trusted_prefix = open_trusted_linux_install_prefix(&prefix)?;
 
-    let bytes = read_bounded_regular(&marker_path, 16 * 1024).map_err(|e| {
+    read_install_marker(&marker_path)?;
+    Ok(ManagedInstall {
+        prefix,
+        executable,
+        marker_path,
+    })
+}
+
+/// Reads and validates the installer marker at `marker_path`: schema,
+/// product, owner, this build's target, a recorded version, and the stable
+/// channel. Every failure is an [`UpdateError::UnmanagedInstall`].
+#[cfg(any(windows, target_os = "linux"))]
+fn read_install_marker(marker_path: &Path) -> Result<InstallMarker, UpdateError> {
+    let target = current_target().ok_or(UpdateError::UnsupportedPlatform)?;
+    let bytes = read_bounded_regular(marker_path, 16 * 1024).map_err(|e| {
         UpdateError::UnmanagedInstall(format!(
             "{} is missing or unreadable ({e}); update through the package manager or installer that owns this executable",
             marker_path.display()
@@ -1290,11 +1304,7 @@ fn locate_managed_install_at(executable: &Path) -> Result<ManagedInstall, Update
             marker.channel
         )));
     }
-    Ok(ManagedInstall {
-        prefix,
-        executable,
-        marker_path,
-    })
+    Ok(marker)
 }
 
 #[cfg(any(windows, target_os = "linux"))]
@@ -1373,8 +1383,15 @@ fn install_update_into(
             "selected artifact does not match this platform".to_string(),
         ));
     }
-    let _lock = prepare_update_transaction(install, &running_version)?;
+    #[cfg(target_os = "linux")]
+    {
+        install_linux_update_with_download(install, update, &running_version, || {
+            client.download_bytes(update)
+        })
+    }
 
+    #[cfg(windows)]
+    let _lock = prepare_update_transaction(install, &running_version)?;
     #[cfg(windows)]
     let transaction_id = unique_suffix();
     #[cfg(windows)]
@@ -1405,39 +1422,56 @@ fn install_update_into(
         }
         windows_result
     }
+}
 
-    #[cfg(target_os = "linux")]
-    let archive = {
-        let bytes = client.download_bytes(update)?;
-        verify_sha256_bytes(&bytes, &asset.sha256)?;
-        bytes
-    };
-    #[cfg(target_os = "linux")]
+/// The Linux half of [`install_update_into`], with the download passed in so
+/// tests can run it without a feed.
+///
+/// The running version was checked before this; under the update lock the
+/// candidate must also be newer than the installed one. Another process may
+/// have installed a newer release since this one started, and without the
+/// check it would put the older candidate back. A marker that records
+/// `unknown` has no installed version to compare.
+#[cfg(target_os = "linux")]
+fn install_linux_update_with_download(
+    install: &ManagedInstall,
+    update: &AvailableUpdate,
+    running_version: &semver::Version,
+    download: impl FnOnce() -> Result<Vec<u8>, UpdateError>,
+) -> Result<InstallOutcome, UpdateError> {
+    let asset = update
+        .asset
+        .as_ref()
+        .ok_or(UpdateError::UnsupportedPlatform)?;
+    let _lock = prepare_update_transaction(install, running_version)?;
+    let marker = read_install_marker(&install.marker_path)?;
+    if let Ok(installed) = semver::Version::parse(&marker.version) {
+        require_strict_upgrade(&update.version, &installed)?;
+    }
+    let archive = download()?;
+    verify_sha256_bytes(&archive, &asset.sha256)?;
     let package = load_linux_package(&archive, update)?;
 
-    #[cfg(target_os = "linux")]
-    {
-        let mut transaction = Transaction::begin(&install.prefix, &update.version.to_string())?;
-        let result = apply_verified_linux_update(&mut transaction, &package, install, update);
-        match result {
-            Ok(()) => transaction.commit()?,
-            Err(error) => {
-                if let Err(rollback) = transaction.rollback() {
-                    return Err(UpdateError::Transaction(format!(
-                        "{error}; rollback also failed: {rollback}"
-                    )));
-                }
-                return Err(error);
+    let mut transaction = Transaction::begin(&install.prefix, &update.version.to_string())?;
+    let result = apply_verified_linux_update(&mut transaction, &package, install, update);
+    match result {
+        Ok(()) => transaction.commit()?,
+        Err(error) => {
+            if let Err(rollback) = transaction.rollback() {
+                return Err(UpdateError::Transaction(format!(
+                    "{error}; rollback also failed: {rollback}"
+                )));
             }
+            return Err(error);
         }
-
-        refresh_platform_integration(install);
-        Ok(InstallOutcome {
-            version: update.version.clone(),
-            executable: install.executable.clone(),
-            disposition: InstallDisposition::Applied,
-        })
     }
+
+    refresh_platform_integration(install);
+    Ok(InstallOutcome {
+        version: update.version.clone(),
+        executable: install.executable.clone(),
+        disposition: InstallDisposition::Applied,
+    })
 }
 
 #[cfg(any(windows, target_os = "linux"))]
@@ -7742,6 +7776,51 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn test_linux_package_tar(version: &str) -> Vec<u8> {
         test_linux_package_tar_with(version, &[], &[])
+    }
+
+    /// Under the update lock the candidate must be newer than the installed
+    /// version as well as the running one. Another process may have
+    /// installed a newer release since this one checked, and this one would
+    /// otherwise put the older candidate back (#574).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_update_refuses_a_candidate_not_newer_than_the_installed_marker() {
+        let root = test_tempdir();
+        let prefix = root.path().join("install");
+        create_linux_install_dir_all(&prefix, &prefix.join("share/kettle"));
+        let marker_path = prefix.join("share/kettle/install.json");
+        fs::write(&marker_path, marker_json("99.0.0").unwrap()).unwrap();
+        seed_linux_install_provenance(&prefix);
+        let install = ManagedInstall {
+            prefix: prefix.clone(),
+            executable: prefix.join("bin/kettle"),
+            marker_path: marker_path.clone(),
+        };
+        let running = semver::Version::new(1, 0, 0);
+
+        let error = install_linux_update_with_download(&install, &fake_update(), &running, || {
+            panic!("a candidate the install already has must not be downloaded")
+        })
+        .unwrap_err();
+        assert!(
+            matches!(error, UpdateError::Rollback { .. }),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            fs::read_to_string(&marker_path).unwrap(),
+            marker_json("99.0.0").unwrap()
+        );
+
+        // A marker that records `unknown` leaves only the running-version
+        // check, so the newer candidate goes on to download.
+        fs::write(&marker_path, marker_json("unknown").unwrap()).unwrap();
+        seed_linux_install_provenance(&prefix);
+        let mut downloaded = false;
+        let _ = install_linux_update_with_download(&install, &fake_update(), &running, || {
+            downloaded = true;
+            Err(UpdateError::UnsupportedPlatform)
+        });
+        assert!(downloaded);
     }
 
     #[cfg(target_os = "linux")]
