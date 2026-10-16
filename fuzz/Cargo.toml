@@ -1,7 +1,8 @@
-# The media parsers' cargo-fuzz targets. A workspace of its own, so the
-# product's builds, lockfile and audits never include libFuzzer; its own
-# lockfile pins what a fuzz run builds. Run by .github/workflows/media-fuzz.yml
-# on a pinned nightly (cargo fuzz needs one); see docs/TESTING.md.
+# Kettle's cargo-fuzz targets. A workspace of its own, so the product's
+# builds, lockfile and audits never include libFuzzer; its own lockfile pins
+# what a fuzz run builds. Run by .github/workflows/fuzz.yml on a pinned
+# nightly (cargo fuzz needs one), on the schedule fuzz/targets.json gives
+# each target; see docs/TESTING.md.
 [package]
 name = "kettle-fuzz"
 version = "0.0.0"
@@ -17,15 +18,23 @@ members = ["."]
 
 [dependencies]
 libfuzzer-sys = "0.4.13"
+kettle-config = { path = "../crates/kettle-config", features = ["fuzzing"] }
+kettle-core = { path = "../crates/kettle-core", features = ["fuzzing"] }
+kettle-ctl = { path = "../crates/kettle-ctl", features = ["fuzzing"] }
 kettle-media = { path = "../crates/kettle-media", features = ["fuzzing"] }
 kettle-media-native = { path = "../crates/kettle-media-native", features = ["fuzzing"] }
 kettle-media-render = { path = "../crates/kettle-media-render", features = ["fuzzing"] }
+kettle-update = { path = "../crates/kettle-update", features = ["fuzzing"] }
+kettle-vt = { path = "../crates/kettle-vt", features = ["fuzzing"] }
 
 # The product workspace's `[patch.crates-io]` does not reach this one, so a
 # vendored fix the targets build must be patched here too, or they fuzz the
 # released crate. See vendor/README.md.
 [patch.crates-io]
+alacritty_terminal = { path = "../vendor/alacritty_terminal-0.26.0" }
 merman-core = { path = "../vendor/merman-core-0.8.0" }
+portable-pty = { path = "../vendor/portable-pty-0.9.0" }
+vte = { path = "../vendor/vte-0.15.0" }
 
 [profile.release]
 # Symbols for a crash's stack, and overflow checks as the tests have them.
@@ -63,6 +72,48 @@ bench = false
 [[bin]]
 name = "ffprobe"
 path = "fuzz_targets/ffprobe.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "vt"
+path = "fuzz_targets/vt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "images"
+path = "fuzz_targets/images.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "term"
+path = "fuzz_targets/term.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ctl"
+path = "fuzz_targets/ctl.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "update"
+path = "fuzz_targets/update.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config"
+path = "fuzz_targets/config.rs"
 test = false
 doc = false
 bench = false

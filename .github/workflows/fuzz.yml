@@ -1,0 +1,184 @@
+# fuzz — nightly, time-boxed fuzzing of what Kettle reads from untrusted
+# bytes.
+#
+# Each target in fuzz/targets.json has an in-process sweep that runs with
+# every test (see docs/TESTING.md); this runs the same entry points under
+# libFuzzer (cargo fuzz, on a pinned nightly), starting from the sweeps'
+# seeds and the corpus earlier runs kept. scripts/fuzz-plan.py turns the
+# table into this run's matrix:
+#
+# - Nightly: each target for its nightly time (10 or 20 minutes); Sundays
+#   run some longer and minimize every corpus.
+# - Dispatch: the targets named (all when none are) for as long as asked,
+#   up to five hours.
+# - A pull request that changes a target or what it fuzzes: each target for
+#   a minute, so a broken target is found before it merges.
+#
+# A target that crashes, leaks, runs out of memory or hangs fails its job
+# and keeps its input as an artifact. A failed nightly run opens one issue,
+# or comments on the open one. This is separate from ci.yml's per-PR nightly
+# job, which only builds and tests.
+name: fuzz
+
+on:
+  schedule:
+    - cron: "41 7 * * *"
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: Targets to run, separated by spaces (all when empty)
+        required: false
+        default: ""
+      seconds:
+        description: Seconds each target runs (at most 18000)
+        required: false
+        default: "3600"
+  pull_request:
+    paths:
+      - ".github/workflows/fuzz.yml"
+      - "fuzz/**"
+      - "scripts/fuzz-plan.py"
+      - "crates/kettle-test-support/src/mutate.rs"
+      - "crates/*/src/fuzzing.rs"
+      - "crates/*/src/fuzzing/**"
+
+permissions:
+  contents: read
+
+# Each event type queues on its own, and only a pull request's newer push
+# cancels its older run: a nightly must not cancel a dispatched campaign, or
+# the reverse, which would also skip the failure report.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test the planner
+        run: python3 scripts/test-fuzz-plan.py
+      - name: Plan this run
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          TARGETS: ${{ inputs.targets }}
+          SECONDS_ASKED: ${{ inputs.seconds }}
+        run: >-
+          python3 scripts/fuzz-plan.py --event "$EVENT" --weekday "$(( $(date -u +%u) - 1 ))"
+          --targets "$TARGETS" --seconds "$SECONDS_ASKED" >> "$GITHUB_OUTPUT"
+
+  fuzz:
+    name: fuzz (${{ matrix.target }})
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      TARGET: ${{ matrix.target }}
+      SECONDS_TO_RUN: ${{ matrix.seconds }}
+      CORPUS: fuzz/corpus/${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # cargo fuzz needs a nightly compiler for its sanitizer flags. Pinned,
+      # so a night's result depends on the code, not on that day's nightly.
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: nightly-2026-09-24
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: fuzz-${{ matrix.target }}
+          workspaces: |
+            . -> target
+            fuzz -> target
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
+      - name: Check the fuzz lockfile is current
+        run: cargo metadata --locked --format-version 1 --manifest-path fuzz/Cargo.toml > /dev/null
+      # What earlier runs found worth keeping. Every run starts from the
+      # newest corpus; only nights and dispatches save one, so a pull
+      # request reads main's corpus without adding to it.
+      - name: Restore the corpus
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.CORPUS }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+      # The sweeps' seeds join it: each crate's sweep writes its targets'
+      # seeds when KETTLE_FUZZ_CORPUS names a directory.
+      - name: Seed the corpus
+        env:
+          KETTLE_FUZZ_CORPUS: ${{ github.workspace }}/fuzz/corpus
+          CRATES: ${{ matrix.crates }}
+        run: |
+          # shellcheck disable=SC2086 # CRATES is a list of `-p crate` flags.
+          cargo test --locked $CRATES --lib fuzzing
+      - name: Fuzz
+        shell: bash
+        run: |
+          set -euo pipefail
+          dictionary=()
+          if [ -f "fuzz/dict/$TARGET.dict" ]; then
+            dictionary=("-dict=$GITHUB_WORKSPACE/fuzz/dict/$TARGET.dict")
+          fi
+          cargo fuzz run "$TARGET" "$CORPUS" -- \
+            -max_total_time="$SECONDS_TO_RUN" \
+            -max_len=262144 \
+            -rss_limit_mb=2560 \
+            -timeout=30 \
+            "${dictionary[@]}"
+      - name: Minimize the corpus
+        if: ${{ matrix.minimize }}
+        run: cargo fuzz cmin "$TARGET" "$CORPUS" -- -rss_limit_mb=2560 -timeout=30
+      - name: Save the corpus
+        if: ${{ always() && github.event_name != 'pull_request' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.CORPUS }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Keep the finding
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  report:
+    name: report a failed night
+    needs: [plan, fuzz]
+    if: ${{ always() && (needs.plan.result == 'failure' || needs.fuzz.result == 'failure') && github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the tracking issue
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="fuzz: a nightly run failed"
+          body="The nightly fuzz run failed: $RUN_URL. A target that found an input that crashes, leaks or hangs keeps it in that run's artifacts; reproduce it with \`cargo fuzz run <target> <input>\` on the workflow's pinned nightly (docs/TESTING.md). A run with no artifact failed to plan, build or seed."
+          existing=$(gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi

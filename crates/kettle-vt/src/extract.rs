@@ -745,6 +745,11 @@ pub struct Extractor {
     /// Once the full private namespace prefix is known, malformed ESC
     /// followers must not make its remaining payload visible.
     private_completion: bool,
+    /// Private completion messages that outgrew their cap. Their recovery
+    /// window is counted from the read that crossed it, so how the bytes
+    /// arrived decides where ordinary output resumes.
+    #[cfg(any(test, feature = "fuzzing"))]
+    private_overflows: usize,
     /// Rolling tail (≤3 bytes) of the active control string's payload, kept
     /// even while discarding, so a raw `0x9c` can be classified as either a
     /// standalone C1 ST or a UTF-8 continuation byte of an in-progress
@@ -785,7 +790,7 @@ impl Extractor {
         Self::with_budget(budget)
     }
 
-    fn with_budget(budget: GraphicsBudget) -> Self {
+    pub(crate) fn with_budget(budget: GraphicsBudget) -> Self {
         Extractor {
             mode: Mode::Pass,
             pass: Vec::with_capacity(8192),
@@ -810,6 +815,8 @@ impl Extractor {
             recovery_private_started: false,
             raw_tap: false,
             private_completion: false,
+            #[cfg(any(test, feature = "fuzzing"))]
+            private_overflows: 0,
             seq_tail: [0; 3],
             seq_tail_len: 0,
             shell_hostname: None,
@@ -956,6 +963,13 @@ impl Extractor {
             chunk => collected.push(chunk),
         });
         collected
+    }
+
+    /// How many private completion messages outgrew their cap so far.
+    #[cfg(any(test, feature = "fuzzing"))]
+    #[doc(hidden)]
+    pub fn private_overflows(&self) -> usize {
+        self.private_overflows
     }
 
     /// Feed bytes and handle each completed chunk before parsing the next
@@ -1309,6 +1323,14 @@ impl Extractor {
                 .sequence_bytes
                 .saturating_sub(self.seq.len());
             if bytes.len() > room {
+                // A completion message is private from its prefix however
+                // its bytes arrive. Judge the part that still fits, as reads
+                // that stopped there would have, before the string is dropped.
+                if self.mode == Mode::Osc
+                    && joined_starts_with(&self.seq, &bytes[..room], completion::PREFIX)
+                {
+                    self.private_completion = true;
+                }
                 // `append_seq` is intentionally all-or-nothing. Account for
                 // the prefix that still fit so recovery starts at the actual
                 // configured limit, not at the start of this bulk slice.
@@ -1449,6 +1471,10 @@ impl Extractor {
     }
 
     fn bail_private(&mut self) {
+        #[cfg(any(test, feature = "fuzzing"))]
+        {
+            self.private_overflows += 1;
+        }
         self.seq = Vec::new();
         self.seq_reservation = None;
         self.recovery_private_prefix = 0;
@@ -2302,6 +2328,16 @@ fn normalize_drive_path(path: String) -> String {
     } else {
         path
     }
+}
+
+/// Whether `head` followed by `tail` starts with `prefix`.
+fn joined_starts_with(head: &[u8], tail: &[u8], prefix: &[u8]) -> bool {
+    head.len() + tail.len() >= prefix.len()
+        && head
+            .iter()
+            .chain(tail)
+            .zip(prefix)
+            .all(|(byte, want)| byte == want)
 }
 
 /// Parse an OSC 9;4 body (`9;4;<state>[;<pct>]`) into a [`Progress`].
@@ -3707,6 +3743,36 @@ mod tests {
             "a clean sequence after the discarded OSC must parse, got {out:?}"
         );
         assert_eq!(passed(&out), b"ok");
+    }
+
+    /// A completion message is private from its prefix however it arrives.
+    /// A read that carried it past the sequence limit in one go once bailed
+    /// before the prefix was seen, so an ESC inside it ended the string and
+    /// the rest reached the grid; read byte by byte, the same bytes stayed
+    /// private. Found by the `vt` fuzz target.
+    #[test]
+    fn an_oversized_completion_message_is_private_however_it_arrives() {
+        let limits = crate::GraphicsLimits {
+            sequence_bytes: 64,
+            ..crate::GraphicsLimits::default()
+        };
+        // Past the 64-byte limit, with the ESC inside the recovery window.
+        let mut input = b"\x1b]777;kettle-completion;1;show;1;completion;;fish;".to_vec();
+        input.extend(std::iter::repeat_n(b'x', 30));
+        input.extend_from_slice(b"\x1b[31msecret\x07after");
+        let read = |sizes: usize| {
+            let budget = crate::GraphicsBudget::isolated(limits).unwrap();
+            let mut ex = Extractor::with_budget(budget);
+            input
+                .chunks(sizes)
+                .flat_map(|piece| passed(&ex.feed(piece)))
+                .collect::<Vec<u8>>()
+        };
+        let whole = read(input.len());
+        assert_eq!(whole, b"after", "one read leaked the private payload");
+        for size in [1, 2, 3, 7, 64] {
+            assert_eq!(read(size), whole, "reads of {size} bytes");
+        }
     }
 
     /// DCS uses the same bounded discard path and recognizes its `ESC \` end.

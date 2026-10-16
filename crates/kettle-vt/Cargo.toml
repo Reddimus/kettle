@@ -34,6 +34,10 @@ memchr = "2.7"
 # export HOSTNAME). Tiny wrapper over gethostname(2) / GetComputerNameExW.
 gethostname = "1"
 
+[features]
+# The entry points the fuzz targets (fuzz/) call. Never in a shipped build.
+fuzzing = []
+
 [dev-dependencies]
 vte = "=0.15.0"
 kettle-test-support.workspace = true

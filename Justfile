@@ -96,10 +96,10 @@ media-protocol-test:
     cargo clippy --locked -p kettle-media-worker --all-targets --features test-faults -- -D warnings
     cargo test --locked -p kettle-media-worker --features test-faults
 
-# The media fuzz targets (fuzz/, a workspace of its own) format, compile and
-# lint on stable with the entry points' feature on, so a change to what they
-# call shows here rather than in the nightly fuzz run. Running them needs a
-# nightly and cargo-fuzz (docs/TESTING.md, Media fuzzing). The renderer the
+# The fuzz targets (fuzz/, a workspace of its own) format, compile and lint
+# on stable with the entry points' feature on, so a change to what they call
+# shows here rather than in the nightly fuzz run. Running them needs a
+# nightly and cargo-fuzz (docs/TESTING.md, Fuzzing). The media renderer the
 # targets call is Unix-only.
 [unix]
 fuzz-check:
@@ -108,7 +108,7 @@ fuzz-check:
 
 [windows]
 fuzz-check:
-    @echo "fuzz-check: the media fuzz targets are Unix-only"
+    @echo "fuzz-check: the fuzz targets are Unix-only"
 
 # `cargo doc` with `-D warnings` — rustdoc has its own warning class
 # (broken intra-doc-links, missing docs on public items) that
@@ -197,6 +197,13 @@ icons-check-required:
 tracked-audit:
     python3 scripts/test-audit-tracked-files.py
     python3 scripts/audit-tracked-files.py --output target/diagnostics/tracked-files-audit.json
+
+# Fuzzing: the run planner's tests, the target table against fuzz/Cargo.toml,
+# and no shipped binary built with a crate's `fuzzing` entry points.
+[unix]
+fuzz-guard:
+    python3 scripts/test-fuzz-plan.py
+    scripts/check-no-fuzzing-feature.sh
 
 # Compile every ```mermaid block in tracked Markdown. A diagram that does not
 # parse renders as a red error panel on GitHub, which reads as a broken
@@ -393,9 +400,9 @@ gauntlet: live-ui-helper-selftest native-titlebar-self-test wayland-first-frame-
 # supplements the current-OS vendor check with Linux + Windows native vendor
 # legs.
 [unix]
-gauntlet-strict: gauntlet vendor-check deny audit lru-scope machete tracked-audit mermaid-check release-script-test
+gauntlet-strict: gauntlet vendor-check deny audit lru-scope machete tracked-audit fuzz-guard mermaid-check release-script-test
     @echo ""
-    @echo "STRICT GAUNTLET PASSED — core, patched crates, RustSec product/vendor audits, release preparation, the lru scope, deny (with the ttf-parser ban), machete, tracked-file audit, and mermaid rendering are green."
+    @echo "STRICT GAUNTLET PASSED — core, patched crates, RustSec product/vendor audits, release preparation, the lru scope, deny (with the ttf-parser ban), machete, tracked-file audit, fuzzing guards, and mermaid rendering are green."
 
 # The FULL CI-equivalent gate: gauntlet-strict plus every packaging,
 # installer, update-manifest, and GPU-render check ci.yml runs that

@@ -33,6 +33,8 @@
 
 pub mod completion;
 pub mod extract;
+#[cfg(any(test, feature = "fuzzing"))]
+pub mod fuzzing;
 pub mod graphics_limits;
 pub mod image;
 pub mod inline_marker;

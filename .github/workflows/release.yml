@@ -107,6 +107,8 @@ jobs:
         with:
           key: release-pretest
       - run: cargo test --locked --workspace
+      - name: No shipped binary enables a fuzzing feature
+        run: scripts/check-no-fuzzing-feature.sh
       - name: Test patched vendor crates directly
         # arboard's upstream tests need a desktop clipboard, which this runner
         # does not have; its backport's display-free tests run instead, as in

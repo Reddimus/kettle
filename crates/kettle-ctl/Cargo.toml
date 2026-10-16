@@ -18,6 +18,10 @@ description = "kettle: agent control-plane protocol, local-IPC transport (Unix s
 [lints]
 workspace = true
 
+[features]
+# The entry points the fuzz targets (fuzz/) call. Never in a shipped build.
+fuzzing = []
+
 [dependencies]
 # `show` image bytes travel as standard base64.
 base64 = { version = "0.23", default-features = false, features = ["alloc"] }

@@ -3619,13 +3619,13 @@ Two mermaid traps it catches:
   message text (`OSC 133;A`) truncates the line. Write `#59;`.
 - Quotes inside a node label must be `&quot;`, not `\"`.
 
-## Media fuzzing
+## Fuzzing
 
-What the media worker parses from untrusted bytes has one entry point each,
-called both by an in-process sweep in every test run and by a cargo-fuzz
-target (`fuzz/`) each night. The renderer's and ffprobe's are built only on
-macOS and Linux, where the worker runs; Windows builds neither, and neither
-sweep runs there.
+What Kettle parses from untrusted bytes has one entry point each, called
+both by an in-process sweep in every test run and by a cargo-fuzz target
+(`fuzz/`) each night. The renderer's and ffprobe's are built only on macOS
+and Linux, where the worker runs; Windows builds neither, and neither sweep
+runs there.
 
 | Target | Entry point | What must hold |
 | --- | --- | --- |
@@ -3634,6 +3634,12 @@ sweep runs there.
 | `sniff` | `kettle_media::fuzzing::sniff` | a video's first bytes sniff without a panic or a read past them, whatever length the file is said to have (the answer may change with it: an atom of size zero runs to the end of the file) |
 | `render` | `kettle_media_render::fuzzing::render` | a job the parent could send, of the kind its first byte picks, rendered into a 64-pixel box: no panic outside a guarded library call, and a render that passes the parent's reply checks, fits its box, is the kind asked for and encodes as the worker writes it |
 | `ffprobe` | `kettle_media_native::fuzzing::ffprobe` | ffprobe's description and packet list and ffmpeg's codec list, split at NUL bytes, parse or fail: a description's picture within bounds, turned by a quarter turn, with a frame of at most a thousand seconds; a packet list sorted, distinct and holding its keyframes, every frame it finds for a time one of its own |
+| `vt` | `kettle_vt::fuzzing::vt` | a script of PTY reads and extractor calls, read whole and in pieces, gives the same engine bytes, raw bytes and chunks at the same places; bytes with no ESC pass through untouched; every image is the size it says and within its limits; the graphics account is back to zero once the extractor is gone |
+| `images` | `kettle_vt::fuzzing::images` | Sixel, iTerm2 and Kitty decoding, the completion protocol and the placeholder marks: images within their limits, completion lists within the protocol's caps with no unsafe characters, an inline marker that decodes encodes back to itself |
+| `term` | `kettle_core::fuzzing::term` | a pane's PTY pipeline through resizes, scrollback, scrolling, selection and search: cursor and grid in bounds, links, hints and matches inside the grid and within their caps, selected text within its cap, replies in proportion to what was sent |
+| `ctl` | `kettle_ctl::fuzzing::ctl` | a request stream finds the same newline read in pieces; a request line, `show` request or activation request that parses writes back as itself; pages stay within their limit |
+| `update` | `kettle_update::fuzzing::update` | no manifest verifies under the release key; one signed with a test key and accepted has unique, safely named, bounded assets with a lowercase SHA-256, and any flipped bit voids it; an accepted archive path has only plain relative components |
+| `config` | `kettle_config::fuzzing::config` | a config file reads the same with or without a UTF-8 byte-order mark and with CRLF as with LF; a key bind or color that parses parses again from how Kettle writes it |
 
 The sweeps (`mutated_frames_never_break_the_decoder` and the rest in each
 crate's `fuzzing` module) build their cases with
@@ -3657,15 +3663,27 @@ lockfile, so the product's builds and audits never include libFuzzer;
 on stable on macOS and Linux, so a change to what they call shows before the
 nightly run (on Windows the recipe only says the targets are Unix-only). A
 render that panics inside a guarded library call unwinds to the guard, as it
-does in the worker; any other panic aborts. `.github/workflows/media-fuzz.yml`
-runs each target for 15 minutes a night on a pinned nightly, for a minute on
-a pull request that changes the harness, and as long as a dispatch asks, up
-to an hour. It
-seeds each corpus from the sweeps (`KETTLE_FUZZ_CORPUS` names the directory
-they write to), uses the dictionaries in `fuzz/dict`, and keeps a target's
-crash, leak, out-of-memory or hang input as an artifact; a failed night opens
-one issue, or comments on the open one. To run one locally, with that nightly
-and `cargo install cargo-fuzz --version 0.13.2 --locked`:
+does in the worker; any other panic aborts.
+
+`.github/workflows/fuzz.yml` runs every target in `fuzz/targets.json` on a
+pinned nightly:
+
+- each night, for the target's nightly time (10 or 20 minutes); Sundays run
+  some targets for an hour and minimize every corpus;
+- for a minute on a pull request that changes a target or what it fuzzes;
+- on dispatch, the targets named (all when none are) for as long as asked,
+  up to five hours.
+
+Each run starts from the corpus the last night or dispatch kept, plus the
+sweeps' seeds (`KETTLE_FUZZ_CORPUS` names the directory they write to). It
+uses the dictionaries in `fuzz/dict`, and keeps a target's crash, leak,
+out-of-memory or hang input as an artifact; a failed night opens one issue,
+or comments on the open one. `scripts/fuzz-plan.py` turns the table into the
+run's matrix and refuses a table that disagrees with `fuzz/Cargo.toml`.
+`just fuzz-guard` tests it and checks that no shipped binary is built with a
+crate's `fuzzing` feature; CI and the release pretest run the same check. To
+run a target locally, with that nightly and
+`cargo install cargo-fuzz --version 0.13.2 --locked`:
 
 ```sh
 KETTLE_FUZZ_CORPUS=$PWD/fuzz/corpus cargo test -p kettle-media -p kettle-media-render -p kettle-media-native --lib fuzzing
@@ -5651,8 +5669,8 @@ retained compile/regression checks on **windows**:
 
 - `fmt --check`, `build --all-targets`, `clippy -D warnings`,
   `cargo test --workspace` on every OS.
-- `.github/workflows/media-fuzz.yml` fuzzes the media parsers each night
-  (see Media fuzzing).
+- `.github/workflows/fuzz.yml` runs the fuzz targets each night
+  (see Fuzzing).
 - `cargo doc --no-deps` with `RUSTDOCFLAGS=-D warnings` (Linux only —
   catches broken intra-doc-links, malformed examples; rustdoc is
   platform-agnostic so one runner suffices).

@@ -15,6 +15,8 @@ pub mod activation;
 pub mod agent_launch;
 pub mod client;
 pub mod discovery;
+#[cfg(any(test, feature = "fuzzing"))]
+pub mod fuzzing;
 pub mod identity;
 pub mod policy;
 // Cross-process window-presence registry (Peacock accent dedupe). No

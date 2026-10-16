@@ -107,7 +107,7 @@ impl ActivationRequest {
         self.launch_id.as_deref()
     }
 
-    fn is_valid(&self) -> bool {
+    pub(crate) fn is_valid(&self) -> bool {
         self.v == PROTOCOL_VERSION
             && self.action == "open_window"
             && self.cwd.as_ref().is_none_or(|cwd| {
