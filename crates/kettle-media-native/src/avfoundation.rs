@@ -848,6 +848,14 @@ impl VideoPlayer for AvFoundation {
         deadline: Instant,
     ) -> Result<Playback, FailureCode> {
         let asset = Arc::new(Keep(open(&input, deadline)?));
+        // SAFETY: open loaded the track's preferredTransform key.
+        let transform = unsafe { asset.video.preferredTransform() };
+        // The copy path supports only axis-aligned scaling and quarter turns.
+        if !((transform.b == 0.0 && transform.c == 0.0)
+            || (transform.a == 0.0 && transform.d == 0.0))
+        {
+            return Err(FailureCode::BackendUnavailable);
+        }
         let (info, mirrored) = (asset.info, asset.mirrored);
         let (width, height) = play_size(
             info.width,

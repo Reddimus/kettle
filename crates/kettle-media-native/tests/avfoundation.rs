@@ -267,6 +267,41 @@ fn played(
     (size, frames)
 }
 
+#[test]
+fn a_session_rejects_display_transforms_it_cannot_copy() {
+    for matrix in [
+        [46341, 46341, 0, -46341, 46341, 0, 0, 0, 1 << 30],
+        [1 << 16, 0, 0, 1 << 15, 1 << 16, 0, 0, 0, 1 << 30],
+    ] {
+        let mut bytes = std::fs::read(fixture("index.mp4")).unwrap();
+        let track = bytes.windows(4).position(|word| word == b"tkhd").unwrap();
+        assert_eq!(bytes[track + 4], 0);
+        // A version 0 tkhd has 40 bytes of fields before its matrix.
+        let matrix_at = track + 44;
+        for (slot, value) in bytes[matrix_at..matrix_at + 36]
+            .chunks_exact_mut(4)
+            .zip(matrix)
+        {
+            slot.copy_from_slice(&i32::to_be_bytes(value));
+        }
+        let clip = Clip::of(&bytes);
+        let (poster, _) = take(&AvFoundation, &clip, &[2000], (32, 32));
+        poster.unwrap();
+        let played = AvFoundation.play(
+            clip.input(),
+            PlayRequest {
+                max_width: 64,
+                max_height: 64,
+                start_ms: 0,
+                max_fps_milli: 10_000,
+                audio: AudioRequest::Off,
+            },
+            Instant::now() + Duration::from_secs(10),
+        );
+        assert_eq!(played.err(), Some(FailureCode::BackendUnavailable));
+    }
+}
+
 /// A session plays every frame from where it starts, each timed as the
 /// frame it shows, fitted to its room, upright, and at most the rate asked.
 #[test]

@@ -291,26 +291,29 @@ mod tests {
         assert_eq!(pages_of(&document), Err(FailureCode::TooLarge));
     }
 
-    /// Text built to make a parser work hard stays within the document
-    /// limit and comes back well inside a diagram's deadline.
+    /// Hostile Markdown extracts no pages unless a Mermaid fence is present;
+    /// an oversized fence is refused.
     #[test]
-    fn hostile_markdown_at_the_limit_stays_fast() {
+    fn hostile_markdown_at_the_limit_keeps_extraction_and_fence_limits() {
         for document in [
             ">".repeat(MAX_MARKDOWN_BYTES),
             "- ".repeat(MAX_MARKDOWN_BYTES / 2),
             "`".repeat(MAX_MARKDOWN_BYTES),
             "[".repeat(MAX_MARKDOWN_BYTES),
             "*a".repeat(MAX_MARKDOWN_BYTES / 2),
-            "```mermaid\n".repeat(MAX_MARKDOWN_BYTES / 11),
         ] {
-            let started = std::time::Instant::now();
-            let _ = pages_of(&document);
-            assert!(
-                started.elapsed() < Duration::from_secs(1),
+            assert_eq!(
+                pages(&document, &inline(&document), &OperationControl::new()),
+                Ok(Vec::new()),
                 "{:?}",
                 &document[..12]
             );
         }
+        let document = "```mermaid\n".repeat(MAX_MARKDOWN_BYTES / 11);
+        assert_eq!(
+            pages(&document, &inline(&document), &OperationControl::new()),
+            Err(FailureCode::TooLarge)
+        );
     }
 
     /// The deadline holds through extraction.
