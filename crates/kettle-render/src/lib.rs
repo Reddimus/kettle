@@ -23107,10 +23107,7 @@ mod title_fit_tests {
                 "ssh picker",
                 "push_input_bar(&mut quads, search_rect, theme, theme.palette[4]);",
             ),
-            (
-                "update chip",
-                "push_update_chip(&mut quads, chip, theme);",
-            ),
+            ("update chip", "push_update_chip(&mut quads, chip, theme);"),
             (
                 "title editor",
                 "push_input_bar(&mut quads, edit.rect, theme, theme.palette[3]);",
