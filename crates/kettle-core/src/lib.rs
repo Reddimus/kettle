@@ -68,7 +68,7 @@ pub use alacritty_terminal::term::{ClipboardType, TermMode, cell::Flags, viewpor
 pub use alacritty_terminal::vi_mode::ViMotion;
 pub use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor};
 
-pub use event::{EventProxy, TermEvent, Waker};
+pub use event::{EventProxy, TermEvent, TitleChange, Waker};
 pub use images::{
     ImageData, ImageRefusal, ImageSourceCrop, ImageSourceRect, Images, PixelBuffer, Placement,
     PlacementParams,

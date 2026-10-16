@@ -4618,10 +4618,9 @@ pub struct Terminal {
     /// drain its bounded queue. A hidden pane without either consumer
     /// coalesces output into one dirty bit and publishes one wake when enabled.
     output_wake: Arc<OutputWakeGate>,
-    /// A bounded semantic-event queue overflow cannot block the parser while it
-    /// holds the terminal lock. It instead marks the pane failed so the UI can
-    /// tear it down explicitly without unbounded memory or silent reply loss.
-    event_overflowed: Arc<AtomicBool>,
+    /// State events (bell, title, cursor blinking, OSC 52 writes, exit) the
+    /// event proxy latched since the owner last took them.
+    latched: Arc<crate::event::LatchedEvents>,
     /// Live OSC 52 write policy shared with the terminal event proxy. DA1
     /// extension 52 is emitted only while this is true.
     osc52_copy_allowed: Arc<AtomicBool>,
@@ -6808,15 +6807,14 @@ impl Terminal {
 
         let output_wake = Arc::new(OutputWakeGate::new(waker.clone()));
         let osc52_copy_allowed = Arc::new(AtomicBool::new(capabilities.osc52_copy));
-        let event_overflowed = Arc::new(AtomicBool::new(false));
-        let proxy = EventProxy::with_output_wake_osc52_and_overflow(
+        let proxy = EventProxy::with_output_wake_and_osc52(
             event_tx,
             waker.clone(),
             output_wake.clone(),
             osc52_copy_allowed.clone(),
-            event_overflowed.clone(),
         );
         let lifecycle_pending = proxy.lifecycle_pending();
+        let latched = proxy.latched();
         // Seed the engine's *default* cursor style from the user config; the
         // engine seeds `cursor_style` lazily from this, and programs can flip
         // both fields at runtime — `?12 h/l` for blinking (honored live via
@@ -8056,7 +8054,7 @@ impl Terminal {
             geometry: shared_geometry,
             applied_pty_geometry: geometry,
             output_wake,
-            event_overflowed,
+            latched,
             osc52_copy_allowed,
             out_gen,
         })
@@ -9365,11 +9363,33 @@ impl Terminal {
         self.output_wake.acknowledge();
     }
 
-    /// Whether this pane's bounded semantic-event queue overflowed. Overflow is
-    /// sticky and is an explicit fail-pane condition; callers must not continue
-    /// as though reply-bearing events were delivered.
-    pub fn event_queue_overflowed(&self) -> bool {
-        self.event_overflowed.load(Ordering::Acquire)
+    /// Whether the program rang the bell since the last call. Bells are
+    /// latched rather than queued, so any number of them is one bell here.
+    pub fn take_bell(&self) -> bool {
+        self.latched.take_bell()
+    }
+
+    /// The newest title the program set or reset since the last call.
+    pub fn take_title(&self) -> Option<crate::TitleChange> {
+        self.latched.take_title()
+    }
+
+    /// Whether the program switched cursor blinking (DEC mode 12) since the
+    /// last call.
+    pub fn take_cursor_blinking_changed(&self) -> bool {
+        self.latched.take_cursor_blinking_changed()
+    }
+
+    /// The newest OSC 52 write for each target since the last call.
+    pub fn take_clipboard_stores(&self) -> Vec<(crate::ClipboardType, String)> {
+        self.latched.take_clipboard_stores()
+    }
+
+    /// Whether the reader finished: the PTY closed after the last of its
+    /// output crossed the parser. Taken once; the owner applies exit policy
+    /// after handling the replies queued before it.
+    pub fn take_exited(&self) -> bool {
+        self.latched.take_exited()
     }
 
     /// Has the child process exited?
@@ -12619,9 +12639,24 @@ mod conformance {
     type Rx = crossbeam_channel::Receiver<TermEvent>;
 
     fn harness_rx(cols: usize, rows: usize) -> (Term<EventProxy>, Processor, Rx) {
+        let (term, processor, rx, _) = harness_latched(cols, rows);
+        (term, processor, rx)
+    }
+
+    /// [`harness_rx`] plus the state events its proxy latched.
+    fn harness_latched(
+        cols: usize,
+        rows: usize,
+    ) -> (
+        Term<EventProxy>,
+        Processor,
+        Rx,
+        std::sync::Arc<crate::event::LatchedEvents>,
+    ) {
         let (tx, rx) = crossbeam_channel::unbounded();
         let waker: Waker = std::sync::Arc::new(|| {});
         let proxy = EventProxy::new(tx, waker);
+        let latched = proxy.latched();
         let term = Term::new(
             TermConfig::default(),
             &TermSize {
@@ -12630,7 +12665,7 @@ mod conformance {
             },
             proxy,
         );
-        (term, Processor::new(), rx)
+        (term, Processor::new(), rx, latched)
     }
 
     /// A one-column grid aborts the whole process on any wide character, and
@@ -14184,14 +14219,14 @@ mod conformance {
 
     #[test]
     fn osc52_copy_emits_clipboard_store() {
-        let (mut t, mut p, rx) = harness_rx(8, 2);
+        let (mut t, mut p, _rx, latched) = harness_latched(8, 2);
         // base64("hi") = "aGk=" ; OSC 52 ; c ; <b64> ST
         feed(&mut t, &mut p, b"\x1b]52;c;aGk=\x07");
-        let stored = rx.try_iter().find_map(|ev| match ev {
-            TermEvent::ClipboardStore(_, s) => Some(s),
-            _ => None,
-        });
-        assert_eq!(stored.as_deref(), Some("hi"), "OSC 52 c sets clipboard");
+        assert_eq!(
+            latched.take_clipboard_stores(),
+            vec![(crate::ClipboardType::Clipboard, "hi".to_string())],
+            "OSC 52 c sets clipboard"
+        );
     }
 
     #[test]
@@ -14280,12 +14315,12 @@ mod conformance {
 
     #[test]
     fn cursor_blink_mode_emits_event() {
-        let (mut t, mut p, rx) = harness_rx(8, 2);
+        let (mut t, mut p, _rx, latched) = harness_latched(8, 2);
         feed(&mut t, &mut p, b"\x1b[?12h"); // DECSET 12 = cursor blink on
-        let got = rx
-            .try_iter()
-            .any(|ev| matches!(ev, TermEvent::CursorBlinkingChange));
-        assert!(got, "?12h should signal a cursor-blink change");
+        assert!(
+            latched.take_cursor_blinking_changed(),
+            "?12h should signal a cursor-blink change"
+        );
     }
 
     #[test]
@@ -15909,10 +15944,11 @@ mod teardown_tests {
                 match ev {
                     // Answer the child's terminal queries so it can finish.
                     TermEvent::PtyWrite(s) => term.write(s.as_bytes()),
-                    TermEvent::Exit | TermEvent::ChildExit(_) => saw_exit_event = true,
+                    TermEvent::ChildExit(_) => saw_exit_event = true,
                     _ => {}
                 }
             }
+            saw_exit_event |= term.take_exited();
             if let Some(c) = term.child_exit_code() {
                 break c;
             }
@@ -16875,12 +16911,11 @@ mod teardown_tests {
         let mut saw_exit = false;
         while std::time::Instant::now() < deadline && !saw_exit {
             while let Ok(event) = rx.try_recv() {
-                match event {
-                    TermEvent::PtyWrite(reply) => term.write(reply.as_bytes()),
-                    TermEvent::Exit => saw_exit = true,
-                    _ => {}
+                if let TermEvent::PtyWrite(reply) = event {
+                    term.write(reply.as_bytes());
                 }
             }
+            saw_exit |= term.take_exited();
             if cleanup.0.is_none()
                 && let Some(screen) = term.screen_text(0)
                 && let Some(pid) = screen

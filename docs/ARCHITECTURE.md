@@ -1320,6 +1320,13 @@ distinction as `read_only`, `busy`, `bad_params`, and `internal` errors. A
 local paste over 4 MiB is rejected before wrapping or fan-out; it is never
 silently shortened.
 
+Terminal events reach the App through one bounded queue per pane, 1,024 deep,
+which holds only replies to the program's queries. State events (bell, title,
+cursor blinking, OSC 52 writes, exit) are latched in `LatchedEvents`, the
+newest kept, and taken when the App drains the pane; a reply that finds the
+queue full is dropped until it drains. Nothing a program prints can close its
+pane.
+
 ## In-process multi-window
 
 On macOS, decorated windows keep AppKit's title, traffic lights, drag region,
@@ -1958,8 +1965,9 @@ attempt share a short ordering gate. The producer holds it only for
 `try_send`; the arbiter drops it before yielding or retrying. An admitted reply
 therefore cannot be overtaken by an EOF attempt based on a stale empty-channel
 observation, while PTY capacity can never extend the critical section. Reply
-queue overflow, disconnect, and semantic-event overflow fail the command
-explicitly instead of dropping terminal protocol state. The guarantee begins at
+queue overflow and disconnect fail the command explicitly. The semantic-event
+queue cannot: state events are latched, the newest kept, and a reply that finds
+it full is dropped. The guarantee begins at
 reply admission; a query generated after the kernel accepted a VEOF cannot
 retroactively overtake that byte.
 Unix permits exactly one live `PtyStdin` arbiter handle per terminal. Duplicated

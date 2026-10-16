@@ -1,10 +1,11 @@
 //! Bridges `alacritty_terminal` events to the UI thread.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 pub use alacritty_terminal::event::Event as TermEvent;
 use alacritty_terminal::event::EventListener;
+use alacritty_terminal::term::ClipboardType;
 use crossbeam_channel::Sender;
 
 const UPSTREAM_PRIMARY_DA_REPLY: &str = "\x1b[?6c";
@@ -149,6 +150,83 @@ impl OutputWakeGate {
     }
 }
 
+/// A window title a program asked for. Only the newest one is kept.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TitleChange {
+    Set(String),
+    Reset,
+}
+
+/// Terminal events that only matter as their latest state, held until the
+/// owner takes them. They are latched here, not queued: output that repeats
+/// them, such as `cat` of a binary file or a loop setting the title, would
+/// otherwise fill the bounded event queue faster than a slow frame drains it.
+#[derive(Default)]
+pub(crate) struct LatchedEvents {
+    bell: AtomicBool,
+    cursor_blinking_changed: AtomicBool,
+    exited: AtomicBool,
+    title: Mutex<Option<TitleChange>>,
+    /// OSC 52 writes, the newest for each target, oldest first: where both
+    /// targets are one system clipboard (macOS, Windows), the newer write
+    /// must be applied last.
+    clipboard: Mutex<Vec<(ClipboardType, String)>>,
+}
+
+impl LatchedEvents {
+    pub(crate) fn take_bell(&self) -> bool {
+        self.bell.swap(false, Ordering::AcqRel)
+    }
+
+    pub(crate) fn take_cursor_blinking_changed(&self) -> bool {
+        self.cursor_blinking_changed.swap(false, Ordering::AcqRel)
+    }
+
+    pub(crate) fn take_exited(&self) -> bool {
+        self.exited.swap(false, Ordering::AcqRel)
+    }
+
+    pub(crate) fn take_title(&self) -> Option<TitleChange> {
+        self.title.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+
+    pub(crate) fn take_clipboard_stores(&self) -> Vec<(ClipboardType, String)> {
+        std::mem::take(&mut *self.clipboard.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    /// Latch `event` if it is one of the latched kinds. Returns whether it
+    /// was, and whether it is the first of its kind since the owner last took
+    /// it, so the owner is woken once per run rather than once per event.
+    fn latch(&self, event: TermEvent) -> Result<bool, TermEvent> {
+        let flag = |flag: &AtomicBool| !flag.swap(true, Ordering::AcqRel);
+        Ok(match event {
+            TermEvent::Bell => flag(&self.bell),
+            TermEvent::CursorBlinkingChange => flag(&self.cursor_blinking_changed),
+            TermEvent::Exit => flag(&self.exited),
+            TermEvent::Title(title) => self
+                .title
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .replace(TitleChange::Set(title))
+                .is_none(),
+            TermEvent::ResetTitle => self
+                .title
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .replace(TitleChange::Reset)
+                .is_none(),
+            TermEvent::ClipboardStore(target, text) => {
+                let mut stores = self.clipboard.lock().unwrap_or_else(|e| e.into_inner());
+                let first = stores.is_empty();
+                stores.retain(|(kept, _)| *kept != target);
+                stores.push((target, text));
+                first
+            }
+            other => return Err(other),
+        })
+    }
+}
+
 /// Implements `EventListener`; semantic terminal events are forwarded to the
 /// UI channel and wake the loop. Engine-only `Wakeup` is suppressed because
 /// the PTY reader publishes its generation-ordered output wake separately.
@@ -161,7 +239,11 @@ pub struct EventProxy {
     /// The UI consumes this edge before applying its output-generation gate.
     lifecycle_pending: Arc<AtomicBool>,
     osc52_copy_allowed: Arc<AtomicBool>,
-    overflowed: Arc<AtomicBool>,
+    /// State events the owner takes as their latest value: see
+    /// [`EventProxy::send_event`].
+    latched: Arc<LatchedEvents>,
+    /// Replies dropped in the current run of a full queue.
+    dropped_replies: Arc<AtomicUsize>,
 }
 
 impl EventProxy {
@@ -174,7 +256,8 @@ impl EventProxy {
             // Compatibility constructor: callers that do not provide a live
             // policy retain Kettle's default copy-enabled behavior.
             osc52_copy_allowed: Arc::new(AtomicBool::new(true)),
-            overflowed: Arc::new(AtomicBool::new(false)),
+            latched: Arc::default(),
+            dropped_replies: Arc::default(),
         }
     }
 
@@ -192,42 +275,50 @@ impl EventProxy {
         output_wake: Arc<OutputWakeGate>,
         osc52_copy_allowed: Arc<AtomicBool>,
     ) -> Self {
-        Self::with_output_wake_osc52_and_overflow(
-            tx,
-            waker,
-            output_wake,
-            osc52_copy_allowed,
-            Arc::new(AtomicBool::new(false)),
-        )
-    }
-
-    pub fn with_output_wake_osc52_and_overflow(
-        tx: Sender<TermEvent>,
-        waker: Waker,
-        output_wake: Arc<OutputWakeGate>,
-        osc52_copy_allowed: Arc<AtomicBool>,
-        overflowed: Arc<AtomicBool>,
-    ) -> Self {
         Self {
             tx,
             waker,
             output_wake: Some(output_wake),
             lifecycle_pending: Arc::new(AtomicBool::new(false)),
             osc52_copy_allowed,
-            overflowed,
+            latched: Arc::default(),
+            dropped_replies: Arc::default(),
         }
     }
 
     pub(crate) fn lifecycle_pending(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.lifecycle_pending)
     }
+
+    pub(crate) fn latched(&self) -> Arc<LatchedEvents> {
+        Arc::clone(&self.latched)
+    }
+
+    fn wake_owner(&self) {
+        self.lifecycle_pending.store(true, Ordering::Release);
+        (self.waker)();
+    }
 }
 
 impl EventListener for EventProxy {
     fn send_event(&self, event: TermEvent) {
-        if self.overflowed.load(Ordering::Acquire) {
+        // The grid's mouse-cursor shape is read on every frame; nothing
+        // consumes this hint, and a run of mode toggles would only fill the
+        // queue with it.
+        if matches!(event, TermEvent::MouseCursorDirty) {
             return;
         }
+        // State events are latched, the newest kept, and wake the owner once
+        // per run; see [`LatchedEvents`].
+        let event = match self.latched.latch(event) {
+            Ok(first) => {
+                if first {
+                    self.wake_owner();
+                }
+                return;
+            }
+            Err(event) => event,
+        };
         let event = match event {
             TermEvent::PtyWrite(s) if s == UPSTREAM_PRIMARY_DA_REPLY => TermEvent::PtyWrite(
                 if self.osc52_copy_allowed.load(Ordering::Acquire) {
@@ -249,19 +340,21 @@ impl EventListener for EventProxy {
         }
         match self.tx.try_send(event) {
             Ok(()) => {
-                self.lifecycle_pending.store(true, Ordering::Release);
-                (self.waker)();
+                let dropped = self.dropped_replies.swap(0, Ordering::AcqRel);
+                if dropped > 0 {
+                    log::warn!("terminal queue drained; {dropped} replies were dropped");
+                }
+                self.wake_owner();
             }
             Err(crossbeam_channel::TrySendError::Full(_)) => {
-                // The parser calls this while holding the terminal mutex, so
-                // blocking here would deadlock the UI renderer. A full bounded
-                // semantic queue is therefore an explicit fail-pane condition:
-                // retain no unbounded overflow, drop no reply silently while
-                // pretending the pane is healthy, and wake the owner to tear
-                // the hostile/stalled pane down.
-                if !self.overflowed.swap(true, Ordering::AcqRel) {
-                    self.lifecycle_pending.store(true, Ordering::Release);
-                    (self.waker)();
+                // Only replies to the program's queries (and the advisory
+                // child-exit status) reach the queue. The parser calls this
+                // while holding the terminal mutex, so it must not block, and
+                // the queue must not grow. A program asking faster than the
+                // window answers loses the newest replies until the queue
+                // drains, as one that does not read its replies already does.
+                if self.dropped_replies.fetch_add(1, Ordering::AcqRel) == 0 {
+                    log::warn!("terminal queue full; dropping replies until it drains");
                 }
             }
             Err(crossbeam_channel::TrySendError::Disconnected(_)) => {}
@@ -271,7 +364,7 @@ impl EventListener for EventProxy {
 
 #[cfg(test)]
 mod tests {
-    use super::{EventListener, EventProxy, OutputWakeGate, TermEvent};
+    use super::{ClipboardType, EventListener, EventProxy, OutputWakeGate, TermEvent};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -290,15 +383,137 @@ mod tests {
 
         proxy.send_event(TermEvent::Wakeup);
         assert!(lifecycle_pending.swap(false, Ordering::AcqRel));
-        proxy.send_event(TermEvent::Bell);
+        proxy.send_event(TermEvent::PtyWrite("\x1b[0n".into()));
         assert!(lifecycle_pending.swap(false, Ordering::AcqRel));
 
         // Both events arrive on the channel in order…
         assert!(matches!(rx.try_recv(), Ok(TermEvent::Wakeup)));
-        assert!(matches!(rx.try_recv(), Ok(TermEvent::Bell)));
+        assert!(matches!(rx.try_recv(), Ok(TermEvent::PtyWrite(s)) if s == "\x1b[0n"));
         assert!(rx.try_recv().is_err());
         // …and the waker fired once per event.
         assert_eq!(woke.load(Ordering::SeqCst), 2);
+    }
+
+    fn gated_proxy(
+        capacity: usize,
+    ) -> (
+        EventProxy,
+        crossbeam_channel::Receiver<TermEvent>,
+        Arc<AtomicUsize>,
+    ) {
+        let (tx, rx) = crossbeam_channel::bounded(capacity);
+        let woke = Arc::new(AtomicUsize::new(0));
+        let woke_for_callback = woke.clone();
+        let waker: super::Waker = Arc::new(move || {
+            woke_for_callback.fetch_add(1, Ordering::SeqCst);
+        });
+        let output_wake = Arc::new(OutputWakeGate::new(waker.clone()));
+        let proxy = EventProxy::with_output_wake_and_osc52(
+            tx,
+            waker,
+            output_wake,
+            Arc::new(AtomicBool::new(true)),
+        );
+        (proxy, rx, woke)
+    }
+
+    /// Output that repeats state events, such as `cat` of a binary file or a
+    /// loop setting the title, is latched, the newest kept, and wakes the
+    /// owner once per run. A flood of them once filled the 1,024-deep queue
+    /// and closed the pane, and with it a one-pane Kettle.
+    #[test]
+    fn floods_of_state_events_are_latched_not_queued() {
+        let (proxy, rx, woke) = gated_proxy(1024);
+        let latched = proxy.latched();
+
+        for i in 0..10_000 {
+            proxy.send_event(TermEvent::Bell);
+            proxy.send_event(TermEvent::Title(format!("title {i}")));
+            proxy.send_event(TermEvent::CursorBlinkingChange);
+            proxy.send_event(TermEvent::MouseCursorDirty);
+            proxy.send_event(TermEvent::ClipboardStore(
+                ClipboardType::Clipboard,
+                format!("copy {i}"),
+            ));
+        }
+        proxy.send_event(TermEvent::ClipboardStore(
+            ClipboardType::Selection,
+            "selected".into(),
+        ));
+        assert!(rx.is_empty(), "nothing a program repeats reaches the queue");
+        assert_eq!(
+            woke.load(Ordering::SeqCst),
+            4,
+            "each kind wakes once per run: bell, title, blinking, clipboard"
+        );
+        assert!(latched.take_bell());
+        assert!(!latched.take_bell());
+        assert_eq!(
+            latched.take_title(),
+            Some(super::TitleChange::Set("title 9999".into()))
+        );
+        assert_eq!(latched.take_title(), None);
+        assert!(latched.take_cursor_blinking_changed());
+        assert_eq!(
+            latched.take_clipboard_stores(),
+            vec![
+                (ClipboardType::Clipboard, "copy 9999".into()),
+                (ClipboardType::Selection, "selected".into()),
+            ]
+        );
+        assert!(latched.take_clipboard_stores().is_empty());
+        // Writes come back oldest first: where both targets are one system
+        // clipboard, the newer must be applied last.
+        for (target, text) in [
+            (ClipboardType::Clipboard, "a"),
+            (ClipboardType::Selection, "b"),
+            (ClipboardType::Clipboard, "c"),
+        ] {
+            proxy.send_event(TermEvent::ClipboardStore(target, text.into()));
+        }
+        assert_eq!(
+            latched.take_clipboard_stores(),
+            vec![
+                (ClipboardType::Selection, "b".into()),
+                (ClipboardType::Clipboard, "c".into()),
+            ]
+        );
+
+        // A reset after a title wins, as the newer request.
+        proxy.send_event(TermEvent::Title("gone".into()));
+        proxy.send_event(TermEvent::ResetTitle);
+        assert_eq!(latched.take_title(), Some(super::TitleChange::Reset));
+
+        proxy.send_event(TermEvent::Exit);
+        proxy.send_event(TermEvent::Exit);
+        assert!(latched.take_exited());
+        assert!(!latched.take_exited());
+        assert!(rx.is_empty());
+    }
+
+    /// Replies are the only events that reach the bounded queue. A program
+    /// asking faster than the window answers loses the newest replies while
+    /// the queue is full; the queue never grows and the pane stays open.
+    #[test]
+    fn a_full_queue_drops_replies_without_blocking_or_growing() {
+        let (proxy, rx, woke) = gated_proxy(2);
+
+        for _ in 0..1025 {
+            proxy.send_event(TermEvent::PtyWrite("\x1b[0n".into()));
+        }
+        assert_eq!(rx.len(), 2, "the queue holds its bound and no more");
+        assert_eq!(
+            woke.load(Ordering::SeqCst),
+            2,
+            "only delivered replies wake"
+        );
+        assert_eq!(proxy.dropped_replies.load(Ordering::Acquire), 1023);
+
+        // Once the owner drains it, replies flow again and the run ends.
+        while rx.try_recv().is_ok() {}
+        proxy.send_event(TermEvent::PtyWrite("\x1b[?6c".into()));
+        assert!(matches!(rx.try_recv(), Ok(TermEvent::PtyWrite(_))));
+        assert_eq!(proxy.dropped_replies.load(Ordering::Acquire), 0);
     }
 
     #[test]
@@ -324,38 +539,6 @@ mod tests {
         let proxy = EventProxy::new(tx, Arc::new(|| {}));
         drop(rx);
         proxy.send_event(TermEvent::Wakeup); // must not panic
-    }
-
-    #[test]
-    fn bounded_semantic_queue_fails_closed_without_blocking_or_growing() {
-        let (tx, rx) = crossbeam_channel::bounded(1);
-        let woke = Arc::new(AtomicUsize::new(0));
-        let woke_for_callback = woke.clone();
-        let waker: super::Waker = Arc::new(move || {
-            woke_for_callback.fetch_add(1, Ordering::SeqCst);
-        });
-        let output_wake = Arc::new(OutputWakeGate::new(waker.clone()));
-        let overflowed = Arc::new(AtomicBool::new(false));
-        let proxy = EventProxy::with_output_wake_osc52_and_overflow(
-            tx,
-            waker,
-            output_wake,
-            Arc::new(AtomicBool::new(true)),
-            overflowed.clone(),
-        );
-
-        proxy.send_event(TermEvent::Bell);
-        proxy.send_event(TermEvent::Title("hostile flood".into()));
-        proxy.send_event(TermEvent::PtyWrite("must not allocate an overflow".into()));
-
-        assert!(overflowed.load(Ordering::Acquire));
-        assert!(matches!(rx.try_recv(), Ok(TermEvent::Bell)));
-        assert!(rx.try_recv().is_err());
-        assert_eq!(
-            woke.load(Ordering::SeqCst),
-            2,
-            "one normal event and the first overflow each wake exactly once"
-        );
     }
 
     #[test]
@@ -465,8 +648,8 @@ mod tests {
         assert_eq!(woke.load(Ordering::SeqCst), 1);
 
         proxy.send_event(TermEvent::Wakeup);
-        proxy.send_event(TermEvent::Bell);
-        assert!(matches!(rx.try_recv(), Ok(TermEvent::Bell)));
+        proxy.send_event(TermEvent::PtyWrite("\x1b[0n".into()));
+        assert!(matches!(rx.try_recv(), Ok(TermEvent::PtyWrite(_))));
         assert!(rx.try_recv().is_err());
         assert_eq!(
             woke.load(Ordering::SeqCst),
