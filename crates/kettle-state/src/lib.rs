@@ -742,6 +742,20 @@ impl ExclusiveFileLock {
             Err(fs4::TryLockError::Error(error)) => Err(error),
         }
     }
+
+    /// Removes the lock file, then releases it. A caller that opened the
+    /// file before the removal finds it retired (see [`is_retired_lock`])
+    /// instead of locking a file nobody else can see. Removes nothing if
+    /// `path` no longer names the locked file. Windows cannot delete a file
+    /// that is still open, so there the lock is released first.
+    pub fn remove(self, path: &Path) -> io::Result<()> {
+        if !private::same_file_identity(&self.file, path)? {
+            return Err(retired_lock());
+        }
+        #[cfg(windows)]
+        drop(self);
+        fs::remove_file(path)
+    }
 }
 
 impl Drop for ExclusiveFileLock {
@@ -838,14 +852,37 @@ fn acquire_file_lock(
 }
 
 fn verify_locked_file(file: File, path: &Path) -> io::Result<File> {
-    // Uninstall may retire an idle lock while another caller holds its old fd.
+    // Uninstall, or a sweep of stale locks, may retire an idle lock while
+    // another caller holds its old fd.
     if !private::same_file_identity(&file, path)? {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "lock path no longer identifies the acquired file",
-        ));
+        return Err(retired_lock());
     }
     Ok(file)
+}
+
+/// The lock file a caller opened was removed or replaced before it could be
+/// locked. Opening the path again finds the current one.
+#[derive(Debug)]
+struct RetiredLock;
+
+impl std::fmt::Display for RetiredLock {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("lock path no longer identifies the acquired file")
+    }
+}
+
+impl std::error::Error for RetiredLock {}
+
+fn retired_lock() -> io::Error {
+    io::Error::new(io::ErrorKind::PermissionDenied, RetiredLock)
+}
+
+/// Whether a lock acquisition failed only because its lock file was retired
+/// under it, so retrying is safe, as opposed to a real permission error.
+pub fn is_retired_lock(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|inner| inner.is::<RetiredLock>())
 }
 
 #[cfg(unix)]
@@ -882,11 +919,40 @@ mod tests {
                     }
                     Ok(())
                 });
-                assert!(
-                    matches!(result, Err(error) if error.kind() == io::ErrorKind::PermissionDenied)
-                );
+                assert!(matches!(
+                    result,
+                    Err(error) if error.kind() == io::ErrorKind::PermissionDenied
+                        && is_retired_lock(&error)
+                ));
             }
         }
+    }
+
+    #[test]
+    fn a_permission_error_is_not_a_retired_lock() {
+        let denied = io::Error::from(io::ErrorKind::PermissionDenied);
+        assert!(!is_retired_lock(&denied));
+        assert!(is_retired_lock(&retired_lock()));
+    }
+
+    /// Unix only for the second half: Windows cannot replace a file another
+    /// handle holds open.
+    #[cfg(unix)]
+    #[test]
+    fn removing_a_held_lock_unlinks_only_the_file_it_locked() {
+        let root = test_tempdir();
+        let path = root.path().join("lock");
+        let lock = ExclusiveFileLock::try_acquire(&path).unwrap().unwrap();
+        lock.remove(&path).unwrap();
+        assert!(!path.exists());
+
+        // A path that now names another file is left alone.
+        let lock = ExclusiveFileLock::try_acquire(&path).unwrap().unwrap();
+        fs::remove_file(&path).unwrap();
+        drop(open_private_file(&path).unwrap());
+        let error = lock.remove(&path).unwrap_err();
+        assert!(is_retired_lock(&error));
+        assert!(path.exists());
     }
 
     #[test]

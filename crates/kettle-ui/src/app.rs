@@ -5140,13 +5140,17 @@ struct StartupPlan {
     pre_launch: bool,
 }
 
-fn startup_plan(options: &crate::Options, cfg: &Config) -> StartupPlan {
+fn startup_plan(
+    options: &crate::Options,
+    cfg: &Config,
+    another_build_running: bool,
+) -> StartupPlan {
     let launch_override = options.command.is_some() || options.cwd.is_some();
     let may_restore = !launch_override
         && (options.tab_handoff_fd.is_some()
             || options.tab_handoff.is_some()
             || options.layout.is_some()
-            || should_restore_session(options.restore, cfg.restore_session));
+            || should_restore_session(options.restore, cfg.restore_session, another_build_running));
     StartupPlan {
         launch_override,
         may_restore,
@@ -9390,6 +9394,13 @@ pub struct App {
     update_available: Option<(String, String)>,
     /// The installed version last logged as waiting for a restart.
     logged_restart_pending: Option<String>,
+    /// Primaries of other builds still running, found at election.
+    other_builds: kettle_ctl::activation::OtherBuilds,
+    /// This executable's canonical path, found at startup. On Linux an
+    /// update replaces it by rename, after which `current_exe()` reads
+    /// `<path> (deleted)` and no longer resolves; agent files keep naming
+    /// the installed one.
+    executable: Option<std::path::PathBuf>,
     /// The full version string the About panel shows —
     /// the bin crate passes its `KETTLE_VERSION` (version + git hash, exactly
     /// what `--version` prints); falls back to the bare crate version.
@@ -9862,6 +9873,14 @@ impl App {
         crate::startup_trace::mark(crate::startup_trace::Phase::EventLoopBuilt);
         event_loop.set_control_flow(ControlFlow::Wait);
         let proxy = event_loop.create_proxy();
+        // Primaries of other builds, such as the old version's after an
+        // update: shared state they own waits until they exit.
+        let other_builds = startup
+            .activation
+            .as_ref()
+            .map(kettle_ctl::activation::PrimaryHandle::other_builds)
+            .unwrap_or_default();
+        let another_build_running = other_builds.running();
         let activation = startup.activation.take().and_then(|primary| {
             match crate::activation_server::ActivationInbox::start(primary, proxy.clone()) {
                 Ok(inbox) => Some(inbox),
@@ -9964,8 +9983,7 @@ impl App {
                         // registration. Once it is released, every later
                         // append is observed; there is no truncate→watch gap
                         // in which a valid command can be stranded.
-                        let initialized = kettle_state::open_private_file(&path)
-                            .and_then(|file| file.set_len(0))
+                        let initialized = initialize_remote_spool(&path, another_build_running)
                             .and_then(|()| {
                                 w.watch(&dir, notify::RecursiveMode::NonRecursive)
                                     .map_err(std::io::Error::other)
@@ -10270,7 +10288,7 @@ impl App {
             };
         let video_previewer =
             crate::video_preview::VideoPreviewer::new(proxy.clone(), startup.media.clone());
-        let plan = startup_plan(&startup, &initial_cfg);
+        let plan = startup_plan(&startup, &initial_cfg, another_build_running);
         let ctl_policy = ctl_overrides(&startup).resolve(initial_cfg.ctl_policy());
         let mut app = App {
             #[cfg(target_os = "linux")]
@@ -10371,6 +10389,8 @@ impl App {
             lua_startup_fired: false,
             update_available: None,
             logged_restart_pending: None,
+            other_builds,
+            executable: std::env::current_exe().and_then(std::fs::canonicalize).ok(),
             version_line: startup_version,
             torn_drag: None,
             last_session_sweep: None,
@@ -17439,8 +17459,31 @@ fn session_write_target(
 /// Routing both through this one predicate keeps them symmetric.
 /// `--layout NAME` is independent (its own file, explicit intent) and never
 /// consults this gate.
-fn should_restore_session(startup_restore: bool, cfg_restore_session: bool) -> bool {
-    startup_restore || cfg_restore_session
+///
+/// While another build's primary still runs, typically the old version after
+/// an update, the session is its: restoring it here would duplicate its open
+/// tabs, and saving would overwrite them (#575). Both wait until it exits.
+fn should_restore_session(
+    startup_restore: bool,
+    cfg_restore_session: bool,
+    another_build_running: bool,
+) -> bool {
+    (startup_restore || cfg_restore_session) && !another_build_running
+}
+
+/// Open the remote-command spool for watching. Commands left after a crash
+/// must not replay into a new run, so the spool is emptied, unless another
+/// build's primary is still running: the spool is shared, and a command it
+/// has not claimed yet is still meant for it.
+fn initialize_remote_spool(
+    path: &std::path::Path,
+    another_build_running: bool,
+) -> std::io::Result<()> {
+    let file = kettle_state::open_private_file(path)?;
+    if another_build_running {
+        return Ok(());
+    }
+    file.set_len(0)
 }
 
 /// How long to let the synchronous GPU adapter+device

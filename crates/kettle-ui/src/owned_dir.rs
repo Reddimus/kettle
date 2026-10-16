@@ -108,10 +108,15 @@ impl OwnedFiles {
 /// it, and any staging found was left by an install that ended. `identity`
 /// reads the executable and version an older directory under `root` names.
 #[cfg(unix)]
+///
+/// While `keep_older` is set, typically because another build's primary is
+/// still running after an update, directories of the same command at older
+/// versions stay: that build's panes still read them (#575).
 pub(crate) fn install(
     root: &Path,
     files: &OwnedFiles,
     identity: IdentityReader,
+    keep_older: bool,
 ) -> Result<PathBuf, ()> {
     kettle_state::create_private_dirs(root).map_err(|_| ())?;
     let _installing =
@@ -122,12 +127,12 @@ pub(crate) fn install(
         write(root, &directory, files);
         verify(&directory, files)?;
     }
-    remove_stale(root, &directory, files, identity);
+    remove_stale(root, &directory, files, identity, keep_older);
     Ok(directory)
 }
 
 #[cfg(not(unix))]
-pub(crate) fn install(_: &Path, _: &OwnedFiles, _: IdentityReader) -> Result<PathBuf, ()> {
+pub(crate) fn install(_: &Path, _: &OwnedFiles, _: IdentityReader, _: bool) -> Result<PathBuf, ()> {
     Err(())
 }
 
@@ -281,7 +286,13 @@ pub(crate) fn remove_tree(path: &Path) -> std::io::Result<()> {
 /// version's for this executable, which a Kettle upgraded in place offers. A
 /// running program that read a removed directory keeps what it read.
 #[cfg(unix)]
-fn remove_stale(root: &Path, keep: &Path, files: &OwnedFiles, identity: IdentityReader) {
+fn remove_stale(
+    root: &Path,
+    keep: &Path,
+    files: &OwnedFiles,
+    identity: IdentityReader,
+    keep_older: bool,
+) {
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
     };
@@ -299,8 +310,10 @@ fn remove_stale(root: &Path, keep: &Path, files: &OwnedFiles, identity: Identity
             match identity(&path) {
                 None => true,
                 Some((command, version)) if command == files.command => {
-                    // Kept only when it is a newer version's.
-                    !(ours.is_some() && version.as_deref().and_then(version_key) > ours)
+                    // Kept when it is a newer version's, or any version's
+                    // while another build may still be using it.
+                    !(keep_older
+                        || ours.is_some() && version.as_deref().and_then(version_key) > ours)
                 }
                 Some((command, _)) => !Path::new(&command).exists(),
             }
@@ -370,7 +383,7 @@ mod tests {
         let base = kettle_test_support::private_tempdir("kettle-owned-dir-");
         let root = base.path().join("kettle/owned");
         let files = nested();
-        let directory = install(&root, &files, |_| None).unwrap();
+        let directory = install(&root, &files, |_| None, false).unwrap();
         assert_eq!(directory, root.join(files.directory_name()));
         for inner in ["", "fish", "fish/fish", "fish/fish/vendor_conf.d", "zsh"] {
             let mode = std::fs::metadata(directory.join(inner))
@@ -386,8 +399,42 @@ mod tests {
         std::fs::set_permissions(&inner, std::fs::Permissions::from_mode(0o500)).unwrap();
         assert_eq!(verify(&directory, &files), Err(()));
         // The next install puts it right.
-        assert_eq!(install(&root, &files, |_| None), Ok(directory.clone()));
+        assert_eq!(
+            install(&root, &files, |_| None, false),
+            Ok(directory.clone())
+        );
         assert_eq!(verify(&directory, &files), Ok(()));
+        remove_tree(&base.path().join("kettle")).unwrap();
+    }
+
+    /// The version an older test directory names, from its one file.
+    #[cfg(unix)]
+    fn test_identity(directory: &Path) -> Option<(String, Option<String>)> {
+        let version = std::fs::read_to_string(directory.join("version")).ok()?;
+        Some(("/opt/kettle/bin/kettle".into(), Some(version.trim().into())))
+    }
+
+    /// #575: after an update the old build's panes still read their files.
+    /// While its primary runs, the new build's install keeps them; once it
+    /// has exited, they go as stale.
+    #[cfg(unix)]
+    #[test]
+    fn installing_keeps_older_same_command_files_while_another_build_runs() {
+        let base = kettle_test_support::private_tempdir("kettle-owned-dir-builds-");
+        let root = base.path().join("kettle/owned");
+        let files = |version: &str| {
+            OwnedFiles::new(
+                "test",
+                "/opt/kettle/bin/kettle".into(),
+                version.into(),
+                vec![("version", format!("{version}\n"))],
+            )
+        };
+        let old = install(&root, &files("5.1.0"), test_identity, false).unwrap();
+        install(&root, &files("5.2.0"), test_identity, true).unwrap();
+        assert!(old.exists(), "removed while the old build still runs");
+        install(&root, &files("5.2.0"), test_identity, false).unwrap();
+        assert!(!old.exists(), "kept after the old build exited");
         remove_tree(&base.path().join("kettle")).unwrap();
     }
 }

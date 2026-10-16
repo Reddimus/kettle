@@ -83,7 +83,11 @@ impl App {
         match session_write_target(
             self.startup.layout.as_deref(),
             self.named_layout_writable,
-            should_restore_session(self.startup.restore, self.cfg.restore_session),
+            should_restore_session(
+                self.startup.restore,
+                self.cfg.restore_session,
+                self.other_builds.running(),
+            ),
             s.is_empty(),
         ) {
             SessionWriteTarget::NamedLayout(name) => s.save_layout(name),
@@ -180,7 +184,11 @@ impl App {
         } else if let Some(name) = self.startup.layout.as_deref() {
             self.restore_source = crate::session::Session::path_for_layout(name);
             crate::session::Session::load_layout(name)
-        } else if should_restore_session(self.startup.restore, self.cfg.restore_session) {
+        } else if should_restore_session(
+            self.startup.restore,
+            self.cfg.restore_session,
+            self.other_builds.running(),
+        ) {
             self.restore_source = crate::session::Session::path();
             crate::session::Session::load()
         } else {

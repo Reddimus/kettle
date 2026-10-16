@@ -44,7 +44,7 @@ fn startup_plan_truth_table() {
                         let override_launch = command || cwd;
                         let restore = !override_launch && restore_bits != 0;
                         assert_eq!(
-                            super::startup_plan(&options, &cfg),
+                            super::startup_plan(&options, &cfg, false),
                             super::StartupPlan {
                                 launch_override: override_launch,
                                 may_restore: restore,
@@ -102,7 +102,7 @@ fn pre_launch_spawn_sits_between_app_build_and_run_app() {
     let order = [
         run.find("EventLoop::<UserEvent>::with_user_event().build()")
             .unwrap(),
-        run.find("let plan = startup_plan(&startup, &initial_cfg);")
+        run.find("let plan = startup_plan(&startup, &initial_cfg, another_build_running);")
             .unwrap(),
         run.find("let mut app = App {").unwrap(),
         run.find("startup_trace::Phase::AppBuilt").unwrap(),
@@ -5627,15 +5627,40 @@ fn visible_surface_requirement_breaks_the_hidden_first_frame_cycle() {
 #[test]
 fn restore_session_gate_truth_table() {
     assert!(
-        !should_restore_session(false, false),
+        !should_restore_session(false, false, false),
         "fresh default: no load, no save"
     );
-    assert!(should_restore_session(true, false), "--restore one-shot");
     assert!(
-        should_restore_session(false, true),
+        should_restore_session(true, false, false),
+        "--restore one-shot"
+    );
+    assert!(
+        should_restore_session(false, true, false),
         "restore-session = true"
     );
-    assert!(should_restore_session(true, true));
+    assert!(should_restore_session(true, true, false));
+}
+
+/// #575: after an update, the new build's first window opens while the old
+/// version's windows are still running. The session is still theirs, so the
+/// new build neither restores it (duplicating their tabs) nor overwrites it.
+#[test]
+fn config_restore_and_save_wait_for_another_build_to_exit() {
+    for (startup_restore, cfg_restore) in [(false, true), (true, false), (true, true)] {
+        assert!(!should_restore_session(startup_restore, cfg_restore, true));
+        assert!(should_restore_session(startup_restore, cfg_restore, false));
+    }
+}
+
+#[test]
+fn startup_keeps_the_remote_spool_while_another_build_runs() {
+    let dir = crate::test_tempdir();
+    let path = dir.path().join("remote.cmd");
+    std::fs::write(&path, b"new-tab\n").unwrap();
+    super::initialize_remote_spool(&path, true).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"new-tab\n");
+    super::initialize_remote_spool(&path, false).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"");
 }
 
 #[test]
@@ -5842,7 +5867,7 @@ fn explicit_restore_paths_precede_default_session() {
     // The LOAD gate specifically (`} else if should_restore_session(...)`),
     // not the save path's call with the same args earlier in the file.
     let gate = src
-        .find("else if should_restore_session(self.startup.restore")
+        .find("else if should_restore_session(\n            self.startup.restore")
         .expect("the load gate is `} else if should_restore_session(self.startup.restore, ...)`");
     let before = &src[..gate];
     for marker in [
@@ -5861,7 +5886,9 @@ fn explicit_restore_paths_precede_default_session() {
     // halves: that `save_session` feeds it the predicate, and that the
     // default-session arm is the only thing that predicate unlocks.
     assert!(
-        src.contains("should_restore_session(self.startup.restore, self.cfg.restore_session),"),
+        src.contains(
+            "should_restore_session(\n                self.startup.restore,\n                self.cfg.restore_session,\n                self.other_builds.running(),\n            ),"
+        ),
         "save_session must pass should_restore_session into the write \
              routing — symmetric with the load gate (audit M1)"
     );

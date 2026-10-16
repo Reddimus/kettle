@@ -1485,6 +1485,13 @@ default launch. Dev-record builds also compare a bounded path fingerprint and
 raw-input policy before joining, preventing recording-policy drift without
 putting a user path on the wire.
 
+Each build, named by its source hash, elects its own primary under its own lock
+and endpoint, so after an update the first launch of the new build becomes its
+primary while the old one keeps its windows. A new primary removes the
+activation files of builds whose lock is free, and while another build's
+primary is alive it leaves shared per-user state to it: the restorable session,
+pending remote commands, and older agent files.
+
 - **Take-out/put-back dispatch** — the `ApplicationHandler` entry points
   remove the addressed window from the map, run the inner handlers with
   disjoint `&mut App` + `&mut WindowState` borrows, then reinsert it.
