@@ -2232,10 +2232,14 @@ impl LinuxSession {
         // Hold pidfds before signaling so numeric PID reuse cannot redirect a
         // stop or kill to a different process.
         let mut stable = false;
+        let mut scan_error = None;
         for _ in 0..8 {
             let before = handles.len();
-            let scan = linux_session_processes(self.id, 4096, &mut budget);
+            let scan = linux_session_processes(self.id, 4096, &mut budget, &handles);
             incomplete |= scan.incomplete;
+            if let Some(error) = scan.error {
+                scan_error.get_or_insert(error);
+            }
             for handle in scan.handles {
                 if let std::collections::hash_map::Entry::Vacant(entry) =
                     handles.entry(handle.identity)
@@ -2288,11 +2292,12 @@ impl LinuxSession {
             }
         }
         if budget.exhausted || !stable || incomplete {
+            let cause = scan_error.map_or_else(String::new, |error| format!(" ({error})"));
             let _ = writeln!(
                 std::io::stderr(),
                 "kettle exec: Linux process cleanup could not prove the complete session was \
-                 frozen; falling back to the PTY process group, and a member in another group \
-                 may still be running"
+                 frozen{cause}; falling back to the PTY process group, and a member in another \
+                 group may still be running"
             );
         }
         for handle in handles.values() {
@@ -2381,38 +2386,50 @@ fn linux_wait_for_root_anchor(
 struct LinuxSessionScan {
     handles: Vec<LinuxPidHandle>,
     incomplete: bool,
+    /// The first error that made the scan incomplete, for the warning.
+    error: Option<std::io::Error>,
 }
 
 #[cfg(target_os = "linux")]
-fn linux_session_processes(
+/// Opens a pidfd for each member of `session` that `known` does not already
+/// hold. Teardown keeps every member's handle across scan rounds, so
+/// reopening known members would hold two descriptors per member and run a
+/// session of a few hundred processes into the open-file limit. `limit` caps
+/// the known and new handles together.
+fn linux_session_processes<S: std::hash::BuildHasher>(
     session: u32,
     limit: usize,
     budget: &mut LinuxProcScanBudget,
+    known: &std::collections::HashMap<LinuxProcessIdentity, LinuxPidHandle, S>,
 ) -> LinuxSessionScan {
-    if limit == 0 {
+    if known.len() >= limit {
         budget.exhausted = true;
         return LinuxSessionScan {
             handles: Vec::new(),
             incomplete: true,
+            error: None,
         };
     }
     let processes = match std::fs::read_dir("/proc") {
         Ok(processes) => processes,
-        Err(_) => {
+        Err(error) => {
             return LinuxSessionScan {
                 handles: Vec::new(),
                 incomplete: true,
+                error: Some(error),
             };
         }
     };
     let own_pid = std::process::id();
     let mut members = Vec::new();
     let mut incomplete = false;
+    let mut first_error = None;
     for process in processes {
         let process = match process {
             Ok(process) => process,
-            Err(_) => {
+            Err(error) => {
                 incomplete = true;
+                first_error.get_or_insert(error);
                 continue;
             }
         };
@@ -2432,28 +2449,33 @@ fn linux_session_processes(
         let identity = match LinuxProcessIdentity::read(pid) {
             Ok(Some(identity)) => identity,
             Ok(None) => continue,
-            Err(_) => {
+            Err(error) => {
                 incomplete = true;
+                first_error.get_or_insert(error);
                 continue;
             }
         };
-        if identity.session == session {
+        if identity.session == session && !known.contains_key(&identity) {
             match LinuxPidHandle::open(identity) {
                 Ok(Some(handle)) => {
                     members.push(handle);
-                    if members.len() >= limit {
+                    if known.len() + members.len() >= limit {
                         budget.exhausted = true;
                         break;
                     }
                 }
                 Ok(None) => {}
-                Err(_) => incomplete = true,
+                Err(error) => {
+                    incomplete = true;
+                    first_error.get_or_insert(error);
+                }
             }
         }
     }
     LinuxSessionScan {
         handles: members,
         incomplete,
+        error: first_error,
     }
 }
 
@@ -5923,6 +5945,59 @@ wait
         );
     }
 
+    /// Teardown keeps every member's pidfd across scan rounds, so a later
+    /// round must not open a second one for a member it already holds: two
+    /// per member ran a session of ~600 processes into the 1024 open-file
+    /// limit, and the run ended "not verified" (125) instead of timed out.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_session_scan_opens_no_second_pidfd_for_a_held_member() {
+        struct Reap(std::process::Child);
+        impl Drop for Reap {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let sleeper = Reap(
+            std::process::Command::new("sleep")
+                .arg("60")
+                .spawn()
+                .expect("spawn a session member"),
+        );
+        let own = LinuxProcessIdentity::read(std::process::id())
+            .expect("read own proc stat")
+            .expect("own process still exists");
+        let mut budget = LinuxProcScanBudget::new();
+        let first = linux_session_processes(
+            own.session,
+            4096,
+            &mut budget,
+            &std::collections::HashMap::new(),
+        );
+        assert!(
+            first
+                .handles
+                .iter()
+                .any(|handle| handle.identity.pid == sleeper.0.id()),
+            "the first scan finds the member"
+        );
+        let held: std::collections::HashMap<_, _> = first
+            .handles
+            .into_iter()
+            .map(|handle| (handle.identity, handle))
+            .collect();
+        let mut budget = LinuxProcScanBudget::new();
+        let second = linux_session_processes(own.session, 4096, &mut budget, &held);
+        assert!(
+            second
+                .handles
+                .iter()
+                .all(|handle| !held.contains_key(&handle.identity)),
+            "a held member was opened again"
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_process_identity_parser_and_scan_cap_are_pinned() {
@@ -5944,7 +6019,12 @@ wait
             .expect("read own proc stat")
             .expect("own process still exists");
         let mut budget = LinuxProcScanBudget::new();
-        let _ = linux_session_processes(own.session, 0, &mut budget);
+        let _ = linux_session_processes(
+            own.session,
+            0,
+            &mut budget,
+            &std::collections::HashMap::new(),
+        );
         assert!(
             budget.exhausted,
             "a local result cap must be reported through the shared budget"

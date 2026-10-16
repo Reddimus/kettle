@@ -17,6 +17,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Keep remote and working-directory labels current on a busy machine. A
   process scan that runs out of time is now retried with a longer budget,
   instead of publishing nothing until the next poll.
+- `kettle exec --timeout` on Linux: tearing down a session of several hundred
+  processes no longer runs out of file descriptors and reports "teardown was
+  not verified" (exit 125) instead of a timeout. The cleanup warning now names
+  the error that stopped it.
 
 ## [5.1.0] — 2026-10-15
 
