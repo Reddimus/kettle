@@ -267,8 +267,25 @@ impl LanePlayback {
                     self.position_ms = frame.pts_ms.min(self.duration_ms);
                     changed = true;
                 }
-                // No room for it now: the frame shown stays.
-                Err(ImageRefusal::NoRoom(pixels)) => session.recycle(pixels),
+                Err(ImageRefusal::NoRoom(pixels)) => {
+                    if let Some((old, at_ms)) = self.shown.take() {
+                        match old.try_replace_with_budget(frame.width, frame.height, pixels, budget)
+                        {
+                            Ok((image, pixels)) => {
+                                self.shown = Some((image, frame.pts_ms));
+                                session.recycle(pixels);
+                                self.position_ms = frame.pts_ms.min(self.duration_ms);
+                                changed = true;
+                            }
+                            Err((old, pixels)) => {
+                                self.shown = Some((old, at_ms));
+                                session.recycle(pixels);
+                            }
+                        }
+                    } else {
+                        session.recycle(pixels);
+                    }
+                }
                 Err(ImageRefusal::Invalid) => {}
             }
         }
@@ -893,6 +910,61 @@ mod tests {
         playback.reopen(session, at_ms, play, now);
         assert_eq!(playback.position_ms(), 8000);
         assert_eq!(again.borrow().commands, ["play"]);
+    }
+
+    /// One frame fits the account but two do not. Each new frame takes over
+    /// the shown frame's reservation instead of needing a second one, so
+    /// the picture keeps moving; a frame someone else still holds is not
+    /// replaced.
+    #[test]
+    fn playback_replaces_a_frame_when_only_one_fits() {
+        let budget = GraphicsBudget::independent(kettle_core::GraphicsLimits {
+            retained_bytes: 12,
+            image_bytes: 8,
+            ..kettle_core::GraphicsLimits::default()
+        })
+        .unwrap();
+        let _previews = budget.reserve_retained_cpu(4).unwrap();
+        let (session, script) = stand();
+        let mut playback = LanePlayback::new(1, 2, 9000, session, 0, true, Instant::now());
+        script.borrow_mut().frames.push(frame(100));
+        assert!(playback.poll(&budget));
+        let old_key = playback.frame().unwrap().allocation_key();
+        let pin = std::sync::Arc::downgrade(&playback.frame().unwrap().rgba);
+        let mut next = frame(200);
+        next.rgba.fill(2);
+        script.borrow_mut().frames.push(next);
+        assert!(playback.poll(&budget));
+        assert_eq!(playback.position_ms(), 200);
+        assert_eq!(playback.frame().unwrap().rgba.as_slice(), &[2; 8]);
+        assert_ne!(playback.frame().unwrap().allocation_key(), old_key);
+        assert!(pin.upgrade().is_none());
+        // The new frame took over the old one's reservation: the account is
+        // full, not over.
+        assert!(budget.reserve_retained_cpu(1).is_none());
+        assert_eq!(script.borrow().recycled, 1);
+
+        let shared = playback.frame().unwrap().clone();
+        script.borrow_mut().frames.push(frame(300));
+        assert!(!playback.poll(&budget));
+        assert_eq!(playback.position_ms(), 200);
+        assert_eq!(shared.rgba.as_slice(), &[2; 8]);
+        drop(shared);
+        script.borrow_mut().frames.push(frame(400));
+        assert!(playback.poll(&budget));
+        assert_eq!(playback.position_ms(), 400);
+        assert_eq!(script.borrow().recycled, 3);
+
+        let mut smaller = frame(500);
+        smaller.width = 1;
+        smaller.rgba.truncate(4);
+        script.borrow_mut().frames.push(smaller);
+        assert!(playback.poll(&budget));
+        assert_eq!(playback.position_ms(), 500);
+        assert_eq!(playback.frame().unwrap().width, 1);
+        // The smaller frame gave its extra bytes back: four free, no more.
+        assert!(budget.reserve_retained_cpu(5).is_none());
+        assert!(budget.reserve_retained_cpu(4).is_some());
     }
 
     /// A frame with no room in the account is given back, and the one shown

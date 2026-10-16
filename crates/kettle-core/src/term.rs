@@ -12950,6 +12950,27 @@ mod conformance {
         assert_eq!(t.grid().display_offset(), 0);
     }
 
+    /// A block selection whose end lies past the last column clamps onto it,
+    /// and trimming its edge cells can then leave no column at all. Copying
+    /// it read a column past the row and aborted.
+    #[test]
+    fn a_block_selection_clamped_onto_the_last_column_copies_nothing() {
+        use alacritty_terminal::index::Side;
+        use alacritty_terminal::selection::{Selection, SelectionType};
+        let (mut t, mut p) = harness(80, 10);
+        feed(&mut t, &mut p, b"x");
+        for side in [Side::Left, Side::Right] {
+            let mut selection = Selection::new(
+                SelectionType::Block,
+                Point::new(Line(5), Column(79)),
+                Side::Right,
+            );
+            selection.update(Point::new(Line(6), Column(81)), side);
+            t.selection = Some(selection);
+            assert_eq!(t.selection_to_string(), None);
+        }
+    }
+
     /// A selection made while scrolled back must read the VISIBLE (history)
     /// row, not the active-screen row at the same viewport index. This guards
     /// alacritty's `Selection` coordinate contract, which expects GRID-ABSOLUTE

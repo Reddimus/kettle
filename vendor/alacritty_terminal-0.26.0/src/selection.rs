@@ -402,6 +402,12 @@ impl Selection {
             start.point.column += 1;
         }
 
+        // Anchors past the last column were clamped onto it, so trimming the
+        // edge cells can leave no column at all, or a start one past the grid.
+        if start.point.column > end.point.column {
+            return None;
+        }
+
         Some(SelectionRange {
             start: start.point,
             end: end.point,
@@ -430,6 +436,22 @@ mod tests {
     fn term(height: usize, width: usize) -> Term<()> {
         let size = TermSize::new(width, height);
         Term::new(Config::default(), &size, ())
+    }
+
+    #[test]
+    fn block_selection_clamped_to_right_edge_is_empty() {
+        let mut terminal = term(10, 80);
+        for side in [Side::Left, Side::Right] {
+            let mut selection = Selection::new(
+                SelectionType::Block,
+                Point::new(Line(5), Column(79)),
+                Side::Right,
+            );
+            selection.update(Point::new(Line(6), Column(81)), side);
+            assert_eq!(selection.to_range(&terminal), None);
+            terminal.selection = Some(selection);
+            assert_eq!(terminal.selection_to_string(), None);
+        }
     }
 
     /// Test case of single cell selection.

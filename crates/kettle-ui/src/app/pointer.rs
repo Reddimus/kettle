@@ -2,6 +2,24 @@
 
 use super::*;
 
+/// A selection point from the pointer, kept on the pane's grid. The pointer
+/// can sit past the last column, over a neighboring split; the point stays on
+/// the last column, taking its right half, so a drag past the edge selects
+/// through it. Then converted to grid-absolute, as `viewport_point_to_grid`.
+fn selection_point_to_grid(
+    mut viewport: kettle_core::Point,
+    mut side: kettle_core::Side,
+    dimensions: &impl Dimensions,
+    display_offset: usize,
+) -> (kettle_core::Point, kettle_core::Side) {
+    if viewport.column > dimensions.last_column() {
+        viewport.column = dimensions.last_column();
+        side = kettle_core::Side::Right;
+    }
+    viewport.line.0 = viewport.line.0.clamp(0, dimensions.bottommost_line().0);
+    (viewport_point_to_grid(viewport, display_offset), side)
+}
+
 impl App {
     /// Clear the focused pane's selection (called when the user types —
     /// every modern terminal does this so a stale highlight doesn't
@@ -258,7 +276,7 @@ impl App {
                 // Store the grid-absolute point (viewport − display_offset)
                 // so a selection started while scrolled back anchors on the
                 // history row the user sees, not the active screen.
-                let p = viewport_point_to_grid(vp, t.grid().display_offset());
+                let (p, side) = selection_point_to_grid(vp, side, &*t, t.grid().display_offset());
                 // The anchor carries the pointer's sub-cell side so a Simple/Block
                 // drag trims the start cell when the press lands in its right half
                 // (Semantic/Lines ignore the side — they snap to token bounds).
@@ -370,7 +388,7 @@ impl App {
         if let Ok(mut t) = pane.term.term.lock() {
             // Convert to grid-absolute before the mutable `selection`
             // borrow so the dragged end-point tracks scrollback too.
-            let p = viewport_point_to_grid(vp, t.grid().display_offset());
+            let (p, side) = selection_point_to_grid(vp, side, &*t, t.grid().display_offset());
             if let Some(sel) = t.selection.as_mut() {
                 // The drag end carries the pointer's sub-cell side so the
                 // boundary cell is included only once the pointer crosses its
@@ -452,7 +470,7 @@ impl App {
             {
                 // Grid-absolute end-point so Shift+Click extends to the
                 // right history row while scrolled back.
-                let p = viewport_point_to_grid(vp, t.grid().display_offset());
+                let (p, side) = selection_point_to_grid(vp, side, &*t, t.grid().display_offset());
                 if let Some(sel) = t.selection.as_mut() {
                     // Sub-cell side so Shift+Click lands the boundary on the
                     // same half-cell rule as a drag.
@@ -905,5 +923,42 @@ impl App {
             }
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod selection_point_tests {
+    use super::*;
+
+    struct Grid(usize, usize);
+
+    impl Dimensions for Grid {
+        fn total_lines(&self) -> usize {
+            self.1
+        }
+        fn screen_lines(&self) -> usize {
+            self.1
+        }
+        fn columns(&self) -> usize {
+            self.0
+        }
+    }
+
+    /// A drag past the right edge, over a neighboring split, stays on the
+    /// last column and takes its right half.
+    #[test]
+    fn a_point_past_the_last_column_stays_on_the_grid() {
+        use kettle_core::{Column, Line, Point, Side};
+        let grid = Grid(80, 24);
+        for side in [Side::Left, Side::Right] {
+            assert_eq!(
+                selection_point_to_grid(Point::new(Line(6), Column(81)), side, &grid, 0),
+                (Point::new(Line(6), Column(79)), Side::Right)
+            );
+        }
+        assert_eq!(
+            selection_point_to_grid(Point::new(Line(30), Column(3)), Side::Left, &grid, 0),
+            (Point::new(Line(23), Column(3)), Side::Left)
+        );
     }
 }
