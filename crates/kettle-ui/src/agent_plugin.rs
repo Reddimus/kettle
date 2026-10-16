@@ -807,10 +807,11 @@ mod tests {
         remove_tree(&base.path().join("kettle")).unwrap();
     }
 
-    /// Installing removes this executable's plugins from the same or an
-    /// older version, plugins whose executable is gone, and staging an
-    /// ended install left, but not another installed Kettle's plugin, nor a
-    /// newer version's for this executable.
+    /// Installing removes this executable's plugins from an older version,
+    /// plugins whose executable is gone, and staging an ended install left,
+    /// but not another installed Kettle's plugin, a newer version's for this
+    /// executable, or another of this version's, which a Kettle with other
+    /// settings may still offer.
     #[test]
     fn installing_keeps_other_installs_plugins() {
         let base = kettle_test_support::private_tempdir("kettle-plugin-");
@@ -869,7 +870,8 @@ mod tests {
         assert!(!not_mcp.exists(), "a server that is not Kettle's");
         assert!(!overlong.exists(), "a file read only in part");
         assert!(!older_dir.exists(), "this executable's older version");
-        assert!(!rebuilt_dir.exists(), "another build of this version");
+        assert!(rebuilt_dir.exists(), "another build of this version");
+        assert_eq!(verify(&rebuilt_dir, &rebuilt), Ok(()));
         assert!(!gone_dir.exists(), "a plugin whose Kettle is gone");
         assert!(!left.exists(), "staging an ended install left");
         assert!(newer_dir.exists(), "a newer version's, upgraded in place");
@@ -882,22 +884,21 @@ mod tests {
 
     /// Kettles sharing the plugins directory install one at a time.
     #[test]
-    fn an_install_waits_for_another_to_finish() {
+    fn a_busy_install_returns_without_waiting_and_can_be_retried() {
         let base = kettle_test_support::private_tempdir("kettle-plugin-");
         let root = base.path().join("kettle/agent-plugins");
         kettle_state::create_private_dirs(&root).unwrap();
         let held = kettle_state::ExclusiveFileLock::acquire(&root.join(INSTALL_LOCK)).unwrap();
-        let installing = std::thread::spawn({
-            let root = root.clone();
-            move || install(&root, &files(), false)
-        });
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        let started = std::time::Instant::now();
+        assert!(install(&root, &files(), false).is_err());
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
         assert!(
             !root.join(files().directory_name()).exists(),
             "nothing written while another install holds the lock"
         );
+        assert!(crate::owned_dir::retry_deadline().is_some());
         drop(held);
-        let directory = installing.join().unwrap().unwrap();
+        let directory = install(&root, &files(), false).unwrap();
         assert_eq!(verify(&directory, &files()), Ok(()));
         remove_tree(&base.path().join("kettle")).unwrap();
     }

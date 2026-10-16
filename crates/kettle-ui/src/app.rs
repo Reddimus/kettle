@@ -18048,6 +18048,10 @@ impl ApplicationHandler<UserEvent> for App {
         // Returns a wait budget that keeps it ticking.
         let torn_tick_wait = self.torn_drag_pointer_tick(event_loop);
         let now = std::time::Instant::now();
+        if crate::owned_dir::take_retry(now) {
+            self.reconcile_claude_plugin();
+            self.reconcile_codex_shell();
+        }
         if self
             .config_reload_deadline
             .is_some_and(|deadline| deadline <= now)
@@ -18090,6 +18094,10 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(deadline) = self.config_reload_deadline {
             let deadline =
                 deadline.max(std::time::Instant::now() + std::time::Duration::from_millis(1));
+            earliest_deadline =
+                Some(earliest_deadline.map_or(deadline, |current| current.min(deadline)));
+        }
+        if let Some(deadline) = crate::owned_dir::retry_deadline() {
             earliest_deadline =
                 Some(earliest_deadline.map_or(deadline, |current| current.min(deadline)));
         }

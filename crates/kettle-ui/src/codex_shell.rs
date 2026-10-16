@@ -388,6 +388,36 @@ mod tests {
         );
     }
 
+    /// Two Kettles of one version with different agents enabled each offer
+    /// their own startup files; installing one keeps the other's.
+    #[cfg(unix)]
+    #[test]
+    fn installing_another_agent_selection_keeps_the_previous_startup() {
+        let base = kettle_test_support::private_tempdir("kettle-codex-shell-");
+        let kettle = Path::new("/kettle-stand-in/bin/kettle");
+        let root = base.path().join("agent-shell");
+        let first = prepare(&root, kettle, "5.0.0", CODEX, false).unwrap();
+        let second = prepare(
+            &root,
+            kettle,
+            "5.0.0",
+            Agents {
+                codex: true,
+                claude: true,
+            },
+            false,
+        )
+        .unwrap();
+        assert_ne!(first.directory, second.directory);
+        for offered in [&first, &second] {
+            assert_eq!(
+                crate::owned_dir::verify(&offered.directory, &offered.files),
+                Ok(())
+            );
+        }
+        crate::owned_dir::remove_tree(&root).unwrap();
+    }
+
     /// A newline in Kettle's path is part of the quoted path in both shells,
     /// so the definitions carry the function exactly as it is.
     #[test]

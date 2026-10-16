@@ -119,9 +119,16 @@ pub(crate) fn install(
     keep_older: bool,
 ) -> Result<PathBuf, ()> {
     kettle_state::create_private_dirs(root).map_err(|_| ())?;
-    let _installing =
-        kettle_state::ExclusiveFileLock::acquire_timeout(&root.join(INSTALL_LOCK), INSTALL_WAIT)
-            .map_err(|_| ())?;
+    // Never waits: this runs on the UI thread, and another Kettle can hold
+    // the lock for as long as it is suspended. A busy lock asks for a retry.
+    let Some(_installing) =
+        kettle_state::ExclusiveFileLock::try_acquire(&root.join(INSTALL_LOCK)).map_err(|_| ())?
+    else {
+        if let Ok(mut retry) = RETRY_AT.lock() {
+            retry.get_or_insert_with(|| std::time::Instant::now() + INSTALL_RETRY);
+        }
+        return Err(());
+    };
     let directory = root.join(files.directory_name());
     if verify(&directory, files).is_err() {
         write(root, &directory, files);
@@ -136,12 +143,33 @@ pub(crate) fn install(_: &Path, _: &OwnedFiles, _: IdentityReader, _: bool) -> R
     Err(())
 }
 
-/// The lock Kettles sharing a root install under, and the longest an install
-/// waits for another to finish.
+/// The lock Kettles sharing a root install under.
 #[cfg(unix)]
 pub(crate) const INSTALL_LOCK: &str = ".install.lock";
+/// How soon an install that found the lock busy is tried again.
 #[cfg(unix)]
-const INSTALL_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+const INSTALL_RETRY: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// When an install that found the lock busy wants another try, if one did.
+static RETRY_AT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+/// The next install retry, for the event loop's wake deadline.
+pub(crate) fn retry_deadline() -> Option<std::time::Instant> {
+    *RETRY_AT.lock().ok()?
+}
+
+/// Whether an install retry is due at `now`, clearing it when it is.
+pub(crate) fn take_retry(now: std::time::Instant) -> bool {
+    let Ok(mut retry) = RETRY_AT.lock() else {
+        return false;
+    };
+    if retry.is_some_and(|deadline| deadline <= now) {
+        *retry = None;
+        true
+    } else {
+        false
+    }
+}
 
 /// Replace whatever is at `directory` with `files`, built read-only in
 /// staging under `root` and renamed into place. A failure leaves no staging
@@ -279,12 +307,14 @@ pub(crate) fn remove_tree(path: &Path) -> std::io::Result<()> {
 }
 
 /// Remove what is left under `root` that no pane will get again: this
-/// executable's directories from the same or an older version, directories
+/// executable's directories from an older version, directories
 /// whose executable is gone or that `identity` cannot read, and staging,
 /// which under the install lock is always left over. Another installed
 /// Kettle's directory stays, since its panes still get it, as does a newer
-/// version's for this executable, which a Kettle upgraded in place offers. A
-/// running program that read a removed directory keeps what it read.
+/// version's for this executable, which a Kettle upgraded in place offers,
+/// and another of this version's, which a Kettle of this version with other
+/// settings may still offer. A running program that read a removed directory
+/// keeps what it read.
 #[cfg(unix)]
 fn remove_stale(
     root: &Path,
@@ -310,10 +340,10 @@ fn remove_stale(
             match identity(&path) {
                 None => true,
                 Some((command, version)) if command == files.command => {
-                    // Kept when it is a newer version's, or any version's
-                    // while another build may still be using it.
+                    // Kept when it is this version's or a newer one's, or any
+                    // version's while another build may still be using it.
                     !(keep_older
-                        || ours.is_some() && version.as_deref().and_then(version_key) > ours)
+                        || ours.is_some() && version.as_deref().and_then(version_key) >= ours)
                 }
                 Some((command, _)) => !Path::new(&command).exists(),
             }
