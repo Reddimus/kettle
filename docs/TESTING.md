@@ -10,6 +10,10 @@ adapter-less host can soft-skip the GPU test and a restricted sandbox can
 soft-skip the PTY tests, but that is reduced coverage and must not be reported
 as a native GPU or PTY pass.
 
+Session-save regression coverage injects a blocked writer, queues newer
+snapshots, and checks that shutdown persists only the newest pending snapshot
+after the in-flight write. It needs no GPU, PTY, or filesystem timing assumptions.
+
 ## Run it
 
 ```sh

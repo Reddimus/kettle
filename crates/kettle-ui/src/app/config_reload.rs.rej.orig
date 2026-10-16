@@ -1,0 +1,19 @@
+@@ -235,11 +235,13 @@
+     /// each window keeps its session-local zoom.
+     pub(super) fn load_reloaded_config(&mut self) -> bool {
+         let previous_config_font_size = self.cfg.font_size;
+-        let path = self
+-            .config_path
+-            .clone()
+-            .or_else(Config::default_path)
+-            .filter(|path| path.exists());
++        let path = self.config_path.clone().or_else(Config::default_path);
++        if let Some(engine) = &self.lua_engine
++            && let Err(error) = engine.set_config_path(path.as_deref())
++        {
++            log::warn!("Lua config path synchronization failed: {error:#}");
++        }
++        let path = path.filter(|path| path.exists());
+         let (mut new, malformed) = match path {
+             Some(path) => match prepare_config_directory(&path, self.config_trust)
+                 .and_then(|()| Config::read_from_with_trust(&path, self.config_trust))

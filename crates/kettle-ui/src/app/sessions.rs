@@ -75,6 +75,19 @@ impl App {
     }
 
     pub(super) fn save_session(&self, ws: &WindowState) {
+        let target = session_write_target(
+            self.startup.layout.as_deref(),
+            self.named_layout_writable,
+            should_restore_session(
+                self.startup.restore,
+                self.cfg.restore_session,
+                self.other_builds.running(),
+            ),
+            false,
+        );
+        if target == SessionWriteTarget::Skip {
+            return;
+        }
         // Serialize EVERY live window (the checked-out one plus the map),
         // ordered by seq so window 1 stays first. Windows whose mux is already
         // empty (a close_window in flight) are dropped, since there is nothing
@@ -113,20 +126,12 @@ impl App {
         // launch is in restore mode — symmetric with the opt-in load gate. A
         // fresh (non-opted-in) window must NOT overwrite the saved layout that
         // `--restore` / `restore-session = true` exists to recover.
-        match session_write_target(
-            self.startup.layout.as_deref(),
-            self.named_layout_writable,
-            should_restore_session(
-                self.startup.restore,
-                self.cfg.restore_session,
-                self.other_builds.running(),
-            ),
-            s.is_empty(),
-        ) {
-            SessionWriteTarget::NamedLayout(name) => s.save_layout(name),
-            SessionWriteTarget::DefaultSession => s.save(),
-            SessionWriteTarget::Skip => {}
-        }
+        let layout = match target {
+            SessionWriteTarget::NamedLayout(name) if !s.is_empty() => Some(name.to_string()),
+            SessionWriteTarget::DefaultSession => None,
+            _ => return,
+        };
+        self.session_writer.submit(s, layout);
     }
 
     /// Move a session aside when it loaded but could not be restored.

@@ -2,6 +2,17 @@
 
 use super::*;
 
+pub(super) fn read_config_for_reload(
+    path: &std::path::Path,
+    trust: ConfigTrust,
+) -> std::io::Result<Option<kettle_config::LoadedConfig>> {
+    if !path.try_exists()? {
+        return Ok(None);
+    }
+    prepare_config_directory(path, trust)?;
+    Config::read_from_with_trust(path, trust).map(Some)
+}
+
 impl App {
     /// Reconcile the live theme with the theme picker after every event (see
     /// `theme_preview_change`).
@@ -70,18 +81,12 @@ impl App {
         let Some(is_dark) = self.theme_schedule_is_dark() else {
             return;
         };
-        // Seed on first call so we don't flip the theme just for
-        // existing on a "now's dark" tick — only boundary
-        // crossings fire the swap.
-        if self.last_schedule_decision == Some(is_dark) {
+        if !theme_schedule_redraw_due(self.last_schedule_decision, Some(is_dark)) {
             return;
         }
         let was_first = self.last_schedule_decision.is_none();
         self.last_schedule_decision = Some(is_dark);
-        if was_first {
-            return;
-        }
-        // Boundary crossing: ask `resolve_theme_for_mode`
+        // Ask `resolve_theme_for_mode`
         // what to switch to. We override the ThemeMode to Light/Dark
         // for the duration of the swap so the helper picks the
         // configured light/dark theme name.
@@ -97,7 +102,11 @@ impl App {
             &self.cfg.dark_theme,
             None,
         ) {
-            self.apply_theme_name(ws, "theme-schedule", next);
+            if was_first {
+                self.set_runtime_theme_name(ws, &next);
+            } else {
+                self.apply_theme_name(ws, "theme-schedule", next);
+            }
         }
     }
 
@@ -124,7 +133,7 @@ impl App {
     }
 
     pub(super) fn set_runtime_theme_name(&mut self, ws: &WindowState, name: &str) {
-        self.set_runtime_theme_state(ws, name.to_string(), kettle_config::Theme::by_name(name));
+        self.set_runtime_theme_state(ws, name.to_string(), self.cfg.theme_by_name(name));
     }
 
     pub(super) fn os_theme_choice(&self, theme: WindowTheme) -> Option<String> {
@@ -149,6 +158,7 @@ impl App {
         ws: &WindowState,
         theme: WindowTheme,
     ) {
+        self.os_theme_dark = Some(matches!(theme, WindowTheme::Dark));
         if let Some(next) = self.os_theme_choice(theme) {
             log::info!("theme-mode=auto: initial OS theme selects {next}");
             self.set_runtime_theme_name(ws, &next);
@@ -156,6 +166,7 @@ impl App {
     }
 
     pub(super) fn apply_os_theme_preference(&mut self, ws: &mut WindowState, theme: WindowTheme) {
+        self.os_theme_dark = Some(matches!(theme, WindowTheme::Dark));
         if let Some(next) = self.os_theme_choice(theme) {
             self.apply_theme_name(ws, "theme-mode=auto", next);
         }
@@ -230,21 +241,50 @@ impl App {
         }
     }
 
+    /// Make the profile at `path` the active config: what reloads read,
+    /// what live reload watches, and what Lua reports.
+    pub(super) fn switch_profile(&mut self, ws: &mut WindowState, path: std::path::PathBuf) {
+        self.config_path = Some(path);
+        self.config_trust = ConfigTrust::VerifyDirectory;
+        self.reload_config(ws);
+    }
+
+    fn refresh_config_watcher(&mut self) {
+        let path = self.config_path.clone().or_else(Config::default_path);
+        self._watcher = path.and_then(|path| {
+            let proxy = self.proxy.clone();
+            config_watcher(
+                &path,
+                self.config_trust,
+                self.config_reload_pending.clone(),
+                move || proxy.send_event(UserEvent::ReloadConfig).is_ok(),
+            )
+            .map_err(|error| {
+                log::warn!(
+                    "config live-reload unavailable for {}: {error}",
+                    path.display()
+                );
+            })
+            .ok()
+        });
+    }
+
     /// Read and install the process-wide portion of a live configuration once.
     /// Returns whether the configured font size changed, which controls whether
     /// each window keeps its session-local zoom.
     pub(super) fn load_reloaded_config(&mut self) -> bool {
+        self.refresh_config_watcher();
         let previous_config_font_size = self.cfg.font_size;
-        let path = self
-            .config_path
-            .clone()
-            .or_else(Config::default_path)
-            .filter(|path| path.exists());
+        let path = self.config_path.clone().or_else(Config::default_path);
+        if let Some(engine) = &self.lua_engine
+            && let Err(error) = engine.set_config_path(path.as_deref())
+        {
+            log::warn!("Lua config path synchronization failed: {error:#}");
+        }
         let (mut new, malformed) = match path {
-            Some(path) => match prepare_config_directory(&path, self.config_trust)
-                .and_then(|()| Config::read_from_with_trust(&path, self.config_trust))
-            {
-                Ok(loaded) => {
+            Some(path) => match read_config_for_reload(&path, self.config_trust) {
+                Ok(None) => (Config::default(), Vec::new()),
+                Ok(Some(loaded)) => {
                     if !loaded.unknown_keys.is_empty() {
                         log::warn!(
                             "{}: unrecognized config keys: {}",
@@ -312,6 +352,8 @@ impl App {
             new.window_title_format = title;
         }
         let font_size_changed = (new.font_size - previous_config_font_size).abs() > f32::EPSILON;
+        new.resolve_theme_mode(self.os_theme_dark);
+        self.last_schedule_decision = None;
         self.cfg = new;
         self.reconcile_agent_display();
         self.reconcile_claude_plugin();
@@ -325,6 +367,9 @@ impl App {
         // A config change, including a Settings edit or a menu toggle, is
         // activity: a new blink or timeout value takes effect visibly now.
         self.reset_blink_phase(ws);
+        // A changed schedule applies the theme it picks now, not at its next
+        // boundary.
+        self.poll_theme_schedule(ws);
         if !self.cfg.macos_cursor_blink_layer && !ws.blink_layer.is_active() {
             Self::retire_cursor_layer(ws);
         }

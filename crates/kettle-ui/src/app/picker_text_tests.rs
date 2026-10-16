@@ -201,7 +201,11 @@ fn picker_rows_and_empty_states_follow_the_ui_language() {
     let empty = layout_picker_list("", 0, &[], &ES);
     assert_eq!(empty.rows[0].label, "No hay diseños guardados");
     // The command is the same in every language.
-    assert_eq!(empty.rows[0].hint, "kettle --save-layout NAME");
+    assert_eq!(empty.rows[0].hint, "kettle --layout NAME");
+    assert_eq!(
+        layout_picker_list("", 0, &[], &EN).rows[0].hint,
+        "kettle --layout NAME"
+    );
     let layouts = ["dev".to_string()];
     assert_eq!(
         layout_picker_list("zzz", 0, &layouts, &ES).rows[0].label,
