@@ -88,6 +88,8 @@ struct Counters {
     cpu: AtomicUsize,
     gpu: AtomicUsize,
     image_order: AtomicU64,
+    in_flight_slots: AtomicUsize,
+    in_flight_bytes: AtomicUsize,
 }
 
 static PROCESS_COUNTERS: OnceLock<Arc<Counters>> = OnceLock::new();
@@ -159,6 +161,31 @@ impl GraphicsBudget {
                 Err(actual) => current = actual,
             }
         }
+    }
+
+    pub(crate) fn in_flight_usage(&self) -> (usize, usize) {
+        (
+            self.scope.in_flight_slots.load(Ordering::Acquire),
+            self.scope.in_flight_bytes.load(Ordering::Acquire),
+        )
+    }
+
+    pub(crate) fn reserve_in_flight(&self, bytes: usize) -> Option<InFlightReservation> {
+        if !try_add(&self.scope.in_flight_slots, 1, self.limits.in_flight_slots) {
+            return None;
+        }
+        if !try_add(
+            &self.scope.in_flight_bytes,
+            bytes,
+            self.limits.in_flight_bytes,
+        ) {
+            subtract(&self.scope.in_flight_slots, 1);
+            return None;
+        }
+        Some(InFlightReservation {
+            budget: self.clone(),
+            bytes,
+        })
     }
 
     pub(crate) fn retained_cpu_bytes(&self) -> usize {
@@ -304,6 +331,35 @@ impl GraphicsBudget {
             self.process.gpu.load(Ordering::Acquire),
             self.scope.gpu.load(Ordering::Acquire),
         )
+    }
+}
+
+pub(crate) struct InFlightReservation {
+    budget: GraphicsBudget,
+    bytes: usize,
+}
+
+impl InFlightReservation {
+    pub(crate) fn try_grow_to(&mut self, bytes: usize) -> bool {
+        let Some(extra) = bytes.checked_sub(self.bytes) else {
+            return false;
+        };
+        if !try_add(
+            &self.budget.scope.in_flight_bytes,
+            extra,
+            self.budget.limits.in_flight_bytes,
+        ) {
+            return false;
+        }
+        self.bytes = bytes;
+        true
+    }
+}
+
+impl Drop for InFlightReservation {
+    fn drop(&mut self) {
+        subtract(&self.budget.scope.in_flight_bytes, self.bytes);
+        subtract(&self.budget.scope.in_flight_slots, 1);
     }
 }
 

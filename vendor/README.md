@@ -323,6 +323,10 @@ the `Restore` and `Disable` variants, so it does not build against an upstream
   the arguments follow. Upstream panics on any argument for the default
   program, so Kettle could not hand the user's fish its `-C` startup without
   naming the shell itself and losing that login `argv[0]`.
+  On Unix, `CommandBuilder::resolve_program` names the executable a spawn
+  would run, through the same `PATH` search, child working directory and
+  access checks, so Kettle's shell startup inspects that same file. Relative
+  and empty `PATH` entries count from the child's directory, as at spawn.
   On Unix, dropping the master writer now closes only its duplicate descriptor
   and never writes a newline or VEOF byte into the terminal; deliberate EOF
   remains Kettle's live-termios `PtyStdin::try_signal_eof` path.

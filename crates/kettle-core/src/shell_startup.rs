@@ -170,27 +170,30 @@ pub fn zsh_left_alone(program: &Path) -> Option<PathBuf> {
 /// otherwise the first executable file of that name in `path`, the pane's
 /// `PATH`. A name found nowhere stays as it is.
 pub fn resolve_program(program: &Path, path: Option<&OsStr>) -> PathBuf {
-    if program.components().count() != 1 || program.is_absolute() {
-        return program.to_owned();
+    #[cfg(unix)]
+    {
+        let mut cmd = CommandBuilder::new(program);
+        if let Some(path) = path {
+            cmd.env("PATH", path);
+        } else {
+            cmd.env_remove("PATH");
+        }
+        cmd.resolve_program()
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| program.to_owned())
     }
-    path.into_iter()
-        .flat_map(std::env::split_paths)
-        .filter(|directory| directory.is_absolute())
-        .map(|directory| directory.join(program))
-        .find(|candidate| is_executable_file(candidate))
-        .unwrap_or_else(|| program.to_owned())
-}
-
-#[cfg(unix)]
-fn is_executable_file(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt as _;
-    std::fs::metadata(path)
-        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
-}
-
-#[cfg(not(unix))]
-fn is_executable_file(path: &Path) -> bool {
-    path.is_file()
+    #[cfg(not(unix))]
+    {
+        if program.components().count() != 1 || program.is_absolute() {
+            return program.to_owned();
+        }
+        path.into_iter()
+            .flat_map(std::env::split_paths)
+            .filter(|directory| directory.is_absolute())
+            .map(|directory| directory.join(program))
+            .find(|candidate| candidate.is_file())
+            .unwrap_or_else(|| program.to_owned())
+    }
 }
 
 /// What [`ShellStartup`] adds to the command of a pane that runs `program`
@@ -250,7 +253,10 @@ pub(crate) fn apply(cmd: &mut CommandBuilder, explicit: Option<&str>, startup: &
         return;
     }
     let program = match explicit {
-        Some(program) => resolve_program(Path::new(program), cmd.get_env("PATH")),
+        Some(program) => cmd
+            .resolve_program()
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from(program)),
         None if cmd.is_default_prog() => PathBuf::from(cmd.get_shell()),
         None => return,
     };
@@ -523,6 +529,41 @@ mod tests {
         )
         .unwrap();
         assert_eq!(zshenv_keeping_kettle_out(&[stock, commented]), None);
+    }
+
+    #[test]
+    fn relative_and_empty_path_entries_follow_the_child_directory() {
+        if zsh_is_left_alone("zsh") {
+            return;
+        }
+        let prefix = private_tempdir("kettle-shell-startup");
+        std::fs::create_dir_all(prefix.join("tools/bin")).unwrap();
+        std::fs::create_dir_all(prefix.join("tools/etc")).unwrap();
+        let zsh = prefix.join("tools/bin/zsh");
+        std::fs::write(&zsh, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&zsh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(
+            prefix.join("tools/etc/zshenv"),
+            "ZDOTDIR=${ZDOTDIR:-$HOME/.config/zsh}\n",
+        )
+        .unwrap();
+        for (cwd, path_entry, program) in [
+            (prefix.path().to_path_buf(), "tools/bin", "zsh"),
+            (prefix.join("tools/bin"), "", "zsh"),
+            (
+                prefix.path().to_path_buf(),
+                "/kettle-missing",
+                "./tools/bin/zsh",
+            ),
+        ] {
+            let mut cmd = CommandBuilder::new(program);
+            cmd.cwd(cwd);
+            cmd.env("PATH", std::env::join_paths([path_entry, "/bin"]).unwrap());
+            cmd.env_remove("ZDOTDIR");
+            apply(&mut cmd, Some(program), &startup());
+            assert_eq!(env(&cmd, "ZDOTDIR"), None, "{program}: {path_entry}");
+            assert_eq!(env(&cmd, ZDOTDIR_SAVED), None);
+        }
     }
 
     /// A bare `zsh` command is found on the pane's `PATH`, as the PTY finds
