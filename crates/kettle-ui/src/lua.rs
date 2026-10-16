@@ -1135,9 +1135,9 @@ impl LuaEngine {
                         LuaEvent::TabAdd(idx) | LuaEvent::TabClose(idx) => cb.call(*idx),
                         LuaEvent::Bell(pane_id) | LuaEvent::PaneClose(pane_id) => cb.call(*pane_id),
                         LuaEvent::Output(pane_id, bytes) => {
-                            // Send bytes as a Lua string (UTF-8 not
-                            // assumed — raw bytes are fine, callbacks
-                            // can string.byte / string.sub them).
+                            // A slice reaches Lua as a sequence table of
+                            // byte values, the shape the documented example
+                            // reads with `string.char(table.unpack(bytes))`.
                             cb.call((*pane_id, bytes.as_slice()))
                         }
                         LuaEvent::PaneFocus(prev, cur) => {
@@ -2262,6 +2262,32 @@ mod tests {
             UrlHandlerOutcome::Handled
         );
         assert_eq!(eng.eval_str("return claimed_hits").unwrap(), "1");
+    }
+
+    /// The documented output hook, run as written, notifies when a build
+    /// finishes: the bytes it reads are the table the event passes.
+    #[test]
+    fn documented_output_hook_notifies_on_a_finished_build() {
+        let eng = LuaEngine::new("Default").expect("init");
+        let hook = include_str!("../../../docs/examples/init.lua")
+            .lines()
+            .skip_while(|line| !line.starts_with("local last_notify"))
+            .take_while(|line| !line.starts_with("-- 4."))
+            .collect::<Vec<_>>()
+            .join("\n");
+        eng.eval_str(&hook).expect("documented output hook");
+        eng.fire_event(&LuaEvent::Output(
+            7,
+            b"> Task :build\nBUILD SUCCESSFUL in 3s\n".to_vec(),
+        ));
+        let commands = eng.drain_commands();
+        assert!(
+            matches!(
+                commands.as_slice(),
+                [LuaCommand::Notify { body, .. }] if body == "Build done in pane 7"
+            ),
+            "{commands:?}"
+        );
     }
 
     #[test]

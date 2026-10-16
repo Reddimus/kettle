@@ -118,10 +118,9 @@ end)
 local last_notify = 0
 kettle.on("output", function(pane_id, bytes)
     -- Coalescing — don't spam notifications.
-    local now = os.time()  -- only available in `lua-sandbox = trusted`;
-                           -- safe-mode users would store last-notify in
-                           -- a counter incremented per output instead.
+    local now = os.time()
     if now - last_notify < 5 then return end
+    -- `bytes` is a table of byte values; this makes them one string.
     local text = string.char(table.unpack(bytes))
     if text:find("BUILD SUCCESSFUL") or text:find("Compiling%s*$") then
         last_notify = now
@@ -138,7 +137,7 @@ end)
 -------------------------------------------------------------------------------
 
 kettle.add_menu_item("Send `clear`", function()
-    -- send_text accepts arbitrary bytes; "\n" submits the line.
+    -- send_text takes UTF-8 text; "\n" submits the line.
     kettle.send_text("clear\n")
 end)
 
