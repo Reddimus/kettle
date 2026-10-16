@@ -112,10 +112,11 @@ fn entry_path(dir: &Path, pid: u32, win: u64) -> PathBuf {
     dir.join(format!("{pid}-w{win}.json"))
 }
 
-/// Held to write a claim, and to delete files a reader judged unusable. A
-/// reader judges a file and deletes it later, and a new claim can replace the
-/// file in between; under this lock that cannot happen. Mirrors the
-/// discovery registry's lock.
+/// Held to write a new claim, and to delete files a reader judged unusable.
+/// A reader judges a file and deletes it later, and a new claim can replace
+/// the file in between; under this lock that cannot happen. A recolor or a
+/// release takes no lock: they touch a live window's own record, which a
+/// pruner always keeps. Mirrors the discovery registry's lock.
 fn lock_path(dir: &Path) -> PathBuf {
     dir.join("presence.lock")
 }
@@ -257,9 +258,9 @@ impl PresenceGuard {
         if !replacement.is_valid() {
             return;
         }
-        let Some(_lock) = self.path.parent().and_then(publication_lock) else {
-            return;
-        };
+        // No lock, so a theme switch never waits on the UI thread: the file
+        // is this live window's record, which a pruner judging it again
+        // under the lock always keeps.
         if let Ok(json) =
             crate::protocol::to_json_vec_bounded(&replacement, MAX_PRESENCE_ENTRY_BYTES)
             && kettle_state::atomic_replace(
