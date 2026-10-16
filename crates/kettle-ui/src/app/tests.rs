@@ -13386,6 +13386,28 @@ fn keybind_rebind_persistence_reports_missing_path_and_writes_valid_path() {
     assert!(saved.contains("Ctrl+Shift+Y=copy"));
 }
 
+/// A rebind saves its unbinds and its new binding in one edit. At the size
+/// cap the whole edit is refused, so the old chord stays bound; saving the
+/// unbind alone left the action with no chord at all after a reload.
+#[test]
+fn keybind_rebind_at_the_size_cap_leaves_the_config_unchanged() {
+    let dir = crate::test_tempdir();
+    let path = dir.path().join("config");
+    let mut original = String::from("keybind = Ctrl+Alt+R=new_tab\n#");
+    original.push_str(&"x".repeat(1024 * 1024 - original.len() - 1));
+    original.push('\n');
+    std::fs::write(&path, &original).unwrap();
+
+    let stale = vec!["Ctrl+Alt+R".to_string()];
+    assert!(!super::persist_keybind_rebind(
+        Some(&path),
+        &stale,
+        "Ctrl+Alt+Y",
+        "new_tab",
+    ));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+}
+
 #[test]
 fn cwd_is_local_rejects_unc_and_traversal() {
     use super::cwd_is_local;
