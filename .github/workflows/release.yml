@@ -898,3 +898,15 @@ jobs:
           # on GitHub having associated the tag with a still-draft release.
           gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
             -F draft=false -f make_latest=true >/dev/null
+
+  # Every published release is installed from the one before it and updated
+  # with `kettle update` on Linux (x86_64, arm64) and macOS. It runs after
+  # publishing, so it cannot hold a release back; a failure means a quick
+  # follow-up release. See upgrade.yml.
+  upgrade:
+    name: upgrade from the previous release
+    needs: publish
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/upgrade.yml
+    with:
+      to: ${{ github.ref_name }}

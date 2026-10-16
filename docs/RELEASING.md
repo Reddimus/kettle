@@ -315,6 +315,16 @@ sidecars, plus the rendered Homebrew formula and Arch `PKGBUILD`. The publish
 job reverifies those files, creates or resumes a draft release, uploads and
 checks the exact remote size/SHA-256 set, and only then makes the release public.
 
+Once the release is public, `.github/workflows/upgrade.yml` upgrades to it the
+way a user would. On x86_64 and arm64 Linux it installs the previous release
+with that release's online installer, runs `kettle update --yes`, checks the
+new version, checks that a second update finds nothing newer, and uninstalls
+to an empty prefix. On macOS it swaps the new notarized bundle in place and
+checks its seal. It cannot hold the release back; a failure means a quick
+follow-up release. Rerun it for any pair with
+`gh workflow run upgrade.yml -f to=vX.Y.Z -f from=vA.B.C`; `to` must be the
+newest release, since `kettle update` installs that one.
+
 ## Verify the published artifacts
 
 Run this from a trusted source checkout so the public key comes from the
