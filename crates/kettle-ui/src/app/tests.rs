@@ -15183,6 +15183,83 @@ fn tab_strip_layout_fills_and_overflows() {
     );
 }
 
+/// A side tab bar shows the active tab and `+` however many tabs there are.
+/// It once stacked every tab from the top and clamped `+` to the bottom row,
+/// so past a screenful the active tab was drawn below the window and `+`
+/// covered a tab.
+#[test]
+fn side_tab_rows_keep_the_active_tab_and_plus_in_view() {
+    use super::{SideTabRows, side_tab_rows};
+    let fits = |n| SideTabRows {
+        first: 0,
+        shown: n,
+        top: 0,
+        plus: n,
+        arrows: false,
+    };
+    // Every tab and `+` fit: tabs from the top, `+` right below the last.
+    assert_eq!(side_tab_rows(3, 2, 13), fits(3));
+    assert_eq!(side_tab_rows(12, 11, 13), fits(12));
+    // One more and the strip scrolls: `⌃`, ten tabs, `⌄`, then `+` on the
+    // last row, with the window ending at the active tab past page one.
+    let scrolled = |first| SideTabRows {
+        first,
+        shown: 10,
+        top: 1,
+        plus: 12,
+        arrows: true,
+    };
+    assert_eq!(side_tab_rows(13, 0, 13), scrolled(0));
+    assert_eq!(side_tab_rows(13, 9, 13), scrolled(0));
+    assert_eq!(side_tab_rows(13, 10, 13), scrolled(1));
+    assert_eq!(side_tab_rows(13, 12, 13), scrolled(3));
+    // Too short for the arrows: the active tab and `+`.
+    assert_eq!(
+        side_tab_rows(5, 4, 2),
+        SideTabRows {
+            first: 4,
+            shown: 1,
+            top: 0,
+            plus: 1,
+            arrows: false,
+        }
+    );
+    for n in 1..48 {
+        for rows in 2..20 {
+            for active in 0..n {
+                let l = side_tab_rows(n, active, rows);
+                assert!(
+                    (l.first..l.first + l.shown).contains(&active) && l.first + l.shown <= n,
+                    "{n} tabs, {rows} rows, active {active}: {l:?}"
+                );
+                assert!(l.plus < rows, "{n} tabs, {rows} rows: + below the strip");
+                let arrow_rows = usize::from(l.arrows);
+                assert_eq!(l.top, arrow_rows);
+                assert!(
+                    l.top + l.shown + arrow_rows <= l.plus,
+                    "{n} tabs, {rows} rows: + or ⌄ covers a tab: {l:?}"
+                );
+            }
+        }
+    }
+}
+
+/// The side bar lays its rows out through `side_tab_rows` and parks the tabs
+/// it does not show, rather than stacking every tab from the top.
+#[test]
+fn the_side_tab_bar_places_rows_through_side_tab_rows() {
+    let src = production_source();
+    let body = src
+        .split("fn tab_bar_vertical(")
+        .nth(1)
+        .and_then(|rest| rest.split("\n    fn ").next())
+        .expect("tab_bar_vertical body");
+    assert!(body.contains("let layout = side_tab_rows(labels.len(), active, rows);"));
+    assert!(body.contains("row_y(layout.top + i - layout.first)"));
+    assert!(body.contains("let plus_y = row_y(layout.plus);"));
+    assert!(!body.contains("i as f32 * height"));
+}
+
 /// The 2-tab boundary must line up with a centered vertical pane split so
 /// the split divider visually continues the tab boundary. With the trailing
 /// `▾`/`+` reservation, tabs divide the FULL bar width and only the last tab

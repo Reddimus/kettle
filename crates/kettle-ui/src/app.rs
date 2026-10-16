@@ -3673,12 +3673,7 @@ fn tab_strip_layout(
     let arrow_w = arrow_w.clamp(1.0, strip / 2.0);
     let visible_w = (strip - 2.0 * arrow_w).max(width);
     let count = ((visible_w / width).floor() as usize).clamp(1, n);
-    // Pin the active tab to the trailing edge once it scrolls past page one.
-    let first = if active < count {
-        0
-    } else {
-        (active + 1 - count).min(n - count)
-    };
+    let first = first_shown_tab(n, active, count);
     let x0 = arrow_w;
     let xs = (0..n)
         .map(|i| {
@@ -3695,6 +3690,68 @@ fn tab_strip_layout(
         xs,
         arrow_left: Some(0.0),
         arrow_right: Some(strip - arrow_w),
+    }
+}
+
+/// The first of `count` consecutive tabs, out of `n`, that an overflowing tab
+/// bar shows: page one while it holds the active tab, else the window that
+/// ends at the active tab. Both bar directions scroll this way, so moving the
+/// selection is how a bar scrolls.
+fn first_shown_tab(n: usize, active: usize, count: usize) -> usize {
+    let count = count.clamp(1, n.max(1));
+    if active < count {
+        0
+    } else {
+        (active + 1 - count).min(n.max(1) - count)
+    }
+}
+
+/// Rows of a side tab bar with `rows` rows for its tabs and `+` (the update
+/// chip's row not counted). While every tab and `+` fit, the tabs stack from
+/// the top and `+` follows the last. Otherwise `⌃` and `⌄` rows bracket as
+/// many whole tabs as fit, chosen by [`first_shown_tab`] so the active tab is
+/// always shown, with `+` below `⌄`. A strip too short for the arrows shows
+/// the active tab and `+` alone. Pure, like [`tab_strip_layout`].
+#[derive(Debug, PartialEq)]
+struct SideTabRows {
+    /// The first tab shown, and how many are shown from it.
+    first: usize,
+    shown: usize,
+    /// The row of the first tab shown: 1 below `⌃`, else 0.
+    top: usize,
+    /// The row of `+`; `⌄` is the row above it when `arrows`.
+    plus: usize,
+    arrows: bool,
+}
+
+fn side_tab_rows(n: usize, active: usize, rows: usize) -> SideTabRows {
+    let n = n.max(1);
+    if n < rows {
+        return SideTabRows {
+            first: 0,
+            shown: n,
+            top: 0,
+            plus: n,
+            arrows: false,
+        };
+    }
+    if rows < 4 {
+        let shown = rows.saturating_sub(1).clamp(1, n);
+        return SideTabRows {
+            first: first_shown_tab(n, active, shown),
+            shown,
+            top: 0,
+            plus: shown,
+            arrows: false,
+        };
+    }
+    let shown = rows - 3;
+    SideTabRows {
+        first: first_shown_tab(n, active, shown),
+        shown,
+        top: 1,
+        plus: shown + 2,
+        arrows: true,
     }
 }
 

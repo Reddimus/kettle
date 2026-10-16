@@ -1322,6 +1322,10 @@ impl App {
                     "insert_marker": bar.insert_marker,
                     "dock_highlighted": bar.insert_marker.is_some(),
                     "band": rect_json(bar.band),
+                    // The overflow arrows, back then forward (`‹ ›` across,
+                    // `⌃ ⌄` down a side bar); zero-sized while it all fits.
+                    "scroll_left": rect_json(bar.scroll_left),
+                    "scroll_right": rect_json(bar.scroll_right),
                     "segments": segments,
                 },
                 "pane_titlebars": pane_titlebars,
