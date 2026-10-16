@@ -2180,12 +2180,12 @@ impl App {
         let pre = self.focus_key(ws);
         ws.mux.focus_at(area, px, py);
         self.note_focus_change(ws, pre);
+        if self.send_mouse(ws, bcode, true, false) {
+            return true;
+        }
         if bcode == 2 {
             let offer_copied = ws.mods.shift_key();
             self.open_context_menu(ws, px, py, offer_copied);
-            return true;
-        }
-        if self.send_mouse(ws, bcode, true, false) {
             return true;
         }
         if bcode == 0 {

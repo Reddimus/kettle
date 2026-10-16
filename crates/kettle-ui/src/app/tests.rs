@@ -28,6 +28,272 @@ fn confirmation_hits_use_the_painted_chrome_metrics() {
 }
 
 #[test]
+fn link_hits_require_cursor_containment() {
+    let rect = (400.0, 40.0, 400.0, 560.0);
+    assert!(!super::rect_contains(rect, 200.0, 80.0));
+    assert!(!super::rect_contains(rect, 800.0, 80.0));
+    assert!(super::rect_contains(rect, 400.0, 80.0));
+
+    let src = super::production_source();
+    let hit = src
+        .split("fn link_at_cursor")
+        .nth(1)
+        .and_then(|body| body.split("\n    fn ").next())
+        .expect("link hit test");
+    let guard = hit
+        .find("if !rect_contains(rect, ws.cursor.x as f32, ws.cursor.y as f32)")
+        .expect("link hits reject pointers outside the focused terminal");
+    let cell = hit
+        .find("self.cursor_cell_in_rect(ws, rect)")
+        .expect("cell coordinates are resolved after containment");
+    assert!(guard < cell);
+}
+
+#[test]
+fn multi_click_count_is_scoped_to_a_pane() {
+    let (mux, target, sibling) = title_test_split_mux();
+    let mut ws = WindowState::new(1, mux);
+    assert_eq!(App::click_count(&mut ws, 5, 7), 1);
+    assert_eq!(App::click_count(&mut ws, 5, 7), 2);
+    assert!(ws.mux.focus_pane(sibling));
+    assert_eq!(App::click_count(&mut ws, 5, 7), 1);
+    assert_eq!(App::click_count(&mut ws, 5, 7), 2);
+    assert!(ws.mux.focus_pane(target));
+    assert_eq!(App::click_count(&mut ws, 5, 7), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn foreign_path_paste_dismisses_only_an_accepting_receipt_pane() {
+    for (member, read_only) in [(true, false), (true, true), (false, false)] {
+        let cfg = kettle_config::Config {
+            shell_integration: false,
+            login_shell: false,
+            ..kettle_config::Config::default()
+        };
+        let mut mux = Mux::new();
+        for _ in 0..2 {
+            mux.new_tab_with_geometry(
+                &cfg,
+                kettle_core::PtyGeometry::from_cell_size(80, 24, 8, 16),
+                std::sync::Arc::new(|| {}),
+                &["/bin/cat".to_owned()],
+                None,
+            )
+            .expect("PTY fixture");
+        }
+        let receipt_pane = mux.active_focus().unwrap();
+        for (id, pane) in &mut mux.panes {
+            pane.group_name = Some(
+                if *id == receipt_pane && !member {
+                    "other"
+                } else {
+                    "g"
+                }
+                .into(),
+            );
+        }
+        mux.panes.get_mut(&receipt_pane).unwrap().read_only = read_only;
+        let mut ws = WindowState::new(2, mux);
+        let now = std::time::Instant::now();
+        ws.media_paste_receipt = Some(crate::window_state::MediaPasteReceiptState::new_image(
+            receipt_pane,
+            "old.png".into(),
+            crate::paste_image::PastedImagePreview {
+                image: kettle_core::ImageData::solid(1, 1, [0, 0, 0, 255]).unwrap(),
+                original_width: 1,
+                original_height: 1,
+            },
+            false,
+            true,
+            now,
+        ));
+        ws.pending_video_paste_receipt = Some(crate::window_state::PendingVideoPasteReceipt {
+            pane_id: receipt_pane,
+            generation: 1,
+            request: crate::video_preview::VideoPasteRequest::from_user_paths(
+                &[std::env::temp_dir().join("old.mp4")],
+                crate::video_preview::VideoPasteSource::Drop,
+            )
+            .unwrap(),
+            remote: false,
+            prefer_top: true,
+            created_at: now,
+            previous_receipt: None,
+        });
+        let foreign = App::deliver_foreign_path_paste(
+            &mut ws,
+            &crate::mux::BroadcastScope::Group("g".into()),
+            &["new.txt".into()],
+            false,
+        );
+        ws.mux.kill_children();
+        let accepted = member && !read_only;
+        assert!(foreign.accepted, "another group member always accepts");
+        assert_eq!(foreign.receipt_accepted, accepted);
+        assert_eq!(ws.media_paste_receipt.is_none(), accepted);
+        assert_eq!(ws.pending_video_paste_receipt.is_none(), accepted);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn image_paste_holds_enter_and_keeps_its_original_recipient() {
+    use super::paste::{defer_authored_input, pop_ready_paste};
+
+    let cfg = kettle_config::Config {
+        shell_integration: false,
+        login_shell: false,
+        ..kettle_config::Config::default()
+    };
+    let mut mux = Mux::new();
+    for _ in 0..2 {
+        mux.new_tab_with_geometry(
+            &cfg,
+            kettle_core::PtyGeometry::from_cell_size(80, 24, 8, 16),
+            std::sync::Arc::new(|| {}),
+            &["/bin/cat".to_owned()],
+            None,
+        )
+        .expect("PTY fixture");
+    }
+    let focused = mux.active_focus().unwrap();
+    let target = *mux.panes.keys().find(|id| **id != focused).unwrap();
+    let mut ws = WindowState::new(1, mux);
+    let queued = |content| super::QueuedPaste {
+        window: 1,
+        target: Some(target),
+        receipt_pane: Some(target),
+        broadcast: crate::mux::BroadcastScope::Off,
+        recipients: Vec::new(),
+        content,
+    };
+    let mut queue = std::collections::VecDeque::from([queued(super::QueuedPasteContent::Image {
+        id: 0,
+        fallback: String::new(),
+        path: None,
+    })]);
+    let before = ws.mux.panes[&target].input_generation();
+    let focused_before = ws.mux.panes[&focused].input_generation();
+    assert_eq!(
+        defer_authored_input(
+            &mut queue,
+            queued(super::QueuedPasteContent::Input {
+                targets: vec![(target, b"\r".to_vec())],
+                prepare_input: true,
+            }),
+        ),
+        Some(PaneInputResult::Queued)
+    );
+    assert!(pop_ready_paste(&mut queue).is_none());
+    assert_eq!(ws.mux.panes[&target].input_generation(), before);
+    if let super::QueuedPasteContent::Image { path, .. } = &mut queue.front_mut().unwrap().content {
+        *path = Some(Ok("/tmp/image.png".into()));
+    }
+    let image = pop_ready_paste(&mut queue).unwrap();
+    assert!(matches!(
+        image.content,
+        super::QueuedPasteContent::Image { .. }
+    ));
+    assert!(
+        super::paste_paths_into_target(
+            &mut ws.mux,
+            image.target,
+            &["/tmp/image.png".into()],
+            false,
+        )
+        .unwrap()
+        .accepted
+    );
+    let after_path = ws.mux.panes[&target].input_generation();
+    assert_ne!(after_path, before);
+    let input = pop_ready_paste(&mut queue).unwrap();
+    let super::QueuedPasteContent::Input {
+        targets,
+        prepare_input,
+    } = input.content
+    else {
+        panic!("Enter must follow the image path");
+    };
+    let result = App::deliver_deferred_input(&mut ws, &targets, prepare_input, false);
+    let after_enter = ws.mux.panes[&target].input_generation();
+    let focused_after = ws.mux.panes[&focused].input_generation();
+    ws.mux.kill_children();
+    assert_eq!(result, PaneInputResult::Queued);
+    assert_ne!(after_enter, after_path);
+    assert_eq!(
+        focused_before, focused_after,
+        "focus changes must not retarget Enter"
+    );
+}
+
+/// A key held while a paste ahead of it is still encoding queues one input
+/// per repeat. Each joins the entry before it, so the queue's 64 entries do
+/// not drop typing; the bytes stay in order.
+#[test]
+fn held_keys_behind_an_encoding_paste_join_one_queue_entry() {
+    let queued = |content| super::QueuedPaste {
+        window: 1,
+        target: Some(1),
+        receipt_pane: Some(1),
+        broadcast: crate::mux::BroadcastScope::Off,
+        recipients: Vec::new(),
+        content,
+    };
+    let mut queue = std::collections::VecDeque::from([queued(super::QueuedPasteContent::Image {
+        id: 0,
+        fallback: String::new(),
+        path: None,
+    })]);
+    for byte in (0..200u32).map(|n| b'a' + (n % 26) as u8) {
+        assert_eq!(
+            super::paste::defer_authored_input(
+                &mut queue,
+                queued(super::QueuedPasteContent::Input {
+                    targets: vec![(1, vec![byte])],
+                    prepare_input: true,
+                }),
+            ),
+            Some(PaneInputResult::Queued)
+        );
+    }
+    assert_eq!(queue.len(), 2);
+    let super::QueuedPasteContent::Input { targets, .. } = &queue[1].content else {
+        panic!("the typing follows the image");
+    };
+    let expected: Vec<u8> = (0..200u32).map(|n| b'a' + (n % 26) as u8).collect();
+    assert_eq!(targets, &[(1, expected)]);
+}
+
+#[test]
+fn deferred_authored_input_obeys_the_existing_queue_byte_limit() {
+    let queued = |content| super::QueuedPaste {
+        window: 1,
+        target: Some(1),
+        receipt_pane: Some(1),
+        broadcast: crate::mux::BroadcastScope::Off,
+        recipients: Vec::new(),
+        content,
+    };
+    let mut queue = std::collections::VecDeque::from([queued(super::QueuedPasteContent::Image {
+        id: 0,
+        fallback: String::new(),
+        path: None,
+    })]);
+    assert_eq!(
+        super::paste::defer_authored_input(
+            &mut queue,
+            queued(super::QueuedPasteContent::Input {
+                targets: vec![(1, vec![b'x'; super::QUEUED_PASTE_BYTES_MAX + 1])],
+                prepare_input: true,
+            }),
+        ),
+        Some(PaneInputResult::Oversize)
+    );
+    assert_eq!(queue.len(), 1);
+}
+
+#[test]
 fn failed_additional_window_restore_preserves_source_session() {
     let src = super::production_source();
     let restore = src
@@ -681,36 +947,6 @@ fn echo_bypass_timestamp_only_marks_windows_that_accepted_input() {
 }
 
 #[test]
-fn mixed_path_delivery_tracks_the_initiating_pane_separately() {
-    let accepted = PaneInputDelivery {
-        result: PaneInputResult::Queued,
-        accepted: true,
-        receipt_accepted: true,
-    };
-    let rejected = PaneInputDelivery {
-        result: PaneInputResult::ReadOnly,
-        accepted: false,
-        receipt_accepted: false,
-    };
-    let mixed = accepted.merge(rejected);
-    assert_eq!(mixed.result, PaneInputResult::ReadOnly);
-    assert!(mixed.accepted);
-    assert!(mixed.receipt_accepted);
-
-    let other_only = PaneInputDelivery {
-        result: PaneInputResult::Queued,
-        accepted: true,
-        receipt_accepted: false,
-    }
-    .merge(rejected);
-    assert!(other_only.accepted, "another pane still received the path");
-    assert!(
-        !other_only.receipt_accepted,
-        "the rejecting initiating pane must not show contradictory success chrome"
-    );
-}
-
-#[test]
 fn clipboard_images_encode_off_the_window_thread_in_paste_order() {
     let source = production_source();
     let body = |name: &str| {
@@ -989,7 +1225,8 @@ fn media_receipt_wiring_fails_closed_and_keeps_diagnostics_private() {
                 .count()
                 == 2
             && text_paste.contains("dismiss_media_paste_receipt_after_input")
-            && send_newline.contains("dismiss_media_paste_receipt_after_input")
+            && send_newline.contains("write_focused_terminal_input")
+            && source.contains("Self::dismiss_media_paste_receipt_after_input(ws, id, result)")
             && run_command.contains("dismiss_media_paste_receipt_for_pane"),
         "every successful authored-input route must invalidate the affected pane's receipt, including foreign broadcasts and control commands"
     );
@@ -1365,9 +1602,9 @@ fn the_pty_key_path_never_reads_the_masked_modifiers() {
     );
     assert_eq!(
         body.matches("encode_key_event_for_mode(").count(),
-        3,
-        "focused pane, local broadcast and foreign broadcast; a fourth \
-             encode site needs the same modifiers"
+        4,
+        "focused pane, local broadcast, foreign broadcast and retained releases \
+             must use the same modifiers"
     );
 }
 
@@ -2945,6 +3182,31 @@ fn output_continuation_keeps_progress_and_defers_a_definitive_miss() {
     nearby_search.typing_scanned_revision = Some(3);
     assert!(!super::should_start_nearby_search(&nearby_search));
 
+    let now = std::time::Instant::now();
+    nearby_job.output_drifted = false;
+    nearby_search.typing_scanned_revision = None;
+    nearby_search.unlimited_retry_at = Some(now);
+    assert!(!super::prepare_initial_search_retry_after_output(
+        &mut nearby_search,
+        &nearby_job,
+        nearby_job.wrap_anchor,
+    ));
+    assert_eq!(nearby_search.typing_scanned_revision, Some(3));
+    assert!(nearby_search.unlimited_retry_at.is_none());
+    assert!(!super::should_start_nearby_search(&nearby_search));
+
+    nearby_job.output_drifted = true;
+    let retry_at = now + std::time::Duration::from_millis(500);
+    nearby_search.unlimited_retry_at = Some(retry_at);
+    assert!(super::prepare_initial_search_retry_after_output(
+        &mut nearby_search,
+        &nearby_job,
+        nearby_job.wrap_anchor,
+    ));
+    assert!(nearby_search.quiet_retry_pending);
+    assert_eq!(nearby_search.unlimited_retry_at, Some(retry_at));
+    assert!(!super::should_start_nearby_search(&nearby_search));
+
     let (status, retry_at) = super::finished_background_search(&job, std::time::Instant::now());
     assert_eq!(status, kettle_render::SearchStatus::Searching);
     assert!(retry_at.is_some());
@@ -4487,6 +4749,30 @@ fn empty_ime_preedit_normalizes_to_stable_absence() {
     // safe visible boundary.
     assert_eq!(super::ime_preedit_focus("界x", Some((0, 2))), 0);
     assert_eq!(super::ime_preedit_focus("a\u{301}x", Some((0, 1))), 0);
+}
+
+#[test]
+fn empty_preedit_preserves_ownership_until_commit() {
+    for clear_display in [false, true] {
+        let mut ws = WindowState::new(1, Mux::new());
+        assert!(super::update_ime_preedit(&mut ws, "compose".into(), None));
+        let owner = ws.ime_preedit_owner;
+        if clear_display {
+            super::end_modal_composition(&mut ws);
+            assert!(ws.ime_preedit.is_none());
+        } else {
+            ws.ime_focus_generation += 1;
+        }
+        ws.palette_input = Some((String::new(), 0));
+        super::update_ime_preedit(&mut ws, String::new(), None);
+        assert_eq!(ws.ime_preedit_owner, owner);
+        assert!(!super::take_ime_commit(&mut ws));
+        assert!(ws.ime_preedit_owner.is_none());
+
+        assert!(super::update_ime_preedit(&mut ws, "new".into(), None));
+        super::update_ime_preedit(&mut ws, String::new(), None);
+        assert!(super::take_ime_commit(&mut ws));
+    }
 }
 
 #[test]
@@ -6647,6 +6933,16 @@ fn ctl_mouse_press_handles_app_chrome_before_panes() {
         .nth(1)
         .and_then(|s| s.split("fn ctl_mouse_release").next())
         .expect("ctl_mouse_press body present");
+    let report = body
+        .find("self.send_mouse(ws, bcode, true, false)")
+        .expect("terminal mouse reporting");
+    let menu = body
+        .find("self.open_context_menu(ws, px, py, offer_copied)")
+        .expect("local context menu");
+    assert!(
+        report < menu,
+        "terminal reporting must precede the right-click menu"
+    );
     assert!(
         body.contains("&& self.settings_mouse(ws, if bcode == 2 { -1 } else { 1 }, true)"),
         "ctl_mouse_press must route Settings modal clicks through settings_mouse"
@@ -7299,6 +7595,9 @@ fn every_pane_input_writer_reconciles_focus_reports_first() {
     let mut checked = 0;
     for chunk in source.split("\n    fn ").skip(1) {
         let name = chunk.split('(').next().unwrap_or_default().to_string();
+        if name == "deliver_deferred_input" {
+            continue;
+        }
         let body = chunk.split("\n    }\n").next().unwrap_or(chunk);
         let first_write = ["feed_input(", "feed_input_shared("]
             .iter()
@@ -7314,19 +7613,30 @@ fn every_pane_input_writer_reconciles_focus_reports_first() {
             "{name} writes pane input without reconciling focus reports first"
         );
     }
-    assert!(checked >= 10, "census found only {checked} writers");
+    // Keys and actions now write through `deliver_deferred_input`, so fewer
+    // functions write directly; every caller of it is checked below.
+    assert!(checked >= 8, "census found only {checked} writers");
     for caller in [
         "paste_text_into_target(&mut ws.mux",
         "paste_paths_into_target(&mut ws.mux",
+        "Self::deliver_deferred_input(",
     ] {
-        let owner = source
+        let owners: Vec<_> = source
             .split("\n    fn ")
-            .find(|chunk| chunk.contains(caller))
-            .expect("paste caller");
-        let sync = owner
-            .find("self.sync_pane_focus_reports(")
-            .expect("paste caller syncs");
-        assert!(sync < owner.find(caller).unwrap());
+            .skip(1)
+            .filter(|chunk| !chunk.starts_with("deliver_deferred_input("))
+            .map(|chunk| chunk.split("\n    }\n").next().unwrap_or(chunk))
+            .filter(|body| body.contains(caller))
+            .collect();
+        assert!(!owners.is_empty(), "{caller} has no caller");
+        for owner in owners {
+            let name = owner.split('(').next().unwrap_or_default();
+            let sync = owner.find("self.sync_pane_focus_reports(");
+            assert!(
+                sync.is_some_and(|sync| sync < owner.find(caller).unwrap()),
+                "{name} calls {caller} without reconciling focus reports first"
+            );
+        }
     }
 }
 
@@ -13693,6 +14003,28 @@ fn profile_choices_are_keyboard_navigable() {
         label: "work".into(),
         profile: "work".into()
     }));
+}
+
+#[test]
+fn submenu_transitions_reclamp_the_new_panel() {
+    let src = super::production_source();
+    let call = "self.reclamp_context_menu(ws, (width as f32, height as f32));";
+    let drill = src
+        .split("ContextMenuClick::DrillIntoSubmenu(idx) => {")
+        .nth(1)
+        .unwrap()
+        .split("ContextMenuClick::Action(action) =>")
+        .next()
+        .unwrap();
+    assert!(drill.contains(call));
+    let back = src
+        .split("fn context_menu_back(")
+        .nth(1)
+        .unwrap()
+        .split("fn context_menu_activate(")
+        .next()
+        .unwrap();
+    assert!(back.find(call).unwrap() < back.find("return;").unwrap());
 }
 
 #[test]

@@ -887,6 +887,8 @@ pub(crate) struct WindowState {
     /// prevents a later geometry or modal transition from swallowing the
     /// matching release and leaving a Kitty-protocol client with a stuck key.
     pub(crate) terminal_owned_key_releases: std::collections::HashSet<winit::keyboard::PhysicalKey>,
+    pub(crate) terminal_key_recipients:
+        std::collections::HashMap<PhysicalKey, std::collections::HashSet<u64>>,
     /// Keys whose press closed or replaced a Kettle modal (the search bar,
     /// palette, menu, a dialog, vi mode...), each until it is released. Their
     /// repeats are dropped instead of reaching whatever the modal uncovered,
@@ -1190,7 +1192,7 @@ pub(crate) struct WindowState {
     pub(crate) output_monitor: Option<winit::monitor::MonitorHandle>,
     pub(crate) output_refresh_probe_at: Option<std::time::Instant>,
     pub(crate) output_refresh_probe_pending: bool,
-    pub(crate) last_click: Option<(std::time::Instant, usize, usize, u8)>,
+    pub(crate) last_click: Option<(std::time::Instant, Option<u64>, usize, usize, u8)>,
     /// Last OS window title set (dedupe `set_title` syscalls).
     pub(crate) last_title: String,
     /// A user-set window title that must survive redraws.
@@ -1487,6 +1489,7 @@ impl WindowState {
             macos_right_option_pressed: false,
             suppressed_key_releases: std::collections::HashSet::new(),
             terminal_owned_key_releases: std::collections::HashSet::new(),
+            terminal_key_recipients: std::collections::HashMap::new(),
             closing_keys: std::collections::HashSet::new(),
             ime_preedit: None,
             ime_preedit_owner: None,

@@ -1013,6 +1013,12 @@ impl App {
                             .unwrap_or(0);
                     }
                 }
+                let (width, height) = ws
+                    .renderer
+                    .as_ref()
+                    .map(|renderer| renderer.surface_size())
+                    .unwrap_or((800, 600));
+                self.reclamp_context_menu(ws, (width as f32, height as f32));
                 if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
@@ -1041,15 +1047,9 @@ impl App {
                 ws.context_menu = None;
                 // Terminator parity: write `CMD\n` to the PTY.
                 // Acts as the user — a read-only pane drops it.
-                if let Some(pane_id) = ws.mux.active_focus()
-                    && let Some(p) = ws.mux.panes.get(&pane_id)
-                {
-                    let mut bytes = command.into_bytes();
-                    bytes.push(b'\n');
-                    let result = p.feed_input(&bytes);
-                    self.report_input_result(result);
-                    Self::dismiss_media_paste_receipt_after_input(ws, pane_id, result);
-                }
+                let mut bytes = command.into_bytes();
+                bytes.push(b'\n');
+                self.write_focused_terminal_input(ws, &bytes);
             }
             ContextMenuClick::MoveTabToWindow { window, panes } => {
                 ws.context_menu = None;
@@ -1338,6 +1338,12 @@ impl App {
                 .iter()
                 .position(item_is_dispatchable)
                 .unwrap_or(0);
+            let (width, height) = ws
+                .renderer
+                .as_ref()
+                .map(|renderer| renderer.surface_size())
+                .unwrap_or((800, 600));
+            self.reclamp_context_menu(ws, (width as f32, height as f32));
             if let Some(w) = &ws.window {
                 w.request_redraw();
             }
