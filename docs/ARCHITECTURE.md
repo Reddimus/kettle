@@ -811,6 +811,10 @@ on the pane's `PATH` for that check. fish gets `-C` and the code, which the vend
 portable-pty passes to the default shell after its login `argv[0]`
 (`shell_arg`).
 
+Installation tries the shared lock without waiting. A busy lock sets a retry
+250 ms later, which the event loop wakes for, and then both enabled offers are
+installed again, so a suspended installer cannot hold the UI thread.
+
 Kettle's Claude Code plugin is `kettle-ui`'s `agent_plugin` module. With
 `agent-display-claude-code` and live agent previews, the App's
 `reconcile_claude_plugin`, run before the first pane and after each reload,

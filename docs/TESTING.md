@@ -4413,11 +4413,12 @@ none of its text; and `kettle ctl` never asks for a card. Kettle's Claude Code
 plugin: `kettle-ui`'s `agent_plugin` tests build a plugin that launches this
 Kettle's display server and hooks only `kettle_show`, refuse a translocated
 path, and install it read-only. The plugin must then verify, and a
-reinstall must keep it. An install waits while another holds the lock.
-Cleanup removes this executable's plugins from the same or an older
-version, one whose program is gone, an unreadable one, one whose server is
-not `kettle mcp` or whose file is too long, and any staging, but keeps
-another installed Kettle's plugin and a newer version's. They fail a
+reinstall must keep it. A contended install returns within one second without
+writing and asks for a retry; once the holder releases its lock, it installs.
+Cleanup removes this executable's plugins from an older version, one whose
+program is gone, an unreadable one, one whose server is not `kettle mcp` or
+whose file is too long, and any staging, but keeps another installed
+Kettle's plugin, a newer version's, and another of this version's. They fail a
 changed file, an extra entry, a link and a writable directory, and repair
 each by installing again. On policy, they cover each source Claude Code
 reads: the managed file, its visible JSON drop-ins, the cached remote policy
