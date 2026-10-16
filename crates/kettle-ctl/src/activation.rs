@@ -1676,6 +1676,9 @@ mod tests {
         assert!(!others.running());
     }
 
+    /// Unix only: Windows cannot delete a file another handle holds open,
+    /// so a lock file there is never retired under a waiter this way.
+    #[cfg(unix)]
     #[test]
     fn election_retries_a_lock_retired_under_it() {
         let (_dir, paths) = test_paths("retired");
