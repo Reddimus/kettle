@@ -137,7 +137,9 @@ file, a Mermaid diagram's source or a Markdown document, never the generated SVG
 2 MiB; a raster
 returns none. A DetectedRendered reply is held to its kind on encode, on decode and when
 the parent takes it: an SVG, Mermaid or Markdown reply must carry its source, within that
-kind's input cap (2 MiB, 64 KiB, 1 MiB), and a raster or video reply must carry none.
+kind's input cap (2 MiB, 64 KiB, 1 MiB), and a raster or video reply must carry none. Its
+pixels must also fit the SVG ceiling below, checked before they are read; a plain reply is
+held to the ceiling of the kind the parent asked for.
 Display lines may drop carriage returns and clip long lines; the exact source does
 neither.
 
@@ -798,10 +800,12 @@ seen. The digest is taken over the bytes read and that file's identity
 
 **Raster decoding.** The format comes from the content's signature, never the
 name or extension. PNG, JPEG, WebP, BMP and GIF are decoded; any other format,
-TIFF included, is `UnsupportedMedia`. Two containers are read before their
-decoder sees them. A BMP header, or a WebP extended header's canvas, that
-declares an image past the caps below is `RenderResource` (their decoders
-would refuse some of these with a parse error instead). In a WebP, every lossy
+TIFF included, is `UnsupportedMedia`. Three containers are read before their
+decoder sees them. A BMP header, a WebP extended header's canvas, or any GIF
+frame, that declares an image past the caps below is `RenderResource` (their
+decoders would refuse some of these with a parse error instead; a GIF frame
+can be larger than the screen it belongs to, and the decoder allocates the
+first one at its own size). In a WebP, every lossy
 bitstream must declare the size it fills: a still image's must match the
 canvas, and an animation frame's must match that frame, with the chunk after
 a frame's alpha plane being that bitstream. A mismatch is `RenderParse`,
