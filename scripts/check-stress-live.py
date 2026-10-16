@@ -13,9 +13,13 @@ the control API, and must leave it alive with no panic in its log, answering
   S6  a 64 MiB paste, then a paste with an embedded bracketed-paste end
   S7  a 16 MiB title, then 10,000 title changes
   S8  theme and language rewritten every 200 ms during a flood
+  S9  hostile media through `kettle show` (corrupt, empty, huge and bomb
+      images, SVG, Mermaid and video, a FIFO, a symlink loop); each must be
+      refused within its deadline, and three good files must still render
   S10 64 parallel control clients, 20 requests each
 
-S6 uses the system clipboard and restores it afterwards. Run on macOS or a
+S6 uses the system clipboard and restores it afterwards. S9 needs a working
+media worker, on macOS a signed one (`just macos-avsync` signs it). Run on macOS or a
 Linux desktop session:
 
   scripts/check-stress-live.py --kettle target/debug/kettle --out-dir DIR [S1 S3 ...]
@@ -25,10 +29,13 @@ Linux desktop session:
 import argparse
 import importlib.util
 import json
+import os
+import struct
 import subprocess
 import sys
 import threading
 import time
+import zlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -61,6 +68,8 @@ def failures(row):
         problems.append(f"orphaned children {row['sleep_1000_left']}")
     if any(length > MAX_TITLE_CHARS for length in row.get("title_lengths", [])):
         problems.append("a title past its cap")
+    if row.get("show_timeouts") or row.get("show_unexpected"):
+        problems.append(f"show: {row.get('show_timeouts')} timed out, {row.get('show_unexpected')} unexpected")
     if row.get("ctl_errors"):
         problems.append(f"{row['ctl_errors']} control errors")
     return problems
@@ -229,6 +238,79 @@ def s8_theme_language_churn(live):
     return {"worst_get_state_during_s": round(worst, 3)}
 
 
+def png(width, height, color_type, idat):
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+    header = struct.pack(">IIBBBBB", width, height, 8, color_type, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", idat) + chunk(b"IEND", b"")
+
+
+def zero_rows(width, height, channels):
+    deflate = zlib.compressobj(9)
+    row = b"\x00" * (1 + width * channels)
+    return b"".join(deflate.compress(row) for _ in range(height)) + deflate.flush()
+
+
+def media_cases(root):
+    """S9's files: name -> (path, as Mermaid, must render)."""
+    root.mkdir(parents=True, exist_ok=True)
+    good_png = png(64, 64, 2, zero_rows(64, 64, 3))
+    nested_use = ['<g id="u0"><rect width="1" height="1"/></g>'] + [
+        f'<g id="u{i}">' + f'<use href="#u{i - 1}"/>' * 10 + "</g>" for i in range(1, 11)]
+    entities = "".join(f'<!ENTITY {chr(98 + i)} "' + f"&{chr(97 + i)};" * 10 + '">' for i in range(9))
+    files = {
+        "ok.png": (good_png, False, True),
+        "ok.mmd": (b"graph TD\nA-->B\n", True, True),
+        "ok.md": (b"```mermaid\ngraph TD\nA-->B\n```\n", False, True),
+        "empty.png": (b"", False, False),
+        "corrupt.png": (b"\x89PNG\r\n\x1a\n" + os.urandom(65536), False, False),
+        "truncated.png": (good_png[: len(good_png) // 2], False, False),
+        "16k.png": (png(16384, 16384, 0, zero_rows(16384, 16384, 1)), False, False),
+        "claims-64k.png": (png(65535, 65535, 6, zlib.compress(b"\x00" * 5)), False, False),
+        "no-frames.gif": (b"GIF89a" + struct.pack("<HHBBB", 100, 100, 0, 0, 0) + b";", False, False),
+        "use-bomb.svg": (('<svg xmlns="http://www.w3.org/2000/svg" width="9" height="9"><defs>'
+                          + "".join(nested_use) + '</defs><use href="#u10"/></svg>').encode(), False, False),
+        "entity-bomb.svg": (('<?xml version="1.0"?><!DOCTYPE svg [<!ENTITY a "aaaaaaaaaa">' + entities
+                             + ']><svg xmlns="http://www.w3.org/2000/svg"><text>&j;</text></svg>').encode(), False, False),
+        "500-subgraphs.mmd": (("flowchart TD\n" + "".join(f"subgraph s{i}\n" for i in range(500)) + "a-->b\n" + "end\n" * 500).encode(), True, False),
+        "500-loops.mmd": (("sequenceDiagram\n" + "loop l\n" * 500 + "A->>B: hi\n" + "end\n" * 500).encode(), True, False),
+        "10k-edges.mmd": (("graph TD\n" + "".join(f"a{i}-->a{i + 1}\n" for i in range(10000))).encode(), True, False),
+        "1m-label.mmd": (('graph TD\nA["' + "x" * (1 << 20) + '"]-->B\n').encode(), True, False),
+        "40-diagrams.md": ("".join(f"```mermaid\ngraph TD\nA{i}-->B{i}\n```\n" for i in range(40)).encode(), False, False),
+        "corrupt.mp4": (b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isom" + os.urandom(200000), False, False),
+    }
+    cases = {}
+    for name, (data, mermaid, renders) in files.items():
+        (root / name).write_bytes(data)
+        cases[name] = (root / name, mermaid, renders)
+    fifo, loop = root / "fifo.png", root / "loop.png"
+    if not fifo.exists():
+        os.mkfifo(fifo)
+    if not loop.is_symlink():
+        loop.symlink_to(loop)
+    cases["fifo.png"] = (fifo, False, False)
+    cases["loop.png"] = (loop, False, False)
+    return cases
+
+
+def s9_media(live):
+    timeouts, unexpected = [], []
+    for name, (path, mermaid, renders) in media_cases(live.cfg.parent / "s9-media").items():
+        token = f"S9-{name}"
+        flag = "--mermaid " if mermaid else ""
+        live.ctl("send_text", params={"text": f"clear; '{live.kettle}' show {flag}'{path}' >/dev/null 2>&1; echo {token} rc=$?\r"})
+        deadline = time.monotonic() + 30
+        status = None
+        while status is None and time.monotonic() < deadline:
+            lines = live.json_ctl("read_screen").get("text", "").splitlines()
+            status = next((l.split("rc=")[1].strip() for l in lines if l.startswith(f"{token} rc=")), None)
+            time.sleep(0.2)
+        if status is None:
+            timeouts.append(name)
+        elif (status == "0") != renders:
+            unexpected.append(f"{name} rc={status}")
+    return {"show_timeouts": timeouts, "show_unexpected": unexpected}
+
 
 SCENARIOS = {
     "S1": s1_urandom,
@@ -239,6 +321,7 @@ SCENARIOS = {
     "S6": s6_paste,
     "S7": s7_titles,
     "S8": s8_theme_language_churn,
+    "S9": s9_media,
     "S10": s10_ctl_storm,
 }
 
@@ -296,10 +379,12 @@ def self_test():
         ({"title_lengths": [513]}, "title"),
         ({"ctl_errors": 3}, "control errors"),
         ({"error": "SystemExit: server closed the connection"}, "error"),
+        ({"show_timeouts": ["16k.png"]}, "show"),
+        ({"show_unexpected": ["ok.png rc=1"]}, "show"),
     ]:
         result = failures({**passing, **broken})
         assert any(why in item for item in result), (broken, result)
-    assert set(SCENARIOS) == {"S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S10"}
+    assert set(SCENARIOS) == {"S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9", "S10"}
     print("check-stress-live self-test: ok")
 
 

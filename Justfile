@@ -366,12 +366,13 @@ script-fixture-self-test:
     python3 scripts/check-stress-live.py --self-test
 
 # Live stress: binary floods, resize storms, hundreds of tabs, huge pastes
-# and titles, config churn and parallel control clients against a debug
-# build. Each scenario must leave Kettle alive and answering; see the script.
-# Needs a desktop session; S6 borrows and restores the clipboard.
+# and titles, config churn, hostile media and parallel control clients
+# against a debug build. Each scenario must leave Kettle alive and answering;
+# see the script. Needs a desktop session; S6 borrows and restores the
+# clipboard.
 [unix]
 stress-live *scenarios:
-    cargo build --locked -p kettle
+    cargo build --locked -p kettle -p kettle-media-worker
     python3 scripts/check-stress-live.py --kettle target/debug/kettle --out-dir target/diagnostics/stress-live {{scenarios}}
 
 # Pin the eligibility rule in macos-compare.sh's embedded scorer: Kettle-only
