@@ -1713,6 +1713,15 @@ fn ceil_f64_to_usize(value: f64) -> usize {
     }
 }
 
+/// How far a Kitty placement moves the cursor: right past the image and down
+/// to its last row. A placement can ask for up to `u32::MAX` cells, but VT
+/// parameters saturate at `u16::MAX`, and the terminal's line arithmetic
+/// assumes they do, so both placement paths bound the counts here.
+fn kitty_cursor_counts(cell_cols: usize, cell_rows: usize) -> (usize, usize) {
+    let max = usize::from(u16::MAX);
+    (cell_cols.min(max), cell_rows.saturating_sub(1).min(max))
+}
+
 fn kitty_cursor_movement(
     params: PlacementParams,
     cell_cols: usize,
@@ -1721,7 +1730,7 @@ fn kitty_cursor_movement(
     if params.suppress_cursor_movement {
         return None;
     }
-    let down = cell_rows.saturating_sub(1);
+    let (cell_cols, down) = kitty_cursor_counts(cell_cols, cell_rows);
     if down == 0 {
         Some(format!("\x1b[{cell_cols}C"))
     } else {
@@ -11507,8 +11516,9 @@ fn place_image_during_sync(
     let (params, cell_cols, cell_rows) = insert_image_at_cursor(term, images, geometry, placed)?;
     if let Some(params) = params {
         if !params.suppress_cursor_movement {
-            term.move_forward(cell_cols);
-            term.move_down(cell_rows.saturating_sub(1));
+            let (right, down) = kitty_cursor_counts(cell_cols, cell_rows);
+            term.move_forward(right);
+            term.move_down(down);
         }
     } else {
         for _ in 0..cell_rows.clamp(1, 256) {
@@ -12920,6 +12930,23 @@ mod conformance {
         assert!(!term.mode().intersects(TermMode::KITTY_KEYBOARD_PROTOCOL));
     }
 
+    /// The widest scroll deltas, which a wheel event sent over the control
+    /// socket can carry, stop at the ends of history instead of overflowing
+    /// the offset arithmetic.
+    #[test]
+    fn extreme_scroll_deltas_stop_at_the_ends_of_history() {
+        use alacritty_terminal::grid::Scroll;
+        let (mut t, mut p) = harness(20, 4);
+        feed(&mut t, &mut p, b"L0\r\nL1\r\nL2\r\nL3\r\nL4\r\nL5");
+        let history = t.grid().history_size();
+        assert_eq!(history, 2);
+        t.scroll_display(Scroll::Delta(1));
+        t.scroll_display(Scroll::Delta(i32::MAX));
+        assert_eq!(t.grid().display_offset(), history);
+        t.scroll_display(Scroll::Delta(i32::MIN));
+        assert_eq!(t.grid().display_offset(), 0);
+    }
+
     /// A selection made while scrolled back must read the VISIBLE (history)
     /// row, not the active-screen row at the same viewport index. This guards
     /// alacritty's `Selection` coordinate contract, which expects GRID-ABSOLUTE
@@ -13300,6 +13327,17 @@ mod conformance {
     }
 
     #[test]
+    fn erase_display_above_on_second_row_clears_first_row() {
+        let (mut t, mut p) = harness(10, 3);
+        feed(&mut t, &mut p, b"TOP\r\nBOTTOM\r\nKEEP");
+        feed(&mut t, &mut p, b"\x1b[2;1H\x1b[1J");
+        assert_eq!(row_text(&t, 0), "");
+        assert_eq!(row_text(&t, 1), " OTTOM");
+        assert_eq!(row_text(&t, 2), "KEEP");
+        assert_eq!(t.grid().cursor.point, Point::new(Line(1), Column(0)));
+    }
+
+    #[test]
     fn erase_line_and_display() {
         let (mut t, mut p) = harness(10, 3);
         feed(&mut t, &mut p, b"ABCDEFG");
@@ -13386,6 +13424,25 @@ mod conformance {
         assert_eq!(row_text(&t, 0), "Zacde");
     }
 
+    /// DCH deletes from the cursor to the end of the line at most, whatever
+    /// its count: the cells before the cursor stay.
+    #[test]
+    fn delete_char_never_clears_cells_before_the_cursor() {
+        for (column, expected) in [(4, "ABC"), (8, "ABCDEFG")] {
+            let remaining = 9 - column;
+            for count in [remaining, remaining + 1, 65535] {
+                let (mut t, mut p) = harness(8, 2);
+                feed(&mut t, &mut p, b"ABCDEFGH");
+                feed(
+                    &mut t,
+                    &mut p,
+                    format!("\x1b[1;{column}H\x1b[{count}P").as_bytes(),
+                );
+                assert_eq!(row_text(&t, 0), expected, "column {column}, count {count}");
+            }
+        }
+    }
+
     #[test]
     fn insert_and_delete_line() {
         let (mut t, mut p) = harness(6, 4);
@@ -13411,6 +13468,46 @@ mod conformance {
         feed(&mut t2, &mut p2, b"abcd");
         assert_eq!(row_text(&t2, 0), "abc");
         assert_eq!(row_text(&t2, 1), "d");
+    }
+
+    #[test]
+    fn origin_mode_relative_moves_do_not_reapply_top_margin() {
+        let (mut t, mut p) = harness(10, 24);
+        feed(&mut t, &mut p, b"\x1b[5;20r\x1b[?6h");
+        assert_eq!(t.grid().cursor.point, Point::new(Line(4), Column(0)));
+
+        let cases: &[(&[u8], i32, usize)] = &[
+            (b"\x1b[2G", 4, 1),
+            (b"\x1b[2B", 6, 1),
+            (b"\x1b[A", 5, 1),
+            (b"\x1b[2E", 7, 0),
+            (b"\x1b[F", 6, 0),
+            (b"\x1b[999A", 4, 0),
+            (b"\x1b[999B", 19, 0),
+            (b"\x1b[999E", 19, 0),
+            (b"\x1b[999F", 4, 0),
+            (b"\x1b[999G", 4, 9),
+        ];
+        for &(sequence, line, column) in cases {
+            feed(&mut t, &mut p, sequence);
+            assert_eq!(
+                t.grid().cursor.point,
+                Point::new(Line(line), Column(column))
+            );
+        }
+
+        feed(&mut t, &mut p, b"\x1b[?6l\x1b[3;3H\x1b[999A");
+        assert_eq!(t.grid().cursor.point, Point::new(Line(0), Column(2)));
+        feed(&mut t, &mut p, b"\x1b[999B");
+        assert_eq!(t.grid().cursor.point, Point::new(Line(23), Column(2)));
+
+        // DECRC does not restore DECOM, so the cursor can sit above the top
+        // margin under origin mode. Moving up there must not pull it down
+        // to the margin.
+        feed(&mut t, &mut p, b"\x1b[2;1H\x1b7\x1b[?6h\x1b8\x1b[A");
+        assert_eq!(t.grid().cursor.point, Point::new(Line(0), Column(0)));
+        feed(&mut t, &mut p, b"\x1b[B");
+        assert_eq!(t.grid().cursor.point, Point::new(Line(1), Column(0)));
     }
 
     #[test]
@@ -13660,6 +13757,34 @@ mod conformance {
             CursorShape::Block,
             "DEC ?25 h restores the previous shape"
         );
+    }
+
+    #[test]
+    fn partial_erases_clear_both_halves_of_wide_characters() {
+        let sequences: &[&[u8]] = &[
+            b"\r\x1b[X",
+            b"\x1b[2G\x1b[X",
+            b"\r\x1b[1K",
+            b"\x1b[2G\x1b[K",
+            b"\r\x1b[1J",
+            b"\x1b[2G\x1b[J",
+        ];
+        for &sequence in sequences {
+            let (mut t, mut p) = harness(4, 2);
+            feed(&mut t, &mut p, "\u{4e16}".as_bytes());
+            feed(&mut t, &mut p, sequence);
+            for column in 0..2 {
+                let cell = &t.grid()[Point::new(Line(0), Column(column))];
+                assert_eq!(cell.c, ' ');
+                assert!(
+                    !cell
+                        .flags
+                        .intersects(Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER)
+                );
+            }
+            feed(&mut t, &mut p, b"\rab");
+            assert_eq!(row_text(&t, 0), "ab");
+        }
     }
 
     #[test]
@@ -18765,6 +18890,30 @@ mod image_lifecycle_tests {
     fn kitty_image(id: u32, placement: u32, columns: u32, rows: u32) -> Vec<u8> {
         format!("\x1b_Ga=T,i={id},p={placement},f=32,s=1,v=1,c={columns},r={rows};AQIDBA==\x1b\\")
             .into_bytes()
+    }
+
+    /// A placement asking for billions of rows or columns moves the cursor to
+    /// the same cell inside a synchronized update as outside one: the grid's
+    /// last row and column, not a row its line arithmetic wrapped to.
+    #[test]
+    fn kitty_cursor_movement_is_bounded_in_both_placement_paths() {
+        for (columns, rows) in [(1, u32::MAX), (1, 1 << 31), (u32::MAX, u32::MAX)] {
+            let mut cursors = Vec::new();
+            for synchronized in [false, true] {
+                let mut harness = SyncGraphicsHarness::new();
+                harness.feed(b"\x1b[2;1H");
+                if synchronized {
+                    harness.feed(b"\x1b[?2026h");
+                }
+                harness.feed(&kitty_image(1, 1, columns, rows));
+                if synchronized {
+                    harness.feed(b"\x1b[?2026l");
+                }
+                cursors.push(harness.term.lock().unwrap().grid().cursor.point);
+            }
+            assert_eq!(cursors[0], cursors[1], "c={columns}, r={rows}");
+            assert_eq!(cursors[1].line, Line(3), "c={columns}, r={rows}");
+        }
     }
 
     #[test]

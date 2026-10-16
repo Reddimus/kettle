@@ -109,6 +109,28 @@ date. Recheck that before upgrading a crate or dropping a patch.
   keeps the cursor's row fixed, so splitting a pane scrolled its visible lines
   away while the rows under the prompt stayed empty. Two `grid/tests.rs`
   cases cover wrapping above and below the cursor.
+  DCH (`CSI Ps P`) deletes at most the cells from the cursor to the end of
+  the line. Upstream clamps the count to the line width instead, so a count
+  past the end of the line also cleared cells before the cursor.
+  `Grid::scroll_display` adds a signed delta with saturation, so a wheel
+  delta near `i32::MAX` stops at the top of history instead of overflowing.
+  Five more engine fixes from the same review:
+  - Scrolling a region below the top adds no history, so it no longer moves
+    a scrolled-back viewport. Upstream moved it anyway, past the history
+    there was, and the next render indexed outside the grid.
+  - Copying a row that ends in the spacer of a wide character wrapped to the
+    next row takes that character, with its combining marks, from the next
+    row. Upstream read the previous row.
+  - Erasing half of a wide character (ECH, EL, ED) erases both halves, so
+    no orphaned spacer is left to swallow the next character typed.
+  - CHA changes only the column, and CUU, CUD, CNL and CPL move from the
+    cursor's own row. Upstream sent all of them through CUP, which adds the
+    top margin again under origin mode. The margins stop the cursor under
+    origin mode only while it is inside them, since DECRC does not restore
+    DECOM.
+  - ED 1 with the cursor on the second row clears the first row too.
+
+  Upstream `master` still had all seven of these bugs on 2026-10-16.
 - Upstream status, checked 2026-09-30: crates.io's newest `alacritty_terminal`
   is still 0.26.0, published 2026-04-06. Alacritty's `master`, at `d692748d`
   from 2026-08-31, is `0.26.1-dev`. Since

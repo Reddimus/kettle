@@ -22,6 +22,48 @@ impl GridCell for usize {
     }
 }
 
+// Scrolling a region below the top adds no history, so a scrolled-back
+// viewport stays put and never passes the history there is.
+#[test]
+fn partial_scroll_preserves_scrolled_viewport() {
+    let mut grid = Grid::<usize>::new(5, 1, 10_000);
+    grid[Line(0)][Column(0)] = 42;
+    grid.scroll_up::<usize>(&(Line(0)..Line(5)), 1);
+    grid.scroll_display(Scroll::Delta(1));
+    assert_eq!(grid.history_size(), 1);
+    assert_eq!(grid.display_offset(), 1);
+
+    for _ in 0..2500 {
+        grid.scroll_up::<usize>(&(Line(1)..Line(5)), 1);
+    }
+
+    assert_eq!(grid.history_size(), 1);
+    assert_eq!(grid.display_offset(), 1);
+    assert_eq!(*grid.display_iter().next().unwrap().cell, 42);
+    assert_eq!(grid.display_iter().count(), 5);
+
+    grid.scroll_up::<usize>(&(Line(0)..Line(5)), 1);
+    assert_eq!(grid.history_size(), 2);
+    assert_eq!(grid.display_offset(), 2);
+    assert_eq!(*grid.display_iter().next().unwrap().cell, 42);
+}
+
+// The widest deltas stop at the ends of history instead of overflowing.
+#[test]
+fn scroll_display_extreme_deltas_clamp_to_history() {
+    let mut grid = Grid::<usize>::new(2, 1, 2);
+    let region = Line(0)..Line(2);
+    grid.scroll_up::<usize>(&region, 1);
+    grid.scroll_up::<usize>(&region, 1);
+    assert_eq!(grid.history_size(), 2);
+
+    grid.scroll_display(Scroll::Delta(1));
+    grid.scroll_display(Scroll::Delta(i32::MAX));
+    assert_eq!(grid.display_offset(), 2);
+    grid.scroll_display(Scroll::Delta(i32::MIN));
+    assert_eq!(grid.display_offset(), 0);
+}
+
 // Scroll up moves lines upward.
 #[test]
 fn scroll_up() {
@@ -546,12 +588,13 @@ fn reference_scroll_up(grid: &mut Grid<usize>, region: &Range<Line>, positions: 
         }
         return;
     }
-    if grid.display_offset != 0 {
-        grid.display_offset = min(grid.display_offset + positions, grid.max_scroll_limit);
-    }
     if region.start == 0 {
         let history_before = grid.history_size();
         grid.increase_scroll_limit(positions);
+        // The offset follows history, which only a top-anchored scroll adds.
+        if grid.display_offset != 0 {
+            grid.display_offset = min(grid.display_offset + positions, grid.history_size());
+        }
         let history_added = grid.history_size().saturating_sub(history_before);
         let evicted = positions.saturating_sub(history_added);
         grid.history_origin = grid.history_origin.saturating_add(evicted as u64);
