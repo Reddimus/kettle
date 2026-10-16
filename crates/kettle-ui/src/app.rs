@@ -9396,6 +9396,11 @@ pub struct App {
     logged_restart_pending: Option<String>,
     /// Primaries of other builds still running, found at election.
     other_builds: kettle_ctl::activation::OtherBuilds,
+    /// This executable's canonical path, found at startup. On Linux an
+    /// update replaces it by rename, after which `current_exe()` reads
+    /// `<path> (deleted)` and no longer resolves; agent files keep naming
+    /// the installed one.
+    executable: Option<std::path::PathBuf>,
     /// The full version string the About panel shows —
     /// the bin crate passes its `KETTLE_VERSION` (version + git hash, exactly
     /// what `--version` prints); falls back to the bare crate version.
@@ -10385,6 +10390,7 @@ impl App {
             update_available: None,
             logged_restart_pending: None,
             other_builds,
+            executable: std::env::current_exe().and_then(std::fs::canonicalize).ok(),
             version_line: startup_version,
             torn_drag: None,
             last_session_sweep: None,

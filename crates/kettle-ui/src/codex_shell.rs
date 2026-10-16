@@ -222,8 +222,9 @@ fn identity(_: &Path) -> Option<(String, Option<String>)> {
 pub(crate) fn install(
     root: &Path,
     files: &crate::owned_dir::OwnedFiles,
+    keep_older: bool,
 ) -> Result<std::path::PathBuf, ()> {
-    crate::owned_dir::install(root, files, identity)
+    crate::owned_dir::install(root, files, identity, keep_older)
 }
 
 /// The startup for the Kettle at `executable`, at `version`, with its files
@@ -233,10 +234,11 @@ pub(crate) fn prepare(
     executable: &Path,
     version: &str,
     agents: Agents,
+    keep_older: bool,
 ) -> Result<Offered, ShellRefusal> {
     let files = startup_files(executable, version, agents)?;
     let fish = fish_code(executable, agents)?;
-    let directory = install(root, &files).map_err(|()| ShellRefusal::Unavailable)?;
+    let directory = install(root, &files, keep_older).map_err(|()| ShellRefusal::Unavailable)?;
     Ok(Offered {
         directory,
         files,
@@ -372,7 +374,7 @@ mod tests {
         let base = kettle_test_support::private_tempdir("kettle-codex-shell-");
         let kettle = Path::new("/kettle-stand-in/bin/kettle");
         let root = base.path().join("agent-shell");
-        let offered = prepare(&root, kettle, "5.0.0", CODEX).unwrap();
+        let offered = prepare(&root, kettle, "5.0.0", CODEX, false).unwrap();
         assert!(offered.directory.starts_with(&root));
         assert!(offered.directory.join(ZSH_FILE).is_file());
         assert_eq!(offered.fish, fish_code(kettle, CODEX).unwrap());
@@ -381,7 +383,7 @@ mod tests {
             Ok(())
         );
         assert_eq!(
-            prepare(&root, Path::new("relative/kettle"), "5.0.0", CODEX).err(),
+            prepare(&root, Path::new("relative/kettle"), "5.0.0", CODEX, false).err(),
             Some(ShellRefusal::Unavailable)
         );
     }
@@ -429,6 +431,7 @@ mod tests {
                 &kettle,
                 "5.0.0",
                 agents,
+                false,
             )
             .unwrap();
             let home = base.path().join("home");

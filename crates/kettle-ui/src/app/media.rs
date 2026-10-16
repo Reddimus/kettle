@@ -33,16 +33,19 @@ impl App {
             crate::agent_plugin::offer(None, None);
             return;
         }
-        let prepared = std::env::current_exe()
-            .and_then(std::fs::canonicalize)
-            .map_err(|_| crate::agent_plugin::PluginRefusal::UnnamedExecutable)
+        let keep_older = self.other_builds.running();
+        let prepared = self
+            .executable
+            .as_deref()
+            .ok_or(crate::agent_plugin::PluginRefusal::UnnamedExecutable)
             .and_then(|executable| {
-                crate::agent_plugin::PluginFiles::new(&executable, env!("CARGO_PKG_VERSION"))
+                crate::agent_plugin::PluginFiles::new(executable, env!("CARGO_PKG_VERSION"))
             })
             .and_then(|files| {
                 let root = crate::agent_plugin::plugins_root()
                     .ok_or(crate::agent_plugin::PluginRefusal::Unverified)?;
-                crate::agent_plugin::install(&root, &files).map(|directory| (directory, files))
+                crate::agent_plugin::install(&root, &files, keep_older)
+                    .map(|directory| (directory, files))
             })
             .and_then(|(directory, files)| {
                 crate::agent_plugin::plugin_dir_entry(&directory)
@@ -81,13 +84,21 @@ impl App {
             crate::codex_shell::offer(None, Some(crate::codex_shell::ShellRefusal::Unsupported));
             return;
         }
-        let prepared = std::env::current_exe()
-            .and_then(std::fs::canonicalize)
-            .map_err(|_| crate::codex_shell::ShellRefusal::Unavailable)
+        let keep_older = self.other_builds.running();
+        let prepared = self
+            .executable
+            .as_deref()
+            .ok_or(crate::codex_shell::ShellRefusal::Unavailable)
             .and_then(|executable| {
                 let root = crate::codex_shell::startup_root()
                     .ok_or(crate::codex_shell::ShellRefusal::Unavailable)?;
-                crate::codex_shell::prepare(&root, &executable, env!("CARGO_PKG_VERSION"), agents)
+                crate::codex_shell::prepare(
+                    &root,
+                    executable,
+                    env!("CARGO_PKG_VERSION"),
+                    agents,
+                    keep_older,
+                )
             });
         match prepared {
             Ok(offered) => crate::codex_shell::offer(Some(offered), None),

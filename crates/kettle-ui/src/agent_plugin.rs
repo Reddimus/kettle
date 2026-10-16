@@ -153,11 +153,16 @@ pub(crate) fn plugins_root() -> Option<PathBuf> {
 /// Write the plugin under `root` unless it is already there intact, and
 /// remove what is stale; see [`crate::owned_dir::install`]. Returns the
 /// plugin's directory.
-pub(crate) fn install(root: &Path, files: &PluginFiles) -> Result<PathBuf, PluginRefusal> {
+pub(crate) fn install(
+    root: &Path,
+    files: &PluginFiles,
+    keep_older: bool,
+) -> Result<PathBuf, PluginRefusal> {
     if cfg!(not(unix)) {
         return Err(PluginRefusal::Unsupported);
     }
-    crate::owned_dir::install(root, files, plugin_identity).map_err(|()| PluginRefusal::Unverified)
+    crate::owned_dir::install(root, files, plugin_identity, keep_older)
+        .map_err(|()| PluginRefusal::Unverified)
 }
 
 /// Replace whatever is at `directory` with the plugin.
@@ -789,7 +794,7 @@ mod tests {
         kettle_state::create_private_dirs(&root).unwrap();
         std::fs::create_dir_all(&stale).unwrap();
         let files = files();
-        let directory = install(&root, &files).unwrap();
+        let directory = install(&root, &files, false).unwrap();
         assert_eq!(directory, root.join(files.directory_name()));
         assert_eq!(verify(&directory, &files), Ok(()));
         let mode = |path: &Path| path.symlink_metadata().unwrap().permissions().mode() & 0o777;
@@ -798,7 +803,7 @@ mod tests {
         assert_eq!(mode(&directory.join("hooks/hooks.json")), 0o400);
         assert!(!stale.exists(), "an unreadable leftover is removed");
         // Installing again keeps the intact directory.
-        assert_eq!(install(&root, &files).unwrap(), directory);
+        assert_eq!(install(&root, &files, false).unwrap(), directory);
         remove_tree(&base.path().join("kettle")).unwrap();
     }
 
@@ -860,7 +865,7 @@ mod tests {
                 " ".repeat(MAX_PLUGIN_FILE_BYTES as usize)
             ),
         );
-        let directory = install(&root, &own).unwrap();
+        let directory = install(&root, &own, false).unwrap();
         assert!(!not_mcp.exists(), "a server that is not Kettle's");
         assert!(!overlong.exists(), "a file read only in part");
         assert!(!older_dir.exists(), "this executable's older version");
@@ -884,7 +889,7 @@ mod tests {
         let held = kettle_state::ExclusiveFileLock::acquire(&root.join(INSTALL_LOCK)).unwrap();
         let installing = std::thread::spawn({
             let root = root.clone();
-            move || install(&root, &files())
+            move || install(&root, &files(), false)
         });
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert!(
@@ -910,7 +915,7 @@ mod tests {
         let base = kettle_test_support::private_tempdir("kettle-plugin-");
         let root = base.path().join("kettle/agent-plugins");
         let files = files();
-        let directory = install(&root, &files).unwrap();
+        let directory = install(&root, &files, false).unwrap();
         let writable = |path: &Path, mode: u32| {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap()
         };
@@ -923,14 +928,14 @@ mod tests {
         writable(&directory, 0o500);
         assert_eq!(verify(&directory, &files), Err(PluginRefusal::Unverified));
         // Reinstalling repairs it.
-        assert_eq!(install(&root, &files).unwrap(), directory);
+        assert_eq!(install(&root, &files, false).unwrap(), directory);
         assert_eq!(verify(&directory, &files), Ok(()));
         // An extra entry.
         writable(&directory, 0o700);
         std::fs::write(directory.join("extra"), b"x").unwrap();
         writable(&directory, 0o500);
         assert_eq!(verify(&directory, &files), Err(PluginRefusal::Unverified));
-        install(&root, &files).unwrap();
+        install(&root, &files, false).unwrap();
         // A link in place of a file.
         writable(&directory, 0o700);
         let target = base.path().join("elsewhere.json");
@@ -940,11 +945,11 @@ mod tests {
         std::os::unix::fs::symlink(&target, &mcp).unwrap();
         writable(&directory, 0o500);
         assert_eq!(verify(&directory, &files), Err(PluginRefusal::Unverified));
-        install(&root, &files).unwrap();
+        install(&root, &files, false).unwrap();
         // A writable directory.
         writable(&directory.join("hooks"), 0o700);
         assert_eq!(verify(&directory, &files), Err(PluginRefusal::Unverified));
-        install(&root, &files).unwrap();
+        install(&root, &files, false).unwrap();
         assert_eq!(verify(&directory, &files), Ok(()));
         remove_tree(&base.path().join("kettle")).unwrap();
     }
@@ -956,7 +961,7 @@ mod tests {
         let base = kettle_test_support::private_tempdir("kettle-plugin-");
         let root = base.path().join("kettle/agent-plugins");
         let files = files();
-        let directory = install(&root, &files).unwrap();
+        let directory = install(&root, &files, false).unwrap();
         let sources = || policy(base.path());
         offer(Some((directory.clone(), files)), None);
         assert_eq!(check_offered(sources), Some(Ok(directory.clone())));
