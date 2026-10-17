@@ -184,11 +184,35 @@ pub(crate) struct RestoreWindowRef<'a> {
     pub geometry: Option<SGeometry>,
 }
 
+/// How a restored window opens: at `size` always, the size the aggregate
+/// budget counted, and at `position` only when the session saved one, so the
+/// OS places the others.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RestoreSurface {
+    pub size: (u32, u32),
+    pub position: Option<(i32, i32)>,
+}
+
+impl RestoreSurface {
+    /// The saved geometry to restore at, clamped, if the session saved one.
+    pub(crate) fn geometry(self) -> Option<SGeometry> {
+        self.position.map(|(x, y)| SGeometry {
+            x,
+            y,
+            w: self.size.0,
+            h: self.size.1,
+        })
+    }
+}
+
+/// Each window's surface, clamped to the live monitors, refused as a whole
+/// past the aggregate GPU budget. A window without saved geometry is counted
+/// at `default_size` clamped the same way, and opens at that size.
 pub(crate) fn validated_restore_surface_geometries(
     windows: &[RestoreWindowRef<'_>],
     monitors: &[(i32, i32, u32, u32)],
     default_size: (u32, u32),
-) -> Result<Vec<Option<SGeometry>>, String> {
+) -> Result<Vec<RestoreSurface>, String> {
     let mut total_pixels = 0u64;
     let mut geometries = Vec::with_capacity(windows.len());
     for (index, window) in windows.iter().enumerate() {
@@ -211,7 +235,10 @@ pub(crate) fn validated_restore_surface_geometries(
                  {MAX_RESTORE_TOTAL_SURFACE_PIXELS}-pixel aggregate cap"
             ));
         }
-        geometries.push(window.geometry.map(|_| clamped));
+        geometries.push(RestoreSurface {
+            size: (clamped.w, clamped.h),
+            position: window.geometry.map(|_| (clamped.x, clamped.y)),
+        });
     }
     Ok(geometries)
 }
@@ -621,13 +648,17 @@ pub(crate) fn save_to_path(s: &Session, p: &std::path::Path) -> std::io::Result<
                     "existing session exceeds the size limit",
                 ));
             }
+            // Unchanged bytes skip the write, but not the permissions the
+            // write would set: a file another tool loosened is tightened in
+            // place, or rewritten when that fails.
             if size == text.len() as u64 {
                 let mut on_disk = Vec::with_capacity(text.len());
-                if file
+                if (&file)
                     .take(text.len() as u64 + 1)
                     .read_to_end(&mut on_disk)
                     .is_ok()
                     && on_disk == text.as_bytes()
+                    && kettle_state::restrict_private_file(&file).is_ok()
                 {
                     return Ok(());
                 }
@@ -679,26 +710,63 @@ pub(crate) fn load_from_path(p: &std::path::Path) -> Option<Session> {
     match serde_json::from_slice(&bytes) {
         Ok(s) => Some(s),
         Err(e) => {
-            let dst = p.with_extension(format!(
-                "json.broken.{}",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0)
-            ));
-            let renamed = std::fs::rename(p, &dst).is_ok();
+            // Outside the log call: a disabled level skips its arguments.
+            let backup = stash_session_file(p, "broken");
             log::warn!(
                 "session file {} is corrupted ({e}); {}",
                 p.display(),
-                if renamed {
-                    format!("backed up to {}", dst.display())
-                } else {
-                    "could not rename — kettle will overwrite on the next save".into()
+                match backup {
+                    Ok(dst) => format!("backed up to {}", dst.display()),
+                    Err(_) => "could not rename — kettle will overwrite on the next save".into(),
                 }
             );
             None
         }
     }
+}
+
+/// Move a session file aside, to `<path>.json.<kind>.<unix-seconds>`.
+fn stash_session_file(path: &std::path::Path, kind: &str) -> std::io::Result<std::path::PathBuf> {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    stash_session_file_at(path, kind, seconds)
+}
+
+/// How many names one second's stashes of one kind may take.
+const MAX_STASHES_PER_SECOND: u32 = 64;
+
+/// [`stash_session_file`] at a given time. A second stash in the same second
+/// gets `.1`, `.2`… rather than replacing the first: the name is taken with a
+/// hard link, which never replaces, and only then is `path` removed. Where
+/// hard links are unsupported, a rename to a name not yet taken.
+fn stash_session_file_at(
+    path: &std::path::Path,
+    kind: &str,
+    seconds: u64,
+) -> std::io::Result<std::path::PathBuf> {
+    let base = path.with_extension(format!("json.{kind}.{seconds}"));
+    for attempt in 0..MAX_STASHES_PER_SECOND {
+        let mut name = base.clone().into_os_string();
+        if attempt > 0 {
+            name.push(format!(".{attempt}"));
+        }
+        let candidate = std::path::PathBuf::from(name);
+        match std::fs::hard_link(path, &candidate) {
+            Ok(()) => return std::fs::remove_file(path).map(|()| candidate),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(error),
+            Err(_) if std::fs::symlink_metadata(&candidate).is_err() => {
+                return std::fs::rename(path, &candidate).map(|()| candidate);
+            }
+            Err(_) => {}
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "every session backup name for this second is taken",
+    ))
 }
 
 fn invalid_session_file(path: &std::path::Path) -> std::io::Error {
@@ -771,15 +839,8 @@ pub(crate) fn stash_unrestorable_session(path: &std::path::Path, reason: &str) {
     if !path.exists() {
         return;
     }
-    let destination = path.with_extension(format!(
-        "json.unrestored.{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_secs())
-            .unwrap_or(0)
-    ));
-    match std::fs::rename(path, &destination) {
-        Ok(()) => log::warn!(
+    match stash_session_file(path, "unrestored") {
+        Ok(destination) => log::warn!(
             "session at {} could not be restored ({reason}); kept at {} so the \
              next save cannot overwrite it",
             path.display(),
@@ -805,14 +866,9 @@ fn stash_oversize_session(path: &std::path::Path, size: u64, limit: u64) {
     );
     // Stash for forensics like the parse-error branch above; future launches
     // start fresh rather than repeatedly encountering the oversized file.
-    let destination = path.with_extension(format!(
-        "json.toobig.{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_secs())
-            .unwrap_or(0)
-    ));
-    let _ = std::fs::rename(path, destination);
+    if let Err(error) = stash_session_file(path, "toobig") {
+        log::warn!("could not move {} aside: {error}", path.display());
+    }
 }
 
 #[cfg(test)]
@@ -1474,6 +1530,50 @@ mod tests {
         );
     }
 
+    /// Two stashes in the same second keep both files: the second takes the
+    /// next free name instead of replacing the first.
+    #[test]
+    fn stashes_in_the_same_second_keep_every_file() {
+        let dir = private_tempdir();
+        let path = dir.path().join("session.json");
+        let mut kept = Vec::new();
+        for contents in ["first", "second", "third"] {
+            std::fs::write(&path, contents).unwrap();
+            let backup = stash_session_file_at(&path, "broken", 1_700_000_000).unwrap();
+            assert!(!path.exists());
+            kept.push((backup, contents));
+        }
+        for (backup, contents) in &kept {
+            assert_eq!(std::fs::read_to_string(backup).unwrap(), *contents);
+        }
+        assert_eq!(
+            kept[1].0.file_name().unwrap(),
+            "session.json.broken.1700000000.1"
+        );
+    }
+
+    /// Saving the bytes already on disk still leaves the file owner-only.
+    #[cfg(unix)]
+    #[test]
+    fn save_to_path_tightens_an_unchanged_session_file() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = private_tempdir();
+        let path = dir.path().join("session.json");
+        let session = Session::default();
+        let bytes = serde_json::to_string_pretty(&session).unwrap();
+        for mode in [0o644, 0o666] {
+            std::fs::write(&path, &bytes).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            save_to_path(&session, &path).unwrap();
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), bytes);
+        }
+    }
+
     #[test]
     fn load_from_path_round_trips_valid_session() {
         // Healthy session round-trips through serde_json. The empty
@@ -1716,7 +1816,35 @@ mod tests {
         let geometries =
             validated_restore_surface_geometries(&windows, &[(0, 0, 1920, 1080)], (800, 600))
                 .expect("sixteen 1080p surfaces fit the aggregate budget");
-        assert_eq!(geometries, vec![Some(full_hd); MAX_RESTORE_WINDOWS]);
+        assert_eq!(
+            geometries.iter().map(|s| s.geometry()).collect::<Vec<_>>(),
+            vec![Some(full_hd); MAX_RESTORE_WINDOWS]
+        );
+    }
+
+    /// A window without saved geometry is counted at the default size
+    /// clamped to the monitors, and must open at that size: opening it at
+    /// the configured size let sixteen of them past the aggregate budget.
+    #[test]
+    fn a_window_without_geometry_opens_at_the_size_its_budget_counted() {
+        let windows = vec![
+            RestoreWindowRef {
+                tabs: &[],
+                active: 0,
+                geometry: None,
+            };
+            MAX_RESTORE_WINDOWS
+        ];
+        let surfaces =
+            validated_restore_surface_geometries(&windows, &[(0, 0, 1920, 1080)], (3200, 3200))
+                .unwrap();
+        for surface in surfaces {
+            assert_eq!(surface.position, None);
+            assert!(
+                surface.size.0 <= 1920 && surface.size.1 <= 1080,
+                "{surface:?}"
+            );
+        }
     }
 
     #[test]

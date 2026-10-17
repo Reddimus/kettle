@@ -5235,6 +5235,13 @@ mod windows {
         }
         let descriptor = SecurityDescriptor(descriptor);
         let already_private = dacl_is_current_user_only(descriptor.0, dacl, current_user.sid)?;
+        // New private objects are owned by TokenUser, which differs from
+        // TokenOwner on an elevated administrator's token. One that is already
+        // exactly private needs no change, so it needs no owner's authority.
+        let owned_by_user = !owner.is_null() && unsafe { EqualSid(owner, current_user.sid) } != 0;
+        if already_private && owned_by_user {
+            return Ok(());
+        }
         if !owner_authorizes_hardening(owner, current_owner.sid) {
             let administrators = builtin_administrators_sid()?;
             let legacy_elevated_owner =
@@ -5572,6 +5579,18 @@ mod windows {
                 !owner_authorizes_hardening(administrators.sid, current_user.sid),
                 "a hard-coded Administrators exception must not substitute for TokenOwner"
             );
+        }
+
+        /// Kettle's own private files are owned by TokenUser. On an elevated
+        /// administrator's token TokenOwner is Administrators, and confirming
+        /// such a file still private must not be refused as foreign.
+        #[test]
+        fn a_created_private_file_can_be_confirmed_private() {
+            let dir = crate::test_tempdir();
+            let path = dir.path().join("created");
+            drop(create_private_file_new(&path).unwrap());
+            let file = std::fs::File::open(&path).unwrap();
+            restrict_private_object(&file).unwrap();
         }
 
         #[test]
