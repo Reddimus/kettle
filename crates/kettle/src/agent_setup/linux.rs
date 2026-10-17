@@ -176,7 +176,7 @@ fn small_file(path: &Path, limit: usize) -> Option<Vec<u8>> {
     let metadata = file.metadata().ok()?;
     if !metadata.is_file()
         || metadata.len() > limit as u64
-        || !kettle_ctl::agent_launch::owned_and_writable_by_owner_alone(&metadata)
+        || !kettle_ctl::agent_launch::owned_and_writable_by_owner_alone(&file, &metadata)
     {
         return None;
     }

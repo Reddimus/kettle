@@ -1815,14 +1815,19 @@ original entry. Discard tests require visible Unix exports to remain in place
 and confine fallible export payloads and cleanup to an owner-only staging
 directory, preserving a competing destination. macOS seeds an inheritable
 read ACL and proves atomic publication from an ACL-free staging directory
-leaves the new leaf with no extended ACL. Native Windows pins the
+leaves the new leaf with no extended ACL. A macOS private-file regression
+observes the inode before its first hardening, requires it to be ACL-free,
+and verifies append semantics after seeking. Native Windows pins the
 parent against rename, verifies the protected DACL, and rejects alternate
 streams, trailing-dot aliases, and embedded NULs before path normalization.
 The missing-parent and existing-leaf cases fail without creating or changing
 anything on every platform. Streaming-publication tests prove the requested
 destination stays absent while bytes are written to its owner-only sibling,
 publication creates the complete inode with a no-replace hard link or atomic
-rename fallback, and no staging name remains. A platform seam forces only the
+rename fallback, and no staging name remains under a trusted parent. A Unix
+discard regression displaces the private staging directory and installs a
+replacement, then proves cleanup removes only the held directory's payload.
+A platform seam forces only the
 hard-link syscall to fail, then exercises the real `renameat2`,
 `renameatx_np`, or `FILE_RENAME_INFO` path and its racing-destination refusal.
 Deterministic nonce injection
@@ -5638,7 +5643,10 @@ missing tools and unrun platforms as explicit skips in the release audit.
 Portable tests cover hook profiles, direct/npm ancestry, pane generation,
 one-use pickup, expiry/capacity and redacted permit serialization. Native
 Linux tests exercise held ELF metadata, descriptor transfer, executable
-changes and agent exit. Launcher fixtures check native and npm layouts,
+changes and agent exit. Access ACL fixtures reject named-user and named-group
+write grants through the private-group exception and accept masked grants;
+filesystems without access ACL support skip that fixture explicitly.
+Launcher fixtures check native and npm layouts,
 relative PATH preservation and close-on-exec descriptors. zsh/fish fixtures
 verify each enabled agent independently, unchanged argument forwarding,
 noninteractive shells and user-defined functions. MCP tests keep card text
