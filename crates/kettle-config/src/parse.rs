@@ -243,6 +243,12 @@ pub fn parse(input: &str) -> Vec<Entry> {
         if !section.applies() {
             continue;
         }
+        // No setting holds a NUL, and one would end the string a platform API
+        // reads: a Windows environment block takes `env = A=x\0B=y` as two
+        // variables. `Config::detect_malformed_values` reports the line.
+        if line.contains('\0') {
+            continue;
+        }
         let Some(eq) = line.find('=') else {
             continue;
         };

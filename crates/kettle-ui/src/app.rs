@@ -10120,18 +10120,13 @@ fn persist_keybind_rebind(
         return false;
     };
 
-    let mut saved = true;
-    for old in stale {
-        if let Err(e) = kettle_config::append_keybind(path, old, "unbind") {
-            log::warn!("append_keybind({old}=unbind) failed: {e}");
-            saved = false;
+    match kettle_config::rebind_keybind(path, stale, label, action_name) {
+        Ok(_) => true,
+        Err(e) => {
+            log::warn!("rebind_keybind({label}={action_name}) failed: {e}");
+            false
         }
     }
-    if let Err(e) = kettle_config::append_keybind(path, label, action_name) {
-        log::warn!("append_keybind({label}={action_name}) failed: {e}");
-        saved = false;
-    }
-    saved
 }
 
 fn completion_surface_available(mode: kettle_core::TermMode, display_offset: usize) -> bool {
