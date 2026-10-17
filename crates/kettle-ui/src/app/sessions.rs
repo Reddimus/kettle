@@ -241,8 +241,18 @@ mod tests {
         assert_eq!(session.theme, expected.theme);
     }
 
+    /// Runs alone: macOS marks a received descriptor close-on-exec only after
+    /// `recvmsg` returns, and a child another test spawns in between would keep
+    /// the peer from seeing end of file.
     #[test]
     fn handoff_failures_close_received_fds() {
+        kettle_test_support::run_alone_in_child(
+            "app::sessions::tests::handoff_failures_close_received_fds",
+            handoff_failures_close_received_fds_alone,
+        );
+    }
+
+    fn handoff_failures_close_received_fds_alone() {
         use std::io::Read;
         for payload in [b"{".to_vec(), vec![b' '; 1024 * 1024 + 1]] {
             let (sender, receiver) = UnixStream::pair().unwrap();
