@@ -170,7 +170,7 @@ All paths below are relative to the repository root.
 | `kettle-media` | `crates/kettle-media/src/`, `crates/kettle-media/tests/` | Bounded wire protocol, worker client, video sniffing |
 | `kettle-media-worker` | `crates/kettle-media-worker/src/`, `crates/kettle-media-worker/tests/` | Process boundary, playback, native audio |
 | `kettle-media-native` | `crates/kettle-media-native/src/`, `crates/kettle-media-native/tests/` | Decoders, sandboxing, audio output |
-| `kettle-media-render` | `crates/kettle-media-render/src/`, `crates/kettle-media-render/tests/` | Raster, SVG, Mermaid, hostile inputs |
+| `kettle-media-render` | `crates/kettle-media-render/src/`, `crates/kettle-media-render/tests/` | Raster, SVG, Mermaid, PDF, hostile inputs |
 | `kettle-render` | `crates/kettle-render/src/lib.rs`, `crates/kettle-render/src/headless_tests.rs`, `crates/kettle-render/tests/` | Text, geometry, GPU pixels, menus |
 | `kettle-ui` | `crates/kettle-ui/src/app.rs`, `crates/kettle-ui/src/app/`, `crates/kettle-ui/src/` | Input routing, windows, settings, control actions |
 | `kettle-i18n` | `crates/kettle-i18n/src/`, `crates/kettle-i18n/tests/` | Locale selection and catalogue/build rules |
@@ -362,6 +362,7 @@ The times below are minutes per target, not total workflow duration.
 | `session` | `kettle-media` | Session pixels match the requested size and decoded bytes | 10 / 10 |
 | `sniff` | `kettle-media` | Video prefix sniffing handles arbitrary bytes and declared lengths | 10 / 10 |
 | `render` | `kettle-media-render` | Worker renders fit the box and satisfy the parent's reply checks | 20 / 60 |
+| `pdf` | `kettle-media-render` | A PDF page, at the page each input picks, passes the same checks | 20 / 60 |
 | `ffprobe` | `kettle-media-native` | Descriptions, rates, rotation, codecs, and packet indexes parse safely | 10 / 10 |
 | `ctl` | `kettle-ctl` | Request framing and serialization agree; pages stay bounded | 10 / 10 |
 | `update` | `kettle-update` | Signatures, asset names, hashes, and archive paths obey trust rules | 10 / 10 |
@@ -373,7 +374,7 @@ The times below are minutes per target, not total workflow duration.
 `nightly-2026-09-24` and cargo-fuzz 0.13.2.
 It runs at 07:41 UTC daily.
 Sunday uses each target's Sunday time and minimizes every corpus.
-Only `term`, `vt`, and `render` get the longer Sunday duration.
+Only `term`, `vt`, `render`, and `pdf` get the longer Sunday duration.
 
 A matching PR runs every target for 60 seconds.
 The PR path filter covers the workflow, `fuzz/**`, the planner,

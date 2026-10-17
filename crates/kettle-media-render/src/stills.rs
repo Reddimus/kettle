@@ -308,6 +308,7 @@ pub fn compose(
             samples: frames.iter().map(|frame| frame.sample).collect(),
             tolerance_ms,
         }),
+        page: None,
     };
     rendered
         .validate_as(kettle_media::MediaKind::Video)
@@ -677,7 +678,14 @@ mod tests {
                 misstep,
                 path: path.clone(),
             };
-            crate::render_with_decoder(&file_job(), |_| {}, Some(&decoder))
+            crate::render_with(
+                &file_job(),
+                |_| {},
+                crate::Means {
+                    decoder: Some(&decoder),
+                    confined: true,
+                },
+            )
         };
 
         let (kind, rendered) = render(Misstep::None).unwrap();
@@ -717,10 +725,13 @@ mod tests {
             path: path.clone(),
         };
         assert_eq!(
-            crate::render_with_decoder(
+            crate::render_with(
                 &job(kettle_media::Source::Bytes(mp4.clone())),
                 |_| {},
-                Some(&decoder)
+                crate::Means {
+                    decoder: Some(&decoder),
+                    confined: true,
+                },
             )
             .unwrap_err(),
             FailureCode::UnsupportedMedia

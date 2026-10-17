@@ -151,7 +151,7 @@ fn validate_worker_job(j: &Job) -> Result<(), ValidationError> {
     }
 }
 fn validate_bytes(kind: JobKind, b: &[u8]) -> Result<(), ValidationError> {
-    cap(b.len(), kind.input_cap())?;
+    cap(b.len(), kind.inline_cap())?;
     if matches!(
         kind,
         JobKind::Mermaid | JobKind::Svg | JobKind::MarkdownDiagrams { .. }
@@ -627,6 +627,10 @@ impl Writer {
                 self.raw(&of.mtime_seconds.to_le_bytes())?;
                 self.u32(of.mtime_nanos)
             }
+            JobKind::PdfPage { index } => {
+                self.u8(8)?;
+                self.u32(index)
+            }
         }
     }
     fn job_tail<S>(&mut self, j: &Job<S>) -> Result<(), WireError> {
@@ -821,6 +825,7 @@ fn media_kind_tag(kind: MediaKind) -> u8 {
         MediaKind::Mermaid => 2,
         MediaKind::Markdown => 3,
         MediaKind::Video => 4,
+        MediaKind::Pdf => 5,
     }
 }
 
@@ -871,6 +876,11 @@ fn put_rendered(w: &mut Writer, r: &Rendered) -> Result<(), WireError> {
             w.u64(sample.actual_ms)?;
         }
         w.u32(video.tolerance_ms)?;
+    }
+    w.u8(u8::from(r.page.is_some()))?;
+    if let Some(page) = r.page {
+        w.u32(page.index)?;
+        w.u32(page.count)?;
     }
     Ok(())
 }
@@ -1065,6 +1075,7 @@ impl<'a> Reader<'a> {
             2 => Ok(MediaKind::Mermaid),
             3 => Ok(MediaKind::Markdown),
             4 => Ok(MediaKind::Video),
+            5 => Ok(MediaKind::Pdf),
             _ => Err(WireError::UnknownEnum),
         }
     }
@@ -1096,6 +1107,7 @@ impl<'a> Reader<'a> {
                 mtime_seconds: i64::from_le_bytes(self.array()?),
                 mtime_nanos: self.u32()?,
             }),
+            8 => JobKind::PdfPage { index: self.u32()? },
             _ => return Err(WireError::UnknownEnum),
         };
         k.validate()?;
@@ -1104,7 +1116,7 @@ impl<'a> Reader<'a> {
     fn source(&mut self, kind: JobKind, external: bool) -> Result<Source, WireError> {
         match self.u8()? {
             0 => {
-                let b = self.blob(kind.input_cap())?;
+                let b = self.blob(kind.inline_cap())?;
                 if matches!(
                     kind,
                     JobKind::Mermaid | JobKind::Svg | JobKind::MarkdownDiagrams { .. }
@@ -1331,6 +1343,23 @@ impl<'a> Reader<'a> {
         } else {
             None
         };
+        // A PDF page says which page it is of how many, and no other kind
+        // does.
+        let page = if self.flag()? {
+            if kind.is_some_and(|kind| kind != MediaKind::Pdf) {
+                return Err(ValidationError::BadParams.into());
+            }
+            let page = PageOf {
+                index: self.u32()?,
+                count: self.u32()?,
+            };
+            page.validate()?;
+            Some(page)
+        } else if kind == Some(MediaKind::Pdf) {
+            return Err(ValidationError::BadParams.into());
+        } else {
+            None
+        };
         Ok(Rendered {
             width,
             height,
@@ -1348,6 +1377,7 @@ impl<'a> Reader<'a> {
             uncovered_scripts,
             warnings,
             video,
+            page,
         })
     }
 }

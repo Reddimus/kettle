@@ -78,6 +78,7 @@ pub fn rendered() -> Rendered {
         uncovered_scripts: vec![],
         warnings: vec![],
         video: None,
+        page: None,
     }
 }
 /// A two-frame sheet's video result.
@@ -115,6 +116,9 @@ pub fn rendered_as(kind: MediaKind) -> Rendered {
     }
     if kind == MediaKind::Video {
         rendered.video = Some(video_result());
+    }
+    if kind == MediaKind::Pdf {
+        rendered.page = Some(kettle_media::PageOf { index: 0, count: 1 });
     }
     rendered
 }

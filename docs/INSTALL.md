@@ -232,9 +232,10 @@ Kettle searches only `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`,
 and permissions. A temporary addition to `PATH` does not make a decoder
 available. Kettle uses no GStreamer.
 
-Linux video decoding needs Landlock (kernel 5.13+ with Landlock enabled).
-Containers must permit its three syscalls in their seccomp policy. Without it,
-images, SVG and Mermaid remain available, but video decoding is refused.
+Linux video and PDF decoding need Landlock (kernel 5.13+ with Landlock
+enabled). Containers must permit its three syscalls in their seccomp policy.
+Without it, images, SVG and Mermaid remain available, but videos and PDFs
+are refused.
 Linux sound also needs PulseAudio or a compatible PipeWire server and
 `libpulse.so.0` (`libpulse0` on Debian/Ubuntu).
 

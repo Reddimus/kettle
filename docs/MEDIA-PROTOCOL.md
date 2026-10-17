@@ -64,13 +64,15 @@ nonoverlapping times and phase are checked again by the receiving role.
 External tools cannot send PCM frames. A PCM broker accepts no media path or
 encoded format.
 
-Job-kind tags 0 through 7 are Mermaid, Svg, Raster, MarkdownDiagrams, VideoProbe,
-VideoStills, Auto and CachedThumbnail. An Auto job asks the worker to classify the source by
-its bytes. CachedThumbnail adds the SHA-256 of the video's file URI (32 bytes), the video's
+Job-kind tags 0 through 8 are Mermaid, Svg, Raster, MarkdownDiagrams, VideoProbe,
+VideoStills, Auto, CachedThumbnail and PdfPage. An Auto job asks the worker to classify the
+source by its bytes. PdfPage (job tag 8) adds the page's index from 0 as a u32; its input
+cap is 64 MiB for a file it reads, and 32 MiB, a raster's, for bytes the job carries, as a
+parent frame holds no more. CachedThumbnail adds the SHA-256 of the video's file URI (32 bytes), the video's
 modification time in seconds as a signed i64 and its nanoseconds as a u32 below one billion;
 it has the Raster kind's input cap and deadline.
 MarkdownDiagrams (job tag 3) adds one index byte.
-Media-kind tags 0 through 4 are Raster, Svg, Mermaid, Markdown and Video: what a
+Media-kind tags 0 through 5 are Raster, Svg, Mermaid, Markdown, Video and Pdf: what a
 DetectedRendered reply actually rendered. VideoStills (job tag 5) adds count u8,
 edge u32, start f64, optional end f64, optional single-frame time f64 and a layout:
 tag 0 for a poster, which requires count 1, or tag 1 for a sheet followed by its
@@ -178,7 +180,7 @@ Failure bytes 0 through 27 are pinned in `FailureCode` and round-trip tests. `co
 and `model_message` map applicable cases to the model-facing error contract. Failures carry
 no source, path, parser diagnostic or other input. WorkerUnavailable is the added fixed
 reason for a missing or unverifiable worker. SandboxUnavailable (27) is `backend_unavailable`
-with reason `sandbox`: the worker could not confine itself, so it decodes no video. Codec/backend identities and platform package
+with reason `sandbox`: the worker could not confine itself, so it decodes no video and draws no PDF. Codec/backend identities and platform package
 hints are future bounded provider data, not free-form strings accepted in P1 failures.
 
 The plan leaves some small metadata bounds unspecified. P1 chooses 64 bytes each for version
@@ -196,6 +198,10 @@ Version 5 added CachedThumbnail jobs bound to a video's URI and modification tim
 Version 6 added playback sessions, commands, video frames and playback state.
 Version 7 added playback sound requests, sound status and mute controls.
 Version 8 added private PCM broker frames for Linux playback sound.
+Version 9 added PDF pages: the PdfPage job, the Pdf media kind, and after a Rendered
+payload's video result a flag and, for a PDF only, the page shown and the document's page
+count as u32s; every PDF reply has them, the page is below the count, and no other kind's
+reply has them.
 No version negotiates, so a peer with a different version is `RestartRequired` either way.
 
 ## Build identity and worker availability
@@ -741,8 +747,10 @@ raster, a cached thumbnail renders even where the worker's sandbox cannot be
 applied, as any raster does.
 
 **Auto jobs.** The source is held, and its first 64 KiB are read through
-the held descriptor. A video container there, and no image signature, is a
-video: its poster is the frame in the middle of the video, fitted into the
+the held descriptor. A PDF's signature in its first KiB, and no image
+signature, makes it a PDF, which is read and drawn as **PDF pages** below
+says, and only in a confined worker (`SandboxUnavailable` otherwise). A
+video container there, and no image signature, is a video: its poster is the frame in the middle of the video, fitted into the
 job's box as a raster is and never larger than the picture, taken by the
 worker's decoders from the held file exactly as a stills job's are, and the
 reply is Video with the video result; it is reported as video once a
@@ -751,7 +759,7 @@ the video, it is never read whole. Anything else is read once, through the
 same descriptor, under the larger of the raster and SVG caps, and that one
 snapshot is both classified and rendered, so a file replaced in between
 cannot be classified as one thing and rendered as another. Content with the
-signature of a raster format Kettle draws (PNG, JPEG, GIF, WebP, BMP) is a
+signature of a raster format Kettle draws (PNG, JPEG, GIF, WebP, BMP, TIFF) is a
 raster, whatever the file is called; an animated GIF, PNG or WebP shown this
 way is its first frame. A BMP's signature is the two letters `BM`, so it also
 needs one of the header sizes the decoder reads, and text that starts
@@ -783,6 +791,23 @@ explicit SVG job's would be: `FileTooLarge` from a file and `TooLarge`
 inline. SVG behind a document type declaration is classified as SVG and then
 refused by the parser (`RenderParse`), as an explicit SVG job is.
 
+**PDF pages.** A file whose first kilobyte holds `%PDF-`, and which no image
+signature claims first, is a PDF, read whole under its 64 MiB cap
+(`FileTooLarge` beyond it). hayro, pinned exactly and with its parser patched
+locally, draws the page asked for (an Auto job's first) on white, fitted to the
+target box within the vector ceiling exactly as an SVG is, a crop included; the
+reply says which page it is of how many. hayro parses the document in the
+worker's own process and is younger than the rest of what it runs, so a PDF
+renders only in a confined worker: unconfined it is `SandboxUnavailable`, as a
+video is. Its render cannot be cancelled, so the job's deadline, CPU limit and
+memory watch bound it; a corpus of public test documents renders page 1 well
+inside them, and the one that would not is killed at the deadline. A document
+opens when its user password is empty; another encrypted one is
+`UnsupportedMedia`, a broken one `RenderParse`, and a page past the last
+`IndexOutOfRange`. A font the document does not embed is drawn with the
+standard fonts compiled in, never one read from the system; a font hayro cannot
+use is reported as `MissingGlyphs`.
+
 **Markdown galleries.** A page is each fenced code block whose info
 string's first word is `mermaid`, in any case, in document order, wherever
 CommonMark puts it (the top level, a list item, a block quote, its
@@ -798,8 +823,8 @@ whose display lines are the rendered page's. A page renders exactly as the
 same text sent as a Mermaid job would, within the same two-second diagram
 deadline, which starts before the document is parsed.
 
-**The source.** Inline bytes over the job kind's input cap (32 MiB for a
-raster or an Auto job, 2 MiB for an SVG) are `TooLarge`. A path is opened once, read-only, non-blocking and
+**The source.** Inline bytes over the job kind's inline cap (32 MiB for a
+raster, a PDF page or an Auto job, 2 MiB for an SVG) are `TooLarge`. A path is opened once, read-only, non-blocking and
 without becoming a controlling terminal, and everything after that is decided
 from the open descriptor, never the path:
 
@@ -821,10 +846,11 @@ seen. The digest is taken over the bytes read and that file's identity
 (device, inode, size and modification time), as [Digest](#digest) frames it.
 
 **Raster decoding.** The format comes from the content's signature, never the
-name or extension. PNG, JPEG, WebP, BMP and GIF are decoded; any other format,
-TIFF included, is `UnsupportedMedia`. Three containers are read before their
-decoder sees them. A BMP header, a WebP extended header's canvas, or any GIF
-frame, that declares an image past the caps below is `RenderResource` (their
+name or extension. PNG, JPEG, WebP, BMP, TIFF and GIF are decoded; any other
+format is `UnsupportedMedia`. Four containers are read before their
+decoder sees them. A BMP header, a WebP extended header's canvas, any GIF
+frame, or a TIFF's first image, that declares an image past the caps below is
+`RenderResource` (their
 decoders would refuse some of these with a parse error instead; a GIF frame
 can be larger than the screen it belongs to, and the decoder allocates the
 first one at its own size). In a WebP, every lossy
@@ -836,7 +862,10 @@ buffer. Then, before a pixel is decoded, the decoder reports the image's
 dimensions and its native decoded size, and both are checked: an edge over
 8192 pixels, RGBA over 64 MiB, or a native size over 64 MiB (a 16-bit image
 needs more) is `RenderResource`. The codec's own limits are set to the same
-values, but they are best effort. A GIF or an animated WebP yields its first
+values, but they are best effort. A TIFF yields its first image only: a first
+directory of more than 512 entries is `RenderResource` before it is read, and
+floating-point samples, whose values have no range to map to colors
+faithfully, are `UnsupportedMedia`. A GIF or an animated WebP yields its first
 frame only. Content that does not decode is `RenderParse`.
 
 **Fitting.** The image is scaled down to fit inside the target box, keeping

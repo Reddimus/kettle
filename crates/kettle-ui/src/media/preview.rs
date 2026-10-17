@@ -502,6 +502,7 @@ mod tests {
                     .collect(),
                 tolerance_ms: 40,
             }),
+            page: None,
         }
     }
 

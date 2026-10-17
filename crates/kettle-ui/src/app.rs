@@ -6516,8 +6516,9 @@ fn hint_action(kind: kettle_core::hints::Kind, alternate: bool, unsafe_path: boo
 
 /// Whether a file named `name` is one a lane can preview, by its extension:
 /// the raster formats the media worker decodes, SVG, Mermaid, Markdown,
-/// whose Mermaid diagrams are a gallery, and the common video containers,
-/// shown as a poster (`.ts` is left out: it names TypeScript far more often).
+/// whose Mermaid diagrams are a gallery, PDF, and the common video
+/// containers, shown as a poster (`.ts` is left out: it names TypeScript far
+/// more often).
 /// The worker still decides by the bytes; this only picks what to offer.
 fn previewable_name(name: &str) -> bool {
     let extension = name
@@ -6532,11 +6533,14 @@ fn previewable_name(name: &str) -> bool {
                 | "webp"
                 | "bmp"
                 | "gif"
+                | "tif"
+                | "tiff"
                 | "svg"
                 | "mmd"
                 | "mermaid"
                 | "md"
                 | "markdown"
+                | "pdf"
                 | "mp4"
                 | "m4v"
                 | "mov"
