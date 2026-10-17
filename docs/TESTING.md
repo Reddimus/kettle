@@ -745,6 +745,10 @@ Keep failures and skipped areas with the evidence.
   too narrow for a card: each must put the item on the shelf and say why.
 - [ ] Play and seek video through the shipped worker. Listen for audio, check
   pause/resume, output-device changes, and recovery after a device disappears.
+- [ ] Page through a long PDF with `‹` `›`, Page Up/Down and Home/End, then open
+  it outside Kettle: Preview on macOS, Papers or Evince on GNOME. The ignored
+  `preview_opens_a_marked_copy_live` and `papers_opens_a_copy_live` tests in
+  `kettle-ui` open a one-page PDF copy for you to look at.
 
 ### Window system and appearance
 

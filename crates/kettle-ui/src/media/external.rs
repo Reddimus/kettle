@@ -6,23 +6,29 @@
 //! quarantine); checks that the viewer is the one this platform permits and
 //! that the copy is still the one Kettle wrote; and only then hands it over.
 //! A video goes to the permitted video player instead, as a checked private
-//! copy of its file ([`video`]), never as its poster. The work runs on a
+//! copy of its file ([`video`]), never as its poster, and a PDF to the
+//! permitted document viewer, as a checked private copy of the bytes Kettle
+//! showed ([`document`]), never as a picture of its page. The work runs on a
 //! short thread, never the window thread.
 
+mod document;
 #[cfg(target_os = "linux")]
 mod loupe;
 mod video;
 
-use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::fs::File;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use kettle_core::ImageData;
 
 use crate::media::ShelfItem;
-use crate::paste_image::PastedImages;
+use crate::paste_image::{PastedImages, Reservation, StoreKind};
 
-pub(crate) use video::{Player, VideoCopies, VideoSource, open as open_video};
+pub(crate) use document::{DocumentSource, Reader, open as open_document};
+pub(crate) use video::{Player, VideoSource, open as open_video};
 
 /// Opens being prepared at once; one more is refused rather than queued.
 const MAX_OPENS: usize = 2;
@@ -157,14 +163,19 @@ pub(crate) enum Outside {
     Image(Viewer),
     /// The video player, given a private copy of the video's file.
     Video(Player),
+    /// The document viewer, given a private copy of the PDF.
+    Document(Reader),
 }
 
 impl Outside {
-    /// What opens `item` outside Kettle, if this platform has it: the video
-    /// player for a video shown from its file, the image viewer for
+    /// What opens `item` outside Kettle, if this platform has it: the
+    /// document viewer for a PDF, never a picture of its page; the video
+    /// player for a video shown from its file; the image viewer for
     /// anything else, an animation included.
     pub(crate) fn of(item: &ShelfItem) -> Option<Self> {
-        if item.video.is_some_and(|video| video.container.is_some()) {
+        if item.kind == kettle_media::MediaKind::Pdf {
+            Reader::find().map(Self::Document)
+        } else if item.video.is_some_and(|video| video.container.is_some()) {
             Player::find().map(Self::Video)
         } else {
             Viewer::find().map(Self::Image)
@@ -177,6 +188,7 @@ impl Outside {
         match self {
             Self::Image(viewer) => viewer.label(tr),
             Self::Video(player) => player.label(tr),
+            Self::Document(reader) => reader.label(tr),
         }
     }
 }
@@ -202,11 +214,11 @@ pub(crate) enum OpenFailure {
 }
 
 impl OpenFailure {
-    /// The notice's title and body, for an image or a video.
-    pub(crate) fn notice(self, video: bool) -> (kettle_i18n::Text, kettle_i18n::Text) {
+    /// The notice's title and body, for what was opened `outside`.
+    pub(crate) fn notice(self, outside: Outside) -> (kettle_i18n::Text, kettle_i18n::Text) {
         use kettle_i18n::Text;
-        if !video {
-            return (
+        match outside {
+            Outside::Image(_) => (
                 Text::NotifyTitleOpenImage,
                 match self {
                     Self::Busy => Text::NotifyBodyOpenImageBusy,
@@ -218,20 +230,122 @@ impl OpenFailure {
                         Text::NotifyBodyOpenImageCopy
                     }
                 },
-            );
+            ),
+            Outside::Video(_) => (
+                Text::NotifyTitleOpenVideo,
+                match self {
+                    Self::Busy => Text::NotifyBodyOpenVideoBusy,
+                    Self::Copy => Text::NotifyBodyOpenVideoCopy,
+                    Self::Viewer => Text::NotifyBodyOpenVideoPlayer,
+                    Self::Unplayable => Text::NotifyBodyOpenVideoUnplayable,
+                    Self::Changed => Text::NotifyBodyOpenVideoChanged,
+                    Self::Room => Text::NotifyBodyOpenVideoRoom,
+                    Self::Refused => Text::NotifyBodyOpenVideoRefused,
+                },
+            ),
+            Outside::Document(_) => (
+                Text::NotifyTitleOpenDocument,
+                match self {
+                    Self::Busy => Text::NotifyBodyOpenDocumentBusy,
+                    // Any PDF Kettle shows is one its viewer reads.
+                    Self::Copy | Self::Unplayable => Text::NotifyBodyOpenDocumentCopy,
+                    Self::Viewer => Text::NotifyBodyOpenDocumentViewer,
+                    Self::Changed => Text::NotifyBodyOpenDocumentChanged,
+                    Self::Room => Text::NotifyBodyOpenDocumentRoom,
+                    Self::Refused => Text::NotifyBodyOpenDocumentRefused,
+                },
+            ),
         }
-        (
-            Text::NotifyTitleOpenVideo,
-            match self {
-                Self::Busy => Text::NotifyBodyOpenVideoBusy,
-                Self::Copy => Text::NotifyBodyOpenVideoCopy,
-                Self::Viewer => Text::NotifyBodyOpenVideoPlayer,
-                Self::Unplayable => Text::NotifyBodyOpenVideoUnplayable,
-                Self::Changed => Text::NotifyBodyOpenVideoChanged,
-                Self::Room => Text::NotifyBodyOpenVideoRoom,
-                Self::Refused => Text::NotifyBodyOpenVideoRefused,
-            },
-        )
+    }
+}
+
+/// The private copies handed to a video player or a document viewer, made
+/// off the window thread.
+pub(crate) struct PrivateCopies {
+    store: Mutex<PastedImages>,
+    /// Set at exit before the store closes, so a copy on its way stops at
+    /// its next chunk rather than holding exit up.
+    closing: AtomicBool,
+}
+
+impl PrivateCopies {
+    /// Copies kept in a store of `kind`.
+    pub(crate) fn new(kind: StoreKind) -> Self {
+        Self::of(PastedImages::new(kind))
+    }
+
+    fn of(store: PastedImages) -> Self {
+        Self {
+            store: Mutex::new(store),
+            closing: AtomicBool::new(false),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, PastedImages> {
+        self.store.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Whether exit has begun.
+    fn closing(&self) -> bool {
+        self.closing.load(Ordering::Acquire)
+    }
+
+    /// Stop a copy on its way, delete every copy, and take no more. A copy
+    /// being made holds no store, so this waits on none.
+    pub(crate) fn close(&self) {
+        self.closing.store(true, Ordering::Release);
+        self.lock().close();
+    }
+}
+
+/// Make a private copy in `copies`, `size` bytes named `.extension`: set
+/// aside its room, `make` it without holding the store (given what asks
+/// whether exit has begun), keep it once `check` accepts it, and mark it
+/// downloaded. The store is held only to set the copy aside and to keep it,
+/// so neither exit nor another open waits on the file system. A copy that
+/// fails any step is deleted; a mark that fails is `Other`.
+fn private_copy(
+    copies: &PrivateCopies,
+    (size, extension): (u64, &str),
+    make: impl FnOnce(&Reservation, &dyn Fn() -> bool) -> io::Result<File>,
+    check: impl FnOnce(&File) -> io::Result<()>,
+) -> io::Result<PathBuf> {
+    let reservation = copies.lock().reserve_copy(size, extension)?;
+    // Made and checked without the store: checking reads the source's
+    // metadata, which a network file system may take its time over.
+    let made = make(&reservation, &|| copies.closing()).and_then(|file| match check(&file) {
+        Ok(()) => Ok(file),
+        Err(error) => {
+            reservation.discard(file);
+            Err(error)
+        }
+    });
+    let mut store = copies.lock();
+    let file = match made {
+        Ok(file) => file,
+        Err(error) => {
+            store.release(reservation);
+            return Err(error);
+        }
+    };
+    let path = store.keep_copy(reservation, file, |_| Ok(()))?;
+    if let Err(error) = store.mark_downloaded(&path) {
+        let _ = store.remove(&path);
+        return Err(io::Error::other(error));
+    }
+    Ok(path)
+}
+
+/// Why a private copy failed, for the notice: a store full of copies too new
+/// to drop asks for a while, a full volume says so, and a copy that is not
+/// what was shown, or a source that ended early, says the file changed.
+fn copy_failure(error: io::Error) -> OpenFailure {
+    log::debug!("open: could not make a private copy: {error}");
+    match error.kind() {
+        io::ErrorKind::QuotaExceeded => OpenFailure::Busy,
+        io::ErrorKind::StorageFull => OpenFailure::Room,
+        io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof => OpenFailure::Changed,
+        _ => OpenFailure::Copy,
     }
 }
 
@@ -520,7 +634,7 @@ mod tests {
             OpenFailure::Room,
             OpenFailure::Refused,
         ];
-        let video = all.map(|why| why.notice(true));
+        let video = all.map(|why| why.notice(Outside::Video(Player::QuickTime)));
         assert!(
             video
                 .iter()
@@ -533,7 +647,7 @@ mod tests {
                 all[index]
             );
         }
-        let image = all.map(|why| why.notice(false));
+        let image = all.map(|why| why.notice(Outside::Image(Viewer::Preview)));
         assert!(
             image
                 .iter()
@@ -551,6 +665,74 @@ mod tests {
                 Text::NotifyBodyOpenImageRefused,
             ]
         );
+        let document = all.map(|why| why.notice(Outside::Document(Reader::Preview)));
+        assert!(
+            document
+                .iter()
+                .all(|(title, _)| *title == Text::NotifyTitleOpenDocument)
+        );
+        assert_eq!(
+            document.map(|(_, body)| body),
+            [
+                Text::NotifyBodyOpenDocumentBusy,
+                Text::NotifyBodyOpenDocumentCopy,
+                Text::NotifyBodyOpenDocumentViewer,
+                Text::NotifyBodyOpenDocumentCopy,
+                Text::NotifyBodyOpenDocumentChanged,
+                Text::NotifyBodyOpenDocumentRoom,
+                Text::NotifyBodyOpenDocumentRefused,
+            ]
+        );
+    }
+
+    /// Why a copy failed decides the notice: a store full of new copies is
+    /// busy, a full volume has no room, a copy that is not what was shown
+    /// says the file changed, and anything else that the copy failed.
+    #[test]
+    fn copy_failures_say_why() {
+        for (kind, why) in [
+            (io::ErrorKind::QuotaExceeded, OpenFailure::Busy),
+            (io::ErrorKind::StorageFull, OpenFailure::Room),
+            (io::ErrorKind::InvalidData, OpenFailure::Changed),
+            (io::ErrorKind::UnexpectedEof, OpenFailure::Changed),
+            (io::ErrorKind::TimedOut, OpenFailure::Copy),
+            (io::ErrorKind::Interrupted, OpenFailure::Copy),
+            (io::ErrorKind::PermissionDenied, OpenFailure::Copy),
+            (io::ErrorKind::Other, OpenFailure::Copy),
+        ] {
+            assert_eq!(copy_failure(kind.into()), why, "{kind:?}");
+        }
+    }
+
+    /// A private copy is set aside, made without the store, checked, kept
+    /// and marked, in that order; a check that fails deletes it.
+    #[test]
+    fn a_private_copy_is_made_without_the_store_and_checked() {
+        let source = include_str!("external.rs")
+            .split("#[cfg(all(test, unix))]")
+            .next()
+            .expect("production part")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let body = source
+            .split("fn private_copy(")
+            .nth(1)
+            .expect("private_copy")
+            .split(" fn ")
+            .next()
+            .expect("body");
+        let order = [
+            "let reservation = copies.lock().reserve_copy(size, extension)?;",
+            "let made = make(&reservation, &|| copies.closing()).and_then(|file| match check(&file) {",
+            "reservation.discard(file);",
+            "let mut store = copies.lock();",
+            "store.release(reservation);",
+            "let path = store.keep_copy(reservation, file, |_| Ok(()))?;",
+            "if let Err(error) = store.mark_downloaded(&path) { let _ = store.remove(&path);",
+        ]
+        .map(|step| body.find(step).unwrap_or_else(|| panic!("{step}")));
+        assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{order:?}");
     }
 
     /// The viewer command is a fixed program with the absolute file last, and

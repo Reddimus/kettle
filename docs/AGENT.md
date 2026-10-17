@@ -319,7 +319,7 @@ Params take exactly one source, plus optional `title` (at most 4 KiB) and
 | `svg`: SVG text, at most 2 MiB | SVG |
 | `image_b64`: standard base64 bytes, at most 32 MiB decoded | whatever the media worker finds the bytes to be: raster, SVG, PDF, a Markdown gallery, or text that parses as a Mermaid diagram |
 | `mermaid`: Mermaid text, at most 64 KiB | Mermaid |
-| `path` + `dev` + `ino`: an absolute path (at most 4 KiB) and the device and inode the caller saw | whatever the worker finds in the file it opens, Mermaid with `kind: "mermaid"`, or with `markdown_index` that page of its Markdown gallery; another file at that path is refused |
+| `path` + `dev` + `ino`: an absolute path (at most 4 KiB) and the device and inode the caller saw | whatever the worker finds in the file it opens, Mermaid with `kind: "mermaid"`, with `markdown_index` that page of its Markdown gallery, or with `page_index` that page of a PDF; another file at that path is refused |
 
 The whole request still fits the 1 MiB request line, so larger media goes by
 path. The file's name decides nothing; only the `mermaid` source, or
@@ -327,7 +327,13 @@ path. The file's name decides nothing; only the `mermaid` source, or
 as what its bytes turn out to be. `markdown_index`, from 0 to 31, opens a
 file's Markdown gallery at that page rather than its first; a number past 31
 is `index_out_of_range`, as is one past the file's last page, and only a
-path, never one said to be Mermaid, takes it.
+path, never one said to be Mermaid, takes it. `page_index`, from 0, shows
+that page of a PDF; a file that is no PDF is `unsupported_media`, a page past
+its last `index_out_of_range`, and it takes neither `markdown_index` nor
+`kind: "mermaid"`. A PDF's result adds `page`: `{index, count}`, the page
+shown from 0 and the document's page count, and its card caption says which
+page of how many. `kettle show --page N` and the MCP tool's `page` count from
+1.
 A `pane` param is honored only for full control, for a caller Kettle cannot
 place. A malformed `show` is answered on its connection thread and never
 reaches the App.
@@ -399,7 +405,9 @@ holds its pixels, the header also has `↗`, which opens it there (Preview on
 macOS, Loupe or Eye of GNOME on Linux), the same hand-off as a card menu's row. A
 video's `↗` opens a private copy of its file in the permitted video player
 instead (QuickTime Player on macOS, mpv on Linux), its poster's pixels held
-or not. The
+or not, and a PDF's a private copy of the PDF in the permitted document
+viewer (Preview on macOS, Papers or Evince on Linux), never a picture of its
+page. The
 terminal keeps at least 20 columns and 5 rows: with less room the lane is
 the strip, along the pane's bottom whichever side it opened on; opening one
 in a pane too small even for that shows a notice and leaves the item unseen,
@@ -439,8 +447,8 @@ selection only on the user's own key press or click, and a menu a control
 client opens does not look at them to offer its rows.
 The user can also preview an image, SVG, Mermaid, Markdown, PDF or video file a
 pane names without any agent (a Markdown file's Mermaid diagrams are a gallery,
-paged with `‹` and `›`): `preview_link` (the palette's "Preview
-a file in Kettle") labels such files in the focused pane as quick select does, and the
+and a PDF's pages, paged with `‹` and `›`): `preview_link` (the palette's
+"Preview a file in Kettle") labels such files in the focused pane as quick select does, and the
 right-click menu offers "Preview in Kettle" on a link to one. The file
 opens in the configured preview presentation once it renders. The default
 viewer owns keyboard input; choose Pin or set `media-open-mode = lane` to keep
@@ -526,7 +534,14 @@ only while the file is still the one shown and only in a format that player
 reads (QuickTime Player: H.264, HEVC, MPEG-4, ProRes and Motion JPEG in MP4
 or QuickTime; mpv: every container Kettle recognizes), from a store that
 keeps 8 copies and 8 GiB, copies videos up to 4 GiB, and is deleted on
-exit. The player opens paused. A notice says why an open did not happen.
+exit. The player opens paused. A PDF's row is Open in Preview (macOS) or
+Open in Document Viewer (Linux, Papers at `/usr/bin/papers`, with
+`/usr/bin/evince` as a fallback): it hands the viewer a private copy of the
+PDF, never a picture of its page, made from the file it was shown from
+while that is still the one shown, or from the bytes a request carried, and
+kept only once its every byte matches what was shown, from a store that
+keeps 8 copies and 512 MiB and is deleted on exit. A notice says why an
+open did not happen.
 Nothing a program prints opens another app.
 `kettle ctl send_mouse` clicks a card the same way. Quick select (`hint_mode`) labels each card on screen in the
 focused pane, and picking its label opens it; text in a card's rows is its
@@ -834,7 +849,8 @@ never full control. The full server (`kettle mcp`) offers the same
 `kettle_show` among its tools; it needs only what the display server needs.
 Its arguments are exactly one source, `mermaid` (Mermaid source, at most
 64 KiB of UTF-8) or an absolute `path` (an image, SVG, Mermaid, Markdown,
-PDF or video file, at most 4 KiB), and an optional `title` (at most 4 KiB) and `key` (at most 256
+PDF or video file, at most 4 KiB), and an optional `page` for a PDF path
+(counting from 1), `title` (at most 4 KiB) and `key` (at most 256
 bytes), none of them empty; other media bytes go through `kettle show -`
 instead. The schema says what is checked, except the one-source rule, which
 the description states and the server enforces, since Claude Code drops a tool

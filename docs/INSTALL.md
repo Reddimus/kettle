@@ -242,4 +242,7 @@ Linux sound also needs PulseAudio or a compatible PipeWire server and
 Opening video in an external player uses QuickTime Player on macOS or
 `/usr/bin/mpv` on Linux. Install the latter with `sudo apt install mpv` or
 `sudo dnf install mpv`; without it, the external-player row is absent.
+Opening a PDF outside Kettle uses Preview on macOS, and on Linux
+`/usr/bin/papers` (GNOME 47 and later), or `/usr/bin/evince` where Papers is
+missing (`sudo apt install evince`); without either, that row is absent too.
 See [Agent media](AGENT.md) for playback, previews and decoder diagnostics.

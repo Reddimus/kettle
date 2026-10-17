@@ -35,6 +35,8 @@ pub(crate) enum Refusal {
     UnknownReason,
     /// Kettle's reply was in a form the client does not know.
     UnknownReply,
+    /// A page was asked of bytes on stdin, which only a file's path carries.
+    PageWithoutFile,
 }
 
 impl Refusal {
@@ -48,6 +50,7 @@ impl Refusal {
                 "Kettle refused the media for a reason this client does not know."
             }
             Self::UnknownReply => "Kettle answered in a form this client does not know.",
+            Self::PageWithoutFile => "A page is shown only of a PDF given by its path.",
         }
     }
 
@@ -59,6 +62,7 @@ impl Refusal {
             Self::PathNotUnicode => "bad_params",
             Self::UnknownReason => "unknown_refusal",
             Self::UnknownReply => "unknown_reply",
+            Self::PageWithoutFile => "bad_params",
         }
     }
 
@@ -125,10 +129,10 @@ struct Shown {
 const OLDER_KETTLE: &str = "no inline card: the Kettle this runs in is older than this command";
 
 fn show(args: ShowArgs, stdout_is_terminal: bool) -> Result<Shown, Refusal> {
-    let source = if args.source == Path::new("-") {
-        stdin_source(&mut std::io::stdin().lock(), args.mermaid)?
-    } else {
-        file_source(&args.source, args.mermaid)?
+    let source = match (args.source == Path::new("-"), args.page) {
+        (true, Some(_)) => return Err(Refusal::PageWithoutFile),
+        (true, None) => stdin_source(&mut std::io::stdin().lock(), args.mermaid)?,
+        (false, page) => with_page(file_source(&args.source, args.mermaid)?, page),
     };
     let (inline, mut note) = inline_ask(args.inline, stdout_is_terminal);
     let request = ShowRequest {
@@ -186,6 +190,23 @@ fn shelf_note(result: &ShowResult, own: Option<&'static str>) -> Option<&'static
         return None;
     }
     result.inline_refused.map(InlineRefusal::text).or(own)
+}
+
+/// `source` as page `page` of a PDF, counting from 1, when one is asked for.
+pub(crate) fn with_page(source: ShowSource, page: Option<u32>) -> ShowSource {
+    match (source, page) {
+        (
+            ShowSource::File {
+                path, attestation, ..
+            },
+            Some(page),
+        ) => ShowSource::File {
+            path,
+            attestation,
+            kind: FileKind::PdfPage(page.saturating_sub(1)),
+        },
+        (source, _) => source,
+    }
 }
 
 /// `request`'s params, refused as Kettle would refuse them, and refused as
@@ -675,6 +696,30 @@ mod tests {
         assert_eq!(printed, b"  kettle show\r\n");
     }
 
+    /// A page turns a file into that page of a PDF, counting from 1; bytes
+    /// on stdin have no page.
+    #[test]
+    fn a_page_is_a_pdf_files_page_from_one() {
+        let file = ShowSource::File {
+            path: NativePath::from_path(std::path::Path::new(if cfg!(windows) {
+                "C:\\r.pdf"
+            } else {
+                "/r.pdf"
+            }))
+            .unwrap(),
+            attestation: ExternalAttested { dev: 1, ino: 2 },
+            kind: FileKind::Classified,
+        };
+        assert_eq!(
+            with_page(file.clone(), Some(3)).job_kind(),
+            kettle_media::JobKind::PdfPage { index: 2 }
+        );
+        assert_eq!(with_page(file.clone(), None), file);
+        let bytes = ShowSource::Image(vec![1]);
+        assert_eq!(with_page(bytes.clone(), Some(3)), bytes);
+        assert_eq!(Refusal::PageWithoutFile.code(), "bad_params");
+    }
+
     /// A card is asked for only with `--inline`, and only when this command
     /// writes to a terminal; otherwise the note says why there is none.
     #[test]
@@ -721,6 +766,7 @@ mod tests {
             warnings: vec![],
             inline: None,
             inline_refused: None,
+            page: None,
             video: None,
         };
         let text = confirmation(&result);

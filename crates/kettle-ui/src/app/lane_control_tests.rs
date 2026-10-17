@@ -797,7 +797,7 @@ fn a_gallery_page_render_counts_for_its_own_bytes() {
         kettle_media::Source::Bytes(PAGES[0].into()),
     ] {
         let mut shelf = [gallery_item(4, source)];
-        let render = |page: Option<u8>| crate::media::LaneRender {
+        let render = |page: Option<u32>| crate::media::LaneRender {
             window: 1,
             pane: 2,
             item: 4,
@@ -927,7 +927,9 @@ fn videos_keep_what_they_are() {
         "let video = rendered.video.as_ref().map(|video| video.info);",
         "item.layout = Some(layout); item.video = video;",
         "result.video = video.map(kettle_ctl::show::ShowVideo::from);",
-        "(published.id, generation), (kind, video.as_ref()), &image,",
+        "(published.id, generation), (kind, video.as_ref(), page), &image,",
+        "result.page = page.map(kettle_ctl::show::ShowPage::from);",
+        ".with_pages(page);",
     ] {
         assert!(finish.contains(needle), "finish_show: {needle}");
     }
@@ -973,11 +975,11 @@ fn galleries_are_wired() {
     }
     let page = body("page_preview");
     for needle in [
-        "let Some(page) = gallery_step(shown, count, asked, step) else {",
+        "let Some(page) = gallery_step(shown, count, asked, step).filter(|&page| asked != Some(page)) else {",
         "let spec = item.source.page_spec(page).map(|mut spec| { if let Some(canvas) = canvas { spec.canvas = canvas; } spec });",
         "if page == shown { panel.page = None; panel.notice = None;",
         "self.page_tickets += 1; let ask = crate::media::PageAsk { page, ticket: self.page_tickets, }; panel.page = Some((generation, ask));",
-        "page: Some(ask), }; self.render_for_lane( ws, render, spec, crate::window_state::LaneNotice::RenderingPage, );",
+        "page: Some(ask), }; let notice = if document { crate::window_state::LaneNotice::RenderingDocumentPage } else { crate::window_state::LaneNotice::RenderingPage }; self.render_for_lane(ws, render, spec, notice);",
     ] {
         assert!(page.contains(needle), "page_preview: {needle}");
     }
@@ -997,7 +999,7 @@ fn galleries_are_wired() {
         "if !self.lane_wants(ws, &render) { continue; } self.forget_lane_page(ws, &render); self.tell_lane("
     ));
     assert!(body("preview_lane_panel").contains(
-        "let asked = page_waited_on(panel, item.generation).map_or(shown, |ask| ask.page); (usize::from(asked) + 1, count)"
+        "let asked = page_waited_on(panel, item.generation).map_or(shown, |ask| ask.page); ( usize::try_from(asked).map_or(usize::MAX, |asked| asked.saturating_add(1)), count, )"
     ));
     let again = body("render_preview_again");
     for needle in [
@@ -1016,7 +1018,7 @@ fn galleries_are_wired() {
         "panel.item == render.item && page_waited_on(panel, render.generation) == Some(ask)"
     ));
     assert!(body("act_on_preview").contains(
-        "Hit::PreviousPage => self.page_preview(ws, pane, -1), Hit::NextPage => self.page_preview(ws, pane, 1),"
+        "Hit::PreviousPage => self.page_preview(ws, pane, crate::media::PageStep::By(-1)), Hit::NextPage => self.page_preview(ws, pane, crate::media::PageStep::By(1)),"
     ));
     assert!(
         body("preview_focus_key").contains("K::Page(step) => self.page_preview(ws, pane, step),")
@@ -1065,18 +1067,122 @@ fn a_lane_takes_the_page_it_waits_on_or_shows() {
 /// at either end.
 #[test]
 fn a_gallery_steps_without_wrapping() {
-    assert_eq!(gallery_step(0, 3, None, 1), Some(1));
-    assert_eq!(gallery_step(0, 3, Some(1), 1), Some(2), "from the asked");
-    assert_eq!(gallery_step(0, 3, Some(2), 1), None, "past the last");
-    assert_eq!(gallery_step(0, 3, None, -1), None, "before the first");
-    assert_eq!(gallery_step(2, 3, Some(1), -1), Some(0));
+    use crate::media::PageStep::By;
+    assert_eq!(gallery_step(0, 3, None, By(1)), Some(1));
     assert_eq!(
-        gallery_step(1, 3, Some(2), -1),
+        gallery_step(0, 3, Some(1), By(1)),
+        Some(2),
+        "from the asked"
+    );
+    assert_eq!(gallery_step(0, 3, Some(2), By(1)), None, "past the last");
+    assert_eq!(gallery_step(0, 3, None, By(-1)), None, "before the first");
+    assert_eq!(gallery_step(2, 3, Some(1), By(-1)), Some(0));
+    assert_eq!(
+        gallery_step(1, 3, Some(2), By(-1)),
         Some(1),
         "back to the shown"
     );
-    assert_eq!(gallery_step(0, 1, None, 1), None);
-    assert_eq!(gallery_step(255, 300, None, 1), None, "no page past u8");
+    assert_eq!(gallery_step(0, 1, None, By(1)), None);
+    assert_eq!(
+        gallery_step(255, 300, None, By(1)),
+        Some(256),
+        "a document's pages pass 255"
+    );
+    assert_eq!(gallery_step(299, 300, None, By(1)), None);
+    assert_eq!(gallery_step(0, 3, None, By(i32::MAX)), None);
+}
+
+/// Home and End name a gallery's first and last pages, wherever it stands
+/// and whatever is on its way.
+#[test]
+fn home_and_end_name_the_first_and_last_pages() {
+    use crate::media::PageStep::{First, Last};
+    assert_eq!(gallery_step(5, 300, None, First), Some(0));
+    assert_eq!(gallery_step(5, 300, Some(7), Last), Some(299));
+    assert_eq!(gallery_step(0, 1, None, Last), Some(0), "one page");
+    assert_eq!(gallery_step(0, 0, None, First), None, "no pages");
+    assert_eq!(gallery_step(0, 0, None, Last), None, "no pages");
+}
+
+/// A PDF's page of `pages` read from `source`, whose bytes have `digest`.
+fn document_item(
+    id: u64,
+    source: kettle_media::Source,
+    pages: u32,
+    digest: &kettle_media::Digest,
+) -> crate::media::ShelfItem {
+    let source = crate::media::ItemSource::new(spec(source), digest.clone(), false, None)
+        .with_pages(Some(kettle_media::PageOf {
+            index: 0,
+            count: pages,
+        }));
+    let mut item = with_source(id, source);
+    item.kind = kettle_media::MediaKind::Pdf;
+    item
+}
+
+/// A document pages by reading its source again: every page has the
+/// document's digest, so another one on a page read again is a file that
+/// changed, not a page gone by; a page past the last is none, and a reload
+/// reads the file again at the page shown.
+#[test]
+fn a_documents_pages_read_its_file_again() {
+    let digest = kettle_media::content_digest(b"%PDF-1.7 document", None).unwrap();
+    let other = kettle_media::content_digest(b"%PDF-1.7 rewritten", None).unwrap();
+    let render = |page: Option<u32>| crate::media::LaneRender {
+        window: 1,
+        pane: 2,
+        item: 4,
+        generation: 0,
+        preview: None,
+        tile: None,
+        page: page.map(|page| crate::media::PageAsk { page, ticket: 1 }),
+    };
+    let mut shelf = [document_item(4, file(b"/tmp/report.pdf"), 300, &digest)];
+    assert!(shelf[0].source.is_document());
+    assert_eq!(
+        lane_render_verdict(&shelf, &render(Some(299)), &digest),
+        LaneRenderVerdict::Same
+    );
+    for asked in [Some(299), None] {
+        assert_eq!(
+            lane_render_verdict(&shelf, &render(asked), &other),
+            LaneRenderVerdict::Changed,
+            "{asked:?}"
+        );
+    }
+    let spec = shelf[0].source.page_spec(299).unwrap();
+    assert_eq!(spec.kind, kettle_media::JobKind::PdfPage { index: 299 });
+    assert!(
+        matches!(spec.input, crate::media::SourceInput::Path { .. }),
+        "the file again"
+    );
+    assert!(shelf[0].source.page_spec(300).is_none());
+    assert!(!shelf[0].source.select(300));
+    assert!(shelf[0].source.select(299));
+    assert_eq!(shelf[0].source.shown_page(), Some((299, 300)));
+    let panel = crate::window_state::PreviewPanel::new(4);
+    assert_eq!(
+        super::reload_of(&shelf[0], &panel).unwrap().1.page,
+        Some(crate::media::ReadPage::Document(299))
+    );
+    // Bytes a request carried cannot change: another digest is a render
+    // gone by.
+    let carried = [document_item(
+        4,
+        kettle_media::Source::Bytes(b"%PDF-1.7 document".to_vec()),
+        2,
+        &digest,
+    )];
+    assert_eq!(
+        lane_render_verdict(&carried, &render(Some(1)), &other),
+        LaneRenderVerdict::Gone
+    );
+    // Carried bytes given back have no page left to render.
+    let mut released = carried;
+    assert!(released[0].source.page_spec(1).is_some());
+    released[0].source.release();
+    assert!(released[0].source.page_spec(1).is_none());
 }
 
 /// A gallery read from a file reloads that file at the page shown; one
@@ -1132,9 +1238,12 @@ fn a_gallery_reloads_its_file_at_the_page_shown() {
     #[cfg(windows)]
     let named = std::path::Path::new("C:\\tmp\\plan.md");
     assert_eq!(native, named);
-    assert_eq!(reload.page, Some(0));
+    assert_eq!(reload.page, Some(crate::media::ReadPage::Gallery(0)));
     assert!(read.source.select(1));
-    assert_eq!(super::reload_of(&read, &panel).unwrap().1.page, Some(1));
+    assert_eq!(
+        super::reload_of(&read, &panel).unwrap().1.page,
+        Some(crate::media::ReadPage::Gallery(1))
+    );
     let copied = gallery_item(5, kettle_media::Source::Bytes(PAGES[0].into()));
     assert!(!super::preview_reloads(&copied));
     assert!(super::reload_of(&copied, &panel).is_none());
@@ -1663,6 +1772,16 @@ fn lane_content_actions_are_wired() {
         .find("self.render_for_lane(ws, render, spec, crate::window_state::LaneNotice::Rendering);")
         .expect("queued as the lane");
     assert!(refused < admitted);
+    // A document's page reads its file again: never on a control client's
+    // word, nor once the file is found changed.
+    let page = body("page_preview");
+    let refused = page
+        .find("if reads_a_file && (changed || self.ctl_driving)")
+        .expect("no file read for a control client or a changed file");
+    let admitted = page
+        .find("self.render_for_lane(ws, render, spec, notice);")
+        .expect("queued as the lane");
+    assert!(refused < admitted);
     assert!(
         body("render_for_lane")
             .contains(".admit(crate::media::Sender::Lane(pane), deadline, push);")
@@ -1779,7 +1898,8 @@ fn reload_is_a_pull_of_the_items_file_under_its_key() {
         .find("Some(item) => (item.key, item.title, item.canvas, item.page),")
         .expect("a reload keeps its item's key, title, canvas and page");
     assert!(refused < kept);
-    assert!(pull.contains("Some(index) => kettle_media::JobKind::MarkdownDiagrams { index },"));
+    // A reload reads a gallery or a PDF at the page shown.
+    assert!(pull.contains("crate::media::ReadPage::job_kind"));
     assert!(
         body("show_media_item")
             .contains("notice: None,\n                page: None,\n                ..*panel")

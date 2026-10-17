@@ -164,6 +164,8 @@ pub enum FileKind {
     /// Page `index`, from 0, of the Markdown diagram gallery it holds
     /// (`"markdown_index"`), below [`MAX_FENCES`].
     MarkdownPage(u8),
+    /// Page `index`, from 0, of the PDF it is (`"page_index"`).
+    PdfPage(u32),
 }
 
 impl ShowSource {
@@ -180,6 +182,10 @@ impl ShowSource {
                 kind: FileKind::MarkdownPage(index),
                 ..
             } => JobKind::MarkdownDiagrams { index: *index },
+            Self::File {
+                kind: FileKind::PdfPage(index),
+                ..
+            } => JobKind::PdfPage { index: *index },
             Self::Image(_)
             | Self::File {
                 kind: FileKind::Classified,
@@ -236,18 +242,26 @@ impl ShowRequest {
             Some(Value::String(kind)) if kind == "mermaid" && name == "path" => true,
             Some(_) => return Err(FailureCode::BadParams),
         };
-        // A page of a gallery is a file's too, and never one said to be
-        // Mermaid; past the most pages a gallery holds, it is in none.
-        let kind = match optional_u64(&mut fields, "markdown_index")? {
-            None if mermaid => FileKind::Mermaid,
-            None => FileKind::Classified,
-            Some(_) if name != "path" || mermaid => return Err(FailureCode::BadParams),
-            Some(index) => FileKind::MarkdownPage(
+        // A page of a gallery or a PDF is a file's too, and never one said
+        // to be Mermaid, nor both; past the most pages a gallery holds, it is
+        // in none.
+        let kind = match (
+            optional_u64(&mut fields, "markdown_index")?,
+            optional_u64(&mut fields, "page_index")?,
+        ) {
+            (None, None) if mermaid => FileKind::Mermaid,
+            (None, None) => FileKind::Classified,
+            _ if name != "path" || mermaid => return Err(FailureCode::BadParams),
+            (Some(_), Some(_)) => return Err(FailureCode::BadParams),
+            (Some(index), None) => FileKind::MarkdownPage(
                 u8::try_from(index)
                     .ok()
                     .filter(|&index| usize::from(index) < MAX_FENCES)
                     .ok_or(FailureCode::IndexOutOfRange)?,
             ),
+            (None, Some(index)) => {
+                FileKind::PdfPage(u32::try_from(index).map_err(|_| FailureCode::IndexOutOfRange)?)
+            }
         };
         let source = match (name, attestation) {
             ("svg", (None, None)) if text.len() > MAX_SVG_BYTES => {
@@ -342,6 +356,9 @@ impl ShowRequest {
                     }
                     FileKind::MarkdownPage(index) => {
                         fields.insert("markdown_index".into(), index.into());
+                    }
+                    FileKind::PdfPage(index) => {
+                        fields.insert("page_index".into(), index.into());
                     }
                 }
             }
@@ -476,9 +493,28 @@ pub struct ShowResult {
     /// Why `kettle show --inline` got no card.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inline_refused: Option<InlineRefusal>,
+    /// For a PDF: the page shown, from 0, and how many the document has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<ShowPage>,
     /// What a video is, beside its poster's `width` and `height`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video: Option<ShowVideo>,
+}
+
+/// A PDF page shown: which, from 0, of how many.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShowPage {
+    pub index: u32,
+    pub count: u32,
+}
+
+impl From<kettle_media::PageOf> for ShowPage {
+    fn from(page: kettle_media::PageOf) -> Self {
+        Self {
+            index: page.index,
+            count: page.count,
+        }
+    }
 }
 
 /// A video shown: what it is, from the render of its poster. Numbers and a
@@ -516,7 +552,11 @@ impl ShowResult {
     /// VP8 0:12, no audio`. Numbers and Kettle's own names only.
     pub fn summary(&self) -> String {
         let Some(video) = &self.video else {
-            return format!("{} {}x{}", self.kind, self.width, self.height);
+            let summary = format!("{} {}x{}", self.kind, self.width, self.height);
+            return match self.page {
+                Some(page) => format!("{summary}, page {} of {}", page.index + 1, page.count),
+                None => summary,
+            };
         };
         let codec = kettle_media::VideoCodec::ALL
             .into_iter()
@@ -566,6 +606,7 @@ impl ShowResult {
                 .collect(),
             inline: None,
             inline_refused: None,
+            page: None,
             video: None,
         }
     }
@@ -811,6 +852,54 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    /// A file may name a page of the PDF it is, from 0; never with a gallery
+    /// page, as Mermaid, or of inline media. The reply's summary says which
+    /// page it shows of how many, counting from 1.
+    #[test]
+    fn a_file_may_name_a_pdf_page() {
+        let path = absolute("report.pdf");
+        let page = |index: Value| {
+            ShowRequest::parse(json!({"path": path, "dev": 1, "ino": 2, "page_index": index}))
+        };
+        for (index, expected) in [(0, 0), (299, 299), (u64::from(u32::MAX), u32::MAX)] {
+            let request = page(json!(index)).unwrap();
+            assert_eq!(
+                request.source.job_kind(),
+                JobKind::PdfPage { index: expected }
+            );
+            // It reads back as itself.
+            let params = request.clone().into_params().unwrap();
+            assert_eq!(params["page_index"], json!(index));
+            assert_eq!(ShowRequest::parse(params).unwrap(), request);
+        }
+        assert_eq!(
+            page(json!(u64::from(u32::MAX) + 1)),
+            Err(FailureCode::IndexOutOfRange)
+        );
+        for bad in [
+            page(json!(-1)),
+            page(json!("1")),
+            ShowRequest::parse(json!({"svg": "<svg/>", "page_index": 0})),
+            ShowRequest::parse(
+                json!({"path": path, "dev": 1, "ino": 2, "page_index": 0, "markdown_index": 0}),
+            ),
+            ShowRequest::parse(
+                json!({"path": path, "dev": 1, "ino": 2, "kind": "mermaid", "page_index": 0}),
+            ),
+        ] {
+            assert_eq!(bad, Err(FailureCode::BadParams));
+        }
+        let mut result = ShowResult::new((1, true, 1), 2, MediaKind::Pdf, (816, 1056), &[]);
+        assert_eq!(result.summary(), "pdf 816x1056");
+        result.page = Some(ShowPage {
+            index: 2,
+            count: 12,
+        });
+        assert_eq!(result.summary(), "pdf 816x1056, page 3 of 12");
+        let value = serde_json::to_value(&result).unwrap();
+        assert_eq!(value["page"], json!({"index": 2, "count": 12}));
     }
 
     /// A file may name a page of the Markdown gallery it holds, from 0 to

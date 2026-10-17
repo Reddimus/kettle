@@ -46,9 +46,9 @@ pub(crate) enum PreviewKey {
     ZoomOut,
     /// Fit the picture again, or show a source from its start.
     Fit,
-    /// A gallery's page before (`-1`) or after (`1`) the one shown, as
-    /// Page Up and Page Down.
-    Page(i32),
+    /// Another of a gallery's pages: the one before or after the one shown,
+    /// as Page Up and Page Down, or its first or last, as Home and End.
+    Page(PageStep),
     Copy,
     /// Play or pause a video, or stop its silent preview, as Space.
     Play,
@@ -63,9 +63,23 @@ impl PreviewKey {
     pub(crate) fn once(self) -> bool {
         matches!(
             self,
-            Self::Exit | Self::Copy | Self::Fit | Self::Play | Self::Mute
+            Self::Exit
+                | Self::Copy
+                | Self::Fit
+                | Self::Play
+                | Self::Mute
+                | Self::Page(PageStep::First | PageStep::Last)
         )
     }
+}
+
+/// Which of a gallery's pages to show next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PageStep {
+    /// So many pages on from the one shown: `-1` is the one before.
+    By(i32),
+    First,
+    Last,
 }
 
 /// What `key` with `mods` held does while a lane holds the keyboard. Shift
@@ -84,8 +98,10 @@ pub(crate) fn preview_key(key: &Key, mods: ModifiersState) -> PreviewKey {
             NamedKey::ArrowRight => PreviewKey::Move(1, 0),
             NamedKey::ArrowUp => PreviewKey::Move(0, -1),
             NamedKey::ArrowDown => PreviewKey::Move(0, 1),
-            NamedKey::PageUp => PreviewKey::Page(-1),
-            NamedKey::PageDown => PreviewKey::Page(1),
+            NamedKey::PageUp => PreviewKey::Page(PageStep::By(-1)),
+            NamedKey::PageDown => PreviewKey::Page(PageStep::By(1)),
+            NamedKey::Home => PreviewKey::Page(PageStep::First),
+            NamedKey::End => PreviewKey::Page(PageStep::Last),
             _ => PreviewKey::Swallow,
         },
         Key::Character(text) => match (text.as_str(), shift) {
@@ -156,14 +172,28 @@ mod tests {
         );
         assert_eq!(
             preview_key(&Key::Named(NamedKey::PageUp), none),
-            PreviewKey::Page(-1)
+            PreviewKey::Page(PageStep::By(-1))
         );
         assert_eq!(
             preview_key(&Key::Named(NamedKey::PageDown), none),
-            PreviewKey::Page(1)
+            PreviewKey::Page(PageStep::By(1))
         );
         assert_eq!(
             preview_key(&Key::Named(NamedKey::PageDown), shift),
+            PreviewKey::Swallow
+        );
+        assert!(!PreviewKey::Page(PageStep::By(1)).once());
+        assert_eq!(
+            preview_key(&Key::Named(NamedKey::Home), none),
+            PreviewKey::Page(PageStep::First)
+        );
+        assert_eq!(
+            preview_key(&Key::Named(NamedKey::End), none),
+            PreviewKey::Page(PageStep::Last)
+        );
+        assert!(PreviewKey::Page(PageStep::Last).once());
+        assert_eq!(
+            preview_key(&Key::Named(NamedKey::End), shift),
             PreviewKey::Swallow
         );
         assert_eq!(preview_key(&character("+"), shift), PreviewKey::ZoomIn);

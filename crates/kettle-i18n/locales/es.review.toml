@@ -35,8 +35,8 @@ palette_preview_link = "accepted"
 palette_preview_clipboard_path = "accepted"
 palette_preview_next = "accepted"
 palette_preview_previous = "accepted"
-palette_preview_next_diagram = "accepted"
-palette_preview_previous_diagram = "accepted"
+palette_preview_next_diagram = "draft"
+palette_preview_previous_diagram = "draft"
 palette_close_preview = "accepted"
 palette_preview_source = "accepted"
 palette_preview_canvas = "accepted"
@@ -85,12 +85,16 @@ media_lane_a11y_fit = "accepted"
 media_lane_a11y_previous_diagram = "accepted"
 media_lane_a11y_next_diagram = "accepted"
 media_lane_a11y_diagram = "accepted"
+media_lane_a11y_previous_page = "draft"
+media_lane_a11y_next_page = "draft"
+media_lane_a11y_page = "draft"
 media_lane_notice_image_copied = "accepted"
 media_lane_notice_source_copied = "accepted"
 media_lane_notice_copy_failed = "accepted"
 media_lane_notice_copy_busy = "accepted"
 media_lane_notice_rendering = "accepted"
 media_lane_notice_rendering_page = "accepted"
+media_lane_notice_rendering_document_page = "draft"
 media_lane_notice_render_failed = "accepted"
 media_lane_notice_changed = "accepted"
 media_lane_a11y_play_preview = "accepted"
@@ -182,6 +186,13 @@ notify_body_open_video_unplayable = "accepted"
 notify_body_open_video_changed = "accepted"
 notify_body_open_video_room = "accepted"
 notify_body_open_video_refused = "accepted"
+notify_title_open_document = "draft"
+notify_body_open_document_busy = "draft"
+notify_body_open_document_copy = "draft"
+notify_body_open_document_viewer = "draft"
+notify_body_open_document_changed = "draft"
+notify_body_open_document_room = "draft"
+notify_body_open_document_refused = "draft"
 notify_title_preview_failed = "accepted"
 notify_body_preview_missing = "accepted"
 notify_body_preview_unreadable = "accepted"
@@ -210,6 +221,7 @@ notify_title_preview_no_room = "accepted"
 menu_open_in_image_viewer = "accepted"
 menu_open_in_quicktime = "accepted"
 menu_open_in_mpv = "accepted"
+menu_open_in_document_viewer = "draft"
 menu_open_in_preview = "accepted"
 menu_open_in_kettle = "accepted"
 menu_paste = "accepted"
@@ -696,11 +708,14 @@ keys = [
     "media_lane_a11y_mute_video",
     "media_lane_a11y_next",
     "media_lane_a11y_next_diagram",
+    "media_lane_a11y_next_page",
+    "media_lane_a11y_page",
     "media_lane_a11y_pause_video",
     "media_lane_a11y_play_preview",
     "media_lane_a11y_play_video",
     "media_lane_a11y_previous",
     "media_lane_a11y_previous_diagram",
+    "media_lane_a11y_previous_page",
     "media_lane_a11y_reload",
     "media_lane_a11y_rendered",
     "media_lane_a11y_source",

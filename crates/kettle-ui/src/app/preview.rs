@@ -1179,27 +1179,42 @@ impl App {
         self.media_tick(ws);
     }
 
-    /// Ask for the page of `pane`'s gallery `step` pages from the one asked
-    /// for last and not yet shown, else from the one shown. It renders from
-    /// the pages kept, never the file, on the canvas shown, and replaces the
-    /// shown page once it comes back (see [`Self::finish_lane_render`]);
+    /// Ask for the page of `pane`'s gallery or document `step` pages from the
+    /// one asked for last and not yet shown, else from the one shown. A
+    /// gallery's page renders from the pages kept, never the file, and a
+    /// document's from the bytes a request carried, while they are kept; a
+    /// document shown by its path reads that file again, as a reload does:
+    /// only on the user's own gesture, never a control client's, and not once
+    /// the file is found changed. It renders on the canvas shown and replaces
+    /// the shown page once it comes back (see [`Self::finish_lane_render`]);
     /// until then the lane shows its page and says it is rendering. Past the
     /// first or last page nothing happens; back to the page shown, what was
     /// asked for is let go.
-    pub(super) fn page_preview(&mut self, ws: &mut WindowState, pane: u64, step: i32) {
+    pub(super) fn page_preview(
+        &mut self,
+        ws: &mut WindowState,
+        pane: u64,
+        step: crate::media::PageStep,
+    ) {
         let Some(item) = preview_item(ws, pane) else {
             return;
         };
-        let Some((shown, count)) = item.source.gallery_page() else {
+        let Some((shown, count)) = item.source.shown_page() else {
             return;
         };
+        let document = item.source.is_document();
+        let changed = item.source.changed;
         let (id, generation) = (item.id, item.generation);
         let asked = ws
             .preview_panels
             .get(&pane)
             .and_then(|panel| page_waited_on(panel, generation))
             .map(|ask| ask.page);
-        let Some(page) = gallery_step(shown, count, asked, step) else {
+        // A page already on its way is not asked for again, as Home or End
+        // pressed twice would.
+        let Some(page) =
+            gallery_step(shown, count, asked, step).filter(|&page| asked != Some(page))
+        else {
             return;
         };
         // On the canvas the user chose, which a canvas render still waiting
@@ -1225,6 +1240,16 @@ impl App {
         let Some(spec) = spec else {
             return;
         };
+        // A page read from the file again is read only as a reload would be.
+        let reads_a_file = matches!(spec.input, crate::media::SourceInput::Path { .. });
+        if reads_a_file && (changed || self.ctl_driving) {
+            panel.notice = Some(if changed {
+                crate::window_state::LaneNotice::Changed
+            } else {
+                crate::window_state::LaneNotice::RenderFailed
+            });
+            return self.lanes_changed(ws, false);
+        }
         self.page_tickets += 1;
         let ask = crate::media::PageAsk {
             page,
@@ -1240,12 +1265,12 @@ impl App {
             tile: None,
             page: Some(ask),
         };
-        self.render_for_lane(
-            ws,
-            render,
-            spec,
-            crate::window_state::LaneNotice::RenderingPage,
-        );
+        let notice = if document {
+            crate::window_state::LaneNotice::RenderingDocumentPage
+        } else {
+            crate::window_state::LaneNotice::RenderingPage
+        };
+        self.render_for_lane(ws, render, spec, notice);
         self.lanes_changed(ws, false);
     }
 
@@ -1269,7 +1294,7 @@ impl App {
             .get(&render.pane)
             .and_then(|pane| pane.media_shelf.get(render.item))
             .filter(|item| item.generation == render.generation)
-            .and_then(|item| item.source.gallery_page())
+            .and_then(|item| item.source.shown_page())
             .map(|(shown, _)| shown);
         window
             .preview_panels
@@ -2208,17 +2233,23 @@ impl App {
     }
 
     /// What `pane`'s lane offers to open its item in outside Kettle: none
-    /// when this platform has nothing permitted for it, or an image's pixels
-    /// were let go. A video opens from its file, not its poster.
+    /// when this platform has nothing permitted for it, an image's pixels
+    /// were let go, or a PDF's bytes were. A video opens from its file, not
+    /// its poster, and a PDF from its file or bytes, not its page.
     pub(super) fn preview_opens_outside(
         &self,
         ws: &WindowState,
         pane: u64,
     ) -> Option<crate::media::Outside> {
+        use crate::media::Outside;
         let item = self.preview_item(ws, pane)?;
-        let outside = crate::media::Outside::of(item)?;
-        (matches!(outside, crate::media::Outside::Video(_)) || item.image().is_some())
-            .then_some(outside)
+        let outside = Outside::of(item)?;
+        match outside {
+            Outside::Video(_) => true,
+            Outside::Document(_) => crate::media::DocumentSource::of(item).is_some(),
+            Outside::Image(_) => item.image().is_some(),
+        }
+        .then_some(outside)
     }
 
     /// Open `pane`'s lane item outside Kettle, when it offers to.
@@ -2232,17 +2263,17 @@ impl App {
     }
 
     /// Open a copy of `item` `outside`: a PNG of an image's pixels in the
-    /// image viewer, or a private copy of a video's file in the video
-    /// player. A notice says why if it does not open.
+    /// image viewer, a private copy of a video's file in the video player,
+    /// or a private copy of a PDF in the document viewer. A notice says why
+    /// if it does not open.
     pub(super) fn open_item_outside(
         &self,
         item: &crate::media::ShelfItem,
         outside: crate::media::Outside,
     ) {
         let tr = self.ui_text;
-        let video = matches!(outside, crate::media::Outside::Video(_));
         let failed = move |why: crate::media::OpenFailure| {
-            let (title, body) = why.notice(video);
+            let (title, body) = why.notice(outside);
             fire_notify(tr.text(title), tr.text(body));
         };
         match outside {
@@ -2266,6 +2297,18 @@ impl App {
                 // Shown from no file Kettle can name: nothing to copy.
                 None => failed(crate::media::OpenFailure::Changed),
             },
+            crate::media::Outside::Document(reader) => {
+                match crate::media::DocumentSource::of(item) {
+                    Some(source) => crate::media::open_document(
+                        std::sync::Arc::clone(&self.document_copies),
+                        source,
+                        reader,
+                        failed,
+                    ),
+                    // Its bytes were let go to stay within the budget.
+                    None => failed(crate::media::OpenFailure::Copy),
+                }
+            }
         }
     }
 
@@ -2423,10 +2466,14 @@ impl App {
             position: (index + 1, items.len()),
             // The page asked for and not yet shown, else the one shown: where
             // a step counts from.
-            page: item.source.gallery_page().map(|(shown, count)| {
+            page: item.source.shown_page().map(|(shown, count)| {
                 let asked = page_waited_on(panel, item.generation).map_or(shown, |ask| ask.page);
-                (usize::from(asked) + 1, count)
+                (
+                    usize::try_from(asked).map_or(usize::MAX, |asked| asked.saturating_add(1)),
+                    count,
+                )
             }),
+            document: item.source.is_document(),
             image: item.image().cloned(),
             status: tr.text(kettle_i18n::Text::MediaViewerReleased).to_string(),
             open_outside: self.preview_opens_outside(ws, pane).is_some(),
@@ -2905,8 +2952,8 @@ impl App {
             Hit::Pin => self.pin_preview(ws, pane),
             Hit::Previous => self.step_preview(ws, pane, -1),
             Hit::Next => self.step_preview(ws, pane, 1),
-            Hit::PreviousPage => self.page_preview(ws, pane, -1),
-            Hit::NextPage => self.page_preview(ws, pane, 1),
+            Hit::PreviousPage => self.page_preview(ws, pane, crate::media::PageStep::By(-1)),
+            Hit::NextPage => self.page_preview(ws, pane, crate::media::PageStep::By(1)),
             Hit::OpenOutside => self.open_preview_outside(ws, pane),
             Hit::Mode => self.switch_preview_mode(ws, pane),
             Hit::Canvas => self.next_preview_canvas(ws, pane),
