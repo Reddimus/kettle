@@ -63,6 +63,17 @@ pub(crate) fn render_loaded(
     Ok(rendered)
 }
 
+/// The supported format `bytes` holds by its signature, or `None`. A BMP's
+/// signature is two letters ordinary text can start with, so a BMP also
+/// needs a header size the decoder reads; text that only starts like an
+/// image, or like a format Kettle does not draw, is no raster.
+pub(crate) fn recognized(bytes: &[u8]) -> Option<ImageFormat> {
+    let format = image::guess_format(bytes)
+        .ok()
+        .filter(|&format| supported(format))?;
+    (format != ImageFormat::Bmp || container::is_bmp_header(bytes)).then_some(format)
+}
+
 /// The formats a raster job may hold.
 fn supported(format: ImageFormat) -> bool {
     matches!(

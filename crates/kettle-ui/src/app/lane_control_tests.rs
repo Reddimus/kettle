@@ -966,6 +966,7 @@ fn galleries_are_wired() {
         "crate::media::ItemSource::page(&spec, Arc::new(gallery), index)",
         "return notify_preview_failure(tr, origin.refuse(FailureCode::OverBudget));",
         "(kettle_media::MediaKind::Mermaid, page)",
+        "(kettle_media::MediaKind::Markdown, page)",
         "provenance, item_kind, warnings.clone(),",
     ] {
         assert!(finish.contains(needle), "finish_show: {needle}");
@@ -1080,6 +1081,46 @@ fn a_gallery_steps_without_wrapping() {
 
 /// A gallery read from a file reloads that file at the page shown; one
 /// copied together has no file to read.
+/// A Markdown file's gallery is a Markdown item, as its card and the
+/// `show` reply say, and each page still draws as the Mermaid diagram it is:
+/// on the canvas its render chose, and sharpened when zoomed.
+#[test]
+fn a_markdown_gallery_is_markdown_and_draws_as_a_diagram() {
+    let mut item = gallery_item(6, file(b"/tmp/plan.md"));
+    item.kind = kettle_media::MediaKind::Markdown;
+    item.source.spec.canvas = kettle_media::Canvas::White;
+    let panel = crate::window_state::PreviewPanel::new(6);
+    assert_eq!(
+        crate::app::chosen_canvas(&item, &panel),
+        kettle_render::MediaCanvas::White
+    );
+    assert!(crate::media::draws_as_diagram(item.kind));
+    assert_eq!(item.kind.as_str(), "markdown");
+    let held = kettle_media::Crop {
+        x: 0,
+        y: 0,
+        width: 1024,
+        height: 512,
+    };
+    let layout = kettle_media::RenderLayout {
+        source_width: 200.0,
+        source_height: 100.0,
+        image_in_target: held,
+        result_in_target: held,
+    };
+    assert!(
+        crate::media::plan_crop(
+            item.kind,
+            &layout,
+            (1024, 512),
+            (8192.0, 4096.0),
+            (0.25, 0.25, 0.75, 0.75),
+            1.0,
+        )
+        .is_some()
+    );
+}
+
 #[test]
 fn a_gallery_reloads_its_file_at_the_page_shown() {
     let panel = crate::window_state::PreviewPanel::new(4);

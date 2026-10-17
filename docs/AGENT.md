@@ -437,7 +437,7 @@ on the selected reply, with what the agent's UI added and wrapped taken back
 off. A control client cannot trigger either: they read the clipboard or a
 selection only on the user's own key press or click, and a menu a control
 client opens does not look at them to offer its rows.
-The user can also preview an image, SVG, Mermaid or Markdown file a pane
+The user can also preview an image, SVG, Mermaid, Markdown or video file a pane
 names without any agent (a Markdown file's Mermaid diagrams are a gallery,
 paged with `‹` and `›`): `preview_link` (the palette's "Preview
 a file in Kettle") labels such files in the focused pane as quick select does, and the
@@ -538,7 +538,8 @@ it. The default centered viewer takes keyboard ownership: `send_keys` and
 `send_text` to any pane in that window return `busy` and write nothing until
 it is closed. Use `dispatch_ui_key` for viewer controls, including `escape`
 to close it. `list_panes` reports each pane's shelf as
-`media_shelf`: item, generation, title, kind, size, warnings, `verified`,
+`media_shelf`: item, generation, title, kind (the `show` result's word, so
+a Markdown file's gallery is `markdown`), size, warnings, `verified`,
 `from_user` (the user previewed it from the pane), the
 `sender` of an unverified item (`executable`, `pid` and `signer`, null when
 unknown) and whether its pixels are `held` or
@@ -702,7 +703,7 @@ events it expects.
 | `resize_window` | full | request a live window client-area resize (`window`, `width`, `height`) and let the normal renderer/PTY resize path process it |
 | `perform_action` | full | dispatch a named Kettle app action (`action`, for example `start_search`, `command_palette`, `open_ssh`, `hint_mode`, `edit_tab_title`). The control-only `focus_window` action shows and focuses its target without toggling visibility. Use this for app chrome that is not pane input; `send_keys` intentionally writes terminal keystrokes to the focused pane |
 | `run_command` | full | run `command` in a pane, reply with `{exit_code, duration_ms, output, output_truncated}`; capture is capped at the newest 10,000 retained lines and then 512 KiB, and `output_truncated` is true if either cap drops output |
-| `show` | display | put an image, SVG, Mermaid diagram or Markdown diagram gallery on the shelf of the caller's pane, reply with `{pane, verified, window, item, kind, width, height, warnings}` once it is there (see [Showing media](#showing-media)) |
+| `show` | display | put an image, SVG, Mermaid diagram, Markdown diagram gallery or video poster on the shelf of the caller's pane, reply with `{pane, verified, window, item, kind, width, height, warnings}` once it is there (see [Showing media](#showing-media)) |
 
 **Multi-window**: a kettle process can host several OS windows.
 `list_tabs` / `list_panes` enumerate them all, ordered by window seq;
@@ -904,7 +905,9 @@ call (`delivery: "card"`) and that it has not seen it; nothing of the card
 reaches the model, and `kettle ctl`, whose output a model may read, refuses
 to ask for a card. A pane holds at most 64 cards, a harness owns at most 32
 and registers at most four a second; a card retires when its harness exits,
-its pane closes, or its item leaves the shelf or is replaced. Its pixels stay
+its pane closes, or its item leaves the shelf or is replaced. A card shows
+once: if its text is printed again in the pane, as a replayed transcript
+would, only the latest copy shows and the earlier one is blank. Its pixels stay
 the shelf's: a card keeps none alive, and an item whose card is on screen is
 not released, nor dropped from a full shelf while another item can go
 instead. Without a supported launch and plugin, the shelf has the item and

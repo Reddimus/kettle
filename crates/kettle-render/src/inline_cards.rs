@@ -261,6 +261,7 @@ impl InlineCards {
         frame.accepted_cells.clear();
         frame.known_cells.clear();
         frame.groups.clear();
+        frame.latest.clear();
         for (index, marks) in snap.card_marks.cells() {
             if snap
                 .cells
@@ -320,6 +321,22 @@ impl InlineCards {
                 continue;
             }
             group.accepted = true;
+            let latest = frame.latest.entry(nonce).or_insert(line);
+            *latest = (*latest).max(line);
+        }
+        // A card shows once: when its text is printed again in the pane (a
+        // replayed transcript, a harness's reprint), only the latest copy, the
+        // lowest, is accepted, and the others' cells paint blank as a torn
+        // card's do.
+        for (&(nonce, line, column), group) in &mut frame.groups {
+            if !group.accepted {
+                continue;
+            }
+            if frame.latest.get(&nonce) != Some(&line) {
+                group.accepted = false;
+                continue;
+            }
+            let entry = &self.entries[&nonce];
             frame.blocks.push(CardBlock {
                 nonce,
                 line,
@@ -415,6 +432,8 @@ pub(crate) struct CardFrame {
     accepted_cells: Vec<usize>,
     known_cells: Vec<usize>,
     groups: HashMap<(InlineNonce, i32, usize), Group>,
+    /// Each card's lowest complete copy this frame, by its first grid line.
+    latest: HashMap<InlineNonce, i32>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -612,8 +631,16 @@ pub(crate) mod tests {
         for index in 0..prefix_lines {
             output.push_str(&format!("ordinary prefix {index}\r\n"));
         }
-        output.push_str(label);
-        output.push_str("\r\n");
+        output.push_str(&card_text(label, left, nonce));
+        processor.advance(&mut term, output.as_bytes());
+        (cards, term, nonce)
+    }
+
+    /// What a harness prints for a 3 by 12 card: `label` on its own line,
+    /// then the rows and the caption at column `left`, with no final line
+    /// break.
+    fn card_text(label: &str, left: usize, nonce: InlineNonce) -> String {
+        let mut output = format!("{label}\r\n");
         let indent = " ".repeat(left);
         for row in 0..3 {
             output.push_str(&indent);
@@ -624,6 +651,38 @@ pub(crate) mod tests {
         }
         output.push_str(&indent);
         output.push_str("diagram.png - raster 640x480");
+        output
+    }
+
+    /// The fixture's card printed twice in a pane tall enough for both, with
+    /// a line of output between: as a replayed transcript, or a harness's
+    /// reprint, would leave it.
+    fn printed_twice() -> (InlineCards, Term<EventProxy>, InlineNonce) {
+        struct Tall;
+        impl Dimensions for Tall {
+            fn columns(&self) -> usize {
+                80
+            }
+            fn screen_lines(&self) -> usize {
+                16
+            }
+            fn total_lines(&self) -> usize {
+                16
+            }
+        }
+        let label = "  \u{23bf} \u{00a0}PostToolUse:mcp__plugin_kettle_kettle__kettle_show says:";
+        let nonce = InlineNonce::new([2, 3, 4, 5, 6, 7]).unwrap();
+        let mut cards = InlineCards::default();
+        cards.register_for(nonce, 3, 12, CardHarness::ClaudeHook);
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut term = Term::new(
+            Config::default(),
+            &Tall,
+            EventProxy::new(tx, std::sync::Arc::new(|| {})),
+        );
+        let card = card_text(label, 5, nonce);
+        let output = format!("{card}\r\nordinary output\r\n{card}");
+        let mut processor: Processor = Processor::new();
         processor.advance(&mut term, output.as_bytes());
         (cards, term, nonce)
     }
@@ -1002,6 +1061,47 @@ pub(crate) mod tests {
         assert!(!frame.suppress_point(&snap, 2, 9));
         let unknown = InlineCards::default().recognize(&snap);
         assert_eq!(unknown.cell(&snap, neighbor), CardCell::Unknown);
+    }
+
+    /// A card shows once in its pane: when its text is printed again, only
+    /// the latest copy, the lowest, paints; the earlier one's cells are known
+    /// card cells and paint blank.
+    #[test]
+    fn a_card_printed_twice_shows_once_at_its_latest_copy() {
+        let (cards, term, nonce) = printed_twice();
+        let mut snap = PaneSnapshot::default();
+        snap.capture_with_card_marks(&term, true);
+        let frame = cards.recognize(&snap);
+        assert_eq!(frame.blocks.len(), 1);
+        assert_eq!((frame.blocks[0].nonce, frame.blocks[0].line), (nonce, 7));
+        assert_eq!(frame.accepted_cells.len(), 36);
+        let earlier = snap
+            .cells
+            .iter()
+            .position(|cell| (cell.line, cell.col) == (1, 5))
+            .unwrap();
+        assert_eq!(frame.cell(&snap, earlier), CardCell::Neutral);
+        assert!(!frame.suppress_point(&snap, 1, 5));
+        assert!(frame.suppress_point(&snap, 7, 5));
+    }
+
+    /// When the latest copy is torn, the earlier complete one still shows,
+    /// so a card never vanishes while a whole copy of it is on screen.
+    #[test]
+    fn a_torn_latest_copy_leaves_the_earlier_one_showing() {
+        let (cards, term, nonce) = printed_twice();
+        let mut snap = PaneSnapshot::default();
+        snap.capture_with_card_marks(&term, true);
+        let index = snap
+            .cells
+            .iter()
+            .position(|cell| (cell.line, cell.col) == (8, 9))
+            .unwrap();
+        snap.cells[index].c = 'X';
+        let frame = cards.recognize(&snap);
+        assert_eq!(frame.blocks.len(), 1);
+        assert_eq!((frame.blocks[0].nonce, frame.blocks[0].line), (nonce, 1));
+        assert_eq!(frame.accepted_cells.len(), 36);
     }
 
     #[test]

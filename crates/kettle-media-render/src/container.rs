@@ -37,6 +37,17 @@ fn within_caps((width, height): (u64, u64)) -> Result<(), FailureCode> {
     Ok(())
 }
 
+/// The BMP header sizes the decoder reads: a core header, then the info
+/// header and its later versions.
+const BMP_HEADER_SIZES: [u32; 6] = [12, 40, 52, 56, 108, 124];
+
+/// Whether `bytes` starts as a BMP the decoder reads: the signature, then
+/// one of its header sizes.
+pub(crate) fn is_bmp_header(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"BM")
+        && u32_le(bytes, 14).is_some_and(|size| BMP_HEADER_SIZES.contains(&size))
+}
+
 /// The size a BMP header declares, for the header sizes the decoder reads: a
 /// core header's unsigned 16-bit fields, or an info header's signed 32-bit
 /// ones, where a negative height is a top-down image. A negative width is

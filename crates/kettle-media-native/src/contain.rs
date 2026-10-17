@@ -6,9 +6,9 @@
 //! On macOS the decoder's process limit is set to one, so every fork or
 //! spawn it attempts fails: the limit counts the user's processes, and the
 //! decoder is one of them. Threads are not processes and still work. Root is
-//! not bound by the limit, so a decoder is not run as root at all. It
-//! could still call `setsid` or `setpgid` to leave the group itself; only
-//! the self-sandbox planned for the worker can take that away.
+//! not bound by the limit, so a decoder is not run as root at all. The
+//! worker's Seatbelt profile also denies `setsid` and `setpgid`, so a
+//! decoder cannot leave the group itself.
 //!
 //! On Linux, where threads count against the process limit, a seccomp
 //! filter refuses `fork`, `vfork`, a `clone` that is not a thread, `setsid`
