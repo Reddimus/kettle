@@ -436,10 +436,11 @@ fn write_out(out: &Path, input: &Path, bytes: &[u8]) -> Result<(), OutputRefusal
         return Err(OutputRefusal::Shared);
     }
     let (temporary, mut file) = create_private(directory, name)?;
-    let written = file
-        .write_all(bytes)
-        .and_then(|()| file.sync_all())
-        .and_then(|()| std::fs::rename(&temporary, out));
+    let written = file.write_all(bytes).and_then(|()| file.sync_all());
+    // Closed first: Windows refuses to rename a file while a handle without
+    // delete sharing is open on it, and the private create grants none.
+    drop(file);
+    let written = written.and_then(|()| std::fs::rename(&temporary, out));
     if written.is_err() {
         // By name, which is safe here: no one else can change an entry in a
         // folder that is not shared.
