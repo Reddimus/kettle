@@ -394,7 +394,7 @@ gauntlet: live-ui-helper-selftest native-titlebar-self-test wayland-first-frame-
     # so the workspace lint above structurally cannot catch it.
     cargo clippy --locked -p kettle-core --all-targets -- -D warnings
     cargo build --locked --workspace --all-targets
-    cargo test --locked --workspace
+    cargo test --locked --workspace --no-fail-fast
     just media-protocol-test
     cargo doc --locked --workspace --no-deps
     @echo ""

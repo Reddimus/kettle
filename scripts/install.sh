@@ -150,9 +150,11 @@ fi
 
 if [[ "${TARBALL_MODE}" -eq 0 && "${SKIP_BUILD}" -eq 0 ]]; then
   echo "Building kettle (release)…"
-  ( cd "${REPO_ROOT}" && cargo build --locked --release -p kettle )
+  ( cd "${REPO_ROOT}" && cargo build --locked --release -p kettle \
+      --target-dir "${REPO_ROOT}/target" )
   echo "Building media worker (media-worker profile)…"
-  ( cd "${REPO_ROOT}" && cargo build --locked --profile media-worker -p kettle-media-worker )
+  ( cd "${REPO_ROOT}" && cargo build --locked --profile media-worker -p kettle-media-worker \
+      --target-dir "${REPO_ROOT}/target" )
 fi
 
 if [[ ! -x "${BIN_SRC}" ]]; then
@@ -262,7 +264,7 @@ Make sure ${BIN_DIR} is on your PATH:
 
 Three optional one-liners to finish setting things up:
 
-    kettle --print-default-config > ~/.config/kettle/config
+    kettle --write-default-config
     kettle --shell-integration bash >> ~/.bashrc      # or zsh / fish
     kettle --print-completions bash >> ~/.bashrc      # or zsh / fish
 

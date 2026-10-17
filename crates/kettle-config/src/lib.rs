@@ -8382,6 +8382,38 @@ cell-height = 1.2\n";
     }
 
     #[test]
+    fn manual_preview_docs_match_the_configured_presentation() {
+        assert_eq!(Config::default().media_open_mode, MediaOpenMode::Overlay);
+        for (guide, required) in [
+            (
+                include_str!("../../../docs/CONFIG.md"),
+                &[
+                    "Type a label to render that file in the configured preview presentation",
+                    "clipboard names using the configured preview presentation",
+                    "Mermaid diagram on the clipboard using the configured preview presentation",
+                ][..],
+            ),
+            (
+                include_str!("../../../docs/AGENT.md"),
+                &["opens in the configured preview presentation once it renders"][..],
+            ),
+        ] {
+            let guide = guide.split_whitespace().collect::<Vec<_>>().join(" ");
+            for &claim in required {
+                assert!(guide.contains(claim), "missing preview guidance: {claim}");
+            }
+            for claim in [
+                "The default viewer owns keyboard input",
+                "Pin",
+                "media-open-mode = lane",
+                "An already open preview keeps its presentation",
+            ] {
+                assert!(guide.contains(claim), "missing preview guidance: {claim}");
+            }
+        }
+    }
+
+    #[test]
     fn media_open_mode_reports_typos_and_keeps_the_default() {
         let text = "media-open-mode = full-screen";
         assert!(!Config::detect_malformed_values(text).is_empty());

@@ -106,7 +106,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: release-pretest
-      - run: cargo test --locked --workspace
+      - run: cargo test --locked --workspace --no-fail-fast
       - name: No shipped binary enables a fuzzing feature
         run: scripts/check-no-fuzzing-feature.sh
       - name: Test patched vendor crates directly

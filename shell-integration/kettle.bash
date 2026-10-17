@@ -134,9 +134,15 @@ kettle_completion_clear() {
 # exit status or appends `[$?]` reports success after a failing command.
 __kettle_pc() {
   local __kettle_status=$?
+  __kettle_command_ready=0
   kettle_completion_clear
   printf '\033]133;D;%s\007\033]133;A\007' "$__kettle_status"
   __kettle_osc7
+  return "$__kettle_status"
+}
+__kettle_prompt_ready() {
+  local __kettle_status=$?
+  __kettle_command_ready=1
   return "$__kettle_status"
 }
 # bash 5.1 allows PROMPT_COMMAND to be an ARRAY. The string form below works on
@@ -151,8 +157,12 @@ __kettle_pc() {
 # PROMPT_COMMAND entirely.
 # shellcheck disable=SC2128,SC2178 # The fallback arm is specifically scalar.
 case "$(declare -p PROMPT_COMMAND 2>/dev/null)" in
-  "declare -a"*) PROMPT_COMMAND=(__kettle_pc "${PROMPT_COMMAND[@]}") ;;
-  *) PROMPT_COMMAND="__kettle_pc${PROMPT_COMMAND:+; $PROMPT_COMMAND}" ;;
+  "declare -a"*) PROMPT_COMMAND=(__kettle_pc "${PROMPT_COMMAND[@]}" __kettle_prompt_ready) ;;
+  *) PROMPT_COMMAND="__kettle_pc${PROMPT_COMMAND:+; $PROMPT_COMMAND}"$'\n__kettle_prompt_ready' ;;
 esac
 PS1='\[\033]133;B\007\]'"$PS1"
-trap 'printf "\033]133;C\007"' DEBUG
+__kettle_command_ready=0
+trap 'if [[ ${__kettle_command_ready:-0} == 1 && $BASH_COMMAND != __kettle_pc ]]; then
+  __kettle_command_ready=0
+  printf "\033]133;C\007"
+fi' DEBUG

@@ -439,16 +439,20 @@ selection only on the user's own key press or click, and a menu a control
 client opens does not look at them to offer its rows.
 The user can also preview an image, SVG, Mermaid or Markdown file a pane
 names without any agent (a Markdown file's Mermaid diagrams are a gallery,
-paged in the lane with `‹` and `›`): `preview_link` (the palette's "Preview
+paged with `‹` and `›`): `preview_link` (the palette's "Preview
 a file in Kettle") labels such files in the focused pane as quick select does, and the
 right-click menu offers "Preview in Kettle" on a link to one. The file
-opens in that pane's lane once it renders, its sender reading "You opened
+opens in the configured preview presentation once it renders. The default
+viewer owns keyboard input; choose Pin or set `media-open-mode = lane` to keep
+the preview beside the terminal. An already open preview keeps its presentation.
+Its sender reads "You opened
 this from the pane", and the shelf report marks it `from_user`. A link from
-a remote pane is refused and one from behind tmux or screen is asked about
-first, as opening it would be; when a preview cannot be had, a notification
-says why. Only the user's own key press or click starts such a read: a
-control client may run `preview_link` or drive the menus, but a pick, a
-menu row or a confirmation it sends previews nothing.
+a remote pane is refused. tmux, screen and zellij with a server on this
+computer count as local: there is no additional confirmation before reading
+the selected local file. When a preview cannot be had, a notification says
+why. Only the user's own key press or click starts such a read: a
+control client may run `preview_link` or drive the menus, but a pick or
+menu row it sends previews nothing.
 A Mermaid diagram an agent shows gets a card like an image, with its
 rendered poster, whether it came as source or as a file; when the lane
 draws it again on another background, the card shows that too.

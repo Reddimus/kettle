@@ -219,6 +219,15 @@ struct Cli {
     ///   kettle --shell-integration fish       >> ~/.config/fish/config.fish
     ///   kettle --shell-integration powershell >> $PROFILE   # PS 5+ / PS 7+
     ///
+    /// Kettle starts the default Unix shell as a login shell. Bash reads the first
+    /// readable `~/.bash_profile`, `~/.bash_login`, or `~/.profile`, not `~/.bashrc`
+    /// automatically. If that active login startup file does not already source
+    /// `~/.bashrc`, add this line to it (create `~/.bash_profile` only if none exists):
+    ///
+    ///   [ -r "$HOME/.bashrc" ] && . "$HOME/.bashrc"
+    ///
+    /// Start a new shell (for example, open a new Kettle pane) after installing.
+    ///
     /// Snippets live at `shell-integration/kettle.{bash,zsh,fish,ps1}`
     /// in the source tree and are embedded at build time so the
     /// binary always emits the version that shipped with it
@@ -3751,6 +3760,34 @@ mod tests {
                 !doc.contains(copied_body),
                 "the guide copied a shell implementation that can drift: {copied_body}"
             );
+        }
+    }
+
+    #[test]
+    fn bash_login_install_guidance_is_present_in_docs_and_help() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let help = cmd
+            .get_arguments()
+            .find(|arg| arg.get_id().as_str() == "shell_integration")
+            .unwrap()
+            .get_long_help()
+            .unwrap()
+            .to_string();
+        for text in [include_str!("../../../docs/SHELL-INTEGRATION.md"), &help] {
+            for required in [
+                "Bash reads the first",
+                "~/.bash_profile",
+                "~/.bash_login",
+                "~/.profile",
+                r#"[ -r "$HOME/.bashrc" ] && . "$HOME/.bashrc""#,
+                "Start a new shell",
+            ] {
+                assert!(
+                    text.contains(required),
+                    "missing login guidance: {required}"
+                );
+            }
         }
     }
 

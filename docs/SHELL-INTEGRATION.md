@@ -68,6 +68,17 @@ kettle --shell-integration fish       >> ~/.config/fish/config.fish
 kettle --shell-integration powershell >> $PROFILE       # PowerShell 5+ / 7+
 ```
 
+Kettle starts the default Unix shell as a login shell. Bash reads the first
+readable `~/.bash_profile`, `~/.bash_login`, or `~/.profile`, not `~/.bashrc`
+automatically. If that active login startup file does not already source
+`~/.bashrc`, add this line to it (create `~/.bash_profile` only if none exists):
+
+```sh
+[ -r "$HOME/.bashrc" ] && . "$HOME/.bashrc"
+```
+
+Start a new shell (for example, open a new Kettle pane) after installing.
+
 The same snippets live at `shell-integration/kettle.{bash,zsh,fish,ps1}` and
 ship in the release archives. Use the generated form instead of copying a
 second implementation from this guide; updates then stay in one place.

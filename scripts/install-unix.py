@@ -546,12 +546,15 @@ def _publish_source(
         os.fchmod(output_fd, mode)
         digest = hashlib.sha256()
         size = 0
+        limit = min(expected_size, MAX_FILE_BYTES)
         while True:
-            chunk = os.read(source_fd, 1024 * 1024)
+            chunk = os.read(source_fd, min(1024 * 1024, limit + 1 - size))
             if not chunk:
                 break
-            digest.update(chunk)
             size += len(chunk)
+            if size > limit:
+                _fail(f"installer source changed while copying: {source}")
+            digest.update(chunk)
             _write_all(output_fd, chunk)
         if size != expected_size or digest.hexdigest() != expected_digest:
             _fail(f"installer source changed while copying: {source}")
