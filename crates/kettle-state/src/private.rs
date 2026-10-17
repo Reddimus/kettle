@@ -537,7 +537,10 @@ fn create_private_dirs_impl(directory: &Path) -> io::Result<()> {
         .take_while(|path| !path.as_os_str().is_empty() && std::fs::symlink_metadata(path).is_err())
         .collect();
     let sync_new_entries = || -> io::Result<()> {
-        for created in missing.iter().rev() {
+        // Outermost first. Only the first parent existed before this call, and
+        // it may be a link, such as a symlinked `~/.config`; the rest are
+        // directories this call created.
+        for (index, created) in missing.iter().rev().enumerate() {
             if let Some(parent) = created.parent() {
                 // A relative path's first component lives in the working
                 // directory, whose name there is the empty path.
@@ -546,7 +549,7 @@ fn create_private_dirs_impl(directory: &Path) -> io::Result<()> {
                 } else {
                     parent
                 };
-                unix::sync_directory_path(parent)?;
+                unix::sync_directory_path(parent, index == 0)?;
             }
         }
         Ok(())
@@ -1801,12 +1804,14 @@ pub(crate) mod unix {
             const { std::cell::RefCell::new(None) };
     }
 
-    /// Sync the directory at `path`, opened without following a symlink.
-    pub(super) fn sync_directory_path(path: &Path) -> io::Result<()> {
+    /// Sync the directory at `path`. A symlink as its last component is
+    /// followed only when `follow_link` is set.
+    pub(super) fn sync_directory_path(path: &Path, follow_link: bool) -> io::Result<()> {
         use std::os::unix::fs::OpenOptionsExt as _;
+        let no_follow = if follow_link { 0 } else { libc::O_NOFOLLOW };
         let directory = std::fs::OpenOptions::new()
             .read(true)
-            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .custom_flags(libc::O_DIRECTORY | no_follow | libc::O_CLOEXEC)
             .open(path)?;
         sync_directory(&directory)
     }
@@ -7106,6 +7111,32 @@ mod tests {
                 }
                 parent = path.parent();
             }
+        }
+    }
+
+    /// The directory a new path starts from may be a link, such as a
+    /// `~/.config` a dotfile manager points elsewhere. The new entry lands in
+    /// the link's target, so that is the directory synced.
+    #[cfg(unix)]
+    #[test]
+    fn private_directory_creation_syncs_through_a_linked_existing_parent() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let root = crate::test_tempdir();
+        let real = root.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, root.path().join("link")).unwrap();
+        let metadata = real.metadata().unwrap();
+        for directory in [
+            root.path().join("link/config/layouts"),
+            root.path().join("link/kettle/sessions"),
+        ] {
+            unix::DIRECTORY_SYNCS.with(|syncs| *syncs.borrow_mut() = Some(Vec::new()));
+            let result = create_private_dirs(&directory);
+            let synced = unix::DIRECTORY_SYNCS.with(|syncs| syncs.borrow_mut().take().unwrap());
+            result.unwrap();
+            assert!(directory.is_dir());
+            assert!(synced.contains(&(metadata.dev(), metadata.ino())));
         }
     }
 
