@@ -1211,13 +1211,17 @@ impl<'a> Reader<'a> {
         }
         Ok(v)
     }
-    /// A Rendered payload; for a reply that names its `kind`, its source is
-    /// held to that kind: within its input cap when it is text, and absent
-    /// when it is not.
+    /// A Rendered payload; for a reply that names its `kind`, its size and
+    /// source are held to that kind before its pixels are read: within the
+    /// kind's result ceiling, and a source within its input cap when it is
+    /// text, and absent when it is not.
     fn rendered(&mut self, kind: Option<MediaKind>) -> Result<Rendered, WireError> {
         let width = self.u32()?;
         let height = self.u32()?;
         let expected = rgba_len(width, height, MAX_RENDERED_EDGE, MAX_RENDERED_BYTES)?;
+        if let Some(kind) = kind {
+            kind.validate_result_size(width, height)?;
+        }
         let pixels = self.blob(MAX_RENDERED_BYTES)?;
         if pixels.len() != expected {
             return Err(WireError::LengthMismatch);

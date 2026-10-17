@@ -879,6 +879,53 @@ fn typed_reply_is_the_kind_then_the_plain_payload() {
     assert_eq!(decode(&expected, Direction::WorkerToParent).unwrap(), frame);
 }
 
+/// SVG, Mermaid and Markdown results are held to the SVG ceiling, 1024
+/// pixels a side and 1024² in all: when a typed reply is decoded, before its
+/// pixels are read, and when the parent checks a plain reply against the
+/// kind it asked for.
+#[test]
+fn svg_family_replies_obey_the_svg_result_ceiling() {
+    for (width, height) in [(1024, 1024), (1025, 1), (1, 1025)] {
+        let mut rendered = common::rendered();
+        rendered.width = width;
+        rendered.height = height;
+        rendered.rgba = vec![0; (width * height * 4) as usize];
+        rendered.layout = common::layout(width, height);
+        let fits = width <= MAX_SVG_RENDERED_EDGE && height <= MAX_SVG_RENDERED_EDGE;
+        let plain = encode(
+            &Frame::Rendered(rendered.clone()),
+            Direction::WorkerToParent,
+        )
+        .unwrap();
+        for (kind, tag) in [
+            (MediaKind::Svg, 1),
+            (MediaKind::Mermaid, 2),
+            (MediaKind::Markdown, 3),
+        ] {
+            let mut typed = plain[..HEADER_BYTES].to_vec();
+            typed[6] = 7;
+            let size = u32::from_le_bytes(typed[7..11].try_into().unwrap()) + 1;
+            typed[7..11].copy_from_slice(&size.to_le_bytes());
+            typed.push(tag);
+            typed.extend_from_slice(&plain[HEADER_BYTES..]);
+            let decoded = decode(&typed, Direction::WorkerToParent);
+            let checked = rendered.validate_as(kind);
+            if fits {
+                assert!(
+                    decoded.is_ok() && checked.is_ok(),
+                    "{kind:?} {width}x{height}"
+                );
+            } else {
+                assert_eq!(
+                    decoded.unwrap_err(),
+                    WireError::Validation(ValidationError::TooLarge)
+                );
+                assert_eq!(checked.unwrap_err(), ValidationError::TooLarge);
+            }
+        }
+    }
+}
+
 #[test]
 fn typed_reply_refuses_unknown_kinds_and_other_directions() {
     let frame = Frame::DetectedRendered {
