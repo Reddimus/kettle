@@ -2317,6 +2317,10 @@ geometry. Unregistered clusters use an owned fallback glyph and background;
 a registered cluster with incomplete context, such as a card partly scrolled
 out of a full-screen program, draws blank cells. Accepted
 cells suppress raw placeholder ink, terminal decoration and cursor ink.
+A card shows once per pane: when its text is printed again (a replayed
+transcript, a harness's reprint after a resize), only the lowest complete copy
+in the captured band, the latest one, is accepted, and the others draw blank.
+A newer copy outside the band does not hide an older one in view.
 
 Capture copies the viewport first and, only for a pane with registrations,
 at most 13 retained terminal rows above and below it. This band covers a
@@ -2348,8 +2352,10 @@ gutter row; a secondary caller label appears when another complete row fits.
 Pending and unavailable status labels stay within the visible card body,
 including a one-row intersection. Their rectangles are recomputed from the
 current grid snapshot and clipped to the pane. Terminal selection and scrolling
-remain terminal operations; card interaction and production registration are
-later slices.
+remain terminal operations. The GUI registers cards for published shelf items
+and returns the message the harness prints. A press released over the same card
+opens its item in the centered viewer, or in the lane with
+`media-open-mode = lane`, unless a dialog, menu or viewer owns the pointer.
 
 ### Linux agent card scopes
 

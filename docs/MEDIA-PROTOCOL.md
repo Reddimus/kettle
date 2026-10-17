@@ -69,10 +69,12 @@ VideoStills, Auto and CachedThumbnail. An Auto job asks the worker to classify t
 its bytes. CachedThumbnail adds the SHA-256 of the video's file URI (32 bytes), the video's
 modification time in seconds as a signed i64 and its nanoseconds as a u32 below one billion;
 it has the Raster kind's input cap and deadline.
+MarkdownDiagrams (job tag 3) adds one index byte.
 Media-kind tags 0 through 4 are Raster, Svg, Mermaid, Markdown and Video: what a
-DetectedRendered reply actually rendered. Markdown adds one index byte. Stills adds count u8, edge u32, start f64, optional
-end f64, optional single-frame time f64 and a layout: tag 0 for a poster, which requires
-count 1, or tag 1 for a sheet followed by its column count u8, from 1 to the frame count, and
+DetectedRendered reply actually rendered. VideoStills (job tag 5) adds count u8,
+edge u32, start f64, optional end f64, optional single-frame time f64 and a layout:
+tag 0 for a poster, which requires count 1, or tag 1 for a sheet followed by its
+column count u8, from 1 to the frame count, and
 a labels boolean. Single-frame time requires count 1, start 0 and no end time. Interval
 times must be finite, nonnegative and ordered. The still-count cap is 16. A worker job's
 edge cap is 4096, room for a lane's poster or sheet; the video-frame contract holds a
@@ -188,8 +190,13 @@ and updated golden fixtures.
 
 Version 2 added the Auto job tag and the DetectedRendered frame to version 1. Version 3
 appends the layout and the exact source to every Rendered payload, so a zoomed preview can
-ask for the crop it shows and the GUI can copy a diagram's source as it was. No version
-negotiates, so a version 1 or 2 peer is `RestartRequired` either way.
+ask for the crop it shows and the GUI can copy a diagram's source as it was.
+Version 4 added stills layouts, video metadata and sample times.
+Version 5 added CachedThumbnail jobs bound to a video's URI and modification time.
+Version 6 added playback sessions, commands, video frames and playback state.
+Version 7 added playback sound requests, sound status and mute controls.
+Version 8 added private PCM broker frames for Linux playback sound.
+No version negotiates, so a peer with a different version is `RestartRequired` either way.
 
 ## Build identity and worker availability
 
@@ -277,15 +284,17 @@ including Kettle itself, so it is outside what they can stop.
 
 Availability describes the installed worker's file/platform checks. It starts
 no worker; each render separately requires the matching Ready, valid result
-and clean process exit. Raster and SVG are available internally. User-facing
-preview callers are introduced separately.
+and clean process exit. The GUI uses the worker for media shelf items, file
+previews and video receipt posters.
 
 ## Running a job
 
 `WorkerClient::render(job)` runs one job in a fresh worker, one job at a time,
 on the caller's thread (never the UI's). It checks the worker again first, the
 same check availability runs, inside the startup deadline, and refuses without
-starting anything once two workers have been stuck. Nothing in the GUI calls it yet.
+starting anything once two workers have been stuck. The GUI's media lane and
+video receipt poster threads call `render_media_with_control` for cancellation
+and an absolute deadline.
 
 The platform starts the worker with `client::worker_command`: no arguments, an
 empty environment (Kettle's own platform then adds only
@@ -392,8 +401,9 @@ not excuse memory held on the way out). A live worker that cannot be measured, o
 nothing; one that exited as it was measured does not. Sampling is protection,
 not proof: an allocation can cross the limit briefly between samples.
 
-Not yet: the GUI's preview account and admission, and cancellation follow in
-later slices.
+The GUI charges retained source bytes and gallery pages to the process preview
+account, admits jobs through its bounded queue, and cancels queued or active jobs
+when their client disconnects or their pane goes away.
 
 ### Playing a video
 
@@ -740,9 +750,14 @@ decoder takes it, and without one it is `BackendUnavailable`. However large
 the video, it is never read whole. Anything else is read once, through the
 same descriptor, under the larger of the raster and SVG caps, and that one
 snapshot is both classified and rendered, so a file replaced in between
-cannot be classified as one thing and rendered as another. Content with a
-raster signature is a raster, whatever the file is called; an animated GIF,
-PNG or WebP shown this way is its first frame. Otherwise UTF-8 markup whose first element, past an optional
+cannot be classified as one thing and rendered as another. Content with the
+signature of a raster format Kettle draws (PNG, JPEG, GIF, WebP, BMP) is a
+raster, whatever the file is called; an animated GIF, PNG or WebP shown this
+way is its first frame. A BMP's signature is the two letters `BM`, so it also
+needs one of the header sizes the decoder reads, and text that starts
+`BMI results` or `P1 tasks` (a PNM's signature) is still text. A format
+Kettle does not draw is no raster either, and is never reported as one on
+its way to `UnsupportedMedia`. Otherwise UTF-8 markup whose first element, past an optional
 byte-order mark and the prolog (the XML declaration, processing
 instructions, comments and a document type declaration), is `svg` is SVG.
 That root is found by one scan, before the SVG cap applies or the parser
@@ -750,7 +765,14 @@ runs, so other markup is `UnsupportedMedia` however large it is or however
 hard it would be to parse, unless it is a Markdown gallery. Other UTF-8 text
 within the 1 MiB Markdown cap, markup included (a README's HTML block or an
 autolink is no SVG), is parsed as CommonMark, and text with a Mermaid fence is
-a Markdown gallery, reported as Markdown before its first page renders. Any
+a Markdown gallery, reported as Markdown before its first page renders. A
+Graphviz DOT graph (an optional `strict`, then `graph` or `digraph`, an
+optional name and `{`, after DOT's comments) is `UnsupportedMedia`: Mermaid's
+flowchart detector would take any text that starts `graph`. A bare `graph`
+whose name starts the next line is read as Mermaid's header with no
+direction instead, since `graph` then `A{Is it?}` on the next line is a
+Mermaid flowchart; DOT files conventionally name their graph on the
+keyword's line. Any
 other UTF-8 text that is not markup goes
 to the Mermaid renderer, which recognizes a diagram with its own
 preprocessing as it parses it and answers `UnsupportedMedia` for text that is

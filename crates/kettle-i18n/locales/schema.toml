@@ -201,7 +201,7 @@ context = "crates/kettle-ui/src/app.rs notify_preview_failure: body when Kettle 
 context = "crates/kettle-ui/src/app.rs notify_preview_failure: body when the file is over Kettle's preview size limit."
 
 [messages.notify_body_preview_unsupported]
-context = "crates/kettle-ui/src/app.rs notify_preview_failure: body when the file is not an image, an SVG or a Mermaid diagram Kettle can render. 'Mermaid' and 'SVG' are names."
+context = "crates/kettle-ui/src/app.rs notify_preview_failure: body when the file is not an image, SVG, Mermaid diagram, Markdown diagram gallery or video Kettle can render. 'Mermaid', 'SVG' and 'Markdown' are names."
 
 [messages.notify_body_preview_unavailable]
 context = "crates/kettle-ui/src/app.rs notify_preview_failure: body when Kettle's media worker, which renders previews in a separate process, is not available."
@@ -222,10 +222,10 @@ context = "crates/kettle-ui/src/app/modals.rs act_hint: body, under notify_title
 context = "crates/kettle-ui/src/app.rs handle_action PreviewLink: title of the desktop notification when the focused pane names no file to preview. 'kettle' is the product name, lowercase as in the other notification titles."
 
 [messages.notify_body_preview_nothing]
-context = "crates/kettle-ui/src/app.rs handle_action PreviewLink: body when the focused pane's visible text names no image, SVG or Mermaid file. Quick select finds a path only with a folder in it; './plot.png' is a literal example path and stays as is."
+context = "crates/kettle-ui/src/app.rs handle_action PreviewLink: body when the focused pane's visible text names no image, SVG, Mermaid, Markdown or video file. Quick select finds a path only with a folder in it; './plot.png' is a literal example path and stays as is."
 
 [messages.notify_body_preview_nothing_copied]
-context = "crates/kettle-ui/src/app/media.rs preview_copied_file: body, under notify_title_preview_nothing, when the clipboard names no image, SVG or Mermaid file. 'file://' is a literal URL scheme and stays as is."
+context = "crates/kettle-ui/src/app/media.rs preview_copied_file: body, under notify_title_preview_nothing, when the clipboard names no image, SVG, Mermaid, Markdown or video file. 'file://' is a literal URL scheme and stays as is."
 
 [messages.notify_body_preview_no_diagram]
 context = "crates/kettle-ui/src/app/media.rs preview_copied_diagram: body, under notify_title_preview_nothing, when the copied or selected text holds no Mermaid diagram: no ```mermaid fence and no row a diagram starts with (flowchart, sequenceDiagram and so on)."
@@ -1775,10 +1775,10 @@ context = "crates/kettle-config/src/palette.rs: command palette entry for focus_
 context = "crates/kettle-config/src/palette.rs: command palette entry for preview_fit, which shows the image in the focused pane's preview lane whole again, fitted to the lane, after zooming or panning."
 
 [messages.media_viewer_kind_image]
-context = "crates/kettle-ui/src/app.rs media_viewer_projection: kind of a raster item in the media viewer's detail line."
+context = "crates/kettle-ui/src/app/preview.rs media_item_kind_and_sender: kind of a raster item in the media viewer's detail line."
 
 [messages.media_viewer_kind_svg]
-context = "crates/kettle-ui/src/app.rs media_viewer_projection: kind of an SVG item in the media viewer's detail line, which lists kind, size and sender. SVG is a format name."
+context = "crates/kettle-ui/src/app/preview.rs media_item_kind_and_sender: kind of an SVG item in the media viewer's detail line, which lists kind, size and sender. SVG is a format name."
 
 [messages.media_viewer_kind_mermaid]
 context = "crates/kettle-ui/src/app/preview.rs media_item_kind_and_sender: the kind of a media shelf item that is a rendered Mermaid diagram, in the viewer's detail line and a card's screen-reader label. Mermaid is a product name."
@@ -1792,8 +1792,8 @@ context = "crates/kettle-ui/src/app.rs video_detail: in a video's detail line af
 [messages.media_video_no_audio]
 context = "crates/kettle-ui/src/app.rs video_detail: in a video's detail line after its size, codec and length, saying it has no sound track."
 
-[messages.media_viewer_kind_media]
-context = "crates/kettle-ui/src/app.rs media_viewer_projection: kind of any other media item in the media viewer's detail line."
+[messages.media_viewer_kind_markdown]
+context = "crates/kettle-ui/src/app/preview.rs media_item_kind_and_sender: kind of a page of a Markdown file's Mermaid diagrams in the media viewer's detail line. 'Markdown' is a name."
 
 [messages.media_viewer_from_pane]
 context = "crates/kettle-ui/src/app.rs media_viewer_projection: the media viewer's sender line, under the kind and size, when Kettle verified the item came from a program running in this pane. It starts its own line."
