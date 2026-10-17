@@ -110,7 +110,7 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo build --locked --workspace --all-targets
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
-      - run: cargo test --locked --workspace
+      - run: cargo test --locked --workspace --no-fail-fast
       # The media protocol's stub worker is a feature-gated test fixture, so
       # the workspace commands above neither build nor exercise it. One
       # command per step: Windows runs steps in PowerShell, where a failing
@@ -956,7 +956,7 @@ jobs:
         with:
           key: msrv-1.95
       - run: cargo build --locked --workspace --all-targets
-      - run: cargo test --locked --workspace
+      - run: cargo test --locked --workspace --no-fail-fast
 
   # Nightly early-warning job. Catches upcoming rustc breaking changes
   # weeks before they hit stable, leaving time to fix them (e.g. an
@@ -989,7 +989,7 @@ jobs:
         with:
           key: nightly
       - run: cargo build --locked --workspace --all-targets
-      - run: cargo test --locked --workspace
+      - run: cargo test --locked --workspace --no-fail-fast
 
   # aarch64-linux cross-compile early-warning. Verifies kettle still
   # builds for ARM64 Linux (Raspberry Pi 4/5, ARM VPS/servers, ARM laptops

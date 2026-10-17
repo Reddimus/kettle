@@ -33,7 +33,7 @@ fn msrv_job_matches(ci: &str, floor: &str) -> bool {
         && values("- run: ")
             == [
                 "cargo build --locked --workspace --all-targets",
-                "cargo test --locked --workspace",
+                "cargo test --locked --workspace --no-fail-fast",
             ]
 }
 
@@ -121,7 +121,7 @@ fn workspace_floor_agrees_with_ci_nix_and_current_build_docs() {
 
 #[test]
 fn stale_toolchain_check_name_cache_key_or_commands_cannot_pass_the_drift_guard() {
-    let original = "jobs:\n  msrv:\n    name: msrv (rust 1.95)\n    steps:\n      - with:\n          toolchain: \"1.95\"\n          key: msrv-1.95\n      - run: cargo build --locked --workspace --all-targets\n      - run: cargo test --locked --workspace\n  build:\n    name: other\n";
+    let original = "jobs:\n  msrv:\n    name: msrv (rust 1.95)\n    steps:\n      - with:\n          toolchain: \"1.95\"\n          key: msrv-1.95\n      - run: cargo build --locked --workspace --all-targets\n      - run: cargo test --locked --workspace --no-fail-fast\n  build:\n    name: other\n";
     assert!(msrv_job_matches(original, "1.95"));
     for (current, stale) in [
         ("toolchain: \"1.95\"", "toolchain: \"1.89\""),
@@ -130,10 +130,10 @@ fn stale_toolchain_check_name_cache_key_or_commands_cannot_pass_the_drift_guard(
         ("  msrv:", "  removed-msrv:"),
         ("--all-targets", ""),
         (
-            "cargo test --locked --workspace",
-            "cargo test --locked -p kettle-vt",
+            "cargo test --locked --workspace --no-fail-fast",
+            "cargo test --locked -p kettle-vt --no-fail-fast",
         ),
-        ("      - run: cargo test --locked --workspace\n", ""),
+        ("      - run: cargo test --locked --workspace --no-fail-fast\n", ""),
     ] {
         assert!(
             !msrv_job_matches(&original.replace(current, stale), "1.95"),
