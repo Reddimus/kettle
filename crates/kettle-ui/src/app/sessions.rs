@@ -262,11 +262,15 @@ mod tests {
         for payload in [b"{".to_vec(), vec![b' '; 1024 * 1024 + 1]] {
             let (sender, receiver) = UnixStream::pair().unwrap();
             let (passed, mut peer) = UnixStream::pair().unwrap();
-            // Before the far end closes: macOS refuses the option after.
-            peer.set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            // Before the far end closes: macOS refuses the option after. End of
+            // file comes at once when the descriptor is closed; the wait only
+            // bounds a leak, and a loaded macOS runner has taken over 1 s to
+            // let the closed descriptor go.
+            peer.set_read_timeout(Some(std::time::Duration::from_secs(10)))
                 .unwrap();
             // The descriptor travels with the first byte; macOS refuses one
             // `sendmsg` of over 1 MiB with ancillary data.
+            let payload_len = payload.len();
             let writer = std::thread::spawn(move || {
                 use std::io::Write as _;
                 crate::fd_transport::send_fds(&sender, &payload[..1], &[passed.as_raw_fd()])
@@ -277,7 +281,11 @@ mod tests {
             let result = receive_handoff_session(&receiver);
             writer.join().unwrap();
             assert!(result.is_err());
-            assert_eq!(peer.read(&mut [0u8]).unwrap(), 0);
+            let end = peer.read(&mut [0u8]);
+            assert!(
+                matches!(end, Ok(0)),
+                "a {payload_len}-byte handoff kept the received descriptor: {end:?}"
+            );
         }
     }
 }
