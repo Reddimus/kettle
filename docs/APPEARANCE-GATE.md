@@ -5,6 +5,45 @@ before the release-cut pull request merges. Unit and image tests can prove the
 material policy; they cannot prove what AppKit actually draws. This file records
 each run, including what did not run and why.
 
+## 5.2.0 cut - 2026-10-17
+
+macOS 27.0.1, M5 Max, 1920x1080 at 1x, system appearance Dark. The candidate
+is the release workflow's own macOS package from the `workflow_dispatch` dry
+run 39032628161 on `25c8d48e`: universal (x86_64, arm64, worker included),
+Developer ID signed, notarized and stapled, accepted by `spctl` as "Notarized
+Developer ID". The release tree differs from `25c8d48e` only by comments,
+documentation, test files moved by #619 and this cut's version bump, so the
+candidate runs the release's window code. This cut changes window chrome
+(`app/chrome.rs`, windowing, the Dock menu and window accents), so the run was
+live, with the console unlocked.
+
+Passed:
+
+- `scripts/check-native-titlebar.py` against the candidate's binary: a light
+  theme started under Dark draws its caption clear of the traffic lights (no
+  caption ink over them) at startup, after a resize and with the pointer over
+  the caption; native fullscreen entered with the green button (pressed through
+  Accessibility) leaves on one toggle and restores 740x480; a window started in
+  fullscreen leaves it on one toggle; a borderless window resizes and
+  round-trips programmatic fullscreen back to 740x480 with the terminal
+  visible.
+- Over a second, opaque saturated Kettle window filled with text, inspected
+  through Computer Use captures: at the default 86% opacity with blur, the
+  opaque native titlebar and the material reach both rounded top corners with
+  no clear strip or seam, and the text behind is blurred; with blur off it shows
+  through sharp; at `background-opacity = 1.0` and `window-blur = false` the
+  theme fills every corner and nothing shows through.
+- On the default blurred window, a control-API resize to 900x600, then a
+  fullscreen round trip (1920x1080), restores the same surface and content
+  rectangles exactly; the traffic lights, caption and first terminal row are
+  where they were.
+- `just macos-update-smoke` passed against the published v5.1.0 archive and
+  against this candidate's archive.
+
+Not run: live Reduce Transparency (a system setting this run does not change),
+Dock, Finder and app-switcher icons (Computer Use captures filter the Dock),
+and HiDPI or physical Intel hardware.
+
 ## 5.1.0 cut - 2026-10-15
 
 macOS 27.0.1, M5 Max. Universal ad-hoc bundle built from `91e58265` (the
