@@ -43,7 +43,12 @@ objc2-av-foundation = { version = "0.3.2", optional = true, default-features = f
 ] }
 objc2-core-foundation = { version = "0.3.2", optional = true, default-features = false, features = [
     "std",
+    "CFArray",
     "CFCGTypes",
+    "CFData",
+    "CFDictionary",
+    "CFNumber",
+    "CFString",
 ] }
 objc2-core-graphics = { version = "0.3.2", optional = true, default-features = false, features = [
     "std",

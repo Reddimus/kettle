@@ -194,7 +194,8 @@ pub(crate) fn serve(
 }
 
 /// Render the job and say what it was, or say why not. `classified` hears
-/// the kind before it is rendered.
+/// the kind before it is rendered, except a HEIF or AVIF still's, which is in
+/// the reply alone.
 fn answer(
     job: &Job,
     mut classified: impl FnMut(MediaKind),
@@ -282,6 +283,16 @@ impl kettle_media::video::VideoDecoder for Refusing {
         ) -> Result<kettle_media::video::StillsPlan, FailureCode>,
         _deadline: Instant,
     ) -> Result<kettle_media::video::DecodedStills, FailureCode> {
+        Err(self.0)
+    }
+
+    fn still_image(
+        &self,
+        _input: kettle_media::video::StillInput<'_>,
+        _still: kettle_media::video::StillImage,
+        _max_edge: u32,
+        _deadline: Instant,
+    ) -> Result<kettle_media::video::DecodedStill, FailureCode> {
         Err(self.0)
     }
 }

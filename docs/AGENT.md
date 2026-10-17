@@ -514,6 +514,16 @@ moves does not count.
 When no decoder reads a video the user previews by its path, it shows as a
 file card, whose lane says ffmpeg may add one (`brew install ffmpeg` on
 macOS, the system's packages on Linux); Kettle never installs it.
+
+HEIC and AVIF photos are drawn by the platform's own decoder in the confined
+worker, a tiled photo whole:
+
+| System | HEIC | AVIF |
+|---|---|---|
+| macOS (ImageIO) | yes | yes from macOS 13; before it, with ffmpeg 7.1 or later |
+| Linux with ffmpeg 7.1 or later (Ubuntu 26.04's is 8.0) | yes | yes, with an AV1 decoder (`libdav1d` or `libaom`) |
+| Linux with an older ffmpeg (Ubuntu 22.04 and 24.04) or none | file card | file card |
+
 Clicking an inline card opens that card's item in the configured preview
 presentation (`media-open-mode`). A card
 takes a primary press, and its release, before anything else in the window

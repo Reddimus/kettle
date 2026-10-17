@@ -658,6 +658,63 @@ fn real_ffmpeg_takes_the_frames_showing() {
     }
 }
 
+/// A real ffmpeg from 7.1 draws a HEIF and an AVIF still from the file it
+/// was read from, at no more than the size asked, in its own colour
+/// (`fixtures/still/README.md`), and never enlarged; without the file it
+/// reads no still.
+#[test]
+fn real_ffmpeg_draws_heif_and_avif_stills() {
+    use kettle_media::video::{StillImage, StillInput};
+    let Some(decoder) = installed() else {
+        return;
+    };
+    for (name, still, source) in [
+        ("solid.heic", StillImage::Heif, (640, 480)),
+        ("solid.avif", StillImage::Avif, (640, 480)),
+        ("grid.heic", StillImage::Heif, (1024, 768)),
+    ] {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/still")
+            .join(name);
+        let bytes = std::fs::read(&path).unwrap();
+        let file = File::open(&path).unwrap();
+        let identity = PathIdentity::of(&file.metadata().unwrap()).unwrap();
+        let input = StillInput {
+            bytes: &bytes,
+            file: Some((&file, identity)),
+        };
+        let drawn = match decoder.still_image(input, still, 64, later()) {
+            Ok(drawn) => drawn,
+            Err(FailureCode::CodecUnavailable) => {
+                eprintln!("skipped {name}: this ffmpeg reads no stills");
+                continue;
+            }
+            Err(failure) => panic!("{name}: {failure:?}"),
+        };
+        assert_eq!((drawn.width, drawn.height), (64, 48), "{name}");
+        assert_eq!((drawn.source_width, drawn.source_height), source, "{name}");
+        let centre = &drawn.rgba[(24 * 64 + 32) * 4..][..4];
+        assert!(
+            centre[0].abs_diff(230) <= 4
+                && centre[1].abs_diff(40) <= 4
+                && centre[2].abs_diff(20) <= 4,
+            "{name}: {centre:?}"
+        );
+        let whole = decoder
+            .still_image(input, still, 4096, later())
+            .unwrap_or_else(|failure| panic!("{name}: {failure:?}"));
+        assert_eq!((whole.width, whole.height), source, "never enlarged");
+        let bare = StillInput {
+            bytes: &bytes,
+            file: None,
+        };
+        assert_eq!(
+            decoder.still_image(bare, still, 64, later()).unwrap_err(),
+            FailureCode::CodecUnavailable
+        );
+    }
+}
+
 /// A real ffmpeg on a clip cut short fails as the stream's fault.
 #[test]
 fn real_ffmpeg_refuses_a_truncated_clip() {
