@@ -133,7 +133,10 @@ fn stale_toolchain_check_name_cache_key_or_commands_cannot_pass_the_drift_guard(
             "cargo test --locked --workspace --no-fail-fast",
             "cargo test --locked -p kettle-vt --no-fail-fast",
         ),
-        ("      - run: cargo test --locked --workspace --no-fail-fast\n", ""),
+        (
+            "      - run: cargo test --locked --workspace --no-fail-fast\n",
+            "",
+        ),
     ] {
         assert!(
             !msrv_job_matches(&original.replace(current, stale), "1.95"),
