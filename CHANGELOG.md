@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [5.2.0] — 2026-10-17
+
 ### Changed
 
 - After an update, launching Kettle opens a window in the new version instead
@@ -27,8 +29,63 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Keep a pane open, and Kettle running, when a program prints binary data,
+  floods bells or titles, or stops reading the replies to its queries.
+- Stop a rectangular selection dragged past a split's right edge from
+  aborting Kettle, and a runaway Lua callback from escaping its budget.
+- Render Mermaid sequence diagrams with a bare `%%` comment instead of hanging
+  the media worker until it is killed.
 - On X11, paste text of 1 MiB or more that `xclip` put on the clipboard.
   Kettle froze for about 16 seconds and pasted nothing.
+- Delete, erase and scroll only the cells and history a program asked for,
+  clear both halves of a cut wide character, and copy wrapped wide characters
+  from their own row.
+- Move the cursor correctly in origin mode and inside scroll margins.
+- Replace a reused Kitty image or named placement correctly, refuse cyclic
+  placement updates, and share Kitty upload limits across both screens.
+- Refuse OSC 8 link targets over 4 KiB cheaply, keep remote `user@host:/path`
+  text from linking to a local file, and open a clicked link only inside the
+  focused terminal.
+- Keep reverse regex searches responsive on long lines, finish searches that
+  need several passes, and keep F3 on its match after output moves it.
+- Hold typing behind a screenshot paste until its path arrives, so Enter
+  cannot run the command first; keep input-method commits with their pane.
+- Type Windows AltGr and dead-key characters correctly, keep a Shift-drag
+  selection after Shift is released, and count repeated clicks per pane.
+- Retry missing glyphs once image memory frees up, keep glyph caches bounded
+  in long sessions, and keep large scenes within the GPU's buffer limits.
+- Draw the block cursor's character in its own face and height, keep
+  confirmation buttons visible with `cell-width`, and scale transparent images
+  without dark fringes.
+- Finish an X11 tab tear-off when the window manager swallows the release,
+  move Search with a docked tab, and drop a tab where it is shown.
+- Restore later windows when the first one's command no longer exists, open
+  restored windows at the size their budget counted, and save sessions off
+  the UI thread.
+- Keep every broken-session backup, even several in one second.
+- Refuse negative window padding, save a rebind whole at the config size
+  limit, and keep the current config when a reload cannot read its folder.
+- Reload symlinked configs and profiles, and apply forced or scheduled themes
+  at startup and on reload.
+- Control API: `wait_for` matches text past the first page, `run_command`
+  refuses while the shell is busy, and long output keeps its exit status.
+- Time a Bash command line from its start, so long-command notifications
+  fire and `run_command` reports the real duration. The Bash integration
+  marked every simple command, which restarted the clock; it now marks each
+  line once, and Kettle counts one command per line even for snippets an
+  earlier version added to `~/.bashrc`.
+- `kettle exec`: reap the process tree when its input writer cannot start,
+  and keep control characters inside escapes with `--strip-ansi`.
+- Keep agent integrations that another Kettle of the same version installed,
+  and never wait for the install lock on the UI thread.
+- Hold GIF frames and SVG, Mermaid and Markdown renders to their limits,
+  play MP4 files with unusual display transforms, and refuse video durations
+  that overflow.
+- Bound decompressed Linux update archives, extension records included.
+- Install the binaries just built when `CARGO_TARGET_DIR` is set, and suggest
+  `kettle --write-default-config` on first run.
+- Write crash logs even when stderr is closed, and report a startup stall
+  when a hook blocks.
 - Tabs in a side tab bar (`tab-position = left` or `right`) reorder by
   dragging, as they do in a top or bottom bar.
 - A left or right tab bar with more tabs than fit the window's height now
@@ -62,6 +119,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   processes no longer runs out of file descriptors and reports "teardown was
   not verified" (exit 125) instead of a timeout. The cleanup warning now names
   the error that stopped it.
+
+### Security
+
+- Refuse a dropped or pasted file name that a shell could run as a command or
+  read as another file: control characters, non-Unicode bytes, or `%` and `!`
+  for `cmd`. A notice says why.
+- Refuse config lines that contain a NUL byte; `--check-config` reports them.
+- Keep session files owner-only even when another tool loosened them, and
+  create private files on macOS without inherited ACL grants.
+- Refuse Linux agent executables and npm files that another user may write
+  through an ACL.
+- Keep export cleanup inside its private staging folder, so another writer
+  cannot swap in a file for it to delete.
 
 ## [5.1.0] — 2026-10-15
 
