@@ -25,8 +25,12 @@ pub(crate) struct CardRecord {
     pub pane: u64,
     /// The shelf item it shows, at the generation it was registered for.
     pub item: (u64, u64),
-    /// The harness process that asked for it.
+    /// The harness process that asked for it, or for `kettle show --inline`
+    /// the pane's own child.
     pub owner: ProcessIdentity,
+    /// Whether a checked harness launch owns it: on Linux it lives only as
+    /// long as that launch's scope.
+    pub launched: bool,
 }
 
 /// Why a harness may not register a card now.
@@ -161,9 +165,44 @@ impl CardLedger {
     }
 }
 
+impl CardRecord {
+    /// Whether the card goes with its owner: the owner process is `gone`, or,
+    /// for a launched harness's card, the launch's scope `lapsed`. A
+    /// command-line card has no launch, so only its pane's child ending
+    /// retires it this way.
+    pub(crate) fn owner_retires(
+        &self,
+        gone: &[ProcessIdentity],
+        lapsed: &[ProcessIdentity],
+    ) -> bool {
+        gone.contains(&self.owner) || (self.launched && lapsed.contains(&self.owner))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A card goes with its owner process; a launched harness's card also
+    /// with its launch's scope, which a command-line card never has.
+    #[test]
+    fn a_command_line_card_outlives_any_launch_scope() {
+        let harness = card(1, 7);
+        let cli = CardRecord {
+            launched: false,
+            ..card(1, 8)
+        };
+        let none: &[ProcessIdentity] = &[];
+        assert!(!harness.owner_retires(none, none));
+        assert!(!cli.owner_retires(none, none));
+        // No launch scope for either owner: only the harness's card goes.
+        let lapsed = [harness.owner, cli.owner];
+        assert!(harness.owner_retires(none, &lapsed));
+        assert!(!cli.owner_retires(none, &lapsed));
+        // An owner gone takes its cards, launched or not.
+        assert!(cli.owner_retires(&[cli.owner], none));
+        assert!(harness.owner_retires(&[harness.owner], none));
+    }
 
     fn owner(pid: u32) -> ProcessIdentity {
         ProcessIdentity::new_for_tests(pid, 1)
@@ -174,6 +213,7 @@ mod tests {
             pane,
             item: (1, 0),
             owner: owner(owner_pid),
+            launched: true,
         }
     }
 

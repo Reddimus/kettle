@@ -33,7 +33,7 @@ impl PaintedCard {
 pub use card_scene::duration_label;
 pub use inline_cards::{
     CardHarness, CardPlacement, CardPoster, CardRefusal, CardSpec, InlineCards, MAX_CARD_COLUMNS,
-    MAX_PANE_CARDS,
+    MAX_PANE_CARDS, cli_card_text,
 };
 mod color;
 mod cursor_patch;

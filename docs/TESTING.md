@@ -739,6 +739,9 @@ Keep failures and skipped areas with the evidence.
   receipts. Check pending, ready, unavailable, compact, and hover states.
 - [ ] On Linux, check launch-scoped cards on the actual GNOME Wayland desktop.
   The simulated agent fixture does not prove official-client acceptance.
+- [ ] Run `kettle show --inline` on a PNG, an SVG and a Mermaid file and click
+  each card. Then pipe it (`| cat`), run it as a background job and in a pane
+  too narrow for a card: each must put the item on the shelf and say why.
 - [ ] Play and seek video through the shipped worker. Listen for audio, check
   pause/resume, output-device changes, and recovery after a device disappears.
 

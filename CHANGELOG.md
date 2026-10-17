@@ -6,6 +6,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Added
+
+- `kettle show --inline` prints a card under the command, for any program
+  in a Kettle pane: an image, SVG, Mermaid or Markdown file, a video, or
+  bytes on stdin, which opens in the viewer when clicked. It needs the
+  command to write straight to its pane's own terminal from the foreground;
+  through a pipe, a file or tmux the item goes to the shelf alone and a note
+  says why.
+
 ### Fixed
 
 - `list_panes` reports a Markdown file's diagram gallery as `markdown`, the

@@ -257,6 +257,37 @@ pub struct ShowAdmission {
     /// The harness an inline card would belong to, when the request asks
     /// for one and its asker is one Kettle trusts to print it.
     pub harness: Option<ProcessIdentity>,
+    /// For `kettle show --inline`: where the sender, Kettle's own command
+    /// line, writes and which process group it runs in, read from the kernel
+    /// here. The App compares them with the pane's own terminal.
+    pub terminal: Option<CliTerminal>,
+}
+
+/// Where a `kettle show --inline` command writes, as the kernel says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CliTerminal {
+    pub output: kettle_ctl::process::StandardOutput,
+    pub group: u32,
+}
+
+impl CliTerminal {
+    /// `sender`'s, when it runs Kettle's own executable and both reads
+    /// succeed for the identity admitted.
+    fn read(sender: &SenderIdentity) -> Option<Self> {
+        let own = own_executable()?;
+        if sender.executable.as_deref() != Some(own) {
+            return None;
+        }
+        Self::of(sender.process)
+    }
+
+    /// `process`'s now, while it is still that process.
+    pub(crate) fn of(process: ProcessIdentity) -> Option<Self> {
+        Some(Self {
+            output: kettle_ctl::process::standard_output(process).ok()?,
+            group: kettle_ctl::process::process_group(process).ok()?,
+        })
+    }
 }
 
 /// macOS vendor-signature admission through Kettle's own MCP executable.
@@ -274,6 +305,8 @@ fn card_harness(
     let requirement = match target {
         kettle_ctl::show::InlineTarget::ClaudeHook => kettle_ctl::signing::Requirement::CLAUDE_CODE,
         kettle_ctl::show::InlineTarget::CodexHook => kettle_ctl::signing::Requirement::CODEX,
+        // A command-line card has no harness: its terminal decides.
+        kettle_ctl::show::InlineTarget::Cli => return None,
     };
     kettle_ctl::signing::signature(asker, requirement)
         .ok()
@@ -499,10 +532,15 @@ fn prepare(
                 .inline
                 .zip(sender.as_ref())
                 .and_then(|(target, sender)| card_harness(target, sender));
+            let terminal = (show.inline == Some(kettle_ctl::show::InlineTarget::Cli))
+                .then_some(sender.as_ref())
+                .flatten()
+                .and_then(CliTerminal::read);
             request.show = Some(Box::new(ShowAdmission {
                 request: show,
                 sender,
                 harness,
+                terminal,
             }));
         }
         Method::AgentLaunch | Method::CardPickup => {
@@ -1903,18 +1941,23 @@ mod tests {
             asker: program(sleep),
         };
         use kettle_ctl::show::InlineTarget;
-        let found: Vec<_> = [InlineTarget::ClaudeHook, InlineTarget::CodexHook]
-            .into_iter()
-            .flat_map(|target| {
-                [
-                    super::card_harness(target, &asked_for_itself),
-                    super::card_harness(target, &through_kettle),
-                ]
-            })
-            .collect();
+        // A command-line card never has a harness, however it was run.
+        let found: Vec<_> = [
+            InlineTarget::ClaudeHook,
+            InlineTarget::CodexHook,
+            InlineTarget::Cli,
+        ]
+        .into_iter()
+        .flat_map(|target| {
+            [
+                super::card_harness(target, &asked_for_itself),
+                super::card_harness(target, &through_kettle),
+            ]
+        })
+        .collect();
         let _ = sleeper.kill();
         let _ = sleeper.wait();
-        assert_eq!(found, [None; 4], "sleep is Apple's, not a harness's");
+        assert_eq!(found, [None; 6], "sleep is Apple's, not a harness's");
     }
 
     /// Kettle's own command line carries another program's request, so the

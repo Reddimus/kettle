@@ -2442,23 +2442,35 @@ fn media_item_detail(
 }
 
 /// Register an inline card for a published item and build the message its
-/// harness prints. `None` when the harness is over its limits, the pane
-/// cannot hold a card, no nonce could be had, or the message would not
-/// print whole: the item stays on the shelf either way.
+/// harness prints, or `kettle show --inline` prints itself. Refused when the
+/// owner is over its limits, the pane cannot hold a card, no nonce could be
+/// had, or a harness's message would not print whole: the item stays on the
+/// shelf either way.
 #[allow(clippy::too_many_arguments)]
 fn register_card(
     cards: &mut crate::media::CardLedger,
-    (pane_id, pane_cards, grid): (u64, &mut kettle_render::InlineCards, (usize, usize)),
+    (pane_id, pane_cards, grid, column): (
+        u64,
+        &mut kettle_render::InlineCards,
+        (usize, usize),
+        usize,
+    ),
     cell: (f32, f32),
     item: (u64, u64),
     (kind, video): (kettle_media::MediaKind, Option<&kettle_media::VideoInfo>),
     image: &kettle_core::ImageData,
     inline: crate::media::InlineDraft,
     now: std::time::Instant,
-) -> Option<kettle_ctl::show::InlineDelivery> {
-    cards.admit(inline.owner, now).ok()?;
-    let size = crate::media::card_size(inline.harness, grid, cell, (image.width, image.height))?;
-    let nonce = cards.mint(|pool| getrandom::fill(pool).is_ok())?;
+) -> Result<kettle_ctl::show::InlineDelivery, kettle_ctl::show::InlineRefusal> {
+    use kettle_ctl::show::InlineRefusal;
+    cards
+        .admit(inline.owner, now)
+        .map_err(|_| InlineRefusal::Limit)?;
+    let size = crate::media::card_size(inline.harness, grid, cell, (image.width, image.height))
+        .ok_or(InlineRefusal::TooSmall)?;
+    let nonce = cards
+        .mint(|pool| getrandom::fill(pool).is_ok())
+        .ok_or(InlineRefusal::Limit)?;
     let room = grid.0.saturating_sub(inline.harness.left() + 1);
     let caption = crate::media::card_caption(
         inline.name.as_deref(),
@@ -2469,12 +2481,20 @@ fn register_card(
         video.map(|video| video.duration_ms),
         room,
     );
+    let cli = inline.harness == kettle_render::CardHarness::Cli;
+    let message = if cli {
+        kettle_render::cli_card_text(nonce, size, &caption, column)
+    } else {
+        crate::media::card_message(nonce, size, &caption)
+    };
     let delivery = kettle_ctl::show::InlineDelivery {
         permit: None,
-        message: crate::media::card_message(nonce, size, &caption)?,
+        message: message.ok_or(InlineRefusal::TooSmall)?,
     };
-    if !delivery.fits() {
-        return None;
+    // Only a harness turns a long message into a stub; the command line
+    // prints whatever the renderer's largest card takes.
+    if !cli && !delivery.fits() {
+        return Err(InlineRefusal::TooSmall);
     }
     pane_cards
         .insert(
@@ -2488,17 +2508,23 @@ fn register_card(
                 duration_ms: video.map(|video| video.duration_ms),
             },
         )
-        .ok()?;
+        .map_err(|refusal| match refusal {
+            kettle_render::CardRefusal::BadSize => InlineRefusal::TooSmall,
+            kettle_render::CardRefusal::Full | kettle_render::CardRefusal::Duplicate => {
+                InlineRefusal::Limit
+            }
+        })?;
     cards.record(
         nonce,
         crate::media::CardRecord {
             pane: pane_id,
             item,
             owner: inline.owner,
+            launched: !cli,
         },
         now,
     );
-    Some(delivery)
+    Ok(delivery)
 }
 
 /// The window holding `pane`: `ws` or one of `windows`.

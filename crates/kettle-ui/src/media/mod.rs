@@ -164,20 +164,29 @@ pub(crate) struct Draft {
     pub provenance: Provenance,
     /// The inline card to register once the item is on the shelf.
     pub inline: Option<InlineDraft>,
+    /// Why `kettle show --inline` gets no card, when that was decided at
+    /// admission.
+    pub inline_refused: Option<kettle_ctl::show::InlineRefusal>,
     /// Diagrams copied or selected together, whose first the push renders:
     /// its item keeps them all as its gallery.
     pub gallery: Option<std::sync::Arc<Gallery>>,
 }
 
-/// An inline card a verified harness may have: who owns it and, when the
-/// media came from a file, the name its caption shows.
+/// An inline card a verified harness, or `kettle show --inline` in its
+/// pane's foreground, may have: who owns it and, when the media came from a
+/// file, the name its caption shows.
 pub(crate) struct InlineDraft {
     #[cfg(target_os = "linux")]
     pub launch: Option<kettle_ctl::agent_launch::LaunchGrant>,
+    /// The harness process, or for `kettle show --inline` the pane's own
+    /// child, so a script's cards outlive the script.
     pub owner: kettle_ctl::process::ProcessIdentity,
     /// The harness that prints the card, which sets its place and size.
     pub harness: kettle_render::CardHarness,
     pub name: Option<String>,
+    /// For `kettle show --inline`: the command that prints the card, whose
+    /// terminal and foreground are checked again once the render is done.
+    pub printer: Option<kettle_ctl::process::ProcessIdentity>,
 }
 
 /// One admitted `show`, from admission until it is answered.
@@ -548,6 +557,7 @@ mod tests {
                 title: "t".into(),
                 provenance: Provenance::Verified,
                 inline: None,
+                inline_refused: None,
                 gallery: None,
             },
             ItemSource::sample(b"<svg/>").spec,

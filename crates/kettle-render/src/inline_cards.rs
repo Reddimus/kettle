@@ -18,12 +18,15 @@ pub enum CardHarness {
     ClaudeHook,
     /// Codex's hook message under the tool call (Codex CLI 0.162.0).
     CodexHook,
+    /// `kettle show --inline`, which prints the whole card itself, label
+    /// included, straight to the pane's terminal.
+    Cli,
 }
 
 impl CardHarness {
     /// The label line above a card's rows as the harness prints it, from
     /// the line's first character after any indent.
-    fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             // Claude Code's `⎿` with its spacing, then the hook's label.
             Self::ClaudeHook => {
@@ -32,6 +35,9 @@ impl CardHarness {
             // Codex's hook line; the message's first line, which Kettle
             // leaves empty, would follow it.
             Self::CodexHook => "\u{21b3} Hook \u{00b7}",
+            // Kettle's own, never translated: recognition matches it exactly,
+            // whatever language the window that registered it speaks.
+            Self::Cli => "kettle show",
         }
     }
 
@@ -39,7 +45,8 @@ impl CardHarness {
     pub fn left(self) -> usize {
         match self {
             Self::ClaudeHook => 5,
-            Self::CodexHook => 4,
+            // Wide enough for the provenance tab in the gutter.
+            Self::CodexHook | Self::Cli => 4,
         }
     }
 
@@ -48,6 +55,7 @@ impl CardHarness {
         match self {
             Self::ClaudeHook => "Claude",
             Self::CodexHook => "Codex",
+            Self::Cli => "CLI",
         }
     }
 
@@ -59,8 +67,53 @@ impl CardHarness {
         match self {
             Self::ClaudeHook => 2 + self.label().chars().count(),
             Self::CodexHook => self.label().chars().count() + 1,
+            // Printed at the card's own column.
+            Self::Cli => self.left() + self.label().chars().count(),
         }
     }
+}
+
+/// The whole card `kettle show --inline` prints to its pane's terminal: the
+/// label line, `size` (rows, columns) of placeholder cells and the caption,
+/// each at the card's column and ended with CR LF, so it lands where
+/// recognition looks for it whether or not the terminal turns a line feed
+/// into both. `column` is where the pane's cursor stands: past the first,
+/// the card starts on a line of its own, after what is already printed on
+/// that one (`printf 'chart: '; kettle show --inline chart.png`). Built here,
+/// beside recognition, so the two cannot drift. `None` for a size no marker
+/// can encode.
+pub fn cli_card_text(
+    nonce: InlineNonce,
+    size: (u8, u8),
+    caption: &str,
+    column: usize,
+) -> Option<String> {
+    let harness = CardHarness::Cli;
+    let indent = " ".repeat(harness.left());
+    let (rows, columns) = size;
+    let mut text = String::with_capacity(
+        (usize::from(rows) + 2) * (indent.len() + 2)
+            + usize::from(rows) * usize::from(columns) * 20
+            + harness.label().len()
+            + caption.len(),
+    );
+    if column > 0 {
+        text.push_str("\r\n");
+    }
+    text.push_str(&indent);
+    text.push_str(harness.label());
+    text.push_str("\r\n");
+    for row in 0..rows {
+        text.push_str(&indent);
+        for column in 0..columns {
+            text.push_str(&InlineMarker { row, column, nonce }.encode()?);
+        }
+        text.push_str("\r\n");
+    }
+    text.push_str(&indent);
+    text.push_str(caption);
+    text.push_str("\r\n");
+    Some(text)
 }
 
 /// A card's poster, held weakly. Its pixels belong to the shelf item, so a
@@ -1102,6 +1155,62 @@ pub(crate) mod tests {
         assert_eq!(frame.blocks.len(), 1);
         assert_eq!((frame.blocks[0].nonce, frame.blocks[0].line), (nonce, 1));
         assert_eq!(frame.accepted_cells.len(), 36);
+    }
+
+    /// `text` written to a fresh 80 by 8 terminal, as a command's output is.
+    fn printed(text: &str) -> Term<EventProxy> {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut term = Term::new(
+            Config::default(),
+            &Size,
+            EventProxy::new(tx, std::sync::Arc::new(|| {})),
+        );
+        let mut processor: Processor = Processor::new();
+        processor.advance(&mut term, text.as_bytes());
+        term
+    }
+
+    /// The card `kettle show --inline` prints is recognized as the command
+    /// line's, under its own label at its own column, exactly as written: so
+    /// printer and recognizer cannot drift. Any other label is not it.
+    #[test]
+    fn a_command_line_card_is_recognized_as_it_prints() {
+        let nonce = InlineNonce::new([9, 8, 7, 6, 5, 4]).unwrap();
+        let caption = "diagram.png - raster 640x480";
+        let text = cli_card_text(nonce, (3, 12), caption, 0).unwrap();
+        // Every line ends with CR LF, the last one too, so the prompt that
+        // follows starts on a line of its own.
+        assert!(text.ends_with("\r\n"));
+        assert_eq!(text.matches('\n').count(), text.matches("\r\n").count());
+        let mut cards = InlineCards::default();
+        cards.register_for(nonce, 3, 12, CardHarness::Cli);
+        let mut snap = PaneSnapshot::default();
+        snap.capture_with_card_marks(&printed(&text), true);
+        let frame = cards.recognize(&snap);
+        assert_eq!(frame.blocks.len(), 1);
+        let block = &frame.blocks[0];
+        assert_eq!(
+            (block.harness, block.line, block.column),
+            (CardHarness::Cli, 1, CardHarness::Cli.left())
+        );
+        assert_eq!(frame.accepted_cells.len(), 36);
+        // A label Kettle never prints, a translated one included, is no
+        // command-line card; neither is a harness's card printed at its column.
+        for label in ["kettle muestra", "kettle show!", "\u{21b3} Hook \u{00b7}"] {
+            let forged = text.replacen(CardHarness::Cli.label(), label, 1);
+            snap.capture_with_card_marks(&printed(&forged), true);
+            assert!(cards.recognize(&snap).blocks.is_empty(), "{label}");
+        }
+        // After a line left unfinished, the card starts on the next one and
+        // is recognized there; the unfinished line is left as it was.
+        let partial = cli_card_text(nonce, (3, 12), caption, 7).unwrap();
+        assert_eq!(partial.strip_prefix("\r\n"), Some(text.as_str()));
+        snap.capture_with_card_marks(&printed(&format!("chart: {partial}")), true);
+        let frame = cards.recognize(&snap);
+        assert_eq!(frame.blocks.len(), 1);
+        assert_eq!((frame.blocks[0].line, frame.accepted_cells.len()), (2, 36));
+        // The largest card the renderer holds still has its text.
+        assert!(cli_card_text(nonce, (MAX_CARD_ROWS, MAX_CARD_COLUMNS), caption, 0).is_some());
     }
 
     #[test]

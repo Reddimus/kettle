@@ -924,6 +924,34 @@ because Codex lets a hook call only an enabled tool. A call carrying the
 model's `_meta.callId` is refused, as is one carrying Claude Code's id. The
 model's result says only that the media shows below the call.
 
+**Inline cards from your own tools.** Any program in a Kettle pane can print
+a card under its output: `kettle show --inline plot.svg` (an image, SVG,
+Mermaid or Markdown file, a video, or bytes on stdin) puts the item on the
+pane's shelf and prints a card right there, which opens the item when
+clicked. Kettle builds the whole card and the command prints it: a
+`kettle show` line, the rows of placeholder cells four columns in, and the
+caption. A card is printed only when the command runs in the pane, writes
+straight to the pane's own terminal (its standard output is the pane's
+terminal device, as the kernel says: not a pipe, a file, `script` or `tmux`),
+runs in the pane's foreground, and no full-screen program owns the screen.
+Kettle checks this when the request arrives and again when the render is
+done. Otherwise the item goes to the shelf alone, the result says why in
+`inline_refused` (`unverified`, `not_terminal`, `background`,
+`alternate_screen`, `too_small`, `limit` or `unsupported`), and the command
+notes it on stderr; it still exits 0. A command-line card belongs to the
+pane's own child, not to the script that printed it, so a script's cards
+outlive the script: a pane has at most 32 of them and registers at most four
+a second, and they retire when the pane closes or the item leaves the shelf.
+Against a Kettle older than the command, the item goes to the shelf alone
+and the command says so. `kettle ctl` never asks for a card, and an agent's
+`kettle_show` cards stay its harness's. Windows has no cards.
+
+```sh
+kettle show --inline plot.png
+dot -Tsvg deps.dot | kettle show --inline -      # Graphviz's own layout, as SVG
+python3 plot.py --svg | kettle show --inline -   # any tool that writes SVG
+```
+
 ### Reading video: `kettle_video_frames` and `kettle video-frames`
 
 Showing media to the user and reading it yourself are separate. The full
