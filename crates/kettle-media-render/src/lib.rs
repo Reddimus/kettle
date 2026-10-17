@@ -5,8 +5,9 @@
 //! nothing here trusts those to be the only bound, so every size is checked
 //! before the work it would cost.
 //!
-//! Raster, SVG, Mermaid and Markdown diagram gallery jobs are rendered, and
-//! Auto jobs, which are classified by their bytes as one of those. A stills
+//! Raster, SVG, Mermaid, Markdown diagram gallery and PDF page jobs are
+//! rendered, and Auto jobs, which are classified by their bytes as one of
+//! those. A stills
 //! job's animation (GIF, APNG, WebP) is decoded and laid out here; a video's
 //! frames come from a decoder the worker holds, which this lays out
 //! ([`stills`]). A video's cached thumbnail renders as a raster once it is
@@ -31,6 +32,8 @@ pub mod fuzzing;
 mod markdown;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod mermaid;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod pdf;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod raster;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -66,7 +69,21 @@ pub fn prepare() {
     svg::prepare();
 }
 
-/// Render one job.
+/// What the worker lends a render beyond its job.
+#[derive(Clone, Copy, Default)]
+pub struct Means<'a> {
+    /// Takes a video container's stills; without one they are
+    /// `BackendUnavailable`. The renderer starts no process.
+    pub decoder: Option<&'a dyn kettle_media::video::VideoDecoder>,
+    /// Whether this process is confined to what the job needs. A PDF, which
+    /// a parser younger than the rest reads in this process, renders only
+    /// then; unconfined it is `SandboxUnavailable`.
+    pub confined: bool,
+}
+
+/// Render one job. This and [`render_with_kind`] are for tests and the
+/// fuzzer, which read no user's file: they render as a confined worker
+/// without a video decoder would.
 pub fn render(job: &Job) -> Result<Rendered, FailureCode> {
     render_with_kind(job, |_| {}).map(|(_, rendered)| rendered)
 }
@@ -79,23 +96,28 @@ pub fn render_with_kind(
     job: &Job,
     on_kind: impl FnMut(MediaKind),
 ) -> Result<(MediaKind, Rendered), FailureCode> {
-    render_with_decoder(job, on_kind, None)
+    render_with(
+        job,
+        on_kind,
+        Means {
+            decoder: None,
+            confined: true,
+        },
+    )
 }
 
-/// Render one job as [`render_with_kind`] does, with `decoder` for a video
-/// container's stills; without one they are `BackendUnavailable`. The
-/// renderer starts no process: the worker supplies the decoder.
-pub fn render_with_decoder(
+/// Render one job as [`render_with_kind`] does, with what the worker lends.
+pub fn render_with(
     job: &Job,
     mut on_kind: impl FnMut(MediaKind),
-    decoder: Option<&dyn kettle_media::video::VideoDecoder>,
+    means: Means<'_>,
 ) -> Result<(MediaKind, Rendered), FailureCode> {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         use kettle_media::JobKind;
         job.target.validate().map_err(|_| FailureCode::BadParams)?;
         match job.kind {
-            JobKind::Auto => auto::render(job, &mut on_kind, decoder),
+            JobKind::Auto => auto::render(job, &mut on_kind, means),
             JobKind::Raster => {
                 on_kind(MediaKind::Raster);
                 raster::render(job).map(|rendered| (MediaKind::Raster, rendered))
@@ -112,8 +134,14 @@ pub fn render_with_decoder(
                 on_kind(MediaKind::Markdown);
                 markdown::render(job, index).map(|rendered| (MediaKind::Markdown, rendered))
             }
-            JobKind::VideoStills(stills) => stills::render(job, &stills, &mut on_kind, decoder)
-                .map(|rendered| (MediaKind::Video, rendered)),
+            JobKind::VideoStills(stills) => {
+                stills::render(job, &stills, &mut on_kind, means.decoder)
+                    .map(|rendered| (MediaKind::Video, rendered))
+            }
+            JobKind::PdfPage { index } => {
+                on_kind(MediaKind::Pdf);
+                pdf::render(job, index, means.confined).map(|rendered| (MediaKind::Pdf, rendered))
+            }
             JobKind::VideoProbe => Err(FailureCode::UnsupportedMedia),
             JobKind::CachedThumbnail(of) => {
                 on_kind(MediaKind::Raster);
@@ -123,7 +151,7 @@ pub fn render_with_decoder(
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        let _ = (job, &mut on_kind, decoder);
+        let _ = (job, &mut on_kind, means);
         Err(FailureCode::UnsupportedPlatform)
     }
 }
@@ -169,6 +197,7 @@ mod tests {
             ("svg/sanitize", include_str!("svg/sanitize.rs")),
             ("svg/structure", include_str!("svg/structure.rs")),
             ("raster", include_str!("raster.rs")),
+            ("pdf", include_str!("pdf.rs")),
         ] {
             let code = code_only(&production_source(source));
             for forbidden in [

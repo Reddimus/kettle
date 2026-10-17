@@ -2594,6 +2594,7 @@ impl App {
             kettle_media::MediaKind::Mermaid => kettle_i18n::Text::MediaViewerKindMermaid,
             kettle_media::MediaKind::Video => kettle_i18n::Text::MediaViewerKindVideo,
             kettle_media::MediaKind::Markdown => kettle_i18n::Text::MediaViewerKindMarkdown,
+            kettle_media::MediaKind::Pdf => kettle_i18n::Text::MediaViewerKindPdf,
         });
         let sender = match &item.provenance {
             crate::media::Provenance::Verified => kettle_render::MediaLaneSender {

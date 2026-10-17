@@ -667,9 +667,9 @@ reaches the terminal, and menus and dialogs open over it without closing it.
 The command palette lists it as "Open media shelf". On macOS its default
 chord is `Ctrl+Shift+Cmd+I`; elsewhere it has no default binding.
 `preview_link` (`preview-link`) is quick select for previews: it labels the
-image (PNG, JPEG, WebP, BMP, GIF), SVG, Mermaid (`.mmd`, `.mermaid`),
-Markdown (`.md`, `.markdown`, whose Mermaid diagrams are a gallery) and video
-files the focused pane names, by their extension, as a whole path (not on
+image (PNG, JPEG, WebP, BMP, GIF, TIFF), SVG, Mermaid (`.mmd`, `.mermaid`),
+Markdown (`.md`, `.markdown`, whose Mermaid diagrams are a gallery), PDF and
+video files the focused pane names, by their extension, as a whole path (not on
 Windows, where path hints are never resolved) or a local `file://` link.
 Type a label to render that file in the configured preview presentation,
 which opens when it is ready (see **Media** above). The default viewer owns
@@ -685,7 +685,8 @@ offers the same as "Preview in Kettle" on a link to such a file. The command
 palette lists it as "Preview a file in Kettle"; it has no default binding.
 `preview_clipboard_path` (`preview-clipboard-path`) previews the file the
 clipboard names using the configured preview presentation: the first image,
-SVG, Mermaid or Markdown file a file manager copied, or else one copied path
+SVG, Mermaid, Markdown, PDF or video file a file manager copied, or else one
+copied path
 (resolved from the pane's folder; quotes and a shell's backslash escapes
 around it are undone) or `file://` link. A copied path or link meets the
 focused pane's gate, as one in its output would; a file a file manager copied

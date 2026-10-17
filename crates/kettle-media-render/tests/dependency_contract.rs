@@ -11,6 +11,11 @@ const FAMILY: &[(&str, &str)] = &[
     // gallery extraction shares rather than locking a second copy.
     ("pulldown-cmark", "0.13.4"),
     ("roughr-merman", "0.12.3"),
+    // The PDF renderer, its interpreter and its parser, which is the patched
+    // local copy: one version of each.
+    ("hayro", "0.8.0"),
+    ("hayro-interpret", "0.8.0"),
+    ("hayro-syntax", "0.8.0"),
 ];
 
 fn contract(manifest: &toml::Value, lock: &toml::Value) -> Result<(), String> {
@@ -54,6 +59,18 @@ fn contract(manifest: &toml::Value, lock: &toml::Value) -> Result<(), String> {
     if features != ["all-diagrams", "layout-cytoscape", "svg"] {
         return Err("Merman must enable only all-diagrams, layout-cytoscape and svg".into());
     }
+    // hayro embeds the fonts and CMaps the PDF standard requires, so nothing
+    // is read from the system; its SIMD image scaler stays off.
+    let mut features: Vec<_> = dependencies["hayro"]["features"]
+        .as_array()
+        .ok_or("missing hayro features")?
+        .iter()
+        .map(|feature| feature.as_str().ok_or("non-string hayro feature"))
+        .collect::<Result<_, _>>()?;
+    features.sort_unstable();
+    if features != ["embed-cmaps", "embed-fonts"] {
+        return Err("hayro must enable only embed-cmaps and embed-fonts".into());
+    }
     Ok(())
 }
 
@@ -75,10 +92,10 @@ fn fixture() -> (toml::Value, toml::Value) {
             .iter()
             .map(|&(name, version)| format!(
                 "{name} = {{ version = \"={version}\", default-features = false{} }}\n",
-                if name == "merman" {
-                    ", features = [\"svg\", \"all-diagrams\", \"layout-cytoscape\"]"
-                } else {
-                    ""
+                match name {
+                    "merman" => ", features = [\"svg\", \"all-diagrams\", \"layout-cytoscape\"]",
+                    "hayro" => ", features = [\"embed-fonts\", \"embed-cmaps\"]",
+                    _ => "",
                 }
             ))
             .collect::<String>()
@@ -119,7 +136,7 @@ fn unlocked_duplicate_or_missing_family_packages_fail_the_drift_guard() {
     assert!(
         contract(&manifest, &missing)
             .unwrap_err()
-            .contains("roughr-merman")
+            .contains("hayro-syntax")
     );
 }
 
@@ -132,6 +149,12 @@ fn dependencies(value: &mut toml::Value) -> &mut toml::map::Map<String, toml::Va
 #[test]
 fn loose_pins_default_features_and_extra_adapters_fail_the_drift_guard() {
     let (manifest, lock) = fixture();
+    let mut simd = manifest.clone();
+    dependencies(&mut simd).get_mut("hayro").unwrap()["features"]
+        .as_array_mut()
+        .unwrap()
+        .push("simd".into());
+    assert!(contract(&simd, &lock).unwrap_err().contains("hayro"));
     let mut loose = manifest.clone();
     dependencies(&mut loose).get_mut("dugong").unwrap()["version"] = "0.8".into();
     assert!(contract(&loose, &lock).unwrap_err().contains("dugong"));

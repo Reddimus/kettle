@@ -78,8 +78,8 @@ trusted decoder's programs and the trees they load from
 (`Decoders::sandbox_needs`, each program's package prefix from
 `tools::library_tree`); the watchdog thread confines itself to nothing when
 it starts and reports whether it did, and a job counts as confined only if
-it did. A video job whose worker could not confine every thread gets a
-decoder that answers `SandboxUnavailable`; other kinds still render. It
+it did. A video or PDF job in a worker that could not confine every thread
+is refused with `SandboxUnavailable`; other kinds still render. It
 renders through `kettle-media-render`: the source is read once
 through one held descriptor, the format comes from the content, the decoded
 size is checked before any pixel is decoded, and the image is fitted into the
@@ -92,9 +92,12 @@ index preserved and bounded metadata. The worker does no host font discovery
 and refuses embedded SVG/color/bitmap glyph formats. Actual shaped glyphs
 produce fallback and missing-script warnings; databases are isolated across
 jobs. Raster images, SVG and Mermaid diagrams are rendered, Markdown
-diagram galleries too, and so is an Auto job: one held snapshot of a file,
-classified by its bytes as raster, SVG, Markdown or Mermaid and rendered as
-that, with a typed reply that says which. A gallery is the Mermaid fences
+diagram galleries and PDF pages too, and so is an Auto job: one held snapshot
+of a file, classified by its bytes as raster, PDF, SVG, Markdown or Mermaid and
+rendered as that, with a typed reply that says which. A PDF page is drawn by
+hayro (`pdf.rs`), whose parser is the patched local copy, on white and placed
+as an SVG is; the worker renders one only when it confined itself, since hayro
+parses the document in-process and is younger than the rest. A gallery is the Mermaid fences
 of one CommonMark document (pulldown-cmark, the version merman-render
 already locks), at most 32 of at most 64 KiB each in at most 1 MiB; its
 reply carries every page, the document as read and its digest beside the
@@ -1160,7 +1163,7 @@ gallery's does. More than 32 fences are refused (`TooMany`), never cut
 short.
 
 The user can pull a file into a lane too: `preview_link` runs quick select
-with `hint_previews` keeping only the image, SVG, Mermaid and Markdown files
+with `hint_previews` keeping only the image, SVG, Mermaid, Markdown, PDF and video files
 a pane names (a whole path, off Windows, or a local `file://` link), and the
 right-click menu adds a "Preview in Kettle" row (`UrlHow::Preview`) on a
 link to one. Both reach `preview_pane_link`, which passes the pane's

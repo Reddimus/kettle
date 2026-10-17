@@ -7,6 +7,7 @@
     { "name": "session", "crates": ["kettle-media"], "nightly": 600 },
     { "name": "sniff", "crates": ["kettle-media"], "nightly": 600 },
     { "name": "render", "crates": ["kettle-media-render"], "nightly": 1200, "sunday": 3600 },
+    { "name": "pdf", "crates": ["kettle-media-render"], "nightly": 1200, "sunday": 3600 },
     { "name": "ffprobe", "crates": ["kettle-media-native"], "nightly": 600 },
     { "name": "ctl", "crates": ["kettle-ctl"], "nightly": 600 },
     { "name": "update", "crates": ["kettle-update"], "nightly": 600 },

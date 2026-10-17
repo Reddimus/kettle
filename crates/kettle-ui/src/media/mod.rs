@@ -601,6 +601,7 @@ mod tests {
                 uncovered_scripts: Vec::new(),
                 warnings: Vec::new(),
                 video: None,
+                page: None,
             },
         }
     }

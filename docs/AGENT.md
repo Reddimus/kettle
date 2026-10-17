@@ -317,7 +317,7 @@ Params take exactly one source, plus optional `title` (at most 4 KiB) and
 | Source | Rendered as |
 |---|---|
 | `svg`: SVG text, at most 2 MiB | SVG |
-| `image_b64`: standard base64 bytes, at most 32 MiB decoded | whatever the media worker finds the bytes to be: raster, SVG, a Markdown gallery, or text that parses as a Mermaid diagram |
+| `image_b64`: standard base64 bytes, at most 32 MiB decoded | whatever the media worker finds the bytes to be: raster, SVG, PDF, a Markdown gallery, or text that parses as a Mermaid diagram |
 | `mermaid`: Mermaid text, at most 64 KiB | Mermaid |
 | `path` + `dev` + `ino`: an absolute path (at most 4 KiB) and the device and inode the caller saw | whatever the worker finds in the file it opens, Mermaid with `kind: "mermaid"`, or with `markdown_index` that page of its Markdown gallery; another file at that path is refused |
 
@@ -437,8 +437,8 @@ on the selected reply, with what the agent's UI added and wrapped taken back
 off. A control client cannot trigger either: they read the clipboard or a
 selection only on the user's own key press or click, and a menu a control
 client opens does not look at them to offer its rows.
-The user can also preview an image, SVG, Mermaid, Markdown or video file a pane
-names without any agent (a Markdown file's Mermaid diagrams are a gallery,
+The user can also preview an image, SVG, Mermaid, Markdown, PDF or video file a
+pane names without any agent (a Markdown file's Mermaid diagrams are a gallery,
 paged with `‹` and `›`): `preview_link` (the palette's "Preview
 a file in Kettle") labels such files in the focused pane as quick select does, and the
 right-click menu offers "Preview in Kettle" on a link to one. The file
@@ -703,7 +703,7 @@ events it expects.
 | `resize_window` | full | request a live window client-area resize (`window`, `width`, `height`) and let the normal renderer/PTY resize path process it |
 | `perform_action` | full | dispatch a named Kettle app action (`action`, for example `start_search`, `command_palette`, `open_ssh`, `hint_mode`, `edit_tab_title`). The control-only `focus_window` action shows and focuses its target without toggling visibility. Use this for app chrome that is not pane input; `send_keys` intentionally writes terminal keystrokes to the focused pane |
 | `run_command` | full | run `command` in a pane, reply with `{exit_code, duration_ms, output, output_truncated}`; capture is capped at the newest 10,000 retained lines and then 512 KiB, and `output_truncated` is true if either cap drops output |
-| `show` | display | put an image, SVG, Mermaid diagram, Markdown diagram gallery or video poster on the shelf of the caller's pane, reply with `{pane, verified, window, item, kind, width, height, warnings}` once it is there (see [Showing media](#showing-media)) |
+| `show` | display | put an image, SVG, Mermaid diagram, Markdown diagram gallery, PDF page or video poster on the shelf of the caller's pane, reply with `{pane, verified, window, item, kind, width, height, warnings}` once it is there (see [Showing media](#showing-media)) |
 
 **Multi-window**: a kettle process can host several OS windows.
 `list_tabs` / `list_panes` enumerate them all, ordered by window seq;
@@ -833,8 +833,8 @@ the screen, types, runs commands or drives Kettle. It needs agent previews,
 never full control. The full server (`kettle mcp`) offers the same
 `kettle_show` among its tools; it needs only what the display server needs.
 Its arguments are exactly one source, `mermaid` (Mermaid source, at most
-64 KiB of UTF-8) or an absolute `path` (an image, SVG, Mermaid or Markdown
-file, at most 4 KiB), and an optional `title` (at most 4 KiB) and `key` (at most 256
+64 KiB of UTF-8) or an absolute `path` (an image, SVG, Mermaid, Markdown,
+PDF or video file, at most 4 KiB), and an optional `title` (at most 4 KiB) and `key` (at most 256
 bytes), none of them empty; other media bytes go through `kettle show -`
 instead. The schema says what is checked, except the one-source rule, which
 the description states and the server enforces, since Claude Code drops a tool
@@ -926,7 +926,7 @@ model's result says only that the media shows below the call.
 
 **Inline cards from your own tools.** Any program in a Kettle pane can print
 a card under its output: `kettle show --inline plot.svg` (an image, SVG,
-Mermaid or Markdown file, a video, or bytes on stdin) puts the item on the
+Mermaid or Markdown file, a PDF page, a video, or bytes on stdin) puts the item on the
 pane's shelf and prints a card right there, which opens the item when
 clicked. Kettle builds the whole card and the command prints it: a
 `kettle show` line, the rows of placeholder cells four columns in, and the

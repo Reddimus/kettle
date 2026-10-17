@@ -14,6 +14,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   command to write straight to its pane's own terminal from the foreground;
   through a pipe, a file or tmux the item goes to the shelf alone and a note
   says why.
+- PDFs show: `kettle show report.pdf`, an agent's `kettle_show` or a preview
+  link puts the first page on the shelf, drawn on white at the size the lane
+  needs. The renderer is hayro, run only in the confined media worker, with
+  a fix for a crafted file that overflowed its parser's stack.
+- TIFF images show like the other formats: the first image of the file, 8 or
+  16 bits a channel. A floating-point TIFF is not drawn, since its values
+  have no range Kettle could map to colors faithfully.
 
 ### Fixed
 

@@ -201,7 +201,7 @@ context = "crates/kettle-ui/src/app.rs notify_preview_failure: body when Kettle 
 context = "crates/kettle-ui/src/app.rs notify_preview_failure: body when the file is over Kettle's preview size limit."
 
 [messages.notify_body_preview_unsupported]
-context = "crates/kettle-ui/src/app.rs notify_preview_failure: body when the file is not an image, SVG, Mermaid diagram, Markdown diagram gallery or video Kettle can render. 'Mermaid', 'SVG' and 'Markdown' are names."
+context = "crates/kettle-ui/src/app.rs notify_preview_failure: body when the file is not an image, SVG, Mermaid diagram, Markdown diagram gallery, PDF or video Kettle can render. 'Mermaid', 'SVG', 'Markdown' and 'PDF' are names."
 
 [messages.notify_body_preview_unavailable]
 context = "crates/kettle-ui/src/app.rs notify_preview_failure: body when Kettle's media worker, which renders previews in a separate process, is not available."
@@ -210,7 +210,7 @@ context = "crates/kettle-ui/src/app.rs notify_preview_failure: body when Kettle'
 context = "crates/kettle-ui/src/app.rs notify_preview_failure: body when a video could not be previewed because no decoder on this computer reads its format or codec. ffmpeg is a program name; brew install ffmpeg is a command typed exactly. Kettle never installs it."
 
 [messages.notify_body_preview_needs_sandbox]
-context = "crates/kettle-ui/src/app.rs preview_failure_body: body when a video could not be previewed because Kettle's media worker could not confine itself (no Landlock on this Linux kernel, or no sandbox on this macOS), and Kettle never decodes video unconfined. Installing software does not help; images and diagrams are unaffected. 'sandbox' is the security sense: a confined process."
+context = "crates/kettle-ui/src/app.rs preview_failure_body: body when a file of a kind Kettle decodes only in its sandbox (a video or a PDF, for example) could not be previewed because Kettle's media worker could not confine itself (no Landlock on this Linux kernel, or no sandbox on this macOS), and Kettle never decodes such files unconfined. Installing software does not help; images and diagrams are unaffected. 'sandbox' is the security sense: a confined process."
 
 [messages.notify_body_preview_failed]
 context = "crates/kettle-ui/src/app.rs notify_preview_failure: body for any other failure: the render timed out, needed too much memory, or Kettle was rendering something else."
@@ -222,10 +222,10 @@ context = "crates/kettle-ui/src/app/modals.rs act_hint: body, under notify_title
 context = "crates/kettle-ui/src/app.rs handle_action PreviewLink: title of the desktop notification when the focused pane names no file to preview. 'kettle' is the product name, lowercase as in the other notification titles."
 
 [messages.notify_body_preview_nothing]
-context = "crates/kettle-ui/src/app.rs handle_action PreviewLink: body when the focused pane's visible text names no image, SVG, Mermaid, Markdown or video file. Quick select finds a path only with a folder in it; './plot.png' is a literal example path and stays as is."
+context = "crates/kettle-ui/src/app.rs handle_action PreviewLink: body when the focused pane's visible text names no image, SVG, Mermaid, Markdown, PDF or video file. Quick select finds a path only with a folder in it; './plot.png' is a literal example path and stays as is."
 
 [messages.notify_body_preview_nothing_copied]
-context = "crates/kettle-ui/src/app/media.rs preview_copied_file: body, under notify_title_preview_nothing, when the clipboard names no image, SVG, Mermaid, Markdown or video file. 'file://' is a literal URL scheme and stays as is."
+context = "crates/kettle-ui/src/app/media.rs preview_copied_file: body, under notify_title_preview_nothing, when the clipboard names no image, SVG, Mermaid, Markdown, PDF or video file. 'file://' is a literal URL scheme and stays as is."
 
 [messages.notify_body_preview_no_diagram]
 context = "crates/kettle-ui/src/app/media.rs preview_copied_diagram: body, under notify_title_preview_nothing, when the copied or selected text holds no Mermaid diagram: no ```mermaid fence and no row a diagram starts with (flowchart, sequenceDiagram and so on)."
@@ -1795,6 +1795,9 @@ context = "crates/kettle-ui/src/app.rs video_detail: in a video's detail line af
 [messages.media_viewer_kind_markdown]
 context = "crates/kettle-ui/src/app/preview.rs media_item_kind_and_sender: kind of a page of a Markdown file's Mermaid diagrams in the media viewer's detail line. 'Markdown' is a name."
 
+[messages.media_viewer_kind_pdf]
+context = "crates/kettle-ui/src/app/preview.rs media_item_kind_and_sender: kind of a PDF document's page shown in the media viewer's detail line, which lists kind, size and sender. 'PDF' is a format name."
+
 [messages.media_viewer_from_pane]
 context = "crates/kettle-ui/src/app.rs media_viewer_projection: the media viewer's sender line, under the kind and size, when Kettle verified the item came from a program running in this pane. It starts its own line."
 
@@ -1912,7 +1915,7 @@ context = "crates/kettle-ui/src/app.rs lane_notice_text: a video's silent previe
 context = "crates/kettle-ui/src/app.rs lane_notice_text: no decoder Kettle may use reads this video; ffmpeg is the program to install, verbatim."
 
 [messages.media_lane_notice_preview_needs_sandbox]
-context = "crates/kettle-ui/src/app.rs lane_notice_text: Kettle decodes video only in its sandbox, and this system cannot provide one, so there is no preview."
+context = "crates/kettle-ui/src/app.rs lane_notice_text: Kettle decodes some kinds of file (videos and PDFs, for example) only in its sandbox, and this system cannot provide one, so there is no preview of this one."
 
 [messages.media_lane_a11y_play_video]
 context = "crates/kettle-ui/src/app.rs: screen-reader name and tooltip of a preview lane's button that plays the video the lane shows, in the lane, from where it stands, with its sound unless muted."

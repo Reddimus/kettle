@@ -1,6 +1,8 @@
 //! Auto jobs: one held file, classified by its bytes rather than its name,
 //! then rendered as what it is. Its first bytes are read through the held
-//! descriptor; a video container there (and no image) is a video, whose
+//! descriptor; a PDF's signature there (and no image) is a PDF, read whole
+//! under its own cap and drawn only in a confined worker, its first page
+//! shown; a video container there (and no image) is a video, whose
 //! poster, the middle frame fitted to the job's box, the worker's decoder
 //! takes from the held file with the video's metadata. Anything else is one
 //! snapshot read through the same descriptor, within the largest input cap of
@@ -17,20 +19,32 @@
 
 use std::time::Instant;
 
-use kettle_media::video::{MAX_VIDEO_PREFIX_BYTES, VideoDecoder, sniff_video_container};
-use kettle_media::{FailureCode, Job, JobKind, MAX_MARKDOWN_BYTES, MediaKind, Rendered};
+use kettle_media::video::{MAX_VIDEO_PREFIX_BYTES, sniff_video_container};
+use kettle_media::{
+    FailureCode, Job, JobKind, MAX_MARKDOWN_BYTES, MAX_PDF_BYTES, MediaKind, Rendered,
+};
 
-use crate::{markdown, mermaid, raster, source, stills, svg};
+use crate::{Means, markdown, mermaid, pdf, raster, source, stills, svg};
 
 pub(crate) fn render(
     job: &Job,
     on_kind: &mut impl FnMut(MediaKind),
-    decoder: Option<&dyn VideoDecoder>,
+    means: Means<'_>,
 ) -> Result<(MediaKind, Rendered), FailureCode> {
     let held = source::hold(&job.source, MAX_VIDEO_PREFIX_BYTES)?;
-    if raster::recognized(held.prefix()).is_none()
-        && let Some(container) = sniff_video_container(held.prefix(), held.size())
-    {
+    let image = raster::recognized(held.prefix()).is_some();
+    // A PDF is read whole under its own cap, and only in a confined worker;
+    // its first page is shown.
+    if !image && pdf::is_pdf(held.prefix()) {
+        on_kind(MediaKind::Pdf);
+        if !means.confined {
+            return Err(FailureCode::SandboxUnavailable);
+        }
+        let snapshot = held.snapshot(MAX_PDF_BYTES)?;
+        return pdf::render_loaded(job, snapshot, 0).map(|rendered| (MediaKind::Pdf, rendered));
+    }
+    let decoder = means.decoder;
+    if !image && let Some(container) = sniff_video_container(held.prefix(), held.size()) {
         let deadline = Instant::now() + stills::DEADLINE;
         let rendered = stills::render_video(
             &held,
@@ -245,10 +259,16 @@ mod tests {
         "<rect width=\"2\" height=\"1\" fill=\"rgb(10,200,30)\"/></svg>"
     );
 
+    /// A confined worker's means, without a video decoder.
+    const CONFINED: crate::Means<'static> = crate::Means {
+        decoder: None,
+        confined: true,
+    };
+
     /// Every kind this reports, in order, beside the result.
     fn classify(job: &Job) -> (Vec<MediaKind>, Result<(MediaKind, Rendered), FailureCode>) {
         let mut kinds = Vec::new();
-        let result = render(job, &mut |kind| kinds.push(kind), None);
+        let result = render(job, &mut |kind| kinds.push(kind), CONFINED);
         (kinds, result)
     }
 
@@ -265,6 +285,20 @@ mod tests {
             assert_eq!(output.rgba, [10, 200, 30, 255].repeat(2));
             assert!(output.digest.path_identity.is_some());
         }
+    }
+
+    /// A TIFF is a raster by its content, as every format Kettle draws is.
+    #[test]
+    fn a_tiff_is_a_raster_by_its_content() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("scan.bin");
+        RgbaImage::from_pixel(2, 1, Rgba([10, 200, 30, 255]))
+            .save_with_format(&path, ImageFormat::Tiff)
+            .unwrap();
+        let (kinds, result) = classify(&job(&path));
+        let (kind, output) = result.unwrap();
+        assert_eq!((kind, kinds), (MediaKind::Raster, vec![MediaKind::Raster]));
+        assert_eq!(output.rgba, [10, 200, 30, 255].repeat(2));
     }
 
     #[test]
@@ -733,7 +767,15 @@ mod tests {
             job.target.width = 400;
             job.target.height = 400;
             let mut kinds = Vec::new();
-            let (kind, rendered) = render(&job, &mut |kind| kinds.push(kind), Some(&Clip)).unwrap();
+            let (kind, rendered) = render(
+                &job,
+                &mut |kind| kinds.push(kind),
+                crate::Means {
+                    decoder: Some(&Clip),
+                    confined: true,
+                },
+            )
+            .unwrap();
             assert_eq!((kind, kinds), (MediaKind::Video, vec![MediaKind::Video]));
             assert_eq!((rendered.width, rendered.height), (400, 225), "{name}");
             rendered.validate_as(MediaKind::Video).unwrap();
@@ -752,7 +794,15 @@ mod tests {
         let mut boxed = job(&path);
         boxed.target.width = 400;
         boxed.target.height = 400;
-        let (_, rendered) = render(&boxed, &mut |_| {}, Some(&Clip)).unwrap();
+        let (_, rendered) = render(
+            &boxed,
+            &mut |_| {},
+            crate::Means {
+                decoder: Some(&Clip),
+                confined: true,
+            },
+        )
+        .unwrap();
         let fitted = kettle_media::Crop {
             x: 0,
             y: 87,
@@ -772,7 +822,15 @@ mod tests {
             height: 20,
         };
         boxed.target.crop = Some(crop);
-        let (_, rendered) = render(&boxed, &mut |_| {}, Some(&Clip)).unwrap();
+        let (_, rendered) = render(
+            &boxed,
+            &mut |_| {},
+            crate::Means {
+                decoder: Some(&Clip),
+                confined: true,
+            },
+        )
+        .unwrap();
         assert_eq!((rendered.width, rendered.height), (20, 20));
         assert_eq!(rendered.layout.image_in_target, fitted);
         assert_eq!(rendered.layout.result_in_target, crop);
@@ -785,7 +843,15 @@ mod tests {
         let mut wide = job(&path);
         wide.target.width = 4000;
         wide.target.height = 4000;
-        let (_, rendered) = render(&wide, &mut |_| {}, Some(&Clip)).unwrap();
+        let (_, rendered) = render(
+            &wide,
+            &mut |_| {},
+            crate::Means {
+                decoder: Some(&Clip),
+                confined: true,
+            },
+        )
+        .unwrap();
         assert_eq!((rendered.width, rendered.height), (1280, 720));
         // Grown past every snapshot cap, it is still held and decoded.
         let large = directory.path().join("large.mp4");
@@ -795,7 +861,15 @@ mod tests {
             .open(&large)
             .unwrap();
         file.set_len(48 << 20).unwrap();
-        let (kind, _) = render(&job(&large), &mut |_| {}, Some(&Clip)).unwrap();
+        let (kind, _) = render(
+            &job(&large),
+            &mut |_| {},
+            crate::Means {
+                decoder: Some(&Clip),
+                confined: true,
+            },
+        )
+        .unwrap();
         assert_eq!(kind, MediaKind::Video);
     }
 }

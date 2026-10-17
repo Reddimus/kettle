@@ -15,6 +15,8 @@ use kettle_media::{
 
 #[path = "../../kettle-media-render/tests/support/fonts.rs"]
 mod fonts;
+#[path = "../../kettle-media-render/tests/support/pdf.rs"]
+mod pdf;
 
 const WORKER: &str = env!("CARGO_BIN_EXE_kettle-media-worker");
 const EXIT_PROTOCOL: i32 = 2;
@@ -214,6 +216,45 @@ fn an_auto_job_replies_with_the_kind_it_turned_out_to_be() {
     assert_eq!(
         only_reply(&job_of(JobKind::Auto, b"ordinary prose")),
         failure(FailureCode::UnsupportedMedia)
+    );
+}
+
+/// A PDF crosses the worker's boundary as the page asked for, with which
+/// page it is of how many: an Auto job's reply says PDF and shows the first,
+/// an explicit page comes back as asked, and a page past the last is refused
+/// by its code. The worker renders it confined, as it must.
+#[test]
+fn a_pdf_page_crosses_the_boundary() {
+    let document = pdf::pdf(
+        100,
+        50,
+        &["1 0 0 rg 0 0 100 50 re f", "0 0 1 rg 0 0 100 50 re f"],
+    );
+    let Some(Frame::DetectedRendered { kind, rendered }) =
+        only_reply(&job_of(JobKind::Auto, &document))
+    else {
+        panic!("no typed reply to an Auto PDF job");
+    };
+    assert_eq!(kind, MediaKind::Pdf);
+    rendered.validate_as(MediaKind::Pdf).unwrap();
+    assert_eq!(
+        rendered.page,
+        Some(kettle_media::PageOf { index: 0, count: 2 })
+    );
+    assert_eq!(rendered.rgba[..4], [255, 0, 0, 255]);
+    let Some(Frame::Rendered(second)) =
+        only_reply(&job_of(JobKind::PdfPage { index: 1 }, &document))
+    else {
+        panic!("no reply to an explicit PDF page");
+    };
+    assert_eq!(
+        second.page,
+        Some(kettle_media::PageOf { index: 1, count: 2 })
+    );
+    assert_eq!(second.rgba[..4], [0, 0, 255, 255]);
+    assert_eq!(
+        only_reply(&job_of(JobKind::PdfPage { index: 2 }, &document)),
+        failure(FailureCode::IndexOutOfRange)
     );
 }
 
@@ -1142,6 +1183,15 @@ fn without_a_sandbox_videos_are_refused_and_images_render() {
         reply_from(worker(), &marked(job(&png), *b"KN")),
         Some(Frame::Rendered(_))
     ));
+    // Nor is a PDF parsed unconfined, however it was asked for.
+    let document = pdf::pdf(10, 10, &["1 0 0 rg 0 0 10 10 re f"]);
+    for kind in [JobKind::Auto, JobKind::PdfPage { index: 0 }] {
+        assert_eq!(
+            reply_from(worker(), &marked(job_of(kind, &document), *b"KN")),
+            failure(FailureCode::SandboxUnavailable),
+            "{kind:?}"
+        );
+    }
 }
 
 /// A job counts as confined only if the watchdog, started earlier, confined

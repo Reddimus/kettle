@@ -13,6 +13,9 @@ use kettle_media::{
 };
 use kettle_media_render::render;
 
+#[path = "support/pdf.rs"]
+mod pdf_support;
+
 /// The system allocator, recording the largest single request made on each
 /// thread, so tests running beside a measurement cannot count toward it.
 struct Largest;
@@ -124,6 +127,76 @@ fn a_collection_count_cannot_allocate_all_faces() {
         largest < 64 * 1024,
         "collection count caused a {largest}-byte allocation"
     );
+}
+
+/// A little-endian TIFF whose first directory holds `entries`, each a tag,
+/// type, count and value, and nothing more.
+fn tiff(entries: &[(u16, u16, u32, u32)]) -> Vec<u8> {
+    let mut bytes = b"II*\0".to_vec();
+    bytes.extend(8u32.to_le_bytes());
+    bytes.extend(u16::try_from(entries.len()).unwrap().to_le_bytes());
+    for &(tag, kind, count, value) in entries {
+        bytes.extend(tag.to_le_bytes());
+        bytes.extend(kind.to_le_bytes());
+        bytes.extend(count.to_le_bytes());
+        bytes.extend(value.to_le_bytes());
+    }
+    bytes.extend(0u32.to_le_bytes());
+    bytes
+}
+
+/// A TIFF's first image over the caps is refused from its directory, before
+/// a decoder allocates for it; so is a directory longer than any image's,
+/// before it is read.
+#[test]
+fn a_tiff_past_the_caps_is_refused_before_allocation() {
+    // 100,000 pixels square, 8-bit RGB, one uncompressed strip that is not
+    // there: the decoder would allocate for all of it.
+    let huge = tiff(&[
+        (256, 4, 1, 100_000),
+        (257, 4, 1, 100_000),
+        (258, 3, 1, 8),
+        (259, 3, 1, 1),
+        (262, 3, 1, 2),
+        (273, 4, 1, 200),
+        (277, 3, 1, 3),
+        (278, 4, 1, 100_000),
+        (279, 4, 1, u32::MAX),
+    ]);
+    let (result, largest) = measured(huge, 64, 64);
+    assert_eq!(result.unwrap_err(), FailureCode::RenderResource);
+    assert!(largest < 1024 * 1024, "a {largest}-byte allocation");
+    let mut endless = b"II*\0\x08\0\0\0".to_vec();
+    endless.extend(u16::MAX.to_le_bytes());
+    let (result, largest) = measured(endless, 64, 64);
+    assert_eq!(result.unwrap_err(), FailureCode::RenderResource);
+    assert!(largest < 1024 * 1024, "a {largest}-byte allocation");
+}
+
+/// Floating-point samples have no range to map to colors faithfully, so a
+/// TIFF of them is not drawn, although the decoder reads one.
+#[test]
+fn a_floating_point_tiff_is_not_drawn() {
+    let float = image::DynamicImage::ImageRgb32F(image::ImageBuffer::from_pixel(
+        2,
+        2,
+        image::Rgb([0.5_f32, 2.0, -1.0]),
+    ));
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    float.write_to(&mut bytes, ImageFormat::Tiff).unwrap();
+    let (result, _) = measured(bytes.into_inner(), 64, 64);
+    assert_eq!(result.unwrap_err(), FailureCode::UnsupportedMedia);
+}
+
+/// A PDF page as large as the format lets a page claim is drawn within the
+/// vector ceiling: its size decides the scale, never the canvas.
+#[test]
+fn a_huge_pdf_page_is_drawn_within_the_ceiling() {
+    let document = pdf_support::pdf(14_400_000, 14_400_000, &["1 0 0 rg 0 0 100 100 re f"]);
+    let (result, largest) = measured_as(JobKind::PdfPage { index: 0 }, document, 4096, 4096);
+    let rendered = result.unwrap();
+    assert!(rendered.width <= 1024 && rendered.height <= 1024);
+    assert!(largest < 32 * 1024 * 1024, "a {largest}-byte allocation");
 }
 
 /// A 2x2 lossy VP8 key frame of one color, from `cwebp -q 80` (libwebp) on a

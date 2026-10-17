@@ -1,6 +1,6 @@
 //! `kettle show`: send a local image, SVG, Mermaid diagram, Markdown diagram
-//! gallery or video poster to the media shelf of the pane this command
-//! runs in, in the Kettle it runs inside. It never reaches another Kettle,
+//! gallery, PDF page or video poster to the media shelf of the pane this
+//! command runs in, in the Kettle it runs inside. It never reaches another Kettle,
 //! never opens anything on screen, and never needs full control: agent
 //! previews (`agent-display`) are enough. With `--inline` it also prints a
 //! card under itself, when it writes straight to that pane's terminal.
