@@ -2061,7 +2061,7 @@ fn append_remote_command_with_writer(
         return Err(remote_command_size_error(path, existing_len, append_len));
     }
     if let Err(error) = write(&mut file, bytes) {
-        if let Err(rollback) = file.set_len(existing_len) {
+        if let Err(rollback) = kettle_state::truncate_private_file(&file, existing_len) {
             return Err(std::io::Error::new(
                 error.kind(),
                 format!(
@@ -3357,13 +3357,20 @@ mod tests {
         let dir = kettle_test_support::private_tempdir("kettle-remote-rollback-");
         let path = dir.path().join("remote.cmd");
         append_remote_command(&path, b"toggle-window\n").unwrap();
+        // A read-only file cannot be truncated through any handle; Windows
+        // would reopen a read-only handle to a writable file with write access.
+        let read_only = dir.path().join("read-only");
+        std::fs::write(&read_only, b"x").unwrap();
+        let mut permissions = std::fs::metadata(&read_only).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&read_only, permissions).unwrap();
         let error = append_remote_command_with_writer(
             &path,
             b"send-text-json \"partial",
             std::time::Duration::from_secs(1),
             |file, bytes| {
                 file.write_all(bytes)?;
-                *file = std::fs::File::open(&path)?;
+                *file = std::fs::File::open(&read_only)?;
                 Err(std::io::Error::other("injected append failure"))
             },
         )

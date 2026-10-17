@@ -750,6 +750,22 @@ pub fn open_private_file_append(path: &Path) -> io::Result<File> {
     open_private_file_append_impl(path)
 }
 
+/// Truncate an open private file to `len` bytes, such as one from
+/// [`open_private_file_append`] after a failed append.
+///
+/// On Windows an append handle cannot move the end of file, so the same file
+/// object is reopened with write access; no path is resolved again.
+pub fn truncate_private_file(file: &File, len: u64) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        windows::truncate_open_file(file, len)
+    }
+    #[cfg(not(windows))]
+    {
+        file.set_len(len)
+    }
+}
+
 /// Restrict an already-open private file to the effective user.
 ///
 /// Unix applies mode `0600`. Windows replaces the DACL with one protected,
@@ -4359,6 +4375,26 @@ mod windows {
         Ok((file, resolved))
     }
 
+    pub(super) fn truncate_open_file(file: &File, len: u64) -> io::Result<()> {
+        // SAFETY: `file` owns a valid handle. ReOpenFile resolves that same
+        // kernel object rather than a path and returns a separately owned
+        // handle with FILE_WRITE_DATA, which an append handle lacks.
+        let handle = unsafe {
+            ReOpenFile(
+                file.as_raw_handle() as HANDLE,
+                FILE_WRITE_DATA,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                FILE_FLAG_OPEN_REPARSE_POINT,
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: ReOpenFile transferred ownership of this valid handle.
+        let writable = File::from(unsafe { OwnedHandle::from_raw_handle(handle as RawHandle) });
+        writable.set_len(len)
+    }
+
     pub(super) fn remove_open_private_file(file: File, path: &Path) -> io::Result<()> {
         require_regular_non_reparse(&file, path)?;
         require_single_link(&file, path)?;
@@ -6457,6 +6493,26 @@ mod tests {
         second.write_all(b"-two").unwrap();
         drop(second);
         assert_eq!(std::fs::read(path).unwrap(), b"one-two");
+    }
+
+    /// A failed append is undone through the append handle itself, both the
+    /// one that created the file and one that opened it later. On Windows
+    /// neither handle may move the end of file on its own.
+    #[test]
+    fn an_append_handle_can_truncate_back_and_append_again() {
+        let dir = crate::test_tempdir();
+        let path = dir.path().join("append");
+        let mut created = open_private_file_append(&path).unwrap();
+        created.write_all(b"one-partial").unwrap();
+        truncate_private_file(&created, 3).unwrap();
+        created.write_all(b"-two").unwrap();
+        drop(created);
+        let mut existing = open_private_file_append(&path).unwrap();
+        existing.write_all(b"-partial").unwrap();
+        truncate_private_file(&existing, 7).unwrap();
+        existing.write_all(b"-three").unwrap();
+        drop(existing);
+        assert_eq!(std::fs::read(path).unwrap(), b"one-two-three");
     }
 
     #[cfg(windows)]
