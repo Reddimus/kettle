@@ -26,6 +26,15 @@ fn url_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r#"(https?://|ftp://|file://|www\.)[^\s\x00-\x1f<>"]+"#).unwrap())
 }
 
+/// Normalize a detected URL for opening, leaving its displayed text alone.
+pub fn normalize_url(text: &str) -> String {
+    if text.starts_with("www.") {
+        format!("https://{text}")
+    } else {
+        text.to_string()
+    }
+}
+
 fn path_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
@@ -180,11 +189,7 @@ pub fn links_with_cwd(term: &Term<EventProxy>, cwd: Option<&str>) -> Vec<Link> {
             if matched.is_empty() || fragment(m.start(), m.end()) {
                 continue;
             }
-            let uri = if matched.starts_with("www.") {
-                format!("https://{matched}")
-            } else {
-                matched.to_string()
-            };
+            let uri = normalize_url(matched);
             push(m.start(), matched.len(), uri, &mut covered);
         }
         // A quoted path goes before bare ones, so they cannot take a piece

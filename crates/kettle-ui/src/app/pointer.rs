@@ -292,11 +292,13 @@ impl App {
     }
 
     /// Click count for the press at `(row,col)` within ~400 ms of the last.
-    pub(super) fn click_count(&mut self, ws: &mut WindowState, row: usize, col: usize) -> u8 {
+    pub(super) fn click_count(ws: &mut WindowState, row: usize, col: usize) -> u8 {
         let now = std::time::Instant::now();
+        let pane = ws.mux.active_focus();
         let n = match ws.last_click {
-            Some((t, r, c, n))
-                if r == row
+            Some((t, p, r, c, n))
+                if p == pane
+                    && r == row
                     && c == col
                     && now.duration_since(t) < std::time::Duration::from_millis(400) =>
             {
@@ -304,7 +306,7 @@ impl App {
             }
             _ => 1,
         };
-        ws.last_click = Some((now, row, col, n));
+        ws.last_click = Some((now, pane, row, col, n));
         n
     }
 
@@ -409,7 +411,7 @@ impl App {
             return;
         }
         let cell = self.cursor_cell(ws);
-        let clicks = cell.map(|(r, c)| self.click_count(ws, r, c)).unwrap_or(1);
+        let clicks = cell.map(|(r, c)| Self::click_count(ws, r, c)).unwrap_or(1);
         let kind = selection_kind(clicks, ws.mods.alt_key());
         let mut smart_selected = false;
         if clicks == 2
@@ -540,9 +542,10 @@ impl App {
             (true, true) => ws.held_buttons.dragging(),
             (true, false) => None,
         };
-        if let Some(held) = held
-            && let Some(pane) = held.pane
-        {
+        if let Some(held) = held {
+            let Some(pane) = held.pane else {
+                return MouseReport::Declined;
+            };
             let rect = self.pane_terminal(ws, self.area(ws), pane);
             let at = MouseAt::Held {
                 rect,

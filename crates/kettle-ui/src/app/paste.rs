@@ -328,6 +328,120 @@ impl App {
         self.png_encoder.as_ref()
     }
 
+    pub(super) fn defer_terminal_input(
+        &mut self,
+        ws: &mut WindowState,
+        event: Option<&winit::event::KeyEvent>,
+        bytes: &[u8],
+        prepare_input: bool,
+        focused_only: bool,
+    ) -> bool {
+        if self.queued_pastes.is_empty() {
+            return false;
+        }
+        let recipients = self.broadcast_recipients(ws);
+        // A key release goes to the panes its press reached, as one sent at
+        // once does, even if focus or the broadcast scope moved since.
+        let pressed = event
+            .filter(|_| !prepare_input)
+            .and_then(|event| ws.terminal_key_recipients.remove(&event.physical_key));
+        let ids: Vec<u64> = if let Some(pressed) = pressed {
+            pressed.into_iter().collect()
+        } else if ws.mux.is_broadcast_on() && !focused_only {
+            recipients.clone()
+        } else {
+            ws.mux.active_focus().into_iter().collect()
+        };
+        let targets: Vec<(u64, Vec<u8>)> = ids
+            .into_iter()
+            .filter_map(|id| {
+                let pane = ws.mux.panes.get(&id).or_else(|| {
+                    self.windows
+                        .values()
+                        .find_map(|other| other.mux.panes.get(&id))
+                })?;
+                let bytes = if let Some(event) = event {
+                    let mods = pty_key_modifiers(ws, &event.logical_key);
+                    let mode = pane.effective_key_mode(
+                        self.cfg.modify_other_keys,
+                        key_is_modified_enter(&event.logical_key, mods),
+                    );
+                    encode_key_event_for_mode(&self.cfg, event, mods, mode)?
+                } else {
+                    bytes.to_vec()
+                };
+                (!bytes.is_empty()).then_some((id, bytes))
+            })
+            .collect();
+        let reached: Vec<u64> = targets.iter().map(|(id, _)| *id).collect();
+        let paste = QueuedPaste {
+            window: ws.seq,
+            target: paste_target(&ws.mux),
+            receipt_pane: ws.mux.active_focus(),
+            broadcast: ws.mux.broadcast.clone(),
+            recipients,
+            content: QueuedPasteContent::Input {
+                targets,
+                prepare_input,
+            },
+        };
+        let result = defer_authored_input(&mut self.queued_pastes, paste);
+        // A press queued here reaches these panes in its turn, so its
+        // release must go to them, whether it is sent at once or queued too.
+        if let Some(event) = event.filter(|_| prepare_input)
+            && result.is_some_and(|result| result.is_queued())
+        {
+            ws.terminal_key_recipients
+                .entry(event.physical_key)
+                .or_default()
+                .extend(reached);
+        }
+        if let Some(result) = result {
+            self.report_input_result(result);
+        }
+        true
+    }
+
+    pub(super) fn write_focused_terminal_input(&mut self, ws: &mut WindowState, bytes: &[u8]) {
+        if self.defer_terminal_input(ws, None, bytes, true, true) {
+            return;
+        }
+        self.sync_pane_focus_reports(ws);
+        if let Some(id) = ws.mux.active_focus()
+            && let Some(pane) = ws.mux.panes.get(&id)
+        {
+            let result = pane.feed_input(bytes);
+            self.report_input_result(result);
+            Self::dismiss_media_paste_receipt_after_input(ws, id, result);
+        }
+    }
+
+    pub(super) fn deliver_deferred_input(
+        ws: &mut WindowState,
+        targets: &[(u64, Vec<u8>)],
+        prepare_input: bool,
+        scroll_to_bottom: bool,
+    ) -> PaneInputResult {
+        let mut result = PaneInputResult::Queued;
+        for (id, bytes) in targets {
+            let Some(pane) = ws.mux.panes.get(id) else {
+                continue;
+            };
+            let delivered = pane.feed_input(bytes);
+            if delivered.is_queued() && prepare_input {
+                ws.last_typed = Some(std::time::Instant::now());
+                if scroll_to_bottom && let Ok(mut term) = pane.term.term.lock() {
+                    term.scroll_display(Scroll::Bottom);
+                }
+            }
+            if prepare_input {
+                Self::dismiss_media_paste_receipt_after_input(ws, *id, delivered);
+            }
+            result = result.merge(delivered);
+        }
+        result
+    }
+
     /// Whether one more paste of `bytes` may wait in the queue.
     pub(super) fn paste_queue_admits(&self, bytes: usize) -> bool {
         let waiting = self
@@ -400,14 +514,7 @@ impl App {
                 (None, Err(_)) => {}
             }
         }
-        while self
-            .queued_pastes
-            .front()
-            .is_some_and(|paste| !paste.content.encoding())
-        {
-            let Some(paste) = self.queued_pastes.pop_front() else {
-                break;
-            };
+        while let Some(paste) = pop_ready_paste(&mut self.queued_pastes) {
             self.deliver_queued_paste(el, paste);
         }
     }
@@ -441,6 +548,7 @@ impl App {
             self.finish_window_dispatch(el, window, ws);
             return;
         }
+        self.sync_pane_focus_reports(&mut ws);
         match content {
             QueuedPasteContent::Image {
                 path: Some(Ok(path)),
@@ -456,6 +564,26 @@ impl App {
             }
             QueuedPasteContent::Image { path: None, .. } => {}
             QueuedPasteContent::Text(text) => self.paste_text_to(&mut ws, target, &text),
+            QueuedPasteContent::Input {
+                targets,
+                prepare_input,
+            } => {
+                let mut result = Self::deliver_deferred_input(
+                    &mut ws,
+                    &targets,
+                    prepare_input,
+                    self.cfg.scroll_on_keystroke,
+                );
+                for other in self.windows.values_mut() {
+                    result = result.merge(Self::deliver_deferred_input(
+                        other,
+                        &targets,
+                        prepare_input,
+                        self.cfg.scroll_on_keystroke,
+                    ));
+                }
+                self.report_input_result(result);
+            }
             QueuedPasteContent::Paths {
                 paths,
                 trailing_space,
@@ -479,7 +607,9 @@ impl App {
             QueuedPasteContent::Paths { paths, .. } => {
                 self.pasted_images.discard_previews_for_paths(&paths);
             }
-            QueuedPasteContent::Image { .. } | QueuedPasteContent::Text(_) => {}
+            QueuedPasteContent::Image { .. }
+            | QueuedPasteContent::Text(_)
+            | QueuedPasteContent::Input { .. } => {}
         }
     }
 
@@ -691,12 +821,10 @@ impl App {
             );
             if Mux::scope_crosses_windows(&scope) {
                 for other in self.windows.values_mut() {
-                    delivery = delivery.merge(other.mux.broadcast_paste_paths_foreign_delivery(
-                        &scope,
-                        paths,
-                        trailing_space,
-                        LOCAL_PASTE_MAX,
-                    ));
+                    let foreign =
+                        Self::deliver_foreign_path_paste(other, &scope, paths, trailing_space);
+                    delivery.result = delivery.result.merge(foreign.result);
+                    delivery.accepted |= foreign.accepted;
                 }
             }
             self.report_input_result(delivery.result);
@@ -732,6 +860,24 @@ impl App {
             }
             None => self.show_media_paste_receipt(ws, receipt_pane, paths, false, video, previous),
         }
+    }
+
+    pub(super) fn deliver_foreign_path_paste(
+        ws: &mut WindowState,
+        scope: &crate::mux::BroadcastScope,
+        paths: &[std::path::PathBuf],
+        trailing_space: bool,
+    ) -> PaneInputDelivery {
+        let receipt_pane = Self::media_paste_receipt_pane(ws);
+        let delivery = ws.mux.broadcast_paste_paths_foreign_delivery(
+            scope,
+            paths,
+            trailing_space,
+            LOCAL_PASTE_MAX,
+            receipt_pane,
+        );
+        Self::dismiss_media_paste_receipt_after_delivery(ws, delivery);
+        delivery
     }
 
     pub(super) fn show_media_paste_receipt(
@@ -942,5 +1088,63 @@ impl App {
         )?;
         let completion = self.completion_overlay_projection(ws, terminal_surface);
         Some((receipt, completion))
+    }
+}
+
+/// Queue input typed while a paste ahead of it is still being prepared, so
+/// it reaches the panes after that paste. `None` when nothing is waiting and
+/// the input can go now. Input for the same panes as the entry before it
+/// joins that entry, so a held key cannot fill the queue's entries.
+pub(super) fn defer_authored_input(
+    queue: &mut std::collections::VecDeque<QueuedPaste>,
+    input: QueuedPaste,
+) -> Option<PaneInputResult> {
+    if queue.is_empty() {
+        return None;
+    }
+    let bytes = queue
+        .iter()
+        .map(|paste| paste.content.bytes())
+        .fold(input.content.bytes(), usize::saturating_add);
+    if bytes > QUEUED_PASTE_BYTES_MAX {
+        return Some(PaneInputResult::Oversize);
+    }
+    if let (
+        Some(QueuedPaste {
+            content:
+                QueuedPasteContent::Input {
+                    targets: queued,
+                    prepare_input: queued_prepare,
+                },
+            ..
+        }),
+        QueuedPasteContent::Input {
+            targets,
+            prepare_input,
+        },
+    ) = (queue.back_mut(), &input.content)
+        && queued_prepare == prepare_input
+        && queued.len() == targets.len()
+        && queued.iter().zip(targets).all(|(a, b)| a.0 == b.0)
+    {
+        for ((_, queued), (_, bytes)) in queued.iter_mut().zip(targets) {
+            queued.extend_from_slice(bytes);
+        }
+        return Some(PaneInputResult::Queued);
+    }
+    if queue.len() >= QUEUED_PASTES_MAX {
+        return Some(PaneInputResult::Oversize);
+    }
+    queue.push_back(input);
+    Some(PaneInputResult::Queued)
+}
+
+pub(super) fn pop_ready_paste(
+    queue: &mut std::collections::VecDeque<QueuedPaste>,
+) -> Option<QueuedPaste> {
+    if queue.front().is_some_and(|paste| !paste.content.encoding()) {
+        queue.pop_front()
+    } else {
+        None
     }
 }

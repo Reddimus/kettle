@@ -259,14 +259,6 @@ impl PaneInputDelivery {
             self.record(result);
         }
     }
-
-    pub(crate) fn merge(self, other: Self) -> Self {
-        Self {
-            result: self.result.merge(other.result),
-            accepted: self.accepted || other.accepted,
-            receipt_accepted: self.receipt_accepted || other.receipt_accepted,
-        }
-    }
 }
 
 fn pane_input_policy(failed: bool, read_only: bool) -> Option<PaneInputResult> {
@@ -3938,7 +3930,7 @@ impl Mux {
         scroll_to_bottom: bool,
         receipt_pane: Option<u64>,
         encode: F,
-    ) -> PaneInputDelivery
+    ) -> (PaneInputDelivery, Vec<u64>)
     where
         F: FnMut(kettle_core::TermMode) -> Option<Vec<u8>>,
     {
@@ -3961,7 +3953,7 @@ impl Mux {
         scroll_to_bottom: bool,
         receipt_pane: Option<u64>,
         encode: F,
-    ) -> PaneInputDelivery
+    ) -> (PaneInputDelivery, Vec<u64>)
     where
         F: FnMut(kettle_core::TermMode) -> Option<Vec<u8>>,
     {
@@ -3984,7 +3976,7 @@ impl Mux {
         scroll_to_bottom: bool,
         receipt_pane: Option<u64>,
         encode: F,
-    ) -> PaneInputDelivery
+    ) -> (PaneInputDelivery, Vec<u64>)
     where
         F: FnMut(kettle_core::TermMode) -> Option<Vec<u8>>,
     {
@@ -3995,11 +3987,15 @@ impl Mux {
         });
         let encoded = encode_target_modes(target_modes, encode);
         let mut delivery = PaneInputDelivery::new();
+        let mut recipients = Vec::new();
         for (id, bytes) in encoded {
             let Some(pane) = self.panes.get_mut(&id) else {
                 continue;
             };
             let pane_result = pane.feed_input(&bytes);
+            if pane_result.is_queued() && !bytes.is_empty() {
+                recipients.push(id);
+            }
             if pane_result.is_queued()
                 && scroll_to_bottom
                 && let Ok(mut term) = pane.term.term.lock()
@@ -4008,7 +4004,27 @@ impl Mux {
             }
             delivery.record_for(id, receipt_pane, pane_result);
         }
-        delivery
+        (delivery, recipients)
+    }
+
+    pub(crate) fn release_key_to(
+        &self,
+        recipients: &std::collections::HashSet<u64>,
+        policy: ModifyOtherKeysMode,
+        sample_automatic_context: bool,
+        mut encode: impl FnMut(kettle_core::TermMode) -> Option<Vec<u8>>,
+    ) -> PaneInputResult {
+        let mut result = PaneInputResult::Queued;
+        for id in recipients {
+            let Some(pane) = self.panes.get(id) else {
+                continue;
+            };
+            let mode = pane.effective_key_mode(policy, sample_automatic_context);
+            if let Some(bytes) = encode(mode) {
+                result = result.merge(pane.feed_input(&bytes));
+            }
+        }
+        result
     }
 
     /// Whether a scope reaches panes outside the window that owns it, so the
@@ -4135,9 +4151,10 @@ impl Mux {
         paths: &[std::path::PathBuf],
         trailing_space: bool,
         max_text_bytes: usize,
+        receipt_pane: Option<u64>,
     ) -> PaneInputDelivery {
         let ids = self.foreign_target_ids(scope);
-        self.paste_paths_into(ids, paths, trailing_space, max_text_bytes, None)
+        self.paste_paths_into(ids, paths, trailing_space, max_text_bytes, receipt_pane)
     }
 
     pub fn broadcast_paste_paths_foreign_within_limit(
@@ -5039,6 +5056,66 @@ mod node_tests {
                 .then(|| b"\x1b[97;1:3u".to_vec())
         });
         assert_eq!(release, [(20, b"\x1b[97;1:3u".to_vec())]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn key_releases_follow_press_recipients_after_focus_and_scope_changes() {
+        let cfg = Config {
+            shell_integration: false,
+            login_shell: false,
+            ..Config::default()
+        };
+        let mut mux = Mux::new();
+        let argv = vec!["/bin/cat".to_owned()];
+        let mut ids = Vec::new();
+        for _ in 0..3 {
+            mux.new_tab_with_geometry(
+                &cfg,
+                PtyGeometry::from_cell_size(80, 24, 8, 16),
+                Arc::new(|| {}),
+                &argv,
+                None,
+            )
+            .expect("PTY fixture");
+            ids.push(mux.active_focus().unwrap());
+        }
+        let (a, b, c) = (ids[0], ids[1], ids[2]);
+        assert!(mux.focus_pane(a));
+        mux.broadcast = BroadcastScope::Tab;
+        let (_, pressed) = mux.broadcast_encoded(cfg.modify_other_keys, false, false, None, |_| {
+            Some(b"\x1b[97;1u".to_vec())
+        });
+        let mut recipients: std::collections::HashSet<_> = pressed.into_iter().collect();
+        assert_eq!(recipients, std::collections::HashSet::from([a]));
+
+        assert!(mux.focus_pane(b));
+        mux.broadcast = BroadcastScope::All;
+        mux.panes.get_mut(&c).unwrap().read_only = true;
+        let (_, repeated) =
+            mux.broadcast_encoded(cfg.modify_other_keys, false, false, None, |_| {
+                Some(b"\x1b[97;1:2u".to_vec())
+            });
+        recipients.extend(repeated);
+        assert_eq!(recipients, std::collections::HashSet::from([a, b]));
+
+        mux.panes.get_mut(&c).unwrap().read_only = false;
+        assert!(mux.focus_pane(c));
+        mux.broadcast = BroadcastScope::Off;
+        let before: Vec<_> = ids
+            .iter()
+            .map(|id| mux.panes[id].input_generation())
+            .collect();
+        assert_eq!(
+            mux.release_key_to(&recipients, cfg.modify_other_keys, false, |_| {
+                Some(b"\x1b[97;1:3u".to_vec())
+            }),
+            PaneInputResult::Queued
+        );
+        assert_eq!(mux.panes[&a].input_generation(), before[0] + 1);
+        assert_eq!(mux.panes[&b].input_generation(), before[1] + 1);
+        assert_eq!(mux.panes[&c].input_generation(), before[2]);
+        mux.kill_children();
     }
 
     #[test]

@@ -327,6 +327,28 @@ fn modify_other_keys_was_negotiated(mode: TermMode) -> bool {
         || mode.intersects(TermMode::MODIFY_OTHER_KEYS)
 }
 
+fn legacy_event_modifiers(
+    logical_key: &Key,
+    key_without_modifiers: &Key,
+    text: Option<&str>,
+    mods: ModifiersState,
+    windows: bool,
+) -> ModifiersState {
+    if windows
+        && mods.control_key()
+        && mods.alt_key()
+        && let (Key::Character(logical), Key::Character(base), Some(text)) =
+            (logical_key, key_without_modifiers, text)
+        && text == logical.as_str()
+        && !text.eq_ignore_ascii_case(base.as_str())
+        && !text.is_empty()
+        && !text.chars().any(char::is_control)
+    {
+        return mods - (ModifiersState::CONTROL | ModifiersState::ALT);
+    }
+    mods
+}
+
 fn legacy_control_code(c: char) -> Option<u8> {
     let c = c.to_ascii_lowercase();
     match c {
@@ -635,7 +657,7 @@ pub fn encode(
         if alt {
             out.push(0x1b);
         }
-        out.extend_from_slice(s.as_bytes());
+        out.extend_from_slice(text.unwrap_or(s.as_str()).as_bytes());
         return Some(out);
     }
 
@@ -667,6 +689,13 @@ pub fn encode_key_event(event: &KeyEvent, mods: ModifiersState, mode: TermMode) 
         if event.state == ElementState::Released {
             return None;
         }
+        let mods = legacy_event_modifiers(
+            &event.logical_key,
+            &event.key_without_modifiers(),
+            event.text.as_deref(),
+            mods,
+            cfg!(target_os = "windows"),
+        );
         return encode_app_keypad(&event.logical_key, event.location, mods, mode)
             .or_else(|| encode(&event.logical_key, event.text.as_deref(), mods, mode));
     }
@@ -724,6 +753,13 @@ fn encode_kitty_key_event(
         if event.state == ElementState::Released {
             return None;
         }
+        let mods = legacy_event_modifiers(
+            &event.logical_key,
+            &event.key_without_modifiers,
+            event.text.as_deref(),
+            mods,
+            cfg!(target_os = "windows"),
+        );
         return encode_app_keypad(&event.logical_key, event.location, mods, mode)
             .or_else(|| encode(&event.logical_key, event.text.as_deref(), mods, mode));
     }
@@ -2404,6 +2440,23 @@ mod tests {
         assert_eq!(encode(&ch("5"), Some("5"), none, mode), Some(b"5".to_vec()));
     }
 
+    #[test]
+    fn legacy_character_preserves_unmatched_dead_key_text() {
+        let key = Key::Character("b".into());
+        assert_eq!(
+            encode(&key, Some("^b"), ModifiersState::empty(), TermMode::empty()),
+            Some(b"^b".to_vec())
+        );
+        assert_eq!(
+            encode(&key, None, ModifiersState::empty(), TermMode::empty()),
+            Some(b"b".to_vec())
+        );
+        assert_eq!(
+            encode(&key, Some("b"), ModifiersState::CONTROL, TermMode::empty()),
+            Some(vec![0x02])
+        );
+    }
+
     /// The space bar comes through as NamedKey::Space, so the
     /// Ctrl+@/Ctrl+Space → NUL rule has to be handled there, not only in the
     /// Ctrl-punctuation table (which Space never reaches).
@@ -2427,6 +2480,34 @@ mod tests {
             encode(&sp(), None, ModifiersState::ALT, mode),
             Some(vec![0x1b, b' '])
         );
+    }
+
+    #[test]
+    fn windows_altgr_substitute_uses_layout_identity() {
+        let ctrl_alt = ModifiersState::CONTROL | ModifiersState::ALT;
+        for (logical, base, text, expected) in [
+            ("@", "q", "@", b"@".as_slice()),
+            ("a", "a", "a", b"\x1b\x01".as_slice()),
+            ("A", "a", "A", b"\x1b\x01".as_slice()),
+        ] {
+            let event = character_event(logical, base, text, ElementState::Pressed, false);
+            let mods = legacy_event_modifiers(
+                &event.logical_key,
+                &event.key_without_modifiers,
+                event.text.as_deref(),
+                ctrl_alt,
+                true,
+            );
+            assert_eq!(
+                encode(
+                    &event.logical_key,
+                    event.text.as_deref(),
+                    mods,
+                    TermMode::empty()
+                ),
+                Some(expected.to_vec())
+            );
+        }
     }
 
     /// `Ctrl+Alt+<char>` is xterm's Meta+Control form: ESC then the C0 code.
@@ -2493,21 +2574,6 @@ mod tests {
             },
             "a character outside the C0 table stays printable Meta input"
         );
-
-        // The AltGr substitute. winit only neutralizes AltGr for the RIGHT
-        // Alt, but Windows documents left-Ctrl + left-Alt as a substitute, so
-        // a German `Ctrl+Alt+Q` (how you type `@`) reaches this branch as
-        // plain CONTROL|ALT with `@` as the committed text. The C0 table must
-        // not claim it. `q` is in the table, and the user asked for `@`, not
-        // DC1/XON.
-        let composed = encode(
-            &Key::Character("q".to_string().into()),
-            Some("@"),
-            ctrl_alt,
-            mode,
-        )
-        .expect("composed key encodes");
-        assert_eq!(composed, b"@".to_vec());
 
         // A chord that committed no printable text still takes the table, so
         // the composition check does not switch the table off.

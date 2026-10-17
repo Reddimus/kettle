@@ -132,6 +132,14 @@ impl SearchState {
         self.background = None;
     }
 
+    pub(crate) fn invalidate_stale_navigation(&mut self, token: kettle_core::SearchScanToken) {
+        if self.scan_token != Some(token) {
+            self.restart_navigation(std::time::Instant::now());
+            self.anchor = None;
+            self.unlimited_retry_at = None;
+        }
+    }
+
     pub(crate) fn restart_navigation(&mut self, now: std::time::Instant) {
         let compile_error = self.compiled_revision == Some(self.revision)
             && self.compiled.is_none()
@@ -567,6 +575,21 @@ impl SearchEditor {
         outcome
     }
 
+    /// Cut only after the clipboard writer accepts the selected text.
+    pub(crate) fn cut_selection(
+        &mut self,
+        max_bytes: usize,
+        write: impl FnOnce(&str) -> bool,
+    ) -> bool {
+        let Some(selected) = self.selected_text() else {
+            return false;
+        };
+        if !write(selected) {
+            return false;
+        }
+        self.insert("", max_bytes).changed
+    }
+
     /// Insert `value` over the selection or at the caret, as one undo step.
     pub(crate) fn insert(&mut self, value: &str, max_bytes: usize) -> EditOutcome {
         let before = self.snapshot();
@@ -922,6 +945,65 @@ mod tests {
     use super::{SearchEditor, VisibleSearchKey, VisibleSearchScan};
 
     #[test]
+    fn navigation_invalidates_stale_coordinates_before_reanchoring() {
+        let current = kettle_core::SearchScanToken {
+            query_revision: 3,
+            output_generation: 10,
+            layout: kettle_core::SearchLayout {
+                columns: 80,
+                screen_lines: 24,
+                history_size: 200,
+            },
+        };
+        let span = kettle_core::SearchSpan::new(
+            kettle_core::SearchPoint::new(-100, 0),
+            kettle_core::SearchPoint::new(-100, 2),
+        );
+        for previous in [
+            current,
+            kettle_core::SearchScanToken {
+                output_generation: 9,
+                ..current
+            },
+            kettle_core::SearchScanToken {
+                query_revision: 2,
+                ..current
+            },
+            kettle_core::SearchScanToken {
+                layout: kettle_core::SearchLayout {
+                    columns: 40,
+                    ..current.layout
+                },
+                ..current
+            },
+        ] {
+            let mut search = super::SearchState {
+                editor: SearchEditor::from_text("hit".into(), 64),
+                revision: 3,
+                scan_token: Some(previous),
+                focused: Some(span),
+                revealed_focus: Some(span),
+                visible: vec![span],
+                typing_scanned_revision: Some(3),
+                anchor: Some(span.start),
+                ..Default::default()
+            };
+            search.invalidate_stale_navigation(current);
+            if previous == current {
+                assert_eq!(search.focused, Some(span));
+                assert_eq!(search.visible, vec![span]);
+            } else {
+                assert!(search.focused.is_none());
+                assert!(search.revealed_focus.is_none());
+                assert!(search.visible.is_empty());
+                assert!(search.typing_scanned_revision.is_none());
+                assert!(search.anchor.is_none());
+                assert!(search.unlimited_retry_at.is_none());
+            }
+        }
+    }
+
+    #[test]
     fn deletes_one_extended_grapheme_at_a_time() {
         let mut editor = SearchEditor::from_text("a\u{301}👩‍💻z".into(), 64);
         assert!(editor.backspace());
@@ -930,6 +1012,25 @@ mod tests {
         assert_eq!(editor.text(), "a\u{301}");
         assert!(editor.backspace());
         assert_eq!(editor.text(), "");
+    }
+
+    #[test]
+    fn cut_keeps_selection_until_clipboard_write_succeeds() {
+        let mut editor = SearchEditor::from_text("needle".into(), 64);
+        editor.select_all();
+        assert!(!editor.cut_selection(64, |_| false));
+        assert_eq!(editor.text(), "needle");
+        assert_eq!(editor.selected_text(), Some("needle"));
+        assert!(!editor.undo());
+        assert!(editor.cut_selection(64, |selected| {
+            assert_eq!(selected, "needle");
+            true
+        }));
+        assert_eq!(editor.text(), "");
+        assert!(editor.selected_text().is_none());
+        assert!(editor.undo());
+        assert_eq!(editor.text(), "needle");
+        assert_eq!(editor.selected_text(), Some("needle"));
     }
 
     #[test]

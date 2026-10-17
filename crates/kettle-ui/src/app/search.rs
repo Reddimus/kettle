@@ -453,6 +453,8 @@ impl App {
                     // cross-boundary match could precede them. Do not advertise a wrong
                     // first/next result or wrap past it.
                     ws.search.status = kettle_render::SearchStatus::Limited;
+                    ws.search.typing_scanned_revision = Some(ws.search.revision);
+                    ws.search.unlimited_retry_at = None;
                 } else if let Some(found) = result.matches.first().copied() {
                     ws.search.focused = Some(found);
                     ws.search.revealed_focus = None;
@@ -1146,18 +1148,21 @@ impl App {
             Key::Character(s) if shortcut_only && letter(s, "c") => self.search_copy(ws),
             Key::Character(s) if shortcut_only && !shifted_shortcut && letter(s, "x") => {
                 ws.search.focused_control = kettle_render::SearchControl::Editor;
-                if let Some(selected) = ws.search.editor.selected_text().map(str::to_string) {
-                    if let Some(clipboard) = self.clipboard.as_mut()
-                        && let Err(error) = clipboard.set_text(selected)
-                    {
-                        log::warn!("search cut: clipboard write failed: {error}");
-                    }
-                    edited = ws
-                        .search
-                        .editor
-                        .insert("", kettle_core::MAX_SEARCH_QUERY_BYTES)
-                        .changed;
-                }
+                edited = ws.search.editor.cut_selection(
+                    kettle_core::MAX_SEARCH_QUERY_BYTES,
+                    |selected| {
+                        let Some(clipboard) = self.clipboard.as_mut() else {
+                            return false;
+                        };
+                        match clipboard.set_text(selected.to_string()) {
+                            Ok(()) => true,
+                            Err(error) => {
+                                log::warn!("search cut: clipboard write failed: {error}");
+                                false
+                            }
+                        }
+                    },
+                );
             }
             Key::Character(s) if shortcut_only && letter(s, "v") => self.search_paste(ws),
             // The text-field keys every macOS text field shares: Ctrl+A / E to
@@ -1385,7 +1390,6 @@ impl App {
             ws.search.status = kettle_render::SearchStatus::NoMatch;
             return;
         };
-        let output_generation = pane.term.output_generation();
         let Ok(term) = pane.term.term.lock() else {
             ws.search.set_status_at(
                 kettle_render::SearchStatus::Searching,
@@ -1399,6 +1403,12 @@ impl App {
         } else {
             kettle_core::SearchDirection::Forward
         };
+        let token = kettle_core::SearchScanToken::capture(
+            &term,
+            ws.search.revision,
+            pane.term.output_generation(),
+        );
+        ws.search.invalidate_stale_navigation(token);
         let top_line = term.topmost_line().0;
         let bottom_line = term.bottommost_line().0;
         let last_column = term.last_column().0;
@@ -1446,8 +1456,6 @@ impl App {
             }
             kettle_core::SearchDirection::Reverse => kettle_core::SearchPoint::new(top_line, 0),
         };
-        let token =
-            kettle_core::SearchScanToken::capture(&term, ws.search.revision, output_generation);
         drop(term);
 
         // Enter/F3 navigation uses the same one-chunk-per-event-loop continuation as the idle
@@ -1627,7 +1635,7 @@ impl App {
         // or line selection uses the character under the pointer.
         let boundary = self.search_caret_point_at(ws, x, geometry);
         let under = self.search_char_point_at(ws, x, geometry);
-        let clicks = self.click_count(ws, usize::MAX, under.click_key());
+        let clicks = Self::click_count(ws, usize::MAX, under.click_key());
         match clicks {
             2 => {
                 ws.search.editor.select_word_at(under);

@@ -298,6 +298,34 @@ fn preview_quick_select_labels_only_files_a_lane_can_show() {
     )));
 }
 
+#[test]
+fn www_hints_are_normalized_only_for_opening() {
+    for (raw, target) in [
+        ("www.example.com", "https://www.example.com"),
+        ("https://example.com", "https://example.com"),
+    ] {
+        let hints = kettle_core::hints::detect(&[raw]);
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].text, raw);
+        assert_eq!(hint_action(hints[0].kind, true, false), HintAction::Copy);
+        assert_eq!(kettle_core::links::normalize_url(raw), target);
+        assert!(kettle_core::links::is_safe_url(target));
+    }
+    let src = production_source();
+    let open = src
+        .split("fn open_pane_link(")
+        .nth(1)
+        .and_then(|body| body.split("\n    fn ").next())
+        .expect("pane link opener");
+    let normalized = open
+        .find("normalize_url(uri)")
+        .expect("normalize the target");
+    let gate = open
+        .find("match link_gate(uri, origin)")
+        .expect("pane gate");
+    assert!(normalized < gate);
+}
+
 /// Picking a label acts as before; with Shift a URL is copied and a path
 /// opens, unless the path may not be a whole local file.
 #[test]

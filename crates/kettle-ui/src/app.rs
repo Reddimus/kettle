@@ -2472,6 +2472,10 @@ enum QueuedPasteContent {
         path: Option<std::io::Result<std::path::PathBuf>>,
     },
     Text(String),
+    Input {
+        targets: Vec<(u64, Vec<u8>)>,
+        prepare_input: bool,
+    },
     Paths {
         paths: Vec<std::path::PathBuf>,
         trailing_space: bool,
@@ -2485,6 +2489,10 @@ impl QueuedPasteContent {
         match self {
             Self::Image { fallback, .. } => fallback.len(),
             Self::Text(text) => text.len(),
+            Self::Input { targets, .. } => targets
+                .iter()
+                .map(|(_, bytes)| bytes.len())
+                .fold(0, usize::saturating_add),
             Self::Paths { paths, .. } => paths
                 .iter()
                 .map(|path| path.as_os_str().len())
@@ -3132,6 +3140,12 @@ fn prepare_initial_search_retry_after_output(
     job: &crate::search_input::BackgroundSearch,
     anchor: kettle_core::SearchPoint,
 ) -> bool {
+    if job.nearby {
+        search.typing_scanned_revision = Some(search.revision);
+        if !should_retry_output_drift(job) {
+            search.unlimited_retry_at = None;
+        }
+    }
     if !should_retry_output_drift(job) {
         return false;
     }
@@ -8502,8 +8516,9 @@ fn theme_preview_change(ws: &mut WindowState, live_name: &str) -> Option<ThemeSt
 /// covered.
 fn end_modal_composition(ws: &mut WindowState) {
     ws.ime_focus_generation = ws.ime_focus_generation.wrapping_add(1);
-    if ws.ime_preedit_owner.is_some() {
+    if let Some(session) = ws.ime_preedit_owner.as_mut() {
         ws.ime_preedit = None;
+        session.ended.get_or_insert(ws.ime_focus_generation);
     }
 }
 
@@ -10941,20 +10956,25 @@ impl App {
 
     /// Deliver user-authored bytes with the same selection, cursor, broadcast,
     /// read-only, and scroll behavior for keyboard and IME commit paths.
-    fn write_terminal_input(&mut self, ws: &mut WindowState, bytes: &[u8]) {
+    fn write_terminal_input(&mut self, ws: &mut WindowState, bytes: &[u8]) -> PaneInputResult {
         self.sync_pane_focus_reports(ws);
         if bytes.is_empty() {
-            return;
+            return PaneInputResult::Queued;
         }
         self.clear_selection_on_input(ws);
         self.reset_blink_phase(ws);
         self.hide_mouse_cursor(ws);
+        // Queued behind a paste still being prepared, it is delivered in
+        // order when that paste is.
+        if self.defer_terminal_input(ws, None, bytes, true, false) {
+            return PaneInputResult::Queued;
+        }
         let input_time = std::time::Instant::now();
         let result = if ws.mux.is_broadcast_on() {
             self.broadcast_input(ws, bytes, self.cfg.scroll_on_keystroke, input_time)
         } else if let Some(pane_id) = ws.mux.active_focus() {
             let Some(pane) = ws.mux.panes.get(&pane_id) else {
-                return;
+                return PaneInputResult::Queued;
             };
             let result = pane.feed_input(bytes);
             if result.is_queued() {
@@ -10972,6 +10992,7 @@ impl App {
             PaneInputResult::Queued
         };
         self.report_input_result(result);
+        result
     }
 
     fn write_terminal_key_event(
@@ -10980,9 +11001,37 @@ impl App {
         event: &winit::event::KeyEvent,
         prepare_input: bool,
     ) {
+        if self.defer_terminal_input(ws, Some(event), &[], prepare_input, false) {
+            if prepare_input {
+                self.clear_selection_on_input(ws);
+                self.reset_blink_phase(ws);
+                self.hide_mouse_cursor(ws);
+            }
+            return;
+        }
         self.sync_pane_focus_reports(ws);
         let mods = pty_key_modifiers(ws, &event.logical_key);
         let modified_enter = key_is_modified_enter(&event.logical_key, mods);
+        if !prepare_input {
+            let recipients = ws
+                .terminal_key_recipients
+                .remove(&event.physical_key)
+                .unwrap_or_default();
+            let cfg = &self.cfg;
+            let mut result = PaneInputResult::Queued;
+            for mux in
+                std::iter::once(&ws.mux).chain(self.windows.values().map(|window| &window.mux))
+            {
+                result = result.merge(mux.release_key_to(
+                    &recipients,
+                    cfg.modify_other_keys,
+                    modified_enter,
+                    |mode| encode_key_event_for_mode(cfg, event, mods, mode),
+                ));
+            }
+            self.report_input_result(result);
+            return;
+        }
         if !ws.mux.is_broadcast_on() {
             let mode = ws
                 .mux
@@ -10992,11 +11041,15 @@ impl App {
             let Some(bytes) = encode_key_event_for_mode(&self.cfg, event, mods, mode) else {
                 return;
             };
-            if prepare_input {
-                self.write_terminal_input(ws, &bytes);
-            } else if let Some(pane) = ws.mux.focused() {
-                let result = pane.feed_input(&bytes);
-                self.report_input_result(result);
+            let result = self.write_terminal_input(ws, &bytes);
+            if result.is_queued()
+                && !bytes.is_empty()
+                && let Some(pane_id) = ws.mux.active_focus()
+            {
+                ws.terminal_key_recipients
+                    .entry(event.physical_key)
+                    .or_default()
+                    .insert(pane_id);
             }
             return;
         }
@@ -11013,13 +11066,17 @@ impl App {
         let receipt_pane = prepare_input
             .then(|| Self::media_paste_receipt_pane(ws))
             .flatten();
-        let mut delivery = ws.mux.broadcast_encoded(
+        let (mut delivery, recipients) = ws.mux.broadcast_encoded(
             self.cfg.modify_other_keys,
             modified_enter,
             scroll_to_bottom,
             receipt_pane,
             |mode| encode_key_event_for_mode(cfg, event, mods, mode),
         );
+        ws.terminal_key_recipients
+            .entry(event.physical_key)
+            .or_default()
+            .extend(recipients);
         Self::dismiss_media_paste_receipt_after_delivery(ws, delivery);
         if let Some(input_time) = input_time {
             stamp_accepted_input(&mut ws.last_typed, delivery, input_time);
@@ -11029,7 +11086,7 @@ impl App {
                 let receipt_pane = prepare_input
                     .then(|| Self::media_paste_receipt_pane(other))
                     .flatten();
-                let foreign = other.mux.broadcast_encoded_foreign(
+                let (foreign, recipients) = other.mux.broadcast_encoded_foreign(
                     &scope,
                     self.cfg.modify_other_keys,
                     modified_enter,
@@ -11037,6 +11094,10 @@ impl App {
                     receipt_pane,
                     |mode| encode_key_event_for_mode(cfg, event, mods, mode),
                 );
+                ws.terminal_key_recipients
+                    .entry(event.physical_key)
+                    .or_default()
+                    .extend(recipients);
                 Self::dismiss_media_paste_receipt_after_delivery(other, foreign);
                 if let Some(input_time) = input_time {
                     stamp_accepted_input(&mut other.last_typed, foreign, input_time);
@@ -11101,7 +11162,7 @@ impl App {
             self.search_key(ws, &key, None, Some(text));
         } else {
             ws.mods = latched_mods;
-            self.write_terminal_input(ws, text.as_bytes());
+            let _ = self.write_terminal_input(ws, text.as_bytes());
             if let Some(window) = &ws.window {
                 window.request_redraw();
             }
@@ -11551,6 +11612,8 @@ impl App {
     /// on that machine; a pane that has gone counts as remote. Other links open
     /// through [`Self::open_url`].
     fn open_pane_link(&mut self, ws: &mut WindowState, pane: Option<u64>, uri: &str) {
+        let normalized = kettle_core::links::normalize_url(uri);
+        let uri = normalized.as_str();
         let origin = pane
             .and_then(|id| ws.mux.panes.get(&id))
             .map(pane_path_origin);
@@ -12618,7 +12681,11 @@ impl App {
     }
 
     fn link_at_cursor<'a>(&self, ws: &'a WindowState) -> Option<&'a kettle_core::Link> {
-        let (row, col) = self.cursor_cell(ws)?;
+        let rect = self.focused_terminal(ws, self.area(ws))?;
+        if !rect_contains(rect, ws.cursor.x as f32, ws.cursor.y as f32) {
+            return None;
+        }
+        let (row, col) = self.cursor_cell_in_rect(ws, rect);
         ws.links
             .iter()
             .find(|l| l.row == row && col >= l.start_col && col <= l.end_col)
@@ -13872,11 +13939,8 @@ impl App {
         // was actually open -- this runs before every other modal opens, and an
         // unconditional resize would fire on all 17 call sites for nothing.
         let title_edit_was_open = ws.editing_title.is_some();
-        let search_was_open = ws.search.open;
         self.close_search(ws);
-        if !search_was_open {
-            ws.ime_focus_generation = ws.ime_focus_generation.wrapping_add(1);
-        }
+        end_modal_composition(ws);
         ws.palette_input = None;
         ws.settings_nav = None;
         // Also drop any open inline settings text prompt (the image-path
@@ -14692,21 +14756,15 @@ impl App {
             // the same bytes would. That helper also invalidates the affected
             // pane's media-paste receipt, which every authored-input route owes.
             Action::SendText(text) => {
-                self.write_terminal_input(ws, text.as_bytes());
+                let _ = self.write_terminal_input(ws, text.as_bytes());
             }
             Action::SendNewline => {
-                if let Some(pane_id) = ws.mux.active_focus()
-                    && let Some(p) = ws.mux.panes.get(&pane_id)
-                {
-                    // Terminator parity (`key_send_newline`): write a literal
-                    // `\n` for shell line-editors that consume Enter normally
-                    // but expect an explicit `\n` for line continuation
-                    // (multi-line readline prompts). Typed-input semantics, so
-                    // read-only drops it.
-                    let result = p.feed_input(b"\n");
-                    self.report_input_result(result);
-                    Self::dismiss_media_paste_receipt_after_input(ws, pane_id, result);
-                }
+                // Terminator parity (`key_send_newline`): write a literal
+                // `\n` for shell line-editors that consume Enter normally
+                // but expect an explicit `\n` for line continuation
+                // (multi-line readline prompts). Typed-input semantics, so
+                // read-only drops it.
+                self.write_focused_terminal_input(ws, b"\n");
             }
             // Terminator parity (`key_preferences` /
             // `key_preferences_keybindings`). Terminator opens a GUI
@@ -15596,13 +15654,7 @@ impl App {
                     .focused_pane_index_in_tab()
                     .map(|i| i + 1)
                     .unwrap_or(1);
-                if let Some(pane_id) = ws.mux.active_focus()
-                    && let Some(p) = ws.mux.panes.get(&pane_id)
-                {
-                    let result = p.feed_input(idx.to_string().as_bytes());
-                    self.report_input_result(result);
-                    Self::dismiss_media_paste_receipt_after_input(ws, pane_id, result);
-                }
+                self.write_focused_terminal_input(ws, idx.to_string().as_bytes());
             }
             Action::InsertPanePadded => {
                 let idx = ws
@@ -15610,13 +15662,7 @@ impl App {
                     .focused_pane_index_in_tab()
                     .map(|i| i + 1)
                     .unwrap_or(1);
-                if let Some(pane_id) = ws.mux.active_focus()
-                    && let Some(p) = ws.mux.panes.get(&pane_id)
-                {
-                    let result = p.feed_input(format!("{idx:02}").as_bytes());
-                    self.report_input_result(result);
-                    Self::dismiss_media_paste_receipt_after_input(ws, pane_id, result);
-                }
+                self.write_focused_terminal_input(ws, format!("{idx:02}").as_bytes());
             }
             // Terminator parity (`insert_term_name.py`
             // plugin → `InsertTermName` menu item + keybind). Send
@@ -15626,13 +15672,8 @@ impl App {
             // output by source pane, or for keyboard workflows
             // that re-type the current title into the command line.
             Action::InsertPaneName => {
-                if let Some(pane_id) = ws.mux.active_focus()
-                    && let Some(p) = ws.mux.panes.get(&pane_id)
-                {
-                    let title = p.title.clone();
-                    let result = p.feed_input(title.as_bytes());
-                    self.report_input_result(result);
-                    Self::dismiss_media_paste_receipt_after_input(ws, pane_id, result);
+                if let Some(title) = ws.mux.focused().map(|pane| pane.title.clone()) {
+                    self.write_focused_terminal_input(ws, title.as_bytes());
                 }
             }
             // Terminator parity (`dir_open.py` plugin → `CurrDirOpen` menu
@@ -17738,6 +17779,75 @@ fn normalized_ime_preedit(
     selection: Option<(usize, usize)>,
 ) -> Option<(String, Option<(usize, usize)>)> {
     (!text.is_empty()).then_some((text, selection))
+}
+
+fn current_ime_owner(ws: &WindowState) -> crate::window_state::ImePreeditOwner {
+    if ws.search.open {
+        crate::window_state::ImePreeditOwner::Search
+    } else {
+        crate::window_state::ImePreeditOwner::Other
+    }
+}
+
+fn update_ime_preedit(
+    ws: &mut WindowState,
+    text: String,
+    selection: Option<(usize, usize)>,
+) -> bool {
+    use crate::window_state::ImePreeditSession;
+    let next = normalized_ime_preedit(text, selection);
+    if ws.ime_preedit == next {
+        return false;
+    }
+    let owner = current_ime_owner(ws);
+    let generation = ws.ime_focus_generation;
+    match (next.is_some(), ws.ime_preedit_owner) {
+        // A composition begins here, unless one under way here goes on.
+        (true, session)
+            if session.is_none_or(|session| {
+                session.ended.is_some()
+                    || session.owner != owner
+                    || session.generation != generation
+            }) =>
+        {
+            ws.ime_preedit_owner = Some(ImePreeditSession {
+                owner,
+                generation,
+                ended: None,
+            });
+        }
+        // Emptied where it began: cancelled, or leading into a Commit for
+        // this same surface, so there is nothing to guard.
+        (false, Some(session))
+            if session.ended.is_none()
+                && session.owner == owner
+                && session.generation == generation =>
+        {
+            ws.ime_preedit_owner = None;
+        }
+        // Emptied after focus moved: a Commit for the old surface may follow.
+        (false, Some(session)) if session.ended.is_none() => {
+            ws.ime_preedit_owner = Some(ImePreeditSession {
+                ended: Some(generation),
+                ..session
+            });
+        }
+        _ => {}
+    }
+    ws.ime_preedit = next;
+    true
+}
+
+fn take_ime_commit(ws: &mut WindowState) -> bool {
+    ws.ime_preedit = None;
+    let owner = current_ime_owner(ws);
+    let generation = ws.ime_focus_generation;
+    ws.ime_preedit_owner.take().is_none_or(|session| {
+        // A session that ended before focus moved on again is stale: no
+        // Commit was still due for it, so this one is new input here.
+        session.ended.is_some_and(|ended| ended != generation)
+            || (session.owner == owner && session.generation == generation)
+    })
 }
 
 fn ime_preedit_focus(text: &str, selection: Option<(usize, usize)>) -> usize {
@@ -20825,6 +20935,7 @@ impl App {
                     // missing half of an old shortcut.
                     ws.suppressed_key_releases.clear();
                     ws.terminal_owned_key_releases.clear();
+                    ws.terminal_key_recipients.clear();
                     ws.closing_keys.clear();
                     ws.ime_preedit = None;
                     ws.ime_focus_generation = ws.ime_focus_generation.wrapping_add(1);
@@ -20947,38 +21058,15 @@ impl App {
                         false
                     }
                     winit::event::Ime::Preedit(text, selection) => {
-                        let next = normalized_ime_preedit(text, selection);
-                        if ws.ime_preedit == next {
+                        if !update_ime_preedit(ws, text, selection) {
                             return;
                         }
-                        ws.ime_preedit_owner =
-                            next.as_ref()
-                                .map(|_| crate::window_state::ImePreeditSession {
-                                    owner: if ws.search.open {
-                                        crate::window_state::ImePreeditOwner::Search
-                                    } else {
-                                        crate::window_state::ImePreeditOwner::Other
-                                    },
-                                    generation: ws.ime_focus_generation,
-                                });
-                        ws.ime_preedit = next;
                         self.update_ime_cursor_area(ws);
                         true
                     }
                     winit::event::Ime::Commit(text) => {
                         let redraw = ws.ime_preedit.is_some() || !text.is_empty();
-                        ws.ime_preedit = None;
-                        let owner = ws.ime_preedit_owner.take();
-                        let current_owner = if ws.search.open {
-                            crate::window_state::ImePreeditOwner::Search
-                        } else {
-                            crate::window_state::ImePreeditOwner::Other
-                        };
-                        let owns_current_surface = owner.is_none_or(|session| {
-                            session.owner == current_owner
-                                && session.generation == ws.ime_focus_generation
-                        });
-                        if owns_current_surface {
+                        if take_ime_commit(ws) {
                             self.commit_ime_text(ws, &text, event_loop);
                         }
                         redraw

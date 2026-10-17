@@ -179,6 +179,7 @@ fn closing_a_modal_ends_its_composition() {
     let mut ws = WindowState::new(0, Mux::new());
     ws.ime_preedit = Some(("ka".into(), None));
     ws.ime_preedit_owner = Some(ImePreeditSession {
+        ended: None,
         owner: ImePreeditOwner::Other,
         generation: ws.ime_focus_generation,
     });

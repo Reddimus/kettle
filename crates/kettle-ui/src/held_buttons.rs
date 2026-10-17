@@ -52,10 +52,9 @@ impl HeldButtons {
             .retain(|held| held.button != button || held.pane.is_some());
     }
 
-    /// The program gesture a drag reports to, if the newest press still
-    /// held is a program's; a newer gesture of Kettle's own takes the drag.
+    /// The newest press still held, including a gesture Kettle handles itself.
     pub(crate) fn dragging(&self) -> Option<Held> {
-        self.held.last().filter(|held| held.pane.is_some()).copied()
+        self.held.last().copied()
     }
 
     /// Note that `pane` was told of `cell`.
@@ -134,12 +133,33 @@ mod tests {
         let mut held = HeldButtons::default();
         held.pressed(128, Some(7), (1, 1));
         held.pressed(0, None, (0, 0));
-        assert_eq!(held.dragging(), None, "Kettle's selection drags");
+        assert_eq!(
+            held.dragging().map(|held| held.pane),
+            Some(None),
+            "Kettle's selection keeps the drag",
+        );
         assert!(held.any(), "the program still holds Back");
         held.end_own(0);
         assert_eq!(held.dragging().map(|held| held.button), Some(128));
         held.end_own(128);
         assert_eq!(held.take(128).map(|held| held.cell), Some((1, 1)));
         assert!(!held.any());
+    }
+
+    #[test]
+    fn a_local_drag_is_distinct_from_hover() {
+        let mut held = HeldButtons::default();
+        assert_eq!(held.dragging(), None);
+        held.pressed(0, None, (5, 79));
+        assert_eq!(
+            held.dragging(),
+            Some(Held {
+                button: 0,
+                pane: None,
+                cell: (5, 79),
+            }),
+        );
+        held.end_own(0);
+        assert_eq!(held.dragging(), None);
     }
 }
