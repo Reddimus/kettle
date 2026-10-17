@@ -8516,8 +8516,9 @@ fn theme_preview_change(ws: &mut WindowState, live_name: &str) -> Option<ThemeSt
 /// covered.
 fn end_modal_composition(ws: &mut WindowState) {
     ws.ime_focus_generation = ws.ime_focus_generation.wrapping_add(1);
-    if ws.ime_preedit_owner.is_some() {
+    if let Some(session) = ws.ime_preedit_owner.as_mut() {
         ws.ime_preedit = None;
+        session.ended.get_or_insert(ws.ime_focus_generation);
     }
 }
 
@@ -17780,24 +17781,58 @@ fn normalized_ime_preedit(
     (!text.is_empty()).then_some((text, selection))
 }
 
+fn current_ime_owner(ws: &WindowState) -> crate::window_state::ImePreeditOwner {
+    if ws.search.open {
+        crate::window_state::ImePreeditOwner::Search
+    } else {
+        crate::window_state::ImePreeditOwner::Other
+    }
+}
+
 fn update_ime_preedit(
     ws: &mut WindowState,
     text: String,
     selection: Option<(usize, usize)>,
 ) -> bool {
+    use crate::window_state::ImePreeditSession;
     let next = normalized_ime_preedit(text, selection);
     if ws.ime_preedit == next {
         return false;
     }
-    if next.is_some() && ws.ime_preedit_owner.is_none() {
-        ws.ime_preedit_owner = Some(crate::window_state::ImePreeditSession {
-            owner: if ws.search.open {
-                crate::window_state::ImePreeditOwner::Search
-            } else {
-                crate::window_state::ImePreeditOwner::Other
-            },
-            generation: ws.ime_focus_generation,
-        });
+    let owner = current_ime_owner(ws);
+    let generation = ws.ime_focus_generation;
+    match (next.is_some(), ws.ime_preedit_owner) {
+        // A composition begins here, unless one under way here goes on.
+        (true, session)
+            if session.is_none_or(|session| {
+                session.ended.is_some()
+                    || session.owner != owner
+                    || session.generation != generation
+            }) =>
+        {
+            ws.ime_preedit_owner = Some(ImePreeditSession {
+                owner,
+                generation,
+                ended: None,
+            });
+        }
+        // Emptied where it began: cancelled, or leading into a Commit for
+        // this same surface, so there is nothing to guard.
+        (false, Some(session))
+            if session.ended.is_none()
+                && session.owner == owner
+                && session.generation == generation =>
+        {
+            ws.ime_preedit_owner = None;
+        }
+        // Emptied after focus moved: a Commit for the old surface may follow.
+        (false, Some(session)) if session.ended.is_none() => {
+            ws.ime_preedit_owner = Some(ImePreeditSession {
+                ended: Some(generation),
+                ..session
+            });
+        }
+        _ => {}
     }
     ws.ime_preedit = next;
     true
@@ -17805,14 +17840,13 @@ fn update_ime_preedit(
 
 fn take_ime_commit(ws: &mut WindowState) -> bool {
     ws.ime_preedit = None;
-    let owner = ws.ime_preedit_owner.take();
-    let current_owner = if ws.search.open {
-        crate::window_state::ImePreeditOwner::Search
-    } else {
-        crate::window_state::ImePreeditOwner::Other
-    };
-    owner.is_none_or(|session| {
-        session.owner == current_owner && session.generation == ws.ime_focus_generation
+    let owner = current_ime_owner(ws);
+    let generation = ws.ime_focus_generation;
+    ws.ime_preedit_owner.take().is_none_or(|session| {
+        // A session that ended before focus moved on again is stale: no
+        // Commit was still due for it, so this one is new input here.
+        session.ended.is_some_and(|ended| ended != generation)
+            || (session.owner == owner && session.generation == generation)
     })
 }
 

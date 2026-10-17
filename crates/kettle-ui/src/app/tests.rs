@@ -4751,6 +4751,35 @@ fn empty_ime_preedit_normalizes_to_stable_absence() {
     assert_eq!(super::ime_preedit_focus("a\u{301}x", Some((0, 1))), 0);
 }
 
+/// A composition cancelled where it began leaves no owner behind, so the
+/// next composition, in search, keeps its Commit. And one cut short by a
+/// focus change without a Commit stops guarding once focus moves on again,
+/// so a plain Commit later is typed. Both once dropped the text.
+#[test]
+fn a_finished_composition_leaves_no_stale_ime_owner() {
+    let mut ws = WindowState::new(1, Mux::new());
+    assert!(super::update_ime_preedit(&mut ws, "ka".into(), None));
+    super::update_ime_preedit(&mut ws, String::new(), None);
+    assert!(ws.ime_preedit_owner.is_none(), "a cancel ends the session");
+    ws.search.open = true;
+    ws.ime_focus_generation += 1;
+    assert!(super::update_ime_preedit(&mut ws, "ki".into(), None));
+    assert!(
+        super::take_ime_commit(&mut ws),
+        "search's own Commit is typed"
+    );
+
+    let mut ws = WindowState::new(1, Mux::new());
+    assert!(super::update_ime_preedit(&mut ws, "ku".into(), None));
+    super::end_modal_composition(&mut ws);
+    super::update_ime_preedit(&mut ws, String::new(), None);
+    ws.ime_focus_generation += 1;
+    assert!(
+        super::take_ime_commit(&mut ws),
+        "a later plain Commit is typed"
+    );
+}
+
 #[test]
 fn empty_preedit_preserves_ownership_until_commit() {
     for clear_display in [false, true] {
@@ -4765,7 +4794,8 @@ fn empty_preedit_preserves_ownership_until_commit() {
         }
         ws.palette_input = Some((String::new(), 0));
         super::update_ime_preedit(&mut ws, String::new(), None);
-        assert_eq!(ws.ime_preedit_owner, owner);
+        let kept = |ws: &WindowState| ws.ime_preedit_owner.map(|s| (s.owner, s.generation));
+        assert_eq!(kept(&ws), owner.map(|s| (s.owner, s.generation)));
         assert!(!super::take_ime_commit(&mut ws));
         assert!(ws.ime_preedit_owner.is_none());
 
@@ -9026,6 +9056,7 @@ fn a_key_that_closes_or_replaces_a_modal_stops_repeating() {
     ws.ime_preedit_owner = Some(crate::window_state::ImePreeditSession {
         owner: crate::window_state::ImePreeditOwner::Other,
         generation: ws.ime_focus_generation,
+        ended: None,
     });
     let generation = ws.ime_focus_generation;
 

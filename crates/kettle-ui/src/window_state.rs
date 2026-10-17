@@ -466,6 +466,10 @@ pub(crate) enum ImePreeditOwner {
 pub(crate) struct ImePreeditSession {
     pub(crate) owner: ImePreeditOwner,
     pub(crate) generation: u64,
+    /// The focus generation at which the composition left the screen while
+    /// its Commit could still arrive. Once focus moves on from there, no
+    /// Commit is due and the session guards nothing.
+    pub(crate) ended: Option<u64>,
 }
 
 const MEDIA_RECEIPT_EXPANDED: std::time::Duration = std::time::Duration::from_secs(4);
