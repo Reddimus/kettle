@@ -531,13 +531,21 @@ fn create_private_dirs_impl(directory: &Path) -> io::Result<()> {
     // The directories the creates below add, innermost first. A save is
     // durable only once each new directory's entry is in its parent, so each
     // parent is synced at the end.
+    // A relative path ends in the empty path, which is never created.
     let missing: Vec<&Path> = directory
         .ancestors()
-        .take_while(|path| std::fs::symlink_metadata(path).is_err())
+        .take_while(|path| !path.as_os_str().is_empty() && std::fs::symlink_metadata(path).is_err())
         .collect();
     let sync_new_entries = || -> io::Result<()> {
         for created in missing.iter().rev() {
             if let Some(parent) = created.parent() {
+                // A relative path's first component lives in the working
+                // directory, whose name there is the empty path.
+                let parent = if parent.as_os_str().is_empty() {
+                    Path::new(".")
+                } else {
+                    parent
+                };
                 unix::sync_directory_path(parent)?;
             }
         }
@@ -5802,6 +5810,38 @@ mod windows {
 mod tests {
     use super::*;
     use std::io::Write as _;
+
+    /// A relative directory whose first component is new is created and
+    /// reported as created. Syncing the new entry's parent once named the
+    /// empty path, so the call failed after making the directories and a
+    /// retry succeeded; `--config conf/kettle.toml` with a new `conf` could
+    /// not save. A child process runs it from a temporary working directory.
+    #[cfg(unix)]
+    #[test]
+    fn a_relative_directory_with_a_new_first_component_is_created() {
+        const CHILD: &str = "KETTLE_STATE_RELATIVE_DIRS_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let made = create_private_dirs(Path::new("conf/sub"));
+            std::process::exit(match made {
+                Ok(()) if Path::new("conf/sub").is_dir() => 0,
+                Ok(()) => 4,
+                Err(_) => 3,
+            });
+        }
+        let root = crate::test_tempdir();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "private::tests::a_relative_directory_with_a_new_first_component_is_created",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .current_dir(root.path())
+            .status()
+            .unwrap();
+        assert!(status.success(), "creating conf/sub failed: {status}");
+        assert!(root.path().join("conf/sub").is_dir());
+    }
 
     #[test]
     fn user_selected_file_requires_an_existing_parent_and_a_new_leaf() {
