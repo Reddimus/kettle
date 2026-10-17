@@ -1439,17 +1439,21 @@ mod tests {
         #[test]
         fn stale_candidates_do_not_count_toward_the_cap() {
             // A group scan remembered 100 processes that have since exited:
-            // only the live worker counts, and they are forgotten.
+            // only the live worker counts, and they are forgotten. Linux never
+            // hands out a pid of PID_MAX_LIMIT (2^22) or more, so these can
+            // only be stale; a long-running machine's live pids pass any
+            // smaller number.
+            const NEVER_A_PID: libc::pid_t = 1 << 22;
             let directory = tempfile::tempdir().unwrap();
             let path = script(directory.path(), "echo $$\n/bin/sleep 30");
             let mut worker = spawn_script(&path);
             let leader: libc::pid_t = first_line(&mut worker).parse().unwrap();
             let mut probe = footprint::Probe::default();
             probe.measure(leader).unwrap();
-            probe.remember_stale((0..100).map(|i| 3_999_000 + i).collect());
+            probe.remember_stale((0..100).map(|i| NEVER_A_PID + i).collect());
             assert!(probe.measure(leader).is_ok());
             assert!(
-                probe.remembered().iter().all(|&pid| pid < 3_999_000),
+                probe.remembered().iter().all(|&pid| pid < NEVER_A_PID),
                 "{:?}",
                 probe.remembered()
             );
