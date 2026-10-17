@@ -163,6 +163,60 @@ pub(crate) fn renderer(width: u32, height: u32) -> Option<(Renderer, Config)> {
 }
 
 #[test]
+fn returning_to_cached_wallpaper_rejects_an_obsolete_decode() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(32, 32) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    cfg.background_type = kettle_config::BackgroundType::Image;
+    cfg.background_image = "A".into();
+    cfg.background_blur = false;
+    cfg.background_animation = kettle_config::BackgroundAnimation::Off;
+    let image = kettle_core::ImageData::new(1, 1, vec![255; 4]).unwrap();
+    let key = image.allocation_key();
+    renderer.bg_image_cache = Some(BgImageAnim {
+        path: "A".into(),
+        blur: 0,
+        frames: vec![image],
+        opaque_frames: vec![true],
+        gaps: vec![0],
+        started: std::time::Instant::now(),
+    });
+    let (sender, _jobs) = std::sync::mpsc::sync_channel(1);
+    let (results, receiver) = std::sync::mpsc::channel();
+    renderer.bg_image_worker = Some(BgImageWorker {
+        sender,
+        receiver,
+        busy: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+    });
+    renderer.bg_image_pending = Some(("B".into(), 0));
+    assert!(
+        results
+            .send(BgImageResult {
+                path: "B".into(),
+                blur_radius: 0,
+                frames: vec![BgFrame {
+                    image: BgImage {
+                        width: 1,
+                        height: 1,
+                        rgba: vec![0, 0, 0, 255],
+                    },
+                    gap_ms: 0,
+                }],
+            })
+            .is_ok()
+    );
+    let _ = renderer
+        .render_frame(&[], &TabBar::hidden(), &cfg, &focused(false))
+        .expect("wallpaper frame renders");
+    let cache = renderer.bg_image_cache.as_ref().unwrap();
+    assert_eq!(cache.path, "A");
+    assert_eq!(cache.frames[0].allocation_key(), key);
+    assert!(renderer.bg_image_pending.is_none());
+}
+
+#[test]
 fn bold_palette_resolution_honors_osc_overrides_and_preserves_truecolor() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(320, 120) else {
@@ -545,6 +599,16 @@ fn draw_quads(
     quads: &QuadPipeline,
     size: u32,
 ) -> Vec<u8> {
+    draw_quads_hiding(device, queue, quads, size, None)
+}
+
+fn draw_quads_hiding(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    quads: &QuadPipeline,
+    size: u32,
+    hidden: Option<std::ops::Range<u32>>,
+) -> Vec<u8> {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("kettle-ring-target"),
         size: wgpu::Extent3d {
@@ -587,7 +651,7 @@ fn draw_quads(
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        quads.draw(&mut pass);
+        quads.draw_hiding(&mut pass, hidden);
     }
     encoder.copy_texture_to_buffer(
         wgpu::TexelCopyTextureInfo {
@@ -814,6 +878,83 @@ fn the_glyph_ring_outgrows_its_first_buffer() {
         (1, 2, 101 * size),
         "the uniform once through the queue, both instance sets mapped"
     );
+}
+
+#[test]
+fn quad_upload_batches_at_the_device_limit_and_recovers_after_shrinking() {
+    let _serialized = gpu_test_guard();
+    let cfg = gpu_test_config();
+    for mapped in [false, true] {
+        let Some((device, queue)) = pollster::block_on(async {
+            let (_instance, adapter) = crate::resolve_headless_adapter(&cfg, "quad-limit-test")
+                .await
+                .ok()?;
+            let features = if mapped {
+                wgpu::Features::MAPPABLE_PRIMARY_BUFFERS
+            } else {
+                wgpu::Features::empty()
+            };
+            if !adapter.features().contains(features) {
+                return None;
+            }
+            let device = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    required_features: features,
+                    required_limits: wgpu::Limits {
+                        max_buffer_size: 128 * 1024,
+                        ..live_device_limits(adapter.limits())
+                    },
+                    ..Default::default()
+                })
+                .await
+                .expect("device with a small buffer limit");
+            Some(device)
+        }) else {
+            eprintln!("no GPU adapter for mapped={mapped}; skipped");
+            continue;
+        };
+        if mapped {
+            let mut ring = upload::MappedRing::new("limit-test", wgpu::BufferUsages::VERTEX, None);
+            let counters = upload::UploadCounters::default();
+            let too_large = vec![0; 128 * 1024 + 4];
+            assert!(!ring.write(&device, &queue, None, &too_large, &counters));
+            assert!(ring.current().is_none());
+            assert!(ring.write(&device, &queue, None, &[0; 32], &counters));
+        }
+        let red = QuadInstance {
+            pos: [0.0, 0.0],
+            size: [16.0, 16.0],
+            color: [1.0, 0.0, 0.0, 1.0],
+        };
+        let green = QuadInstance {
+            color: [0.0, 1.0, 0.0, 1.0],
+            ..red
+        };
+        let mut data = vec![red; 4097];
+        data[4096] = green;
+        let mut quads = QuadPipeline::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb);
+        quads.upload(&device, &queue, [16.0, 16.0], &data);
+        assert_eq!(quads.count, 4097);
+        assert_eq!(quads.uploaded().unwrap().count(), 4097);
+        assert_eq!(
+            &draw_quads(&device, &queue, &quads, 16)[..4],
+            &[0, 255, 0, 255]
+        );
+        assert_eq!(
+            &draw_quads_hiding(&device, &queue, &quads, 16, Some(4095..4097))[..4],
+            &[255, 0, 0, 255],
+        );
+        assert_eq!(
+            &draw_quads_hiding(&device, &queue, &quads, 16, Some(0..4096))[..4],
+            &[0, 255, 0, 255],
+        );
+        quads.upload(&device, &queue, [16.0, 16.0], &[red]);
+        assert_eq!(quads.count, 1);
+        assert_eq!(
+            &draw_quads(&device, &queue, &quads, 16)[..4],
+            &[255, 0, 0, 255]
+        );
+    }
 }
 
 /// Each pipeline, uploading the same data twice, writes nothing the second
@@ -1178,6 +1319,137 @@ fn grid_output_prepares_no_glyphon_text() {
     );
     assert_eq!(renderer.render_uploads().chrome_prepares, chrome_prepares);
     assert_ne!(after, before, "the new text is still drawn");
+}
+
+#[test]
+fn block_cursor_uses_the_pane_baseline_with_scaled_rows() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(320, 160) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let mut snap = snapshot_of(20, 4, b"W\r");
+    snap.cursor.shape = alacritty_terminal::vte::ansi::CursorShape::Block;
+    for height in [2.0, 3.0] {
+        cfg.cell_height = height;
+        renderer.set_cell_scale(1.0, height);
+        capture(
+            &mut renderer,
+            &cfg,
+            &[pane(&snap, 320, 160)],
+            &focused(true),
+        );
+        assert_eq!(
+            renderer.cursor_glyph_buffer.metrics(),
+            renderer.pane_buffers[0].metrics()
+        );
+        let cursor_y = renderer
+            .cursor_glyph_buffer
+            .layout_runs()
+            .next()
+            .unwrap()
+            .line_y;
+        let pane_y = renderer.pane_buffers[0]
+            .layout_runs()
+            .next()
+            .unwrap()
+            .line_y;
+        assert_eq!(cursor_y, pane_y);
+        assert_eq!(
+            renderer.last_cursor_glyph_key,
+            cursor_glyph_damage_key(
+                renderer.pending_cursor_glyph.as_ref(),
+                pane_metrics(renderer.metrics.font_size, renderer.cell_h),
+                &renderer.font_family,
+            ),
+        );
+    }
+}
+
+#[test]
+fn block_cursor_preserves_cell_font_attributes_and_invalidates_style() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(320, 120) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    cfg.font_family_bold_italic = Some("monospace".into());
+    let mut previous_key = None;
+    for (input, bold, italic) in [
+        (b"W\r".as_slice(), false, false),
+        (b"\x1b[1;3mW\r".as_slice(), true, true),
+        (b"\x1b[3mW\r".as_slice(), false, true),
+    ] {
+        let mut snap = snapshot_of(20, 4, input);
+        snap.cursor.shape = alacritty_terminal::vte::ansi::CursorShape::Block;
+        capture(
+            &mut renderer,
+            &cfg,
+            &[pane(&snap, 320, 120)],
+            &focused(true),
+        );
+        let attrs = renderer.cursor_glyph_buffer.lines[0]
+            .attrs_list()
+            .get_span(0);
+        let color = renderer.pending_cursor_glyph.as_ref().unwrap().color;
+        let expected = run_attrs(&cfg, &font_features(&cfg), color, bold, italic);
+        assert_eq!(attrs.weight, expected.weight);
+        assert_eq!(attrs.style, expected.style);
+        assert_eq!(attrs.family, expected.family);
+        assert_eq!(attrs.font_features, expected.font_features);
+        if previous_key.is_some() {
+            assert_ne!(renderer.last_cursor_glyph_key, previous_key);
+        }
+        previous_key = renderer.last_cursor_glyph_key;
+    }
+}
+
+#[test]
+fn confirmation_uses_chrome_columns_with_scaled_terminal_cells() {
+    let _serialized = gpu_test_guard();
+    let mut cfg = gpu_test_config();
+    cfg.cell_width = 0.5;
+    cfg.cell_height = 0.5;
+    let Some(mut renderer) = Renderer::headless_for_tests_with(&cfg, 800, 600, 1.25, false)
+        .expect("headless renderer builds")
+    else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let snap = snapshot_of(20, 4, b"");
+    let buttons = vec![
+        ConfirmDialogButton {
+            label: "Cancel".into(),
+            destructive: false,
+        },
+        ConfirmDialogButton {
+            label: "Close".into(),
+            destructive: true,
+        },
+    ];
+    let (row, _) = confirm_bar_buttons(&buttons, 0);
+    let overlay = Overlay {
+        confirm_dialog: Some(ConfirmDialogOverlay {
+            prompt: "Close this pane?".into(),
+            buttons,
+            focus_idx: 0,
+        }),
+        ..focused(true)
+    };
+    capture(&mut renderer, &cfg, &[pane(&snap, 800, 600)], &overlay);
+    let cw = renderer.overlay_text_cell_width();
+    let ch = renderer.overlay_text_line_height();
+    let text = renderer.search_buffer.lines[0].text();
+    assert!(text.ends_with(&row));
+    assert_eq!(display_width(text), confirm_bar_columns(800.0, cw));
+    let geometry = ConfirmBarGeometry::new((800.0, 600.0), (cw, ch));
+    let rects = geometry.button_rects(&[10, 9]);
+    assert_eq!(
+        rects[0].0,
+        (display_width(text) - display_width(&row)) as f32 * cw
+    );
+    assert!(rects[1].0 + rects[1].2 <= 800.0);
+    assert_eq!(geometry.rect.3, ch + 10.0);
 }
 
 #[test]
@@ -2857,4 +3129,65 @@ fn a_playing_lane_draws_its_frame_and_bar() {
         center.2 > 200 && center.0 < 40,
         "the frame, blue: {center:?}"
     );
+}
+
+#[test]
+fn disabled_wallpaper_discards_late_worker_frames() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(32, 32) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    cfg.background_type = kettle_config::BackgroundType::Solid;
+    for cached in [true, false] {
+        renderer.bg_image_cache = cached.then(|| BgImageAnim {
+            path: "old".into(),
+            blur: 0,
+            frames: Vec::new(),
+            opaque_frames: Vec::new(),
+            gaps: Vec::new(),
+            started: std::time::Instant::now(),
+        });
+        renderer.bg_image_pending = Some(("old".into(), 0));
+        let (sender, _jobs) = std::sync::mpsc::sync_channel(1);
+        let (results, receiver) = std::sync::mpsc::channel();
+        renderer.bg_image_worker = Some(BgImageWorker {
+            sender,
+            receiver,
+            busy: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        });
+        let _ = renderer
+            .render_frame(&[], &TabBar::hidden(), &cfg, &focused(false))
+            .expect("disabled frame renders");
+        assert!(renderer.bg_image_cache.is_none());
+        assert!(
+            results
+                .send(BgImageResult {
+                    path: "old".into(),
+                    blur_radius: 0,
+                    frames: vec![BgFrame {
+                        image: BgImage {
+                            width: 1,
+                            height: 1,
+                            rgba: vec![255; 4],
+                        },
+                        gap_ms: 0,
+                    }],
+                })
+                .is_ok()
+        );
+        let _ = renderer
+            .render_frame(&[], &TabBar::hidden(), &cfg, &focused(false))
+            .expect("late decode redraw renders");
+        assert!(renderer.bg_image_pending.is_none());
+        assert!(
+            renderer
+                .bg_image_worker
+                .as_ref()
+                .unwrap()
+                .try_recv()
+                .is_none(),
+            "disabled backgrounds retained decoded frames"
+        );
+    }
 }

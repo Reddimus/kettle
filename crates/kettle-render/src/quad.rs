@@ -85,15 +85,24 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 
 /// Compute the instance-buffer capacity (rounded up to a power of two) and
 /// its byte size needed to hold `len` quad instances. Returns `None` if
-/// either the capacity or the resulting byte size would overflow `usize`,
-/// so callers can degrade (skip the upload) rather than panic —
+/// either the capacity or the resulting byte size would overflow `usize`
+/// or exceed `max_bytes`, so callers can degrade (skip the upload) rather than panic —
 /// `usize::next_power_of_two()` panics on overflow, and a plain
 /// `capacity * size_of::<QuadInstance>()` multiplication can overflow even
 /// when the capacity itself is representable.
-fn grow_capacity(len: usize) -> Option<(usize, usize)> {
+fn grow_capacity(len: usize, max_bytes: u64) -> Option<(usize, usize)> {
     let capacity = len.checked_next_power_of_two()?;
     let bytes = capacity.checked_mul(std::mem::size_of::<QuadInstance>())?;
-    Some((capacity, bytes))
+    (u64::try_from(bytes).ok()? <= max_bytes).then_some((capacity, bytes))
+}
+
+fn max_quads_per_buffer(max_bytes: u64) -> usize {
+    let count =
+        (max_bytes / std::mem::size_of::<QuadInstance>() as u64).min(u64::from(u32::MAX)) as usize;
+    count
+        .checked_ilog2()
+        .map(|power| 1usize << power)
+        .unwrap_or(0)
 }
 
 /// Premultiplied-alpha blending: the shader returns premultiplied colour, so
@@ -216,20 +225,92 @@ fn build_pipeline(
     })
 }
 
+struct QuadBatch {
+    instances: wgpu::Buffer,
+    capacity: usize,
+    len: usize,
+    instances_held: RetainedBytes,
+    ring: Option<MappedRing>,
+}
+
+impl QuadBatch {
+    fn new(device: &wgpu::Device) -> Self {
+        let ring = mapped_uploads(device)
+            .then(|| MappedRing::new("kettle-quad-instances", wgpu::BufferUsages::VERTEX, None));
+        let capacity = if ring.is_some() {
+            1
+        } else {
+            4096.min(max_quads_per_buffer(device.limits().max_buffer_size))
+        };
+        let instances = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("kettle-quad-instances"),
+            size: (capacity * std::mem::size_of::<QuadInstance>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Self {
+            instances,
+            capacity,
+            len: 0,
+            instances_held: RetainedBytes::default(),
+            ring,
+        }
+    }
+
+    fn upload(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        data: &[QuadInstance],
+        counters: &UploadCounters,
+    ) -> bool {
+        if let Some(ring) = &mut self.ring {
+            if !ring.write(
+                device,
+                queue,
+                Some(&mut self.instances_held),
+                bytemuck::cast_slice(data),
+                counters,
+            ) {
+                return false;
+            }
+        } else {
+            if data.len() > self.capacity {
+                let Some((capacity, bytes)) =
+                    grow_capacity(data.len(), device.limits().max_buffer_size)
+                else {
+                    return false;
+                };
+                let instances = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("kettle-quad-instances"),
+                    size: bytes as u64,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                self.instances = instances;
+                self.capacity = capacity;
+                self.instances_held.invalidate();
+            }
+            write_buffer_if_changed(
+                queue,
+                &self.instances,
+                &mut self.instances_held,
+                bytemuck::cast_slice(data),
+                counters,
+            );
+        }
+        self.len = data.len();
+        true
+    }
+}
+
 pub struct QuadPipeline {
     pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
     screen_buf: wgpu::Buffer,
-    instances: wgpu::Buffer,
-    capacity: usize,
+    batches: Vec<QuadBatch>,
     pub count: u32,
     screen_held: RetainedBytes,
-    /// What the buffer the draws read holds: `instances`, or the ring's
-    /// current buffer when there is a ring.
-    instances_held: RetainedBytes,
-    /// On shared memory, the instances go through mapped buffers instead of
-    /// `instances` (see `upload.rs`).
-    ring: Option<MappedRing>,
     counters: UploadCounters,
 }
 
@@ -279,26 +360,13 @@ impl QuadPipeline {
                 resource: screen_buf.as_entire_binding(),
             }],
         });
-        let ring = mapped_uploads(device)
-            .then(|| MappedRing::new("kettle-quad-instances", wgpu::BufferUsages::VERTEX, None));
-        // With a ring, the queue path's buffer is never drawn from.
-        let capacity = if ring.is_some() { 1 } else { 4096 };
-        let instances = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("kettle-quad-instances"),
-            size: (capacity * std::mem::size_of::<QuadInstance>()) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
         Self {
             pipeline,
             bind_group,
             screen_buf,
-            instances,
-            capacity,
+            batches: vec![QuadBatch::new(device)],
             count: 0,
             screen_held: RetainedBytes::default(),
-            instances_held: RetainedBytes::default(),
-            ring,
             counters: UploadCounters::default(),
         }
     }
@@ -332,47 +400,24 @@ impl QuadPipeline {
             }),
             &self.counters,
         );
-        if let Some(ring) = &mut self.ring {
-            let written = ring.write(
-                device,
-                queue,
-                Some(&mut self.instances_held),
-                bytemuck::cast_slice(data),
-                &self.counters,
-            );
-            self.count = if written { data.len() as u32 } else { 0 };
+        self.count = 0;
+        let limit = max_quads_per_buffer(device.limits().max_buffer_size);
+        if limit == 0 || u32::try_from(data.len()).is_err() {
             return;
         }
-        if data.len() > self.capacity {
-            // `grow_capacity` is checked because release builds use
-            // `panic = "abort"`, so an overflow panic would abort the process.
-            // Like `ImagePipeline::upload` (imgpipe.rs) and
-            // `GlyphPipeline::upload` (glyphpipe.rs), skip this frame's quad
-            // upload instead.
-            let Some((capacity, bytes)) = grow_capacity(data.len()) else {
-                log::warn!(
-                    "quad instance buffer growth for {} instances overflows usize; skipping quad upload",
-                    data.len()
-                );
-                self.count = 0;
-                return;
-            };
-            self.capacity = capacity;
-            self.instances = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("kettle-quad-instances"),
-                size: bytes as u64,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            self.instances_held.invalidate();
+        let needed = data.len().div_ceil(limit).max(1);
+        self.batches.truncate(needed);
+        while self.batches.len() < needed {
+            self.batches.push(QuadBatch::new(device));
         }
-        write_buffer_if_changed(
-            queue,
-            &self.instances,
-            &mut self.instances_held,
-            bytemuck::cast_slice(data),
-            &self.counters,
-        );
+        for (batch, data) in self.batches.iter_mut().zip(data.chunks(limit)) {
+            if !batch.upload(device, queue, data, &self.counters) {
+                return;
+            }
+        }
+        if data.is_empty() {
+            self.batches[0].len = 0;
+        }
         self.count = data.len() as u32;
     }
 
@@ -380,16 +425,23 @@ impl QuadPipeline {
     /// the retained copy. `None` when that copy does not cover them.
     pub(crate) fn uploaded(&self) -> Option<impl Iterator<Item = QuadInstance> + '_> {
         const SIZE: usize = std::mem::size_of::<QuadInstance>();
-        let bytes = self
-            .instances_held
-            .bytes()
-            .get(..self.count as usize * SIZE)?;
-        let (records, _) = bytes.as_chunks::<SIZE>();
-        Some(
+        let batches = if self.count == 0 {
+            &self.batches[..0]
+        } else {
+            &self.batches[..]
+        };
+        if batches
+            .iter()
+            .any(|batch| batch.instances_held.bytes().len() < batch.len * SIZE)
+        {
+            return None;
+        }
+        Some(batches.iter().flat_map(|batch| {
+            let (records, _) = batch.instances_held.bytes()[..batch.len * SIZE].as_chunks::<SIZE>();
             records
                 .iter()
-                .map(|record| bytemuck::pod_read_unaligned(record)),
-        )
+                .map(|record| bytemuck::pod_read_unaligned(record))
+        }))
     }
 
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
@@ -406,20 +458,28 @@ impl QuadPipeline {
         if self.count == 0 {
             return;
         }
-        let instances = match &self.ring {
-            Some(ring) => match ring.current() {
-                Some(buffer) => buffer,
-                None => return,
-            },
-            None => &self.instances,
-        };
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
-        pass.set_vertex_buffer(0, instances.slice(..));
-        for range in visible_instance_ranges(self.count, hidden) {
-            if !range.is_empty() {
-                pass.draw(0..4, range);
+        let ranges = visible_instance_ranges(self.count, hidden);
+        let mut offset = 0;
+        for batch in &self.batches {
+            let end = offset + batch.len as u32;
+            let instances = match &batch.ring {
+                Some(ring) => match ring.current() {
+                    Some(buffer) => buffer,
+                    None => return,
+                },
+                None => &batch.instances,
+            };
+            pass.set_vertex_buffer(0, instances.slice(..));
+            for range in &ranges {
+                let start = range.start.max(offset);
+                let stop = range.end.min(end);
+                if start < stop {
+                    pass.draw(0..4, start - offset..stop - offset);
+                }
             }
+            offset = end;
         }
     }
 }
@@ -455,18 +515,32 @@ mod tests {
     }
 
     #[test]
+    fn quad_batches_respect_the_device_buffer_limit() {
+        let limit = 256 * 1024 * 1024;
+        assert_eq!(max_quads_per_buffer(limit), 8_388_608);
+        assert_eq!(grow_capacity(8_388_609, limit), None);
+        assert_eq!(
+            grow_capacity(8_388_608, limit),
+            Some((8_388_608, limit as usize))
+        );
+        assert_eq!(max_quads_per_buffer(5000), 128);
+        assert_eq!(grow_capacity(128, 5000), Some((128, 4096)));
+        assert_eq!(grow_capacity(129, 5000), None);
+    }
+
+    #[test]
     fn grow_capacity_rounds_up_to_next_power_of_two() {
         assert_eq!(
-            grow_capacity(5),
+            grow_capacity(5, u64::MAX),
             Some((8, 8 * std::mem::size_of::<QuadInstance>()))
         );
         assert_eq!(
-            grow_capacity(4096 + 1),
+            grow_capacity(4096 + 1, u64::MAX),
             Some((8192, 8192 * std::mem::size_of::<QuadInstance>()))
         );
         // Already a power of two: capacity is unchanged.
         assert_eq!(
-            grow_capacity(64),
+            grow_capacity(64, u64::MAX),
             Some((64, 64 * std::mem::size_of::<QuadInstance>()))
         );
     }
@@ -476,7 +550,7 @@ mod tests {
         // No power of two large enough to hold `usize::MAX` instances is
         // representable in a `usize`, so the checked call must return
         // `None` rather than panicking the way `next_power_of_two()` would.
-        assert_eq!(grow_capacity(usize::MAX), None);
+        assert_eq!(grow_capacity(usize::MAX, u64::MAX), None);
     }
 
     #[test]
@@ -485,6 +559,6 @@ mod tests {
         // by `size_of::<QuadInstance>()` (32 bytes) overflows `usize` — this
         // exercises the second checked step, independent of the first.
         let huge = 1usize << (usize::BITS - 1);
-        assert_eq!(grow_capacity(huge), None);
+        assert_eq!(grow_capacity(huge, u64::MAX), None);
     }
 }

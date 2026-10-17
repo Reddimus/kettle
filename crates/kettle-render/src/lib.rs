@@ -65,7 +65,7 @@ use std::sync::Arc;
 use alacritty_terminal::term::cell::Flags;
 use anyhow::{Result, anyhow};
 use glyphon::cosmic_text::{
-    Align, AttrsList, BufferLine, FeatureTag, FontFeatures, LineEnding, Wrap, fontdb,
+    Align, AttrsList, AttrsOwned, BufferLine, FeatureTag, FontFeatures, LineEnding, Wrap, fontdb,
 };
 use glyphon::{
     Attrs, Buffer as TextBuffer, Cache, Color as GColor, Family, FontSystem, Metrics, Resolution,
@@ -1275,6 +1275,8 @@ pub struct SettingsOverlay {
     pub value_cols: usize,
     /// Index of the active category (its tab is highlighted, its rows shown).
     pub active_category: usize,
+    /// Whether the active category previews the terminal background.
+    pub background_page: bool,
     /// The active category's fields as (label, current-value) pairs.
     pub rows: Vec<SettingsRow>,
     /// Index into `rows` of the focused field (gets the accent highlight).
@@ -1288,6 +1290,12 @@ pub struct SettingsOverlay {
     /// Graphics category's active GPU and pending restart. `None`
     /// on categories that don't need it.
     pub footer_note: Option<String>,
+}
+
+impl SettingsOverlay {
+    fn backdrop_alpha(&self) -> f32 {
+        if self.background_page { 0.30 } else { 0.55 }
+    }
 }
 
 /// One settings row — a human label and its current value string.
@@ -2640,6 +2648,7 @@ struct PendingCursorGlyph {
     /// evidence: `ch` alone cannot show a variation selector, so a qualified
     /// sequence would draw in colour underneath and monochrome on top.
     emoji_qualified: bool,
+    attrs: AttrsOwned,
     /// Cursor foreground (theme `cursor_text`, or the cell bg under an OSC 12
     /// runtime cursor color so the inverted glyph follows reverse-video).
     color: Rgb,
@@ -2658,8 +2667,10 @@ fn cursor_glyph_damage_key(
     let mut hash = std::hash::DefaultHasher::new();
     cursor.x.to_bits().hash(&mut hash);
     cursor.y.to_bits().hash(&mut hash);
+    cursor.ch.hash(&mut hash);
     cursor.text.hash(&mut hash);
     cursor.emoji_qualified.hash(&mut hash);
+    cursor.attrs.hash(&mut hash);
     cursor.color.r.hash(&mut hash);
     cursor.color.g.hash(&mut hash);
     cursor.color.b.hash(&mut hash);
@@ -5935,6 +5946,7 @@ impl Renderer {
         // size / scale / family change makes every cached slot stale, so drop
         // them (the atlas textures keep their allocation; the packer resets).
         self.glyph_pipeline.clear();
+        self.swash = SwashCache::new();
         self.grid_glyphs_dirty = true;
     }
 
@@ -6196,26 +6208,25 @@ impl Renderer {
         }
     }
 
-    /// Drain any finished background-image decodes and install the one that
-    /// matches the pending `(path, blur_radius)` key into `bg_image_cache`,
-    /// arming the retry throttle on failure and clearing it on success. A
-    /// result whose key no longer matches `bg_image_pending` (the config moved
-    /// on to a different image/blur, or off background images entirely, before
-    /// this decode finished) is silently discarded: a fresh request for the
-    /// current key has already been queued.
-    fn apply_bg_image_worker_result(&mut self) {
+    /// Drain finished decodes, installing only the pending job whose key also
+    /// matches the current configuration. Clear a completed pending job even
+    /// when its result is obsolete, so the same key can be requested again.
+    fn apply_bg_image_worker_result(&mut self, path: &str, blur_radius: u32) {
         let Some(worker) = self.bg_image_worker.as_ref() else {
             return;
         };
         while let Some(result) = worker.try_recv() {
-            let is_current = self
+            let is_pending = self
                 .bg_image_pending
                 .as_ref()
                 .is_some_and(|(p, b)| *p == result.path && *b == result.blur_radius);
-            if !is_current {
+            if !is_pending {
                 continue;
             }
             self.bg_image_pending = None;
+            if result.path != path || result.blur_radius != blur_radius {
+                continue;
+            }
             let mut frames = Vec::with_capacity(result.frames.len());
             let mut opaque_frames = Vec::with_capacity(result.frames.len());
             let mut gaps = Vec::with_capacity(result.frames.len());
@@ -6580,7 +6591,7 @@ impl Renderer {
             }
             // Pick up a finished decode (if any) before selecting the frame
             // to display. A cheap `try_recv` no-op when nothing has finished.
-            self.apply_bg_image_worker_result();
+            self.apply_bg_image_worker_result(&want, blur_radius);
             // Select the frame to display now. A still image (1 frame) or
             // `background-animation = off` shows frame 0; otherwise the
             // playback clock loops through frames at their own gaps. Focus does
@@ -6647,18 +6658,18 @@ impl Renderer {
                         frame_is_opaque && rect_covers_surface(rect, [sw, sh]);
                 }
             }
-        } else if self.bg_image_cache.is_some() {
+        } else {
             // Config no longer requests an image background
             // (type switched away, or path cleared) — drop the decoded RGBA so
             // a large wallpaper isn't pinned for the rest of the
             // session. Re-enabling re-decodes via the need_reload path above.
             self.bg_image_cache = None;
             self.bg_image_retry_at = None; // reset the self-heal throttle
-            // A still-in-flight decode for the old path/blur is now
-            // irrelevant — its result (once it lands) is discarded by
-            // `apply_bg_image_worker_result`'s key check rather than
-            // resurrecting a wallpaper the config no longer wants.
             self.bg_image_pending = None;
+            // The worker requests a redraw when a late result is published.
+            if let Some(worker) = self.bg_image_worker.as_ref() {
+                while worker.try_recv().is_some() {}
+            }
         }
 
         // The opaque fill color for the window chrome strips (tab bar, status
@@ -7884,8 +7895,15 @@ impl Renderer {
             // dispatch through the same confirmation state machine.
             have_search = true;
             search_text_on_menu = true;
-            let bar_h = ch + 10.0;
-            search_rect = (0.0, sh - bar_h, sw, bar_h);
+            let geometry = ConfirmBarGeometry::new(
+                (sw, sh),
+                (
+                    self.overlay_text_cell_width(),
+                    self.overlay_text_line_height(),
+                ),
+            );
+            let bar_h = geometry.rect.3;
+            search_rect = geometry.rect;
             // Red-ish accent (palette[1]) to signal "destructive
             // confirmation pending" vs the palette/ssh/
             // edit-title yellows/blues/cyans.
@@ -7925,12 +7943,7 @@ impl Renderer {
             } else {
                 "  Tab/←→ · Enter · Esc"
             };
-            let label = compose_confirm_bar_label(
-                &prompt,
-                help,
-                &buttons_label,
-                confirm_bar_columns(sw, cw),
-            );
+            let label = compose_confirm_bar_label(&prompt, help, &buttons_label, geometry.columns);
             let spans = confirm_bar_spans(&label, &buttons_label, &bold_labels);
             self.search_buffer.set_metrics(metrics);
             self.search_buffer.set_size(Some(sw), Some(bar_h));
@@ -9418,10 +9431,15 @@ impl Renderer {
             });
         }
         if have_search {
+            let text_h = if overlay.confirm_dialog.is_some() {
+                metrics.line_height
+            } else {
+                ch
+            };
             let area = TextArea {
                 buffer: &self.search_buffer,
                 left: search_rect.0,
-                top: search_rect.1 + ((search_rect.3 - ch) * 0.5).max(0.0),
+                top: search_rect.1 + ((search_rect.3 - text_h) * 0.5).max(0.0),
                 scale: 1.0,
                 bounds: TextBounds {
                     left: search_rect.0 as i32,
@@ -9603,19 +9621,23 @@ impl Renderer {
             // On the Background page, dim LESS so the live wallpaper (the real
             // animated starfield / image) shows around the panel as a genuine
             // preview while you change `background-type`.
-            let on_bg_page = set
-                .categories
-                .get(set.active_category)
-                .map(|c| c == "Background")
-                .unwrap_or(false);
-            let backdrop_a = if on_bg_page { 0.30 } else { 0.55 };
+            let backdrop_a = set.backdrop_alpha();
             // Stop the dim above a confirm bar when one is showing. The bar is
             // pushed to this same list earlier in the frame, so a full-height
             // backdrop lands on top of it and greys out the one thing that has
             // to stay legible — and the dialog raised by rebinding onto an
             // already-bound chord comes from inside this very panel.
             let dim_h = if overlay.confirm_dialog.is_some() {
-                (sh - (ch + 10.0)).max(0.0)
+                ConfirmBarGeometry::new(
+                    (sw, sh),
+                    (
+                        self.overlay_text_cell_width(),
+                        self.overlay_text_line_height(),
+                    ),
+                )
+                .rect
+                .1
+                .max(0.0)
             } else {
                 sh
             };
@@ -9852,8 +9874,9 @@ impl Renderer {
         // or an empty cell is known to rasterize nothing (other whitespace,
         // such as U+1680 OGHAM SPACE MARK, can draw a stroke), and a blink
         // leaves the key as it was.
+        let cursor_metrics = pane_metrics(self.metrics.font_size, self.cell_h);
         let cursor_glyph_key =
-            cursor_glyph_damage_key(self.pending_cursor_glyph.as_ref(), metrics, &family);
+            cursor_glyph_damage_key(self.pending_cursor_glyph.as_ref(), cursor_metrics, &family);
         let cursor_glyph_changed = cursor_glyph_key != self.last_cursor_glyph_key;
         let cursor_char_changed = cursor_glyph_changed
             && self
@@ -9984,38 +10007,29 @@ impl Renderer {
         // text/position/style changed. A main text prepare also forces this tiny
         // prepare because both renderers share an atlas that may have repacked.
         // Menu-highlight and other quad-only frames reuse retained vertices.
-        if let Some((gx, gy, gch, gqualified, gcolor, gclip, gtext)) = self
+        if let Some((gx, gy, gcolor, gclip, gtext, gattrs)) = self
             .pending_cursor_glyph
             .as_ref()
             .map(|c| {
                 (
                     c.x,
                     c.y,
-                    c.ch,
-                    c.emoji_qualified,
                     c.color,
                     c.clip,
                     c.text.as_str(),
+                    c.attrs.as_attrs(),
                 )
             })
             .filter(|_| need_cursor_prepare)
         {
-            self.cursor_glyph_buffer.set_metrics(metrics);
+            self.cursor_glyph_buffer.set_metrics(cursor_metrics);
             // The cursor draws its own glyph last, over the pane's, so it has
             // to reach the same answer the pane did. Both halves matter: skip
             // the override and it paints a colour square over a text circle;
             // ignore the cell's variation selector and it paints a text circle
             // over the colour square the user explicitly asked for.
-            let cursor_family = self
-                .text_symbol_family
-                .filter(|_| !gqualified && single_column_text_presentation(gch))
-                .unwrap_or(&family);
-            self.cursor_glyph_buffer.set_text(
-                gtext,
-                &Attrs::new().family(Family::Name(cursor_family)),
-                Shaping::Advanced,
-                None,
-            );
+            self.cursor_glyph_buffer
+                .set_text(gtext, &gattrs, Shaping::Advanced, None);
             self.cursor_glyph_buffer
                 .shape_until_scroll(&mut self.font_system, false);
             let area = TextArea {
@@ -10968,7 +10982,7 @@ impl Renderer {
         // row's shaping cache every blink and force a whole-viewport
         // re-prepare. This way the buffer stays byte-identical across a blink,
         // so the prepare is skipped.
-        let mut cursor_glyph_capture: Option<(char, Rgb, &[char])> = None;
+        let mut cursor_glyph_capture: Option<(char, Rgb, &[char], AttrsOwned)> = None;
         let mut fallback_run = None;
 
         for (snapshot_index, sc) in snap.cells.iter().enumerate() {
@@ -11082,7 +11096,14 @@ impl Renderer {
                 // cursor pass draws this recolored copy on top of the block.
                 // See `color::cursor_glyph_color` for which colour and why.
                 let cursor_fg = color::cursor_glyph_color(theme, term_colors, bg);
-                cursor_glyph_capture = Some((dc, cursor_fg, marks));
+                let mut attrs = run_attrs(cfg, &font_features(cfg), cursor_fg, bold, italic);
+                if let Some(symbol_family) = self
+                    .text_symbol_family
+                    .filter(|_| !marks.contains(&'\u{FE0F}') && single_column_text_presentation(dc))
+                {
+                    attrs = attrs.family(Family::Name(symbol_family));
+                }
+                cursor_glyph_capture = Some((dc, cursor_fg, marks, AttrsOwned::new(&attrs)));
             }
 
             if bg != default_bg {
@@ -11263,7 +11284,7 @@ impl Renderer {
                 // full Block shape covers the glyph; beam/underline leave it
                 // visible in its normal color, so they need no overdraw.
                 if matches!(shape, EShape::Block)
-                    && let Some((gch, gcolor, gmarks)) = cursor_glyph_capture
+                    && let Some((gch, gcolor, gmarks, gattrs)) = cursor_glyph_capture
                 {
                     self.pending_cursor_glyph = Some(PendingCursorGlyph {
                         x: bx,
@@ -11271,6 +11292,7 @@ impl Renderer {
                         ch: gch,
                         text: std::iter::once(gch).chain(gmarks.iter().copied()).collect(),
                         emoji_qualified: gmarks.contains(&'\u{FE0F}'),
+                        attrs: gattrs,
                         color: gcolor,
                         clip: pv.terminal,
                     });
@@ -14521,6 +14543,57 @@ pub fn confirm_bar_columns(width: f32, cell_width: f32) -> usize {
     overlay_label_cols(width, cell_width)
 }
 
+/// Confirmation geometry in surface pixels, using unrounded chrome metrics.
+pub struct ConfirmBarGeometry {
+    pub rect: Rect4,
+    pub columns: usize,
+    cell_width: f32,
+}
+
+impl ConfirmBarGeometry {
+    pub fn new((width, height): (f32, f32), (cell_width, line_height): (f32, f32)) -> Self {
+        let bar_h = line_height + 10.0;
+        Self {
+            rect: (0.0, height - bar_h, width, bar_h),
+            columns: confirm_bar_columns(width, cell_width),
+            cell_width,
+        }
+    }
+
+    pub fn button_rects(&self, button_columns: &[usize]) -> Vec<Rect4> {
+        let gap = 2usize;
+        let gaps = gap.saturating_mul(button_columns.len().saturating_sub(1));
+        let Some(total) = button_columns
+            .iter()
+            .try_fold(gaps, |n, w| n.checked_add(*w))
+        else {
+            return Vec::new();
+        };
+        if button_columns.is_empty()
+            || total > self.columns
+            || !self.rect.1.is_finite()
+            || !self.rect.3.is_finite()
+            || self.rect.3 <= 10.0
+        {
+            return Vec::new();
+        }
+        let mut column = self.columns - total;
+        button_columns
+            .iter()
+            .map(|&width| {
+                let rect = (
+                    column as f32 * self.cell_width,
+                    self.rect.1,
+                    width as f32 * self.cell_width,
+                    self.rect.3,
+                );
+                column += width + gap;
+                rect
+            })
+            .collect()
+    }
+}
+
 fn overlay_label_cols(width: f32, cell_width: f32) -> usize {
     if !width.is_finite() || !cell_width.is_finite() || width <= 0.0 || cell_width <= 0.0 {
         return 0;
@@ -15808,8 +15881,10 @@ fn emit_cell_locked_glyphs(
             let off_x = cell_locked_pen_x(cell_left, x_off_px) - glyph.x - x_off_px;
             let phys = glyph.physical((off_x, origin.1), 1.0);
             let key = phys.cache_key;
+            let mut image = None;
             let slot = match glyph_pipeline.ensure_glyph(device, queue, key, || {
-                RasterGlyph::from_swash(swash.get_image(font_system, key).as_ref()?)
+                image = swash.get_image_uncached(font_system, key);
+                RasterGlyph::from_swash(image.as_ref()?)
             }) {
                 Some(s) => s,
                 None => continue, // empty / whitespace glyph — nothing to draw
@@ -18393,6 +18468,10 @@ mod gpu_tests {
                  set; got {} glyphs",
                 instances.len()
             );
+            assert!(
+                swash.image_cache.is_empty(),
+                "grid bitmaps must be released after atlas upload"
+            );
         });
     }
 
@@ -19384,8 +19463,8 @@ mod titlebar_glyph_fallback_tests {
     fn the_block_cursor_makes_the_same_presentation_choice() {
         let src = crate::production_source();
         let choice = [
-            "self\n                .text_symbol_family\n                .filter(|_| !gqualified && ",
-            "single_column_text_presentation(gch))",
+            "self\n                    .text_symbol_family\n                    .filter(|_| ",
+            "!marks.contains(&'\\u{FE0F}') && single_column_text_presentation(dc))",
         ]
         .concat();
         assert!(
@@ -19393,9 +19472,14 @@ mod titlebar_glyph_fallback_tests {
             "the cursor glyph pass must pick the text face for the same cells \
              the pane does"
         );
-        let used = ["Family::Name(cursor_", "family)"].concat();
+        let captured = [
+            "cursor_glyph_capture = Some((dc, cursor_fg, marks, ",
+            "AttrsOwned::new(&attrs)))",
+        ]
+        .concat();
+        let used = [".set_text(gtext, &", "gattrs, Shaping::Advanced, None)"].concat();
         assert!(
-            src.contains(&used),
+            src.contains(&captured) && src.contains(&used),
             "the chosen family must actually reach the cursor buffer"
         );
     }
@@ -19875,6 +19959,9 @@ mod pane_buffer_lifecycle_tests {
             ch: 'x',
             text: "x".into(),
             emoji_qualified: false,
+            attrs: super::AttrsOwned::new(
+                &super::Attrs::new().family(glyphon::Family::Name("Kettle Mono")),
+            ),
             color: kettle_config::Rgb::new(1, 2, 3),
             clip: (0.0, 0.0, 100.0, 80.0),
         };
@@ -19892,6 +19979,16 @@ mod pane_buffer_lifecycle_tests {
             initial
         );
 
+        cursor.attrs.weight = glyphon::Weight::BOLD;
+        assert_ne!(
+            super::cursor_glyph_damage_key(
+                Some(&cursor),
+                glyphon::Metrics::new(14.0, 18.0),
+                "Kettle Mono",
+            ),
+            initial
+        );
+        cursor.attrs.weight = glyphon::Weight::NORMAL;
         cursor.text.push('\u{301}');
         assert_ne!(
             super::cursor_glyph_damage_key(
@@ -20168,12 +20265,6 @@ mod pane_buffer_lifecycle_tests {
         assert!(
             src.contains("c.path != want") && src.contains("c.blur != blur_radius"),
             "need_reload must compare blur radius, not just the path"
-        );
-        assert!(
-            src.contains("} else if self.bg_image_cache.is_some() {")
-                && src.contains("self.bg_image_cache = None;"),
-            "the decoded wallpaper must be freed when background-type leaves \
-             image / the path is cleared"
         );
         // A FAILED decode self-heals on a THROTTLE — the
         // reload condition includes `c.frames.is_empty()` gated on
@@ -22931,6 +23022,17 @@ mod title_fit_tests {
         }
     }
 
+    #[test]
+    fn confirmation_geometry_keeps_fractional_chrome_metrics() {
+        let geometry = super::ConfirmBarGeometry::new((800.0, 600.0), (8.25, 16.5));
+        assert_eq!(geometry.columns, 95);
+        assert_eq!(
+            geometry.button_rects(&[10, 9]),
+            [(610.5, 573.5, 82.5, 26.5), (709.5, 573.5, 74.25, 26.5)]
+        );
+        assert!(geometry.button_rects(&[100]).is_empty());
+    }
+
     /// Destructive buttons (Close, Delete) draw their label in bold. The whole
     /// bar is already `palette[1]`, so a red accent on one button could not
     /// show. Only the label is bold; the brackets and focus marker stay
@@ -23550,6 +23652,7 @@ mod settings_hit_test_tests {
             label_cols: 31,
             value_cols: 25,
             active_category: 0,
+            background_page: false,
             rows: vec![
                 SettingsRow {
                     label: "Theme".into(),
@@ -23566,6 +23669,23 @@ mod settings_hit_test_tests {
             title: "Settings — Appearance".into(),
             hints: "↑↓ field    ←→ change    Tab category    Esc close".into(),
             footer_note: None,
+        }
+    }
+
+    #[test]
+    fn background_preview_opacity_uses_page_identity_in_every_language() {
+        for language in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
+            let tr = kettle_i18n::Translator::new(language);
+            let mut set = overlay();
+            set.categories = vec![
+                tr.text(kettle_i18n::Text::SettingsCategoryBackground)
+                    .into(),
+            ];
+            set.active_category = 0;
+            set.background_page = true;
+            assert_eq!(set.backdrop_alpha(), 0.30);
+            set.background_page = false;
+            assert_eq!(set.backdrop_alpha(), 0.55);
         }
     }
 
@@ -24859,6 +24979,7 @@ mod settings_panel_cols_tests {
             label_cols: 31,
             value_cols: 40,
             active_category: 0,
+            background_page: false,
             rows: vec![],
             focused_row: 0,
             title: "Settings — Appearance".into(),
@@ -25060,7 +25181,7 @@ mod glyph_cell_lock_tests {
         let gate = src
             .split("let grid_upload_needed =")
             .nth(1)
-            .and_then(|s| s.split("if let Some((gx, gy, gch,").next())
+            .and_then(|s| s.split("if let Some((gx, gy, gcolor,").next())
             .expect("grid upload block present before cursor-glyph prepare");
         assert!(
             !gate.contains("cursor_char_changed") && !gate.contains("cursor_visible"),

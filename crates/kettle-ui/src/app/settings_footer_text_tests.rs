@@ -30,6 +30,7 @@ fn settings_accessibility_names_follow_the_ui_language() {
             label_cols: 10,
             value_cols: 10,
             active_category: 0,
+            background_page: false,
             rows: Vec::new(),
             focused_row: 0,
             title: String::new(),

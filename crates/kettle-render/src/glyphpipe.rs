@@ -642,11 +642,13 @@ pub struct GlyphPipeline {
     mask: Atlas,
     bind_group: wgpu::BindGroup,
     bg_dirty: bool,
+    glyphs_complete: bool,
     slots: HashMap<CacheKey, CachedSlot>,
     /// Frame counter bumped once per `upload`. Stamped onto a slot on every
     /// `ensure_glyph` touch (hit or miss) so `evict_lru` can tell which slots
     /// are cold once the cache needs to make room.
     epoch: u64,
+    slot_limit_epoch: Option<u64>,
     max_dim: u32,
     instances: wgpu::Buffer,
     capacity: usize,
@@ -829,9 +831,11 @@ impl GlyphPipeline {
             mask,
             bind_group,
             bg_dirty: false,
+            glyphs_complete: true,
             slots: HashMap::new(),
             epoch: 0,
             max_dim: device.limits().max_texture_dimension_2d,
+            slot_limit_epoch: None,
             instances,
             capacity,
             instance_gpu,
@@ -905,12 +909,19 @@ impl GlyphPipeline {
         // self-heals instead of losing glyph rendering for good.
         const MAX_GLYPH_SLOTS: usize = 131_072;
         if self.slots.len() >= MAX_GLYPH_SLOTS {
+            if self.slot_limit_epoch == Some(self.epoch) {
+                return None;
+            }
             // Evict down to 7/8 capacity rather than one slot at a time, so
             // the age scan amortizes over the next ~16K misses instead of
             // running on every single insert once the cache is steady-state at
             // the cap. The scan is linear (see `lru_victims`).
             let target = MAX_GLYPH_SLOTS - MAX_GLYPH_SLOTS / 8;
             self.evict_lru(self.slots.len().saturating_sub(target));
+            if self.slots.len() >= MAX_GLYPH_SLOTS {
+                self.slot_limit_epoch = Some(self.epoch);
+                return None;
+            }
         }
         match self.rasterize_into_atlas(device, queue, rasterize) {
             CacheOutcome::Slot(slot) => {
@@ -933,7 +944,10 @@ impl GlyphPipeline {
                 );
                 None
             }
-            CacheOutcome::AtlasFull => None,
+            CacheOutcome::AtlasFull => {
+                self.glyphs_complete = false;
+                None
+            }
         }
     }
 
@@ -1086,6 +1100,7 @@ impl GlyphPipeline {
 
     /// Upload this frame's instances + the screen size, rebuilding the atlas
     /// bind group first if a glyph upload grew a texture.
+    /// Returns true only when glyph resolution and instance upload both complete.
     pub fn upload(
         &mut self,
         device: &wgpu::Device,
@@ -1098,6 +1113,7 @@ impl GlyphPipeline {
         // frame's evictions see any slot left untouched since as strictly older
         // than one touched this frame.
         self.epoch = self.epoch.saturating_add(1);
+        let glyphs_complete = std::mem::replace(&mut self.glyphs_complete, true);
         if self.bg_dirty {
             self.bind_group = Self::make_bg(
                 device,
@@ -1128,7 +1144,7 @@ impl GlyphPipeline {
                 &self.counters,
             );
             self.count = if written { data.len() as u32 } else { 0 };
-            return written;
+            return written && glyphs_complete;
         }
         if data.len() > self.capacity {
             let Some(capacity) = data.len().checked_next_power_of_two() else {
@@ -1161,7 +1177,7 @@ impl GlyphPipeline {
             &self.counters,
         );
         self.count = data.len() as u32;
-        true
+        glyphs_complete
     }
 
     /// Draw the uploaded instances, each pane's contiguous range clipped to its
@@ -1228,18 +1244,87 @@ impl GlyphPipeline {
     /// allocation; the packer resets so freed space is reused.
     pub fn clear(&mut self) {
         self.slots.clear();
+        self.glyphs_complete = true;
         // Drop the live draw count too: a `draw` after a bare `clear` (no
         // intervening `upload`) would otherwise render stale instances whose UVs
         // point at atlas pixels the packer is about to overwrite from (0,0).
         self.count = 0;
         self.color.allocator = AtlasAllocator::new(self.color.width, self.color.height);
         self.mask.allocator = AtlasAllocator::new(self.mask.width, self.mask.height);
+        self.slot_limit_epoch = None;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slot_ceiling_protects_current_entries_and_recovers_next_epoch() {
+        let _serialized = crate::gpu_tests::gpu_test_guard();
+        let cfg = crate::gpu_tests::gpu_test_config();
+        let Some(mut renderer) =
+            crate::Renderer::headless_for_tests(&cfg, 64, 64).expect("headless renderer builds")
+        else {
+            eprintln!("no GPU adapter on this host; skipped");
+            return;
+        };
+        let font_id = renderer.font_system.db().faces().next().expect("font").id;
+        let base = CacheKey::new(
+            font_id,
+            0,
+            12.0,
+            (0.0, 0.0),
+            Default::default(),
+            glyphon::cosmic_text::CacheKeyFlags::empty(),
+        )
+        .0;
+        let key = |index: usize| CacheKey {
+            glyph_id: index as u16,
+            font_size_bits: (12.0 + (index >> 16) as f32).to_bits(),
+            ..base
+        };
+        let pipeline = &mut renderer.glyph_pipeline;
+        let device = &renderer.gpu.device;
+        let queue = &renderer.gpu.queue;
+        const LIMIT: usize = 131_072;
+        for index in 0..LIMIT {
+            pipeline.slots.insert(
+                key(index),
+                CachedSlot {
+                    slot: None,
+                    last_used: pipeline.epoch,
+                },
+            );
+        }
+        for index in LIMIT..LIMIT + 4 {
+            let mut rasterized = false;
+            assert!(
+                pipeline
+                    .ensure_glyph(device, queue, key(index), || {
+                        rasterized = true;
+                        None
+                    })
+                    .is_none()
+            );
+            assert!(!rasterized, "no rasterization without a cache slot");
+            assert_eq!(pipeline.slots.len(), LIMIT);
+        }
+        assert!(
+            pipeline
+                .ensure_glyph(device, queue, key(0), || panic!("cached hit"))
+                .is_none()
+        );
+        assert!(pipeline.upload(device, queue, [64.0, 64.0], &[]));
+        let mut rasterized = false;
+        let resolved = pipeline.ensure_glyph(device, queue, key(LIMIT), || {
+            rasterized = true;
+            None
+        });
+        assert!(resolved.is_none());
+        assert!(rasterized, "cold entries must make room next epoch");
+        assert!(pipeline.slots.len() <= LIMIT);
+    }
 
     #[test]
     fn refused_grid_upload_recovers_without_text_or_layout_damage() {
@@ -1561,12 +1646,64 @@ mod tests {
     }
 
     #[test]
-    fn atlas_capacity_failures_are_not_cached_as_whitespace() {
-        let src = production_source();
-        assert!(
-            src.contains("CacheOutcome::AtlasFull => None"),
-            "capacity failure must return without inserting a permanent None slot"
-        );
+    fn atlas_capacity_failure_retries_unchanged_grid() {
+        use crate::headless_tests::{capture, focused, pane, snapshot_of};
+
+        let _serialized = crate::gpu_tests::gpu_test_guard();
+        for allow_mapping in [false, true] {
+            let cfg = crate::gpu_tests::gpu_test_config();
+            let Some(mut renderer) = crate::Renderer::headless_for_tests_with_mapping(
+                &cfg,
+                128,
+                64,
+                1.0,
+                false,
+                allow_mapping,
+            )
+            .expect("headless renderer builds") else {
+                eprintln!("no GPU adapter on this host; skipped");
+                return;
+            };
+            let budget = GraphicsBudget::independent(kettle_core::GraphicsLimits::default())
+                .expect("valid graphics limits");
+            let mut pipeline = GlyphPipeline::new_with_budget(
+                &renderer.gpu.device,
+                renderer.config.format,
+                budget.clone(),
+            )
+            .expect("glyph pipeline");
+            let width = pipeline.mask.width;
+            let height = pipeline.mask.height;
+            assert_eq!(
+                pipeline.mask.alloc(width - GUTTER, height - GUTTER),
+                Some((0, 0))
+            );
+            let charged = pipeline.color._gpu.bytes()
+                + pipeline.mask._gpu.bytes()
+                + pipeline.instance_gpu.bytes();
+            renderer.glyph_pipeline = pipeline;
+            let mut remaining = budget.limits().retained_bytes - charged;
+            let mut pressure = Vec::new();
+            while remaining > 0 {
+                let bytes = remaining.min(budget.limits().image_bytes);
+                pressure.push(budget.reserve_gpu(bytes).expect("remaining scope budget"));
+                remaining -= bytes;
+            }
+            let snap = snapshot_of(4, 1, b"A");
+            let panes = [pane(&snap, 128, 64)];
+            let missing = capture(&mut renderer, &cfg, &panes, &focused(false));
+            assert!(renderer.glyph_instances.is_empty());
+            assert_eq!(renderer.glyph_pipeline.count, 0);
+            assert!(renderer.grid_glyphs_dirty);
+
+            drop(pressure);
+            let recovered = capture(&mut renderer, &cfg, &panes, &focused(false));
+            assert!(!renderer.grid_glyphs_dirty);
+            assert!(renderer.glyph_pipeline.count > 0);
+            assert_ne!(missing, recovered);
+            let retained = capture(&mut renderer, &cfg, &panes, &focused(false));
+            assert_eq!(recovered, retained);
+        }
     }
 
     /// Drift guard. `ensure_glyph` must evict cold

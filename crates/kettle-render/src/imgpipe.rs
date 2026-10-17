@@ -33,6 +33,57 @@ mod cache_lifetime_tests {
     use std::sync::Arc;
 
     #[test]
+    fn linear_filtering_premultiplies_each_texel() {
+        let _serialized = crate::gpu_tests::gpu_test_guard();
+        pollster::block_on(async {
+            let Ok((_instance, adapter)) = crate::resolve_headless_adapter(
+                &crate::gpu_tests::gpu_test_config(),
+                "image-alpha-filter",
+            )
+            .await
+            else {
+                eprintln!("no GPU adapter on this host; skipped");
+                return;
+            };
+            let (device, queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("image-alpha-filter"),
+                    required_limits: crate::live_device_limits(adapter.limits()),
+                    ..Default::default()
+                })
+                .await
+                .expect("GPU device");
+            let mut pipeline = ImagePipeline::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb)
+                .expect("image pipeline");
+            for opaque in [[255, 255, 255, 255], [128, 128, 128, 128]] {
+                for transparent in [[0, 0, 0, 0], [255, 0, 255, 0]] {
+                    let rgba = [opaque, transparent].concat();
+                    let image = ImageData::new(2, 1, rgba).unwrap();
+                    let clamp = ImageItem::full(0.0, 0.0, 1.0, 1.0, image.clone());
+                    let mut repeat = ImageItem::full(1.0, 0.0, 1.0, 1.0, image);
+                    repeat.repeat = true;
+                    pipeline.upload(&device, &queue, [2.0, 1.0], &[clamp, repeat]);
+                    let expected = crate::srgb_encode(
+                        crate::srgb(opaque[0]) * f64::from(opaque[3]) / 255.0 * 0.5,
+                    );
+                    for pixel in read_two_pixels(&device, &queue, &pipeline)
+                        .as_chunks::<4>()
+                        .0
+                    {
+                        for &channel in &pixel[..3] {
+                            assert!(
+                                channel.abs_diff(expected) <= 3,
+                                "filtered pixel {pixel:?}, expected channel {expected}"
+                            );
+                        }
+                        assert_eq!(pixel[3], 255);
+                    }
+                }
+            }
+        });
+    }
+
+    #[test]
     fn composition_after_placement_drop_refreshes_cached_pixels_without_copying() {
         let _serialized = crate::gpu_tests::gpu_test_guard();
         pollster::block_on(async {
@@ -631,8 +682,23 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     if in.uv_clamp.x >= 0.0 {
         uv = clamp(uv, in.uv_clamp.xy, in.uv_clamp.zw);
     }
-    let c = textureSample(tex, smp, uv);
-    return vec4<f32>(c.rgb * c.a, c.a);
+    // Sample individual linear-light texels and premultiply before interpolation.
+    let dimensions = vec2<f32>(textureDimensions(tex));
+    let position = uv * dimensions - vec2<f32>(0.5);
+    let base = floor(position);
+    let weights = fract(position);
+    var color = vec4<f32>(0.0);
+    for (var y = 0u; y < 2u; y += 1u) {
+        for (var x = 0u; x < 2u; x += 1u) {
+            let center = (base + vec2<f32>(f32(x) + 0.5, f32(y) + 0.5))
+                / dimensions;
+            let c = textureSampleLevel(tex, smp, center, 0.0);
+            let wx = select(1.0 - weights.x, weights.x, x == 1u);
+            let wy = select(1.0 - weights.y, weights.y, y == 1u);
+            color += vec4<f32>(c.rgb * c.a, c.a) * wx * wy;
+        }
+    }
+    return color;
 }
 "#;
 
@@ -969,16 +1035,16 @@ impl ImageShared {
         });
         let clamp_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("img-sampler"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
         let repeat_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("img-repeat-sampler"),
             address_mode_u: wgpu::AddressMode::Repeat,
             address_mode_v: wgpu::AddressMode::Repeat,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
         Self {
