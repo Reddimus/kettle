@@ -200,9 +200,20 @@ mod tab_handoff_tests {
         }
     }
 
+    /// Runs alone: macOS marks a new socket pair close-on-exec in a second
+    /// step, and a child another test spawns in between would keep the peer
+    /// from seeing end of file.
     #[cfg(unix)]
     #[test]
     fn handoff_requires_a_stream_and_owns_the_inherited_descriptor() {
+        kettle_test_support::run_alone_in_child(
+            "tab_handoff_tests::handoff_requires_a_stream_and_owns_the_inherited_descriptor",
+            handoff_requires_a_stream_and_owns_the_inherited_descriptor_alone,
+        );
+    }
+
+    #[cfg(unix)]
+    fn handoff_requires_a_stream_and_owns_the_inherited_descriptor_alone() {
         use std::io::{Read, Write};
         use std::os::fd::{AsRawFd, IntoRawFd};
 

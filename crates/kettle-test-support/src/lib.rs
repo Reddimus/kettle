@@ -866,8 +866,51 @@ pub fn poll_until<T>(
     }
 }
 
+const ALONE_CHILD_ENV: &str = "KETTLE_TEST_ALONE_CHILD";
+
+/// Run `body` in a re-executed copy of the test binary that runs only the test
+/// named `name`, its full path such as `module::tests::case`.
+///
+/// The harness runs tests on a thread pool, so a test shares its process with
+/// whatever the others do meanwhile. One that checks a socket's peer sees end
+/// of file breaks when another test spawns a child between the moment a
+/// descriptor is created and the moment it is marked close-on-exec, which on
+/// macOS are two steps: the child keeps a copy open. The run must report one
+/// passed test, so a misspelled name fails instead of running nothing.
+pub fn run_alone_in_child(name: &str, body: impl FnOnce()) {
+    if std::env::var_os(ALONE_CHILD_ENV).is_some_and(|running| running == name) {
+        body();
+        return;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", name, "--nocapture", "--test-threads=1"])
+        .env(ALONE_CHILD_ENV, name)
+        .output()
+        .expect("re-exec the test binary");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("test result: ok. 1 passed"),
+        "{name} failed in its child process ({}):\n{stdout}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_test_run_alone_runs_its_body_in_the_child() {
+        super::run_alone_in_child("tests::a_test_run_alone_runs_its_body_in_the_child", || {
+            assert!(std::env::var_os(super::ALONE_CHILD_ENV).is_some());
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "failed in its child process")]
+    fn a_misspelled_test_name_fails() {
+        super::run_alone_in_child("tests::no_such_test", || {});
+    }
+
     #[test]
     fn polling_observes_delayed_results_and_stops_at_its_bound() {
         let mut values = [None, None, Some(17)].into_iter();
