@@ -329,11 +329,13 @@ fn startup_plan_truth_table() {
                             tab_handoff_fd: {
                                 #[cfg(unix)]
                                 {
-                                    use std::os::fd::AsRawFd;
+                                    use std::os::fd::IntoRawFd;
                                     (restore_bits & 4 != 0).then(|| {
                                         let (socket, _peer) =
                                             std::os::unix::net::UnixStream::pair().unwrap();
-                                        crate::TabHandoff::duplicate(socket.as_raw_fd()).unwrap()
+                                        // SAFETY: into_raw_fd gave up the only other owner.
+                                        unsafe { crate::TabHandoff::adopt(socket.into_raw_fd()) }
+                                            .unwrap()
                                     })
                                 }
                                 #[cfg(not(unix))]

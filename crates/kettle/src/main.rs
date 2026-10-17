@@ -1834,7 +1834,9 @@ fn main() -> anyhow::Result<()> {
     let remote_file = cli.remote_file.clone().or_else(default_remote_file);
     let tab_handoff_fd = cli
         .tab_handoff_fd
-        .map(kettle_ui::TabHandoff::duplicate)
+        // SAFETY: the sending process passed this descriptor for this process
+        // to own and surrendered it across exec; nothing here has opened it.
+        .map(|fd| unsafe { kettle_ui::TabHandoff::adopt(fd) })
         .transpose()?;
     // A whitespace-only program name (`kettle -e ""`) slips
     // past the is_empty check (the Vec has one element) but would reach

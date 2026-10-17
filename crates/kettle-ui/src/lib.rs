@@ -126,8 +126,17 @@ pub struct TabHandoff {
 }
 
 impl TabHandoff {
-    /// Duplicate a connected Unix stream before starting the UI.
-    pub fn duplicate(fd: i32) -> std::io::Result<Self> {
+    /// Take over an inherited, connected Unix stream before starting the UI.
+    ///
+    /// The checks run on a close-on-exec duplicate. Once they pass, `fd`
+    /// itself is closed, so children never inherit it and the sender sees the
+    /// socket close when the handoff is dropped. On error `fd` stays open.
+    ///
+    /// # Safety
+    ///
+    /// The caller must own `fd`: nothing else in this process may use or
+    /// close it afterwards.
+    pub unsafe fn adopt(fd: i32) -> std::io::Result<Self> {
         #[cfg(unix)]
         {
             use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -163,6 +172,8 @@ impl TabHandoff {
             let socket = std::os::unix::net::UnixStream::from(owned);
             socket.local_addr()?;
             socket.peer_addr()?;
+            // SAFETY: the caller owns `fd`, and the duplicate now holds the socket.
+            drop(unsafe { OwnedFd::from_raw_fd(fd) });
             Ok(Self {
                 socket: std::sync::Arc::new(socket),
             })
@@ -181,37 +192,50 @@ mod tab_handoff_tests {
 
     #[test]
     fn invalid_handoff_descriptor_is_rejected() {
-        assert!(TabHandoff::duplicate(-1).is_err());
-        assert!(TabHandoff::duplicate(0).is_err());
-        assert!(TabHandoff::duplicate(i32::MAX).is_err());
+        // SAFETY: none of these numbers is an open descriptor in this process.
+        unsafe {
+            assert!(TabHandoff::adopt(-1).is_err());
+            assert!(TabHandoff::adopt(0).is_err());
+            assert!(TabHandoff::adopt(i32::MAX).is_err());
+        }
     }
 
     #[cfg(unix)]
     #[test]
-    fn handoff_requires_a_stream_and_owns_its_duplicate() {
+    fn handoff_requires_a_stream_and_owns_the_inherited_descriptor() {
         use std::io::{Read, Write};
-        use std::os::fd::AsRawFd;
+        use std::os::fd::{AsRawFd, IntoRawFd};
 
+        // A rejected descriptor stays with its owner, which closes it.
         let file = std::fs::File::open("/dev/null").unwrap();
-        assert!(TabHandoff::duplicate(file.as_raw_fd()).is_err());
         let (datagram, _peer) = std::os::unix::net::UnixDatagram::pair().unwrap();
-        assert!(TabHandoff::duplicate(datagram.as_raw_fd()).is_err());
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let tcp = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        assert!(TabHandoff::duplicate(tcp.as_raw_fd()).is_err());
+        // SAFETY: each check fails, and a failed adopt leaves the fd alone.
+        unsafe {
+            assert!(TabHandoff::adopt(file.as_raw_fd()).is_err());
+            assert!(TabHandoff::adopt(datagram.as_raw_fd()).is_err());
+            assert!(TabHandoff::adopt(tcp.as_raw_fd()).is_err());
+        }
 
         let (stream, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
-        let handoff = TabHandoff::duplicate(stream.as_raw_fd()).unwrap();
-        assert_ne!(handoff.socket.as_raw_fd(), stream.as_raw_fd());
+        // Set before the far end closes: macOS refuses the option afterwards.
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let inherited = stream.into_raw_fd();
+        // SAFETY: into_raw_fd gave up the only other owner.
+        let handoff = unsafe { TabHandoff::adopt(inherited) }.unwrap();
+        assert_ne!(handoff.socket.as_raw_fd(), inherited);
         let flags = unsafe { libc::fcntl(handoff.socket.as_raw_fd(), libc::F_GETFD) };
         assert_ne!(flags & libc::FD_CLOEXEC, 0);
-        drop(stream);
         peer.write_all(b"x").unwrap();
         let mut byte = [0];
         (&*handoff.socket).read_exact(&mut byte).unwrap();
         assert_eq!(&byte, b"x");
+        // Dropping the handoff closes the last descriptor, the inherited one
+        // included, so the sender sees end of file.
         drop(handoff);
-        peer.write_all(b"y").unwrap_err();
+        assert_eq!(peer.read(&mut byte).unwrap(), 0);
     }
 }
 
