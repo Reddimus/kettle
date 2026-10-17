@@ -27,6 +27,8 @@ pub fn card_version(target: InlineTarget, output: &str) -> bool {
             .strip_prefix("codex-cli ")
             .and_then(release)
             .is_some_and(|(major, minor, _)| major == 0 && minor == CODEX_CARD_MINOR),
+        // `kettle show --inline` prints its own card; no harness launches it.
+        InlineTarget::Cli => false,
     }
 }
 
@@ -163,6 +165,10 @@ mod tests {
     #[test]
     fn card_profiles_accept_only_tested_hook_versions() {
         assert!(card_version(InlineTarget::CodexHook, "codex-cli 0.162.0\n"));
+        // No harness launch is ever registered for a command-line card.
+        for output in ["2.1.280 (Claude Code)", "codex-cli 0.162.0", "kettle 5.3.0"] {
+            assert!(!card_version(InlineTarget::Cli, output), "{output}");
+        }
         assert!(card_version(InlineTarget::CodexHook, "codex-cli 0.162.7"));
         for output in ["2.1.280 (Claude Code)\n", "2.1.300 (Claude Code)"] {
             assert!(card_version(InlineTarget::ClaudeHook, output), "{output}");

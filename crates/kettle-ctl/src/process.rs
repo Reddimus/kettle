@@ -109,10 +109,91 @@ pub fn executable(identity: ProcessIdentity) -> Result<std::path::PathBuf, Inspe
     }
 }
 
+/// Where a process's standard output goes, as the kernel names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StandardOutput {
+    /// A character device, such as a terminal: its number, as
+    /// [`device_number`] gives it.
+    Device(u64),
+    /// Anything else: a pipe, a socket, a file, or nothing open.
+    Other,
+}
+
+/// Where `identity`'s standard output (descriptor 1) goes, while it is still
+/// that process: the identity is read again after, so a pid reused meanwhile
+/// reads as unavailable. Read from the kernel, never from the process.
+pub fn standard_output(identity: ProcessIdentity) -> Result<StandardOutput, InspectError> {
+    if identity.pid == 0 {
+        return Err(InspectError::Unavailable);
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let output = imp::standard_output(identity.pid)?;
+        if self::identity(identity.pid)? != identity {
+            return Err(InspectError::Unavailable);
+        }
+        Ok(output)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    Err(InspectError::Unsupported)
+}
+
+/// `identity`'s process group, while it is still that process.
+pub fn process_group(identity: ProcessIdentity) -> Result<u32, InspectError> {
+    if identity.pid == 0 {
+        return Err(InspectError::Unavailable);
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let group = imp::process_group(identity.pid)?;
+        if self::identity(identity.pid)? != identity {
+            return Err(InspectError::Unavailable);
+        }
+        Ok(group)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    Err(InspectError::Unsupported)
+}
+
+/// A character device's number as [`StandardOutput::Device`] gives it, from
+/// the device file's metadata: Linux's 64-bit `dev_t`, macOS's 32-bit one.
+#[cfg(unix)]
+pub fn device_number(metadata: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt as _;
+    #[cfg(target_os = "macos")]
+    return u64::from(metadata.rdev() as u32);
+    #[cfg(not(target_os = "macos"))]
+    return metadata.rdev();
+}
+
 #[cfg(target_os = "linux")]
 mod imp {
-    use super::{InspectError, ProcessIdentity, ProcessSnapshot};
+    use super::{InspectError, ProcessIdentity, ProcessSnapshot, StandardOutput};
     use std::io::Read as _;
+
+    /// What `/proc/<pid>/fd/1` opens, by its target's metadata. No such
+    /// descriptor is no device; a process gone is told apart by the caller,
+    /// which reads its identity again.
+    pub(super) fn standard_output(pid: u32) -> Result<StandardOutput, InspectError> {
+        use std::os::unix::fs::FileTypeExt as _;
+        match std::fs::metadata(format!("/proc/{pid}/fd/1")) {
+            Ok(metadata) if metadata.file_type().is_char_device() => {
+                Ok(StandardOutput::Device(super::device_number(&metadata)))
+            }
+            Ok(_) => Ok(StandardOutput::Other),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(StandardOutput::Other),
+            Err(_) => Err(InspectError::Unavailable),
+        }
+    }
+
+    pub(super) fn process_group(pid: u32) -> Result<u32, InspectError> {
+        let stat = read_stat(pid)?;
+        let fields = fixed_fields(pid, &stat)?;
+        fields
+            .get(5 - 3)
+            .and_then(|group| group.parse().ok())
+            .ok_or(InspectError::InvalidData)
+    }
 
     pub(super) fn executable(pid: u32) -> Result<std::path::PathBuf, InspectError> {
         std::fs::read_link(format!("/proc/{pid}/exe")).map_err(|_| InspectError::Unavailable)
@@ -122,6 +203,10 @@ mod imp {
     const MAX_STAT_BYTES: u64 = 4096;
 
     pub(super) fn inspect(pid: u32) -> Result<ProcessSnapshot, InspectError> {
+        parse_stat(pid, &read_stat(pid)?)
+    }
+
+    fn read_stat(pid: u32) -> Result<Vec<u8>, InspectError> {
         let mut stat = Vec::new();
         std::fs::File::open(format!("/proc/{pid}/stat"))
             .and_then(|file| file.take(MAX_STAT_BYTES + 1).read_to_end(&mut stat))
@@ -129,13 +214,14 @@ mod imp {
         if stat.len() as u64 > MAX_STAT_BYTES {
             return Err(InspectError::InvalidData);
         }
-        parse_stat(pid, &stat)
+        Ok(stat)
     }
 
-    /// Parse `pid`'s stat line. `comm` (field 2) is raw bytes, unescaped, and
-    /// may hold spaces, `)` or bytes that are not UTF-8, so the fixed fields
-    /// begin after its LAST `)` and only they are decoded.
-    pub(super) fn parse_stat(pid: u32, stat: &[u8]) -> Result<ProcessSnapshot, InspectError> {
+    /// The fields after `comm`, numbered from 3 as in proc_pid_stat(5), at
+    /// index `number - 3`. `comm` (field 2) is raw bytes, unescaped, and may
+    /// hold spaces, `)` or bytes that are not UTF-8, so the fixed fields begin
+    /// after its LAST `)` and only they are decoded.
+    fn fixed_fields(pid: u32, stat: &[u8]) -> Result<Vec<&str>, InspectError> {
         let close = stat
             .iter()
             .rposition(|byte| *byte == b')')
@@ -152,8 +238,12 @@ mod imp {
         if reported != pid {
             return Err(InspectError::InvalidData);
         }
-        // Fields after `comm`, numbered from 3 as in proc_pid_stat(5).
-        let fields: Vec<&str> = rest.split_ascii_whitespace().take(20).collect();
+        Ok(rest.split_ascii_whitespace().take(20).collect())
+    }
+
+    /// Parse `pid`'s stat line.
+    pub(super) fn parse_stat(pid: u32, stat: &[u8]) -> Result<ProcessSnapshot, InspectError> {
+        let fields = fixed_fields(pid, stat)?;
         let field = |number: usize| {
             fields
                 .get(number - 3)
@@ -179,10 +269,79 @@ mod imp {
 
 #[cfg(target_os = "macos")]
 mod imp {
-    use super::{InspectError, ProcessIdentity, ProcessSnapshot};
+    use super::{InspectError, ProcessIdentity, ProcessSnapshot, StandardOutput};
 
     /// `pbi_status` of a process that has exited and awaits its parent.
     const SZOMB: u32 = 5;
+
+    /// `proc_pidfdinfo`'s flavor for a descriptor's vnode, from
+    /// `<sys/proc_info.h>`.
+    const PROC_PIDFDVNODEINFO: libc::c_int = 1;
+    /// `vnode_info.vi_type` of a character device (`VCHR` in `<sys/vnode.h>`).
+    const VCHR: i32 = 4;
+
+    /// `struct proc_fileinfo` from `<sys/proc_info.h>`.
+    #[repr(C)]
+    struct FileInfo {
+        open_flags: u32,
+        status: u32,
+        offset: i64,
+        kind: i32,
+        guard_flags: u32,
+    }
+
+    /// `struct vnode_info` from `<sys/proc_info.h>`.
+    #[repr(C)]
+    struct VnodeInfo {
+        stat: libc::vinfo_stat,
+        kind: i32,
+        pad: i32,
+        fsid: [i32; 2],
+    }
+
+    /// `struct vnode_fdinfo` from `<sys/proc_info.h>`: a descriptor and the
+    /// vnode it opens. libc declares the call but not the struct.
+    #[repr(C)]
+    struct VnodeFdInfo {
+        file: FileInfo,
+        vnode: VnodeInfo,
+    }
+
+    // The SDK's sizes, so a mistyped field fails the build, not a read.
+    const _: () = assert!(std::mem::size_of::<FileInfo>() == 24);
+    const _: () = assert!(std::mem::size_of::<VnodeInfo>() == 152);
+    const _: () = assert!(std::mem::size_of::<VnodeFdInfo>() == 176);
+
+    /// What descriptor 1 opens, by its vnode. A pipe or socket has no vnode,
+    /// so the call fails for one, as it does for no descriptor or a process
+    /// gone; the caller reads the identity again to tell the last apart.
+    pub(super) fn standard_output(pid: u32) -> Result<StandardOutput, InspectError> {
+        let os_pid = libc::pid_t::try_from(pid).map_err(|_| InspectError::Unavailable)?;
+        let size = std::mem::size_of::<VnodeFdInfo>();
+        // SAFETY: an all-zero `VnodeFdInfo` is a valid value of this plain C
+        // struct of integers.
+        let mut info: VnodeFdInfo = unsafe { std::mem::zeroed() };
+        // SAFETY: `info` is a live buffer of exactly `size` bytes for the
+        // PROC_PIDFDVNODEINFO flavor, whose layout the asserts above pin; the
+        // call writes at most `size` bytes and returns how many it wrote.
+        let written = unsafe {
+            libc::proc_pidfdinfo(
+                os_pid,
+                1,
+                PROC_PIDFDVNODEINFO,
+                std::ptr::from_mut(&mut info).cast(),
+                size as libc::c_int,
+            )
+        };
+        if written != size as libc::c_int || info.vnode.kind != VCHR {
+            return Ok(StandardOutput::Other);
+        }
+        Ok(StandardOutput::Device(u64::from(info.vnode.stat.vst_rdev)))
+    }
+
+    pub(super) fn process_group(pid: u32) -> Result<u32, InspectError> {
+        bsd_info(pid).map(|info| info.pbi_pgid)
+    }
 
     pub(super) fn executable(pid: u32) -> Result<std::path::PathBuf, InspectError> {
         use std::os::unix::ffi::OsStrExt as _;
@@ -201,6 +360,20 @@ mod imp {
     }
 
     pub(super) fn inspect(pid: u32) -> Result<ProcessSnapshot, InspectError> {
+        let info = bsd_info(pid)?;
+        let start = info
+            .pbi_start_tvsec
+            .checked_mul(1_000_000)
+            .and_then(|micros| micros.checked_add(info.pbi_start_tvusec))
+            .ok_or(InspectError::InvalidData)?;
+        Ok(ProcessSnapshot {
+            identity: ProcessIdentity::new(pid, start),
+            parent_pid: (info.pbi_ppid != 0).then_some(info.pbi_ppid),
+            exited: info.pbi_status == SZOMB,
+        })
+    }
+
+    fn bsd_info(pid: u32) -> Result<libc::proc_bsdinfo, InspectError> {
         let os_pid = libc::pid_t::try_from(pid).map_err(|_| InspectError::Unavailable)?;
         let size = std::mem::size_of::<libc::proc_bsdinfo>();
         // SAFETY: an all-zero `proc_bsdinfo` is a valid value of this plain C
@@ -224,16 +397,7 @@ mod imp {
         if written != size as libc::c_int || info.pbi_pid != pid {
             return Err(InspectError::InvalidData);
         }
-        let start = info
-            .pbi_start_tvsec
-            .checked_mul(1_000_000)
-            .and_then(|micros| micros.checked_add(info.pbi_start_tvusec))
-            .ok_or(InspectError::InvalidData)?;
-        Ok(ProcessSnapshot {
-            identity: ProcessIdentity::new(pid, start),
-            parent_pid: (info.pbi_ppid != 0).then_some(info.pbi_ppid),
-            exited: info.pbi_status == SZOMB,
-        })
+        Ok(info)
     }
 }
 
@@ -497,6 +661,119 @@ mod tests {
             executable(ProcessIdentity::new(0, 0)),
             Err(InspectError::Unavailable)
         );
+    }
+
+    /// A new pseudo-terminal, its controller and its terminal end, neither
+    /// handed to children that do not ask for it.
+    #[cfg(unix)]
+    fn pty() -> (std::os::fd::OwnedFd, std::os::fd::OwnedFd) {
+        use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+        let (mut controller, mut terminal) = (-1, -1);
+        // SAFETY: both out-pointers are live; the null name, settings and
+        // size ask for defaults.
+        let status = unsafe {
+            libc::openpty(
+                &mut controller,
+                &mut terminal,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, 0, "openpty: {}", std::io::Error::last_os_error());
+        // SAFETY: openpty returned two new descriptors this test alone owns.
+        let ends = unsafe {
+            (
+                OwnedFd::from_raw_fd(controller),
+                OwnedFd::from_raw_fd(terminal),
+            )
+        };
+        for end in [&ends.0, &ends.1] {
+            // SAFETY: a live descriptor this test owns.
+            unsafe { libc::fcntl(end.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
+        }
+        ends
+    }
+
+    /// A child that waits half a minute unless killed.
+    #[cfg(unix)]
+    fn waiting(command: &mut std::process::Command) -> std::process::Child {
+        command.arg("30").spawn().expect("spawn sleep")
+    }
+
+    /// Descriptor 1 is told by the device it opens: the child's own
+    /// terminal, another terminal, another character device, or a pipe, and
+    /// only while the identity asked about is still the process.
+    #[cfg(unix)]
+    #[test]
+    fn standard_output_names_the_device_a_child_writes_to() {
+        use std::process::{Command, Stdio};
+        let (_controller, terminal) = pty();
+        let (_other_controller, other) = pty();
+        let number = |end: &std::os::fd::OwnedFd| {
+            device_number(
+                &std::fs::File::from(end.try_clone().unwrap())
+                    .metadata()
+                    .unwrap(),
+            )
+        };
+        let (device, other_device) = (number(&terminal), number(&other));
+        assert_ne!(device, other_device);
+        let null = device_number(&std::fs::metadata("/dev/null").unwrap());
+        let mut children = [
+            waiting(Command::new("sleep").stdout(Stdio::from(terminal))),
+            waiting(Command::new("sleep").stdout(Stdio::from(other))),
+            waiting(Command::new("sleep").stdout(Stdio::null())),
+            waiting(Command::new("sleep").stdout(Stdio::piped())),
+        ];
+        let identities: Vec<_> = children
+            .iter()
+            .map(|child| inspect(child.id()).unwrap().identity)
+            .collect();
+        let outputs: Vec<_> = identities.iter().map(|&id| standard_output(id)).collect();
+        assert_eq!(
+            outputs,
+            [
+                Ok(StandardOutput::Device(device)),
+                Ok(StandardOutput::Device(other_device)),
+                Ok(StandardOutput::Device(null)),
+                Ok(StandardOutput::Other),
+            ]
+        );
+        let first = identities[0];
+        let reused = ProcessIdentity::new(first.pid(), first.start().wrapping_add(1));
+        assert_eq!(standard_output(reused), Err(InspectError::Unavailable));
+        for child in &mut children {
+            child.kill().ok();
+            child.wait().ok();
+        }
+        assert_eq!(standard_output(first), Err(InspectError::Unavailable));
+        assert_eq!(
+            standard_output(ProcessIdentity::new(0, 0)),
+            Err(InspectError::Unavailable)
+        );
+    }
+
+    /// A child that leads its own group is that group; one that does not is
+    /// in its parent's.
+    #[cfg(unix)]
+    #[test]
+    fn process_group_is_the_one_a_child_runs_in() {
+        use std::os::unix::process::CommandExt as _;
+        let mut leader = waiting(std::process::Command::new("sleep").process_group(0));
+        let mut member = waiting(&mut std::process::Command::new("sleep"));
+        let group =
+            |child: &std::process::Child| process_group(inspect(child.id()).unwrap().identity);
+        assert_eq!(group(&leader), Ok(leader.id()));
+        // SAFETY: getpgrp has no failure mode.
+        let ours = unsafe { libc::getpgrp() };
+        assert_eq!(group(&member), Ok(ours as u32));
+        let identity = inspect(member.id()).unwrap().identity;
+        for child in [&mut leader, &mut member] {
+            child.kill().ok();
+            child.wait().ok();
+        }
+        assert_eq!(process_group(identity), Err(InspectError::Unavailable));
     }
 
     #[test]

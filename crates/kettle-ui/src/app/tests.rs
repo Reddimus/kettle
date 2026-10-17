@@ -5818,7 +5818,7 @@ fn a_mermaid_item_gets_a_card_from_source_or_file() {
     ] {
         let delivery = super::register_card(
             &mut ledger,
-            (3, &mut pane_cards, (80, 40)),
+            (3, &mut pane_cards, (80, 40), 0),
             (8.0, 16.0),
             (9, 0),
             (kettle_media::MediaKind::Mermaid, None),
@@ -5829,6 +5829,7 @@ fn a_mermaid_item_gets_a_card_from_source_or_file() {
                 owner,
                 harness: kettle_render::CardHarness::ClaudeHook,
                 name: name.map(Into::into),
+                printer: None,
             },
             now,
         )
@@ -5852,13 +5853,14 @@ fn a_card_is_registered_with_the_message_its_harness_prints() {
         owner,
         harness: kettle_render::CardHarness::ClaudeHook,
         name: Some("plot.png".into()),
+        printer: None,
     };
     let now = std::time::Instant::now();
     let mut ledger = crate::media::CardLedger::default();
     let mut pane_cards = kettle_render::InlineCards::default();
     let delivery = super::register_card(
         &mut ledger,
-        (3, &mut pane_cards, (80, 40)),
+        (3, &mut pane_cards, (80, 40), 0),
         (8.0, 16.0),
         (9, 0),
         (kettle_media::MediaKind::Raster, None),
@@ -5877,10 +5879,10 @@ fn a_card_is_registered_with_the_message_its_harness_prints() {
     assert!(pane_cards.contains(marker.nonce));
     assert_eq!(ledger.item(3, marker.nonce), Some(9));
     // A pane too small for a card, or a harness past its limit, gets none.
-    assert!(
+    assert_eq!(
         super::register_card(
             &mut ledger,
-            (3, &mut pane_cards, (80, 4)),
+            (3, &mut pane_cards, (80, 4), 0),
             (8.0, 16.0),
             (9, 0),
             (kettle_media::MediaKind::Raster, None),
@@ -5888,12 +5890,13 @@ fn a_card_is_registered_with_the_message_its_harness_prints() {
             draft(),
             now,
         )
-        .is_none()
+        .err(),
+        Some(kettle_ctl::show::InlineRefusal::TooSmall)
     );
     for _ in 0..crate::media::HARNESS_CARDS_PER_SECOND {
         let _ = super::register_card(
             &mut ledger,
-            (3, &mut pane_cards, (80, 40)),
+            (3, &mut pane_cards, (80, 40), 0),
             (8.0, 16.0),
             (9, 0),
             (kettle_media::MediaKind::Raster, None),
@@ -5903,10 +5906,10 @@ fn a_card_is_registered_with_the_message_its_harness_prints() {
         );
     }
     let before = pane_cards.len();
-    assert!(
+    assert_eq!(
         super::register_card(
             &mut ledger,
-            (3, &mut pane_cards, (80, 40)),
+            (3, &mut pane_cards, (80, 40), 0),
             (8.0, 16.0),
             (9, 0),
             (kettle_media::MediaKind::Raster, None),
@@ -5914,10 +5917,99 @@ fn a_card_is_registered_with_the_message_its_harness_prints() {
             draft(),
             now,
         )
-        .is_none(),
+        .err(),
+        Some(kettle_ctl::show::InlineRefusal::Limit),
         "four a second"
     );
     assert_eq!(pane_cards.len(), before, "nothing registered");
+}
+
+/// `kettle show --inline` gets a card only when it runs in the pane, writes
+/// to the pane's own terminal from its foreground, and no full-screen program
+/// owns the screen; the card is the pane's own child's. Real panes, real
+/// processes: the pane's child is the command here.
+#[cfg(unix)]
+#[test]
+fn a_command_line_card_needs_the_panes_own_terminal_and_foreground() {
+    use kettle_ctl::process::StandardOutput;
+    use kettle_ctl::show::InlineRefusal;
+    let cfg = kettle_config::Config {
+        shell_integration: false,
+        login_shell: false,
+        ..kettle_config::Config::default()
+    };
+    let spawn = |script: &str| {
+        let mut mux = crate::mux::Mux::new();
+        let argv = ["/bin/sh", "-c", script].map(String::from).to_vec();
+        mux.new_tab_with_geometry(
+            &cfg,
+            kettle_core::PtyGeometry::from_cell_size(100, 30, 8, 16),
+            std::sync::Arc::new(|| {}),
+            &argv,
+            None,
+        )
+        .ok()
+        .map(|_| mux)
+    };
+    let Some(plain) = spawn("exec sleep 30") else {
+        eprintln!("skipping: no PTY");
+        return;
+    };
+    let pane = plain.panes.values().next().unwrap();
+    let root = pane.caller_root.expect("the pane's child");
+    let terminal = crate::ctl_server::CliTerminal::of(root).expect("its terminal");
+    assert!(matches!(terminal.output, StandardOutput::Device(_)));
+    assert_eq!(
+        super::media::cli_card_owner(pane, true, Some(terminal)),
+        Ok(root)
+    );
+    // Not in the pane, writing elsewhere, or behind another process group.
+    assert_eq!(
+        super::media::cli_card_owner(pane, false, Some(terminal)),
+        Err(InlineRefusal::Unverified)
+    );
+    let null = kettle_ctl::process::device_number(&std::fs::metadata("/dev/null").unwrap());
+    for output in [StandardOutput::Other, StandardOutput::Device(null)] {
+        let elsewhere = crate::ctl_server::CliTerminal { output, ..terminal };
+        assert_eq!(
+            super::media::cli_card_owner(pane, true, Some(elsewhere)),
+            Err(InlineRefusal::NotTerminal)
+        );
+    }
+    assert_eq!(
+        super::media::cli_card_owner(pane, true, None),
+        Err(InlineRefusal::NotTerminal)
+    );
+    let background = crate::ctl_server::CliTerminal {
+        group: terminal.group.wrapping_add(1),
+        ..terminal
+    };
+    assert_eq!(
+        super::media::cli_card_owner(pane, true, Some(background)),
+        Err(InlineRefusal::Background)
+    );
+    plain.kill_children();
+    // A full-screen program owns its pane's screen.
+    let Some(full) = spawn("printf '\\033[?1049h'; exec sleep 30") else {
+        return;
+    };
+    let pane = full.panes.values().next().unwrap();
+    let alternate = kettle_test_support::poll_until(std::time::Duration::from_secs(10), || {
+        pane.term
+            .term
+            .lock()
+            .ok()
+            .filter(|term| term.mode().contains(kettle_core::TermMode::ALT_SCREEN))
+            .map(|_| ())
+    });
+    assert!(alternate.is_some(), "the program took the screen");
+    let root = pane.caller_root.expect("the pane's child");
+    let terminal = crate::ctl_server::CliTerminal::of(root).expect("its terminal");
+    assert_eq!(
+        super::media::cli_card_owner(pane, true, Some(terminal)),
+        Err(InlineRefusal::AlternateScreen)
+    );
+    full.kill_children();
 }
 
 /// The App gives a card only to a verified route, retires cards on its
@@ -5936,8 +6028,9 @@ fn cards_are_for_verified_harnesses_and_retire_with_their_item() {
     let show = body("ctl_show");
     assert!(show.contains("(Some(target), Some(owner)) if route.verified =>"));
     // Each harness's card is placed and sized as that harness prints it.
-    assert!(show.contains(
-        "kettle_ctl::show::InlineTarget::CodexHook => {\n                        kettle_render::CardHarness::CodexHook"
+    assert!(show.contains("harness: printed_by(target),"));
+    assert!(source.contains(
+        "kettle_ctl::show::InlineTarget::CodexHook => kettle_render::CardHarness::CodexHook,"
     ));
     assert!(
         body("ctl_show").contains("name: card_name,"),

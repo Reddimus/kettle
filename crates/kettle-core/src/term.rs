@@ -6666,6 +6666,14 @@ impl Terminal {
         Ok(attrs.c_lflag & libc::ICANON != 0)
     }
 
+    /// The path of this pane's terminal device, the pseudo-terminal's other
+    /// end, named when it was opened. It names that device while Kettle holds
+    /// the controller, which it does for the pane's life.
+    #[cfg(unix)]
+    pub fn tty_path(&self) -> Option<std::path::PathBuf> {
+        self.master.as_ref()?.tty_name()
+    }
+
     /// Current Unix PTY foreground process group id.
     ///
     /// This is a single `tcgetpgrp` snapshot over the master descriptor. It
