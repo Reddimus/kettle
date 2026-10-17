@@ -15,9 +15,10 @@
 //! via `kill(pid, 0)` on Unix / `OpenProcess` + `GetExitCodeProcess` on
 //! Windows), and a record also carries the owning process's start-time token
 //! so a *recycled* pid cannot resurrect it — see [`process_start_token`]. Two
-//! processes claiming simultaneously can race to the same hue (no locking by
-//! design); the worst case is two same-colored windows, which the next
-//! window-open won't repeat.
+//! processes claiming simultaneously can race to the same hue (choosing one
+//! takes no lock); the worst case is two same-colored windows, which the next
+//! window-open won't repeat. Publishing a claim and pruning one do share
+//! `presence.lock`, so a reader never deletes a claim written after it looked.
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -109,6 +110,24 @@ pub fn presence_dir() -> PathBuf {
 
 fn entry_path(dir: &Path, pid: u32, win: u64) -> PathBuf {
     dir.join(format!("{pid}-w{win}.json"))
+}
+
+/// Held to write a new claim, and to delete files a reader judged unusable.
+/// A reader judges a file and deletes it later, and a new claim can replace
+/// the file in between; under this lock that cannot happen. A recolor or a
+/// release takes no lock: they touch a live window's own record, which a
+/// pruner always keeps. Mirrors the discovery registry's lock.
+fn lock_path(dir: &Path) -> PathBuf {
+    dir.join("presence.lock")
+}
+
+/// How long a claim waits for the lock. A holder only re-reads and unlinks a
+/// few small files, so this is reached only when one is stuck; the claim is
+/// then skipped, like any other failed claim.
+const PUBLICATION_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+fn publication_lock(dir: &Path) -> Option<kettle_state::ExclusiveFileLock> {
+    kettle_state::ExclusiveFileLock::acquire_timeout(&lock_path(dir), PUBLICATION_LOCK_TIMEOUT).ok()
 }
 
 /// Is `pid` a live process?
@@ -239,6 +258,9 @@ impl PresenceGuard {
         if !replacement.is_valid() {
             return;
         }
+        // No lock, so a theme switch never waits on the UI thread: the file
+        // is this live window's record, which a pruner judging it again
+        // under the lock always keeps.
         if let Ok(json) =
             crate::protocol::to_json_vec_bounded(&replacement, MAX_PRESENCE_ENTRY_BYTES)
             && kettle_state::atomic_replace(
@@ -254,6 +276,7 @@ impl PresenceGuard {
 }
 
 impl Drop for PresenceGuard {
+    // No lock: only this process, which is still running, writes this path.
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
     }
@@ -268,6 +291,7 @@ pub fn claim(dir: &Path, entry: PresenceEntry) -> Option<PresenceGuard> {
     crate::ensure_private_dir(dir).ok()?;
     let path = entry_path(dir, entry.pid, entry.win);
     let json = crate::protocol::to_json_vec_bounded(&entry, MAX_PRESENCE_ENTRY_BYTES).ok()?;
+    let _lock = publication_lock(dir)?;
     kettle_state::atomic_replace(&path, &json, kettle_state::AtomicWriteOptions::PRIVATE).ok()?;
     Some(PresenceGuard { path, entry })
 }
@@ -283,6 +307,7 @@ pub fn live_entries(dir: &Path) -> Vec<PresenceEntry> {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return out;
     };
+    let mut unusable = Vec::new();
     for ent in rd.take(MAX_PRESENCE_DIR_ENTRIES).flatten() {
         let path = ent.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
@@ -296,36 +321,46 @@ pub fn live_entries(dir: &Path) -> Vec<PresenceEntry> {
             {
                 out.push(e);
             }
-            // Dead owner (including a pid now belonging to someone else) —
-            // prune so the dir can't grow forever, but only while the file is
-            // still the record we judged.
-            EntryRead::Record(stale) => prune_stale(&path, &stale),
-            // Read through and not a record: nothing to preserve, and a claim
-            // this reader cannot parse can never take part in color selection.
-            EntryRead::Garbage => {
-                let _ = std::fs::remove_file(&path);
-            }
+            // Dead owner (including a pid now belonging to someone else), or
+            // read through and not a record: prune so the dir can't grow
+            // forever. A claim this reader cannot parse can never take part
+            // in color selection anyway.
+            EntryRead::Record(stale) => unusable.push((path, Some(stale))),
+            EntryRead::Garbage => unusable.push((path, None)),
             // Never examined, so keep it. Deleting on a failed look would take
             // live windows' colors out of the pool whenever this process runs
             // short of descriptors.
             EntryRead::Unexamined => {}
         }
     }
+    if !unusable.is_empty() {
+        prune(dir, &unusable);
+    }
     out
 }
 
-/// Delete a record judged stale — but only while the file still *is* that
-/// record.
+/// Delete files judged unusable — but only while each file still *is* what
+/// was judged.
 ///
 /// A record is named on disk by pid and window sequence, and both are reused:
-/// the process that made this claim is gone, so its pid can already belong to a
-/// new kettle whose first window claims the same name. Re-reading keeps the
-/// delete from taking a live window's color out of the pool on the strength of
-/// a judgement made about a different record. Mirrors
-/// [`crate::discovery::prune_stale`].
-fn prune_stale(path: &Path, judged: &PresenceEntry) {
-    if read_entry(path).is_some_and(|current| current == *judged) {
-        let _ = std::fs::remove_file(path);
+/// the process that made a stale claim is gone, so its pid can already belong
+/// to a new kettle whose first window claims the same name, replacing the
+/// file after it was judged. Under the lock no claim is written, so judging
+/// each file again and deleting it is one step. Busy: nothing is deleted; the
+/// next reader prunes. Mirrors [`crate::discovery::prune_stale`].
+fn prune(dir: &Path, judged: &[(PathBuf, Option<PresenceEntry>)]) {
+    let Ok(Some(_lock)) = kettle_state::ExclusiveFileLock::try_acquire(&lock_path(dir)) else {
+        return;
+    };
+    for (path, judged) in judged {
+        let still = match (examine_entry(path), judged) {
+            (EntryRead::Record(current), Some(stale)) => current == *stale,
+            (EntryRead::Garbage, None) => true,
+            _ => false,
+        };
+        if still {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 
@@ -341,13 +376,6 @@ enum EntryRead {
     Garbage,
     /// Could not be examined. It may be a perfectly good claim, so leave it.
     Unexamined,
-}
-
-fn read_entry(path: &Path) -> Option<PresenceEntry> {
-    match examine_entry(path) {
-        EntryRead::Record(e) => Some(e),
-        _ => None,
-    }
 }
 
 fn examine_entry(path: &Path) -> EntryRead {
@@ -500,6 +528,16 @@ mod tests {
 
     /// Put `entry` on disk exactly the way `claim` would, without taking a
     /// guard that would delete it again at end of scope.
+    /// Every file in `dir` except the lock, which stays.
+    fn claim_files(dir: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| *p != lock_path(dir))
+            .collect()
+    }
+
     fn write_entry(dir: &Path, entry: &PresenceEntry) {
         kettle_state::atomic_replace(
             &entry_path(dir, entry.pid, entry.win),
@@ -558,10 +596,7 @@ mod tests {
             live_entries(&dir).is_empty(),
             "dead-pid + garbage entries are dropped"
         );
-        assert!(
-            std::fs::read_dir(&dir).unwrap().flatten().next().is_none(),
-            "pruned from disk too"
-        );
+        assert!(claim_files(&dir).is_empty(), "pruned from disk too");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -624,7 +659,7 @@ mod tests {
         .unwrap();
 
         assert!(live_entries(&dir).is_empty());
-        assert!(std::fs::read_dir(&dir).unwrap().next().is_none());
+        assert!(claim_files(&dir).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -765,18 +800,47 @@ mod tests {
         let live = entry(me, 1, "#00ff00");
         write_entry(&dir, &live);
 
-        prune_stale(&entry_path(&dir, me, 1), &stale);
+        prune(&dir, &[(entry_path(&dir, me, 1), Some(stale))]);
         assert_eq!(
             live_entries(&dir),
             vec![live.clone()],
             "a delete aimed at the stale claim must not take the live one with it"
         );
 
-        prune_stale(&entry_path(&dir, me, 1), &live);
+        prune(&dir, &[(entry_path(&dir, me, 1), Some(live))]);
         assert!(
             live_entries(&dir).is_empty(),
             "a record still unchanged on disk is pruned"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A reader deletes nothing while a claim is being written. It judged
+    /// the files before taking the lock, and a claim written in between would
+    /// otherwise be deleted on the strength of that judgement.
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn pruning_waits_for_a_claim_being_written() {
+        let dir = tmp("prune-lock");
+        ensure_private_dir(&dir).unwrap();
+        let me = std::process::id();
+        let token = process_start_token(me).expect("a supported platform reports a start token");
+        let mut stale = entry(me, 1, "#ff0000");
+        stale.start_token = Some(token.wrapping_add(1));
+        write_entry(&dir, &stale);
+        let garbage = entry_path(&dir, me, 2);
+        kettle_state::atomic_replace(&garbage, b"{", kettle_state::AtomicWriteOptions::PRIVATE)
+            .unwrap();
+
+        let publishing = kettle_state::ExclusiveFileLock::acquire(&lock_path(&dir)).unwrap();
+        assert!(live_entries(&dir).is_empty());
+        assert!(entry_path(&dir, me, 1).exists(), "the stale claim waits");
+        assert!(garbage.exists(), "the unreadable claim waits");
+
+        drop(publishing);
+        assert!(live_entries(&dir).is_empty());
+        assert!(!entry_path(&dir, me, 1).exists());
+        assert!(!garbage.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
