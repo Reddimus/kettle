@@ -1,0 +1,3363 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:kettle:control:v1",
+  "title": "Kettle local control protocol v1",
+  "description": "Local NDJSON control protocol over a user-private Unix-domain socket or Windows named pipe. Requests are limited to 1048576 serialized bytes; response/event framing is limited to 786432 serialized bytes. Production subscription events additionally have a 65536-byte serialized budget. These are byte limits, including encoding and escaping overhead, not JSON Schema character limits. Unknown request object fields are ignored. Read methods require read-only or full control; mutate methods require full control; display methods require full control or agent-display. Authorization, live targets, native paths, byte budgets, regex/key grammars and floating-point conversions require runtime checks. JSON Schema integer validation cannot distinguish integer tokens from equivalent floating-point spellings that serde_json may handle differently. Replies identify their request by id, not method; validate a result against the definition for the outstanding request's method.",
+  "anyOf": [
+    {
+      "$ref": "#/$defs/request"
+    },
+    {
+      "$ref": "#/$defs/reply_ok"
+    },
+    {
+      "$ref": "#/$defs/reply_error"
+    },
+    {
+      "$ref": "#/$defs/event"
+    }
+  ],
+  "$defs": {
+    "u64": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615,
+      "description": "Unsigned 64-bit integer; clients must preserve integer precision."
+    },
+    "u32": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "pid": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4294967295
+    },
+    "i32": {
+      "type": "integer",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    "i64": {
+      "type": "integer",
+      "minimum": -9223372036854775808,
+      "maximum": 9223372036854775807
+    },
+    "nullable_u64": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/u64"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "start_token": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|18446744073709550[0-9]{3}|18446744073709551[0-5][0-9]{2}|1844674407370955160[0-9]|1844674407370955161[0-4]|18446744073709551615)$",
+      "description": "Canonical unsigned decimal string representing 0..18446744073709551615: no sign, padding or leading zero except 0. Units are Linux clock ticks since boot, macOS microseconds since epoch, or Windows creation FILETIME."
+    },
+    "ignored_unless_string": {
+      "description": "A string is used; every other JSON value is treated as absent."
+    },
+    "ignored_unless_u64": {
+      "description": "An unsigned 64-bit integer is used; every other JSON value is treated as absent."
+    },
+    "ignored_unless_number": {
+      "description": "A number representable as f64 is used; other values are treated as absent."
+    },
+    "ignored_unless_boolean": {
+      "description": "A boolean is used; every other JSON value is treated as absent."
+    },
+    "caller": {
+      "type": "object",
+      "description": "Untrusted process claim. The connection's first nonblank frame fixes its claim; later requests may omit caller. Verification requires agreement with captured kernel peer identity and process ancestry. Missing claims/start tokens remain unverified; changing the claim permanently invalidates verification. pane_hint and pid_hint are hints only. Unknown fields are ignored.",
+      "properties": {
+        "pid": {
+          "$ref": "#/$defs/pid"
+        },
+        "start_token": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/start_token"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Absent/null means no start token."
+        },
+        "pane_hint": {
+          "$ref": "#/$defs/nullable_u64",
+          "description": "Absent/null means no pane hint."
+        },
+        "pid_hint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/pid"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Absent/null means no Kettle-process hint."
+        }
+      },
+      "required": [
+        "pid"
+      ],
+      "additionalProperties": true
+    },
+    "request": {
+      "type": "object",
+      "description": "Public request envelope. id is echoed by the reply; monotonically increasing ids are a client convention, not a parser check. Absent params becomes null. Server admission permits only object or null params. Unknown envelope fields are ignored.",
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/u64"
+        },
+        "method": {
+          "type": "string",
+          "enum": [
+            "get_state",
+            "list_tabs",
+            "list_panes",
+            "read_screen",
+            "read_cells",
+            "ui_geometry",
+            "screenshot",
+            "subscribe",
+            "send_text",
+            "send_keys",
+            "dispatch_ui_key",
+            "dispatch_keybind",
+            "send_mouse",
+            "resize_window",
+            "perform_action",
+            "run_command",
+            "wait_for",
+            "show"
+          ]
+        },
+        "params": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "caller": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/caller"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "v",
+        "id",
+        "method"
+      ],
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "get_state"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/get_state_params"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "list_tabs"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/list_tabs_params"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "list_panes"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/list_panes_params"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "read_screen"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/read_screen_params"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "read_cells"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/read_cells_params"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "ui_geometry"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/ui_geometry_params"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "screenshot"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/screenshot_params"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "subscribe"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/subscribe_params"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "send_text"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "params"
+            ],
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/send_text_params"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "send_keys"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "params"
+            ],
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/send_keys_params"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "dispatch_ui_key"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "params"
+            ],
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/dispatch_ui_key_params"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "dispatch_keybind"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "params"
+            ],
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/dispatch_keybind_params"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "send_mouse"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "params"
+            ],
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/send_mouse_params"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "resize_window"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "params"
+            ],
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/resize_window_params"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "perform_action"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "params"
+            ],
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/perform_action_params"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "run_command"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "params"
+            ],
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/run_command_params"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "wait_for"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "params"
+            ],
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/wait_for_params"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "show"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "params"
+            ],
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/show_params"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "reply_ok": {
+      "type": "object",
+      "description": "Successful public-method reply. Select the result definition using the outstanding request's method. A successful wait_for or run_command may report a timeout.",
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/u64"
+        },
+        "ok": {
+          "const": true
+        },
+        "result": {
+          "description": "The diagnostic result schemas deliberately accept open objects; this union cannot correlate id to a method.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/get_state_result"
+            },
+            {
+              "$ref": "#/$defs/list_tabs_result"
+            },
+            {
+              "$ref": "#/$defs/list_panes_result"
+            },
+            {
+              "$ref": "#/$defs/read_screen_result"
+            },
+            {
+              "$ref": "#/$defs/read_cells_result"
+            },
+            {
+              "$ref": "#/$defs/ui_geometry_result"
+            },
+            {
+              "$ref": "#/$defs/screenshot_result"
+            },
+            {
+              "$ref": "#/$defs/subscribe_result"
+            },
+            {
+              "$ref": "#/$defs/send_text_result"
+            },
+            {
+              "$ref": "#/$defs/send_keys_result"
+            },
+            {
+              "$ref": "#/$defs/dispatch_ui_key_result"
+            },
+            {
+              "$ref": "#/$defs/dispatch_keybind_result"
+            },
+            {
+              "$ref": "#/$defs/send_mouse_result"
+            },
+            {
+              "$ref": "#/$defs/resize_window_result"
+            },
+            {
+              "$ref": "#/$defs/perform_action_result"
+            },
+            {
+              "$ref": "#/$defs/run_command_result"
+            },
+            {
+              "$ref": "#/$defs/wait_for_result"
+            },
+            {
+              "$ref": "#/$defs/show_result"
+            }
+          ]
+        },
+        "error": false
+      },
+      "required": [
+        "v",
+        "id",
+        "ok",
+        "result"
+      ],
+      "additionalProperties": true
+    },
+    "reply_error": {
+      "type": "object",
+      "description": "Failed request. id is recovered when possible; malformed requests may receive id 0. Human-readable messages are not stable identifiers.",
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/u64"
+        },
+        "ok": {
+          "const": false
+        },
+        "result": false,
+        "error": {
+          "type": "object",
+          "properties": {
+            "code": {
+              "$ref": "#/$defs/error_code"
+            },
+            "message": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "additionalProperties": true,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "code": {
+                    "const": "file_refused"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "reason"
+                ],
+                "properties": {
+                  "reason": {
+                    "enum": [
+                      "not_found",
+                      "permission",
+                      "not_regular",
+                      "too_large"
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "code": {
+                    "const": "render_failed"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "reason"
+                ],
+                "properties": {
+                  "reason": {
+                    "enum": [
+                      "timeout",
+                      "resource",
+                      "parse"
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "code": {
+                    "const": "backend_unavailable"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "reason": {
+                    "const": "sandbox"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "code": {
+                    "not": {
+                      "enum": [
+                        "file_refused",
+                        "render_failed",
+                        "backend_unavailable"
+                      ]
+                    }
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "reason": false
+                }
+              }
+            }
+          ]
+        }
+      },
+      "required": [
+        "v",
+        "id",
+        "ok",
+        "error"
+      ],
+      "additionalProperties": true
+    },
+    "error_code": {
+      "type": "string",
+      "description": "Exactly the union of protocol error-code constants and FailureCode::code wire words. file_refused always has reason not_found, permission, not_regular or too_large. render_failed always has reason timeout, resource or parse. backend_unavailable either omits reason or has reason sandbox. Other codes omit reason. not_in_kettle is also used by client adapters.",
+      "enum": [
+        "bad_request",
+        "unsupported_version",
+        "unknown_method",
+        "bad_params",
+        "no_such_pane",
+        "read_only",
+        "display_only",
+        "display_disabled",
+        "busy",
+        "internal",
+        "response_too_large",
+        "stale_snapshot",
+        "too_large",
+        "file_refused",
+        "changed",
+        "index_out_of_range",
+        "unsupported_media",
+        "unsupported_platform",
+        "render_failed",
+        "restart_required",
+        "unsupported_container",
+        "codec_unavailable",
+        "backend_unavailable",
+        "external_open_unavailable",
+        "not_in_kettle",
+        "not_in_kettle_pane",
+        "over_budget",
+        "worker_unavailable"
+      ]
+    },
+    "event": {
+      "type": "object",
+      "description": "Messages sent after a successful subscribe reply. Production kinds are enumerated here. ping omits pane and data. A lag notice reports one dropped event and may itself be lost when the subscriber queue is full. Production events have a 65536-byte serialized budget.",
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "event": {
+          "enum": [
+            "command_finished",
+            "protocol_notification",
+            "pane_focus",
+            "title",
+            "agent_attached",
+            "tab_moved",
+            "lag",
+            "ping"
+          ]
+        },
+        "pane": {
+          "$ref": "#/$defs/u64"
+        },
+        "data": {}
+      },
+      "required": [
+        "v",
+        "event"
+      ],
+      "additionalProperties": true,
+      "oneOf": [
+        {
+          "properties": {
+            "event": {
+              "const": "command_finished"
+            },
+            "data": {
+              "type": "object",
+              "properties": {
+                "exit_code": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/i32"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "duration_ms": {
+                  "$ref": "#/$defs/u64"
+                }
+              },
+              "required": [
+                "exit_code",
+                "duration_ms"
+              ],
+              "additionalProperties": true
+            }
+          },
+          "required": [
+            "pane",
+            "data"
+          ]
+        },
+        {
+          "properties": {
+            "event": {
+              "const": "protocol_notification"
+            },
+            "data": {
+              "type": "object",
+              "properties": {
+                "title": {
+                  "type": "string"
+                },
+                "body": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "title",
+                "body"
+              ],
+              "additionalProperties": true
+            }
+          },
+          "required": [
+            "pane",
+            "data"
+          ]
+        },
+        {
+          "properties": {
+            "event": {
+              "const": "pane_focus"
+            },
+            "data": {
+              "type": "object",
+              "properties": {
+                "previous": {
+                  "$ref": "#/$defs/nullable_u64"
+                }
+              },
+              "required": [
+                "previous"
+              ],
+              "additionalProperties": true
+            }
+          },
+          "required": [
+            "pane",
+            "data"
+          ]
+        },
+        {
+          "properties": {
+            "event": {
+              "const": "title"
+            },
+            "data": {
+              "type": "object",
+              "properties": {
+                "title": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "title"
+              ],
+              "additionalProperties": true
+            }
+          },
+          "required": [
+            "pane",
+            "data"
+          ]
+        },
+        {
+          "properties": {
+            "event": {
+              "const": "agent_attached"
+            },
+            "data": {
+              "type": "object",
+              "properties": {
+                "attached": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "attached"
+              ],
+              "additionalProperties": true
+            }
+          },
+          "required": [
+            "pane",
+            "data"
+          ]
+        },
+        {
+          "properties": {
+            "event": {
+              "const": "tab_moved"
+            },
+            "data": {
+              "type": "object",
+              "description": "Tab movement between windows. Tear-off paths report the source index; existing-window attachment reports the landed index.",
+              "properties": {
+                "from_window": {
+                  "$ref": "#/$defs/u64"
+                },
+                "to_window": {
+                  "$ref": "#/$defs/u64"
+                },
+                "tab": {
+                  "$ref": "#/$defs/u64"
+                }
+              },
+              "required": [
+                "from_window",
+                "to_window",
+                "tab"
+              ],
+              "additionalProperties": true
+            }
+          },
+          "required": [
+            "data"
+          ]
+        },
+        {
+          "properties": {
+            "event": {
+              "const": "lag"
+            },
+            "data": {
+              "type": "object",
+              "properties": {
+                "dropped": {
+                  "const": 1
+                },
+                "reason": {
+                  "enum": [
+                    "queue_full",
+                    "event_too_large"
+                  ]
+                }
+              },
+              "required": [
+                "dropped",
+                "reason"
+              ],
+              "additionalProperties": true
+            }
+          },
+          "required": [
+            "data"
+          ]
+        },
+        {
+          "properties": {
+            "event": {
+              "const": "ping"
+            },
+            "data": false,
+            "pane": false
+          }
+        }
+      ]
+    },
+    "methods_index": {
+      "type": "object",
+      "description": "Documentation index, not a wire envelope. Each public method has corresponding <method>_params and <method>_result definitions.",
+      "properties": {
+        "get_state": {
+          "$ref": "#/$defs/get_state_params"
+        },
+        "list_tabs": {
+          "$ref": "#/$defs/list_tabs_params"
+        },
+        "list_panes": {
+          "$ref": "#/$defs/list_panes_params"
+        },
+        "read_screen": {
+          "$ref": "#/$defs/read_screen_params"
+        },
+        "read_cells": {
+          "$ref": "#/$defs/read_cells_params"
+        },
+        "ui_geometry": {
+          "$ref": "#/$defs/ui_geometry_params"
+        },
+        "screenshot": {
+          "$ref": "#/$defs/screenshot_params"
+        },
+        "subscribe": {
+          "$ref": "#/$defs/subscribe_params"
+        },
+        "send_text": {
+          "$ref": "#/$defs/send_text_params"
+        },
+        "send_keys": {
+          "$ref": "#/$defs/send_keys_params"
+        },
+        "dispatch_ui_key": {
+          "$ref": "#/$defs/dispatch_ui_key_params"
+        },
+        "dispatch_keybind": {
+          "$ref": "#/$defs/dispatch_keybind_params"
+        },
+        "send_mouse": {
+          "$ref": "#/$defs/send_mouse_params"
+        },
+        "resize_window": {
+          "$ref": "#/$defs/resize_window_params"
+        },
+        "perform_action": {
+          "$ref": "#/$defs/perform_action_params"
+        },
+        "run_command": {
+          "$ref": "#/$defs/run_command_params"
+        },
+        "wait_for": {
+          "$ref": "#/$defs/wait_for_params"
+        },
+        "show": {
+          "$ref": "#/$defs/show_params"
+        }
+      },
+      "additionalProperties": true
+    },
+    "page_params": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "Shared paging controls. Unknown fields are ignored. Absent/null params uses defaults. cursor is a decimal usize offset; leading zeros and a leading plus are accepted. Nonzero cursor requires a non-null snapshot. limit defaults to 1024 and positive values above 4096 are clamped. cursor and limit must fit server usize. snapshot is an opaque string of 1..128 UTF-8 bytes. Continue with unchanged other parameters; stale_snapshot requires restarting without cursor/snapshot.",
+      "properties": {
+        "cursor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^\\+?[0-9]+$",
+          "default": "0",
+          "description": "Absent/null means offset 0; numeric value must fit usize."
+        },
+        "limit": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 18446744073709551615
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 1024,
+          "description": "Absent/null means 1024. Must fit usize; positive values above 4096 are clamped."
+        },
+        "snapshot": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "default": null,
+          "description": "Absent/null disables snapshot comparison. Supplied strings must contain 1..128 UTF-8 bytes."
+        }
+      },
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "required": [
+              "cursor"
+            ],
+            "properties": {
+              "cursor": {
+                "type": "string",
+                "not": {
+                  "pattern": "^\\+?0+$"
+                }
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "snapshot"
+            ],
+            "properties": {
+              "snapshot": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "page_result": {
+      "type": "object",
+      "properties": {
+        "snapshot": {
+          "type": "string",
+          "description": "Opaque live-state snapshot token."
+        },
+        "next_cursor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "description": "Next item offset when truncated; otherwise null."
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "total": {
+          "$ref": "#/$defs/u64"
+        }
+      },
+      "required": [
+        "snapshot",
+        "next_cursor",
+        "truncated",
+        "total"
+      ],
+      "additionalProperties": true
+    },
+    "grid_point": {
+      "type": "array",
+      "description": "[row, column], zero-based. Rows may be negative for history.",
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/i32"
+        },
+        {
+          "$ref": "#/$defs/u64"
+        }
+      ],
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "pixel_point": {
+      "type": "array",
+      "description": "[x, y], window-relative physical pixels.",
+      "prefixItems": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "number"
+        }
+      ],
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "media_kind": {
+      "type": "string",
+      "enum": [
+        "raster",
+        "svg",
+        "mermaid",
+        "markdown",
+        "video",
+        "pdf",
+        "file"
+      ],
+      "description": "Shelf/show item kind: six MediaKind wire words, or file for an undrawn file."
+    },
+    "media_warnings": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "source_display_clipped",
+          "missing_glyphs",
+          "font_fallback",
+          "silent_video"
+        ]
+      }
+    },
+    "media_shelf_item": {
+      "type": "object",
+      "properties": {
+        "item": {
+          "$ref": "#/$defs/u64"
+        },
+        "generation": {
+          "$ref": "#/$defs/u64"
+        },
+        "title": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/media_kind"
+        },
+        "width": {
+          "$ref": "#/$defs/u32"
+        },
+        "height": {
+          "$ref": "#/$defs/u32"
+        },
+        "warnings": {
+          "$ref": "#/$defs/media_warnings"
+        },
+        "verified": {
+          "type": "boolean"
+        },
+        "from_user": {
+          "type": "boolean"
+        },
+        "sender": {
+          "description": "Null for verified/user-originated items; otherwise kernel-derived sender metadata.",
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "executable": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "pid": {
+                  "$ref": "#/$defs/u32"
+                },
+                "signer": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "executable",
+                "pid",
+                "signer"
+              ],
+              "additionalProperties": true
+            }
+          ]
+        },
+        "pixels": {
+          "enum": [
+            "held",
+            "released",
+            "none"
+          ]
+        },
+        "file": {
+          "$ref": "#/$defs/show_file"
+        }
+      },
+      "required": [
+        "item",
+        "generation",
+        "title",
+        "kind",
+        "width",
+        "height",
+        "warnings",
+        "verified",
+        "from_user",
+        "sender",
+        "pixels"
+      ],
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "file"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "file"
+            ],
+            "properties": {
+              "width": {
+                "const": 0
+              },
+              "height": {
+                "const": 0
+              },
+              "warnings": {
+                "maxItems": 0
+              },
+              "pixels": {
+                "const": "none"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "file": false,
+              "pixels": {
+                "enum": [
+                  "held",
+                  "released"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "get_state_params": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "Capability: read. No fields are consumed; all object fields are ignored.",
+      "additionalProperties": true
+    },
+    "get_state_result": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "string"
+        },
+        "pid": {
+          "$ref": "#/$defs/pid"
+        },
+        "mode": {
+          "enum": [
+            "off",
+            "readonly",
+            "full"
+          ],
+          "description": "Legacy spelling uses readonly without a hyphen."
+        },
+        "policy": {
+          "type": "object",
+          "properties": {
+            "server": {
+              "enum": [
+                "off",
+                "read-only",
+                "full"
+              ]
+            },
+            "display": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "server",
+            "display"
+          ],
+          "additionalProperties": true
+        },
+        "theme": {
+          "type": "string"
+        },
+        "tabs": {
+          "$ref": "#/$defs/u64",
+          "description": "Tab count in the focused window."
+        },
+        "focused_pane": {
+          "$ref": "#/$defs/nullable_u64"
+        },
+        "windows": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "focused_window": {
+          "$ref": "#/$defs/u64"
+        },
+        "window_title": {
+          "type": "string"
+        },
+        "caller": {
+          "type": "object",
+          "properties": {
+            "verified": {
+              "type": "boolean"
+            },
+            "reason": {
+              "enum": [
+                null,
+                "missing_claim",
+                "invalid_claim",
+                "claim_changed",
+                "peer_unavailable",
+                "claim_mismatch",
+                "peer_exited",
+                "peer_started_after_accept",
+                "ancestor_unavailable",
+                "parent_younger_than_child",
+                "chain_changed",
+                "cycle",
+                "depth_exceeded",
+                "deadline_exceeded",
+                "no_pane",
+                "unsupported"
+              ]
+            },
+            "pane": {
+              "$ref": "#/$defs/nullable_u64"
+            },
+            "window": {
+              "$ref": "#/$defs/nullable_u64"
+            },
+            "peer": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "pid": {
+                      "$ref": "#/$defs/pid"
+                    },
+                    "start_token": {
+                      "$ref": "#/$defs/start_token"
+                    }
+                  },
+                  "required": [
+                    "pid",
+                    "start_token"
+                  ],
+                  "additionalProperties": true
+                }
+              ]
+            },
+            "hint": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "pane": {
+                      "$ref": "#/$defs/u64"
+                    },
+                    "window": {
+                      "$ref": "#/$defs/u64"
+                    }
+                  },
+                  "required": [
+                    "pane",
+                    "window"
+                  ],
+                  "additionalProperties": true
+                }
+              ]
+            }
+          },
+          "required": [
+            "verified",
+            "reason",
+            "pane",
+            "window",
+            "peer",
+            "hint"
+          ],
+          "additionalProperties": true
+        },
+        "media": {
+          "type": "object",
+          "properties": {
+            "availability": {
+              "enum": [
+                "checking",
+                "available",
+                "unavailable"
+              ]
+            },
+            "reason": {
+              "enum": [
+                "worker_missing",
+                "unsafe_worker_file",
+                "unverified_worker",
+                "no_install_location",
+                "unsupported_platform",
+                "check_failed",
+                "not_configured",
+                "stuck_workers"
+              ]
+            },
+            "video": {
+              "type": "object",
+              "description": "Release-policy decoder order, not an installation probe: avfoundation then ffmpeg on macOS, ffmpeg on Linux, empty on Windows.",
+              "properties": {
+                "decoders": {
+                  "type": "array",
+                  "items": {
+                    "enum": [
+                      "avfoundation",
+                      "ffmpeg"
+                    ]
+                  }
+                },
+                "gstreamer": {
+                  "const": "not_used"
+                }
+              },
+              "required": [
+                "decoders",
+                "gstreamer"
+              ],
+              "additionalProperties": true
+            }
+          },
+          "required": [
+            "availability",
+            "video"
+          ],
+          "additionalProperties": true,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "availability": {
+                    "const": "unavailable"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "reason"
+                ]
+              },
+              "else": {
+                "properties": {
+                  "reason": false
+                }
+              }
+            }
+          ]
+        }
+      },
+      "required": [
+        "version",
+        "pid",
+        "mode",
+        "policy",
+        "theme",
+        "tabs",
+        "focused_pane",
+        "windows",
+        "focused_window",
+        "window_title",
+        "caller",
+        "media"
+      ],
+      "additionalProperties": true
+    },
+    "list_tabs_params": {
+      "$ref": "#/$defs/page_params",
+      "description": "Capability: read. Consumes only cursor, limit and snapshot; unknown fields are ignored."
+    },
+    "list_tabs_result": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/page_result"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "tabs": {
+              "type": "array",
+              "maxItems": 4096,
+              "description": "All windows, ordered by window sequence and in-window index.",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "window": {
+                    "$ref": "#/$defs/u64"
+                  },
+                  "index": {
+                    "$ref": "#/$defs/u64"
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "active": {
+                    "type": "boolean"
+                  },
+                  "focused_pane": {
+                    "$ref": "#/$defs/u64"
+                  },
+                  "panes": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/u64"
+                    }
+                  }
+                },
+                "required": [
+                  "window",
+                  "index",
+                  "title",
+                  "active",
+                  "focused_pane",
+                  "panes"
+                ],
+                "additionalProperties": true
+              }
+            }
+          },
+          "required": [
+            "tabs"
+          ],
+          "additionalProperties": true
+        }
+      ]
+    },
+    "list_panes_params": {
+      "$ref": "#/$defs/page_params",
+      "description": "Capability: read. Consumes only cursor, limit and snapshot; unknown fields are ignored."
+    },
+    "list_panes_result": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/page_result"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "panes": {
+              "type": "array",
+              "maxItems": 4096,
+              "description": "All windows, ordered by window sequence then tab/layout traversal. focused is within the owning window.",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "$ref": "#/$defs/u64"
+                  },
+                  "window": {
+                    "$ref": "#/$defs/u64"
+                  },
+                  "tab": {
+                    "$ref": "#/$defs/u64"
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "cwd": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "cols": {
+                    "$ref": "#/$defs/u64"
+                  },
+                  "rows": {
+                    "$ref": "#/$defs/u64"
+                  },
+                  "focused": {
+                    "type": "boolean"
+                  },
+                  "argv": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "child_pid": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/u32"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "agent_attached": {
+                    "type": "boolean"
+                  },
+                  "read_only": {
+                    "type": "boolean"
+                  },
+                  "media_shelf": {
+                    "type": "array",
+                    "description": "Newest first; at most eight retained items.",
+                    "maxItems": 8,
+                    "items": {
+                      "$ref": "#/$defs/media_shelf_item"
+                    }
+                  }
+                },
+                "required": [
+                  "id",
+                  "window",
+                  "tab",
+                  "title",
+                  "cwd",
+                  "cols",
+                  "rows",
+                  "focused",
+                  "argv",
+                  "child_pid",
+                  "agent_attached",
+                  "read_only",
+                  "media_shelf"
+                ],
+                "additionalProperties": true
+              }
+            }
+          },
+          "required": [
+            "panes"
+          ],
+          "additionalProperties": true
+        }
+      ]
+    },
+    "read_screen_params": {
+      "description": "Capability: read. Consumes pane, scrollback_lines, include_selection and paging controls; unknown fields are ignored. Absent pane targets the focused pane; explicit null is rejected. scrollback_lines defaults to 0 and is capped at 10000. include_selection defaults to false. Those two fields accept null as their default.",
+      "allOf": [
+        {
+          "$ref": "#/$defs/page_params"
+        },
+        {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "pane": {
+              "$ref": "#/$defs/u64"
+            },
+            "scrollback_lines": {
+              "$ref": "#/$defs/nullable_u64",
+              "default": 0,
+              "description": "Must fit usize. Absent/null means 0; values above 10000 are clamped."
+            },
+            "include_selection": {
+              "type": [
+                "boolean",
+                "null"
+              ],
+              "default": false,
+              "description": "Absent/null means false. Selection text is omitted as null if its 128 KiB preflight fails."
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "read_screen_result": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/page_result"
+        },
+        {
+          "type": "object",
+          "description": "Paged, per-line right-trimmed text. scrollback_lines=0 reads the viewport; positive values include requested history and the active screen. total/cursors count text lines. Pages have a 256 KiB UTF-8 budget; the complete snapshot has a 512 KiB preflight budget.",
+          "properties": {
+            "pane": {
+              "$ref": "#/$defs/u64"
+            },
+            "text": {
+              "type": "string"
+            },
+            "cols": {
+              "$ref": "#/$defs/u64"
+            },
+            "rows": {
+              "$ref": "#/$defs/u64"
+            },
+            "history_size": {
+              "$ref": "#/$defs/u64"
+            },
+            "display_offset": {
+              "$ref": "#/$defs/u64"
+            },
+            "cursor": {
+              "$ref": "#/$defs/grid_point"
+            },
+            "cursor_visible": {
+              "type": "boolean"
+            },
+            "selection_present": {
+              "type": "boolean"
+            },
+            "selection": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "selection_truncated": {
+              "type": "boolean"
+            },
+            "selection_range": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "start": {
+                      "$ref": "#/$defs/grid_point"
+                    },
+                    "end": {
+                      "$ref": "#/$defs/grid_point"
+                    },
+                    "block": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "start",
+                    "end",
+                    "block"
+                  ],
+                  "additionalProperties": true
+                }
+              ]
+            },
+            "text_truncated": {
+              "type": "boolean",
+              "description": "One text line exceeded the page byte budget and was cut at a character boundary."
+            }
+          },
+          "required": [
+            "pane",
+            "text",
+            "cols",
+            "rows",
+            "history_size",
+            "display_offset",
+            "cursor",
+            "cursor_visible",
+            "selection_present",
+            "selection",
+            "selection_truncated",
+            "selection_range",
+            "text_truncated"
+          ],
+          "additionalProperties": true
+        }
+      ]
+    },
+    "read_cells_params": {
+      "description": "Capability: read. Consumes pane and paging controls; unknown fields are ignored. Absent pane targets the focused pane; explicit null is rejected.",
+      "allOf": [
+        {
+          "$ref": "#/$defs/page_params"
+        },
+        {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "pane": {
+              "$ref": "#/$defs/u64"
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "read_cells_result": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/page_result"
+        },
+        {
+          "type": "object",
+          "description": "Paged visible-cell diagnostics. Grids above 262144 cells are rejected before collection. row/col are viewport coordinates. Inline-card placeholders appear as spaces.",
+          "properties": {
+            "pane": {
+              "$ref": "#/$defs/u64"
+            },
+            "cols": {
+              "$ref": "#/$defs/u64"
+            },
+            "rows": {
+              "$ref": "#/$defs/u64"
+            },
+            "history_size": {
+              "$ref": "#/$defs/u64"
+            },
+            "display_offset": {
+              "$ref": "#/$defs/u64"
+            },
+            "cursor": {
+              "$ref": "#/$defs/grid_point"
+            },
+            "cells": {
+              "type": "array",
+              "maxItems": 4096,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "row": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "col": {
+                    "$ref": "#/$defs/u64"
+                  },
+                  "ch": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1
+                  },
+                  "underline": {
+                    "type": "boolean"
+                  },
+                  "double_underline": {
+                    "type": "boolean"
+                  },
+                  "undercurl": {
+                    "type": "boolean"
+                  },
+                  "dotted_underline": {
+                    "type": "boolean"
+                  },
+                  "dashed_underline": {
+                    "type": "boolean"
+                  },
+                  "any_underline": {
+                    "type": "boolean"
+                  },
+                  "strikeout": {
+                    "type": "boolean"
+                  },
+                  "underline_color": {
+                    "type": "boolean",
+                    "description": "Presence of an underline color, not its value."
+                  }
+                },
+                "required": [
+                  "row",
+                  "col",
+                  "ch",
+                  "underline",
+                  "double_underline",
+                  "undercurl",
+                  "dotted_underline",
+                  "dashed_underline",
+                  "any_underline",
+                  "strikeout",
+                  "underline_color"
+                ],
+                "additionalProperties": true
+              }
+            }
+          },
+          "required": [
+            "pane",
+            "cols",
+            "rows",
+            "history_size",
+            "display_offset",
+            "cursor",
+            "cells"
+          ],
+          "additionalProperties": true
+        }
+      ]
+    },
+    "ui_geometry_params": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "Capability: read. Consumes only window; unknown fields are ignored. Absent window targets the focused window. Explicit null or a stale window is bad_params. Does not force a frame.",
+      "properties": {
+        "window": {
+          "$ref": "#/$defs/u64"
+        }
+      },
+      "additionalProperties": true
+    },
+    "ui_geometry_result": {
+      "type": "object",
+      "description": "Diagnostic and unstable open object. Top-level and nested geometry, modal, rendering and desktop diagnostic fields may change.",
+      "additionalProperties": true
+    },
+    "screenshot_params": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "Capability: mutate. Consumes pane, full_window, path and four crop_* fields; unknown fields, including window, are ignored. Default captures the focused pane. full_window defaults to false when absent/nonboolean; path defaults to a generated destination when absent/nonstring. A string destination must be nonblank and must not already exist; relative paths are accepted. All four crop fields must be supplied together and cannot accompany any pane field or full_window=true. Coordinates are window-relative physical pixels. Pane selection determines its owning window; full-window/crop capture without pane uses the focused window.",
+      "properties": {
+        "pane": {
+          "$ref": "#/$defs/u64"
+        },
+        "full_window": {
+          "$ref": "#/$defs/ignored_unless_boolean",
+          "default": false
+        },
+        "path": {
+          "$ref": "#/$defs/ignored_unless_string",
+          "description": "String destination is checked for nonblank content and existing entries; missing/nonstring uses a generated destination."
+        },
+        "crop_x": {
+          "type": "number",
+          "maximum": 3.4028234663852886e+38,
+          "description": "Must be nonnegative after f32 conversion. Tiny negative values rounding to negative zero are accepted; conversion is checked at runtime."
+        },
+        "crop_y": {
+          "type": "number",
+          "maximum": 3.4028234663852886e+38,
+          "description": "Must be nonnegative after f32 conversion. Tiny negative values rounding to negative zero are accepted; conversion is checked at runtime."
+        },
+        "crop_width": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 3.4028234663852886e+38,
+          "description": "Must remain strictly positive after f32 conversion; positive values underflowing to zero are rejected."
+        },
+        "crop_height": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 3.4028234663852886e+38,
+          "description": "Must remain strictly positive after f32 conversion; positive values underflowing to zero are rejected."
+        }
+      },
+      "dependentRequired": {
+        "crop_x": [
+          "crop_y",
+          "crop_width",
+          "crop_height"
+        ],
+        "crop_y": [
+          "crop_x",
+          "crop_width",
+          "crop_height"
+        ],
+        "crop_width": [
+          "crop_x",
+          "crop_y",
+          "crop_height"
+        ],
+        "crop_height": [
+          "crop_x",
+          "crop_y",
+          "crop_width"
+        ]
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "required": [
+              "crop_x"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "pane"
+              ]
+            },
+            "properties": {
+              "full_window": {
+                "not": {
+                  "const": true
+                }
+              }
+            }
+          }
+        }
+      ],
+      "additionalProperties": true
+    },
+    "screenshot_result": {
+      "type": "object",
+      "description": "Returned after PNG publication. crop is null for automatic pane cropping and full-window captures; only an explicit crop is reported.",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "pane": {
+          "$ref": "#/$defs/nullable_u64"
+        },
+        "window": {
+          "$ref": "#/$defs/u64"
+        },
+        "full_window": {
+          "type": "boolean"
+        },
+        "crop": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "array",
+              "description": "[x, y, width, height] after f32 conversion.",
+              "prefixItems": [
+                {
+                  "type": "number",
+                  "minimum": 0
+                },
+                {
+                  "type": "number",
+                  "minimum": 0
+                },
+                {
+                  "type": "number",
+                  "exclusiveMinimum": 0
+                },
+                {
+                  "type": "number",
+                  "exclusiveMinimum": 0
+                }
+              ],
+              "minItems": 4,
+              "maxItems": 4
+            }
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "pane",
+        "window",
+        "full_window",
+        "crop"
+      ],
+      "additionalProperties": true
+    },
+    "subscribe_params": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "Capability: read. No fields are consumed; all object fields are ignored. Success switches the connection to the event stream.",
+      "additionalProperties": true
+    },
+    "subscribe_result": {
+      "type": "object",
+      "properties": {
+        "subscribed": {
+          "const": true
+        }
+      },
+      "required": [
+        "subscribed"
+      ],
+      "additionalProperties": true
+    },
+    "send_text_params": {
+      "type": "object",
+      "description": "Capability: mutate. Consumes pane and text; unknown fields are ignored. Absent pane targets focus; explicit null is rejected. text is literal UTF-8, may be empty, and receives no escape decoding or implicit Enter. Pane input locks, backpressure and preview keyboard ownership can refuse input.",
+      "properties": {
+        "pane": {
+          "$ref": "#/$defs/u64"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "additionalProperties": true
+    },
+    "send_text_result": {
+      "type": "object",
+      "properties": {
+        "pane": {
+          "$ref": "#/$defs/u64"
+        },
+        "bytes": {
+          "$ref": "#/$defs/u64",
+          "description": "UTF-8 bytes queued."
+        }
+      },
+      "required": [
+        "pane",
+        "bytes"
+      ],
+      "additionalProperties": true
+    },
+    "key_token": {
+      "type": "string",
+      "minLength": 1,
+      "description": "1..64 UTF-8 bytes. '+' separates modifiers from the final key; components are trimmed. Modifier aliases: ctrl/control, alt/opt/option, shift, super/cmd/command/win/windows/meta/logo, case-insensitive. Named keys: escape/esc, enter/return, tab, backspace/bs, delete/del, insert/ins, space, up/down/left/right, home/end, page_up/pageup/prior, page_down/pagedown/next, f1..f12, plus, comma, minus, equal. Otherwise the key must be one Unicode scalar. Character case is preserved; uppercase ASCII implies Shift. Full grammar and byte length are checked at runtime."
+    },
+    "send_keys_params": {
+      "type": "object",
+      "description": "Capability: mutate. Consumes pane and keys; unknown fields are ignored. Absent pane targets focus; explicit null is rejected. All tokens parse and encode before input is sent. Live terminal modes determine encoding, including negotiated Kitty support. Encoded bytes must total at most 65536.",
+      "properties": {
+        "pane": {
+          "$ref": "#/$defs/u64"
+        },
+        "keys": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1024,
+          "items": {
+            "$ref": "#/$defs/key_token"
+          }
+        }
+      },
+      "required": [
+        "keys"
+      ],
+      "additionalProperties": true
+    },
+    "send_keys_result": {
+      "type": "object",
+      "properties": {
+        "pane": {
+          "$ref": "#/$defs/u64"
+        },
+        "keys": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1024
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65536
+        }
+      },
+      "required": [
+        "pane",
+        "keys",
+        "bytes"
+      ],
+      "additionalProperties": true
+    },
+    "dispatch_ui_key_params": {
+      "type": "object",
+      "description": "Capability: mutate. Consumes only keys; unknown fields are ignored. Targets the supported open modal in the focused window. Uses key_token grammar but accepts only characters, Space, Escape, Enter, Tab, Backspace, Delete, arrows, Home, End and F3, with modifiers. Insert, PageUp/PageDown and other function keys are rejected. Tokens are 1..64 UTF-8 bytes; all validate before changes. The batch stops when its addressed modal closes or changes. It does not encode PTY input, although modal actions may run commands or spawn processes.",
+      "properties": {
+        "keys": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/key_token"
+          }
+        }
+      },
+      "required": [
+        "keys"
+      ],
+      "additionalProperties": true
+    },
+    "dispatch_ui_key_result": {
+      "type": "object",
+      "properties": {
+        "window": {
+          "$ref": "#/$defs/u64"
+        },
+        "modal": {
+          "enum": [
+            "confirm",
+            "hint_mode",
+            "palette",
+            "theme_picker",
+            "settings_text",
+            "settings",
+            "layout_picker",
+            "ssh",
+            "title_edit",
+            "search",
+            "preview"
+          ]
+        },
+        "keys": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64,
+          "description": "Keys applied before the batch ended."
+        },
+        "requested_keys": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        },
+        "open": {
+          "type": "boolean",
+          "description": "Whether the same addressed modal remains open."
+        }
+      },
+      "required": [
+        "window",
+        "modal",
+        "keys",
+        "requested_keys",
+        "open"
+      ],
+      "additionalProperties": true
+    },
+    "modifiers": {
+      "description": "A '+'-separated string or array of strings. Entries are trimmed and matched ASCII case-insensitively; empty entries are ignored. Aliases: ctrl/control, alt/opt/option, shift, super/cmd/command/win/windows/meta/logo. Unknown names or nonstring array members are bad_params. Null is rejected.",
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "dispatch_keybind_params": {
+      "type": "object",
+      "description": "Capability: mutate. Consumes logical, physical and mods; unknown fields are ignored. Targets the focused window. At least one key must resolve to an actual key. Absent keys and empty/none/unidentified spellings mean no key; null is rejected. mods defaults to no modifiers. Uses app-keybind resolution and reports terminal fallthrough without writing PTY bytes.",
+      "properties": {
+        "logical": {
+          "type": "string",
+          "description": "One parsed key token without modifiers. Empty, none and unidentified, trimmed and case-insensitive, mean no key. Modifier-bearing tokens are rejected; uppercase ASCII implies Shift and is rejected here. No send_keys token-byte cap is applied."
+        },
+        "physical": {
+          "type": "string",
+          "description": "Normalized by retaining ASCII alphanumerics and lowercasing. Supported normalized names: equal/equals, minus, digit0/key0/0, numpadadd/numpadplus, numpadsubtract/numpadminus, numpadequal/numpadequals, numpad0. Empty, none and unidentified mean no key. Other names are rejected."
+        },
+        "mods": {
+          "$ref": "#/$defs/modifiers"
+        }
+      },
+      "anyOf": [
+        {
+          "required": [
+            "logical"
+          ]
+        },
+        {
+          "required": [
+            "physical"
+          ]
+        }
+      ],
+      "additionalProperties": true
+    },
+    "dispatch_keybind_result": {
+      "type": "object",
+      "description": "Diagnostic and unstable open object. Candidate/action resolution details, dispatch/fallthrough flags and font-size samples may change.",
+      "additionalProperties": true
+    },
+    "mouse_event_name": {
+      "type": "string",
+      "pattern": "^([mM][oO][vV][eE]|[pP][rR][eE][sS][sS]|[rR][eE][lL][eE][aA][sS][eE]|[cC][lL][iI][cC][kK]|[wW][hH][eE][eE][lL])$",
+      "description": "ASCII case-insensitive; replies use lowercase."
+    },
+    "mouse_button": {
+      "description": "For press/release/click, absent/nonstring defaults to left. String names are ASCII case-insensitive; unknown strings are rejected.",
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^([lL][eE][fF][tT]|[mM][iI][dD][dD][lL][eE]|[rR][iI][gG][hH][tT]|[bB][aA][cC][kK]|[fF][oO][rR][wW][aA][rR][dD])$"
+        },
+        {
+          "not": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "send_mouse_params": {
+      "type": "object",
+      "description": "Capability: mutate. Consumes window, event, x, y, button, wheel_lines, wheel_delta and mods; unknown fields are ignored. Absent window targets focus; explicit null is rejected. Coordinates are finite f64 window-relative physical pixels and may be negative. Nonwheel events require both coordinates. Wheel events may omit coordinates to use the current synthetic cursor; when either coordinate is numeric, both must be numeric. Absent mods uses the window's modifier state; supplied null is rejected. button is read only for press/release/click. Wheel fields are read only for wheel. A wheel requires exactly one usable signed-i64 wheel_lines or numeric wheel_delta; an unusable other field is ignored. wheel_lines is clamped to i32. wheel_delta accepts fractional detents.",
+      "properties": {
+        "window": {
+          "$ref": "#/$defs/u64"
+        },
+        "event": {
+          "$ref": "#/$defs/mouse_event_name"
+        },
+        "x": {
+          "description": "Number when used; a nonnumber may be ignored for wheel."
+        },
+        "y": {
+          "description": "Number when used; a nonnumber may be ignored for wheel."
+        },
+        "button": {
+          "description": "left/middle/right/back/forward for button events; ignored otherwise."
+        },
+        "wheel_lines": {
+          "description": "Signed i64 for wheel, clamped to i32; ignored otherwise."
+        },
+        "wheel_delta": {
+          "description": "Finite f64 raw wheel detents for wheel; ignored otherwise."
+        },
+        "mods": {
+          "$ref": "#/$defs/modifiers"
+        }
+      },
+      "required": [
+        "event"
+      ],
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "event": {
+                "pattern": "^[wW][hH][eE][eE][lL]$"
+              }
+            }
+          },
+          "then": {
+            "oneOf": [
+              {
+                "required": [
+                  "wheel_lines"
+                ],
+                "properties": {
+                  "wheel_lines": {
+                    "$ref": "#/$defs/i64"
+                  },
+                  "wheel_delta": {
+                    "not": {
+                      "type": "number"
+                    }
+                  }
+                }
+              },
+              {
+                "required": [
+                  "wheel_delta"
+                ],
+                "properties": {
+                  "wheel_delta": {
+                    "type": "number"
+                  },
+                  "wheel_lines": {
+                    "not": {
+                      "$ref": "#/$defs/i64"
+                    }
+                  }
+                }
+              }
+            ],
+            "allOf": [
+              {
+                "if": {
+                  "anyOf": [
+                    {
+                      "required": [
+                        "x"
+                      ],
+                      "properties": {
+                        "x": {
+                          "type": "number"
+                        }
+                      }
+                    },
+                    {
+                      "required": [
+                        "y"
+                      ],
+                      "properties": {
+                        "y": {
+                          "type": "number"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "then": {
+                  "required": [
+                    "x",
+                    "y"
+                  ],
+                  "properties": {
+                    "x": {
+                      "type": "number"
+                    },
+                    "y": {
+                      "type": "number"
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "else": {
+            "required": [
+              "x",
+              "y"
+            ],
+            "properties": {
+              "x": {
+                "type": "number"
+              },
+              "y": {
+                "type": "number"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event": {
+                "pattern": "^([pP][rR][eE][sS][sS]|[rR][eE][lL][eE][aA][sS][eE]|[cC][lL][iI][cC][kK])$"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "button": {
+                "$ref": "#/$defs/mouse_button"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "send_mouse_result": {
+      "type": "object",
+      "properties": {
+        "window": {
+          "$ref": "#/$defs/u64"
+        },
+        "event": {
+          "enum": [
+            "move",
+            "press",
+            "release",
+            "click",
+            "wheel"
+          ]
+        },
+        "cursor": {
+          "$ref": "#/$defs/pixel_point"
+        },
+        "handled": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "window",
+        "event",
+        "cursor",
+        "handled"
+      ],
+      "additionalProperties": true
+    },
+    "resize_window_params": {
+      "type": "object",
+      "description": "Capability: mutate. Consumes window, width and height; unknown fields are ignored. Absent window targets focus; explicit null is rejected. Dimensions are physical-pixel client-area dimensions.",
+      "properties": {
+        "window": {
+          "$ref": "#/$defs/u64"
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        }
+      },
+      "required": [
+        "width",
+        "height"
+      ],
+      "additionalProperties": true
+    },
+    "window_size": {
+      "type": "object",
+      "properties": {
+        "width": {
+          "$ref": "#/$defs/u32"
+        },
+        "height": {
+          "$ref": "#/$defs/u32"
+        }
+      },
+      "required": [
+        "width",
+        "height"
+      ],
+      "additionalProperties": true
+    },
+    "resize_window_result": {
+      "type": "object",
+      "properties": {
+        "window": {
+          "$ref": "#/$defs/u64"
+        },
+        "requested": {
+          "$ref": "#/$defs/window_size"
+        },
+        "applied": {
+          "$ref": "#/$defs/window_size",
+          "description": "Immediate request_inner_size return, or requested size when no immediate size is returned; later compositor behavior is asynchronous."
+        }
+      },
+      "required": [
+        "window",
+        "requested",
+        "applied"
+      ],
+      "additionalProperties": true
+    },
+    "perform_action_params": {
+      "type": "object",
+      "description": "Capability: mutate. Consumes only action; unknown fields, including window/pane, are ignored. Acts on the focused window. action resolves through kettle_config::Action::from_name, or is exactly focus_window. Config names are trimmed, ASCII case-insensitive and fold hyphens to underscores; aliases are accepted. Parameterized names include goto_tab:N, switch_to_tab_N and new_tab_shell_N for N=1..255, and text:<escaped payload> with nonempty decoded content of at most 256 UTF-8 bytes. This is not a closed enum. Actions requiring a genuine user gesture do not gain that authority from control.",
+      "properties": {
+        "action": {
+          "type": "string",
+          "description": "Validated against Action::from_name at runtime. focus_window is an exact, case-sensitive control-only special case."
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "additionalProperties": true
+    },
+    "perform_action_result": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "description": "Resolved action's Rust Debug spelling; FocusWindow for focus_window."
+        },
+        "requested": {
+          "type": "string"
+        },
+        "window": {
+          "$ref": "#/$defs/u64"
+        }
+      },
+      "required": [
+        "action",
+        "requested",
+        "window"
+      ],
+      "additionalProperties": true
+    },
+    "run_command_params": {
+      "type": "object",
+      "description": "Capability: mutate. Consumes pane, command and timeout_s; unknown fields are ignored. Absent pane targets focus; explicit null is rejected. command may be empty. CR is appended unless it already ends in CR or LF. timeout_s defaults to 15 for absent/nonnumeric values; numeric values are clamped to 0.1..600 seconds. Only one pending command per pane is allowed. Input locks/backpressure apply. Completion depends on OSC 133 markers.",
+      "properties": {
+        "pane": {
+          "$ref": "#/$defs/u64"
+        },
+        "command": {
+          "type": "string"
+        },
+        "timeout_s": {
+          "$ref": "#/$defs/ignored_unless_number",
+          "default": 15,
+          "description": "Numeric seconds are clamped to 0.1..600; absent/nonnumeric means 15."
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "additionalProperties": true
+    },
+    "run_command_result": {
+      "type": "object",
+      "description": "Output is bounded to the newest 10000 retained history lines and 512 KiB, then trimmed further if needed for the encoded reply budget. Timeout is a successful reply and does not establish command cancellation.",
+      "properties": {
+        "pane": {
+          "$ref": "#/$defs/u64"
+        },
+        "exit_code": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/i32"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "duration_ms": {
+          "$ref": "#/$defs/u64"
+        },
+        "timed_out": {
+          "type": "boolean"
+        },
+        "output": {
+          "type": "string"
+        },
+        "output_truncated": {
+          "type": "boolean"
+        },
+        "hint": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pane",
+        "exit_code",
+        "timed_out",
+        "output",
+        "output_truncated"
+      ],
+      "additionalProperties": true,
+      "oneOf": [
+        {
+          "properties": {
+            "timed_out": {
+              "const": false
+            },
+            "hint": false
+          },
+          "required": [
+            "duration_ms"
+          ]
+        },
+        {
+          "properties": {
+            "timed_out": {
+              "const": true
+            },
+            "exit_code": {
+              "type": "null"
+            },
+            "duration_ms": false
+          },
+          "required": [
+            "hint"
+          ]
+        }
+      ]
+    },
+    "wait_for_params": {
+      "type": "object",
+      "description": "Capability: read. Consumes pane, text, regex, quiet_ms, timeout_ms and poll_ms; unknown fields are ignored. At least one usable condition is required; conditions combine with AND. Nonstrings for text/regex and non-u64 quiet_ms are ignored. Rust regex syntax must compile. timeout_ms defaults to 30000 and is capped at 300000; poll_ms defaults to 100 and is clamped to 50..5000. Invalid timer types use defaults. Absent pane is resolved by the first successful screen probe and pinned. Explicit pane is validated by the probe, which rejects null. Quiet detection fingerprints text, cursor and history_size and requires at least two polls, even for quiet_ms=0. Runs on the connection thread.",
+      "properties": {
+        "pane": {
+          "$ref": "#/$defs/u64"
+        },
+        "text": {
+          "$ref": "#/$defs/ignored_unless_string",
+          "description": "Substring condition, including empty string; nonstrings are ignored."
+        },
+        "regex": {
+          "$ref": "#/$defs/ignored_unless_string",
+          "description": "Rust regex, including empty regex; nonstrings are ignored. Screen text is right-trimmed per line and newline-joined."
+        },
+        "quiet_ms": {
+          "$ref": "#/$defs/ignored_unless_u64",
+          "description": "Unsigned milliseconds of unchanged fingerprint; unusable values are ignored."
+        },
+        "timeout_ms": {
+          "$ref": "#/$defs/ignored_unless_u64",
+          "default": 30000,
+          "description": "Default 30000, capped at 300000; zero yields immediate timeout."
+        },
+        "poll_ms": {
+          "$ref": "#/$defs/ignored_unless_u64",
+          "default": 100,
+          "description": "Default 100; clamped to 50..5000, including zero."
+        }
+      },
+      "anyOf": [
+        {
+          "required": [
+            "text"
+          ],
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "required": [
+            "regex"
+          ],
+          "properties": {
+            "regex": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "required": [
+            "quiet_ms"
+          ],
+          "properties": {
+            "quiet_ms": {
+              "$ref": "#/$defs/u64"
+            }
+          }
+        }
+      ],
+      "additionalProperties": true
+    },
+    "wait_for_result": {
+      "type": "object",
+      "properties": {
+        "matched": {
+          "type": "boolean"
+        },
+        "elapsed_ms": {
+          "$ref": "#/$defs/u64"
+        },
+        "polls": {
+          "$ref": "#/$defs/u64"
+        },
+        "pane": {
+          "$ref": "#/$defs/nullable_u64"
+        },
+        "timed_out": {
+          "const": true
+        }
+      },
+      "required": [
+        "matched",
+        "elapsed_ms",
+        "polls"
+      ],
+      "additionalProperties": true,
+      "oneOf": [
+        {
+          "properties": {
+            "matched": {
+              "const": true
+            },
+            "timed_out": false
+          },
+          "required": [
+            "pane"
+          ]
+        },
+        {
+          "properties": {
+            "matched": {
+              "const": false
+            },
+            "pane": false
+          },
+          "required": [
+            "timed_out"
+          ]
+        }
+      ]
+    },
+    "show_inline_source_options": {
+      "type": "object",
+      "description": "Non-file sources cannot carry non-null attestation, kind, markdown_index or page_index.",
+      "properties": {
+        "dev": {
+          "type": "null"
+        },
+        "ino": {
+          "type": "null"
+        },
+        "kind": {
+          "type": "null"
+        },
+        "markdown_index": {
+          "type": "null"
+        },
+        "page_index": {
+          "type": "null"
+        }
+      },
+      "additionalProperties": true
+    },
+    "show_params": {
+      "type": "object",
+      "description": "Capability: display. Unknown fields are ignored. Exactly one source must be non-null and nonempty; other source fields may be absent/null. Optional fields accept null as absent. SVG is limited to 2097152 UTF-8 bytes; Mermaid to 65536 UTF-8 bytes; decoded image bytes to 33554432 bytes. The complete request must still fit 1048576 serialized bytes. A path requires dev and ino attestation and must be absolute, NUL-free and at most 4096 native-encoding bytes: UTF-8 on Unix, UTF-16LE on Windows. Files are content-classified unless kind=mermaid. markdown_index and page_index apply only to paths without kind=mermaid and cannot both be non-null. With neither, classification starts Markdown/PDF at index 0. Routing first uses verified ancestry; an explicit pane is honored for full control when the caller cannot otherwise be placed. There is no focused-pane fallback. Success is deferred until shelf publication.",
+      "properties": {
+        "svg": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "description": "SVG source, at most 2097152 UTF-8 bytes."
+        },
+        "image_b64": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "contentEncoding": "base64",
+          "description": "Strict padded standard base64, without whitespace or data-URL prefix. At most 33554432 decoded bytes. Decoded content is worker-classified, not restricted to raster images."
+        },
+        "mermaid": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "description": "Mermaid source, at most 65536 UTF-8 bytes."
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "description": "Absolute native path: leading slash on Unix; absolute drive or complete UNC path on Windows. Native syntax, encoding, NUL exclusion and identity are checked at runtime."
+        },
+        "dev": {
+          "$ref": "#/$defs/nullable_u64"
+        },
+        "ino": {
+          "$ref": "#/$defs/nullable_u64"
+        },
+        "kind": {
+          "enum": [
+            "mermaid",
+            null
+          ],
+          "description": "Only non-null on a path. Absent/null means content classification."
+        },
+        "markdown_index": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 31,
+          "description": "Zero-based gallery index, only on a path without kind=mermaid. Mutually exclusive with non-null page_index. Index must exist in the file; out-of-range integers produce index_out_of_range."
+        },
+        "page_index": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/u32"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Zero-based PDF page, only on a path without kind=mermaid. Mutually exclusive with non-null markdown_index. Values above u32::MAX produce index_out_of_range; page existence is checked at runtime."
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "description": "Optional title, 1..4096 UTF-8 bytes, then sanitized for display. Absent/null supplies no explicit title."
+        },
+        "key": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "description": "Optional replacement key, 1..256 UTF-8 bytes. Same key in the same pane replaces the item. Absent/null defaults to the file path for a file; inline sources have no explicit replacement key."
+        },
+        "pane": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 18446744073709551615
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional full-control routing choice. show accepts null as absent and rejects zero."
+        },
+        "inline": {
+          "enum": [
+            "claude_hook",
+            "codex_hook",
+            "cli",
+            null
+          ],
+          "description": "Optional inline-card delivery request. Absent/null requests none; asking grants no delivery permission."
+        }
+      },
+      "additionalProperties": true,
+      "oneOf": [
+        {
+          "required": [
+            "svg"
+          ],
+          "properties": {
+            "svg": {
+              "type": "string",
+              "minLength": 1
+            },
+            "image_b64": {
+              "type": "null"
+            },
+            "mermaid": {
+              "type": "null"
+            },
+            "path": {
+              "type": "null"
+            }
+          },
+          "allOf": [
+            {
+              "$ref": "#/$defs/show_inline_source_options"
+            }
+          ]
+        },
+        {
+          "required": [
+            "image_b64"
+          ],
+          "properties": {
+            "svg": {
+              "type": "null"
+            },
+            "image_b64": {
+              "type": "string",
+              "minLength": 1
+            },
+            "mermaid": {
+              "type": "null"
+            },
+            "path": {
+              "type": "null"
+            }
+          },
+          "allOf": [
+            {
+              "$ref": "#/$defs/show_inline_source_options"
+            }
+          ]
+        },
+        {
+          "required": [
+            "mermaid"
+          ],
+          "properties": {
+            "svg": {
+              "type": "null"
+            },
+            "image_b64": {
+              "type": "null"
+            },
+            "mermaid": {
+              "type": "string",
+              "minLength": 1
+            },
+            "path": {
+              "type": "null"
+            }
+          },
+          "allOf": [
+            {
+              "$ref": "#/$defs/show_inline_source_options"
+            }
+          ]
+        },
+        {
+          "required": [
+            "path",
+            "dev",
+            "ino"
+          ],
+          "properties": {
+            "svg": {
+              "type": "null"
+            },
+            "image_b64": {
+              "type": "null"
+            },
+            "mermaid": {
+              "type": "null"
+            },
+            "path": {
+              "type": "string",
+              "minLength": 1
+            },
+            "dev": {
+              "$ref": "#/$defs/u64"
+            },
+            "ino": {
+              "$ref": "#/$defs/u64"
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "required": [
+                  "kind"
+                ],
+                "properties": {
+                  "kind": {
+                    "const": "mermaid"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "markdown_index": {
+                    "type": "null"
+                  },
+                  "page_index": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "markdown_index"
+            ],
+            "properties": {
+              "markdown_index": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "page_index": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "show_result": {
+      "type": "object",
+      "description": "Shelf delivery receipt. item stays stable while retained and for replacement in place by the same key. width/height describe rendered pixels, or the video's poster. An undrawn file has kind=file, zero dimensions, no warnings and a file object. Optional inline output is for the requesting adapter. Inline refusal does not undo shelf delivery.",
+      "properties": {
+        "pane": {
+          "$ref": "#/$defs/u64"
+        },
+        "verified": {
+          "type": "boolean"
+        },
+        "window": {
+          "$ref": "#/$defs/u64"
+        },
+        "item": {
+          "$ref": "#/$defs/u64"
+        },
+        "kind": {
+          "$ref": "#/$defs/media_kind"
+        },
+        "width": {
+          "$ref": "#/$defs/u32"
+        },
+        "height": {
+          "$ref": "#/$defs/u32"
+        },
+        "warnings": {
+          "$ref": "#/$defs/media_warnings"
+        },
+        "inline": {
+          "$ref": "#/$defs/show_inline"
+        },
+        "inline_refused": {
+          "enum": [
+            "unverified",
+            "not_terminal",
+            "background",
+            "alternate_screen",
+            "too_small",
+            "limit",
+            "unsupported"
+          ],
+          "description": "Optional fixed CLI inline-card refusal reason."
+        },
+        "page": {
+          "$ref": "#/$defs/show_page"
+        },
+        "video": {
+          "$ref": "#/$defs/show_video"
+        },
+        "file": {
+          "$ref": "#/$defs/show_file"
+        }
+      },
+      "required": [
+        "pane",
+        "verified",
+        "window",
+        "item",
+        "kind",
+        "width",
+        "height",
+        "warnings"
+      ],
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "file"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "file"
+            ],
+            "properties": {
+              "width": {
+                "const": 0
+              },
+              "height": {
+                "const": 0
+              },
+              "warnings": {
+                "maxItems": 0
+              },
+              "page": false,
+              "video": false
+            }
+          },
+          "else": {
+            "properties": {
+              "file": false
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "page"
+            ]
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "pdf"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "video"
+            ]
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "video"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "show_inline": {
+      "type": "object",
+      "description": "Present when inline delivery was registered. message is printed whole and limited to 9900 UTF-16 code units, not JSON Schema characters.",
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "permit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$",
+          "description": "Optional opaque, launch-bound, expiring, one-use pickup permit; private to the adapter."
+        }
+      },
+      "required": [
+        "message"
+      ],
+      "additionalProperties": true
+    },
+    "show_page": {
+      "type": "object",
+      "description": "PDF page metadata. index is zero-based and must be below count; that relation is checked at runtime.",
+      "properties": {
+        "index": {
+          "$ref": "#/$defs/u32"
+        },
+        "count": {
+          "$ref": "#/$defs/u32"
+        }
+      },
+      "required": [
+        "index",
+        "count"
+      ],
+      "additionalProperties": true
+    },
+    "show_video": {
+      "type": "object",
+      "description": "Video metadata accompanying its poster. Dimensions include rotation. fps_milli is frame rate multiplied by 1000, when known.",
+      "properties": {
+        "duration_ms": {
+          "$ref": "#/$defs/u64"
+        },
+        "width": {
+          "$ref": "#/$defs/u32"
+        },
+        "height": {
+          "$ref": "#/$defs/u32"
+        },
+        "codec": {
+          "enum": [
+            "unknown",
+            "h264",
+            "hevc",
+            "vp8",
+            "vp9",
+            "av1",
+            "mpeg4",
+            "mpeg2",
+            "prores",
+            "mjpeg",
+            "qtrle",
+            "theora",
+            "gif",
+            "apng",
+            "webp"
+          ]
+        },
+        "fps_milli": {
+          "$ref": "#/$defs/u32"
+        },
+        "has_audio": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "duration_ms",
+        "width",
+        "height",
+        "codec",
+        "has_audio"
+      ],
+      "additionalProperties": true
+    },
+    "show_file": {
+      "type": "object",
+      "description": "Undrawn file metadata; used by show receipts and list_panes shelf items.",
+      "properties": {
+        "bytes": {
+          "$ref": "#/$defs/u64"
+        },
+        "reason": {
+          "enum": [
+            "unsupported_media",
+            "codec_unavailable",
+            "too_large"
+          ]
+        }
+      },
+      "required": [
+        "bytes",
+        "reason"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

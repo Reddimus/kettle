@@ -715,6 +715,7 @@ kettle ctl dispatch_ui_key --keys "n,e,e,d,l,e,enter"  # drive the open modal (S
 kettle ctl wait_for --text "INSERT" --json '{"timeout_ms":5000}'   # block until on screen
 kettle ctl run_command --text "cargo build"            # run + wait for the result
 kettle ctl events                                       # stream the event feed (NDJSON)
+kettle ctl schema                                       # the protocol's JSON Schema (no Kettle needed)
 kettle ctl get_state --pid 12345                        # target a specific kettle
 ```
 
@@ -724,6 +725,26 @@ so press Enter with `send_keys`, not a trailing `\n`.
 `kettle ctl events` prints `kettle ctl: listening for events` on stderr once
 it is subscribed, so a script can wait for that line before it causes the
 events it expects.
+
+### Using Kettle from your own tool
+
+A tool shows media with `kettle show` (with `--inline`, as a card under its
+own output; see [Showing media](#showing-media)) and drives everything else
+with `kettle ctl METHOD --json '{…}' --raw`, which prints the reply's
+`result` as one JSON line. `kettle ctl schema` prints the protocol's JSON
+Schema (draft 2020-12, `$id` `urn:kettle:control:v1`), with no running
+Kettle needed: the request and reply envelopes, every error code, the event
+messages, and each public method's params and result, so what `--json`
+takes and what `--raw` prints can be checked with any validator. The
+results of `ui_geometry` and `dispatch_keybind` are diagnostic, and left
+open. A schema's string lengths count characters, so the byte limits (1 MiB
+a request line, 768 KiB a reply or event line) are in its descriptions. The
+methods Kettle's own adapters use (`agent_launch`, `card_pickup`) are not in
+it, and change with them. The schema describes the socket's lines too, but a
+client that speaks to the socket itself must find the server and claim its
+caller as `kettle ctl` does, which only `kettle ctl` and `kettle show` are
+supported to do. Kettle's tests check the schema against the methods, this
+table, the error codes, the `show` parser and real replies.
 
 ### Methods (protocol v1)
 
@@ -970,7 +991,8 @@ model's result says only that the media shows below the call.
 
 **Inline cards from your own tools.** Any program in a Kettle pane can print
 a card under its output: `kettle show --inline plot.svg` (an image, SVG,
-Mermaid or Markdown file, a PDF page, a video, or bytes on stdin) puts the item on the
+Mermaid or Markdown file, a PDF page, a video, a file Kettle does not draw,
+or bytes on stdin) puts the item on the
 pane's shelf and prints a card right there, which opens the item when
 clicked. Kettle builds the whole card and the command prints it: a
 `kettle show` line, the rows of placeholder cells four columns in, and the
@@ -994,6 +1016,7 @@ and the command says so. `kettle ctl` never asks for a card, and an agent's
 kettle show --inline plot.png
 dot -Tsvg deps.dot | kettle show --inline -      # Graphviz's own layout, as SVG
 python3 plot.py --svg | kettle show --inline -   # any tool that writes SVG
+typst compile notes.typ && kettle show --inline notes.pdf   # a document's first page
 ```
 
 ### Reading video: `kettle_video_frames` and `kettle video-frames`

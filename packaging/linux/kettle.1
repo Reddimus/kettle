@@ -498,7 +498,9 @@ is one of
 .BR get_state ", " list_tabs ", " list_panes ", " read_screen ", " read_cells ", " ui_geometry ", " screenshot ", " send_text ", " send_keys ", " dispatch_keybind ", " dispatch_ui_key ", " send_mouse ", " resize_window ", " perform_action ", " wait_for ", " run_command ,
 or
 .B events
-to stream the event feed. The target kettle must run with
+to stream the event feed, or
+.B schema
+to print the protocol's JSON Schema, which connects to no kettle. The target kettle must run with
 .B agent\-server
 enabled (see
 .BR \-\-agent\-server ).
