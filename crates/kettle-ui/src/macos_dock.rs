@@ -374,6 +374,25 @@ mod tests {
         assert_eq!(DockCommand::NewTab.action(), kettle_config::Action::NewTab);
     }
 
+    #[test]
+    fn dock_new_tab_restores_its_window_before_dispatch() {
+        let source = kettle_test_support::production_source(&crate::app::app_source());
+        let (_, arm) = source
+            .rsplit_once("UserEvent::DockCommand(command) => {")
+            .expect("Dock command handler");
+        let (restore, _) = arm
+            .split_once("self.handle_action(ws, command.action(), _el);")
+            .expect("Dock action dispatch");
+        let branch = restore
+            .split_once("command == crate::macos_dock::DockCommand::NewTab")
+            .expect("New Tab restores the existing window")
+            .1;
+        let visible = branch.find("w.set_visible(true);").unwrap();
+        let unminimized = branch.find("w.set_minimized(false);").unwrap();
+        let focused = branch.find("w.focus_window();").unwrap();
+        assert!(visible < unminimized && unminimized < focused);
+    }
+
     /// Source census: the call site must stay free of `#[cfg]`, with the
     /// platform split inside `imp`. A `cfg` in `run_with` would make that
     /// function read differently on each target — the trap already documented

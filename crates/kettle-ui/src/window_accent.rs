@@ -5,6 +5,9 @@ use std::rc::{Rc, Weak};
 
 use kettle_config::Rgb;
 
+mod presence;
+pub(crate) use presence::AccentPresence;
+
 /// The accent for pool `slot` under `cfg`, or the configured accent when
 /// automatic accents are off or pinned.
 pub(crate) fn resolve_accent(cfg: &kettle_config::Config, slot: Option<usize>) -> Rgb {
@@ -157,6 +160,71 @@ mod tests {
             presence: None,
         });
         ws
+    }
+
+    #[test]
+    fn window_presence_claims_are_dispatched_to_the_worker() {
+        let source = kettle_test_support::production_source(include_str!("app/windowing.rs"));
+        assert!(source.contains("let presence = crate::window_accent::AccentPresence::claim("));
+    }
+
+    #[test]
+    fn theme_previews_coalesce_presence_without_blocking_local_accents() {
+        use kettle_ctl::presence::{PresenceEntry, live_entries};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let dir = crate::test_tempdir();
+        let registry = AccentRegistry::default();
+        let mut cfg = kettle_config::Config::parse_text("theme = Dracula");
+        let mut ws = claimed_window(&registry, &cfg, 0);
+        let initial = ws.accent.as_ref().unwrap().color;
+        let entry = PresenceEntry::claiming(std::process::id(), ws.seq, rgb_hex(initial), true);
+        let (entered, started) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let (published, publications) = mpsc::channel();
+        let caller = std::thread::current().id();
+        let (presence, worker) =
+            AccentPresence::with_backend(&dir, entry, move |guard, dir, entry| {
+                assert_ne!(std::thread::current().id(), caller);
+                if entry.rgb == "#102030" {
+                    entered.send(()).unwrap();
+                    released.recv_timeout(Duration::from_secs(5)).unwrap();
+                }
+                super::presence::publish_claim(guard, dir, entry);
+                published.send(entry.rgb.clone()).unwrap();
+            });
+        assert_eq!(
+            publications.recv_timeout(Duration::from_secs(5)).unwrap(),
+            rgb_hex(initial)
+        );
+        ws.accent.as_mut().unwrap().presence = Some(presence);
+        cfg = kettle_config::Config::parse_text("theme = Dracula\npalette = 4=#102030");
+        refresh_accent(&mut ws, &cfg);
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        for color in ["#203040", "#304050"] {
+            cfg =
+                kettle_config::Config::parse_text(&format!("theme = Dracula\npalette = 4={color}"));
+            refresh_accent(&mut ws, &cfg);
+            let accent = ws.accent.as_ref().unwrap();
+            assert_eq!(accent.color, kettle_config::Rgb::parse(color).unwrap());
+            assert_eq!(accent.local_claim.0.get(), accent.color);
+        }
+        assert_eq!(live_entries(&dir)[0].rgb, rgb_hex(initial));
+        release.send(()).unwrap();
+        assert_eq!(
+            publications.recv_timeout(Duration::from_secs(5)).unwrap(),
+            "#102030"
+        );
+        assert_eq!(
+            publications.recv_timeout(Duration::from_secs(5)).unwrap(),
+            "#304050"
+        );
+        assert_eq!(live_entries(&dir)[0].rgb, "#304050");
+        drop(ws);
+        worker.join().unwrap();
+        assert!(publications.try_recv().is_err());
+        assert!(live_entries(&dir).is_empty());
     }
 
     #[test]

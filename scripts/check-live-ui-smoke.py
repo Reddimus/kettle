@@ -18550,6 +18550,78 @@ end tell
                 f"NSApp.windowsMenu is nil. Saw: {rows}"
             )
 
+        # New Tab must reveal the sole window even when it is minimized.
+        tabs_before = len(live.json_ctl("list_tabs").get("tabs", []))
+        minimized = _dock_osascript(
+            out,
+            "minimize",
+            f"""
+tell application "System Events"
+  tell (first process whose unix id is {live.pid})
+    set value of attribute "AXMinimized" of window 1 to true
+    return value of attribute "AXMinimized" of window 1
+  end tell
+end tell
+""",
+        )
+        if minimized != "true":
+            raise SystemExit("dock-menu smoke: could not minimize the only window")
+        for attempt in range(6):
+            clicked_tab = _dock_osascript(
+                out,
+                f"click-new-tab-{attempt}",
+                _RUNNING_KETTLE_TILE
+                + """
+    perform action "AXShowMenu" of target
+    delay 1.5
+    repeat with menu_ref in (menus of target)
+      repeat with menu_entry in (menu items of menu_ref)
+        if name of menu_entry is "New Tab" then
+          click menu_entry
+          return "clicked"
+        end if
+      end repeat
+    end repeat
+    key code 53
+    return "not-found"
+  end tell
+end tell
+""",
+            )
+            if clicked_tab == "clicked":
+                break
+            time.sleep(1.0)
+        else:
+            _dock_dismiss(out)
+            raise SystemExit("dock-menu smoke: could not click New Tab")
+        deadline = time.monotonic() + 12.0
+        while time.monotonic() < deadline:
+            if len(live.json_ctl("list_tabs").get("tabs", [])) == tabs_before + 1:
+                break
+            time.sleep(0.1)
+        else:
+            raise SystemExit("dock-menu smoke: New Tab did not add a tab")
+        restored = _dock_osascript(
+            out,
+            "check-new-tab-restored",
+            f"""
+tell application "System Events"
+  tell (first process whose unix id is {live.pid})
+    repeat 100 times
+      if (value of attribute "AXMinimized" of window 1) is false and frontmost then
+        return "restored"
+      end if
+      delay 0.1
+    end repeat
+    return "still-hidden"
+  end tell
+end tell
+""",
+        )
+        if restored != "restored" or live.json_ctl("get_state").get("windows") != 1:
+            raise SystemExit("dock-menu smoke: New Tab did not restore its window")
+        analysis["minimized_new_tab"] = restored
+
         # ---- 2. choosing New Window actually opens one ----
         # Re-shown menus populate slower than the first, so this retries the
         # same way the enumeration does rather than treating one empty read as

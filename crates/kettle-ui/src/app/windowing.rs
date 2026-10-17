@@ -1083,6 +1083,18 @@ impl App {
             return Some(TORN_TICK_MS);
         }
         let cursor = cursor_screen_pos()?;
+        if !primary_button_physically_held() {
+            let (seq, hwnd) = (td.seq, td.hwnd);
+            self.update_dock_target(cursor, hwnd, None);
+            if let Some(mut ws) = self.windows.remove(&seq) {
+                let commit = self.revalidate_dock_latch(&ws);
+                self.finalize_torn_drag(&mut ws, commit);
+                self.finish_window_dispatch(event_loop, seq, ws);
+            } else {
+                self.abandon_torn_drag(None);
+            }
+            return None;
+        }
         if td.native {
             // Demotion evidence: the pointer travelled while the WM sent
             // no `Moved`. `signal_cursor` is the pointer at the last
@@ -1715,8 +1727,10 @@ impl App {
         idx: usize,
         from_seq: u64,
     ) {
+        let pre_focus = self.focus_key(target);
         let landed = target.mux.attach_tab(dt, Some(idx));
         target.adopt_moved_paste_state(paste);
+        self.note_focus_change(target, pre_focus);
         target.dock_preview = None;
         self.resize_all(target);
         if let Some(w) = &target.window {
@@ -1769,7 +1783,7 @@ impl App {
             return;
         };
         let color = pool[slot];
-        let presence = kettle_ctl::presence::claim(
+        let presence = crate::window_accent::AccentPresence::claim(
             &dir,
             kettle_ctl::presence::PresenceEntry::claiming(
                 me,

@@ -54,6 +54,7 @@ pub(crate) struct RuntimeTracker {
 
 pub(crate) struct PhaseGuard {
     tracker: RuntimeTracker,
+    previous: &'static str,
 }
 
 impl RuntimeTracker {
@@ -93,9 +94,11 @@ impl RuntimeTracker {
     }
 
     pub(crate) fn enter(&self, phase: &'static str) -> PhaseGuard {
+        let previous = self.snapshot().name;
         self.set_phase(phase);
         PhaseGuard {
             tracker: self.clone(),
+            previous,
         }
     }
 
@@ -150,7 +153,7 @@ impl RuntimeTracker {
 
 impl Drop for PhaseGuard {
     fn drop(&mut self) {
-        self.tracker.set_phase("idle");
+        self.tracker.set_phase(self.previous);
     }
 }
 
@@ -421,6 +424,23 @@ mod tests {
     }
 
     #[test]
+    fn nested_phase_guard_restores_the_enclosing_phase() {
+        let tracker = RuntimeTracker::start(None, "test".to_string());
+        let resumed = tracker.enter("resumed");
+        let gpu = tracker.enter("gpu_init");
+        assert_eq!(tracker.snapshot().name, "gpu_init");
+        let completed = Instant::now();
+        drop(gpu);
+        let restored = tracker.snapshot();
+        assert_eq!(restored.name, "resumed");
+        assert!(restored.entered >= completed);
+        assert_eq!(tracker.shared.threshold(restored.name), NORMAL_STALL);
+        drop(resumed);
+        assert_eq!(tracker.snapshot().name, "idle");
+        tracker.stop();
+    }
+
+    #[test]
     fn sanitizes_and_bounds_error_text() {
         let input = format!("line\n{}", "x".repeat(MAX_ERROR_CHARS + 50));
         let output = sanitize(&input);
@@ -685,18 +705,22 @@ mod tests {
                 let dir = diagnostic_dir(Some(root.path()));
                 let incidents = || published_incidents(&dir).len();
 
+                let _resumed = tracker.enter("resumed");
                 // Long enough for the watchdog to read `gpu_init` and sleep
                 // toward its 5 s deadline.
-                tracker.set_phase("gpu_init");
+                let gpu = tracker.enter("gpu_init");
                 std::thread::sleep(Duration::from_millis(600));
                 let hung = Instant::now();
-                tracker.set_phase("redraw");
+                drop(gpu);
                 while incidents() == 0 && hung.elapsed() < Duration::from_secs(6) {
                     std::thread::sleep(Duration::from_millis(20));
                 }
                 let recorded_after = hung.elapsed();
                 tracker.stop();
                 assert_eq!(incidents(), 1, "the hang after gpu_init was not recorded");
+                let text = std::fs::read_to_string(&published_incidents(&dir)[0]).unwrap();
+                let incident: serde_json::Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(incident["phase"], "resumed");
                 assert!(
                     recorded_after < Duration::from_secs(2),
                     "recorded {recorded_after:?} after the hang, not near its 300 ms deadline"
