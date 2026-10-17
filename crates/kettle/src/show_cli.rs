@@ -2,12 +2,15 @@
 //! gallery or video poster to the media shelf of the pane this command
 //! runs in, in the Kettle it runs inside. It never reaches another Kettle,
 //! never opens anything on screen, and never needs full control: agent
-//! previews (`agent-display`) are enough.
+//! previews (`agent-display`) are enough. With `--inline` it also prints a
+//! card under itself, when it writes straight to that pane's terminal.
 
-use std::io::Read;
+use std::io::{IsTerminal as _, Read, Write};
 use std::path::{Path, PathBuf};
 
-use kettle_ctl::show::{FileKind, SHOW_CALL_TIMEOUT, ShowRequest, ShowResult, ShowSource};
+use kettle_ctl::show::{
+    FileKind, InlineRefusal, InlineTarget, SHOW_CALL_TIMEOUT, ShowRequest, ShowResult, ShowSource,
+};
 use kettle_ctl::{Client, CtlError};
 use kettle_media::{ExternalAttested, FailureCode, MAX_MERMAID_BYTES, NativePath};
 
@@ -74,13 +77,21 @@ impl From<FailureCode> for Refusal {
     }
 }
 
-/// Run `kettle show …`; returns the process exit code (0 shown, 1 not).
+/// Run `kettle show …`; returns the process exit code: 0 once the item is
+/// on the shelf, 1 otherwise.
 pub fn run_show(args: ShowArgs) -> i32 {
-    match show(args) {
-        Ok(result) => {
-            println!("{}", confirmation(&result));
-            0
-        }
+    let stdout_is_terminal = std::io::stdout().is_terminal();
+    match show(args, stdout_is_terminal) {
+        Ok(Shown { result, note }) => match &result.inline {
+            Some(card) => print_card(&mut std::io::stdout().lock(), &card.message),
+            None => {
+                println!("{}", confirmation(&result));
+                if let Some(note) = note {
+                    eprintln!("kettle show: {note}");
+                }
+                0
+            }
+        },
         Err(refusal) => {
             eprintln!("kettle show: {}", refusal.text());
             1
@@ -88,24 +99,93 @@ pub fn run_show(args: ShowArgs) -> i32 {
     }
 }
 
-fn show(args: ShowArgs) -> Result<ShowResult, Refusal> {
+/// Print `card` to `out`: the card is the confirmation, its caption naming
+/// what it shows. One that cannot be printed leaves the item on the shelf all
+/// the same, so the exit code is still 0, and standard error says the card is
+/// missing.
+fn print_card(out: &mut impl Write, card: &str) -> i32 {
+    if out
+        .write_all(card.as_bytes())
+        .and_then(|()| out.flush())
+        .is_err()
+    {
+        eprintln!("kettle show: could not print the card; the item is on the shelf");
+    }
+    0
+}
+
+/// A `kettle show` that put its item on the shelf, and why it printed no
+/// card when it was asked for one.
+struct Shown {
+    result: ShowResult,
+    note: Option<&'static str>,
+}
+
+/// Said when a Kettle older than this command refused the card's request.
+const OLDER_KETTLE: &str = "no inline card: the Kettle this runs in is older than this command";
+
+fn show(args: ShowArgs, stdout_is_terminal: bool) -> Result<Shown, Refusal> {
     let source = if args.source == Path::new("-") {
         stdin_source(&mut std::io::stdin().lock(), args.mermaid)?
     } else {
         file_source(&args.source, args.mermaid)?
     };
-    let params = request_params(ShowRequest {
+    let (inline, mut note) = inline_ask(args.inline, stdout_is_terminal);
+    let request = ShowRequest {
         source,
         title: args.title,
         key: args.key,
         pane: None,
-        inline: None,
-    })?;
+        inline,
+    };
     let mut client = Client::discover_display(None).map_err(|error| refusal(&error))?;
-    let result = client
-        .call_with_timeout("show", params, SHOW_CALL_TIMEOUT)
-        .map_err(|error| refusal(&error))?;
-    serde_json::from_value(result).map_err(|_| Refusal::UnknownReply)
+    let mut call = |request: ShowRequest| -> Result<ShowResult, Refusal> {
+        let result = client
+            .call_with_timeout("show", request_params(request)?, SHOW_CALL_TIMEOUT)
+            .map_err(|error| refusal(&error))?;
+        serde_json::from_value(result).map_err(|_| Refusal::UnknownReply)
+    };
+    let result = if request.inline.is_none() {
+        call(request)?
+    } else {
+        match call(request.clone()) {
+            // A Kettle that does not know command-line cards refuses the
+            // whole request: show it on the shelf alone.
+            Err(Refusal::Kettle(FailureCode::BadParams)) => {
+                note = Some(OLDER_KETTLE);
+                call(ShowRequest {
+                    inline: None,
+                    ..request
+                })?
+            }
+            result => result?,
+        }
+    };
+    let note = shelf_note(&result, note);
+    Ok(Shown { result, note })
+}
+
+/// Whether to ask Kettle for a card, and what to say if not. Kettle checks
+/// the terminal itself; this only spares asking for a card whose text would
+/// go somewhere other than a terminal.
+fn inline_ask(
+    asked: bool,
+    stdout_is_terminal: bool,
+) -> (Option<InlineTarget>, Option<&'static str>) {
+    match (asked, stdout_is_terminal) {
+        (false, _) => (None, None),
+        (true, true) => (Some(InlineTarget::Cli), None),
+        (true, false) => (None, Some(InlineRefusal::NotTerminal.text())),
+    }
+}
+
+/// What to say on stderr about a card asked for and not printed: Kettle's
+/// reason first, else this command's own. Nothing when there is a card.
+fn shelf_note(result: &ShowResult, own: Option<&'static str>) -> Option<&'static str> {
+    if result.inline.is_some() {
+        return None;
+    }
+    result.inline_refused.map(InlineRefusal::text).or(own)
 }
 
 /// `request`'s params, refused as Kettle would refuse them, and refused as
@@ -576,6 +656,58 @@ mod tests {
         assert_eq!(native_len(path), want);
     }
 
+    /// A card that cannot be printed still exits 0: the item is on the
+    /// shelf, as the man page and AGENT.md promise.
+    #[test]
+    fn a_card_that_cannot_print_leaves_the_item_shown() {
+        struct Broken;
+        impl Write for Broken {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        assert_eq!(print_card(&mut Broken, "  kettle show\r\n"), 0);
+        let mut printed = Vec::new();
+        assert_eq!(print_card(&mut printed, "  kettle show\r\n"), 0);
+        assert_eq!(printed, b"  kettle show\r\n");
+    }
+
+    /// A card is asked for only with `--inline`, and only when this command
+    /// writes to a terminal; otherwise the note says why there is none.
+    #[test]
+    fn a_card_is_asked_for_only_into_a_terminal() {
+        assert_eq!(inline_ask(false, true), (None, None));
+        assert_eq!(inline_ask(false, false), (None, None));
+        assert_eq!(inline_ask(true, true), (Some(InlineTarget::Cli), None));
+        assert_eq!(
+            inline_ask(true, false),
+            (None, Some(InlineRefusal::NotTerminal.text()))
+        );
+    }
+
+    /// Kettle's reason wins over this command's own, and a printed card
+    /// needs no note at all.
+    #[test]
+    fn the_shelf_note_is_kettles_reason_or_this_commands() {
+        let mut result =
+            ShowResult::new((3, true, 1), 9, kettle_media::MediaKind::Svg, (64, 48), &[]);
+        assert_eq!(shelf_note(&result, None), None);
+        assert_eq!(shelf_note(&result, Some(OLDER_KETTLE)), Some(OLDER_KETTLE));
+        result.inline_refused = Some(InlineRefusal::Background);
+        assert_eq!(
+            shelf_note(&result, Some(OLDER_KETTLE)),
+            Some(InlineRefusal::Background.text())
+        );
+        result.inline = Some(kettle_ctl::show::InlineDelivery {
+            message: "card".into(),
+            permit: None,
+        });
+        assert_eq!(shelf_note(&result, Some(OLDER_KETTLE)), None);
+    }
+
     #[test]
     fn the_confirmation_names_the_pane_and_says_nothing_was_seen() {
         let result = ShowResult {
@@ -588,6 +720,7 @@ mod tests {
             height: 480,
             warnings: vec![],
             inline: None,
+            inline_refused: None,
             video: None,
         };
         let text = confirmation(&result);

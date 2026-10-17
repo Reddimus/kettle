@@ -1595,7 +1595,9 @@ fn copied_diagrams_are_wired() {
     ] {
         assert!(preview_flat.contains(needle), "{needle}");
     }
-    assert!(body("admit_user_pull_of").contains("inline: None,\n                gallery,"));
+    assert!(body("admit_user_pull_of").contains(
+        "inline: None,\n                inline_refused: None,\n                gallery,"
+    ));
     for needle in [
         "Action::RenderClipboardAsDiagram => self.preview_copied_diagram(ws, false),",
         "Action::RenderSelectionAsDiagram => self.preview_copied_diagram(ws, true),",
