@@ -7830,7 +7830,14 @@ impl Terminal {
                                                 clear_completion_slot(&mut completion);
                                                 completion.prompt_boundary_pending = true;
                                             }
-                                            if let Ok(mut t) = output_started_at.lock() {
+                                            // One command line is one command: bash's
+                                            // DEBUG trap marks C before every simple
+                                            // command and again before PROMPT_COMMAND, so
+                                            // only the first C since the last D or prompt
+                                            // starts its generation and its duration.
+                                            if let Ok(mut t) = output_started_at.lock()
+                                                && t.is_none()
+                                            {
                                                 command_generation
                                                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                                 *t = Some(std::time::Instant::now());
@@ -7842,8 +7849,8 @@ impl Terminal {
                                             output_start_seen
                                                 .store(true, std::sync::atomic::Ordering::Relaxed);
                                         }
-                                        // OSC 133 CommandEnd (D). Pop the
-                                        // most-recent OutputStart timestamp, compute
+                                        // OSC 133 CommandEnd (D). Take the
+                                        // command's OutputStart timestamp, compute
                                         // the elapsed duration, push a CommandFinished
                                         // event for the App to drain. Bounded queue at
                                         // 32 entries — a runaway / hostile shell that
@@ -16017,11 +16024,17 @@ mod teardown_tests {
         ready: impl Fn(&Terminal) -> bool,
         wait: Duration,
     ) -> Option<Terminal> {
-        let argv: Vec<String> = vec![
-            "/bin/sh".to_string(),
-            "-c".to_string(),
-            format!("printf '{format}'; sleep 10"),
-        ];
+        pane_running(&format!("printf '{format}'; sleep 10"), ready, wait)
+    }
+
+    /// Run the `/bin/sh` script `script` in a real PTY child, as `pane_after`.
+    #[cfg(unix)]
+    fn pane_running(
+        script: &str,
+        ready: impl Fn(&Terminal) -> bool,
+        wait: Duration,
+    ) -> Option<Terminal> {
+        let argv: Vec<String> = vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()];
         let (tx, _rx) = crossbeam_channel::unbounded();
         let waker: Waker = std::sync::Arc::new(|| {});
         let term = match Terminal::new(
@@ -16049,6 +16062,35 @@ mod teardown_tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         Some(term)
+    }
+
+    /// One command line is one command. bash's DEBUG trap marks OutputStart
+    /// before every simple command and again before PROMPT_COMMAND, so
+    /// `sleep 0.3; echo b` sends C, C, C, then D: the generation moves by one,
+    /// and the duration runs from the first mark.
+    #[cfg(unix)]
+    #[test]
+    fn repeated_output_starts_are_one_command() {
+        let script = "printf '\\033]133;A\\007$ \\033]133;B\\007\\033]133;C\\007'; sleep 0.3; \
+                      printf '\\033]133;C\\007\\033]133;C\\007\\033]133;D;7\\007'; sleep 10";
+        let Some(pane) = pane_running(script, |_| true, Duration::ZERO) else {
+            return;
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut finished = Vec::new();
+        while finished.is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+            finished = pane.drain_command_finished_events();
+        }
+        assert_eq!(finished.len(), 1, "one CommandEnd, one event");
+        assert_eq!(finished[0].generation, 1);
+        assert_eq!(finished[0].exit_code, Some(7));
+        assert!(
+            finished[0].duration >= Duration::from_millis(250),
+            "timed from the first mark: {:?}",
+            finished[0].duration
+        );
+        assert_eq!(pane.idle_command_generation(), Some(1));
     }
 
     /// The pane's keyboard claims once `done` accepts them (see `pane_after`).
