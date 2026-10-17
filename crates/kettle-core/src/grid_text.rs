@@ -144,9 +144,96 @@ pub fn append_row_text(grid: &Grid<Cell>, line: i32, cols: usize, out: &mut Stri
     append_row(grid, line, cols, out, &mut |_| {});
 }
 
+/// Right-trimmed grid rows in [first, end), joined within a UTF-8 byte cap.
+/// Returns a retained prefix and whether any non-trailing content was omitted.
+pub fn rows_text_bounded(grid: &Grid<Cell>, first: i32, end: i32, cap: usize) -> (String, bool) {
+    let mut out = String::with_capacity(cap);
+    for row in first..end {
+        if row != first {
+            if out.len() == cap {
+                return (out, true);
+            }
+            out.push('\n');
+        }
+        let mut trimmed_end = out.len();
+        let mut overflow = false;
+        for column in 0..grid.columns() {
+            let cell = &grid[Point::new(Line(row), Column(column))];
+            if is_spacer(cell.flags) {
+                continue;
+            }
+            let (base, marks) =
+                crate::inline_text::text_parts(cell.c, cell.zerowidth().unwrap_or_default());
+            for ch in std::iter::once(base).chain(marks.iter().copied()) {
+                if !overflow && ch.len_utf8() <= cap - out.len() {
+                    out.push(ch);
+                    if !ch.is_whitespace() {
+                        trimmed_end = out.len();
+                    }
+                } else if !ch.is_whitespace() {
+                    return (out, true);
+                } else {
+                    // Whitespace beyond the cap can still be trimmed at row end.
+                    overflow = true;
+                }
+            }
+        }
+        out.truncate(trimmed_end);
+    }
+    (out, false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_rows_stop_retaining_combining_text_at_the_byte_cap() {
+        let mut grid: Grid<Cell> = Grid::new(200, 80, 0);
+        for row in 0..200 {
+            for column in 0..80 {
+                let cell = &mut grid[Point::new(Line(row), Column(column))];
+                cell.c = 'e';
+                for _ in 0..30 {
+                    cell.push_zerowidth('\u{301}');
+                }
+            }
+        }
+        let (output, truncated) = rows_text_bounded(&grid, 0, 200, 1024);
+        assert!(truncated);
+        assert!(output.len() <= 1024);
+        assert!(
+            output.capacity() <= 1024,
+            "capture must not retain a full snapshot"
+        );
+        let mut first_row = String::new();
+        append_row_text(&grid, 0, 80, &mut first_row);
+        assert!(first_row.starts_with(&output));
+        assert!(output.len() >= 1022);
+    }
+
+    #[test]
+    fn bounded_rows_preserve_trimming_spacers_and_requested_range() {
+        let mut grid: Grid<Cell> = Grid::new(3, 8, 0);
+        grid[Point::new(Line(0), Column(0))].c = 'X';
+        let cell = &mut grid[Point::new(Line(1), Column(0))];
+        cell.c = '\u{754c}';
+        cell.flags.insert(Flags::WIDE_CHAR);
+        cell.push_zerowidth('\u{301}');
+        grid[Point::new(Line(1), Column(1))]
+            .flags
+            .insert(Flags::WIDE_CHAR_SPACER);
+        grid[Point::new(Line(1), Column(2))].c = 'y';
+        assert_eq!(
+            rows_text_bounded(&grid, 1, 3, 7),
+            ("\u{754c}\u{301}y\n".into(), false)
+        );
+        assert_eq!(
+            rows_text_bounded(&grid, 1, 2, 6),
+            ("\u{754c}\u{301}y".into(), false)
+        );
+        assert_eq!(rows_text_bounded(&grid, 1, 2, 4), ("\u{754c}".into(), true));
+    }
 
     /// A logical line joins rows only across soft wraps, only while the next
     /// row is the grid line below, and never more than `MAX_LOGICAL_ROWS`.

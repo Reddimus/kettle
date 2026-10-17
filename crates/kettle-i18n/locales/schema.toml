@@ -1,6 +1,9 @@
 # Stable message identifiers, argument types and translator context.
 # Context names the code that shows the message. Edit TOML, never generated Rust.
 
+[messages.ctl_run_command_busy]
+context = "crates/kettle-ui/src/app/ctl.rs ctl_run_command: control API error when a shell command is already running in the pane."
+
 [messages.screenshot_dimensions_too_large]
 context = "crates/kettle-render/src/lib.rs capture_png_with_annotation: CLI screenshot error when window padding and at least one terminal cell cannot fit the GPU texture limit."
 

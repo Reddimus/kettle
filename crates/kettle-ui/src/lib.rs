@@ -118,6 +118,138 @@ pub fn set_build_identity(identity: &str) {
     video_preview::set_build_identity(identity);
 }
 
+/// An independently owned, validated startup handoff socket.
+#[derive(Debug, Clone)]
+pub struct TabHandoff {
+    #[cfg(unix)]
+    pub(crate) socket: std::sync::Arc<std::os::unix::net::UnixStream>,
+}
+
+impl TabHandoff {
+    /// Take over an inherited, connected Unix stream before starting the UI.
+    ///
+    /// The checks run on a close-on-exec duplicate. Once they pass, `fd`
+    /// itself is closed, so children never inherit it and the sender sees the
+    /// socket close when the handoff is dropped. On error `fd` stays open.
+    ///
+    /// # Safety
+    ///
+    /// The caller must own `fd`: nothing else in this process may use or
+    /// close it afterwards.
+    pub unsafe fn adopt(fd: i32) -> std::io::Result<Self> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+            if fd < 3 {
+                return Err(std::io::ErrorKind::InvalidInput.into());
+            }
+            // SAFETY: fcntl validates the number and returns a new owned fd.
+            let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
+            if duplicate < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // SAFETY: the successful fcntl call returned unique ownership.
+            let owned = unsafe { OwnedFd::from_raw_fd(duplicate) };
+            let mut kind: libc::c_int = 0;
+            let mut len = std::mem::size_of_val(&kind) as libc::socklen_t;
+            // SAFETY: both output pointers refer to live, correctly sized values.
+            if unsafe {
+                libc::getsockopt(
+                    owned.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_TYPE,
+                    (&mut kind as *mut libc::c_int).cast(),
+                    &mut len,
+                )
+            } < 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            if kind != libc::SOCK_STREAM {
+                return Err(std::io::ErrorKind::InvalidInput.into());
+            }
+            let socket = std::os::unix::net::UnixStream::from(owned);
+            socket.local_addr()?;
+            socket.peer_addr()?;
+            // SAFETY: the caller owns `fd`, and the duplicate now holds the socket.
+            drop(unsafe { OwnedFd::from_raw_fd(fd) });
+            Ok(Self {
+                socket: std::sync::Arc::new(socket),
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = fd;
+            Err(std::io::ErrorKind::Unsupported.into())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tab_handoff_tests {
+    use super::TabHandoff;
+
+    #[test]
+    fn invalid_handoff_descriptor_is_rejected() {
+        // SAFETY: none of these numbers is an open descriptor in this process.
+        unsafe {
+            assert!(TabHandoff::adopt(-1).is_err());
+            assert!(TabHandoff::adopt(0).is_err());
+            assert!(TabHandoff::adopt(i32::MAX).is_err());
+        }
+    }
+
+    /// Runs alone: macOS marks a new socket pair close-on-exec in a second
+    /// step, and a child another test spawns in between would keep the peer
+    /// from seeing end of file.
+    #[cfg(unix)]
+    #[test]
+    fn handoff_requires_a_stream_and_owns_the_inherited_descriptor() {
+        kettle_test_support::run_alone_in_child(
+            "tab_handoff_tests::handoff_requires_a_stream_and_owns_the_inherited_descriptor",
+            handoff_requires_a_stream_and_owns_the_inherited_descriptor_alone,
+        );
+    }
+
+    #[cfg(unix)]
+    fn handoff_requires_a_stream_and_owns_the_inherited_descriptor_alone() {
+        use std::io::{Read, Write};
+        use std::os::fd::{AsRawFd, IntoRawFd};
+
+        // A rejected descriptor stays with its owner, which closes it.
+        let file = std::fs::File::open("/dev/null").unwrap();
+        let (datagram, _peer) = std::os::unix::net::UnixDatagram::pair().unwrap();
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let tcp = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        // SAFETY: each check fails, and a failed adopt leaves the fd alone.
+        unsafe {
+            assert!(TabHandoff::adopt(file.as_raw_fd()).is_err());
+            assert!(TabHandoff::adopt(datagram.as_raw_fd()).is_err());
+            assert!(TabHandoff::adopt(tcp.as_raw_fd()).is_err());
+        }
+
+        let (stream, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        // Set before the far end closes: macOS refuses the option afterwards.
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let inherited = stream.into_raw_fd();
+        // SAFETY: into_raw_fd gave up the only other owner.
+        let handoff = unsafe { TabHandoff::adopt(inherited) }.unwrap();
+        assert_ne!(handoff.socket.as_raw_fd(), inherited);
+        let flags = unsafe { libc::fcntl(handoff.socket.as_raw_fd(), libc::F_GETFD) };
+        assert_ne!(flags & libc::FD_CLOEXEC, 0);
+        peer.write_all(b"x").unwrap();
+        let mut byte = [0];
+        (&*handoff.socket).read_exact(&mut byte).unwrap();
+        assert_eq!(&byte, b"x");
+        // Dropping the handoff closes the last descriptor, the inherited one
+        // included, so the sender sees end of file.
+        drop(handoff);
+        assert_eq!(peer.read(&mut byte).unwrap(), 0);
+    }
+}
+
 /// First-tab startup overrides from the CLI.
 #[derive(Debug, Default, Clone)]
 pub struct Options {
@@ -185,7 +317,7 @@ pub struct Options {
     /// session JSON plus PTY fds. kettle receives both with
     /// `fd_transport::recv_fds`, restores the session from the JSON, and closes
     /// the PTY fds, so running shells are not preserved. Unix-only.
-    pub tab_handoff_fd: Option<i32>,
+    pub tab_handoff_fd: Option<TabHandoff>,
     /// `--restore` — restore the previous session (tabs/splits/dirs)
     /// for THIS launch, regardless of the `restore-session` config default
     /// (which is off). A one-shot "continue where I left off" without editing

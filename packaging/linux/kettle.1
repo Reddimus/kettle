@@ -277,7 +277,10 @@ JSON-string frame; receivers retain the legacy, lossy
 line format for direct writers.
 Cross-platform (no D-Bus needed). Pair with
 .B \-\-remote\-file
-to address a non-default kettle instance.
+to address a non-default kettle instance. If several processes watch the same
+path, the first process to claim the shared spool receives the batch.
+Use distinct paths for each receiver and its senders for deterministic
+instance targeting.
 The private spool is locked and capped at 1 MiB; an append that
 would cross the cap fails without changing commands already queued.
 A receiver accepts at most 1,024 operations per claimed batch and rejects an

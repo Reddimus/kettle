@@ -123,17 +123,11 @@ impl App {
     pub(super) fn load_startup_session(&mut self) -> Option<crate::session::Session> {
         // Terminator parity (detachable tabs):
         // --tab-handoff-fd FD wins over the file handoff, named layout, and
-        // default session. The option is consumed exactly once because
-        // `UnixStream::from_raw_fd` takes ownership of the descriptor.
-        if let Some(fd) = self.startup.tab_handoff_fd.take() {
+        // default session. The validated socket is consumed exactly once.
+        if let Some(handoff) = self.startup.tab_handoff_fd.take() {
             #[cfg(unix)]
             {
-                use std::os::unix::io::FromRawFd;
-
-                // SAFETY: the source kettle process passed this owned
-                // descriptor through --tab-handoff-fd and surrendered it
-                // across exec. `socket` closes it on every return path.
-                let socket = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
+                let socket = handoff.socket;
                 let mut payload = vec![0u8; 1024 * 1024];
                 return match crate::fd_transport::recv_fds(&socket, &mut payload, 64) {
                     Ok((n, received_fds)) => {
@@ -166,7 +160,7 @@ impl App {
             }
             #[cfg(not(unix))]
             {
-                let _ = fd;
+                let _ = handoff;
                 log::warn!("--tab-handoff-fd unsupported on non-Unix");
                 return None;
             }

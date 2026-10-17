@@ -4360,6 +4360,7 @@ pub(crate) fn home_dir_fallback(
 /// shell didn't ship one).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandFinished {
+    pub generation: u64,
     pub duration: std::time::Duration,
     pub exit_code: Option<i32>,
 }
@@ -4532,6 +4533,7 @@ pub struct Terminal {
     /// thread updates this; the App reads `command_finished` (below)
     /// to learn that a command completed + how long it took.
     pub output_started_at: Arc<Mutex<Option<std::time::Instant>>>,
+    command_generation: Arc<std::sync::atomic::AtomicU64>,
     /// Per-pane queue of completed-command events.
     /// Populated by the reader thread on OSC 133 D (CommandEnd) when
     /// `output_started_at` is `Some`; drained by the App each tick
@@ -4645,6 +4647,18 @@ pub enum ShellActivity {
     Running,
 }
 
+fn command_admission_generation(
+    started: &Mutex<Option<std::time::Instant>>,
+    generation: &std::sync::atomic::AtomicU64,
+) -> Option<u64> {
+    // The reader publishes the generation and running state under this lock.
+    let started = started.lock().ok()?;
+    if started.is_some() {
+        return None;
+    }
+    Some(generation.load(std::sync::atomic::Ordering::Relaxed))
+}
+
 fn classify_shell_activity(
     seen_prompts: bool,
     tracks_commands: bool,
@@ -4663,6 +4677,21 @@ fn classify_shell_activity(
 #[cfg(test)]
 mod shell_activity_tests {
     use super::{ShellActivity, classify_shell_activity};
+
+    #[test]
+    fn command_admission_rejects_running_shell() {
+        let started = std::sync::Mutex::new(Some(std::time::Instant::now()));
+        let generation = std::sync::atomic::AtomicU64::new(7);
+        assert_eq!(
+            super::command_admission_generation(&started, &generation),
+            None
+        );
+        *started.lock().unwrap() = None;
+        assert_eq!(
+            super::command_admission_generation(&started, &generation),
+            Some(7)
+        );
+    }
 
     #[test]
     fn incomplete_integration_never_claims_idle_or_running() {
@@ -6865,6 +6894,7 @@ impl Terminal {
         // per-pane OSC 133 OutputStart timestamp + completed-command
         // event queue. Reader thread writes; App polls each tick.
         let output_started_at: Arc<Mutex<Option<std::time::Instant>>> = Arc::new(Mutex::new(None));
+        let command_generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let output_start_seen: Arc<std::sync::atomic::AtomicBool> =
             Arc::new(std::sync::atomic::AtomicBool::new(false));
         let output_start_seen_for_struct = output_start_seen.clone();
@@ -6955,6 +6985,7 @@ impl Terminal {
             let graphics_reflow_generation = graphics_reflow_generation.clone();
             let prompts = prompts.clone();
             let output_started_at = output_started_at.clone();
+            let command_generation = command_generation.clone();
             let output_start_seen = output_start_seen.clone();
             let command_finished = command_finished.clone();
             let protocol_notifications = protocol_notifications.clone();
@@ -7799,7 +7830,16 @@ impl Terminal {
                                                 clear_completion_slot(&mut completion);
                                                 completion.prompt_boundary_pending = true;
                                             }
-                                            if let Ok(mut t) = output_started_at.lock() {
+                                            // One command line is one command: bash's
+                                            // DEBUG trap marks C before every simple
+                                            // command and again before PROMPT_COMMAND, so
+                                            // only the first C since the last D or prompt
+                                            // starts its generation and its duration.
+                                            if let Ok(mut t) = output_started_at.lock()
+                                                && t.is_none()
+                                            {
+                                                command_generation
+                                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                                 *t = Some(std::time::Instant::now());
                                             }
                                             // `shell_idle` needs a REAL OutputStart source.
@@ -7809,8 +7849,8 @@ impl Terminal {
                                             output_start_seen
                                                 .store(true, std::sync::atomic::Ordering::Relaxed);
                                         }
-                                        // OSC 133 CommandEnd (D). Pop the
-                                        // most-recent OutputStart timestamp, compute
+                                        // OSC 133 CommandEnd (D). Take the
+                                        // command's OutputStart timestamp, compute
                                         // the elapsed duration, push a CommandFinished
                                         // event for the App to drain. Bounded queue at
                                         // 32 entries — a runaway / hostile shell that
@@ -7829,6 +7869,8 @@ impl Terminal {
                                                     q.drain(0..d);
                                                 }
                                                 q.push(CommandFinished {
+                                                    generation: command_generation
+                                                        .load(std::sync::atomic::Ordering::Relaxed),
                                                     duration: started.elapsed(),
                                                     exit_code: code,
                                                 });
@@ -8036,6 +8078,7 @@ impl Terminal {
             graphics_reflow_generation,
             prompts,
             output_started_at,
+            command_generation,
             command_finished,
             protocol_notifications,
             completion: completion_cell,
@@ -8176,6 +8219,11 @@ impl Terminal {
                 .context("cannot read the PTY foreground process group");
         }
         u32::try_from(foreground).context("PTY foreground process group is out of range")
+    }
+
+    /// The last command generation, only when no OSC 133 command is running.
+    pub fn idle_command_generation(&self) -> Option<u64> {
+        command_admission_generation(&self.output_started_at, &self.command_generation)
     }
 
     /// Current command state when OSC 133 supplies enough information to know.
@@ -15976,11 +16024,17 @@ mod teardown_tests {
         ready: impl Fn(&Terminal) -> bool,
         wait: Duration,
     ) -> Option<Terminal> {
-        let argv: Vec<String> = vec![
-            "/bin/sh".to_string(),
-            "-c".to_string(),
-            format!("printf '{format}'; sleep 10"),
-        ];
+        pane_running(&format!("printf '{format}'; sleep 10"), ready, wait)
+    }
+
+    /// Run the `/bin/sh` script `script` in a real PTY child, as `pane_after`.
+    #[cfg(unix)]
+    fn pane_running(
+        script: &str,
+        ready: impl Fn(&Terminal) -> bool,
+        wait: Duration,
+    ) -> Option<Terminal> {
+        let argv: Vec<String> = vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()];
         let (tx, _rx) = crossbeam_channel::unbounded();
         let waker: Waker = std::sync::Arc::new(|| {});
         let term = match Terminal::new(
@@ -16008,6 +16062,35 @@ mod teardown_tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         Some(term)
+    }
+
+    /// One command line is one command. bash's DEBUG trap marks OutputStart
+    /// before every simple command and again before PROMPT_COMMAND, so
+    /// `sleep 0.3; echo b` sends C, C, C, then D: the generation moves by one,
+    /// and the duration runs from the first mark.
+    #[cfg(unix)]
+    #[test]
+    fn repeated_output_starts_are_one_command() {
+        let script = "printf '\\033]133;A\\007$ \\033]133;B\\007\\033]133;C\\007'; sleep 0.3; \
+                      printf '\\033]133;C\\007\\033]133;C\\007\\033]133;D;7\\007'; sleep 10";
+        let Some(pane) = pane_running(script, |_| true, Duration::ZERO) else {
+            return;
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut finished = Vec::new();
+        while finished.is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+            finished = pane.drain_command_finished_events();
+        }
+        assert_eq!(finished.len(), 1, "one CommandEnd, one event");
+        assert_eq!(finished[0].generation, 1);
+        assert_eq!(finished[0].exit_code, Some(7));
+        assert!(
+            finished[0].duration >= Duration::from_millis(250),
+            "timed from the first mark: {:?}",
+            finished[0].duration
+        );
+        assert_eq!(pane.idle_command_generation(), Some(1));
     }
 
     /// The pane's keyboard claims once `done` accepts them (see `pane_after`).

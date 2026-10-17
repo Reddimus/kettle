@@ -2535,6 +2535,64 @@ fn exec_json_emits_start_and_exit_events() {
 }
 
 #[test]
+fn exec_one_column_metadata_uses_effective_pty_geometry() {
+    let directory = kettle_test_support::private_tempdir("kettle-exec-geometry-");
+    let path = directory.path().join("trace.cast");
+    #[cfg(unix)]
+    let argv = vec!["sh", "-c", "stty size; printf AB"];
+    #[cfg(windows)]
+    let argv = {
+        let mut argv = ECHO.to_vec();
+        argv.push("AB");
+        argv
+    };
+    let (code, out, err) = run_exec(
+        &[
+            "--cols",
+            "1",
+            "--rows",
+            "24",
+            "--record",
+            path.to_str().unwrap(),
+            "--json",
+        ],
+        &argv,
+        None,
+    );
+    if no_pty(code, &err) {
+        eprintln!("skipping exec_one_column_metadata_uses_effective_pty_geometry: no PTY");
+        return;
+    }
+    assert_eq!(code, 0, "stderr: {err}");
+    let cast = std::fs::read_to_string(&path).unwrap();
+    let header: serde_json::Value = serde_json::from_str(cast.lines().next().unwrap()).unwrap();
+    assert_eq!(header["width"], 2);
+    assert_eq!(header["height"], 24);
+    let events: Vec<serde_json::Value> = out
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let start = events
+        .iter()
+        .find(|event| event["event"] == "start")
+        .unwrap();
+    assert_eq!(start["cols"], 2);
+    assert_eq!(start["rows"], 24);
+    #[cfg(unix)]
+    {
+        let output: String = events
+            .iter()
+            .filter(|event| event["event"] == "output")
+            .filter_map(|event| event["data"].as_str())
+            .collect();
+        assert!(
+            output.contains("24 2"),
+            "child reported geometry: {output:?}"
+        );
+    }
+}
+
+#[test]
 fn exec_record_writes_replayable_asciicast() {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

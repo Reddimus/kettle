@@ -463,8 +463,10 @@ struct Cli {
     ///
     /// The receiving kettle window must have been launched with
     /// the same `--remote-file PATH` (or both omit it to use the
-    /// default path). The text is written to the focused pane of
-    /// the most-recently-launched kettle that's watching the file.
+    /// default path). When several processes watch the same file,
+    /// the first process to claim the shared spool receives the batch
+    /// and writes TEXT to its focused pane. Use distinct `--remote-file`
+    /// paths for deterministic instance targeting.
     /// TEXT is transported exactly after shell argument parsing; Kettle
     /// does not reinterpret backslash escapes. Current senders use a
     /// reversible JSON-string frame, while receivers retain the legacy
@@ -473,8 +475,8 @@ struct Cli {
     /// its remaining capacity fails without changing queued commands.
     /// A receiver claims at most 1,024 operations as one batch and
     /// rejects an over-limit batch before dispatching any prefix.
-    /// Multi-window arbitration is "last writer wins" for now;
-    /// per-window socket addressing is a planned follow-up.
+    /// Delivery is at most once; a receiver failure after claiming a batch
+    /// can lose the undispatched suffix.
     #[arg(long, value_name = "TEXT", verbatim_doc_comment)]
     remote_send: Option<String>,
 
@@ -482,6 +484,8 @@ struct Cli {
     /// `<config-dir>/remote.cmd`. Honored by both the
     /// `--remote-send` sender side and the kettle window's
     /// notify-watcher receiver side; both must agree on the path.
+    /// Give each receiving process a distinct path for deterministic
+    /// instance targeting, and use that path for its senders.
     /// See `--remote-send` above for the usage example.
     #[arg(long, value_name = "PATH")]
     remote_file: Option<std::path::PathBuf>,
@@ -928,20 +932,17 @@ fn install_panic_hook() {
              location: {loc}\nmessage: {msg}\nbacktrace:\n{bt}\n"
         );
 
-        // A fallible write, not `eprintln!`. With SIGPIPE at
-        // SIG_IGN (Rust default), `eprintln!` to a broken stderr pipe panics —
-        // and a panic inside the panic hook aborts immediately under
-        // `panic = "abort"`, losing the crash-log write below. `writeln!` lets
-        // us swallow the error and still persist the report.
-        {
-            use std::io::Write as _;
-            let _ = writeln!(std::io::stderr(), "{report}");
-        }
-
         let path = crash_log_path(when, std::process::id(), |k| std::env::var(k).ok());
         if let Ok(mut f) = kettle_state::open_private_file_append(&path) {
             use std::io::Write as _;
             let _ = f.write_all(report.as_bytes());
+        }
+
+        // Persist first: with SIG_DFL a closed stderr pipe terminates the
+        // process before even a fallible write can return its error.
+        {
+            use std::io::Write as _;
+            let _ = writeln!(std::io::stderr(), "{report}");
         }
     }));
 }
@@ -1831,15 +1832,12 @@ fn main() -> anyhow::Result<()> {
     // force borderless off over a `borderless = true` config.
     let borderless_override = cli.borderless.then_some(true);
     let remote_file = cli.remote_file.clone().or_else(default_remote_file);
-    // Validate the internal handoff fd before it reaches
-    // `UnixStream::from_raw_fd`. The source process always passes an inherited
-    // descriptor >= 3; a negative value violates `from_raw_fd`'s safety
-    // contract, and 0/1/2 would adopt stdio as a socket (and later `close` it).
-    if let Some(fd) = cli.tab_handoff_fd
-        && fd < 3
-    {
-        anyhow::bail!("--tab-handoff-fd: expected an inherited descriptor >= 3, got {fd}");
-    }
+    let tab_handoff_fd = cli
+        .tab_handoff_fd
+        // SAFETY: the sending process passed this descriptor for this process
+        // to own and surrendered it across exec; nothing here has opened it.
+        .map(|fd| unsafe { kettle_ui::TabHandoff::adopt(fd) })
+        .transpose()?;
     // A whitespace-only program name (`kettle -e ""`) slips
     // past the is_empty check (the Vec has one element) but would reach
     // CommandBuilder::new("") — fail loudly at the CLI surface, like --config /
@@ -1937,7 +1935,7 @@ fn main() -> anyhow::Result<()> {
         remote_file,
         lua_script: cli.lua_script,
         tab_handoff: cli.tab_handoff,
-        tab_handoff_fd: cli.tab_handoff_fd,
+        tab_handoff_fd,
         record,
         // `KETTLE_RECORD_RAW_INPUT` is bool-parsed above. Only an explicit
         // truthy value enables raw keystroke (password) capture; `=0`,
@@ -2028,6 +2026,15 @@ fn append_remote_command_with_timeout(
 ) -> std::io::Result<()> {
     use std::io::Write as _;
 
+    append_remote_command_with_writer(path, bytes, timeout, |file, bytes| file.write_all(bytes))
+}
+
+fn append_remote_command_with_writer(
+    path: &std::path::Path,
+    bytes: &[u8],
+    timeout: std::time::Duration,
+    write: impl FnOnce(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
+) -> std::io::Result<()> {
     let append_len =
         u64::try_from(bytes.len()).map_err(|_| remote_command_size_error(path, 0, u64::MAX))?;
     if append_len > kettle_state::MAX_REMOTE_COMMAND_BYTES {
@@ -2053,7 +2060,20 @@ fn append_remote_command_with_timeout(
     {
         return Err(remote_command_size_error(path, existing_len, append_len));
     }
-    file.write_all(bytes)
+    if let Err(error) = write(&mut file, bytes) {
+        if let Err(rollback) = kettle_state::truncate_private_file(&file, existing_len) {
+            return Err(std::io::Error::new(
+                error.kind(),
+                format!(
+                    "remote-command append at {} failed: {error}; rollback to \
+                     {existing_len} bytes failed: {rollback}",
+                    path.display()
+                ),
+            ));
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Open (creating if needed) the remote-command file that `--toggle` and
@@ -2807,6 +2827,59 @@ mod record_target_tests {
 mod crash_log_tests {
     use super::{crash_log_path, pipe_was_closed};
 
+    #[cfg(unix)]
+    #[test]
+    fn panic_report_survives_a_closed_stderr_pipe() {
+        use std::os::fd::{FromRawFd, OwnedFd};
+        use std::os::unix::process::ExitStatusExt;
+        use std::process::{Command, Stdio};
+
+        const CHILD: &str = "KETTLE_PANIC_CLOSED_STDERR";
+        if std::env::var_os(CHILD).is_some() {
+            super::install_panic_hook();
+            super::reset_sigpipe();
+            panic!("closed stderr regression");
+        }
+        let root = kettle_test_support::private_tempdir("kettle-panic-pipe-");
+        let mut fds = [-1; 2];
+        // SAFETY: pipe writes two descriptors into the supplied array.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        // SAFETY: a successful pipe call returned two uniquely owned fds.
+        let reader = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        let writer = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+        drop(reader);
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "crash_log_tests::panic_report_survives_a_closed_stderr_pipe",
+            ])
+            .env(CHILD, "1")
+            .env("XDG_STATE_HOME", root.path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(writer))
+            .spawn()
+            .expect("run isolated panic");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("isolated panic did not terminate");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert_eq!(status.signal(), Some(libc::SIGPIPE));
+        let reports: Vec<_> = std::fs::read_dir(root.path().join("kettle/crash"))
+            .expect("panic hook persisted its report")
+            .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
+            .collect();
+        assert_eq!(reports.len(), 1);
+        assert!(reports[0].contains("closed stderr regression"));
+    }
+
     /// Build an env lookup closure from `(name, value)` pairs.
     fn from<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
         move |k| {
@@ -2894,9 +2967,9 @@ mod crash_log_tests {
 mod tests {
     use super::{
         Cli, DefaultConfigWrite, append_remote_command, append_remote_command_with_timeout,
-        config_path_problem, encode_remote_send_command, extra_check_config_lines,
-        flag_value_problem, format_ssh_hosts, ignores_profile, media_build_id,
-        queue_startup_update_recovery, resolved_config_trust, write_default_config,
+        append_remote_command_with_writer, config_path_problem, encode_remote_send_command,
+        extra_check_config_lines, flag_value_problem, format_ssh_hosts, ignores_profile,
+        media_build_id, queue_startup_update_recovery, resolved_config_trust, write_default_config,
     };
 
     #[test]
@@ -3248,6 +3321,64 @@ mod tests {
                 "{args:?} is kettle-discovered and must not inherit explicit trust"
             );
         }
+    }
+
+    #[test]
+    fn remote_command_append_rolls_back_partial_utf8_frame() {
+        use std::io::Write as _;
+        let dir = kettle_test_support::private_tempdir("kettle-remote-rollback-");
+        let path = dir.path().join("remote.cmd");
+        let first = encode_remote_send_command("first").unwrap();
+        append_remote_command(&path, &first).unwrap();
+        let failed = encode_remote_send_command("caf\u{e9}").unwrap();
+        let error = append_remote_command_with_writer(
+            &path,
+            &failed,
+            std::time::Duration::from_secs(1),
+            |file, bytes| {
+                let split = bytes.iter().position(|byte| *byte == 0xc3).unwrap() + 1;
+                file.write_all(&bytes[..split])?;
+                Err(std::io::Error::other("injected append failure"))
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "injected append failure");
+        assert_eq!(std::fs::read(&path).unwrap(), first);
+        let next = encode_remote_send_command("next").unwrap();
+        append_remote_command(&path, &next).unwrap();
+        let mut expected = first;
+        expected.extend_from_slice(&next);
+        assert_eq!(std::fs::read(&path).unwrap(), expected);
+    }
+
+    #[test]
+    fn remote_command_append_reports_rollback_failure() {
+        use std::io::Write as _;
+        let dir = kettle_test_support::private_tempdir("kettle-remote-rollback-");
+        let path = dir.path().join("remote.cmd");
+        append_remote_command(&path, b"toggle-window\n").unwrap();
+        // A read-only file cannot be truncated through any handle; Windows
+        // would reopen a read-only handle to a writable file with write access.
+        let read_only = dir.path().join("read-only");
+        std::fs::write(&read_only, b"x").unwrap();
+        let mut permissions = std::fs::metadata(&read_only).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&read_only, permissions).unwrap();
+        let error = append_remote_command_with_writer(
+            &path,
+            b"send-text-json \"partial",
+            std::time::Duration::from_secs(1),
+            |file, bytes| {
+                file.write_all(bytes)?;
+                *file = std::fs::File::open(&read_only)?;
+                Err(std::io::Error::other("injected append failure"))
+            },
+        )
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("injected append failure"));
+        assert!(message.contains("rollback to"));
+        assert!(message.contains(path.display().to_string().as_str()));
     }
 
     #[test]
@@ -3865,6 +3996,18 @@ mod tests {
             missing.is_empty(),
             "man page (packaging/linux/kettle.1) is missing flags: {missing:?}"
         );
+    }
+
+    #[test]
+    fn remote_send_help_documents_first_claimant_routing() {
+        use clap::CommandFactory;
+        let mut command = Cli::command();
+        let help = command.render_long_help().to_string();
+        let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(help.contains("first process to claim the shared spool"));
+        assert!(help.contains("distinct `--remote-file` paths"));
+        assert!(!help.contains("most-recently-launched"));
+        assert!(!help.contains("last writer wins"));
     }
 
     #[test]

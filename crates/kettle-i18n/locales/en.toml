@@ -3,6 +3,7 @@
 screenshot_dimensions_too_large = "Screenshot dimensions exceed the GPU texture limit; reduce window padding or font size."
 
 ctl_screenshot_pane_not_visible = "The requested pane is not visible."
+ctl_run_command_busy = "The pane already has a running command."
 inline_card_pending = "Loading…"
 inline_card_unavailable = "Unavailable"
 inline_card_tip = "Click to open"

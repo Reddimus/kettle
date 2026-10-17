@@ -1883,8 +1883,8 @@ pub(crate) struct PaneDrag {
 }
 
 /// An in-flight `run_command` awaiting its OSC-133
-/// completion. The control server wrote `cmd\r` to the pane; the next
-/// `CommandFinished` for that pane resolves the request with the exit code,
+/// completion. The control server wrote `cmd\r` to the pane; the matching
+/// `CommandFinished` generation resolves the request with the exit code,
 /// duration, and the output captured since `start_line`. A deadline guards the
 /// no-shell-integration case (the command runs but no `CommandEnd` ever fires).
 struct PendingRun {
@@ -1896,11 +1896,24 @@ struct PendingRun {
     /// included), where the command's output begins, so the reply can slice
     /// just this command's output out of the grid even after the ring wraps.
     start_line: u64,
+    /// Command-start generation observed before submitting input.
+    command_generation: u64,
     /// When the request gives up waiting for OSC-133 and replies `timed_out`.
     deadline: std::time::Instant,
     /// Where the completion response is sent (the connection thread is blocked
     /// reading this until the command finishes or the deadline fires).
     reply: crate::ctl_server::ReplyTx,
+}
+
+fn take_pending_run(
+    runs: &mut std::collections::HashMap<u64, PendingRun>,
+    pane: u64,
+    event: &kettle_core::CommandFinished,
+) -> Option<PendingRun> {
+    if event.generation != runs.get(&pane)?.command_generation.wrapping_add(1) {
+        return None;
+    }
+    runs.remove(&pane)
 }
 
 struct GpuRecoveryOutcome {
@@ -2112,16 +2125,37 @@ fn cap_ctl_selection(mut text: String) -> (String, bool) {
     (text, true)
 }
 
-fn cap_utf8_bytes(mut text: String, cap: usize) -> (String, bool) {
-    if text.len() <= cap {
-        return (text, false);
+fn cap_ctl_command_response(
+    mut response: kettle_ctl::protocol::Response,
+) -> kettle_ctl::protocol::Response {
+    use kettle_ctl::protocol::{MAX_RESPONSE_LINE_BYTES, to_json_vec_bounded};
+    let serde_json::Value::String(mut output) = response.result["output"].take() else {
+        return response;
+    };
+    response.result["output"] = serde_json::json!("");
+    let overhead = to_json_vec_bounded(&response, MAX_RESPONSE_LINE_BYTES)
+        .map_or(MAX_RESPONSE_LINE_BYTES, |bytes| bytes.len());
+    let budget = MAX_RESPONSE_LINE_BYTES.saturating_sub(overhead);
+    let mut encoded = 0;
+    let mut end = 0;
+    for (at, ch) in output.char_indices() {
+        let cost = match ch {
+            '"' | '\\' | '\u{8}' | '\t' | '\n' | '\u{c}' | '\r' => 2,
+            '\0'..='\u{1f}' => 6,
+            _ => ch.len_utf8(),
+        };
+        if at + ch.len_utf8() > MAX_CTL_COMMAND_OUTPUT_BYTES || encoded + cost > budget {
+            break;
+        }
+        encoded += cost;
+        end = at + ch.len_utf8();
     }
-    let mut end = cap;
-    while !text.is_char_boundary(end) {
-        end -= 1;
+    if end < output.len() {
+        output.truncate(end);
+        response.result["output_truncated"] = serde_json::json!(true);
     }
-    text.truncate(end);
-    (text, true)
+    response.result["output"] = serde_json::Value::String(output);
+    response
 }
 
 /// Merge independently-owned placement classes without letting a saturated

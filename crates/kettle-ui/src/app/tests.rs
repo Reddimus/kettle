@@ -316,6 +316,9 @@ fn startup_plan_truth_table() {
     for command in [false, true] {
         for cwd in [false, true] {
             for restore_bits in 0u8..32 {
+                if !cfg!(unix) && restore_bits & 4 != 0 {
+                    continue;
+                }
                 for state in [Normal, Hidden, Maximise, Fullscreen] {
                     for position in 0u8..4 {
                         let options = crate::Options {
@@ -323,7 +326,23 @@ fn startup_plan_truth_table() {
                             cwd: cwd.then(|| std::path::PathBuf::from("/tmp")),
                             layout: (restore_bits & 1 != 0).then(|| "test".into()),
                             tab_handoff: (restore_bits & 2 != 0).then(|| "/tmp/handoff".into()),
-                            tab_handoff_fd: (restore_bits & 4 != 0).then_some(10),
+                            tab_handoff_fd: {
+                                #[cfg(unix)]
+                                {
+                                    use std::os::fd::IntoRawFd;
+                                    (restore_bits & 4 != 0).then(|| {
+                                        let (socket, _peer) =
+                                            std::os::unix::net::UnixStream::pair().unwrap();
+                                        // SAFETY: into_raw_fd gave up the only other owner.
+                                        unsafe { crate::TabHandoff::adopt(socket.into_raw_fd()) }
+                                            .unwrap()
+                                    })
+                                }
+                                #[cfg(not(unix))]
+                                {
+                                    None
+                                }
+                            },
                             restore: restore_bits & 8 != 0,
                             ..Default::default()
                         };
@@ -16142,6 +16161,50 @@ fn custom_url_handler_failure_falls_back_to_system_open() {
 }
 
 #[test]
+fn run_command_output_budget_includes_json_escaping_and_metadata() {
+    use kettle_ctl::protocol::{MAX_RESPONSE_LINE_BYTES, Response, to_json_vec_bounded};
+    for timed_out in [false, true] {
+        for unit in ["\"", "\\", "\0", "\n", "e\u{301}"] {
+            let original = unit.repeat(450_000);
+            let mut result = serde_json::json!({
+                "pane": u64::MAX,
+                "exit_code": if timed_out { None } else { Some(17) },
+                "timed_out": timed_out,
+                "output": original,
+                "output_truncated": false,
+            });
+            if timed_out {
+                result["hint"] = serde_json::json!(
+                    "no OSC 133 command-end seen; enable shell integration for exit codes"
+                );
+            } else {
+                result["duration_ms"] = serde_json::json!(u64::MAX);
+            }
+            let response = super::cap_ctl_command_response(Response::ok(u64::MAX, result));
+            let bytes = to_json_vec_bounded(&response, MAX_RESPONSE_LINE_BYTES).unwrap();
+            let decoded: Response = serde_json::from_slice(&bytes).unwrap();
+            assert!(decoded.ok);
+            assert_eq!(decoded.result["timed_out"], timed_out);
+            assert_eq!(
+                decoded.result["exit_code"],
+                if timed_out {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::json!(17)
+                }
+            );
+            assert_eq!(decoded.result["output_truncated"], true);
+            let output = decoded.result["output"].as_str().unwrap();
+            assert!(!output.is_empty());
+            assert!(original.starts_with(output));
+            if !timed_out {
+                assert_eq!(decoded.result["duration_ms"], u64::MAX);
+            }
+        }
+    }
+}
+
+#[test]
 fn pending_run_orphan_check_searches_all_windows() {
     let src = production_source();
     let check = src
@@ -16158,6 +16221,33 @@ fn pending_run_orphan_check_searches_all_windows() {
         !check.contains("!ws.mux.panes.contains_key(pane)"),
         "current-window-only orphan checks kill pending runs in other windows"
     );
+}
+
+#[test]
+fn run_command_ignores_queued_completion_from_before_submission() {
+    use super::{PendingRun, take_pending_run};
+    let (reply, replies) = crossbeam_channel::bounded(1);
+    let run = PendingRun {
+        conn_id: 1,
+        req_id: 2,
+        start_line: 0,
+        command_generation: 7,
+        deadline: std::time::Instant::now(),
+        reply,
+    };
+    let mut runs = std::collections::HashMap::from([(3, run)]);
+    let mut event = kettle_core::CommandFinished {
+        generation: 7,
+        duration: std::time::Duration::from_secs(5),
+        exit_code: Some(9),
+    };
+    assert!(take_pending_run(&mut runs, 3, &event).is_none());
+    assert!(runs.contains_key(&3));
+    assert!(replies.try_recv().is_err());
+    event.generation = 8;
+    let run = take_pending_run(&mut runs, 3, &event).unwrap();
+    assert_eq!(run.req_id, 2);
+    assert!(runs.is_empty());
 }
 
 #[test]
