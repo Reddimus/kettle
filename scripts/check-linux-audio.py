@@ -131,7 +131,10 @@ def main():
             result['reused_audio_service'] = True
             result['stalled_clock_unrun'] = 'needs an owned cold Pulse null sink'
         stages = [
-            ('decoder', executable(args.decoder_tests_json, 'ffmpeg'), [], 22),
+            # The audio-path decoder tests. HEIF and AVIF stills need ffmpeg 7.1,
+            # newer than this runner's, and are no part of the audio path.
+            ('decoder', executable(args.decoder_tests_json, 'ffmpeg'),
+             ['--skip', 'real_ffmpeg_draws_heif_and_avif_stills'], 22),
             ('playback', native, ['--ignored', '--skip', stalled_case], 4),
             ('broker', executable(args.worker_tests_json, 'process_boundary'),
              ['--ignored', '--exact', 'linux_pcm_only_broker_plays_pauses_and_closes'], 1),

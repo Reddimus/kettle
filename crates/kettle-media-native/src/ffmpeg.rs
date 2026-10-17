@@ -33,8 +33,9 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use kettle_media::video::{
-    DECODER_ENV, DecodedFrame, DecodedStills, FrameSource, PlayGate, PlayRequest, Playback,
-    StillsPlan, VideoContainer, VideoDecoder, VideoInput, VideoPlayer,
+    DECODER_ENV, DecodedFrame, DecodedStill, DecodedStills, FrameSource, PlayGate, PlayRequest,
+    Playback, StillImage, StillInput, StillsPlan, VideoContainer, VideoDecoder, VideoInput,
+    VideoPlayer, still_fit, still_size_drawn,
 };
 use kettle_media::{
     AudioStatus, FailureCode, MAX_VIDEO_FPS_MILLI, MAX_VIDEO_SIDE, Opened, StillSample, VideoCodec,
@@ -1103,7 +1104,262 @@ impl FrameSource for Frames {
     }
 }
 
+/// The most ffprobe says of a still: a grid lists each of its tiles.
+const MAX_STILL_PROBE_BYTES: usize = 256 * 1024;
+/// The most `ffmpeg -version` says.
+const MAX_VERSION_BYTES: usize = 64 * 1024;
+
+/// What ffprobe says of a HEIF or AVIF still: its coding; the size it is
+/// shown at, a grid of tiles' own size, turned as it is shown; how far it is
+/// turned to be shown, clockwise, in quarter turns' degrees; and whether it
+/// is a grid.
+#[derive(Debug, PartialEq, Eq)]
+struct StillProbe {
+    codec: String,
+    width: u32,
+    height: u32,
+    turn: u32,
+    grid: bool,
+}
+
+/// What ffprobe is asked of a still: its first stream, its turn, and the
+/// grid of tiles it is made of, if it is.
+fn still_probe_args() -> Vec<String> {
+    [
+        "-v",
+        "error",
+        "-hide_banner",
+        "-protocol_whitelist",
+        "file",
+        "-f",
+        "mov",
+        "-show_entries",
+        "stream=codec_type,codec_name,width,height:stream_side_data=rotation:\
+         stream_group=type:stream_group_components",
+        "-of",
+        "flat",
+        INPUT,
+    ]
+    .map(str::to_string)
+    .to_vec()
+}
+
+/// Read ffprobe's answer for a still. A turn is ffmpeg's own reading of the
+/// display matrix, rounded to a quarter: the matrix says how far it turns
+/// counterclockwise, which is shown turned the other way.
+fn parse_still_probe(text: &str) -> Result<StillProbe, FailureCode> {
+    let (mut codec, mut width, mut height, mut rotation) = (None, None, None, None);
+    let (mut grid, mut grid_codec, mut grid_width, mut grid_height) = (false, None, None, None);
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = value.trim_matches('"');
+        match key {
+            "streams.stream.0.codec_name" => codec = Some(value.to_string()),
+            "streams.stream.0.width" => width = value.parse::<u32>().ok(),
+            "streams.stream.0.height" => height = value.parse::<u32>().ok(),
+            "stream_groups.stream_group.0.type" => grid = value == "Tile Grid",
+            "stream_groups.stream_group.0.streams.stream.0.codec_name" => {
+                grid_codec = Some(value.to_string());
+            }
+            "stream_groups.stream_group.0.components.component.0.width" => {
+                grid_width = value.parse::<u32>().ok();
+            }
+            "stream_groups.stream_group.0.components.component.0.height" => {
+                grid_height = value.parse::<u32>().ok();
+            }
+            _ if key.ends_with(".rotation") && rotation.is_none() => {
+                rotation = value.parse::<f64>().ok();
+            }
+            _ => {}
+        }
+    }
+    let (codec, width, height) = if grid {
+        (grid_codec, grid_width, grid_height)
+    } else {
+        (codec, width, height)
+    };
+    let (Some(codec), Some(width), Some(height)) = (codec, width, height) else {
+        return Err(FailureCode::RenderParse);
+    };
+    let turn = match rotation {
+        None => 0,
+        Some(degrees) if degrees.is_finite() => {
+            ((-degrees / 90.0).round() as i64).rem_euclid(4) as u32 * 90
+        }
+        Some(_) => return Err(FailureCode::RenderParse),
+    };
+    let (width, height) = if turn % 180 == 90 {
+        (height, width)
+    } else {
+        (width, height)
+    };
+    Ok(StillProbe {
+        codec,
+        width,
+        height,
+        turn,
+        grid,
+    })
+}
+
+/// The decode of a still, turned as it is shown and drawn at exactly
+/// `width` by `height`: a grid of tiles as the one picture they make. ffmpeg
+/// turns nothing itself, so the size is the one asked for.
+fn still_args(grid: bool, turn: u32, width: u32, height: u32) -> Vec<String> {
+    let turned = match turn {
+        90 => "transpose=clock,",
+        180 => "hflip,vflip,",
+        270 => "transpose=cclock,",
+        _ => "",
+    };
+    let filters = format!("{turned}scale={width}:{height}:flags=area,setsar=1");
+    let mut args: Vec<String> = [
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-protocol_whitelist",
+        "file",
+        "-threads",
+        THREADS,
+        "-noautorotate",
+        "-f",
+        "mov",
+        "-i",
+        INPUT,
+    ]
+    .map(str::to_string)
+    .to_vec();
+    if grid {
+        args.extend([
+            "-filter_complex".to_string(),
+            format!("[0:g:0]{filters}[still]"),
+            "-map".to_string(),
+            "[still]".to_string(),
+        ]);
+    } else {
+        args.extend([
+            "-map".to_string(),
+            "0:v:0".to_string(),
+            "-vf".to_string(),
+            filters,
+        ]);
+    }
+    args.extend(
+        [
+            "-frames:v",
+            "1",
+            "-pix_fmt",
+            "rgba",
+            "-f",
+            "rawvideo",
+            "pipe:1",
+        ]
+        .map(str::to_string),
+    );
+    args
+}
+
+/// Whether ffmpeg's first `-version` line names a release that reads HEIF
+/// and AVIF stills whole, a grid of tiles as one picture: 7.1 or later. A
+/// build named by its commit (`N-…`) is a recent one.
+fn reads_stills(version_line: &str) -> bool {
+    let Some(rest) = version_line.strip_prefix("ffmpeg version ") else {
+        return false;
+    };
+    let version = rest.split_whitespace().next().unwrap_or_default();
+    if version.starts_with('N') {
+        return true;
+    }
+    let version = version.strip_prefix('n').unwrap_or(version);
+    let mut numbers = version
+        .split(|c: char| !c.is_ascii_digit())
+        .map(|part| part.parse::<u32>().ok());
+    match (numbers.next().flatten(), numbers.next().flatten()) {
+        (Some(major), minor) => (major, minor.unwrap_or(0)) >= (7, 1),
+        (None, _) => false,
+    }
+}
+
+impl Ffmpeg {
+    /// Whether this ffmpeg reads HEIF and AVIF stills, by its version.
+    fn reads_stills(&self, deadline: Instant) -> Result<bool, FailureCode> {
+        let ran = run(
+            &self.ffmpeg,
+            &["-hide_banner", "-version"],
+            None,
+            MAX_VERSION_BYTES,
+            deadline,
+        )
+        .map_err(failure)?;
+        let text = String::from_utf8_lossy(&ran.stdout);
+        Ok(ran.success && reads_stills(text.lines().next().unwrap_or_default()))
+    }
+}
+
 impl VideoDecoder for Ffmpeg {
+    /// A HEIF or AVIF still, from the file it was read from, opened again: a
+    /// release too old to read one, or bytes with no file, is
+    /// `CodecUnavailable`; a still past the caps is `FileTooLarge`.
+    fn still_image(
+        &self,
+        input: StillInput<'_>,
+        _still: StillImage,
+        max_edge: u32,
+        deadline: Instant,
+    ) -> Result<DecodedStill, FailureCode> {
+        let Some((file, identity)) = input.file else {
+            return Err(FailureCode::CodecUnavailable);
+        };
+        if !self.reads_stills(deadline)? {
+            return Err(FailureCode::CodecUnavailable);
+        }
+        let ran = run(
+            &self.ffprobe,
+            &still_probe_args(),
+            Some(reopen(file, identity)?),
+            MAX_STILL_PROBE_BYTES,
+            deadline,
+        )
+        .map_err(failure)?;
+        if ran.overran {
+            return Err(FailureCode::RenderResource);
+        }
+        if !ran.success {
+            return Err(FailureCode::RenderParse);
+        }
+        let probe = parse_still_probe(
+            &String::from_utf8(ran.stdout).map_err(|_| FailureCode::RenderParse)?,
+        )?;
+        if !still_size_drawn(probe.width, probe.height) {
+            return Err(FailureCode::FileTooLarge);
+        }
+        let (width, height) = still_fit(probe.width, probe.height, max_edge);
+        let size = width as usize * height as usize * 4;
+        let ran = run(
+            &self.ffmpeg,
+            &still_args(probe.grid, probe.turn, width, height),
+            Some(reopen(file, identity)?),
+            size,
+            deadline,
+        )
+        .map_err(failure)?;
+        if ran.success && !ran.overran && ran.stdout.len() == size {
+            return Ok(DecodedStill {
+                width,
+                height,
+                rgba: ran.stdout,
+                source_width: probe.width,
+                source_height: probe.height,
+            });
+        }
+        // The decoder failed or framed its output wrong: its codec missing
+        // from this ffmpeg, or the still itself.
+        Err(self.explain(&probe.codec, deadline))
+    }
+
     fn stills(
         &self,
         input: VideoInput<'_>,
@@ -1284,6 +1540,123 @@ pub(crate) fn check_text(data: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A still is read from its first stream, or from the grid of tiles it
+    /// is made of; a turn of a quarter swaps the size it is shown at; and an
+    /// answer without a coding or a size is a broken still.
+    #[test]
+    fn still_probes_say_what_is_shown() {
+        let plain = "streams.stream.0.codec_name=\"av1\"\nstreams.stream.0.codec_type=\"video\"\n\
+                     streams.stream.0.width=640\nstreams.stream.0.height=480\n";
+        assert_eq!(
+            parse_still_probe(plain),
+            Ok(StillProbe {
+                codec: "av1".into(),
+                width: 640,
+                height: 480,
+                turn: 0,
+                grid: false,
+            })
+        );
+        let turned = format!("{plain}streams.stream.0.side_data_list.side_data.0.rotation=-90\n");
+        let probe = parse_still_probe(&turned).unwrap();
+        assert_eq!((probe.width, probe.height, probe.turn), (480, 640, 90));
+        let back = format!("{plain}streams.stream.0.side_data_list.side_data.0.rotation=90\n");
+        assert_eq!(parse_still_probe(&back).unwrap().turn, 270);
+        let half = format!("{plain}streams.stream.0.side_data_list.side_data.0.rotation=180\n");
+        let probe = parse_still_probe(&half).unwrap();
+        assert_eq!((probe.width, probe.height, probe.turn), (640, 480, 180));
+        let grid = "stream_groups.stream_group.0.type=\"Tile Grid\"\n\
+                    stream_groups.stream_group.0.components.component.0.nb_tiles=54\n\
+                    stream_groups.stream_group.0.components.component.0.coded_width=8064\n\
+                    stream_groups.stream_group.0.components.component.0.coded_height=6144\n\
+                    stream_groups.stream_group.0.components.component.0.width=8064\n\
+                    stream_groups.stream_group.0.components.component.0.height=6048\n\
+                    stream_groups.stream_group.0.streams.stream.0.codec_name=\"hevc\"\n\
+                    stream_groups.stream_group.0.streams.stream.0.width=896\n\
+                    stream_groups.stream_group.0.streams.stream.0.height=1024\n\
+                    streams.stream.0.codec_name=\"hevc\"\nstreams.stream.0.width=896\n\
+                    streams.stream.0.height=1024\n";
+        assert_eq!(
+            parse_still_probe(grid),
+            Ok(StillProbe {
+                codec: "hevc".into(),
+                width: 8064,
+                height: 6048,
+                turn: 0,
+                grid: true,
+            })
+        );
+        assert_eq!(
+            parse_still_probe("streams.stream.0.width=640\n"),
+            Err(FailureCode::RenderParse)
+        );
+        let nan = format!("{plain}streams.stream.0.side_data_list.side_data.0.rotation=nan\n");
+        assert_eq!(parse_still_probe(&nan), Err(FailureCode::RenderParse));
+    }
+
+    /// A still decodes its first stream, or its grid through a graph of its
+    /// own, turned by Kettle and never by ffmpeg, at exactly the size asked.
+    #[test]
+    fn stills_decode_at_exactly_the_size_asked() {
+        let plain = still_args(false, 0, 64, 48);
+        let at = |args: &[String], flag: &str| {
+            args.iter()
+                .position(|arg| arg == flag)
+                .map(|index| args[index + 1].clone())
+        };
+        assert!(plain.iter().any(|arg| arg == "-noautorotate"));
+        assert!(
+            plain.iter().position(|arg| arg == "-noautorotate")
+                < plain.iter().position(|arg| arg == "-i")
+        );
+        assert_eq!(at(&plain, "-map").as_deref(), Some("0:v:0"));
+        assert_eq!(
+            at(&plain, "-vf").as_deref(),
+            Some("scale=64:48:flags=area,setsar=1")
+        );
+        assert_eq!(at(&plain, "-pix_fmt").as_deref(), Some("rgba"));
+        assert_eq!(plain.last().map(String::as_str), Some("pipe:1"));
+        let turned = still_args(false, 90, 48, 64);
+        assert_eq!(
+            at(&turned, "-vf").as_deref(),
+            Some("transpose=clock,scale=48:64:flags=area,setsar=1")
+        );
+        let grid = still_args(true, 270, 64, 48);
+        assert_eq!(
+            at(&grid, "-filter_complex").as_deref(),
+            Some("[0:g:0]transpose=cclock,scale=64:48:flags=area,setsar=1[still]")
+        );
+        assert_eq!(at(&grid, "-map").as_deref(), Some("[still]"));
+        assert!(!grid.iter().any(|arg| arg == "-vf"));
+    }
+
+    /// Only a release that reads stills whole, 7.1 or later, or a build
+    /// named by its commit, is asked for one.
+    #[test]
+    fn only_a_recent_ffmpeg_reads_stills() {
+        for (line, reads) in [
+            (
+                "ffmpeg version 8.0.1-3ubuntu2 Copyright (c) 2000-2025 the FFmpeg developers",
+                true,
+            ),
+            (
+                "ffmpeg version 9.0.2 Copyright (c) 2000-2026 the FFmpeg developers",
+                true,
+            ),
+            ("ffmpeg version 7.1 Copyright", true),
+            ("ffmpeg version n7.1.1 Copyright", true),
+            ("ffmpeg version 7.0.2 Copyright", false),
+            ("ffmpeg version 6.1.1-3ubuntu5 Copyright", false),
+            ("ffmpeg version 4.4.2-0ubuntu0.22.04.1 Copyright", false),
+            ("ffmpeg version N-118215-g1234abcd Copyright", true),
+            ("ffmpeg version git-2026-10-01 Copyright", false),
+            ("ffprobe version 8.0.1", false),
+            ("", false),
+        ] {
+            assert_eq!(reads_stills(line), reads, "{line}");
+        }
+    }
 
     #[test]
     fn numbers_from_ffprobe_are_read_exactly_or_not_at_all() {

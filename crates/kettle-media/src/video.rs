@@ -40,6 +40,21 @@ pub trait VideoDecoder {
         plan: &mut dyn FnMut(&VideoInfo) -> Result<StillsPlan, FailureCode>,
         deadline: Instant,
     ) -> Result<DecodedStills, FailureCode>;
+
+    /// Decode the still image `input` holds, `still` by its brands, its
+    /// orientation applied and its longer side no more than `max_edge`, by
+    /// `deadline`. A decoder that reads no still images answers
+    /// `CodecUnavailable`.
+    fn still_image(
+        &self,
+        input: StillInput<'_>,
+        still: StillImage,
+        max_edge: u32,
+        deadline: Instant,
+    ) -> Result<DecodedStill, FailureCode> {
+        let _ = (input, still, max_edge, deadline);
+        Err(FailureCode::CodecUnavailable)
+    }
 }
 
 /// A video decoder that also plays: it opens a held video for a session.
@@ -564,6 +579,105 @@ fn atom(prefix: &[u8], offset: usize, file_len: u64) -> Option<(&[u8], usize, u6
     Some((kind, offset.checked_add(header)?, end))
 }
 
+/// How much of a file [`still_image`] looks at, from its start: room for
+/// padding boxes and a file-type box with many brands.
+pub const STILL_IMAGE_PEEK_BYTES: usize = 4096;
+
+/// A still image an ISO-BMFF file holds, as its file-type box's brands say.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StillImage {
+    /// HEIF, as cameras and phones write it: HEVC-coded, or a coding the
+    /// brands leave to the decoder.
+    Heif,
+    /// AVIF: AV1-coded.
+    Avif,
+}
+
+/// The longest side a still may declare, before anything decodes it.
+pub const MAX_STILL_EDGE: u32 = 16_384;
+/// The most pixels a still may declare: a 48-megapixel camera's, and room.
+pub const MAX_STILL_PIXELS: u64 = 64 * 1024 * 1024;
+
+/// Whether a still declaring `width` by `height` is one Kettle draws: within
+/// [`MAX_STILL_EDGE`] and [`MAX_STILL_PIXELS`], and not empty.
+pub fn still_size_drawn(width: u32, height: u32) -> bool {
+    width > 0
+        && height > 0
+        && width.max(height) <= MAX_STILL_EDGE
+        && u64::from(width) * u64::from(height) <= MAX_STILL_PIXELS
+}
+
+/// The size a still `width` by `height` is drawn at so its longer side is no
+/// more than `max_edge`: scaled down keeping its shape, each side rounded and
+/// at least 1, and never enlarged.
+pub fn still_fit(width: u32, height: u32, max_edge: u32) -> (u32, u32) {
+    let longer = width.max(height);
+    if longer <= max_edge || longer == 0 {
+        return (width, height);
+    }
+    let scale = f64::from(max_edge) / f64::from(longer);
+    let side = |edge: u32| ((f64::from(edge) * scale).round() as u32).clamp(1, max_edge);
+    (side(width), side(height))
+}
+
+/// What a still image's decoder reads: the bytes held, and, when they were
+/// read from a file, that file and the identity it was opened with, which a
+/// decoder in another process opens again by its descriptor.
+#[derive(Clone, Copy, Debug)]
+pub struct StillInput<'a> {
+    pub bytes: &'a [u8],
+    pub file: Option<(&'a File, PathIdentity)>,
+}
+
+/// A still image a decoder drew: straight RGBA, `width` by `height`, its
+/// orientation applied; and the image's own size, as its file declares it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DecodedStill {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+    pub source_width: u32,
+    pub source_height: u32,
+}
+
+/// The still image whose first bytes are `prefix`, of a file `file_len`
+/// long, when its file-type box, after any padding boxes and within the
+/// first [`STILL_IMAGE_PEEK_BYTES`], names a HEIF or AVIF brand. Only the
+/// brands are read.
+pub fn still_image(prefix: &[u8], file_len: u64) -> Option<StillImage> {
+    let prefix = &prefix[..prefix.len().min(STILL_IMAGE_PEEK_BYTES)];
+    let mut offset = 0;
+    loop {
+        let (kind, payload_start, end) = atom(prefix, offset, file_len)?;
+        match kind {
+            b"free" | b"skip" | b"wide" => offset = usize::try_from(end).ok()?,
+            b"ftyp" => {
+                let payload = prefix.get(payload_start..usize::try_from(end).ok()?)?;
+                if payload.len() < 8 || payload.len() % 4 != 0 {
+                    return None;
+                }
+                let brands = || {
+                    std::iter::once(&payload[..4])
+                        .chain(payload[8..].as_chunks::<4>().0.iter().map(|b| b.as_slice()))
+                };
+                return if brands().any(|brand| matches!(brand, b"avif" | b"avis")) {
+                    Some(StillImage::Avif)
+                } else if brands().any(|brand| {
+                    matches!(
+                        brand,
+                        b"heic" | b"heix" | b"heim" | b"heis" | b"mif1" | b"msf1"
+                    )
+                }) {
+                    Some(StillImage::Heif)
+                } else {
+                    None
+                };
+            }
+            _ => return None,
+        }
+    }
+}
+
 // Registered file-type brands: https://mp4ra.org/registered-types/brands.
 // A compatible base brand alone does not turn a still-image file into video.
 fn image_brand(brand: &[u8]) -> bool {
@@ -972,6 +1086,86 @@ mod tests {
                 }
             )
             .is_some_and(|(width, _)| width > 1)
+        );
+    }
+
+    /// A file-type box with `major` and `compatible` brands.
+    fn ftyp(major: &[u8; 4], compatible: &[&[u8; 4]]) -> Vec<u8> {
+        let mut payload = major.to_vec();
+        payload.extend([0; 4]);
+        for brand in compatible {
+            payload.extend(*brand);
+        }
+        let mut atom = u32::try_from(payload.len() + 8)
+            .unwrap()
+            .to_be_bytes()
+            .to_vec();
+        atom.extend(b"ftyp");
+        atom.extend(payload);
+        atom
+    }
+
+    /// HEIF and AVIF stills are known by their brands, AVIF first, whatever
+    /// else the box lists; a movie, an unknown brand, a box cut short, or a
+    /// file-type box past the window looked at is none.
+    #[test]
+    fn still_images_are_known_by_their_brands() {
+        let still = |bytes: &[u8]| still_image(bytes, bytes.len() as u64 + 1000);
+        assert_eq!(
+            still(&ftyp(b"heic", &[b"mif1", b"heic"])),
+            Some(StillImage::Heif)
+        );
+        assert_eq!(still(&ftyp(b"mif1", &[b"miaf"])), Some(StillImage::Heif));
+        assert_eq!(still(&ftyp(b"msf1", &[])), Some(StillImage::Heif));
+        assert_eq!(
+            still(&ftyp(b"avif", &[b"mif1", b"miaf"])),
+            Some(StillImage::Avif)
+        );
+        assert_eq!(
+            still(&ftyp(b"mif1", &[b"avif"])),
+            Some(StillImage::Avif),
+            "AVIF first"
+        );
+        assert_eq!(still(&ftyp(b"avis", &[b"msf1"])), Some(StillImage::Avif));
+        assert_eq!(still(&ftyp(b"isom", &[b"mp41", b"avc1"])), None, "a movie");
+        assert_eq!(still(&ftyp(b"M4A ", &[b"mp42"])), None, "audio");
+        assert_eq!(still(b"\x89PNG\r\n\x1a\n"), None);
+        // After padding boxes, as some writers put them.
+        let mut padded = b"\x00\x00\x00\x10free\x00\x00\x00\x00\x00\x00\x00\x00".to_vec();
+        padded.extend(ftyp(b"heic", &[]));
+        assert_eq!(still(&padded), Some(StillImage::Heif));
+        // Cut short, or a box whose brands do not fill whole words.
+        let whole = ftyp(b"heic", &[b"mif1"]);
+        assert_eq!(still(&whole[..whole.len() - 1]), None);
+        let mut ragged = whole.clone();
+        ragged[3] += 1;
+        ragged.push(0);
+        assert_eq!(still(&ragged), None);
+        // Beyond the window the classifier looks at.
+        let mut far = Vec::new();
+        let gap = STILL_IMAGE_PEEK_BYTES;
+        far.extend(u32::try_from(gap).unwrap().to_be_bytes());
+        far.extend(b"free");
+        far.resize(gap, 0);
+        far.extend(ftyp(b"heic", &[]));
+        assert_eq!(still(&far), None, "only the first {gap} bytes are read");
+    }
+
+    /// A still is drawn within the box's longer side, its shape kept and
+    /// never enlarged; only a still within the caps is drawn at all.
+    #[test]
+    fn stills_fit_their_box_and_their_caps() {
+        assert_eq!(still_fit(640, 480, 64), (64, 48));
+        assert_eq!(still_fit(480, 640, 64), (48, 64));
+        assert_eq!(still_fit(640, 480, 4096), (640, 480), "never enlarged");
+        assert_eq!(still_fit(10_000, 1, 100), (100, 1), "at least one pixel");
+        assert_eq!(still_fit(8064, 6048, 1024), (1024, 768));
+        assert!(still_size_drawn(8064, 6048), "48 megapixels");
+        assert!(!still_size_drawn(0, 10));
+        assert!(!still_size_drawn(MAX_STILL_EDGE + 1, 1));
+        assert!(
+            !still_size_drawn(MAX_STILL_EDGE, MAX_STILL_EDGE),
+            "past the pixels"
         );
     }
 }

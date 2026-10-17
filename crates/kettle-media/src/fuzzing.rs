@@ -96,6 +96,7 @@ pub fn session(data: &[u8]) {
 pub fn sniff(data: &[u8]) {
     for size in [data.len() as u64, u64::MAX, 0] {
         let _ = crate::video::sniff_video_container(data, size);
+        let _ = crate::video::still_image(data, size);
     }
 }
 

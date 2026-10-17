@@ -667,10 +667,11 @@ reaches the terminal, and menus and dialogs open over it without closing it.
 The command palette lists it as "Open media shelf". On macOS its default
 chord is `Ctrl+Shift+Cmd+I`; elsewhere it has no default binding.
 `preview_link` (`preview-link`) is quick select for previews: it labels the
-image (PNG, JPEG, WebP, BMP, GIF, TIFF), SVG, Mermaid (`.mmd`, `.mermaid`),
-Markdown (`.md`, `.markdown`, whose Mermaid diagrams are a gallery), PDF and
-video files the focused pane names, by their extension, as a whole path (not on
-Windows, where path hints are never resolved) or a local `file://` link.
+image (PNG, JPEG, WebP, BMP, GIF, TIFF, HEIF, AVIF), SVG, Mermaid (`.mmd`,
+`.mermaid`), Markdown (`.md`, `.markdown`, whose Mermaid diagrams are a
+gallery), PDF and video files the focused pane names, by their extension, as a
+whole path (not on Windows, where path hints are never resolved) or a local
+`file://` link.
 Type a label to render that file in the configured preview presentation,
 which opens when it is ready (see **Media** above). The default viewer owns
 keyboard input; choose **Pin** or `media-open-mode = lane` to keep the preview

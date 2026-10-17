@@ -180,7 +180,7 @@ Failure bytes 0 through 27 are pinned in `FailureCode` and round-trip tests. `co
 and `model_message` map applicable cases to the model-facing error contract. Failures carry
 no source, path, parser diagnostic or other input. WorkerUnavailable is the added fixed
 reason for a missing or unverifiable worker. SandboxUnavailable (27) is `backend_unavailable`
-with reason `sandbox`: the worker could not confine itself, so it decodes no video and draws no PDF. Codec/backend identities and platform package
+with reason `sandbox`: the worker could not confine itself, so it decodes no video and draws no PDF, HEIF or AVIF still. Codec/backend identities and platform package
 hints are future bounded provider data, not free-form strings accepted in P1 failures.
 
 The plan leaves some small metadata bounds unspecified. P1 chooses 64 bytes each for version
@@ -478,7 +478,8 @@ both binaries of one source answer with one `BuildId`. On Linux and macOS:
    deadline from the job until its reply is written: 2 s for a raster and 3 s
    for any other kind. An Auto job starts with 3 s and, once classified,
    narrows to its kind's deadline, still counted from its arrival, so learning
-   the kind never restarts the clock. A parent that stalls or dies cannot keep
+   the kind never restarts the clock; a HEIF or AVIF still never narrows it,
+   its kind being in the reply alone. A parent that stalls or dies cannot keep
    the worker alive. A watchdog that cannot start exits 8.
 5. **One job, or one session.** Hello must carry this build's identity. A
    different build, or a frame header of another protocol version, is answered
@@ -867,6 +868,37 @@ directory of more than 512 entries is `RenderResource` before it is read, and
 floating-point samples, whose values have no range to map to colors
 faithfully, are `UnsupportedMedia`. A GIF or an animated WebP yields its first
 frame only. Content that does not decode is `RenderParse`.
+
+**HEIF and AVIF stills.** An Auto job whose first 4 KiB hold an ISO-BMFF
+file-type box (after any `free`, `skip` or `wide` padding) with a HEIF brand
+(`heic`, `heix`, `heim`, `heis`, `mif1`, `msf1`) or an AVIF one (`avif`,
+`avis`) is a still (`video::still_image`), reported as `raster` in its reply
+and never before it is drawn, so the worker's watchdog keeps an Auto job's
+3 s rather than a raster's 2 s while the decoder has its own 2.5 s; a movie's
+brands never make one, and a still's never make a video.
+Kettle's own code reads nothing of it but those brands. Only a confined
+worker draws one (`SandboxUnavailable` otherwise), with the platform's own
+decoder (`VideoDecoder::still_image`), from the bytes read under the raster
+cap. On macOS that is ImageIO, which declares the still's size before
+decoding and draws it as a thumbnail no longer than the box's longer side,
+its EXIF orientation applied, in sRGB, within the base sandbox; a still it
+cannot read (AVIF before macOS 13) goes to the worker's trusted ffmpeg, as a
+video AVFoundation cannot read does. Elsewhere it is that ffmpeg alone, from
+7.1 (`CodecUnavailable` before, and for bytes with no file, which it never
+reads): ffprobe reads the still's coding,
+size, turn and whether it is a grid of tiles from a fresh descriptor of the
+held file, and ffmpeg draws it from another at exactly the size asked,
+turned by Kettle (`-noautorotate`, then `transpose`) and a grid as the one
+picture its tiles make (`-filter_complex [0:g:0]…`), contained as a video's
+decode is. Either way a still declaring an edge past 16384 pixels or more
+than 64 megapixels is `FileTooLarge` before anything decodes it
+(`video::still_size_drawn`), and it is drawn no larger than the box nor
+enlarged (`video::still_fit`). What comes back is
+checked (a size within the bound, RGBA of exactly that size) and fitted as a
+raster is, its layout keeping the still's own size. A decoder that reads no
+stills is `CodecUnavailable`, and a worker with none at all
+`BackendUnavailable`; the GUI shows a still it could not draw as a file
+card.
 
 **Fitting.** The image is scaled down to fit inside the target box, keeping
 its aspect ratio, each edge rounded and kept between 1 pixel and the box. It

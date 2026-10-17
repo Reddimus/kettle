@@ -30,6 +30,8 @@ mod contain;
 pub mod ffmpeg;
 #[cfg(all(unix, any(test, feature = "fuzzing")))]
 pub mod fuzzing;
+#[cfg(all(target_os = "macos", feature = "avfoundation"))]
+mod imageio;
 #[cfg(any(target_os = "linux", all(test, unix)))]
 pub mod pulse;
 #[cfg(unix)]
@@ -144,7 +146,56 @@ mod decoders {
         )
     }
 
+    /// Whether a still the native decoder failed on is the external one's to
+    /// try: only one the native decoder cannot read at all (AVIF before
+    /// macOS 13). A still it could not parse is broken, and stays so rather
+    /// than becoming a decoder that is missing.
+    #[cfg(all(target_os = "macos", feature = "avfoundation"))]
+    fn still_falls_through(failure: FailureCode) -> bool {
+        failure == FailureCode::CodecUnavailable
+    }
+
+    /// The native decoder's answer, or the external one's when the native
+    /// one failed in a way `falls_through` passes on and there is one to ask.
+    #[cfg(all(target_os = "macos", feature = "avfoundation"))]
+    fn native_then_external<T>(
+        native: Result<T, FailureCode>,
+        external: Option<impl FnOnce() -> Result<T, FailureCode>>,
+        falls_through: fn(FailureCode) -> bool,
+    ) -> Result<T, FailureCode> {
+        match (native, external) {
+            (Err(failure), Some(external)) if falls_through(failure) => external(),
+            (answer, _) => answer,
+        }
+    }
+
     impl VideoDecoder for Decoders {
+        /// A HEIF or AVIF still: Apple's own decoder on macOS, then the
+        /// trusted ffmpeg for one it cannot read (AVIF before macOS 13);
+        /// elsewhere the trusted ffmpeg, from 7.1.
+        fn still_image(
+            &self,
+            input: kettle_media::video::StillInput<'_>,
+            still: kettle_media::video::StillImage,
+            max_edge: u32,
+            deadline: Instant,
+        ) -> Result<kettle_media::video::DecodedStill, FailureCode> {
+            #[cfg(all(target_os = "macos", feature = "avfoundation"))]
+            if let Some(native) = &self.native {
+                return native_then_external(
+                    native.still_image(input, still, max_edge, deadline),
+                    self.ffmpeg
+                        .as_ref()
+                        .map(|ffmpeg| move || ffmpeg.still_image(input, still, max_edge, deadline)),
+                    still_falls_through,
+                );
+            }
+            self.ffmpeg
+                .as_ref()
+                .ok_or(FailureCode::BackendUnavailable)?
+                .still_image(input, still, max_edge, deadline)
+        }
+
         fn stills(
             &self,
             input: VideoInput<'_>,
@@ -185,6 +236,52 @@ mod decoders {
                 .as_ref()
                 .ok_or(FailureCode::BackendUnavailable)?
                 .play(input, request, deadline)
+        }
+    }
+
+    #[cfg(all(test, target_os = "macos", feature = "avfoundation"))]
+    mod tests {
+        use super::*;
+
+        /// The external decoder is asked only when the native one could not
+        /// read the still at all, as ImageIO cannot read an AVIF before
+        /// macOS 13; a still it found broken, or refused for itself, stays
+        /// so, and the native answer stands when there is no external one.
+        /// `still_image` asks by this rule.
+        #[test]
+        fn the_external_decoder_reads_what_the_native_one_cannot() {
+            let external = || Ok::<_, FailureCode>("ffmpeg");
+            let still = |native| native_then_external(native, Some(external), still_falls_through);
+            assert_eq!(still(Ok("imageio")), Ok("imageio"));
+            assert_eq!(still(Err(FailureCode::CodecUnavailable)), Ok("ffmpeg"));
+            for kept in [
+                FailureCode::RenderParse,
+                FailureCode::BackendUnavailable,
+                FailureCode::FileTooLarge,
+                FailureCode::SandboxUnavailable,
+                FailureCode::Changed,
+            ] {
+                assert_eq!(still(Err(kept)), Err(kept), "{kept:?}");
+            }
+            let none: Option<fn() -> Result<&'static str, FailureCode>> = None;
+            assert_eq!(
+                native_then_external(
+                    Err(FailureCode::CodecUnavailable),
+                    none,
+                    still_falls_through
+                ),
+                Err(FailureCode::CodecUnavailable)
+            );
+            let code = kettle_test_support::code_only(&kettle_test_support::production_source(
+                include_str!("lib.rs"),
+            ));
+            let asked = code
+                .split("fn still_image(")
+                .nth(1)
+                .and_then(|body| body.split("fn stills(").next())
+                .unwrap();
+            assert!(asked.contains("native_then_external("));
+            assert!(asked.contains("still_falls_through,"));
         }
     }
 }

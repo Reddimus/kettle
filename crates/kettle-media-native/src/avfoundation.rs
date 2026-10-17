@@ -282,7 +282,7 @@ impl Batch {
 }
 
 /// Draw `image` at exactly `width` by `height` in sRGB, as straight RGBA.
-fn pixels(image: &CGImage, width: u32, height: u32) -> Result<Vec<u8>, FailureCode> {
+pub(crate) fn pixels(image: &CGImage, width: u32, height: u32) -> Result<Vec<u8>, FailureCode> {
     let (w, h) = (width as usize, height as usize);
     let mut rgba = vec![0u8; w * h * 4];
     // SAFETY: kCGColorSpaceSRGB is a constant CFString.
@@ -473,6 +473,21 @@ fn open(input: &VideoInput<'_>, deadline: Instant) -> Result<Asset, FailureCode>
 }
 
 impl VideoDecoder for AvFoundation {
+    /// A HEIF or AVIF still, through ImageIO, Apple's image decoder beside
+    /// its video one.
+    fn still_image(
+        &self,
+        input: kettle_media::video::StillInput<'_>,
+        still: kettle_media::video::StillImage,
+        max_edge: u32,
+        deadline: Instant,
+    ) -> Result<kettle_media::video::DecodedStill, FailureCode> {
+        if Instant::now() >= deadline {
+            return Err(FailureCode::RenderTimeout);
+        }
+        crate::imageio::decode(input.bytes, still, max_edge)
+    }
+
     fn stills(
         &self,
         input: VideoInput<'_>,

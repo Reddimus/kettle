@@ -14,6 +14,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   command to write straight to its pane's own terminal from the foreground;
   through a pipe, a file or tmux the item goes to the shelf alone and a note
   says why.
+- HEIC and AVIF photos show, drawn in the confined media worker at the size
+  the lane needs and turned as they are meant to be shown: by Apple's own
+  decoder on macOS (AVIF before macOS 13 by ffmpeg 7.1 or later), and on
+  Linux by ffmpeg 7.1 or later, a camera's tiled photo whole. With an older
+  ffmpeg, or none, they show as file cards.
 - PDFs show: `kettle show report.pdf`, an agent's `kettle_show` or a preview
   link puts the first page on the shelf, drawn on white at the size the lane
   needs, and the preview pages through the rest with `‹ ›`, PageUp and

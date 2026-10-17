@@ -39,6 +39,8 @@ mod raster;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod source;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
+mod still;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod stills;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod svg;
@@ -91,7 +93,9 @@ pub fn render(job: &Job) -> Result<Rendered, FailureCode> {
 /// Render one job and say what it turned out to be. `on_kind` hears the kind
 /// once it is known and before it is decoded or rendered: at once for an
 /// explicit kind, and after classification for an Auto job, so the worker
-/// can narrow its deadline to that kind's.
+/// can narrow its deadline to that kind's. A HEIF or AVIF still is the
+/// exception: its kind is in the result alone, so its decoder keeps an Auto
+/// job's longer deadline rather than a raster's.
 pub fn render_with_kind(
     job: &Job,
     on_kind: impl FnMut(MediaKind),

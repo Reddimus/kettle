@@ -121,6 +121,9 @@ The full workspace suite includes offscreen wgpu tests.
 Most parser, state, and UI-decision tests need no GPU or child process.
 An adapter-less host can skip GPU coverage, so inspect the test output.
 A passing Cargo summary with a skip is reduced coverage.
+Real-decoder tests in `kettle-media-native` and `kettle-media-worker` pass
+without running when no trusted ffmpeg is installed. On Linux, the HEIF and
+AVIF still tests also need ffmpeg 7.1 or later.
 
 Linux GPU tests need a Vulkan loader and a hardware or software adapter.
 `libvulkan1` and `mesa-vulkan-drivers` provide the CI software path.
@@ -360,7 +363,7 @@ The times below are minutes per target, not total workflow duration.
 | `images` | `kettle-vt` | Image decoders, completion metadata, and inline markers obey their limits | 10 / 10 |
 | `wire` | `kettle-media` | Directional decode budgets, round-trip bytes, and stream decoding agree | 20 / 20 |
 | `session` | `kettle-media` | Session pixels match the requested size and decoded bytes | 10 / 10 |
-| `sniff` | `kettle-media` | Video prefix sniffing handles arbitrary bytes and declared lengths | 10 / 10 |
+| `sniff` | `kettle-media` | Video and HEIF/AVIF still prefix sniffing handles arbitrary bytes and declared lengths | 10 / 10 |
 | `render` | `kettle-media-render` | Worker renders fit the box and satisfy the parent's reply checks | 20 / 60 |
 | `pdf` | `kettle-media-render` | A PDF page, at the page each input picks, passes the same checks | 20 / 60 |
 | `ffprobe` | `kettle-media-native` | Descriptions, rates, rotation, codecs, and packet indexes parse safely | 10 / 10 |
@@ -752,6 +755,9 @@ Keep failures and skipped areas with the evidence.
 - [ ] Show a file Kettle does not draw, such as a `.docx` or an MP3, and use
   Show in Finder (macOS) or Show in Folder (GNOME) from its card's menu and the
   viewer's `↗`. The file manager must open its folder with that file selected.
+- [ ] Show an iPhone HEIC photo, which is a grid of tiles, and an AVIF: on
+  macOS, and on Linux with ffmpeg 7.1 or later. With an older ffmpeg each must
+  show as a file card whose viewer says which decoder is missing.
 
 ### Window system and appearance
 
