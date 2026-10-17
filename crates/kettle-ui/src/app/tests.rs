@@ -320,6 +320,25 @@ fn reload_metadata_errors_are_not_missing_configs() {
     );
 }
 
+/// Every path paste is checked before it is formatted or delivered, so a
+/// file name the target shell cannot take exactly authors no input.
+#[test]
+fn path_pastes_are_checked_before_they_are_formatted() {
+    let source = include_str!("paste.rs");
+    let body = source
+        .split_once("pub(super) fn paste_paths_to(")
+        .unwrap()
+        .1
+        .split("\n    }\n")
+        .next()
+        .unwrap();
+    let check = body
+        .find("if !self.paths_type_exactly(ws, &argv, &paths)")
+        .unwrap();
+    assert!(check < body.find("format_paths_for_paste").unwrap());
+    assert!(check < body.find("deliver_path_paste").unwrap());
+}
+
 #[test]
 fn failed_additional_window_restore_preserves_source_session() {
     let src = super::production_source();

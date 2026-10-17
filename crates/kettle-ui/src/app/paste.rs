@@ -765,6 +765,18 @@ impl App {
         let argv = target
             .and_then(|pane| ws.mux.panes.get(&pane))
             .map_or_else(|| ws.mux.focused_argv(), |pane| pane.argv.clone());
+        if !self.paths_type_exactly(ws, &argv, &paths) {
+            self.pasted_images.discard_previews_for_paths(&paths);
+            log::warn!(
+                "paste: a file name cannot be typed exactly into a target shell; pasted nothing"
+            );
+            fire_notify(
+                self.ui_text
+                    .text(kettle_i18n::Text::NotifyTitleInputNotDelivered),
+                self.ui_text.text(kettle_i18n::Text::NotifyBodyPathNotTyped),
+            );
+            return;
+        }
         let mut preview = crate::mux::format_paths_for_paste(&argv, &paths);
         if trailing_space {
             preview.push(' ');
@@ -791,6 +803,38 @@ impl App {
         }
 
         self.deliver_path_paste(ws, target, receipt_pane, &paths, trailing_space, video);
+    }
+
+    /// Whether every path can be typed exactly into every pane the paste
+    /// reaches: the target, or each pane broadcast reaches, in every window
+    /// its scope crosses. See [`crate::mux::path_types_exactly`].
+    fn paths_type_exactly(
+        &self,
+        ws: &WindowState,
+        argv: &[String],
+        paths: &[std::path::PathBuf],
+    ) -> bool {
+        let fits = |argv: &[String]| {
+            paths
+                .iter()
+                .all(|path| crate::mux::path_types_exactly(argv, path))
+        };
+        if !ws.mux.is_broadcast_on() {
+            return fits(argv);
+        }
+        let pane_fits = |mux: &Mux, id: u64| mux.panes.get(&id).is_none_or(|pane| fits(&pane.argv));
+        ws.mux
+            .broadcast_target_ids()
+            .into_iter()
+            .all(|id| pane_fits(&ws.mux, id))
+            && (!Mux::scope_crosses_windows(&ws.mux.broadcast)
+                || self.windows.values().all(|other| {
+                    other
+                        .mux
+                        .foreign_target_ids(&ws.mux.broadcast)
+                        .into_iter()
+                        .all(|id| pane_fits(&other.mux, id))
+                }))
     }
 
     pub(super) fn deliver_path_paste(
