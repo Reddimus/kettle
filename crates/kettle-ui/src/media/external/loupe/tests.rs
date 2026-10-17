@@ -135,7 +135,7 @@ fn an_absent_viewer_is_not_activated_by_the_owner_probe() {
     let bus = Bus::start();
     future::block_on(async {
         let client = client(&bus).await;
-        assert!(owner(&client).await.unwrap().is_none());
+        assert!(owner(&client, NAME).await.unwrap().is_none());
     });
 }
 
@@ -146,7 +146,7 @@ fn a_bus_alias_does_not_make_another_program_the_viewer() {
     future::block_on(async {
         let _server = server(&bus, seen.clone()).await;
         let client = client(&bus).await;
-        let name = owner(&client).await.unwrap().unwrap();
+        let name = owner(&client, NAME).await.unwrap().unwrap();
         let expected = HeldExecutable::open(Path::new("/usr/bin/true")).unwrap();
         assert!(receiver(&client, name, &expected).await.is_err());
         assert!(seen.files.lock().unwrap().is_empty());
@@ -165,7 +165,7 @@ fn the_verified_unique_connection_receives_the_exact_private_file() {
         let _server = server(&bus, seen.clone()).await;
         let client = client(&bus).await;
         let held = this_binary();
-        let receiver = receiver(&client, owner(&client).await.unwrap().unwrap(), &held)
+        let receiver = receiver(&client, owner(&client, NAME).await.unwrap().unwrap(), &held)
             .await
             .unwrap();
         let file =
@@ -190,7 +190,7 @@ fn replacing_the_alias_cannot_redirect_a_verified_delivery() {
         let original = server(&bus, old.clone()).await;
         let client = client(&bus).await;
         let held = this_binary();
-        let receiver = receiver(&client, owner(&client).await.unwrap().unwrap(), &held)
+        let receiver = receiver(&client, owner(&client, NAME).await.unwrap().unwrap(), &held)
             .await
             .unwrap();
         original.release_name(NAME).await.unwrap();
@@ -222,7 +222,7 @@ fn a_stalled_viewer_cannot_hold_an_open_slot_indefinitely() {
         let _server = server(&bus, seen).await;
         let client = client(&bus).await;
         let held = this_binary();
-        let receiver = receiver(&client, owner(&client).await.unwrap().unwrap(), &held)
+        let receiver = receiver(&client, owner(&client, NAME).await.unwrap().unwrap(), &held)
             .await
             .unwrap();
         let start = std::time::Instant::now();
@@ -251,7 +251,7 @@ fn a_closed_receiver_does_not_redirect_to_a_replacement() {
         let original = server(&bus, Arc::new(Seen::default())).await;
         let client = client(&bus).await;
         let held = this_binary();
-        let receiver = receiver(&client, owner(&client).await.unwrap().unwrap(), &held)
+        let receiver = receiver(&client, owner(&client, NAME).await.unwrap().unwrap(), &held)
             .await
             .unwrap();
         original.release_name(NAME).await.unwrap();
@@ -282,7 +282,7 @@ fn delivery_rechecks_the_process_instance() {
         let _server = server(&bus, seen.clone()).await;
         let client = client(&bus).await;
         let held = this_binary();
-        let mut receiver = receiver(&client, owner(&client).await.unwrap().unwrap(), &held)
+        let mut receiver = receiver(&client, owner(&client, NAME).await.unwrap().unwrap(), &held)
             .await
             .unwrap();
         receiver.identity =

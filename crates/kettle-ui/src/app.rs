@@ -809,7 +809,7 @@ fn lane_previews_item(
 ) -> Option<()> {
     let info = item.video?;
     (info.duration_ms > 0
-        && item.kind == kettle_media::MediaKind::Video
+        && item.kind == crate::media::ItemKind::Media(kettle_media::MediaKind::Video)
         && lane_mode(item, panel) == kettle_render::MediaLaneMode::Rendered
         && !matches!(item.source.spec.input, crate::media::SourceInput::Released))
     .then_some(())
@@ -1245,8 +1245,12 @@ fn preview_canvas(
             kettle_media::Canvas::White => C::White,
             kettle_media::Canvas::Checker => C::Checker,
         },
-        kettle_media::MediaKind::Svg => panel.canvas.unwrap_or(C::White),
-        kettle_media::MediaKind::Raster => panel.canvas.unwrap_or(C::Checker),
+        crate::media::ItemKind::Media(kettle_media::MediaKind::Svg) => {
+            panel.canvas.unwrap_or(C::White)
+        }
+        crate::media::ItemKind::Media(kettle_media::MediaKind::Raster) => {
+            panel.canvas.unwrap_or(C::Checker)
+        }
         _ => panel.canvas.unwrap_or(C::Theme),
     }
 }
@@ -2439,6 +2443,9 @@ fn media_item_detail(
     kind: &str,
     item: &crate::media::ShelfItem,
 ) -> String {
+    if let Some(facts) = item.kind.file() {
+        return format!("{kind} · {}", kettle_ctl::show::size_label(facts.bytes));
+    }
     let Some(video) = &item.video else {
         let (width, height) = item.size;
         return format!("{kind} · {width}×{height}");
@@ -2476,7 +2483,7 @@ fn register_card(
     cell: (f32, f32),
     item: (u64, u64),
     (kind, video, page): (
-        kettle_media::MediaKind,
+        crate::media::ItemKind,
         Option<&kettle_media::VideoInfo>,
         Option<kettle_media::PageOf>,
     ),

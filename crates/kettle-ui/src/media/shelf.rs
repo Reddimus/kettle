@@ -4,10 +4,52 @@
 //! one already there replaces it in place, keeping its id; otherwise it goes
 //! first, and a full shelf drops its least recently viewed item, never the
 //! one on screen. Pixels are charged to the process preview account, and an
-//! item whose pixels had to go to make room keeps its place and details.
+//! item whose pixels had to go to make room keeps its place and details. A
+//! file Kettle does not draw is an item with no pixels at all.
 
 use kettle_core::ImageData;
 use kettle_media::{MediaKind, Warning};
+
+use super::file_card::FileFacts;
+
+/// What an item is: something the worker drew, or a file shown as itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ItemKind {
+    Media(MediaKind),
+    File(FileFacts),
+}
+
+impl From<MediaKind> for ItemKind {
+    fn from(kind: MediaKind) -> Self {
+        Self::Media(kind)
+    }
+}
+
+impl ItemKind {
+    /// The word a reply, `list_panes` and a card's caption say for it.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Media(kind) => kind.as_str(),
+            Self::File(_) => kettle_ctl::show::FILE_KIND,
+        }
+    }
+
+    /// What the worker drew, if it drew it.
+    pub(crate) fn media(self) -> Option<MediaKind> {
+        match self {
+            Self::Media(kind) => Some(kind),
+            Self::File(_) => None,
+        }
+    }
+
+    /// The file, if the item is a file shown as itself.
+    pub(crate) fn file(self) -> Option<FileFacts> {
+        match self {
+            Self::Media(_) => None,
+            Self::File(facts) => Some(facts),
+        }
+    }
+}
 
 /// Items one pane's shelf keeps.
 pub(crate) const MAX_SHELF_ITEMS: usize = 8;
@@ -60,6 +102,8 @@ pub(crate) enum ItemPixels {
     Ready(ImageData),
     /// Released so newer previews fit in the preview account.
     Evicted,
+    /// None ever drawn: a file shown as itself.
+    Undrawn,
 }
 
 /// What replaces an item in place when it is published again.
@@ -82,8 +126,8 @@ pub(crate) struct ShelfItem {
     /// Display-ready: sanitized and bounded.
     pub title: String,
     pub provenance: Provenance,
-    pub kind: MediaKind,
-    /// The rendered size, kept when the pixels go.
+    pub kind: ItemKind,
+    /// The rendered size, kept when the pixels go; none for a file.
     pub size: (u32, u32),
     pub warnings: Vec<Warning>,
     pub pixels: ItemPixels,
@@ -121,7 +165,7 @@ impl ShelfItem {
             key,
             title,
             provenance,
-            kind,
+            kind: ItemKind::Media(kind),
             size: (pixels.width, pixels.height),
             warnings,
             pixels: ItemPixels::Ready(pixels),
@@ -134,10 +178,48 @@ impl ShelfItem {
         }
     }
 
+    /// An item for the file `facts` describe, read from `source`'s path:
+    /// no pixels and no warnings, as nothing was drawn.
+    pub(crate) fn file(
+        id: u64,
+        key: Option<ShelfKey>,
+        title: String,
+        provenance: Provenance,
+        facts: FileFacts,
+        source: super::ItemSource,
+    ) -> Self {
+        Self {
+            id,
+            generation: 0,
+            key,
+            title,
+            provenance,
+            kind: ItemKind::File(facts),
+            size: (0, 0),
+            warnings: Vec::new(),
+            pixels: ItemPixels::Undrawn,
+            source,
+            layout: None,
+            video: None,
+            viewed: 0,
+            published: 0,
+            seen: false,
+        }
+    }
+
     pub(crate) fn image(&self) -> Option<&ImageData> {
         match &self.pixels {
             ItemPixels::Ready(image) => Some(image),
+            ItemPixels::Evicted | ItemPixels::Undrawn => None,
+        }
+    }
+
+    /// The picture its card shows: its pixels, or a file's shared poster.
+    pub(crate) fn card_image(&self) -> Option<ImageData> {
+        match &self.pixels {
+            ItemPixels::Ready(image) => Some(image.clone()),
             ItemPixels::Evicted => None,
+            ItemPixels::Undrawn => super::file_card::poster(),
         }
     }
 }
@@ -283,7 +365,8 @@ impl Shelf {
 }
 
 /// A shelf as `list_panes` reports it, newest first. Never pixels or
-/// sources: what each item is, who sent it, and whether its pixels are held.
+/// sources: what each item is, who sent it, and whether its pixels are held;
+/// a file shown as itself has none, and says its size and why.
 pub(crate) fn report(shelf: &Shelf) -> serde_json::Value {
     shelf
         .items()
@@ -297,7 +380,7 @@ pub(crate) fn report(shelf: &Shelf) -> serde_json::Value {
                     "signer": sender.signer,
                 }),
             };
-            serde_json::json!({
+            let mut report = serde_json::json!({
                 "item": item.id,
                 "generation": item.generation,
                 "title": item.title,
@@ -308,8 +391,19 @@ pub(crate) fn report(shelf: &Shelf) -> serde_json::Value {
                 "verified": matches!(item.provenance, Provenance::Verified),
                 "from_user": matches!(item.provenance, Provenance::User),
                 "sender": sender,
-                "pixels": if item.image().is_some() { "held" } else { "released" },
-            })
+                "pixels": match item.pixels {
+                    ItemPixels::Ready(_) => "held",
+                    ItemPixels::Evicted => "released",
+                    ItemPixels::Undrawn => "none",
+                },
+            });
+            if let (Some(facts), Some(fields)) = (item.kind.file(), report.as_object_mut()) {
+                fields.insert(
+                    "file".into(),
+                    serde_json::json!({ "bytes": facts.bytes, "reason": facts.why.as_str() }),
+                );
+            }
+            report
         })
         .collect()
 }
@@ -329,6 +423,60 @@ mod tests {
             ImageData::new(1, 1, vec![0, 0, 0, 255]).unwrap(),
             crate::media::ItemSource::sample(b"<svg/>"),
         )
+    }
+
+    /// A file shown as itself has no pixels of its own: its card shows the
+    /// shared page, eviction never picks it, and `list_panes` says it is a
+    /// file, its size and why, with no pixels held or released.
+    #[test]
+    fn a_file_item_has_no_pixels_and_says_why() {
+        let facts = crate::media::file_card::FileFacts {
+            bytes: 2_400_000,
+            identity: kettle_media::PathIdentity {
+                dev: 1,
+                ino: 2,
+                size: 2_400_000,
+                mtime_seconds: 3,
+                mtime_nanos: 4,
+            },
+            why: crate::media::FileWhy::NoDecoder,
+        };
+        let file = ShelfItem::file(
+            7,
+            None,
+            "photo.heic".into(),
+            Provenance::User,
+            facts,
+            crate::media::ItemSource::sample(b"<svg/>"),
+        );
+        assert_eq!(file.kind, ItemKind::File(facts));
+        assert_eq!((file.kind.as_str(), file.kind.media()), ("file", None));
+        assert!(file.image().is_none());
+        let poster = file.card_image().expect("the shared page");
+        assert!(std::sync::Arc::ptr_eq(
+            &poster.rgba,
+            &crate::media::file_card::poster().unwrap().rgba
+        ));
+        let mut shelf = Shelf::default();
+        shelf.publish(file, None, &[]);
+        assert_eq!(shelf.eviction_candidate(&[]), None, "nothing to give back");
+        assert!(!shelf.evict_pixels(7));
+        shelf.publish(item(8, None), None, &[]);
+        assert_eq!(shelf.eviction_candidate(&[]).map(|(_, id)| id), Some(8));
+        let report = report(&shelf);
+        let file = &report[1];
+        assert_eq!(file["kind"], "file");
+        assert_eq!(file["pixels"], "none");
+        assert_eq!(
+            file["file"],
+            serde_json::json!({"bytes": 2_400_000, "reason": "codec_unavailable"})
+        );
+        assert_eq!(
+            (file["width"].as_u64(), file["height"].as_u64()),
+            (Some(0), Some(0))
+        );
+        assert!(report[0].get("file").is_none(), "a drawn item has none");
+        assert_eq!(report[0]["pixels"], "held");
     }
 
     /// A file's key is its native path: two paths that print alike are two
@@ -378,7 +526,7 @@ mod tests {
     fn a_videos_metadata_outlives_its_pixels() {
         let mut shelf = Shelf::default();
         let mut video = item(1, None);
-        video.kind = MediaKind::Video;
+        video.kind = MediaKind::Video.into();
         let info = kettle_media::VideoInfo {
             duration_ms: 12_000,
             width: 1280,

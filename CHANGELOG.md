@@ -23,6 +23,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Preview on macOS, or Papers (else Evince) on Linux. The renderer is hayro,
   run only in the confined media worker, with a fix for a crafted file that
   overflowed its parser's stack.
+- A file Kettle does not draw, such as a document, an archive, audio, or a
+  video this system has no decoder for, shows as a file card instead of an
+  error: its name and size, a page for a picture, and in the lane why
+  nothing was drawn. Show in Finder (macOS) or Show in Folder (Linux) opens
+  its folder with it selected. `kettle show` and the agent tools report it
+  as `kind: "file"` with its size and the reason.
 - TIFF images show like the other formats: the first image of the file, 8 or
   16 bits a channel. A floating-point TIFF is not drawn, since its values
   have no range Kettle could map to colors faithfully.

@@ -749,6 +749,9 @@ Keep failures and skipped areas with the evidence.
   it outside Kettle: Preview on macOS, Papers or Evince on GNOME. The ignored
   `preview_opens_a_marked_copy_live` and `papers_opens_a_copy_live` tests in
   `kettle-ui` open a one-page PDF copy for you to look at.
+- [ ] Show a file Kettle does not draw, such as a `.docx` or an MP3, and use
+  Show in Finder (macOS) or Show in Folder (GNOME) from its card's menu and the
+  viewer's `↗`. The file manager must open its folder with that file selected.
 
 ### Window system and appearance
 

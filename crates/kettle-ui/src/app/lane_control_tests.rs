@@ -124,7 +124,7 @@ fn copying_a_paused_video_uses_the_displayed_frame() {
         1,
         crate::media::ItemSource::new(spec(file(b"/clip.mp4")), digest, false, None),
     );
-    clip.kind = kettle_media::MediaKind::Video;
+    clip.kind = kettle_media::MediaKind::Video.into();
     clip.video = Some(video(9));
     let panel = crate::window_state::PreviewPanel::new(1);
     let session = Paused(std::cell::RefCell::new(Some(SessionFrame {
@@ -203,7 +203,7 @@ fn only_a_video_lane_offers_a_preview() {
         1,
         crate::media::ItemSource::new(spec(file(b"/clip.mp4")), digest, false, None),
     );
-    clip.kind = kettle_media::MediaKind::Video;
+    clip.kind = kettle_media::MediaKind::Video.into();
     clip.video = Some(video(9));
     let panel = crate::window_state::PreviewPanel::new(1);
     assert!(lane_previews_item(&clip, &panel).is_some());
@@ -211,7 +211,7 @@ fn only_a_video_lane_offers_a_preview() {
     still.video = Some(video(0));
     assert!(lane_previews_item(&still, &panel).is_none());
     let mut image = clip.clone();
-    image.kind = kettle_media::MediaKind::Raster;
+    image.kind = kettle_media::MediaKind::Raster.into();
     assert!(lane_previews_item(&image, &panel).is_none());
     let mut unknown = clip.clone();
     unknown.video = None;
@@ -926,12 +926,19 @@ fn videos_keep_what_they_are() {
     for needle in [
         "let video = rendered.video.as_ref().map(|video| video.info);",
         "item.layout = Some(layout); item.video = video;",
+        ".with_pages(page);",
+        "self.publish_show(ws, (origin, route), item, (inline, inline_refused), page);",
+    ] {
+        assert!(finish.contains(needle), "finish_show: {needle}");
+    }
+    let publish = body("publish_show");
+    for needle in [
+        "let (kind, video, (width, height)) = (item.kind, item.video, item.size);",
         "result.video = video.map(kettle_ctl::show::ShowVideo::from);",
         "(published.id, generation), (kind, video.as_ref(), page), &image,",
         "result.page = page.map(kettle_ctl::show::ShowPage::from);",
-        ".with_pages(page);",
     ] {
-        assert!(finish.contains(needle), "finish_show: {needle}");
+        assert!(publish.contains(needle), "publish_show: {needle}");
     }
     let card = body("register_card");
     assert!(card.contains("duration_ms: video.map(|video| video.duration_ms),"));
@@ -1117,7 +1124,7 @@ fn document_item(
             count: pages,
         }));
     let mut item = with_source(id, source);
-    item.kind = kettle_media::MediaKind::Pdf;
+    item.kind = kettle_media::MediaKind::Pdf.into();
     item
 }
 
@@ -1193,7 +1200,7 @@ fn a_documents_pages_read_its_file_again() {
 #[test]
 fn a_markdown_gallery_is_markdown_and_draws_as_a_diagram() {
     let mut item = gallery_item(6, file(b"/tmp/plan.md"));
-    item.kind = kettle_media::MediaKind::Markdown;
+    item.kind = kettle_media::MediaKind::Markdown.into();
     item.source.spec.canvas = kettle_media::Canvas::White;
     let panel = crate::window_state::PreviewPanel::new(6);
     assert_eq!(
@@ -1216,7 +1223,7 @@ fn a_markdown_gallery_is_markdown_and_draws_as_a_diagram() {
     };
     assert!(
         crate::media::plan_crop(
-            item.kind,
+            item.kind.media().unwrap(),
             &layout,
             (1024, 512),
             (8192.0, 4096.0),
@@ -1790,8 +1797,9 @@ fn lane_content_actions_are_wired() {
     let lane = finish
         .find("return self.finish_lane_render(ws, render, spec, result);")
         .expect("a lane's render is its own");
-    let publish = finish.find("media_shelf.publish(").expect("publishing");
+    let publish = finish.find("self.publish_show(").expect("publishing");
     assert!(lane < publish);
+    assert!(body("publish_show").contains("media_shelf.publish("));
     let canvas = body("next_preview_canvas");
     assert!(canvas.contains(
         "if diagram {\n            self.render_preview_again(ws, pane, media_canvas(next));"
@@ -1851,7 +1859,7 @@ fn a_reload_keeps_the_canvas_the_lane_shows() {
     let (_, reload) = super::reload_of(&svg, &panel).expect("a file");
     assert_eq!(reload.canvas, Canvas::Checker, "the user's choice");
     let mut diagram = svg.clone();
-    diagram.kind = kettle_media::MediaKind::Mermaid;
+    diagram.kind = kettle_media::MediaKind::Mermaid.into();
     diagram.source.spec.canvas = Canvas::White;
     let mut shown = crate::window_state::PreviewPanel::new(1);
     let (_, reload) = super::reload_of(&diagram, &shown).expect("a file");
@@ -1920,7 +1928,7 @@ fn a_lane_without_a_source_shows_and_copies_rendered() {
     let svg = item(1, kettle_media::MediaKind::Svg, b"<svg/>");
     assert_eq!(super::lane_mode(&svg, &panel), Mode::Source);
     let mut raster = svg.clone();
-    raster.kind = kettle_media::MediaKind::Raster;
+    raster.kind = kettle_media::MediaKind::Raster.into();
     raster.source.release();
     assert_eq!(super::lane_mode(&raster, &panel), Mode::Rendered);
     let src = super::production_source();
@@ -1938,4 +1946,76 @@ fn a_lane_without_a_source_shows_and_copies_rendered() {
     let gate = body("lane_takes_wheel");
     assert!(gate.contains("ws.context_menu.is_none()"));
     assert!(gate.contains("!self.non_search_modal_open(ws)"));
+}
+
+/// A file shown as itself: its lane says what it is and how large, and why
+/// no picture is drawn; it draws on the theme's canvas, and offers no copy.
+#[test]
+fn a_file_lane_says_what_the_file_is() {
+    let tr = kettle_i18n::Translator::new(kettle_i18n::Language::En);
+    let facts = crate::media::FileFacts {
+        bytes: 38_200_000,
+        identity: kettle_media::PathIdentity {
+            dev: 1,
+            ino: 2,
+            size: 38_200_000,
+            mtime_seconds: 3,
+            mtime_nanos: 4,
+        },
+        why: crate::media::FileWhy::TooLarge,
+    };
+    let item = crate::media::ShelfItem::file(
+        3,
+        None,
+        "scan.tiff".into(),
+        crate::media::Provenance::User,
+        facts,
+        crate::media::ItemSource::undrawn(spec(file(b"/tmp/scan.tiff")), facts.identity),
+    );
+    assert_eq!(super::media_item_detail(tr, "File", &item), "File · 38 MB");
+    let panel = crate::window_state::PreviewPanel::new(3);
+    assert_eq!(
+        preview_canvas(&item, &panel),
+        kettle_render::MediaCanvas::Theme
+    );
+    assert!(item.image().is_none());
+    assert_eq!(item.source.reload_file().map(|(_, page)| page), Some(None));
+}
+
+/// A render that fails as a file Kettle does not draw puts the file on the
+/// shelf, read from its path and checked against what was asked for; any
+/// other failure, or a failure of bytes, stays the failure it was. Both
+/// kinds of item go through one door to the shelf, the cards and the reply.
+#[test]
+fn an_undrawable_file_goes_on_the_shelf_as_itself() {
+    let source = kettle_test_support::production_source(&super::app_source());
+    let code = kettle_test_support::code_only(&source);
+    let flat = code.split_whitespace().collect::<Vec<_>>().join(" ");
+    let body = |name: &str| {
+        flat.split(&format!("fn {name}("))
+            .nth(1)
+            .and_then(|rest| rest.split(" fn ").next())
+            .unwrap_or_else(|| panic!("{name}"))
+            .to_owned()
+    };
+    let finish = body("finish_show");
+    let steps = [
+        "Err(RenderError::Failure(failure)) => { let why = crate::media::FileWhy::of_job(&spec.kind, failure); let facts = why.and_then(|why| match &spec.input { crate::media::SourceInput::Path { path, authorization, } => super::native_path_buf(path) .and_then(|path| crate::media::file_facts(&path, authorization, why)), _ => None, });",
+        "let Some(facts) = facts else { return notify_preview_failure(tr, origin.refuse(failure)); };",
+        "let item = crate::media::ShelfItem::file( self.media.next_item(), key, title, provenance, facts, crate::media::ItemSource::undrawn(spec, facts.identity), );",
+        "return self.publish_show( ws, (origin, route), item, (inline, inline_refused), None, );",
+        "self.publish_show(ws, (origin, route), item, (inline, inline_refused), page);",
+    ];
+    let at: Vec<_> = steps
+        .iter()
+        .map(|step| finish.find(step).unwrap_or_else(|| panic!("{step}")))
+        .collect();
+    assert!(at.windows(2).all(|pair| pair[0] < pair[1]), "{at:?}");
+    let publish = body("publish_show");
+    for needle in [
+        ".map(|item| (item.generation, item.card_image()));",
+        "crate::media::ItemKind::File(facts) => kettle_ctl::show::ShowResult::file( target, published.id, facts.bytes, facts.why.as_str(), ),",
+    ] {
+        assert!(publish.contains(needle), "publish_show: {needle}");
+    }
 }

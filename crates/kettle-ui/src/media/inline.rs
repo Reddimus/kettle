@@ -4,7 +4,6 @@
 //! sanitized before it can reach a caption.
 
 use kettle_core::{InlineMarker, InlineNonce};
-use kettle_media::MediaKind;
 
 /// Fewest and most rows a card spans.
 const CARD_ROWS: (usize, usize) = (3, 8);
@@ -67,24 +66,31 @@ pub(crate) fn card_message(nonce: InlineNonce, size: (u8, u8), caption: &str) ->
 
 /// What a card says under it: the file's name, when it came from a file, and
 /// what Kettle made of it (a video's own size and length, a document's page
-/// of how many), on one line no wider than `columns`. Nothing else the
-/// sender sent, such as a title, reaches a caption.
+/// of how many, a file's size when Kettle drew nothing of it), on one line
+/// no wider than `columns`. Nothing else the sender sent, such as a title,
+/// reaches a caption.
 pub(crate) fn card_caption(
     name: Option<&str>,
-    kind: MediaKind,
+    kind: impl Into<super::ItemKind>,
     size: (u32, u32),
     duration_ms: Option<u64>,
     page: Option<kettle_media::PageOf>,
     columns: usize,
 ) -> String {
+    let kind = kind.into();
     let (width, height) = size;
-    let mut detail = match duration_ms {
-        Some(ms) => format!(
+    let mut detail = match (kind.file(), duration_ms) {
+        (Some(facts), _) => format!(
+            "{} {}",
+            kind.as_str(),
+            kettle_ctl::show::size_label(facts.bytes)
+        ),
+        (None, Some(ms)) => format!(
             "{} {width}x{height} {}",
             kind.as_str(),
             kettle_render::duration_label(ms)
         ),
-        None => format!("{} {width}x{height}", kind.as_str()),
+        (None, None) => format!("{} {width}x{height}", kind.as_str()),
     };
     if let Some(page) = page.filter(|page| page.count > 1) {
         detail.push_str(&format!(" {}/{}", u64::from(page.index) + 1, page.count));
@@ -153,6 +159,7 @@ fn fit(text: &str, columns: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kettle_media::MediaKind;
 
     #[test]
     fn a_card_takes_a_quarter_of_the_pane_and_keeps_the_images_shape() {
@@ -326,6 +333,22 @@ mod tests {
             card_caption(None, MediaKind::Svg, (64, 48), None, None, 80),
             "svg 64x48",
             "no file, no name"
+        );
+        let file = crate::media::ItemKind::File(crate::media::file_card::FileFacts {
+            bytes: 2_400_000,
+            identity: kettle_media::PathIdentity {
+                dev: 1,
+                ino: 2,
+                size: 2_400_000,
+                mtime_seconds: 3,
+                mtime_nanos: 4,
+            },
+            why: crate::media::FileWhy::Unsupported,
+        });
+        assert_eq!(
+            card_caption(Some("report.docx"), file, (0, 0), None, None, 80),
+            "report.docx - file 2.4 MB",
+            "a file says its size, never a picture's"
         );
         let long = card_caption(
             Some(&"x".repeat(200)),

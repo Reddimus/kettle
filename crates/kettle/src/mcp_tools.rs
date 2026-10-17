@@ -752,12 +752,24 @@ fn show_sent(result: &kettle_ctl::show::ShowResult) -> Value {
     } else {
         ", from an unverified sender"
     };
-    let text = format!(
-        "Sent to the Kettle media shelf of pane {} ({}{sender}); the user can open it \
-         there. You have not seen its contents.",
-        result.pane,
-        result.summary()
-    );
+    // A file Kettle does not draw is shown as itself: the line says so,
+    // so a model does not take the card for a picture of it.
+    let text = if result.file.is_some() {
+        format!(
+            "Kettle does not draw this file; it is on the Kettle media shelf of pane {} as \
+             a file card ({}{sender}), which the user can show in its folder. Kettle drew \
+             nothing, and you have not seen its contents.",
+            result.pane,
+            result.summary()
+        )
+    } else {
+        format!(
+            "Sent to the Kettle media shelf of pane {} ({}{sender}); the user can open it \
+             there. You have not seen its contents.",
+            result.pane,
+            result.summary()
+        )
+    };
     let mut sent = json!({
         "content": [{ "type": "text", "text": text }],
         "structuredContent": {
@@ -777,6 +789,9 @@ fn show_sent(result: &kettle_ctl::show::ShowResult) -> Value {
     if let Some(video) = &result.video {
         sent["structuredContent"]["video"] = serde_json::to_value(video).unwrap_or_default();
     }
+    if let Some(file) = &result.file {
+        sent["structuredContent"]["file"] = serde_json::to_value(file).unwrap_or_default();
+    }
     sent
 }
 
@@ -785,11 +800,19 @@ fn show_sent(result: &kettle_ctl::show::ShowResult) -> Value {
 /// carries the card's text.
 fn show_sent_card(result: &kettle_ctl::show::ShowResult, name: &str) -> Value {
     let mut sent = show_sent(result);
-    let text = format!(
-        "Sent to Kettle for display below this call: {name} ({}). You have not seen its \
-         contents.",
-        result.summary()
-    );
+    let text = if result.file.is_some() {
+        format!(
+            "Sent to Kettle for display below this call as a file card: {name} ({}). Kettle \
+             drew nothing of it, and you have not seen its contents.",
+            result.summary()
+        )
+    } else {
+        format!(
+            "Sent to Kettle for display below this call: {name} ({}). You have not seen its \
+             contents.",
+            result.summary()
+        )
+    };
     sent["content"][0]["text"] = Value::String(text);
     sent["structuredContent"]["delivery"] = Value::String("card".into());
     sent
@@ -1657,6 +1680,7 @@ mod tests {
             inline_refused: None,
             page: None,
             video: None,
+            file: None,
         };
         let sent = show_sent(&result);
         let text = sent["content"][0]["text"].as_str().unwrap();
@@ -2129,6 +2153,38 @@ mod tests {
                 .unwrap()
                 .contains("below this call: clip.webm (video 1280x720 VP8 0:12, no audio)")
         );
+    }
+
+    /// A file Kettle does not draw says so: a file card, its size and why,
+    /// that Kettle drew nothing, and that the model has not seen it.
+    #[test]
+    fn a_file_result_says_kettle_drew_nothing() {
+        let result =
+            kettle_ctl::show::ShowResult::file((4, true, 2), 9, 2_400_000, "unsupported_media");
+        let sent = show_sent(&result);
+        let text = sent["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.starts_with("Kettle does not draw this file;"),
+            "{text}"
+        );
+        assert!(
+            text.contains("as a file card (file 2.4 MB, a kind Kettle does not draw)"),
+            "{text}"
+        );
+        assert!(text.contains("Kettle drew nothing") && text.contains("not seen"));
+        assert_eq!(sent["structuredContent"]["kind"], json!("file"));
+        assert_eq!(
+            sent["structuredContent"]["file"],
+            json!({"bytes": 2_400_000, "reason": "unsupported_media"})
+        );
+        assert_eq!(sent["structuredContent"]["model_has_seen"], json!(false));
+        let card = show_sent_card(&result, "report.docx");
+        let text = card["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("as a file card: report.docx (file 2.4 MB, a kind Kettle does not draw)"),
+            "{text}"
+        );
+        assert!(text.contains("drew nothing"));
     }
 
     /// A missing decoder's failure carries the install hint, which tells the

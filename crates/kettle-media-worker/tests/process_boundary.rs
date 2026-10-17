@@ -701,6 +701,62 @@ fn a_cached_thumbnail_renders_only_for_its_video() {
     );
 }
 
+/// Audio Kettle does not draw: an Auto job on a file of any common audio
+/// format is unsupported, or for audio in a video's container with no
+/// decoder to look inside, a container no decoder here reads (macOS) or no
+/// decoder at all (Linux); the GUI shows each as a file card, never a
+/// failure that stays an error. The headers are each format's own.
+#[test]
+fn audio_is_never_drawn() {
+    use std::os::unix::ffi::OsStrExt as _;
+    let mut wav = b"RIFF\x24\x08\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\x44\xac\x00\x00\x88\x58\x01\x00\x02\x00\x10\x00data\x00\x08\x00\x00".to_vec();
+    wav.resize(wav.len() + 2048, 0);
+    let mut mp3 = b"ID3\x04\x00\x00\x00\x00\x00\x00".to_vec();
+    for _ in 0..8 {
+        mp3.extend([0xff, 0xfb, 0x90, 0x64]);
+        mp3.extend([0; 413]);
+    }
+    let mut flac = b"fLaC\x80\x00\x00\x22".to_vec();
+    flac.extend([
+        0x10, 0x00, 0x10, 0x00, 0, 0, 0x0e, 0, 0, 0x0e, 0x0a, 0xc4, 0x40, 0xf0, 0, 0, 0x56, 0x22,
+    ]);
+    flac.extend([0; 16]);
+    flac.extend([0xff, 0xf8, 0x69, 0x08, 0, 0, 0]);
+    let mut m4a = b"\x00\x00\x00\x20ftypM4A \x00\x00\x02\x00M4A mp42isom\x00\x00\x00\x00".to_vec();
+    m4a.extend(b"\x00\x00\x00\x08free");
+    let mut opus = b"OggS\x00\x02\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x13".to_vec();
+    opus.extend(b"OpusHead\x01\x01\x38\x01\x80\xbb\x00\x00\x00\x00\x00");
+    let dir = kettle_test_support::private_tempdir("kettle-worker-audio-");
+    // In a video's container, with no decoder to look inside.
+    let contained = if cfg!(target_os = "macos") {
+        FailureCode::UnsupportedContainer
+    } else {
+        FailureCode::BackendUnavailable
+    };
+    for (name, bytes, code) in [
+        ("tone.wav", wav, FailureCode::UnsupportedMedia),
+        ("tone.mp3", mp3, FailureCode::UnsupportedMedia),
+        ("tone.flac", flac, FailureCode::UnsupportedMedia),
+        ("tone.m4a", m4a, contained),
+        ("tone.opus", opus, contained),
+    ] {
+        let path = dir.path().join(name);
+        std::fs::write(&path, &bytes).unwrap();
+        let Frame::Job(mut job) = job_of(JobKind::Auto, b"") else {
+            unreachable!()
+        };
+        job.source = Source::user_pull(
+            NativePath::new(path.as_os_str().as_bytes().to_vec()).unwrap(),
+            kettle_media::GuiActionWitness::from_explicit_gui_action(),
+        );
+        assert_eq!(
+            reply_from(worker(), &Frame::Job(job)),
+            failure(code),
+            "{name}"
+        );
+    }
+}
+
 #[test]
 fn an_explicit_kind_gets_the_plain_reply() {
     for frame in [job(&png([10, 20, 30, 255])), job_of(JobKind::Svg, SVG_1X1)] {
