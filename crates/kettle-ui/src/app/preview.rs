@@ -1061,7 +1061,7 @@ impl App {
             C::White => C::Checker,
             C::Checker => C::Theme,
         };
-        let diagram = item.kind == kettle_media::MediaKind::Mermaid;
+        let diagram = crate::media::draws_as_diagram(item.kind);
         if let Some(panel) = ws.preview_panels.get_mut(&pane) {
             panel.canvas = Some(next);
             panel.notice = None;
@@ -2590,7 +2590,7 @@ impl App {
             kettle_media::MediaKind::Svg => kettle_i18n::Text::MediaViewerKindSvg,
             kettle_media::MediaKind::Mermaid => kettle_i18n::Text::MediaViewerKindMermaid,
             kettle_media::MediaKind::Video => kettle_i18n::Text::MediaViewerKindVideo,
-            kettle_media::MediaKind::Markdown => kettle_i18n::Text::MediaViewerKindMedia,
+            kettle_media::MediaKind::Markdown => kettle_i18n::Text::MediaViewerKindMarkdown,
         });
         let sender = match &item.provenance {
             crate::media::Provenance::Verified => kettle_render::MediaLaneSender {

@@ -1295,9 +1295,9 @@ impl App {
             kind,
             kettle_media::MediaKind::Svg | kettle_media::MediaKind::Mermaid
         );
-        // A Markdown gallery's item is the page rendered, as the Mermaid it
-        // is, with every page kept to show the others from; so is the first
-        // of diagrams copied together.
+        // A gallery's item is the page rendered, with every page kept to show
+        // the others from: a Markdown file's is Markdown, as its card and the
+        // reply say, and the first of diagrams copied together is Mermaid.
         let (item_kind, source) = if let Some(gallery) = gallery {
             let Some(page) = crate::media::ItemSource::page(&spec, gallery, 0) else {
                 return notify_preview_failure(tr, origin.refuse(FailureCode::OverBudget));
@@ -1313,7 +1313,7 @@ impl App {
             let Some(page) = page else {
                 return notify_preview_failure(tr, origin.refuse(FailureCode::OverBudget));
             };
-            (kettle_media::MediaKind::Mermaid, page)
+            (kettle_media::MediaKind::Markdown, page)
         } else {
             let source = crate::media::ItemSource::new(
                 spec,

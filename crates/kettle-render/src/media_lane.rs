@@ -181,8 +181,8 @@ pub struct MediaLanePanel {
     /// Shown in the image's place when there are no pixels.
     pub status: String,
     pub canvas: MediaCanvas,
-    /// Whether the header offers to open the item in the image viewer this
-    /// platform permits.
+    /// Whether the header offers to open the item in the image viewer or
+    /// video player this platform permits.
     pub open_outside: bool,
     /// Rendered or source.
     pub mode: MediaLaneMode,

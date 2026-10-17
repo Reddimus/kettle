@@ -38,6 +38,16 @@ pub(crate) use cards::HARNESS_CARDS_PER_SECOND;
 pub(crate) use cards::{CardLedger, CardRecord};
 pub(crate) use copy::{CopyContent, CopyService, CopyStarted};
 pub(crate) use crop::{LaneCrop, LaneTile, coverage as crop_coverage, plan_crop};
+
+/// Whether an item of `kind` draws as a Mermaid diagram: on the canvas its
+/// render chose, rendered again when that canvas changes. A Markdown item is
+/// a page of a Markdown file's Mermaid diagrams.
+pub(crate) fn draws_as_diagram(kind: kettle_media::MediaKind) -> bool {
+    matches!(
+        kind,
+        kettle_media::MediaKind::Mermaid | kettle_media::MediaKind::Markdown
+    )
+}
 #[cfg(test)]
 pub(crate) use external::Viewer;
 pub(crate) use external::{

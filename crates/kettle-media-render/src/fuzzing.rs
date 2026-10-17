@@ -196,6 +196,18 @@ mod tests {
         ] {
             seeds_for(&[AUTO, MARKDOWN], markdown, &mut seeds);
         }
+        // Text that starts with an image format's short signature, and DOT,
+        // which starts like a Mermaid flowchart: both are text to classify.
+        for text in [
+            &b"BMI results\n\n```mermaid\nflowchart TD\n  A --> B\n```\n"[..],
+            b"P1 tasks\n\n```mermaid\npie\n  \"a\" : 1\n```\n",
+            b"qoif\nflowchart TD\n  A --> B\n",
+            b"DDS graph TD\n  A --> B\n",
+            b"strict digraph \"deps\" {\n  a -> b [label=<<b>x</b>>];\n}\n",
+            b"graph G { a -- b }",
+        ] {
+            seeds_for(&[AUTO], text, &mut seeds);
+        }
         let seeds: Vec<&[u8]> = seeds.iter().map(Vec::as_slice).collect();
         save_seeds("render", &seeds);
         for case in cases(&seeds, 800, 0x5eed_0004) {

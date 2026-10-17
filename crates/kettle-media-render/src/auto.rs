@@ -5,12 +5,15 @@
 //! takes from the held file with the video's metadata. Anything else is one
 //! snapshot read through the same descriptor, within the largest input cap of
 //! the kinds it can be, and the actual kind's own cap applies before anything
-//! decodes it. Raster is recognized by its magic bytes; SVG is UTF-8 markup whose root element is `svg`; other UTF-8 text
-//! holding a Mermaid fence, as CommonMark reads it, is a Markdown gallery,
-//! whatever it starts with (a README's HTML block or an autolink is no SVG);
-//! other markup is `UnsupportedMedia`, and any other UTF-8 text goes to the
-//! Mermaid renderer, which recognizes a diagram with its own preprocessing as
-//! it parses and refuses anything else. Anything else is `UnsupportedMedia`.
+//! decodes it. A raster is a supported format recognized by its signature
+//! (a BMP also by its header size, since text can start `BM`); SVG is UTF-8
+//! markup whose root element is `svg`; other UTF-8 text holding a Mermaid
+//! fence, as CommonMark reads it, is a Markdown gallery, whatever it starts
+//! with (a README's HTML block or an autolink is no SVG); other markup, and a
+//! Graphviz DOT graph, are `UnsupportedMedia`, and any other UTF-8 text goes
+//! to the Mermaid renderer, which recognizes a diagram with its own
+//! preprocessing as it parses and refuses anything else. Anything else is
+//! `UnsupportedMedia`.
 
 use std::time::Instant;
 
@@ -25,7 +28,7 @@ pub(crate) fn render(
     decoder: Option<&dyn VideoDecoder>,
 ) -> Result<(MediaKind, Rendered), FailureCode> {
     let held = source::hold(&job.source, MAX_VIDEO_PREFIX_BYTES)?;
-    if image::guess_format(held.prefix()).is_err()
+    if raster::recognized(held.prefix()).is_none()
         && let Some(container) = sniff_video_container(held.prefix(), held.size())
     {
         let deadline = Instant::now() + stills::DEADLINE;
@@ -49,7 +52,7 @@ fn render_loaded(
     snapshot: &source::Snapshot<'_>,
     on_kind: &mut impl FnMut(MediaKind),
 ) -> Result<(MediaKind, Rendered), FailureCode> {
-    if image::guess_format(&snapshot.bytes).is_ok() {
+    if raster::recognized(&snapshot.bytes).is_some() {
         snapshot.within(JobKind::Raster.input_cap())?;
         on_kind(MediaKind::Raster);
         return raster::render_loaded(job, snapshot).map(|rendered| (MediaKind::Raster, rendered));
@@ -76,7 +79,9 @@ fn render_loaded(
         return markdown::render_page(job, snapshot, text, pages, 0, control)
             .map(|rendered| (MediaKind::Markdown, rendered));
     }
-    if markup {
+    // A DOT graph is no Mermaid, though Mermaid's flowchart detector takes
+    // any text starting `graph`.
+    if markup || is_dot(text) {
         return Err(FailureCode::UnsupportedMedia);
     }
     // Mermaid is known to be Mermaid only once it parses as a diagram, so
@@ -85,6 +90,108 @@ fn render_loaded(
     let rendered = mermaid::render_loaded(job, snapshot, control)?;
     on_kind(MediaKind::Mermaid);
     Ok((MediaKind::Mermaid, rendered))
+}
+
+/// Whether `text` starts as a Graphviz DOT graph: after a byte-order mark,
+/// white space and DOT's comments (`//`, `/* */`, and `#` lines), an optional
+/// `strict`, then `graph` or `digraph`, an optional name, and `{`. Keywords
+/// are case-insensitive, as DOT's are. Mermaid's `graph TD` header never has
+/// a `{` straight after its direction, so it is not one; nor is a bare
+/// `graph` whose next line starts with a node, as `A{Is it?}` does, which is
+/// Mermaid's header with no direction (DOT files conventionally name their
+/// graph on the keyword's line, though DOT allows it on the next). Only the
+/// first few tokens are read.
+fn is_dot(text: &str) -> bool {
+    let mut rest = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut keyword = dot_word(&mut rest);
+    let strict = keyword.eq_ignore_ascii_case("strict");
+    if strict {
+        keyword = dot_word(&mut rest);
+    }
+    if !(keyword.eq_ignore_ascii_case("graph") || keyword.eq_ignore_ascii_case("digraph")) {
+        return false;
+    }
+    let after_keyword = rest;
+    skip_dot_space(&mut rest);
+    let next_line = after_keyword[..after_keyword.len() - rest.len()].contains('\n');
+    if !rest.starts_with('{')
+        && (next_line && !strict && keyword.eq_ignore_ascii_case("graph")
+            || !skip_dot_id(&mut rest))
+    {
+        return false;
+    }
+    skip_dot_space(&mut rest);
+    rest.starts_with('{')
+}
+
+/// The identifier-like word after any space and comments, consumed; empty
+/// if none starts there.
+fn dot_word<'a>(rest: &mut &'a str) -> &'a str {
+    skip_dot_space(rest);
+    let end = rest
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .unwrap_or(rest.len());
+    let (word, after) = rest.split_at(end);
+    *rest = after;
+    word
+}
+
+/// Skip white space and DOT comments.
+fn skip_dot_space(rest: &mut &str) {
+    loop {
+        let trimmed = rest.trim_start();
+        *rest = if let Some(line) = trimmed
+            .strip_prefix("//")
+            .or_else(|| trimmed.strip_prefix('#'))
+        {
+            line.find('\n').map_or("", |end| &line[end..])
+        } else if let Some(block) = trimmed.strip_prefix("/*") {
+            block.find("*/").map_or("", |end| &block[end + 2..])
+        } else {
+            trimmed
+        };
+        // Nothing stripped: what is left starts with a token.
+        if rest.len() == trimmed.len() {
+            return;
+        }
+    }
+}
+
+/// Skip one DOT identifier: a name, a numeral, a quoted string, or an HTML
+/// string in balanced angle brackets. False if none starts here.
+fn skip_dot_id(rest: &mut &str) -> bool {
+    let mut chars = rest.char_indices();
+    let end = match chars.next() {
+        Some((_, '"')) => {
+            let mut escaped = false;
+            chars
+                .find(|&(_, c)| {
+                    let closes = c == '"' && !escaped;
+                    escaped = c == '\\' && !escaped;
+                    closes
+                })
+                .map(|(at, _)| at + 1)
+        }
+        Some((_, '<')) => {
+            let mut depth = 1_usize;
+            chars
+                .find(|&(_, c)| {
+                    match c {
+                        '<' => depth += 1,
+                        '>' => depth -= 1,
+                        _ => {}
+                    }
+                    depth == 0
+                })
+                .map(|(at, _)| at + 1)
+        }
+        Some((_, c)) if c.is_alphanumeric() || matches!(c, '_' | '-' | '.') => Some(
+            rest.find(|c: char| !(c.is_alphanumeric() || matches!(c, '_' | '-' | '.')))
+                .unwrap_or(rest.len()),
+        ),
+        _ => None,
+    };
+    end.inspect(|&end| *rest = &rest[end..]).is_some()
 }
 
 #[cfg(test)]
@@ -305,6 +412,120 @@ mod tests {
         svg.pop();
         inline.source = Source::Bytes(svg.into_bytes());
         assert_eq!(classify(&inline).1.unwrap().0, MediaKind::Svg);
+    }
+
+    /// Text that starts with a short image signature (a BMP's `BM`, a
+    /// PNM's `P1` to `P7`, QOI's or DDS's four bytes) is still text: a
+    /// Markdown gallery renders as one, never refused as a broken image.
+    #[test]
+    fn text_that_starts_like_an_image_signature_is_still_text() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("notes.md");
+        for first in [
+            "BMI results",
+            "P1 tasks",
+            "P6 notes",
+            "qoif plan",
+            "DDS review",
+        ] {
+            let text = format!("{first}\n\n```mermaid\nflowchart TD\n  A --> B\n```\n");
+            std::fs::write(&path, text).unwrap();
+            let (kinds, result) = classify(&job(&path));
+            assert_eq!(
+                (result.map(|(kind, _)| kind), kinds),
+                (Ok(MediaKind::Markdown), vec![MediaKind::Markdown]),
+                "{first}"
+            );
+        }
+    }
+
+    /// A file in an image format Kettle does not draw is unsupported, and
+    /// is never reported as a raster on its way to the refusal.
+    #[test]
+    fn an_unsupported_image_format_reports_no_kind() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("picture.qoi");
+        std::fs::write(
+            &path,
+            b"qoif\0\0\0\x02\0\0\0\x01\x04\0\xfe\xff\0\0\0\0\0\0\0\x01",
+        )
+        .unwrap();
+        let (kinds, result) = classify(&job(&path));
+        assert_eq!(
+            result.map(|(kind, _)| kind),
+            Err(FailureCode::UnsupportedMedia)
+        );
+        assert!(kinds.is_empty(), "{kinds:?}");
+    }
+
+    /// A Graphviz DOT graph is a format Kettle does not draw, not a broken
+    /// Mermaid flowchart, although both can start with `graph`; Mermaid's
+    /// own `graph` header still renders.
+    #[test]
+    fn a_dot_graph_is_unsupported_not_a_broken_diagram() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("deps.dot");
+        for dot in [
+            "graph G { a -- b }",
+            "digraph {\n  a -> b;\n}\n",
+            "/* generated */\nstrict digraph \"deps\" {\n  a -> b\n}\n",
+        ] {
+            std::fs::write(&path, dot).unwrap();
+            let (kinds, result) = classify(&job(&path));
+            assert_eq!(
+                result.map(|(kind, _)| kind),
+                Err(FailureCode::UnsupportedMedia),
+                "{dot}"
+            );
+            assert!(kinds.is_empty(), "{dot}");
+        }
+        for mermaid in ["graph TD; A-->B", "graph\n  A{Is it?} -->|Yes| B"] {
+            std::fs::write(&path, mermaid).unwrap();
+            let (kinds, result) = classify(&job(&path));
+            assert_eq!(
+                (result.map(|(kind, _)| kind), kinds),
+                (Ok(MediaKind::Mermaid), vec![MediaKind::Mermaid]),
+                "{mermaid}"
+            );
+        }
+    }
+
+    #[test]
+    fn dot_headers_are_told_from_mermaid_ones() {
+        for dot in [
+            "digraph G {a->b}",
+            "graph{a--b}",
+            "\u{feff}strict digraph \"x \\\" y\" {",
+            "/* c */\n// d\n# 1 \"gen.dot\"\nDiGraph G\n{",
+            "STRICT GRAPH -1.5 {",
+            "graph <<b>x<i>y</i></b>> {",
+            "digraph \u{e9}t\u{e9} {",
+            "graph\n{ a -- b }",
+            "digraph\nG {",
+            "strict graph\nG {",
+        ] {
+            assert!(is_dot(dot), "{dot:?}");
+        }
+        for other in [
+            "graph TD\nA-->B",
+            "graph TD; A{x}-->B",
+            "graph LR",
+            "graph",
+            "flowchart TD\nA{x}",
+            "graphs {",
+            "digraph G",
+            "strict graph",
+            "strict {",
+            "%%{init: {}}%%\ngraph TD",
+            "---\ntitle: x\n---\ngraph TD",
+            "/* unterminated digraph {",
+            "graph \"unterminated {",
+            "graph\n  A{Is it?} -->|Yes| B",
+            "graph\nstart{{Begin}} --> x",
+            "",
+        ] {
+            assert!(!is_dot(other), "{other:?}");
+        }
     }
 
     /// A raster is read under its own cap, not the smaller SVG one.

@@ -1,6 +1,6 @@
-//! The external decoder's binaries. They are looked for only in fixed places,
-//! or where Kettle's configuration names them, never in `PATH`, and trusted
-//! only when no one but the user or root could have put them there: the file
+//! The external decoder's binaries. They are looked for only in fixed places
+//! and the user's Nix profile, never in `PATH`, and trusted only when no
+//! one but the user or root could have put them there: the file
 //! and every directory and link on the way to it belong to the user or root,
 //! and none can be written by anyone else. A group- or world-writable
 //! directory passes only with its sticky bit, which keeps others from

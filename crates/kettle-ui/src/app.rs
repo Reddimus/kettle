@@ -1227,7 +1227,7 @@ fn preview_canvas(
 ) -> kettle_render::MediaCanvas {
     use kettle_render::MediaCanvas as C;
     match item.kind {
-        kettle_media::MediaKind::Mermaid => match item.source.spec.canvas {
+        kind if crate::media::draws_as_diagram(kind) => match item.source.spec.canvas {
             kettle_media::Canvas::Theme => C::Theme,
             kettle_media::Canvas::White => C::White,
             kettle_media::Canvas::Checker => C::Checker,

@@ -6,6 +6,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+
+- `list_panes` reports a Markdown file's diagram gallery as `markdown`, the
+  word its `show` result and card use, and the viewer names it "Markdown
+  diagram". Both said Mermaid.
+- An agent's inline card shows once in its pane. Printing its text again, by
+  replaying a saved transcript, used to paint the picture a second time.
+- A file shown with `kettle show`, an agent's `kettle_show` or a preview link
+  is classified by what it is even when its first letters spell an image
+  format's short signature: a Markdown file starting `BMI results` or
+  `P1 tasks` shows its diagrams instead of being refused as a broken image.
+  A Graphviz DOT file is reported as a format Kettle does not draw instead of
+  rendering as a garbled Mermaid flowchart.
+
 ## [5.2.0] — 2026-10-17
 
 ### Changed
