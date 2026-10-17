@@ -16,8 +16,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   says why.
 - PDFs show: `kettle show report.pdf`, an agent's `kettle_show` or a preview
   link puts the first page on the shelf, drawn on white at the size the lane
-  needs. The renderer is hayro, run only in the confined media worker, with
-  a fix for a crafted file that overflowed its parser's stack.
+  needs, and the preview pages through the rest with `‹ ›`, PageUp and
+  PageDown. `kettle show --page N`, the agent tool's `page` and the control
+  API's `page_index` open another page; Home and End go to the first and
+  last. The card's menu and the lane's `↗` open a private copy of the PDF in
+  Preview on macOS, or Papers (else Evince) on Linux. The renderer is hayro,
+  run only in the confined media worker, with a fix for a crafted file that
+  overflowed its parser's stack.
 - TIFF images show like the other formats: the first image of the file, 8 or
   16 bits a channel. A floating-point TIFF is not drawn, since its values
   have no range Kettle could map to colors faithfully.

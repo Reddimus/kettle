@@ -467,9 +467,10 @@ fn pre_launch_spawn_sits_between_app_build_and_run_app() {
         run.find("app.start_first_pane_before_launch()").unwrap(),
         run.find("event_loop.run_app(&mut app)").unwrap(),
         run.find("app.pasted_images.cleanup();").unwrap(),
-        // Copies handed to the image viewer and the video player go on
-        // exit too.
+        // Copies handed to the image viewer, the document viewer and the
+        // video player go on exit too.
         run.find("app.viewer_copies").unwrap(),
+        run.find("app.document_copies.close();").unwrap(),
         run.find("app.video_copies.close();\n        if let Err(error) = &result {")
             .unwrap(),
         run.find("app.runtime_tracker.stop();").unwrap(),
@@ -5821,7 +5822,7 @@ fn a_mermaid_item_gets_a_card_from_source_or_file() {
             (3, &mut pane_cards, (80, 40), 0),
             (8.0, 16.0),
             (9, 0),
-            (kettle_media::MediaKind::Mermaid, None),
+            (kettle_media::MediaKind::Mermaid, None, None),
             &image,
             crate::media::InlineDraft {
                 #[cfg(target_os = "linux")]
@@ -5863,7 +5864,7 @@ fn a_card_is_registered_with_the_message_its_harness_prints() {
         (3, &mut pane_cards, (80, 40), 0),
         (8.0, 16.0),
         (9, 0),
-        (kettle_media::MediaKind::Raster, None),
+        (kettle_media::MediaKind::Raster, None, None),
         &image,
         draft(),
         now,
@@ -5885,7 +5886,7 @@ fn a_card_is_registered_with_the_message_its_harness_prints() {
             (3, &mut pane_cards, (80, 4), 0),
             (8.0, 16.0),
             (9, 0),
-            (kettle_media::MediaKind::Raster, None),
+            (kettle_media::MediaKind::Raster, None, None),
             &image,
             draft(),
             now,
@@ -5899,7 +5900,7 @@ fn a_card_is_registered_with_the_message_its_harness_prints() {
             (3, &mut pane_cards, (80, 40), 0),
             (8.0, 16.0),
             (9, 0),
-            (kettle_media::MediaKind::Raster, None),
+            (kettle_media::MediaKind::Raster, None, None),
             &image,
             draft(),
             now,
@@ -5912,7 +5913,7 @@ fn a_card_is_registered_with_the_message_its_harness_prints() {
             (3, &mut pane_cards, (80, 40), 0),
             (8.0, 16.0),
             (9, 0),
-            (kettle_media::MediaKind::Raster, None),
+            (kettle_media::MediaKind::Raster, None, None),
             &image,
             draft(),
             now,
@@ -6176,6 +6177,7 @@ pub(super) fn test_lane_panel() -> kettle_render::MediaLanePanel {
         hint: "Keys still go to the terminal".into(),
         position: (2, 3),
         page: None,
+        document: false,
         image: Some(kettle_core::ImageData::new(1, 1, vec![0; 4]).unwrap()),
         status: "Released.".into(),
         canvas: kettle_render::MediaCanvas::Theme,

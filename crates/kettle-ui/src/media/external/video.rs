@@ -18,16 +18,15 @@
 use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use kettle_media::video::{VideoContainer, sniff_video_container};
 use kettle_media::{Digest, PathIdentity, VideoCodec};
 
-use super::{OpenFailure, Slot};
+use super::{OpenFailure, PrivateCopies, Slot, copy_failure, private_copy};
 use crate::media::{ShelfItem, SourceInput};
-use crate::paste_image::{PastedImages, VIDEOS};
+use crate::paste_image::PastedImages;
 
 /// The largest video Kettle copies to open outside it.
 pub(crate) const MAX_VIDEO_COPY_BYTES: u64 = 4 * 1024 * 1024 * 1024;
@@ -252,42 +251,6 @@ fn read_only(file: &File) -> io::Result<File> {
     }
 }
 
-/// The private copies handed to the video player, made off the window
-/// thread.
-pub(crate) struct VideoCopies {
-    store: Mutex<PastedImages>,
-    /// Set at exit before the store closes, so a copy on its way stops at
-    /// its next chunk rather than holding exit up.
-    closing: AtomicBool,
-}
-
-impl VideoCopies {
-    pub(crate) fn new() -> Self {
-        Self::of(PastedImages::new(VIDEOS))
-    }
-
-    fn of(store: PastedImages) -> Self {
-        Self {
-            store: Mutex::new(store),
-            closing: AtomicBool::new(false),
-        }
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, PastedImages> {
-        self.store.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// Stop a copy on its way, delete every copy, and take no more. A copy
-    /// being made holds no store, so this waits on none.
-    pub(crate) fn close(&self) {
-        self.closing.store(true, Ordering::Release);
-        self.store
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .close();
-    }
-}
-
 /// What opening a shown video needs: the file it was shown from, what the
 /// worker found it to be, and the digest its poster carries.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -317,22 +280,23 @@ impl VideoSource {
     }
 }
 
-/// The path `path` names, on Unix, where videos open outside Kettle.
+/// The path `path` names, on Unix, where videos and documents open outside
+/// Kettle.
 #[cfg(unix)]
-fn native_path(path: &kettle_media::NativePath) -> Option<PathBuf> {
+pub(super) fn native_path(path: &kettle_media::NativePath) -> Option<PathBuf> {
     use std::os::unix::ffi::OsStrExt as _;
     Some(PathBuf::from(std::ffi::OsStr::from_bytes(path.as_bytes())))
 }
 
 #[cfg(not(unix))]
-fn native_path(_path: &kettle_media::NativePath) -> Option<PathBuf> {
+pub(super) fn native_path(_path: &kettle_media::NativePath) -> Option<PathBuf> {
     None
 }
 
 /// Open a private copy of `video` in `player`, on a short thread. `failed`
 /// hears why, if it does not open; it runs on that thread.
 pub(crate) fn open(
-    copies: Arc<VideoCopies>,
+    copies: Arc<PrivateCopies>,
     video: VideoSource,
     player: Player,
     failed: impl FnOnce(OpenFailure) + Send + 'static,
@@ -361,7 +325,7 @@ pub(crate) fn open(
 /// Check the player and what it can play, copy the video, and start the
 /// player on the copy. A copy that does not reach the player is deleted.
 fn hand_over(
-    copies: &VideoCopies,
+    copies: &PrivateCopies,
     video: &VideoSource,
     player: Player,
 ) -> Result<std::process::Child, OpenFailure> {
@@ -377,9 +341,7 @@ fn hand_over(
     // Kettle's. Started while the store is held, so the copy cannot be
     // dropped for a newer one before the player is on its way to it.
     let started = if store.path_still_matches(&path) {
-        player.start(&store, &path, &video.title, &|| {
-            copies.closing.load(Ordering::Acquire)
-        })
+        player.start(&store, &path, &video.title, &|| copies.closing())
     } else {
         Err(OpenFailure::Copy)
     };
@@ -390,60 +352,20 @@ fn hand_over(
 }
 
 /// Hold the file `video` was shown from and check it is still the one
-/// shown, copy it without holding the store, keep the copy once it is what
-/// was shown, and mark it downloaded. The store is held only to reserve the
-/// copy and to keep it, so neither exit nor another open waits on the file
-/// system.
-fn copy(copies: &VideoCopies, video: &VideoSource) -> Result<PathBuf, OpenFailure> {
+/// shown, then make its private copy ([`private_copy`]) from the held file,
+/// kept once it is what was shown.
+fn copy(copies: &PrivateCopies, video: &VideoSource) -> Result<PathBuf, OpenFailure> {
     let held = Held::open(video)?;
     if held.identity.size > MAX_VIDEO_COPY_BYTES {
         return Err(OpenFailure::Room);
     }
-    let reservation = copies
-        .lock()
-        .reserve_copy(held.identity.size, video.container.extension())
-        .map_err(copy_failure)?;
-    let stop = || copies.closing.load(Ordering::Acquire);
-    // Made and checked without the store: checking reads the source's
-    // metadata, which a network file system may take its time over.
-    let made = reservation
-        .copy(&held.file, &stop, Instant::now() + COPY_DEADLINE)
-        .and_then(|file| match held.check_copy(&file, video.container) {
-            Ok(()) => Ok(file),
-            Err(error) => {
-                reservation.discard(file);
-                Err(error)
-            }
-        });
-    let mut store = copies.lock();
-    let file = match made {
-        Ok(file) => file,
-        Err(error) => {
-            store.release(reservation);
-            return Err(copy_failure(error));
-        }
-    };
-    let path = store
-        .keep_copy(reservation, file, |_| Ok(()))
-        .map_err(copy_failure)?;
-    if store.mark_downloaded(&path).is_err() {
-        let _ = store.remove(&path);
-        return Err(OpenFailure::Copy);
-    }
-    Ok(path)
-}
-
-/// Why a copy failed, for the notice: a store full of copies too new to
-/// drop asks for a while, a full volume says so, and a copy that is not
-/// what was shown, or a source that ended early, says the video changed.
-fn copy_failure(error: io::Error) -> OpenFailure {
-    log::debug!("open: could not copy the video: {error}");
-    match error.kind() {
-        io::ErrorKind::QuotaExceeded => OpenFailure::Busy,
-        io::ErrorKind::StorageFull => OpenFailure::Room,
-        io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof => OpenFailure::Changed,
-        _ => OpenFailure::Copy,
-    }
+    private_copy(
+        copies,
+        (held.identity.size, video.container.extension()),
+        |reservation, stop| reservation.copy(&held.file, stop, Instant::now() + COPY_DEADLINE),
+        |file| held.check_copy(file, video.container),
+    )
+    .map_err(copy_failure)
 }
 
 /// The file a video was shown from, held open, with the identity and first
@@ -502,7 +424,7 @@ impl Held {
 /// `path` opened read-only, without waiting on a FIFO or becoming a
 /// controlling terminal, as the worker opens a source.
 #[cfg(unix)]
-fn open_read_only(path: &Path) -> io::Result<File> {
+pub(super) fn open_read_only(path: &Path) -> io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt as _;
     std::fs::OpenOptions::new()
         .read(true)
@@ -511,17 +433,17 @@ fn open_read_only(path: &Path) -> io::Result<File> {
 }
 
 #[cfg(not(unix))]
-fn open_read_only(path: &Path) -> io::Result<File> {
+pub(super) fn open_read_only(path: &Path) -> io::Result<File> {
     File::open(path)
 }
 
 #[cfg(unix)]
-fn identity(metadata: &std::fs::Metadata) -> Option<PathIdentity> {
+pub(super) fn identity(metadata: &std::fs::Metadata) -> Option<PathIdentity> {
     PathIdentity::of(metadata)
 }
 
 #[cfg(not(unix))]
-fn identity(_metadata: &std::fs::Metadata) -> Option<PathIdentity> {
+pub(super) fn identity(_metadata: &std::fs::Metadata) -> Option<PathIdentity> {
     None
 }
 
@@ -584,8 +506,8 @@ mod tests {
     }
 
     /// Empty video copies whose session would go in `dir`.
-    fn copies_in(dir: &PrivateTempDir) -> VideoCopies {
-        VideoCopies::of(PastedImages::of_kind_in(
+    fn copies_in(dir: &PrivateTempDir) -> PrivateCopies {
+        PrivateCopies::of(PastedImages::of_kind_in(
             crate::paste_image::VIDEOS_ANY_DISK,
             dir.path().join("copies"),
         ))
@@ -765,31 +687,14 @@ mod tests {
         );
     }
 
-    /// A copy that cannot be made says why: a store full of new copies is
-    /// busy, a full disk is out of room, and anything else is the copy.
-    #[test]
-    fn copy_failures_say_why() {
-        for (kind, why) in [
-            (io::ErrorKind::QuotaExceeded, OpenFailure::Busy),
-            (io::ErrorKind::StorageFull, OpenFailure::Room),
-            (io::ErrorKind::InvalidData, OpenFailure::Changed),
-            (io::ErrorKind::UnexpectedEof, OpenFailure::Changed),
-            (io::ErrorKind::TimedOut, OpenFailure::Copy),
-            (io::ErrorKind::Interrupted, OpenFailure::Copy),
-            (io::ErrorKind::PermissionDenied, OpenFailure::Copy),
-        ] {
-            assert_eq!(copy_failure(kind.into()), why, "{kind:?}");
-        }
-    }
-
     /// Once closed, a store copies nothing more, and a copy asks it to stop.
     #[test]
     fn a_closed_store_copies_nothing() {
         let (dir, video) = shown("late.mp4");
         let copies = copies_in(&dir);
-        assert!(!copies.closing.load(Ordering::Acquire));
+        assert!(!copies.closing());
         copies.close();
-        assert!(copies.closing.load(Ordering::Acquire));
+        assert!(copies.closing());
         assert_eq!(copy(&copies, &video), Err(OpenFailure::Copy));
         assert!(!dir.path().join("copies").exists());
     }
@@ -999,7 +904,7 @@ mod tests {
                 "if !player.plays(video.container, video.codec) { return Err(OpenFailure::Unplayable); }",
                 "let path = copy(copies, video)?;",
                 "let mut store = copies.lock();",
-                "if store.path_still_matches(&path) { player.start(&store, &path, &video.title, &|| { copies.closing.load(Ordering::Acquire) })",
+                "if store.path_still_matches(&path) { player.start(&store, &path, &video.title, &|| copies.closing())",
                 "if started.is_err() { let _ = store.remove(&path); }",
             ],
         );
@@ -1008,14 +913,10 @@ mod tests {
             &[
                 "let held = Held::open(video)?;",
                 "if held.identity.size > MAX_VIDEO_COPY_BYTES { return Err(OpenFailure::Room); }",
-                ".reserve_copy(held.identity.size, video.container.extension())",
-                "let made = reservation .copy(&held.file, &stop, Instant::now() + COPY_DEADLINE)",
-                "held.check_copy(&file, video.container)",
-                "reservation.discard(file);",
-                "let mut store = copies.lock();",
-                "store.release(reservation);",
-                ".keep_copy(reservation, file, |_| Ok(()))",
-                "if store.mark_downloaded(&path).is_err() { let _ = store.remove(&path); return Err(OpenFailure::Copy); }",
+                "private_copy( copies, (held.identity.size, video.container.extension()),",
+                "|reservation, stop| reservation.copy(&held.file, stop, Instant::now() + COPY_DEADLINE),",
+                "|file| held.check_copy(file, video.container),",
+                ".map_err(copy_failure)",
             ],
         );
     }

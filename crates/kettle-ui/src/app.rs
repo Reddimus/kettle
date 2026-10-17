@@ -903,8 +903,8 @@ struct ReloadOf {
     key: crate::media::ShelfKey,
     title: String,
     canvas: kettle_media::Canvas,
-    /// The gallery page shown, which the file is read again at.
-    page: Option<u8>,
+    /// The gallery or document page shown, which the file is read again at.
+    page: Option<crate::media::ReadPage>,
 }
 
 /// What reloading `item`, shown in `panel`, reads and keeps: its file, and
@@ -999,7 +999,9 @@ fn lane_render_verdict(
     };
     if expected.as_ref() == Some(digest) {
         LaneRenderVerdict::Same
-    } else if render.page.is_none() && item.source.reads_file() {
+    } else if (render.page.is_none() || item.source.is_document()) && item.source.reads_file() {
+        // Any page of a document reads the file again: a digest that is not
+        // the document's is a file that changed.
         LaneRenderVerdict::Changed
     } else {
         LaneRenderVerdict::Gone
@@ -1028,20 +1030,31 @@ fn lane_takes_page(
     panel: &crate::window_state::PreviewPanel,
     render: &crate::media::LaneRender,
     ask: crate::media::PageAsk,
-    shown: Option<u8>,
+    shown: Option<u32>,
 ) -> bool {
     panel.item == render.item
         && (page_waited_on(panel, render.generation) == Some(ask) || shown == Some(ask.page))
 }
 
-/// The gallery page `step` pages from the one asked for and not yet shown,
-/// else from the one shown, of `count`: `None` past the first or last, as a
-/// gallery does not wrap.
-fn gallery_step(shown: u8, count: usize, asked: Option<u8>, step: i32) -> Option<u8> {
-    let from = i32::from(asked.unwrap_or(shown));
-    from.checked_add(step)
-        .filter(|&page| page >= 0 && (page as usize) < count)
-        .and_then(|page| u8::try_from(page).ok())
+/// The gallery page of `count` that `step` names: its first or last, or so
+/// many on from the one asked for and not yet shown, else from the one
+/// shown; `None` past the first or last, as a gallery does not wrap.
+fn gallery_step(
+    shown: u32,
+    count: usize,
+    asked: Option<u32>,
+    step: crate::media::PageStep,
+) -> Option<u32> {
+    use crate::media::PageStep;
+    let page = match step {
+        PageStep::By(by) => i64::from(asked.unwrap_or(shown)).checked_add(i64::from(by))?,
+        PageStep::First => 0,
+        PageStep::Last => i64::try_from(count).ok()?.checked_sub(1)?,
+    };
+    usize::try_from(page)
+        .is_ok_and(|page| page < count)
+        .then(|| u32::try_from(page).ok())
+        .flatten()
 }
 
 /// Most columns a source scrolls sideways: past any line a source can hold.
@@ -1260,6 +1273,7 @@ fn lane_notice_text(
         N::CopyBusy => T::MediaLaneNoticeCopyBusy,
         N::Rendering => T::MediaLaneNoticeRendering,
         N::RenderingPage => T::MediaLaneNoticeRenderingPage,
+        N::RenderingDocumentPage => T::MediaLaneNoticeRenderingDocumentPage,
         N::RenderFailed => T::MediaLaneNoticeRenderFailed,
         N::Changed => T::MediaLaneNoticeChanged,
         N::PreviewFailed => T::MediaLaneNoticePreviewFailed,
@@ -1377,7 +1391,11 @@ fn media_lane_accessibility(
         Some((page, pages)) => format!(
             "{} · {} · {}",
             lane.detail,
-            tr.media_lane_a11y_diagram(page as u64, pages as u64),
+            if lane.document {
+                tr.media_lane_a11y_page(page as u64, pages as u64)
+            } else {
+                tr.media_lane_a11y_diagram(page as u64, pages as u64)
+            },
             lane.sender.text
         ),
         None => format!("{} · {}", lane.detail, lane.sender.text),
@@ -2457,7 +2475,11 @@ fn register_card(
     ),
     cell: (f32, f32),
     item: (u64, u64),
-    (kind, video): (kettle_media::MediaKind, Option<&kettle_media::VideoInfo>),
+    (kind, video, page): (
+        kettle_media::MediaKind,
+        Option<&kettle_media::VideoInfo>,
+        Option<kettle_media::PageOf>,
+    ),
     image: &kettle_core::ImageData,
     inline: crate::media::InlineDraft,
     now: std::time::Instant,
@@ -2479,6 +2501,7 @@ fn register_card(
             (video.width, video.height)
         }),
         video.map(|video| video.duration_ms),
+        page,
         room,
     );
     let cli = inline.harness == kettle_render::CardHarness::Cli;
@@ -9729,7 +9752,10 @@ pub struct App {
     /// The private copies of videos handed to the video player, made off
     /// the window thread. Owner-only, bounded, oldest dropped first, and
     /// removed on exit.
-    video_copies: std::sync::Arc<crate::media::VideoCopies>,
+    video_copies: std::sync::Arc<crate::media::PrivateCopies>,
+    /// The private copies of PDFs handed to the document viewer, kept as
+    /// the video copies are.
+    document_copies: std::sync::Arc<crate::media::PrivateCopies>,
     /// Previews the user asked for that are on their pane's shelf, waiting
     /// for that pane's window to open them: window, pane and item.
     previews_ready: Vec<(u64, u64, u64)>,
@@ -10800,7 +10826,12 @@ impl App {
             viewer_copies: std::sync::Arc::new(std::sync::Mutex::new(
                 crate::paste_image::PastedImages::new(crate::paste_image::OPENED),
             )),
-            video_copies: std::sync::Arc::new(crate::media::VideoCopies::new()),
+            video_copies: std::sync::Arc::new(crate::media::PrivateCopies::new(
+                crate::paste_image::VIDEOS,
+            )),
+            document_copies: std::sync::Arc::new(crate::media::PrivateCopies::new(
+                crate::paste_image::DOCUMENTS,
+            )),
             previews_ready: Vec::new(),
             ctl_driving: false,
             lua_driving: false,
@@ -10870,8 +10901,9 @@ impl App {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .close();
-        // And the copies handed to the video player; a copy on its way
-        // stops first.
+        // And the copies handed to the document viewer and the video
+        // player; a copy on its way stops first.
+        app.document_copies.close();
         app.video_copies.close();
         if let Err(error) = &result {
             app.runtime_tracker.record_exit(&error.to_string());

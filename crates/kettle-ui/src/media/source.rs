@@ -243,6 +243,27 @@ pub(crate) struct ItemSource {
     /// For a page of a gallery read from a file: that file, and the page
     /// shown, which a reload reads again. Kept when the pages go.
     origin: Option<(NativePath, u8)>,
+    /// For a PDF: the page shown, from 0, and how many the document has.
+    /// Every page renders from the same source, read again, so the digest
+    /// is the document's for each.
+    document: Option<(u32, u32)>,
+}
+
+/// The page a reload reads its file again at: a gallery's or a PDF's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReadPage {
+    Gallery(u8),
+    Document(u32),
+}
+
+impl ReadPage {
+    /// The job that reads that page.
+    pub(crate) fn job_kind(self) -> JobKind {
+        match self {
+            Self::Gallery(index) => JobKind::MarkdownDiagrams { index },
+            Self::Document(index) => JobKind::PdfPage { index },
+        }
+    }
 }
 
 /// What holds an item's text, if any: the bytes a request carried, or else
@@ -291,7 +312,15 @@ impl ItemSource {
             changed: false,
             gallery: None,
             origin: None,
+            document: None,
         }
+    }
+
+    /// This source as page `page` of a document, which pages through by
+    /// reading it again.
+    pub(crate) fn with_pages(mut self, page: Option<kettle_media::PageOf>) -> Self {
+        self.document = page.map(|page| (page.index, page.count));
+        self
     }
 
     /// Page `index` of `gallery`, the pages a render by `spec` returned or
@@ -314,15 +343,28 @@ impl ItemSource {
             changed: false,
             gallery: Some((gallery, index)),
             origin,
+            document: None,
         };
-        source.select(index).then_some(source)
+        source.select(u32::from(index)).then_some(source)
     }
 
     /// Show page `index` of the item's gallery: its source, digest and rows
-    /// become that page's. False, changing nothing, past the last page or
-    /// once the pages are gone.
-    pub(crate) fn select(&mut self, index: u8) -> bool {
-        let Some(spec) = self.page_spec(index) else {
+    /// become that page's. Of a document, the page is what renders next.
+    /// False, changing nothing, past the last page or once a gallery's pages
+    /// are gone.
+    pub(crate) fn select(&mut self, index: u32) -> bool {
+        if let Some((_, count)) = self.document {
+            if index >= count {
+                return false;
+            }
+            self.document = Some((index, count));
+            self.spec.kind = JobKind::PdfPage { index };
+            return true;
+        }
+        let Ok(index) = u8::try_from(index) else {
+            return false;
+        };
+        let Some(spec) = self.page_spec(u32::from(index)) else {
             return false;
         };
         let SourceInput::Bytes(bytes) = &spec.input else {
@@ -343,12 +385,21 @@ impl ItemSource {
         true
     }
 
-    /// The job that renders page `index` of the item's gallery as it
-    /// renders now: on its canvas, theme and target. `None` past the last
-    /// page, without a gallery, or once the pages are gone.
-    pub(crate) fn page_spec(&self, index: u8) -> Option<JobSpec> {
+    /// The job that renders page `index` of the item's gallery or document
+    /// as it renders now: on its canvas, theme and target. A document's page
+    /// reads its source again. `None` past the last page, without pages, or
+    /// once a gallery's pages or a document's carried bytes are gone.
+    pub(crate) fn page_spec(&self, index: u32) -> Option<JobSpec> {
+        if let Some((_, count)) = self.document {
+            // A document's bytes, once given back, have no pages to read.
+            let readable = !matches!(self.spec.input, SourceInput::Released);
+            return (index < count && readable).then(|| JobSpec {
+                kind: JobKind::PdfPage { index },
+                ..self.spec.clone()
+            });
+        }
         let (gallery, _) = self.gallery.as_ref()?;
-        let bytes = gallery.page(usize::from(index))?;
+        let bytes = gallery.page(usize::try_from(index).ok()?)?;
         Some(JobSpec {
             kind: JobKind::Mermaid,
             input: SourceInput::Bytes(Arc::clone(bytes)),
@@ -356,12 +407,23 @@ impl ItemSource {
         })
     }
 
-    /// The digest a render of page `index` of the item's gallery has: its
-    /// bytes', which no file can change. `None` past the last page, without
-    /// a gallery, or once the pages are gone.
-    pub(crate) fn page_digest(&self, index: u8) -> Option<Digest> {
+    /// The digest a render of page `index` has: a gallery page's bytes',
+    /// which no file can change, or a document's own, which any page read
+    /// again has unless the file changed. `None` past the last page, without
+    /// pages, or once a gallery's pages are gone.
+    pub(crate) fn page_digest(&self, index: u32) -> Option<Digest> {
+        if let Some((_, count)) = self.document {
+            return (index < count).then(|| self.digest.clone());
+        }
         let (gallery, _) = self.gallery.as_ref()?;
-        kettle_media::content_digest(gallery.page(usize::from(index))?.as_slice(), None).ok()
+        kettle_media::content_digest(gallery.page(usize::try_from(index).ok()?)?.as_slice(), None)
+            .ok()
+    }
+
+    /// Whether the item is a page of a document, which reads its source
+    /// again for every page.
+    pub(crate) fn is_document(&self) -> bool {
+        self.document.is_some()
     }
 
     /// Whether rendering the item again reads its file.
@@ -369,20 +431,27 @@ impl ItemSource {
         matches!(self.spec.input, SourceInput::Path { .. })
     }
 
-    /// The page shown, from 0, and how many there are, for a page of a
-    /// gallery whose pages are still held.
-    pub(crate) fn gallery_page(&self) -> Option<(u8, usize)> {
+    /// The page shown, from 0, and how many there are: of a gallery whose
+    /// pages are still held, or of a document.
+    pub(crate) fn shown_page(&self) -> Option<(u32, usize)> {
+        if let Some((shown, count)) = self.document {
+            return Some((shown, usize::try_from(count).unwrap_or(usize::MAX)));
+        }
         self.gallery
             .as_ref()
-            .map(|(gallery, shown)| (*shown, gallery.len()))
+            .map(|(gallery, shown)| (u32::from(*shown), gallery.len()))
     }
 
     /// The file a reload reads again: the one the item was read from, or
-    /// the one its gallery was; with the gallery page shown, for a gallery.
-    pub(crate) fn reload_file(&self) -> Option<(&NativePath, Option<u8>)> {
-        match (&self.spec.input, &self.origin) {
-            (SourceInput::Path { path, .. }, _) => Some((path, None)),
-            (_, Some((path, page))) => Some((path, Some(*page))),
+    /// the one its gallery was; with the page shown, for a gallery or a
+    /// document.
+    pub(crate) fn reload_file(&self) -> Option<(&NativePath, Option<ReadPage>)> {
+        match (&self.spec.input, &self.origin, self.document) {
+            (SourceInput::Path { path, .. }, _, Some((shown, _))) => {
+                Some((path, Some(ReadPage::Document(shown))))
+            }
+            (SourceInput::Path { path, .. }, _, None) => Some((path, None)),
+            (_, Some((path, page)), _) => Some((path, Some(ReadPage::Gallery(*page)))),
             _ => None,
         }
     }
@@ -764,8 +833,11 @@ mod tests {
         assert_eq!(page.text(), Some("flowchart LR\n  A --> B\n"));
         assert_eq!(page.text_rows(), 2);
         assert_eq!(page.digest, digest(b"flowchart LR\n  A --> B\n"));
-        assert_eq!(page.gallery_page(), Some((0, 2)));
-        assert_eq!(page.reload_file(), Some((&path, Some(0))));
+        assert_eq!(page.shown_page(), Some((0, 2)));
+        assert_eq!(
+            page.reload_file(),
+            Some((&path, Some(ReadPage::Gallery(0))))
+        );
         assert!(Arc::ptr_eq(
             page.text_backing().unwrap(),
             gallery.page(0).unwrap()
@@ -781,10 +853,13 @@ mod tests {
         assert!(page.select(1));
         assert_eq!(page.text(), Some("pie\n  \"a\" : 1\n"));
         assert_eq!(page.digest, digest(b"pie\n  \"a\" : 1\n"));
-        assert_eq!(page.gallery_page(), Some((1, 2)));
-        assert_eq!(page.reload_file(), Some((&path, Some(1))));
+        assert_eq!(page.shown_page(), Some((1, 2)));
+        assert_eq!(
+            page.reload_file(),
+            Some((&path, Some(ReadPage::Gallery(1))))
+        );
         assert!(!page.select(2));
-        assert_eq!(page.gallery_page(), Some((1, 2)));
+        assert_eq!(page.shown_page(), Some((1, 2)));
         assert!(ItemSource::page(&markdown, Arc::clone(&gallery), 2).is_none());
         assert_eq!(
             page.page_spec(0).unwrap().job().unwrap().job.source,
@@ -792,9 +867,12 @@ mod tests {
         );
 
         page.release();
-        assert_eq!((page.text(), page.gallery_page()), (None, None));
+        assert_eq!((page.text(), page.shown_page()), (None, None));
         assert!(!page.select(0));
-        assert_eq!(page.reload_file(), Some((&path, Some(1))));
+        assert_eq!(
+            page.reload_file(),
+            Some((&path, Some(ReadPage::Gallery(1))))
+        );
 
         let copied = ItemSource::page(
             &spec(Source::Bytes(b"flowchart LR\n  A --> B\n".to_vec())),
