@@ -23,12 +23,19 @@ fn finish_fixture_copy(
     // after this thread closes it. The lock follows that descriptor; taking
     // it from a new read-only handle waits for every inherited writer to close.
     // https://github.com/rust-lang/rust/issues/114554
-    writer.try_lock().map_err(std::io::Error::from)?;
+    // The writer's own lock waits too: a fork of an earlier handle on the same
+    // file may still hold one.
+    let deadline = Instant::now() + timeout;
+    lock_by(&writer, deadline)?;
     drop(writer);
     let reader = std::fs::File::open(path)?;
-    let deadline = Instant::now() + timeout;
+    lock_by(&reader, deadline)
+}
+
+/// Lock `file` exclusively, waiting for whoever holds it until `deadline`.
+fn lock_by(file: &std::fs::File, deadline: Instant) -> std::io::Result<()> {
     loop {
-        match reader.try_lock() {
+        match file.try_lock() {
             Ok(()) => return Ok(()),
             Err(std::fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(1));
@@ -64,8 +71,10 @@ mod tests {
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
         drop(inherited);
 
+        // Another test's fork may still hold the descriptor until its exec:
+        // waiting it out is what the barrier is for.
         let writer = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
-        finish_fixture_copy(writer, &path, Duration::ZERO).unwrap();
+        finish_fixture_copy(writer, &path, Duration::from_secs(5)).unwrap();
     }
 
     #[cfg(target_os = "linux")]
@@ -92,8 +101,9 @@ mod tests {
             std::io::ErrorKind::TimedOut
         );
         drop(inherited);
+        // Another test's fork may still hold the descriptor until its exec.
         let writer = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
-        finish_fixture_copy(writer, &path, Duration::ZERO).unwrap();
+        finish_fixture_copy(writer, &path, Duration::from_secs(5)).unwrap();
         assert!(
             std::process::Command::new(&path)
                 .status()
