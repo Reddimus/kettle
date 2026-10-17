@@ -489,11 +489,9 @@ fn render_hidden_from_observations(
 /// under `RUST_LOG=warn,kettle::cursor_blink=info`.
 const CURSOR_BLINK_LOG: &str = "kettle::cursor_blink";
 
-/// Whether a theme schedule has flipped since the last redraw applied it.
-/// The first decision only seeds the schedule (`poll_theme_schedule`), so it
-/// asks for nothing.
+/// Whether a theme schedule has a decision that the last redraw did not apply.
 fn theme_schedule_redraw_due(last: Option<bool>, now: Option<bool>) -> bool {
-    matches!((last, now), (Some(last), Some(now)) if last != now)
+    now.is_some() && last != now
 }
 
 /// The wait until the next whole wall-clock minute, when a clock or sunrise
@@ -815,6 +813,47 @@ fn lane_previews_item(
         && lane_mode(item, panel) == kettle_render::MediaLaneMode::Rendered
         && !matches!(item.source.spec.input, crate::media::SourceInput::Released))
     .then_some(())
+}
+
+fn lane_frame(
+    item: &crate::media::ShelfItem,
+    panel: &crate::window_state::PreviewPanel,
+    preview: Option<&crate::media::LanePreview>,
+    playback: Option<&crate::media::LanePlayback>,
+) -> Option<kettle_render::MediaLaneFrame> {
+    lane_previews_item(item, panel)?;
+    if let Some(preview) =
+        preview.filter(|preview| preview.serves(item.id, item.generation) && preview.active())
+    {
+        return preview.frame().map(|frame| kettle_render::MediaLaneFrame {
+            sheet: frame.sheet.clone(),
+            source: frame.source,
+            size: item.size,
+        });
+    }
+    let frame = playback
+        .filter(|playback| playback.serves(item.id, item.generation))?
+        .frame()?;
+    Some(kettle_render::MediaLaneFrame {
+        sheet: frame.clone(),
+        source: (0, 0, frame.width, frame.height),
+        size: item.size,
+    })
+}
+
+fn lane_copy_image(
+    item: &crate::media::ShelfItem,
+    frame: Option<kettle_render::MediaLaneFrame>,
+) -> Option<kettle_core::ImageData> {
+    let Some(frame) = frame else {
+        return item.image().cloned();
+    };
+    let (x, y, width, height) = frame.source;
+    if (x, y, width, height) == (0, 0, frame.sheet.width, frame.sheet.height) {
+        Some(frame.sheet)
+    } else {
+        frame.sheet.crop(x, y, width, height)
+    }
 }
 
 /// The rest the real pointer makes on a lane's picture after `current`:
@@ -1449,6 +1488,33 @@ fn lane_interactive_controls(
         .collect()
 }
 
+fn accessibility_lane_controls_key(
+    lane: &kettle_render::MediaLanePanel,
+    geometry: Option<&kettle_render::MediaLaneGeometry>,
+) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (lane.mode == kettle_render::MediaLaneMode::Source).hash(&mut hasher);
+    lane.pin_label.is_some().hash(&mut hasher);
+    geometry.is_some().hash(&mut hasher);
+    let rect_key =
+        |(x, y, width, height): kettle_render::Rect4| [x, y, width, height].map(f32::to_bits);
+    if let Some(geometry) = geometry {
+        for (part, rect, hit) in lane_controls(geometry) {
+            (part, rect.map(rect_key), lane_control_enabled(lane, hit)).hash(&mut hasher);
+        }
+        geometry.scrubber.map(rect_key).hash(&mut hasher);
+        if geometry.scrubber.is_some() {
+            lane.scrubber
+                .as_ref()
+                .map(|bar| (bar.position_ms, bar.duration_ms))
+                .hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
 fn lane_control_enabled(
     lane: &kettle_render::MediaLanePanel,
     hit: kettle_render::MediaLaneHit,
@@ -1543,6 +1609,28 @@ fn accessibility_confirm_button_index(id: NodeId) -> Option<usize> {
     let first = accessibility_modal_id(1, 1).0;
     let raw = id.0.checked_sub(first)?;
     (raw < (1 << 16) - 1).then_some(raw as usize)
+}
+
+fn accessibility_context_menu_item_index(id: NodeId, ws: &WindowState) -> Option<usize> {
+    if ws.confirm_dialog.is_some()
+        || ws.palette_input.is_some()
+        || ws.theme_picker_input.is_some()
+        || ws.layout_picker_input.is_some()
+        || ws.ssh_input.is_some()
+    {
+        return None;
+    }
+    let raw = id.0.checked_sub(accessibility_modal_id(2, 1).0)?;
+    if raw >= (1 << 16) - 1 {
+        return None;
+    }
+    let index = raw as usize;
+    ws.context_menu
+        .as_ref()?
+        .items
+        .get(index)
+        .is_some_and(item_is_dispatchable)
+        .then_some(index)
 }
 
 struct ModalAccessibilityProjection {
@@ -1665,6 +1753,9 @@ fn modal_accessibility_projection(
             }
             if !row.enabled {
                 node.set_disabled();
+            } else {
+                node.add_action(AccessibilityAction::Focus);
+                node.add_action(AccessibilityAction::Click);
             }
             if index == menu.highlight {
                 highlighted = Some(id);
@@ -3502,6 +3593,41 @@ struct ContentBands {
     tab_bar_h: f32,
     status_bar_h: f32,
     vertical_title_edit_h: f32,
+}
+
+impl ContentBands {
+    fn for_restore(mut self, mode: TabBarMode, tabs: usize, cell_height: f32) -> Self {
+        if matches!(mode, TabBarMode::Auto) {
+            self.tab_bar_h = if tabs > 1 { cell_height + 8.0 } else { 0.0 };
+        }
+        self
+    }
+}
+
+#[cfg(test)]
+mod restore_content_tests {
+    use super::*;
+
+    #[test]
+    fn restored_auto_tabs_reserve_chrome_before_spawning() {
+        let surface = (800, 600);
+        let empty = ContentBands::default();
+        let restored = empty.for_restore(TabBarMode::Auto, 2, 16.0);
+        let area = content_rect_for_with_strip(
+            surface,
+            restored,
+            TabBarPos::Top,
+            kettle_config::StatusBarMode::Off,
+            200.0,
+        );
+        assert_eq!(area, (0.0, 24.0, 800.0, 576.0));
+        assert_eq!(
+            grid_dims_px((area.2, area.3), (8.0, 16.0), (0.0, 0.0)),
+            (100, 36)
+        );
+        assert_eq!(empty.for_restore(TabBarMode::Auto, 1, 16.0).tab_bar_h, 0.0);
+        assert_eq!(empty.for_restore(TabBarMode::Off, 2, 16.0).tab_bar_h, 0.0);
+    }
 }
 
 /// Explicit strip-width variant, so callers with `cfg.tab_bar_width` in scope
@@ -5953,6 +6079,20 @@ fn apply_remote_title_transition(
     }
 }
 
+fn retain_live_remote_probes(
+    applied: &mut std::collections::HashMap<(u64, u32), kettle_remote::RemoteProbe>,
+    live_panes: &mut HashSet<(u64, u32)>,
+    panes: impl IntoIterator<Item = (u64, Option<u32>)>,
+) {
+    live_panes.clear();
+    live_panes.extend(
+        panes
+            .into_iter()
+            .filter_map(|(pane_id, pid)| pid.map(|pid| (pane_id, pid))),
+    );
+    applied.retain(|key, _| live_panes.contains(key));
+}
+
 fn stage_applied_remote_probe(
     applied: &mut std::collections::HashMap<(u64, u32), kettle_remote::RemoteProbe>,
     pane_id: u64,
@@ -6096,6 +6236,55 @@ fn queue_watcher_event(
         pending.store(false, Ordering::Release);
         false
     }
+}
+
+fn config_watch_paths(path: &std::path::Path) -> std::io::Result<Vec<std::path::PathBuf>> {
+    let requested = std::path::absolute(path)?;
+    let mut paths = vec![requested.clone()];
+    match std::fs::canonicalize(&requested) {
+        Ok(target) if target != requested => paths.push(target),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    Ok(paths)
+}
+
+fn config_watcher(
+    path: &std::path::Path,
+    trust: ConfigTrust,
+    pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    send: impl Fn() -> bool + Send + 'static,
+) -> Result<notify::RecommendedWatcher, String> {
+    use notify::Watcher as _;
+
+    prepare_config_directory(path, trust).map_err(|error| error.to_string())?;
+    let watched = config_watch_paths(path).map_err(|error| error.to_string())?;
+    let mut directories = Vec::new();
+    for path in &watched {
+        if let Some(parent) = path.parent()
+            && !directories.iter().any(|directory| directory == parent)
+        {
+            directories.push(parent.to_path_buf());
+        }
+    }
+    let watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
+        if let Ok(event) = result
+            && watched
+                .iter()
+                .any(|path| watcher_event_matches(&event, path))
+        {
+            queue_watcher_event(&pending, &send);
+        }
+    })
+    .map_err(|error| error.to_string())?;
+    registered_watcher(watcher, |watcher| {
+        for directory in directories {
+            watcher.watch(&directory, notify::RecursiveMode::NonRecursive)?;
+        }
+        Ok::<_, notify::Error>(())
+    })
+    .map_err(|error| error.to_string())
 }
 
 fn registered_watcher<W, E>(
@@ -7171,6 +7360,8 @@ enum ContextMenuClick {
     /// `menu-item = LABEL = CMD` config entry. Dispatch writes
     /// `CMD\n` to the focused pane's PTY.
     ConfigCommand(String),
+    /// Reopen a detected session in a fresh local pane.
+    ReconnectRemote(String),
     /// Profile picked from the right-click "Profile ▸" submenu.
     /// Dispatch sets `App::config_path` via the profile-path
     /// resolution helper and calls `reload_config`.
@@ -7240,6 +7431,8 @@ enum ContextMenuItem {
     ConfigItem {
         label: String,
         command: String,
+        /// Reconnect commands run in a fresh local pane.
+        new_pane: bool,
     },
     /// Terminator parity, per
     /// [`TERMINATOR-THEME-SUBMENU-DESIGN.md`](
@@ -7760,15 +7953,23 @@ fn tear_lift_ratio(cx: f32, cy: f32, band: (f32, f32, f32, f32), threshold: f32)
 
 /// Re-dock insertion index for a torn-off tab dropped at
 /// `cursor` (main-axis coordinate) given the existing segments' main-axis
-/// midpoints, in order. First segment whose midpoint exceeds the cursor
-/// wins; past every midpoint appends. Distinct from `tab_drag_target_index`
+/// midpoints, in order. Negative midpoints mark hidden segments.
+/// First visible midpoint past the cursor wins; otherwise insert after the
+/// last visible tab. Distinct from `tab_drag_target_index`
 /// (which picks the segment UNDER the cursor for reorder): docking inserts
 /// BETWEEN segments, so a strip of n tabs has n+1 valid slots.
 fn dock_insertion_index(seg_mids: &[f32], cursor: f32) -> usize {
-    seg_mids
-        .iter()
-        .position(|&m| cursor < m)
-        .unwrap_or(seg_mids.len())
+    let mut insertion = 0;
+    for (idx, &mid) in seg_mids.iter().enumerate() {
+        if mid < 0.0 {
+            continue;
+        }
+        if cursor < mid {
+            return idx;
+        }
+        insertion = idx + 1;
+    }
+    insertion
 }
 
 /// The tab index a torn-off tab dropped at `cursor` (main-axis coordinate)
@@ -8409,7 +8610,8 @@ fn layout_picker_list(
                 separator: false,
                 enabled: false,
                 hint: if layouts.is_empty() {
-                    "kettle --save-layout NAME".to_string()
+                    tr.text(kettle_i18n::Text::PickerCreateLayoutHint)
+                        .to_string()
                 } else {
                     String::new()
                 },
@@ -8767,9 +8969,13 @@ fn item_to_click(item: &ContextMenuItem, idx: usize) -> Option<ContextMenuClick>
             ..
         } => Some(ContextMenuClick::Action(action.clone())),
         ContextMenuItem::LuaItem { lua_idx, .. } => Some(ContextMenuClick::LuaMenuItem(*lua_idx)),
-        ContextMenuItem::ConfigItem { command, .. } => {
-            Some(ContextMenuClick::ConfigCommand(command.clone()))
-        }
+        ContextMenuItem::ConfigItem {
+            command, new_pane, ..
+        } => Some(if *new_pane {
+            ContextMenuClick::ReconnectRemote(command.clone())
+        } else {
+            ContextMenuClick::ConfigCommand(command.clone())
+        }),
         ContextMenuItem::Submenu { .. } => Some(ContextMenuClick::DrillIntoSubmenu(idx)),
         ContextMenuItem::WindowChoice { window, panes, .. } => {
             Some(ContextMenuClick::MoveTabToWindow {
@@ -9372,6 +9578,7 @@ pub struct App {
     /// from state this never sees, and a one-shot tab handoff is deleted as it
     /// is read.
     restore_source: Option<std::path::PathBuf>,
+    session_writer: crate::session::SessionWriter,
     /// All per-window state, keyed by the
     /// window's stable sequence number (`WindowState::seq`, 1-based, never
     /// reused). BTreeMap so iteration order is deterministic (window 1, 2,
@@ -9552,7 +9759,7 @@ pub struct App {
     /// stale-result baseline; worker results may overwrite each other before
     /// the event loop consumes them.
     remote_applied: std::collections::HashMap<(u64, u32), kettle_remote::RemoteProbe>,
-    remote_live_panes_scratch: std::collections::HashSet<u64>,
+    remote_live_panes_scratch: std::collections::HashSet<(u64, u32)>,
     /// Reused target collection for the cross-window remote poll.
     remote_targets_scratch: Vec<kettle_remote::RemoteProbeTarget>,
     /// Throttle the remote-detect poll to ~5 Hz. `None` makes the
@@ -9564,6 +9771,7 @@ pub struct App {
     /// The most-recent auto-theme "schedule decision" (true=dark)
     /// we've applied, so a boundary-crossing fires the swap exactly once.
     last_schedule_decision: Option<bool>,
+    os_theme_dark: Option<bool>,
     /// Resolved non-default config file (explicit path or named profile).
     config_path: Option<std::path::PathBuf>,
     /// Provenance paired with `config_path`; profile switching resets this to
@@ -9669,6 +9877,40 @@ fn remote_reconnect_label(
             runtime, container, ..
         } => tr.menu_reattach(runtime.name(), container),
     }
+}
+
+fn remote_reconnect_item(
+    ctx: &kettle_remote::RemoteContext,
+    tr: &kettle_i18n::Translator,
+) -> Option<ContextMenuItem> {
+    Some(ContextMenuItem::ConfigItem {
+        label: remote_reconnect_label(ctx, tr),
+        command: kettle_remote::clone_session_command(ctx)?,
+        new_pane: true,
+    })
+}
+
+fn reconnect_remote_session(
+    mux: &mut Mux,
+    cfg: &Config,
+    geometry: PtyGeometry,
+    waker: kettle_core::Waker,
+    mut command: String,
+) -> Result<PaneInputResult> {
+    mux.split_with_geometry(
+        Dir::Horizontal,
+        false,
+        cfg,
+        geometry,
+        waker,
+        cfg.shell.iter().cloned().collect(),
+        None,
+    )?;
+    let pane = mux
+        .focused()
+        .ok_or_else(|| anyhow::anyhow!("remote reconnect created no pane"))?;
+    command.push('\n');
+    Ok(pane.feed_input(command.as_bytes()))
 }
 
 /// Which broadcast scope the group chord turns on, from `broadcast-default`.
@@ -9878,18 +10120,13 @@ fn persist_keybind_rebind(
         return false;
     };
 
-    let mut saved = true;
-    for old in stale {
-        if let Err(e) = kettle_config::append_keybind(path, old, "unbind") {
-            log::warn!("append_keybind({old}=unbind) failed: {e}");
-            saved = false;
+    match kettle_config::rebind_keybind(path, stale, label, action_name) {
+        Ok(_) => true,
+        Err(e) => {
+            log::warn!("rebind_keybind({label}={action_name}) failed: {e}");
+            false
         }
     }
-    if let Err(e) = kettle_config::append_keybind(path, label, action_name) {
-        log::warn!("append_keybind({label}={action_name}) failed: {e}");
-        saved = false;
-    }
-    saved
 }
 
 fn completion_surface_available(mode: kettle_core::TermMode, display_offset: usize) -> bool {
@@ -10108,44 +10345,27 @@ impl App {
         // files there change often (session.json saves, palette edits, the
         // theme cache, editor swap files), and each atomic `save_session`
         // alone writes `session.json.tmp.*` then renames it, firing 3+ events.
-        let mut watcher = None;
         let config_reload_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        if let Some(path) = startup.config.clone().or_else(Config::default_path)
-            && let Some(dir) = path.parent().map(|p| p.to_path_buf())
-        {
-            match prepare_config_directory(&path, startup.config_trust) {
-                Err(error) => {
-                    log::warn!("config live-reload disabled for {}: {error}", dir.display())
-                }
-                Ok(()) => {
-                    let p = proxy.clone();
-                    let watched = path.clone();
-                    let pending = config_reload_pending.clone();
-                    use notify::Watcher;
-                    let built =
-                        notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-                            if let Ok(ev) = res
-                                && watcher_event_matches(&ev, &watched)
-                            {
-                                queue_watcher_event(&pending, || {
-                                    p.send_event(UserEvent::ReloadConfig).is_ok()
-                                });
-                            }
-                        });
-                    match built.and_then(|w| {
-                        registered_watcher(w, |w| {
-                            w.watch(&dir, notify::RecursiveMode::NonRecursive)
-                        })
-                    }) {
-                        Ok(w) => watcher = Some(w),
-                        Err(error) => log::warn!(
-                            "config live-reload unavailable for {}: {error}",
-                            dir.display()
-                        ),
-                    }
-                }
-            }
-        }
+        let watcher = startup
+            .config
+            .clone()
+            .or_else(Config::default_path)
+            .and_then(|path| {
+                let p = proxy.clone();
+                config_watcher(
+                    &path,
+                    startup.config_trust,
+                    config_reload_pending.clone(),
+                    move || p.send_event(UserEvent::ReloadConfig).is_ok(),
+                )
+                .map_err(|error| {
+                    log::warn!(
+                        "config live-reload unavailable for {}: {error}",
+                        path.display()
+                    );
+                })
+                .ok()
+            });
 
         // Remote-control watcher. Same notify pattern as the
         // config-reload watcher above. When startup.remote_file is
@@ -10353,9 +10573,10 @@ impl App {
         );
         let mut lua_engine: Option<crate::LuaEngine> = None;
         if let Some((script, trust)) = &init_lua {
-            match crate::LuaEngine::new_with_sandbox(
+            match crate::LuaEngine::new_with_config_path(
                 &initial_cfg.theme_name,
                 initial_cfg.lua_sandbox,
+                initial_path.as_deref(),
             ) {
                 Ok(eng) => {
                     let executed = match trust {
@@ -10510,6 +10731,7 @@ impl App {
             #[cfg(target_os = "linux")]
             wayland_file_drops: std::collections::BTreeMap::new(),
             restore_source: None,
+            session_writer: crate::session::SessionWriter::new()?,
             cfg: initial_cfg,
             // Assume writable; `resumed` clears it when a launch override
             // means the named layout was never loaded.
@@ -10589,6 +10811,7 @@ impl App {
             last_remote_poll: None,
             remote_poll_due: None,
             last_schedule_decision: None,
+            os_theme_dark: None,
             config_path: startup.config.clone(),
             config_trust: startup.config_trust,
             config_malformed_last: Vec::new(),
@@ -11402,13 +11625,17 @@ impl App {
     }
 
     fn area(&self, ws: &WindowState) -> Rect {
+        self.area_with_bands(ws, self.content_bands(ws))
+    }
+
+    fn area_with_bands(&self, ws: &WindowState, bands: ContentBands) -> Rect {
         let surface = Self::surface_size(ws).unwrap_or((800, 600));
         // Delegate to the pure helper, threading
         // `cfg.tab_bar_width` so a user-configured strip width
         // is honored.
         let mut area = content_rect_for_with_strip(
             surface,
-            self.content_bands(ws),
+            bands,
             self.cfg.tab_bar_pos,
             self.cfg.status_bar,
             self.cfg.tab_bar_width,
@@ -11485,7 +11712,12 @@ impl App {
     ) -> Vec<Vec<PtyGeometry>> {
         // A restored tab has no lanes: each pane's terminal is its leaf less
         // its titlebar.
-        let area = self.area(ws);
+        let bands = self.content_bands(ws).for_restore(
+            self.cfg.tab_bar,
+            session.tabs.len(),
+            Self::cell_size(ws).map_or(16.0, |(_, height)| height),
+        );
+        let area = self.area_with_bands(ws, bands);
         let style = self.layout_style(ws);
         let terminal = |leaf: Rect, panes: usize| {
             crate::pane_partition::partition_leaf(leaf, style.metrics(panes), None).terminal
@@ -11811,6 +12043,14 @@ impl App {
         // The window, its font or its splits changed what a zoomed lane
         // shows.
         self.lanes_moved(ws);
+    }
+
+    fn restore_scaled_zoom_font(&mut self, ws: &mut WindowState) {
+        if let Some(prev) = ws.scaled_zoom_prev_font_size.take()
+            && let Some(r) = ws.renderer.as_mut()
+        {
+            r.set_font_size(prev);
+        }
     }
 
     /// Shared zoom transition for `Action::ToggleZoom` and
@@ -12865,7 +13105,7 @@ impl App {
         // Terminator parity (layoutlauncher.py): build the layout picker's
         // query and hint the same way as the command palette. An empty
         // layouts dir is fine; the picker shows a "No saved layouts" row
-        // hinting `kettle --save-layout NAME`.
+        // hinting `kettle --layout NAME`.
         let (layout_picker_query, layout_picker_hint, layout_picker) = match &ws.layout_picker_input
         {
             Some((query, selected)) => (
@@ -13309,6 +13549,9 @@ impl App {
             // its sidechannel — otherwise the shell's last line is lost from the trace.
             self.flush_recorder_output(ws);
             let reaped = ws.mux.reap();
+            if reaped.layout_changed {
+                ws.dragging_split = None;
+            }
             // `clear_stale_title_edit` mutates `ws.editing_title`, so it is
             // evaluated into a binding rather than placed on the right of the
             // `||` where a reaped layout would short-circuit past it and
@@ -14396,6 +14639,15 @@ impl App {
         // Snapshot the (tab, pane-leaf) the cursor lives in so we can detect
         // any focus change the action causes.
         let pre_focus = self.focus_key(ws);
+        let save_session = !matches!(
+            action,
+            Action::ScrollPageUp
+                | Action::ScrollPageDown
+                | Action::ScrollLineUp
+                | Action::ScrollLineDown
+                | Action::ScrollToTop
+                | Action::ScrollToBottom
+        );
         match action {
             Action::NewTab => {
                 // Fire LuaEvent::TabAdd with the new active tab index (via
@@ -14460,6 +14712,8 @@ impl App {
                         &e,
                         &self.ui_text,
                     );
+                } else {
+                    self.restore_scaled_zoom_font(ws);
                 }
             }
             Action::SplitDown | Action::SplitUp | Action::SplitAuto => {
@@ -14490,6 +14744,8 @@ impl App {
                 };
                 if let Err(e) = res {
                     report_split_failure(if new_first { "up" } else { "down" }, &e, &self.ui_text);
+                } else {
+                    self.restore_scaled_zoom_font(ws);
                 }
             }
             Action::ClosePane => {
@@ -15113,7 +15369,7 @@ impl App {
             }
             // Terminator parity (layoutlauncher.py): open the runtime layout
             // picker. With no saved layouts the modal still opens, with a hint
-            // to save one with `kettle --save-layout NAME`.
+            // to save one with `kettle --layout NAME`.
             Action::OpenLayoutPicker => {
                 self.close_all_modals(ws);
                 ws.layout_picker_entries = crate::session::Session::list_layouts();
@@ -15623,9 +15879,7 @@ impl App {
                         matches!(action, Action::NextProfile),
                     );
                     if let Some(p) = kettle_config::Config::path_for_profile(&next) {
-                        self.config_path = Some(p);
-                        self.config_trust = ConfigTrust::VerifyDirectory;
-                        self.reload_config(ws);
+                        self.switch_profile(ws, p);
                     }
                 }
             }
@@ -15636,6 +15890,7 @@ impl App {
             // would leave every child process believing its old geometry.
             Action::RotateCw | Action::RotateCcw => {
                 if ws.mux.rotate_layout(action == Action::RotateCw) {
+                    self.restore_scaled_zoom_font(ws);
                     self.resize_all(ws);
                     self.save_session(ws);
                     if let Some(w) = &ws.window {
@@ -15903,7 +16158,9 @@ impl App {
         } else {
             self.resize_all(ws);
         }
-        self.save_session(ws);
+        if save_session {
+            self.save_session(ws);
+        }
         if let Some(w) = &ws.window {
             w.request_redraw();
         }
@@ -16071,19 +16328,19 @@ impl App {
         else {
             return;
         };
-        self.remote_live_panes_scratch.clear();
-        self.remote_live_panes_scratch
-            .extend(ws.mux.panes.keys().copied());
-        self.remote_live_panes_scratch.extend(
-            self.windows
-                .values()
-                .flat_map(|window| window.mux.panes.keys())
-                .copied(),
+        retain_live_remote_probes(
+            &mut self.remote_applied,
+            &mut self.remote_live_panes_scratch,
+            ws.mux
+                .panes
+                .iter()
+                .chain(
+                    self.windows
+                        .values()
+                        .flat_map(|window| window.mux.panes.iter()),
+                )
+                .map(|(&pane_id, pane)| (pane_id, pane.term.child_pid())),
         );
-        let live_panes = &self.remote_live_panes_scratch;
-        self.remote_applied.retain(|(pane_id, pid), _| {
-            live_panes.contains(pane_id) && snapshot.probes.contains_key(pid)
-        });
 
         if update_window_remote_contexts(&snapshot, &mut self.remote_applied, ws) {
             ws.reuse_pane_snapshots_once = false;
@@ -18944,15 +19201,15 @@ impl App {
         if let Some((width, height)) = startup_surface {
             attrs = attrs.with_inner_size(winit::dpi::PhysicalSize::new(width, height));
         }
-        if let Some(geometry) = restore_plan
+        if let Some(surface) = restore_plan
             .as_ref()
-            .and_then(|(_, geometries)| geometries.first())
-            .copied()
-            .flatten()
+            .and_then(|(_, surfaces)| surfaces.first())
         {
-            attrs = attrs
-                .with_position(winit::dpi::PhysicalPosition::new(geometry.x, geometry.y))
-                .with_inner_size(winit::dpi::PhysicalSize::new(geometry.w, geometry.h));
+            let (width, height) = surface.size;
+            attrs = attrs.with_inner_size(winit::dpi::PhysicalSize::new(width, height));
+            if let Some((x, y)) = surface.position {
+                attrs = attrs.with_position(winit::dpi::PhysicalPosition::new(x, y));
+            }
         }
         // Startup is measured, not guessed: the window is created HIDDEN and
         // revealed at the first paint, so everything between here and that
@@ -19180,7 +19437,7 @@ impl App {
             true
         } else {
             match restore_plan.as_ref() {
-                Some((wins, clamped_geometries)) => {
+                Some((wins, surfaces)) => {
                     // The theme is config-governed (the config `theme =` line,
                     // with the compile-time default as fallback) and persisted
                     // via `persist_pref`. Restore never applies a
@@ -19219,15 +19476,22 @@ impl App {
                                 outcome.skipped
                             ));
                         }
-                        if outcome.restored_any {
-                            for (index, sw) in rest.iter().enumerate() {
+                        if !rest.is_empty() {
+                            for (sw, surface) in rest.iter().zip(&surfaces[1..]) {
                                 let sw = crate::session::SWindow {
                                     tabs: sw.tabs.to_vec(),
                                     active: sw.active,
-                                    geometry: clamped_geometries.get(index + 1).copied().flatten(),
+                                    geometry: surface.geometry(),
                                 };
+                                let size =
+                                    winit::dpi::PhysicalSize::new(surface.size.0, surface.size.1);
                                 if self
-                                    .open_window(event_loop, WindowOpen::Restore(sw), None, None)
+                                    .open_window(
+                                        event_loop,
+                                        WindowOpen::Restore(sw),
+                                        None,
+                                        Some(size),
+                                    )
                                     .is_err()
                                 {
                                     self.stash_unrestorable_session(
@@ -19570,6 +19834,13 @@ impl App {
             // fall-back to a new tab when a window cannot be created.
             #[cfg(target_os = "macos")]
             UserEvent::DockCommand(command) => {
+                if command == crate::macos_dock::DockCommand::NewTab
+                    && let Some(w) = &ws.window
+                {
+                    w.set_visible(true);
+                    w.set_minimized(false);
+                    w.focus_window();
+                }
                 self.handle_action(ws, command.action(), _el);
             }
         }
@@ -21557,6 +21828,9 @@ impl App {
         // e.g. a fast `-e cmd` session).
         self.flush_recorder_output(ws);
         let reaped = ws.mux.reap();
+        if reaped.layout_changed {
+            ws.dragging_split = None;
+        }
         // Binding, not an inline call on the right of `||`: see the matching
         // reap in `redraw`.
         let stale_title = clear_stale_title_edit(&ws.mux, &mut ws.editing_title);
@@ -21689,7 +21963,7 @@ impl App {
                                 log::warn!("GPU fault diagnostic write failed: {write_error}");
                             }
                             let backoff = gpu_recovery_backoff(attempt);
-                            self.gpu_recovery.failed(now, backoff);
+                            let now = self.gpu_recovery.failed(backoff);
                             let next = backoff.max(std::time::Duration::from_millis(1));
                             let next =
                                 automation_wait.map_or(next, |automation| automation.min(next));

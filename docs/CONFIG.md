@@ -86,7 +86,7 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `search-foreground` / `search-background` | color | from theme | Search-match + quick-select highlight. Default derives from the active theme (`search-background` → the theme's yellow `palette[3]`, `search-foreground` → the theme background), so it matches whatever theme is set; override with an explicit color |
 | `scrollback` | int / `infinite` | `10000` | Line-count history cap; `0`, `infinite` or `unlimited` = effectively unbounded before the byte cap is applied |
 | `scrollback-bytes` (`scrollback-byte-limit`, `scrollback-memory`) | bytes with optional `K`/`M`/`G`, `KiB`/`MiB`/`GiB`, or `0` | `10000000` | Per-pane scrollback memory budget. Includes the active screen, protects visible rows, and trims oldest history by reducing the effective line cap. `0` disables the byte cap and uses `scrollback` only. The budget is an **estimate over the inline grid**: it does not walk each cell's optional heap storage (combining marks, underline color, hyperlink), because that would mean touching every cell on the PTY reader's path. Those are separately bounded — combining marks are capped per cell, and hyperlink text is shared across the cells of one link — so actual usage exceeds the configured value by a bounded factor rather than an unbounded one |
-| `window-padding-x` / `window-padding-y` | float | `8` | Inner padding (px) |
+| `window-padding-x` / `window-padding-y` | float | `8` | Inner padding (px), `0` or more |
 | `window-width` / `window-height` | int cells | unset | Initial fresh-window terminal grid size. Width is clamped `[20, 400]`, height `[8, 200]`. Unset, a fresh window opens at a `160x45` baseline (about 150 columns at the default font) fitted to 90 % × 85 % of the monitor, which is about 144 columns on a 1366 px wide laptop: the width Claude Code's fullscreen diff panel needs to auto-open (see [TERMINAL-CLIENT-COMPATIBILITY.md](TERMINAL-CLIENT-COMPATIBILITY.md#claude-code-diff-panel)). If only one dimension is set, the other comes from that same `160x45` baseline, and an explicit value is honoured as typed rather than fitted. The font is measured before the window opens, so a set dimension opens at exactly that many cells. An unset dimension keeps the `160x45` baseline's pixel size, converted with an 8×16 px cell in logical pixels, so a HiDPI display gets the same grid and the default window holds about 152x41 cells at the default font. Applied only as the startup seed; restored session geometry and explicit new-window geometry take precedence. For an ~800×600 px window, set `window-width = 98` / `window-height = 35` |
 | `window-position-x` / `window-position-y` | int px | unset | Initial fresh-window position in physical pixels. Negative coordinates are valid for monitors left/above the primary display. Applied only as the startup seed; restored sessions and explicit new-window placement take precedence |
 | `background-opacity` | float | `0.86` macOS/Windows; `0.99` elsewhere | 0..1. Solid backgrounds request an alpha surface below `1.0`; transparent backgrounds use `background-opacity × background-darkness`; image backgrounds always allow decoded image alpha; starfield stays opaque because its shader covers the surface. macOS and Windows default to visible native material; other targets stay at 99% whether compositor blur is available or not. Set this to `1.0` and `window-blur = false` for a fully opaque window. On macOS, the native titlebar stays opaque and follows Kettle's selected light or dark appearance rather than inheriting content alpha |
@@ -671,9 +671,12 @@ image (PNG, JPEG, WebP, BMP, GIF), SVG, Mermaid (`.mmd`, `.mermaid`) and
 Markdown (`.md`, `.markdown`, whose Mermaid diagrams are a gallery) files the
 focused pane names, by their extension, as a whole path (not on
 Windows, where path hints are never resolved) or a local `file://` link.
-Type a label to render that file in its pane's lane, which opens when it is
-ready; a link from another machine's pane is refused. Behind tmux, screen or
-zellij, whose server runs on this computer, it renders as it would locally.
+Type a label to render that file in the configured preview presentation,
+which opens when it is ready (see **Media** above). The default viewer owns
+keyboard input; choose **Pin** or `media-open-mode = lane` to keep the preview
+beside the terminal. An already open preview keeps its presentation. A link
+from another machine's pane is refused. Behind tmux, screen or zellij, whose
+server runs on this computer, it renders as it would locally.
 A control client can open this quick select but not pick from it: only your
 own key press or click reads a file. With nothing to label it says so; a
 file that cannot be previewed (gone, unreadable, too large, not an image, or
@@ -681,21 +684,22 @@ previews unavailable) is explained in a notification. The right-click menu
 offers the same as "Preview in Kettle" on a link to such a file. The command
 palette lists it as "Preview a file in Kettle"; it has no default binding.
 `preview_clipboard_path` (`preview-clipboard-path`) previews the file the
-clipboard names in the focused pane's lane: the first image, SVG, Mermaid or
-Markdown file a file manager copied, or else one copied path (resolved from the
-pane's folder; quotes and a shell's backslash escapes around it are undone)
-or `file://` link. A copied path or link meets the focused pane's gate, as
-one in its output would; a file a file manager copied is this computer's. On
-Windows only a drive path counts, never a `\\host\share` path.
+clipboard names using the configured preview presentation: the first image,
+SVG, Mermaid or Markdown file a file manager copied, or else one copied path
+(resolved from the pane's folder; quotes and a shell's backslash escapes
+around it are undone) or `file://` link. A copied path or link meets the
+focused pane's gate, as one in its output would; a file a file manager copied
+is this computer's. On Windows only a drive path counts, never a
+`\\host\share` path.
 Shift+right-click offers it too, as "Preview Copied File", when the
 clipboard names such a file; only Shift+right-click reads the clipboard for
 that. As with `preview_link`, a control client cannot have it read a file.
 The palette lists it as "Preview the copied file in Kettle".
 `render_clipboard_as_diagram` (`render-clipboard-as-diagram`) renders the
-Mermaid diagram on the clipboard in the focused pane's lane, as `/copy` in
-Claude Code or Codex leaves it: each ```` ```mermaid ```` fence as written,
-several as one gallery paged with the `‹` and `›` on the lane's detail line
-(at most 32: more are refused, never cut short), or else the
+Mermaid diagram on the clipboard using the configured preview presentation,
+as `/copy` in Claude Code or Codex leaves it: each ```` ```mermaid ```` fence
+as written, several as one gallery paged with the `‹` and `›` on the preview's
+detail line (at most 32: more are refused, never cut short), or else the
 diagram in the text, from its front matter, directives or header to its end,
 with the harness's bullet, label, notice, leading and trailing prose and
 common indentation taken off. `render_selection_as_diagram`

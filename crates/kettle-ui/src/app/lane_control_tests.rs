@@ -96,6 +96,103 @@ fn video(seconds: u64) -> kettle_media::VideoInfo {
     }
 }
 
+#[test]
+fn copying_a_paused_video_uses_the_displayed_frame() {
+    use kettle_media::session::{SessionFrame, SessionStatus};
+
+    struct Paused(std::cell::RefCell<Option<SessionFrame>>);
+
+    impl crate::media::PlaybackSession for Paused {
+        fn status(&self) -> SessionStatus {
+            SessionStatus::Opening
+        }
+        fn take_frame(&self) -> Option<SessionFrame> {
+            self.0.borrow_mut().take()
+        }
+        fn recycle(&self, _rgba: Vec<u8>) {}
+        fn play(&self) {}
+        fn pause(&self) {}
+        fn keep(&self) {}
+        fn audio(&self) -> Option<kettle_media::AudioStatus> {
+            None
+        }
+        fn set_muted(&self, _muted: bool) {}
+    }
+
+    let digest = kettle_media::content_digest(b"clip", None).unwrap();
+    let mut clip = with_source(
+        1,
+        crate::media::ItemSource::new(spec(file(b"/clip.mp4")), digest, false, None),
+    );
+    clip.kind = kettle_media::MediaKind::Video;
+    clip.video = Some(video(9));
+    let panel = crate::window_state::PreviewPanel::new(1);
+    let session = Paused(std::cell::RefCell::new(Some(SessionFrame {
+        seq: 1,
+        pts_ms: 4000,
+        width: 1,
+        height: 1,
+        rgba: vec![9, 8, 7, 255],
+    })));
+    let mut playback = crate::media::LanePlayback::new(
+        clip.id,
+        clip.generation,
+        9000,
+        Box::new(session),
+        4000,
+        false,
+        std::time::Instant::now(),
+    );
+    assert!(playback.poll(&kettle_core::GraphicsBudget::default()));
+    let frame = super::lane_frame(&clip, &panel, None, Some(&playback));
+    let copied = super::lane_copy_image(&clip, frame).unwrap();
+    assert_eq!(copied.rgba.as_slice(), &[9, 8, 7, 255]);
+    assert_eq!(
+        copied.allocation_key(),
+        playback.frame().unwrap().allocation_key()
+    );
+
+    let loading = crate::media::LanePreview::loading(
+        clip.id,
+        clip.generation,
+        7,
+        kettle_media::client::RenderControl::default(),
+        std::time::Instant::now(),
+        crate::media::PreviewStart::User,
+    );
+    let frame = super::lane_frame(&clip, &panel, Some(&loading), Some(&playback));
+    assert!(frame.is_none(), "a loading silent preview shows the poster");
+    clip.generation += 1;
+    let frame = super::lane_frame(&clip, &panel, None, Some(&playback));
+    let copied = super::lane_copy_image(&clip, frame).unwrap();
+    assert_eq!(
+        copied.allocation_key(),
+        clip.image().unwrap().allocation_key()
+    );
+}
+
+#[test]
+fn copying_a_sheet_frame_copies_only_its_pixels() {
+    let clip = item(1, kettle_media::MediaKind::Video, b"clip");
+    let sheet = kettle_core::ImageData::new(
+        2,
+        2,
+        vec![1, 1, 1, 255, 2, 2, 2, 255, 3, 3, 3, 255, 4, 4, 4, 255],
+    )
+    .unwrap();
+    let copied = super::lane_copy_image(
+        &clip,
+        Some(kettle_render::MediaLaneFrame {
+            sheet,
+            source: (1, 1, 1, 1),
+            size: (640, 360),
+        }),
+    )
+    .unwrap();
+    assert_eq!((copied.width, copied.height), (1, 1));
+    assert_eq!(copied.rgba.as_slice(), &[4, 4, 4, 255]);
+}
+
 /// A lane offers a silent preview only for a video with a length, shown
 /// rendered, whose source it can read again: not for an image, a video
 /// without length, or one whose bytes went back to the account.

@@ -174,6 +174,51 @@ fn decoded_edge_and_byte_caps_precede_pixel_allocation() {
     }
 }
 
+/// A GIF with a 1x1 screen and one frame of each size. Each frame holds
+/// one pixel's LZW data; a larger frame is refused before it is decoded.
+fn gif_frames(sizes: &[(u32, u32)]) -> Vec<u8> {
+    let mut bytes = b"GIF89a".to_vec();
+    // A 1x1 screen with a two-colour global table.
+    bytes.extend([1, 0, 1, 0, 0x80, 0, 0, 255, 0, 0, 0, 0, 255]);
+    for &(width, height) in sizes {
+        bytes.extend([0x2c, 0, 0, 0, 0]);
+        bytes.extend(u16::try_from(width).unwrap().to_le_bytes());
+        bytes.extend(u16::try_from(height).unwrap().to_le_bytes());
+        bytes.extend([0, 2, 2, 0x44, 0x01, 0]);
+    }
+    bytes.push(0x3b);
+    bytes
+}
+
+/// A GIF frame declares its own size, which can exceed the logical screen,
+/// and the decoder allocates the first frame at that size. Every frame is
+/// held to the decoded edge cap, as the screen is.
+#[test]
+fn gif_frames_past_the_edge_cap_are_refused() {
+    let edge = kettle_media::MAX_DECODED_EDGE;
+    assert!(
+        render(&job(
+            Source::Bytes(gif_frames(&[(1, 1)])),
+            target(1, 1, None)
+        ))
+        .is_ok()
+    );
+    for sizes in [
+        [(edge + 1, 1), (1, 1)],
+        [(1, edge + 1), (1, 1)],
+        [(1, 1), (edge + 1, 1)],
+        [(1, 1), (1, edge + 1)],
+    ] {
+        assert_eq!(
+            render(&job(Source::Bytes(gif_frames(&sizes)), target(4, 4, None))).unwrap_err(),
+            FailureCode::RenderResource,
+            "{sizes:?}"
+        );
+    }
+    let at_the_cap = encode(&solid(edge, 1, [255, 0, 0, 255]), ImageFormat::Gif);
+    assert!(render(&job(Source::Bytes(at_the_cap), target(4, 4, None))).is_ok());
+}
+
 #[test]
 fn gif_returns_first_frame_only() {
     use image::codecs::gif::GifEncoder;

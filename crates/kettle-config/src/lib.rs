@@ -144,6 +144,16 @@ pub(crate) fn parse_hex_or_dec_u32(s: &str) -> Option<u32> {
         .or_else(|| u32::from_str_radix(t, 16).ok())
 }
 
+/// A window padding in pixels: finite and not negative. A negative padding
+/// widens the grid past the window, and a large one asks for a grid of
+/// `usize::MAX` columns.
+fn valid_padding(value: &str) -> Option<f32> {
+    value
+        .parse::<f32>()
+        .ok()
+        .filter(|v| v.is_finite() && *v >= 0.0)
+}
+
 /// Parse a portable `KEY=VALUE` environment assignment. The value may be empty
 /// and may itself contain `=`; the name is intentionally restricted to the
 /// POSIX/Windows-compatible subset so a checked config behaves the same on
@@ -1215,6 +1225,42 @@ impl FontFeature {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ThemeOverrides {
+    palette: Vec<(usize, Rgb)>,
+    background: Option<Rgb>,
+    foreground: Option<Rgb>,
+    cursor: Option<Rgb>,
+    cursor_text: Option<Rgb>,
+    selection_background: Option<Rgb>,
+    selection_foreground: Option<Rgb>,
+}
+
+impl ThemeOverrides {
+    fn apply(&self, theme: &mut Theme) {
+        for &(i, c) in &self.palette {
+            if i < 16 {
+                if i == 4 && theme.accent == theme.palette[4] {
+                    theme.accent = c;
+                }
+                theme.palette[i] = c;
+            }
+        }
+        for (slot, value) in [
+            (&mut theme.background, self.background),
+            (&mut theme.foreground, self.foreground),
+            (&mut theme.cursor, self.cursor),
+            (&mut theme.cursor_text, self.cursor_text),
+            (&mut theme.selection_background, self.selection_background),
+            (&mut theme.selection_foreground, self.selection_foreground),
+        ] {
+            if let Some(color) = value {
+                *slot = color;
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Keys this config sets that kettle accepts but does not act on — see
@@ -1229,6 +1275,7 @@ pub struct Config {
     pub font_size: f32,
     pub theme_name: String,
     pub theme: Theme,
+    pub theme_overrides: ThemeOverrides,
     pub scrollback: usize,
     pub scrollback_bytes: usize,
     pub padding_x: f32,
@@ -2163,6 +2210,32 @@ pub fn persist_config_toggle(path: &Path, key: &str, new_value: &str) -> std::io
 /// Any prior `keybind` line that maps the SAME trigger is dropped first so the
 /// file doesn't accumulate stale duplicates for a re-rebound chord.
 pub fn append_keybind(path: &Path, trigger: &str, action: &str) -> std::io::Result<PathBuf> {
+    let edit = ConfigEdit::begin(path)?;
+    let out = with_keybind(&edit.document.text, trigger, action)?;
+    edit.commit(&out)
+}
+
+/// Bind `trigger` to `action` and unbind each `stale` chord in one atomic
+/// edit, so the file never keeps the unbinds without the new binding, for
+/// example when the new binding would take it past the size cap.
+pub fn rebind_keybind(
+    path: &Path,
+    stale: &[String],
+    trigger: &str,
+    action: &str,
+) -> std::io::Result<PathBuf> {
+    let edit = ConfigEdit::begin(path)?;
+    let mut out = edit.document.text.clone();
+    for old in stale {
+        out = with_keybind(&out, old, "unbind")?;
+    }
+    out = with_keybind(&out, trigger, action)?;
+    edit.commit(&out)
+}
+
+/// `existing` with `keybind = <trigger>=<action>` added and any earlier
+/// binding of the same chord dropped.
+fn with_keybind(existing: &str, trigger: &str, action: &str) -> std::io::Result<String> {
     validate_single_line("keybind trigger", trigger)?;
     validate_single_line("keybind action", action)?;
     let candidate_line = format!("keybind = {trigger}={action}\n");
@@ -2174,8 +2247,6 @@ pub fn append_keybind(path: &Path, trigger: &str, action: &str) -> std::io::Resu
             ),
         ));
     }
-    let edit = ConfigEdit::begin(path)?;
-    let existing = &edit.document.text;
     // Drop any existing `keybind` line whose trigger is the SAME chord, so a
     // re-rebind overwrites instead of stacking. Compare SEMANTICALLY via
     // `parse_trigger`, splitting the value on the LAST `=` like apply_keybind
@@ -2187,6 +2258,10 @@ pub fn append_keybind(path: &Path, trigger: &str, action: &str) -> std::io::Resu
     let line_ending = preferred_line_ending(existing);
     let mut out = String::with_capacity(existing.len() + candidate_line.len() + 2);
     let mut section = parse::Section::default();
+    // The end of the last line Kettle reads. A binding that has to go before
+    // an ignored tail goes here: any earlier spot would let a later Terminator
+    // `new_tab = ...` line replace it.
+    let mut applied_end = 0;
     for segment in existing.split_inclusive('\n') {
         let (line, _) = split_line_ending(segment);
         if line.trim().starts_with('[') {
@@ -2204,6 +2279,9 @@ pub fn append_keybind(path: &Path, trigger: &str, action: &str) -> std::io::Resu
                 == want_trig;
         if !drop {
             out.push_str(segment);
+            if section.applies() && parse_line_key(line).is_some() {
+                applied_end = out.len();
+            }
         }
     }
     if section.applies() {
@@ -2211,7 +2289,10 @@ pub fn append_keybind(path: &Path, trigger: &str, action: &str) -> std::io::Resu
         out.push_str(&format!("keybind = {trigger}={action}"));
         out.push_str(line_ending);
     } else {
-        out.insert_str(0, &format!("keybind = {trigger}={action}{line_ending}"));
+        let tail = out.split_off(applied_end);
+        ensure_blank_line_before_append(&mut out, line_ending);
+        out.push_str(&format!("keybind = {trigger}={action}{line_ending}"));
+        out.push_str(&tail);
     }
     if Config::detect_malformed_values(&out).len() > Config::detect_malformed_values(existing).len()
     {
@@ -2222,7 +2303,7 @@ pub fn append_keybind(path: &Path, trigger: &str, action: &str) -> std::io::Resu
             ),
         ));
     }
-    edit.commit(&out)
+    Ok(out)
 }
 
 fn split_line_ending(segment: &str) -> (&str, &str) {
@@ -2813,6 +2894,7 @@ impl Default for Config {
             // name falls back to Catppuccin Mocha (`Theme::default`) instead.
             theme_name: "TokyoNight Night".to_string(),
             theme: Theme::by_name("TokyoNight Night"),
+            theme_overrides: ThemeOverrides::default(),
             scrollback: 10_000,
             scrollback_bytes: DEFAULT_SCROLLBACK_BYTES,
             padding_x: 8.0,
@@ -3089,6 +3171,31 @@ fn sort_profile_names(names: &mut [String]) {
 }
 
 impl Config {
+    /// Install the theme `theme-mode` selects: the light or dark theme when
+    /// forced, or, under `auto`, for `os_dark` when it is known. A schedule
+    /// decides by the clock instead, so it is left to its own evaluation.
+    pub fn resolve_theme_mode(&mut self, os_dark: Option<bool>) {
+        if self.theme_schedule.is_some() {
+            return;
+        }
+        if let Some(name) = resolve_theme_for_mode(
+            self.theme_mode,
+            &self.theme_name,
+            &self.light_theme,
+            &self.dark_theme,
+            os_dark,
+        ) {
+            self.theme = self.theme_by_name(&name);
+            self.theme_name = name;
+        }
+    }
+
+    pub fn theme_by_name(&self, name: &str) -> Theme {
+        let mut theme = Theme::by_name(name);
+        self.theme_overrides.apply(&mut theme);
+        theme
+    }
+
     /// How long the cursor keeps blinking after the last activity, or `None`
     /// when `cursor-blink-timeout = 0` asks it to blink indefinitely.
     pub fn cursor_blink_timeout(&self) -> Option<std::time::Duration> {
@@ -3576,7 +3683,9 @@ impl Config {
             if parse::section_header(line).is_some() {
                 continue;
             }
-            if !line.contains('=') {
+            if line.contains('\0') {
+                bad.push(format!("contains a NUL byte: {line:?}"));
+            } else if !line.contains('=') {
                 bad.push(format!("missing `=` separator: {line:?}"));
             }
         }
@@ -3590,10 +3699,10 @@ impl Config {
             }
             let ok = match e.key.as_str() {
                 // Padding has no runtime clamp; big pads just shrink the body
-                // area (`cap_axis_cells` keeps screenshots safe). Require a
-                // FINITE value, as the apply arm (`v.is_finite()`) does.
-                // `"inf".parse::<f32>()` succeeds, so without this the
-                // diagnostic would pass a value the runtime ignores.
+                // area (`cap_axis_cells` keeps screenshots safe). Require what
+                // the apply arm does, `valid_padding`: `"inf".parse::<f32>()`
+                // succeeds, so without this the diagnostic would pass a value
+                // the runtime ignores.
                 "padding-x"
                 | "padding_x"
                 | "window-padding-x"
@@ -3601,7 +3710,7 @@ impl Config {
                 | "padding-y"
                 | "padding_y"
                 | "window-padding-y"
-                | "window_padding_y" => v.parse::<f32>().is_ok_and(|n| n.is_finite()),
+                | "window_padding_y" => valid_padding(v).is_some(),
                 // Numerics with a *runtime clamp* must parse AND land inside
                 // the clamp range, or `--check-config` would pass a value the
                 // runtime changes. The runtime still clamps; the warning just
@@ -4421,16 +4530,12 @@ impl Config {
                 // Accept the bare `padding-x`/`-y` spellings as aliases, which
                 // the malformed-value diagnostic also accepts.
                 "window-padding-x" | "padding-x" | "padding_x" => {
-                    if let Ok(v) = e.value.parse::<f32>()
-                        && v.is_finite()
-                    {
+                    if let Some(v) = valid_padding(&e.value) {
                         cfg.padding_x = v;
                     }
                 }
                 "window-padding-y" | "padding-y" | "padding_y" => {
-                    if let Ok(v) = e.value.parse::<f32>()
-                        && v.is_finite()
-                    {
+                    if let Some(v) = valid_padding(&e.value) {
                         cfg.padding_y = v;
                     }
                 }
@@ -5638,44 +5743,17 @@ impl Config {
         if scrollback_infinite == Some(true) {
             cfg.scrollback = INFINITE_SCROLLBACK;
         }
-        for (i, c) in explicit_palette {
-            if i < 16 {
-                // A DERIVED accent (a theme without an
-                // explicit `accent` line snapshots `palette[4]` at parse
-                // time) must follow a config-level `palette = 4=#hex`
-                // override; an explicit theme accent (different from
-                // palette[4]) stays put. Equality is the derivation marker —
-                // and if a theme explicitly set accent == palette[4],
-                // following the override is indistinguishable from derived.
-                if i == 4 && cfg.theme.accent == cfg.theme.palette[4] {
-                    cfg.theme.accent = c;
-                }
-                cfg.theme.palette[i] = c;
-            }
-        }
-        // Apply explicit single-color overrides AFTER the
-        // theme + palette re-apply above so they're order-independent —
-        // `background = #ff0000` keeps the red whether the `theme =`
-        // line comes before or after it. Precedence (highest first):
-        // explicit single-color line > `palette = N=#hex` > `theme =`.
-        if let Some(c) = explicit_background {
-            cfg.theme.background = c;
-        }
-        if let Some(c) = explicit_foreground {
-            cfg.theme.foreground = c;
-        }
-        if let Some(c) = explicit_cursor {
-            cfg.theme.cursor = c;
-        }
-        if let Some(c) = explicit_cursor_text {
-            cfg.theme.cursor_text = c;
-        }
-        if let Some(c) = explicit_selection_bg {
-            cfg.theme.selection_background = c;
-        }
-        if let Some(c) = explicit_selection_fg {
-            cfg.theme.selection_foreground = c;
-        }
+        cfg.theme_overrides = ThemeOverrides {
+            palette: explicit_palette,
+            background: explicit_background,
+            foreground: explicit_foreground,
+            cursor: explicit_cursor,
+            cursor_text: explicit_cursor_text,
+            selection_background: explicit_selection_bg,
+            selection_foreground: explicit_selection_fg,
+        };
+        cfg.theme_overrides.apply(&mut cfg.theme);
+        cfg.resolve_theme_mode(None);
         // Terminator parity (config.py:215-216):
         // compose `visible_bell` + `urgent_bell` into kettle's
         // unified `BellMode` when EITHER appears in the config
@@ -8304,6 +8382,38 @@ cell-height = 1.2\n";
     }
 
     #[test]
+    fn manual_preview_docs_match_the_configured_presentation() {
+        assert_eq!(Config::default().media_open_mode, MediaOpenMode::Overlay);
+        for (guide, required) in [
+            (
+                include_str!("../../../docs/CONFIG.md"),
+                &[
+                    "Type a label to render that file in the configured preview presentation",
+                    "clipboard names using the configured preview presentation",
+                    "Mermaid diagram on the clipboard using the configured preview presentation",
+                ][..],
+            ),
+            (
+                include_str!("../../../docs/AGENT.md"),
+                &["opens in the configured preview presentation once it renders"][..],
+            ),
+        ] {
+            let guide = guide.split_whitespace().collect::<Vec<_>>().join(" ");
+            for &claim in required {
+                assert!(guide.contains(claim), "missing preview guidance: {claim}");
+            }
+            for claim in [
+                "The default viewer owns keyboard input",
+                "Pin",
+                "media-open-mode = lane",
+                "An already open preview keeps its presentation",
+            ] {
+                assert!(guide.contains(claim), "missing preview guidance: {claim}");
+            }
+        }
+    }
+
+    #[test]
     fn media_open_mode_reports_typos_and_keeps_the_default() {
         let text = "media-open-mode = full-screen";
         assert!(!Config::detect_malformed_values(text).is_empty());
@@ -8717,6 +8827,46 @@ cell-height = 1.2\n";
         );
     }
 
+    /// A negative padding would widen the grid past the window; at `-1e30`
+    /// it asked for `usize::MAX` columns. The parser keeps the default and
+    /// the diagnostic reports the line.
+    #[test]
+    fn padding_refuses_negative_values() {
+        for key in ["window-padding-x", "padding_y"] {
+            for value in ["-1", "-1e30", "-0.5"] {
+                let text = format!("{key} = {value}\n");
+                let cfg = Config::parse_text(&text);
+                assert_eq!(cfg.padding_x, Config::default().padding_x, "{text:?}");
+                assert_eq!(cfg.padding_y, Config::default().padding_y, "{text:?}");
+                assert_eq!(Config::detect_malformed_values(&text).len(), 1, "{text:?}");
+            }
+        }
+        assert_eq!(Config::parse_text("padding-x = 0\n").padding_x, 0.0);
+    }
+
+    /// A NUL in a value would end the string a platform API reads: in a
+    /// Windows environment block, `env = A=x\0KETTLE_PID=1` is two variables.
+    /// No setting holds one, so the line is dropped and reported.
+    #[test]
+    fn a_line_with_a_nul_byte_is_dropped_and_reported() {
+        for value in ["\0", "ok\0KETTLE_PID=1\0\0", "ok\0tail"] {
+            let text = format!(
+                "env = A={value}\nterm = {value}\ncolorterm = {value}\nshell = sh{value}\n"
+            );
+            let cfg = Config::parse_text(&text);
+            assert!(cfg.env.is_empty(), "{text:?}");
+            assert_eq!(cfg.term, Config::default().term);
+            assert_eq!(cfg.colorterm, Config::default().colorterm);
+            assert_eq!(cfg.shell, None);
+            let bad = Config::detect_malformed_values(&text);
+            assert_eq!(bad.len(), 4, "{bad:?}");
+            assert!(
+                bad.iter().all(|b| b.starts_with("contains a NUL byte")),
+                "{bad:?}"
+            );
+        }
+    }
+
     /// `accent_color` (snake_case) passes `detect_malformed_values`, so the
     /// apply arm must handle it too. Otherwise `accent_color = #ff8800` passes
     /// `--check-config`, warns "unknown key", and does nothing.
@@ -8991,6 +9141,26 @@ split_horiz = <Control><Shift>j
                 "`{key}` is validated but parse_collect reports it unknown \
                  (validate-but-don't-apply drift): {unknown:?}"
             );
+        }
+    }
+
+    #[test]
+    fn named_runtime_themes_preserve_explicit_colors() {
+        let cfg = Config::parse_text(
+            "palette = 4=#123456\nbackground = #010203\nforeground = #040506\n\
+             cursor-color = #070809\ncursor-fg-color = #ffffff\n\
+             selection-background = #101112\nselection-foreground = #131415\n",
+        );
+        for name in ["TokyoNight Day", "TokyoNight Night"] {
+            let theme = cfg.theme_by_name(name);
+            assert_eq!(theme.palette[4], Rgb::parse("#123456").unwrap());
+            assert_eq!(theme.accent, theme.palette[4]);
+            assert_eq!(theme.background, Rgb::parse("#010203").unwrap());
+            assert_eq!(theme.foreground, Rgb::parse("#040506").unwrap());
+            assert_eq!(theme.cursor, Rgb::parse("#070809").unwrap());
+            assert_eq!(theme.cursor_text, Rgb::parse("#ffffff").unwrap());
+            assert_eq!(theme.selection_background, Rgb::parse("#101112").unwrap());
+            assert_eq!(theme.selection_foreground, Rgb::parse("#131415").unwrap());
         }
     }
 
@@ -10819,6 +10989,30 @@ split_horiz = <Control><Shift>j
     }
 
     #[test]
+    fn loaded_theme_modes_resolve_forced_and_current_os_choices() {
+        for (mode, expected) in [("light", "TokyoNight Day"), ("dark", "TokyoNight Night")] {
+            let cfg = Config::parse_text(&format!(
+                "theme = Dracula\ntheme-mode = {mode}\n\
+                 light-theme = TokyoNight Day\ndark-theme = TokyoNight Night\n"
+            ));
+            assert_eq!(cfg.theme_name, expected);
+            assert_eq!(cfg.theme.background, Theme::by_name(expected).background);
+        }
+        let text = "theme-mode = auto\nlight-theme = TokyoNight Day\n\
+                    dark-theme = TokyoNight Night\ncursor-fg-color = #ffffff\n";
+        for _ in 0..2 {
+            let mut cfg = Config::parse_text(text);
+            cfg.resolve_theme_mode(Some(false));
+            assert_eq!(cfg.theme_name, "TokyoNight Day");
+            assert_eq!(
+                cfg.theme.background,
+                Theme::by_name("TokyoNight Day").background
+            );
+            assert_eq!(cfg.theme.cursor_text, Rgb::parse("#ffffff").unwrap());
+        }
+    }
+
+    #[test]
     fn theme_mode_parses_terminator_values() {
         use ThemeMode::*;
         assert_eq!(Config::default().theme_mode, Explicit);
@@ -11344,6 +11538,35 @@ split_horiz = <Control><Shift>j
                 assert!(!cfg.cursor_blink, "{text:?}");
                 assert_eq!(cfg.keybinds.get(&trigger), Some(&super::Action::NewTab));
                 assert!(text.ends_with(ignored), "{text:?}");
+            }
+        }
+    }
+
+    /// A Terminator `[keybindings]` line such as `new_tab = <Control>r`
+    /// replaces every chord bound to its action. When the file ends in a
+    /// section Kettle ignores, a saved binding goes after the applied lines,
+    /// not to the top of the file, where that line would erase it.
+    #[test]
+    fn append_keybind_survives_terminator_action_assignments() {
+        for accelerator in ["<Control>r", ""] {
+            for ending in ["\n", "\r\n"] {
+                let dir = tempdir_for("keybind-action-order");
+                let path = dir.join("config");
+                let original = format!(
+                    "[keybindings]{ending}new_tab = {accelerator}{ending}[layouts]{ending}"
+                );
+                std::fs::write(&path, &original).unwrap();
+
+                super::append_keybind(&path, "Ctrl+Alt+R", "new_tab").unwrap();
+                let saved = std::fs::read_to_string(&path).unwrap();
+                let cfg = Config::parse_text(&saved);
+                let trigger = super::keybinds::parse_trigger("Ctrl+Alt+R").unwrap();
+                assert_eq!(
+                    cfg.keybinds.get(&trigger),
+                    Some(&super::Action::NewTab),
+                    "{saved:?}"
+                );
+                assert!(saved.ends_with(&format!("[layouts]{ending}")), "{saved:?}");
             }
         }
     }

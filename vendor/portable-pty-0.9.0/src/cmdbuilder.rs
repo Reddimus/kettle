@@ -669,10 +669,7 @@ impl CommandBuilder {
         }
     }
 
-    /// Convert the CommandBuilder to a `std::process::Command` instance.
-    pub(crate) fn as_command(&self) -> anyhow::Result<std::process::Command> {
-        use std::os::unix::process::CommandExt;
-
+    fn effective_cwd(&self) -> anyhow::Result<OsString> {
         let home = self.get_home_dir()?;
         let dir: &OsStr = match self.cwd.as_deref() {
             Some(dir) if self.require_cwd => dir,
@@ -680,6 +677,23 @@ impl CommandBuilder {
                 .filter(|dir| std::path::Path::new(dir).is_dir())
                 .unwrap_or(home.as_ref()),
         };
+        Ok(dir.to_owned())
+    }
+
+    /// Resolve the executable using the same working directory and access checks as spawn.
+    pub fn resolve_program(&self) -> anyhow::Result<OsString> {
+        if self.is_default_prog() {
+            Ok(self.get_shell().into())
+        } else {
+            self.search_path(&self.args[0], &self.effective_cwd()?)
+        }
+    }
+
+    /// Convert the CommandBuilder to a `std::process::Command` instance.
+    pub(crate) fn as_command(&self) -> anyhow::Result<std::process::Command> {
+        use std::os::unix::process::CommandExt;
+
+        let dir = self.effective_cwd()?;
         let shell = self.get_shell();
 
         let mut cmd = if self.is_default_prog() {
@@ -692,7 +706,7 @@ impl CommandBuilder {
             cmd.args(&self.shell_args);
             cmd
         } else {
-            let resolved = self.search_path(&self.args[0], dir)?;
+            let resolved = self.search_path(&self.args[0], &dir)?;
             let mut cmd = std::process::Command::new(&resolved);
             cmd.arg0(&self.args[0]);
             cmd.args(&self.args[1..]);

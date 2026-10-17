@@ -381,11 +381,12 @@ fn every_split_arm_reports_a_failure_the_user_can_see() {
     let report = ["report_split_", "failure("].concat();
     let swallowed = ["could not split pane (", "right): {e}"].concat();
 
-    // One definition plus one call per arm.
+    // One definition plus one call per arm: the two split actions and the
+    // remote reconnect, which opens its pane as a split.
     assert_eq!(
         source.matches(&report).count(),
-        3,
-        "both split arms must report through the shared reporter; add the \
+        4,
+        "every split arm must report through the shared reporter; add the \
              call when you add an arm"
     );
     assert!(
@@ -448,7 +449,8 @@ fn every_reap_site_schedules_the_survivor_resize() {
         .split(&reap_call)
         .skip(1)
         .filter(|tail| {
-            let window = &tail[..tail.len().min(600)];
+            // Room for the drag reset and the comment ahead of the gate.
+            let window = &tail[..tail.len().min(900)];
             window.contains(&title_clear)
                 && window.contains(&gate)
                 && window.contains(&schedule)

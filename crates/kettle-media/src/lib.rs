@@ -1002,6 +1002,26 @@ impl MediaKind {
         }
     }
 
+    /// Refuse a result size past this kind's ceiling. SVG renders, Mermaid
+    /// and Markdown pages included, stay within `MAX_SVG_RENDERED_EDGE` and
+    /// `MAX_SVG_RENDERED_PIXELS`; the general caps, which every kind meets,
+    /// are [`Rendered::validate`]'s.
+    pub(crate) fn validate_result_size(
+        self,
+        width: u32,
+        height: u32,
+    ) -> Result<(), ValidationError> {
+        let svg = matches!(self, Self::Svg | Self::Mermaid | Self::Markdown);
+        if svg
+            && (width > MAX_SVG_RENDERED_EDGE
+                || height > MAX_SVG_RENDERED_EDGE
+                || u64::from(width) * u64::from(height) > MAX_SVG_RENDERED_PIXELS)
+        {
+            return Err(ValidationError::TooLarge);
+        }
+        Ok(())
+    }
+
     /// The longest source a render of this kind returns as it was read: a
     /// textual kind's input cap; `None` for a kind that is not text.
     pub fn exact_source_cap(self) -> Option<usize> {
@@ -1535,12 +1555,14 @@ impl Rendered {
     }
 }
 impl Rendered {
-    /// [`Self::validate`], and as a render of `kind`: a textual kind returns
-    /// its source as read, within the kind's input cap; any other kind none.
+    /// [`Self::validate`], and as a render of `kind`: within the kind's
+    /// result ceiling, and a textual kind returns its source as read, within
+    /// the kind's input cap; any other kind none.
     /// Video stills return what the video is and their frames' times; no
     /// other kind does.
     pub fn validate_as(&self, kind: MediaKind) -> Result<(), ValidationError> {
         self.validate()?;
+        kind.validate_result_size(self.width, self.height)?;
         if (kind == MediaKind::Video) != self.video.is_some() {
             return Err(ValidationError::BadParams);
         }

@@ -331,7 +331,9 @@ dot/space aliases before Win32 normalization can erase them. Neither policy
 overwrites or follows an existing leaf. A writable export parent can still
 rename or remove the staging name or published pathname; the open file object
 remains the one Kettle created. Unix cleanup uses the held private staging
-directory and never unlinks a published export pathname. Cleanup failure is
+directory and never unlinks a published export pathname. Empty staging
+directories are removed only under a verified trusted parent; a concurrently
+writable parent retains the empty reservation. Cleanup failure is
 reported, but the pathname is not
 a durable capability. This policy is not a substitute for private-state storage
 and is never used implicitly.
@@ -375,6 +377,11 @@ the per-pane output drain. Its subsystems are `impl App` blocks in
 | `pointer`, `chrome` | mouse reporting, wheel and selection; the tab bar, its update chip, and the status bar |
 | `accessibility` | the accessibility tree and its actions |
 | `config_reload`, `sessions`, `gpu_recovery` | reloads and themes; session save and restore; GPU loss |
+
+Session saves pass their opt-in gate before snapshotting. One worker performs
+serialization, comparison and durable replacement with one replaceable pending
+snapshot; it holds no queue lock during filesystem work. Shutdown drains the
+latest snapshot after any write already in progress and waits for completion.
 
 The other files in `app/` are its tests. Guards that read the App's source
 use `app_source()`, which joins app.rs and these modules.
@@ -1688,6 +1695,13 @@ pending remote commands, and older agent files.
   4 KiB, and version, filename identity, PID, owner start-time token, and
   `#rrggbb` fields are validated before a claim participates in color
   selection.
+  Creation, color updates, and removal use one presence writer with at most
+  1,024 admitted claims and one pending color per claim. Preview updates replace
+  pending colors without waiting for disk; local ownership and renderer changes
+  stay synchronous. Closing cancels pending colors; reopening the same filename
+  reuses its slot so an old removal cannot erase the replacement claim.
+  Admission or worker-start failure keeps local ownership working without a
+  cross-process claim.
   `accent-color = theme|off|none` opts out; a hex value pins one color.
 
 ## Search architecture
@@ -2341,7 +2355,11 @@ permits. The checked Kettle launcher passes held ELF descriptors over the
 private display connection before exec. The GUI duplicates only that peer's
 descriptors and binds the launch PID/start, executable identity and original
 pane child. The npm route additionally checks Node and its immediate native
-child. This is owner-enabled local provenance, not vendor authentication.
+child. Executable and npm metadata checks inspect access ACLs through the
+open descriptor before accepting private-group write bits. Named users other
+than the owner or root, and named groups other than that private group, must
+have no effective write grant. This is owner-enabled local provenance, not
+vendor authentication.
 
 Rendering retains a launch witness and rechecks it before registering a card.
 Hook pickup consumes its permit before checking the current native parent and

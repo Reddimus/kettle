@@ -120,6 +120,9 @@ class FullscreenTests(unittest.TestCase):
                 checker.programmatic_fullscreen_roundtrip(window, Path(directory))
             trace = json.loads((Path(directory) / "borderless-fullscreen-state.json").read_text())
             self.assertEqual(trace["after"]["surface"]["height"], 512)
+            # The window server's own bounds sit beside the surface, so a stale
+            # surface and a window that never left fullscreen read apart.
+            self.assertIn("appkit_bounds_after", trace)
         self.assertEqual(window.actions, ["toggle_fullscreen", "toggle_fullscreen"])
 
     def test_borderless_restore_uses_one_action_per_transition(self):

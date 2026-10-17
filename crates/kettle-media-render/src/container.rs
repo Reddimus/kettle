@@ -8,7 +8,10 @@
 //! frame it belongs to, or, for a frame with an alpha chunk, never compares
 //! them. So an oversized BMP or WebP is `RenderResource` here, and a WebP
 //! whose lossy frame does not match the size it fills is `RenderParse`, before
-//! it is decoded. Anything these checks cannot read is left to the decoder,
+//! it is decoded. A GIF frame declares its own size, which can exceed the
+//! logical screen, and the decoder allocates the first frame at that size
+//! with only a byte budget, so every frame's size is checked against the
+//! edge cap too. Anything these checks cannot read is left to the decoder,
 //! which refuses it.
 
 use image::ImageFormat;
@@ -20,6 +23,7 @@ pub(crate) fn check(format: ImageFormat, bytes: &[u8]) -> Result<(), FailureCode
     match format {
         ImageFormat::Bmp => bmp_size(bytes).map_or(Ok(()), within_caps),
         ImageFormat::WebP => webp(bytes),
+        ImageFormat::Gif => gif(bytes),
         _ => Ok(()),
     }
 }
@@ -134,6 +138,66 @@ fn vp8_size(bytes: &[u8], at: u64) -> Option<(u64, u64)> {
     let width = u16::from_le_bytes([header[6], header[7]]) & 0x3fff;
     let height = u16::from_le_bytes([header[8], header[9]]) & 0x3fff;
     Some((width.into(), height.into()))
+}
+
+/// Every image descriptor, walking the blocks as GIF89a lays them out after
+/// the logical screen (whose size the decoder reports, and its caller
+/// checks): extensions (`0x21`) and images (`0x2C`), each followed by data
+/// sub-blocks, until the trailer.
+fn gif(bytes: &[u8]) -> Result<(), FailureCode> {
+    if bytes.get(..3) != Some(b"GIF") {
+        return Ok(());
+    }
+    let Some(&flags) = bytes.get(10) else {
+        return Ok(());
+    };
+    let mut at = 13 + color_table(flags);
+    loop {
+        let next = match slice(bytes, at, 1).map(|b| b[0]) {
+            // Introducer and label, then the extension's sub-blocks.
+            Some(0x21) => sub_blocks(bytes, at + 2),
+            // Separator, position, size and flags, an optional local colour
+            // table, then the LZW code size and the image data.
+            Some(0x2C) => {
+                let (Some(width), Some(height), Some(flags)) = (
+                    u16_le(bytes, at + 5),
+                    u16_le(bytes, at + 7),
+                    slice(bytes, at + 9, 1),
+                ) else {
+                    return Ok(());
+                };
+                within_caps((width.into(), height.into()))?;
+                sub_blocks(bytes, at + 10 + color_table(flags[0]) + 1)
+            }
+            // The trailer, or a block the decoder refuses.
+            _ => None,
+        };
+        match next {
+            Some(next) => at = next,
+            None => return Ok(()),
+        }
+    }
+}
+
+/// The size of the colour table a GIF flags byte declares.
+fn color_table(flags: u8) -> u64 {
+    if flags & 0x80 == 0 {
+        0
+    } else {
+        3 << ((flags & 0x07) + 1)
+    }
+}
+
+/// Past the data sub-blocks at `at`: each a length byte and that many bytes,
+/// ended by a zero length. `None` when the data ends first.
+fn sub_blocks(bytes: &[u8], mut at: u64) -> Option<u64> {
+    loop {
+        let len = slice(bytes, at, 1)?[0];
+        at += 1 + u64::from(len);
+        if len == 0 {
+            return Some(at);
+        }
+    }
 }
 
 /// A RIFF chunk header at `at`: its four-character code and payload size.

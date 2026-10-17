@@ -189,6 +189,7 @@ impl App {
             items.push(ContextMenuItem::ConfigItem {
                 label: mi.label.clone(),
                 command: mi.command.clone(),
+                new_pane: false,
             });
         }
     }
@@ -397,12 +398,9 @@ impl App {
         // is unsafe (control chars / shell metachars that can't be
         // neutralized). Drop the menu item and its separator rather than type
         // an unsafe line into the PTY.
-        if let Some(command) = kettle_remote::clone_session_command(ctx) {
+        if let Some(item) = remote_reconnect_item(ctx, &self.ui_text) {
             items.push(ContextMenuItem::Separator);
-            items.push(ContextMenuItem::ConfigItem {
-                label: remote_reconnect_label(ctx, &self.ui_text),
-                command,
-            });
+            items.push(item);
         }
     }
 
@@ -1051,6 +1049,29 @@ impl App {
                 bytes.push(b'\n');
                 self.write_focused_terminal_input(ws, &bytes);
             }
+            ContextMenuClick::ReconnectRemote(command) => {
+                ws.context_menu = None;
+                let pre_focus = self.focus_key(ws);
+                let geometry = self.prospective_split_geometry(ws, Dir::Horizontal, false);
+                let waker = self.waker();
+                match reconnect_remote_session(&mut ws.mux, &self.cfg, geometry, waker, command) {
+                    Ok(result) => {
+                        self.report_input_result(result);
+                        self.hoover_groups(ws);
+                        self.note_focus_change(ws, pre_focus);
+                        if ws.window.is_some() {
+                            ws.pending_resize = true;
+                        } else {
+                            self.resize_all(ws);
+                        }
+                        self.save_session(ws);
+                    }
+                    Err(error) => report_split_failure("right", &error, &self.ui_text),
+                }
+                if let Some(window) = &ws.window {
+                    window.request_redraw();
+                }
+            }
             ContextMenuClick::MoveTabToWindow { window, panes } => {
                 ws.context_menu = None;
                 self.move_tab_to_window(ws, window, &panes);
@@ -1058,9 +1079,7 @@ impl App {
             ContextMenuClick::SetProfile(name) => {
                 ws.context_menu = None;
                 if let Some(p) = kettle_config::Config::path_for_profile(&name) {
-                    self.config_path = Some(p);
-                    self.config_trust = ConfigTrust::VerifyDirectory;
-                    self.reload_config(ws);
+                    self.switch_profile(ws, p);
                 }
             }
             ContextMenuClick::NewTabWithArgv(argv) => {

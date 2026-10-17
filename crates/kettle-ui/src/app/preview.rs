@@ -1309,7 +1309,13 @@ impl App {
                 .text_backing()
                 .map(|text| crate::media::CopyContent::Text(Arc::clone(text))),
             kettle_render::MediaLaneMode::Rendered => {
-                item.image().cloned().map(crate::media::CopyContent::Image)
+                let frame = lane_frame(
+                    item,
+                    panel,
+                    ws.lane_previews.get(&pane),
+                    ws.lane_playbacks.get(&pane),
+                );
+                lane_copy_image(item, frame).map(crate::media::CopyContent::Image)
             }
         };
         let Some(content) = content else {
@@ -2375,6 +2381,13 @@ impl App {
         let (kind, sender) = self.media_item_kind_and_sender(item);
         let text = item.source.text();
         let mode = lane_mode(item, panel);
+        let frame = lane_frame(
+            item,
+            panel,
+            ws.lane_previews.get(&pane),
+            ws.lane_playbacks.get(&pane),
+        );
+        let copy_image = frame.is_some() || item.image().is_some();
         let mut lane = kettle_render::MediaLanePanel {
             focused_control: None,
             pin_label: ws
@@ -2383,7 +2396,7 @@ impl App {
                 .map(|_| tr.text(kettle_i18n::Text::MediaViewerPinShort).to_string()),
             play: None,
             sound: None,
-            frame: None,
+            frame,
             scrubber: None,
             pane,
             rect,
@@ -2418,7 +2431,7 @@ impl App {
             mode,
             source: text.map(|_| kettle_render::MediaLaneSource::default()),
             copy: match mode {
-                kettle_render::MediaLaneMode::Rendered => item.image().is_some(),
+                kettle_render::MediaLaneMode::Rendered => copy_image,
                 kettle_render::MediaLaneMode::Source => true,
             },
             notice: panel
@@ -2462,11 +2475,6 @@ impl App {
             if let Some(preview) = preview.filter(|preview| preview.active()) {
                 match preview.frame() {
                     Some(frame) => {
-                        lane.frame = Some(kettle_render::MediaLaneFrame {
-                            sheet: frame.sheet.clone(),
-                            source: frame.source,
-                            size: item.size,
-                        });
                         lane.notice = Some(tr.media_lane_notice_preview_playing(
                             &kettle_render::duration_label(frame.at_ms),
                             &kettle_render::duration_label(frame.length_ms),
@@ -2509,13 +2517,6 @@ impl App {
                 }
                 Some(crate::media::PlaybackSound::Silent(_)) | None => None,
             };
-            if let Some(frame) = playback.frame() {
-                lane.frame = Some(kettle_render::MediaLaneFrame {
-                    sheet: frame.clone(),
-                    source: (0, 0, frame.width, frame.height),
-                    size: item.size,
-                });
-            }
             let (at, length) = (playback.position_ms(), playback.duration_ms());
             lane.scrubber = Some(kettle_render::MediaLaneScrubber {
                 position_ms: at,

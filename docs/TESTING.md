@@ -10,6 +10,10 @@ adapter-less host can soft-skip the GPU test and a restricted sandbox can
 soft-skip the PTY tests, but that is reduced coverage and must not be reported
 as a native GPU or PTY pass.
 
+Session-save regression coverage injects a blocked writer, queues newer
+snapshots, and checks that shutdown persists only the newest pending snapshot
+after the in-flight write. It needs no GPU, PTY, or filesystem timing assumptions.
+
 ## Run it
 
 ```sh
@@ -810,10 +814,11 @@ Screen-lifecycle fixtures prove that primary and alternate Kitty stores can
 reuse one image id without collision; mode 47 preserves the alternate store
 across both boundaries; mode 1047 preserves it on entry and clears it on
 exit; mode 1049 clears it on entry and preserves it on exit. ED 2 is
-active-buffer-only and RIS clears both stores. Saturation fixtures pin that a
-transmission the full image store refuses still draws but advertises no image
-id (and that its `U=1` virtual form is refused outright), and compositing
-fixtures pin straight-alpha source-over against a transparent and a partly
+active-buffer-only and RIS clears both stores. Saturation fixtures pin eviction
+of eligible older images while preserving the new image's named identity,
+subsequent addressability, and `U=1` virtual placement. When reclamation cannot
+satisfy admission, the upload is refused without producing a placement.
+Compositing fixtures pin straight-alpha source-over against a transparent and a partly
 transparent destination, not only an opaque one, plus the zero-alpha
 short-circuit the blend's divisor depends on.
 
@@ -1811,14 +1816,19 @@ original entry. Discard tests require visible Unix exports to remain in place
 and confine fallible export payloads and cleanup to an owner-only staging
 directory, preserving a competing destination. macOS seeds an inheritable
 read ACL and proves atomic publication from an ACL-free staging directory
-leaves the new leaf with no extended ACL. Native Windows pins the
+leaves the new leaf with no extended ACL. A macOS private-file regression
+observes the inode before its first hardening, requires it to be ACL-free,
+and verifies append semantics after seeking. Native Windows pins the
 parent against rename, verifies the protected DACL, and rejects alternate
 streams, trailing-dot aliases, and embedded NULs before path normalization.
 The missing-parent and existing-leaf cases fail without creating or changing
 anything on every platform. Streaming-publication tests prove the requested
 destination stays absent while bytes are written to its owner-only sibling,
 publication creates the complete inode with a no-replace hard link or atomic
-rename fallback, and no staging name remains. A platform seam forces only the
+rename fallback, and no staging name remains under a trusted parent. A Unix
+discard regression displaces the private staging directory and installs a
+replacement, then proves cleanup removes only the held directory's payload.
+A platform seam forces only the
 hard-link syscall to fail, then exercises the real `renameat2`,
 `renameatx_np`, or `FILE_RENAME_INFO` path and its racing-destination refusal.
 Deterministic nonce injection
@@ -2776,6 +2786,11 @@ Three mutations were compiled and red-checked: removing local claim collection,
 removing the theme-color update to a live claim, and omitting the client/frame
 inset from the drag anchor. Each failed its regression test at runtime. These
 pure tests do not replace the native dispatch check below.
+
+The presence publisher tests use private temporary claims and a blocked writer
+backend. They cover bounded admission, coalescing theme previews while local
+accents update immediately, closing during an in-flight write, and reopening
+that filename without losing the replacement claim. They need no native window.
 
 Run `scripts/check-tab-window-transfer.py --kettle <binary> --worker <worker>
 --out <new-directory>` under an isolated Linux X server; add `--language es`
@@ -4177,8 +4192,11 @@ and files; the old construction failed under umask `002` before the correction.
 
 `just dock-menu-smoke` drives the real Dock. It reads the menu back through
 accessibility, requires the New Window and New Tab rows plus at least one
-open-window title above them, then clicks New Window and requires the window
-count to reach two over the control plane. Screenshots play no part: the Dock
+open-window title above them, minimizes the sole window, and clicks New Tab.
+It requires one additional tab, the same window restored, and application focus
+before clicking New Window and requiring two windows over the control plane.
+The portable Dock wiring test pins restoration before action dispatch.
+Screenshots play no part: the Dock
 is filtered out of automation captures at the allowlist level, which is why
 five release runs recorded in `APPEARANCE-GATE.md` could not judge the Dock
 from a screen capture. Accessibility enumeration is a different surface and
@@ -5626,7 +5644,10 @@ missing tools and unrun platforms as explicit skips in the release audit.
 Portable tests cover hook profiles, direct/npm ancestry, pane generation,
 one-use pickup, expiry/capacity and redacted permit serialization. Native
 Linux tests exercise held ELF metadata, descriptor transfer, executable
-changes and agent exit. Launcher fixtures check native and npm layouts,
+changes and agent exit. Access ACL fixtures reject named-user and named-group
+write grants through the private-group exception and accept masked grants;
+filesystems without access ACL support skip that fixture explicitly.
+Launcher fixtures check native and npm layouts,
 relative PATH preservation and close-on-exec descriptors. zsh/fish fixtures
 verify each enabled agent independently, unchanged argument forwarding,
 noninteractive shells and user-defined functions. MCP tests keep card text

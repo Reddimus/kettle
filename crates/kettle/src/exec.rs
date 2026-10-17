@@ -464,6 +464,9 @@ impl AnsiStripper {
                     Self::after_escape(b)
                 }
                 StripState::EscapeIntermediate { remaining } => {
+                    if matches!(b, 0x00..=0x17 | 0x19 | 0x1c..=0x1f) {
+                        out.push(b);
+                    }
                     if matches!(b, 0x18 | 0x1a) {
                         StripState::Ground
                     } else if b == 0x1b {
@@ -477,6 +480,9 @@ impl AnsiStripper {
                     }
                 }
                 StripState::Csi { remaining } => {
+                    if matches!(b, 0x00..=0x17 | 0x19 | 0x1c..=0x1f) {
+                        out.push(b);
+                    }
                     if matches!(b, 0x18 | 0x1a) {
                         StripState::Ground
                     } else if b == 0x1b {
@@ -5216,11 +5222,38 @@ mod tests {
         }
     }
 
+    #[test]
+    fn stripping_preserves_executable_controls_inside_sequences() {
+        for prefix in [b"A\x1b[".as_slice(), b"A\x1b[31", b"A\x1b[1 ", b"A\x1b("] {
+            for controls in [
+                b"\t".as_slice(),
+                b"\n",
+                b"\r",
+                b"\r\n",
+                b"\x00\x07\x08\x0b\x0c\x19\x1c\x1f",
+            ] {
+                let mut wire = prefix.to_vec();
+                wire.extend_from_slice(controls);
+                wire.extend_from_slice(b"mB");
+                let mut expected = b"A".to_vec();
+                expected.extend_from_slice(controls);
+                expected.push(b'B');
+                for split in 0..=wire.len() {
+                    let mut stripper = AnsiStripper::default();
+                    let mut output = Vec::new();
+                    stripper.push(&wire[..split], &mut output);
+                    stripper.push(&wire[split..], &mut output);
+                    assert_eq!(output, expected, "wire={wire:?}, split={split}");
+                }
+            }
+        }
+    }
+
     /// Every parser-state sibling crossed with every cancellation/termination
     /// event. Some pairs deliberately do not terminate: BEL is data in a
-    /// DCS/APC-style string, while BEL and raw ST are parameter/intermediate
-    /// bytes in CSI and ESC-intermediate states. The expected-state matrix
-    /// pins those distinctions.
+    /// DCS/APC-style string and executes within CSI and ESC-intermediate
+    /// sequences. Raw ST also leaves those sequences open. The expected-state
+    /// matrix pins those distinctions.
     #[test]
     fn ansi_stripper_control_events_cover_every_state_cross_product() {
         #[derive(Clone, Copy)]
@@ -5365,7 +5398,13 @@ mod tests {
                     let control_prefix: &[u8] = match (state, event) {
                         (StateCase::Ground, Event::Can) => b"\x18",
                         (StateCase::Ground, Event::Sub) => b"\x1a",
-                        (StateCase::Ground | StateCase::Escape, Event::Bel) => b"\x07",
+                        (
+                            StateCase::Ground
+                            | StateCase::Escape
+                            | StateCase::EscapeIntermediate
+                            | StateCase::Csi,
+                            Event::Bel,
+                        ) => b"\x07",
                         _ => b"",
                     };
                     let mut expected = control_prefix.to_vec();

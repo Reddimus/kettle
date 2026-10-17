@@ -2,6 +2,39 @@
 
 use super::*;
 
+/// Receive one legacy handoff; the sender closes its write half after the JSON.
+/// A read timeout bounds stalls while waiting for that EOF.
+#[cfg(unix)]
+fn receive_handoff_session(
+    socket: &std::os::unix::net::UnixStream,
+) -> std::io::Result<crate::session::Session> {
+    const LIMIT: usize = 1024 * 1024;
+    socket.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+    let mut payload = vec![0u8; LIMIT + 1];
+    let mut used = 0;
+    loop {
+        let (n, fds) = crate::fd_transport::recv_fds(socket, &mut payload[used..], 64)?;
+        for fd in fds {
+            // SAFETY: recv_fds transferred ownership; PTY adoption is unsupported.
+            unsafe {
+                libc::close(fd);
+            }
+        }
+        if n == 0 {
+            break;
+        }
+        used += n;
+        if used > LIMIT {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "tab handoff exceeds 1 MiB",
+            ));
+        }
+    }
+    serde_json::from_slice(&payload[..used])
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
 impl App {
     /// Snapshot ONE window (its tabs + geometry).
     pub(super) fn snapshot_window(w: &WindowState) -> crate::session::SWindow {
@@ -42,6 +75,19 @@ impl App {
     }
 
     pub(super) fn save_session(&self, ws: &WindowState) {
+        let target = session_write_target(
+            self.startup.layout.as_deref(),
+            self.named_layout_writable,
+            should_restore_session(
+                self.startup.restore,
+                self.cfg.restore_session,
+                self.other_builds.running(),
+            ),
+            false,
+        );
+        if target == SessionWriteTarget::Skip {
+            return;
+        }
         // Serialize EVERY live window (the checked-out one plus the map),
         // ordered by seq so window 1 stays first. Windows whose mux is already
         // empty (a close_window in flight) are dropped, since there is nothing
@@ -80,20 +126,12 @@ impl App {
         // launch is in restore mode — symmetric with the opt-in load gate. A
         // fresh (non-opted-in) window must NOT overwrite the saved layout that
         // `--restore` / `restore-session = true` exists to recover.
-        match session_write_target(
-            self.startup.layout.as_deref(),
-            self.named_layout_writable,
-            should_restore_session(
-                self.startup.restore,
-                self.cfg.restore_session,
-                self.other_builds.running(),
-            ),
-            s.is_empty(),
-        ) {
-            SessionWriteTarget::NamedLayout(name) => s.save_layout(name),
-            SessionWriteTarget::DefaultSession => s.save(),
-            SessionWriteTarget::Skip => {}
-        }
+        let layout = match target {
+            SessionWriteTarget::NamedLayout(name) if !s.is_empty() => Some(name.to_string()),
+            SessionWriteTarget::DefaultSession => None,
+            _ => return,
+        };
+        self.session_writer.submit(s, layout);
     }
 
     /// Move a session aside when it loaded but could not be restored.
@@ -128,32 +166,10 @@ impl App {
             #[cfg(unix)]
             {
                 let socket = handoff.socket;
-                let mut payload = vec![0u8; 1024 * 1024];
-                return match crate::fd_transport::recv_fds(&socket, &mut payload, 64) {
-                    Ok((n, received_fds)) => {
-                        log::info!(
-                            "tab-handoff-fd: received {n} bytes + {} fds",
-                            received_fds.len()
-                        );
-                        // Adopting the received PTYs is a separate feature.
-                        // Until then, explicitly close every owned descriptor.
-                        for received_fd in received_fds {
-                            // SAFETY: recv_fds returned ownership of each fd.
-                            unsafe {
-                                libc::close(received_fd);
-                            }
-                        }
-                        payload.truncate(n);
-                        match serde_json::from_slice(&payload) {
-                            Ok(session) => Some(session),
-                            Err(error) => {
-                                log::warn!("tab-handoff-fd session JSON is invalid: {error}");
-                                None
-                            }
-                        }
-                    }
+                return match receive_handoff_session(&socket) {
+                    Ok(session) => Some(session),
                     Err(error) => {
-                        log::warn!("tab-handoff-fd recv_fds: {error}");
+                        log::warn!("tab-handoff-fd: {error}");
                         None
                     }
                 };
@@ -187,6 +203,81 @@ impl App {
             crate::session::Session::load()
         } else {
             None
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::receive_handoff_session;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn handoff_receives_fragmented_session() {
+        let (sender, receiver) = UnixStream::pair().unwrap();
+        let small: libc::c_int = 4096;
+        assert_eq!(
+            unsafe {
+                libc::setsockopt(
+                    sender.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    &small as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&small) as libc::socklen_t,
+                )
+            },
+            0
+        );
+        let expected = crate::session::Session {
+            active: 7,
+            theme: Some("x".repeat(256 * 1024)),
+            ..Default::default()
+        };
+        let payload = serde_json::to_vec(&expected).unwrap();
+        let writer = std::thread::spawn(move || {
+            let fd = std::fs::File::open("/dev/null").unwrap();
+            crate::fd_transport::send_fds(&sender, &payload, &[fd.as_raw_fd()]).unwrap();
+            sender.shutdown(std::net::Shutdown::Write).unwrap();
+        });
+        let session = receive_handoff_session(&receiver).unwrap();
+        writer.join().unwrap();
+        assert_eq!(session.active, expected.active);
+        assert_eq!(session.theme, expected.theme);
+    }
+
+    /// Runs alone: macOS marks a received descriptor close-on-exec only after
+    /// `recvmsg` returns, and a child another test spawns in between would keep
+    /// the peer from seeing end of file.
+    #[test]
+    fn handoff_failures_close_received_fds() {
+        kettle_test_support::run_alone_in_child(
+            "app::sessions::tests::handoff_failures_close_received_fds",
+            handoff_failures_close_received_fds_alone,
+        );
+    }
+
+    fn handoff_failures_close_received_fds_alone() {
+        use std::io::Read;
+        for payload in [b"{".to_vec(), vec![b' '; 1024 * 1024 + 1]] {
+            let (sender, receiver) = UnixStream::pair().unwrap();
+            let (passed, mut peer) = UnixStream::pair().unwrap();
+            // Before the far end closes: macOS refuses the option after.
+            peer.set_read_timeout(Some(std::time::Duration::from_secs(1)))
+                .unwrap();
+            // The descriptor travels with the first byte; macOS refuses one
+            // `sendmsg` of over 1 MiB with ancillary data.
+            let writer = std::thread::spawn(move || {
+                use std::io::Write as _;
+                crate::fd_transport::send_fds(&sender, &payload[..1], &[passed.as_raw_fd()])
+                    .unwrap();
+                (&sender).write_all(&payload[1..]).unwrap();
+                sender.shutdown(std::net::Shutdown::Write).unwrap();
+            });
+            let result = receive_handoff_session(&receiver);
+            writer.join().unwrap();
+            assert!(result.is_err());
+            assert_eq!(peer.read(&mut [0u8]).unwrap(), 0);
         }
     }
 }

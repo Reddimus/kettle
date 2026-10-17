@@ -293,11 +293,57 @@ fn deferred_authored_input_obeys_the_existing_queue_byte_limit() {
     assert_eq!(queue.len(), 1);
 }
 
+#[cfg(unix)]
+#[test]
+fn reload_metadata_errors_are_not_missing_configs() {
+    use std::os::unix::fs::symlink;
+
+    let dir = kettle_test_support::private_tempdir("kettle-reload-metadata-");
+    let path = dir.join("config");
+    assert!(
+        super::config_reload::read_config_for_reload(
+            &path,
+            kettle_config::ConfigTrust::ExplicitPath,
+        )
+        .unwrap()
+        .is_none()
+    );
+    symlink("config", &path).unwrap();
+    assert!(!path.exists());
+    assert!(path.try_exists().is_err());
+    assert!(
+        super::config_reload::read_config_for_reload(
+            &path,
+            kettle_config::ConfigTrust::ExplicitPath,
+        )
+        .is_err()
+    );
+}
+
+/// Every path paste is checked before it is formatted or delivered, so a
+/// file name the target shell cannot take exactly authors no input.
+#[test]
+fn path_pastes_are_checked_before_they_are_formatted() {
+    let source = include_str!("paste.rs");
+    let body = source
+        .split_once("pub(super) fn paste_paths_to(")
+        .unwrap()
+        .1
+        .split("\n    }\n")
+        .next()
+        .unwrap();
+    let check = body
+        .find("if !self.paths_type_exactly(ws, &argv, &paths)")
+        .unwrap();
+    assert!(check < body.find("format_paths_for_paste").unwrap());
+    assert!(check < body.find("deliver_path_paste").unwrap());
+}
+
 #[test]
 fn failed_additional_window_restore_preserves_source_session() {
     let src = super::production_source();
     let restore = src
-        .split_once("for (index, sw) in rest.iter().enumerate() {")
+        .split_once("for (sw, surface) in rest.iter().zip(&surfaces[1..]) {")
         .unwrap()
         .1
         .split("// Focus comes home to window 1")
@@ -2615,6 +2661,41 @@ fn remote_poll_stages_checked_out_and_stored_windows_without_stale_roots() {
 }
 
 #[test]
+fn omitted_remote_probe_preserves_shell_until_pane_identity_changes() {
+    let probe = kettle_remote::RemoteProbe {
+        remote: None,
+        native_cwd: None,
+        foreground_shell: Some(kettle_remote::ShellLaunch {
+            argv: vec!["bash".into(), "-i".into()],
+            cwd: Some("/tmp".into()),
+        }),
+        foreground_process: None,
+    };
+    let mut applied = std::collections::HashMap::from([
+        ((1, 10), probe.clone()),
+        ((2, 20), probe.clone()),
+        ((3, 30), probe.clone()),
+        ((4, 40), probe.clone()),
+    ]);
+    let mut live = HashSet::from([(99, 99)]);
+    super::retain_live_remote_probes(
+        &mut applied,
+        &mut live,
+        [(1, Some(10)), (2, Some(21)), (4, None)],
+    );
+    assert_eq!(
+        applied,
+        std::collections::HashMap::from([((1, 10), probe.clone())])
+    );
+    let cleared = kettle_remote::RemoteProbe {
+        foreground_shell: None,
+        ..probe
+    };
+    assert!(stage_applied_remote_probe(&mut applied, 1, 10, &cleared));
+    assert!(applied[&(1, 10)].foreground_shell.is_none());
+}
+
+#[test]
 fn remote_snapshot_compares_against_ui_applied_state_not_worker_history() {
     let old = kettle_remote::RemoteProbe {
         remote: None,
@@ -2981,6 +3062,107 @@ fn watcher_accepts_content_and_name_changes_to_exact_path_only() {
     assert!(!super::watcher_event_matches(&unrelated, watched));
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn profile_switches_retarget_live_reload() {
+    use std::sync::{Arc, atomic::AtomicBool, mpsc};
+    use std::time::Duration;
+
+    let source = production_source();
+    let refresh = source
+        .split_once("fn refresh_config_watcher(")
+        .unwrap()
+        .1
+        .split_once("/// Read and install")
+        .unwrap()
+        .0;
+    assert!(refresh.contains("self.config_path.clone()"));
+    assert!(!refresh.contains("self.startup.config"));
+    assert_eq!(source.matches("self.switch_profile(ws, p);").count(), 2);
+
+    let root = kettle_test_support::private_tempdir("kettle-profile-watch-");
+    let original = root.join("config");
+    let profiles = root.join("profiles");
+    std::fs::create_dir(&profiles).unwrap();
+    let profile = profiles.join("work.config");
+    std::fs::write(&original, "").unwrap();
+    std::fs::write(&profile, "").unwrap();
+    let (tx, rx) = mpsc::channel();
+    let _watcher = super::config_watcher(
+        &profile,
+        kettle_config::ConfigTrust::VerifyDirectory,
+        Arc::new(AtomicBool::new(false)),
+        move || tx.send(()).is_ok(),
+    )
+    .unwrap();
+    std::fs::write(&original, "font-size = 13\n").unwrap();
+    assert!(rx.recv_timeout(Duration::from_millis(150)).is_err());
+    std::fs::write(&profile, "font-size = 14\n").unwrap();
+    rx.recv_timeout(Duration::from_secs(5)).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn config_watch_paths_follow_leaf_symlink_retargets() {
+    use std::os::unix::fs::symlink;
+
+    let root = kettle_test_support::private_tempdir("kettle-config-watch-link-");
+    let config_dir = root.join("config-dir");
+    let dotfiles = root.join("dotfiles");
+    std::fs::create_dir(&config_dir).unwrap();
+    std::fs::create_dir(&dotfiles).unwrap();
+    let first = dotfiles.join("first");
+    let second = dotfiles.join("second");
+    std::fs::write(&first, "").unwrap();
+    std::fs::write(&second, "").unwrap();
+    let link = config_dir.join("config");
+    symlink(&first, &link).unwrap();
+    for target in [&first, &second] {
+        let paths = super::config_watch_paths(&link).unwrap();
+        assert!(paths.contains(&std::path::absolute(&link).unwrap()));
+        assert!(paths.contains(&std::fs::canonicalize(target).unwrap()));
+        let event = notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
+            .add_path(std::fs::canonicalize(target).unwrap());
+        assert!(
+            paths
+                .iter()
+                .any(|path| super::watcher_event_matches(&event, path))
+        );
+        if target == &first {
+            std::fs::remove_file(&link).unwrap();
+            symlink(&second, &link).unwrap();
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn symlinked_config_target_events_reload() {
+    use std::os::unix::fs::symlink;
+    use std::sync::{Arc, atomic::AtomicBool, mpsc};
+    use std::time::Duration;
+
+    let root = kettle_test_support::private_tempdir("kettle-config-watch-target-");
+    let links = root.join("links");
+    let targets = root.join("targets");
+    std::fs::create_dir(&links).unwrap();
+    std::fs::create_dir(&targets).unwrap();
+    let target = targets.join("config");
+    let link = links.join("config");
+    std::fs::write(&target, "").unwrap();
+    symlink(&target, &link).unwrap();
+    let (tx, rx) = mpsc::channel();
+    let _watcher = super::config_watcher(
+        &link,
+        kettle_config::ConfigTrust::ExplicitPath,
+        Arc::new(AtomicBool::new(false)),
+        move || tx.send(()).is_ok(),
+    )
+    .unwrap();
+    std::fs::write(&target, "font-size = 15\n").unwrap();
+    rx.recv_timeout(Duration::from_secs(5)).unwrap();
+}
+
 #[test]
 fn watcher_handle_survives_only_a_successful_registration() {
     use std::sync::Arc;
@@ -3287,6 +3469,26 @@ fn output_continuation_keeps_progress_and_defers_a_definitive_miss() {
     assert!(retry_at.is_none());
 }
 
+/// Turning updates off in Settings, or any other reload, refreshes the update
+/// notice at once. It once waited for the next focus change or hourly tick,
+/// so a focused window kept its chip for up to an hour.
+#[test]
+fn a_config_reload_refreshes_the_update_notice() {
+    let src = production_source();
+    let body = src
+        .split("fn load_reloaded_config(&mut self) -> bool {")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("load_reloaded_config body");
+    let assigned = body
+        .find("self.cfg = new;")
+        .expect("the new config is applied");
+    let refreshed = body
+        .find("self.request_update_facts(true);")
+        .expect("a reload refreshes the update notice");
+    assert!(assigned < refreshed, "facts are read with the new policy");
+}
+
 #[test]
 fn watched_reload_loads_once_then_applies_every_window() {
     let src = production_source();
@@ -3368,6 +3570,108 @@ fn confirm_dialog_accessibility_focuses_the_selected_button() {
         .expect("focused modal node");
     assert_eq!(focused.1.role(), accesskit::Role::Button);
     assert_eq!(focused.1.label(), Some("Close"));
+}
+
+#[test]
+fn context_menu_accessibility_exposes_actions_and_validates_targets() {
+    use super::{ContextMenuItem, ContextMenuState, accessibility_context_menu_item_index};
+    let mut ws = WindowState::new(1, Mux::new());
+    ws.context_menu = Some(ContextMenuState {
+        anchor: (0.0, 0.0),
+        anchor_scale: 1.0,
+        items: vec![
+            ContextMenuItem::Item {
+                label: "Copy",
+                action: Action::Copy,
+                enabled: true,
+            },
+            ContextMenuItem::Separator,
+            ContextMenuItem::Item {
+                label: "Paste",
+                action: Action::Paste,
+                enabled: false,
+            },
+            ContextMenuItem::Submenu {
+                label: "Theme".into(),
+                items: Vec::new(),
+            },
+        ],
+        highlight: 0,
+        drill_stack: Vec::new(),
+        scroll_offset: 0,
+        scroll_stack: Vec::new(),
+        typeahead_buf: String::new(),
+        typeahead_until: None,
+    });
+    let overlay = kettle_render::Overlay {
+        context_menu: Some(kettle_render::ContextMenu {
+            anchor: (0.0, 0.0),
+            a11y_label: None,
+            rows: [
+                ("Copy", false, true),
+                ("", true, false),
+                ("Paste", false, false),
+                ("Theme", false, true),
+            ]
+            .into_iter()
+            .map(
+                |(label, separator, enabled)| kettle_render::ContextMenuRow {
+                    label: label.into(),
+                    separator,
+                    enabled,
+                    hint: String::new(),
+                },
+            )
+            .collect(),
+            highlight: 0,
+            scroll_offset: 0,
+            panel_w_clamped: 200.0,
+            panel_h_clamped: 120.0,
+        }),
+        ..kettle_render::Overlay::default()
+    };
+    let projection = super::modal_accessibility_projection(&overlay, (800.0, 600.0), &EN_TEXT);
+    for index in [0, 2, 3] {
+        let id = super::accessibility_modal_id(2, index + 1);
+        let (_, node) = projection.nodes.iter().find(|(at, _)| *at == id).unwrap();
+        let enabled = index != 2;
+        assert_eq!(node.supports_action(accesskit::Action::Focus), enabled);
+        assert_eq!(node.supports_action(accesskit::Action::Click), enabled);
+        assert_eq!(
+            accessibility_context_menu_item_index(id, &ws),
+            enabled.then_some(index)
+        );
+    }
+    for id in [
+        super::accessibility_modal_id(2, 0),
+        super::accessibility_modal_id(2, 2),
+        super::accessibility_modal_id(2, 5),
+        super::accessibility_modal_id(1, 1),
+        super::accessibility_modal_id(3, 1),
+    ] {
+        assert_eq!(accessibility_context_menu_item_index(id, &ws), None);
+    }
+    let copy = super::accessibility_modal_id(2, 1);
+    ws.palette_input = Some((String::new(), 0));
+    assert_eq!(accessibility_context_menu_item_index(copy, &ws), None);
+    ws.palette_input = None;
+    ws.context_menu = None;
+    assert_eq!(accessibility_context_menu_item_index(copy, &ws), None);
+
+    let source = super::production_source();
+    let handler = source
+        .split_once("fn handle_accessibility_action(")
+        .unwrap()
+        .1;
+    let menu = handler
+        .split_once("accessibility_context_menu_item_index(")
+        .unwrap()
+        .1
+        .split("ACCESSIBILITY_MEDIA_RECEIPT_DISMISS_ID")
+        .next()
+        .unwrap();
+    assert!(menu.contains("self.set_context_menu_highlight(ws, index)"));
+    assert!(menu.contains("self.context_menu_activate(ws, event_loop)"));
 }
 
 #[test]
@@ -4079,8 +4383,9 @@ fn a_throttled_process_poll_is_deferred_not_dropped() {
 
 #[test]
 fn a_flipped_theme_schedule_asks_for_one_redraw() {
-    // The first decision only seeds the schedule; a flip asks for a frame.
-    assert!(!super::theme_schedule_redraw_due(None, Some(true)));
+    assert!(super::theme_schedule_redraw_due(None, Some(true)));
+    assert!(super::theme_schedule_redraw_due(None, Some(false)));
+    assert!(!super::theme_schedule_redraw_due(None, None));
     assert!(!super::theme_schedule_redraw_due(Some(true), Some(true)));
     assert!(!super::theme_schedule_redraw_due(Some(false), None));
     assert!(super::theme_schedule_redraw_due(Some(true), Some(false)));
@@ -5692,6 +5997,71 @@ fn the_sender_line_finds_its_program_in_any_word_order() {
     assert!(unsigned.program.is_some());
 }
 
+#[test]
+fn preview_accessibility_key_tracks_controls_and_video_position() {
+    let source = super::production_source();
+    let key_body = source
+        .split_once("fn accessibility_key(")
+        .unwrap()
+        .1
+        .split("fn publish_accessibility_if_due(")
+        .next()
+        .unwrap();
+    assert!(key_body.contains("accessibility_lane_controls_key("));
+    let geometry = |lane: &kettle_render::MediaLanePanel| {
+        kettle_render::media_lane_geometry(lane, (8.4, 16.4), (8.4, 16.4)).unwrap()
+    };
+    let key = |lane: &kettle_render::MediaLanePanel| {
+        super::accessibility_lane_controls_key(lane, Some(&geometry(lane)))
+    };
+    let mut lane = test_lane_panel();
+    lane.source = Some(kettle_render::MediaLaneSource::default());
+    let rendered = key(&lane);
+    lane.mode = kettle_render::MediaLaneMode::Source;
+    assert_ne!(rendered, key(&lane));
+    lane.mode = kettle_render::MediaLaneMode::Rendered;
+    lane.position = (1, 3);
+    assert_ne!(rendered, key(&lane));
+    lane.position = (2, 3);
+    lane.pin_label = Some("Pin".into());
+    assert_ne!(rendered, key(&lane));
+    lane.pin_label = None;
+    let mut moved = geometry(&lane);
+    moved.close.0 += 1.0;
+    assert_ne!(
+        rendered,
+        super::accessibility_lane_controls_key(&lane, Some(&moved))
+    );
+    let mut fewer = geometry(&lane);
+    assert!(fewer.copy.take().is_some());
+    assert_ne!(
+        rendered,
+        super::accessibility_lane_controls_key(&lane, Some(&fewer))
+    );
+    assert_ne!(
+        rendered,
+        super::accessibility_lane_controls_key(&lane, None)
+    );
+
+    lane.scrubber = Some(kettle_render::MediaLaneScrubber {
+        position_ms: 1_000,
+        duration_ms: 10_000,
+        label: String::new(),
+    });
+    assert!(geometry(&lane).scrubber.is_some());
+    let playing = key(&lane);
+    assert_ne!(rendered, playing);
+    lane.scrubber.as_mut().unwrap().position_ms = 2_000;
+    assert_ne!(playing, key(&lane));
+    let later = key(&lane);
+    lane.scrubber.as_mut().unwrap().duration_ms = 20_000;
+    assert_ne!(later, key(&lane));
+    let changed_duration = key(&lane);
+    lane.scrubber = None;
+    assert_ne!(changed_duration, key(&lane));
+    assert_eq!(rendered, key(&lane));
+}
+
 pub(super) fn test_lane_panel() -> kettle_render::MediaLanePanel {
     kettle_render::MediaLanePanel {
         focused_control: None,
@@ -6207,6 +6577,20 @@ fn window_constructors_size_through_the_shared_startup_rule() {
         src.contains("let (w, h) = startup_inner_size(&self.cfg, monitor);\n            let scale = monitor.map_or(1.0, |m| m.scale);"),
         "the restore planner's fallback surface must be the same rule in physical pixels"
     );
+}
+
+#[test]
+fn later_saved_windows_do_not_depend_on_the_first_restore_succeeding() {
+    let src = production_source();
+    let restore = src
+        .split("if let Some((first, rest)) = wins.split_first() {")
+        .nth(1)
+        .expect("multi-window startup restore");
+    let (before_loop, _) = restore
+        .split_once(" in rest.iter()")
+        .expect("additional windows are attempted");
+    assert!(!before_loop.contains("if outcome.restored_any {"));
+    assert!(restore.contains("outcome.restored_any"));
 }
 
 /// Drift guard: in `load_startup_session()`, the explicit restore paths
@@ -7069,6 +7453,18 @@ fn split_divider_drag_is_wired() {
     );
 }
 
+#[test]
+fn pane_reaping_cancels_divider_drags() {
+    let src = production_source();
+    let mut count = 0;
+    for after_reap in src.split("let reaped = ws.mux.reap();").skip(1) {
+        let flat: String = after_reap.split_whitespace().collect();
+        assert!(flat.starts_with("ifreaped.layout_changed{ws.dragging_split=None;}"));
+        count += 1;
+    }
+    assert_eq!(count, 2);
+}
+
 /// The group actions must actually GROUP, not just resolve to a name.
 ///
 /// The config-side test proves `group_all` maps to `Action::GroupAll`; it
@@ -7760,6 +8156,27 @@ fn every_tab_transfer_releases_the_focus_report() {
     assert_eq!(docks, reconciled, "every docked target is reconciled");
 }
 
+#[test]
+fn docking_retargets_pane_owned_focus_state() {
+    let src = production_source();
+    let dock = src
+        .split_once("fn dock_tab_into(")
+        .unwrap()
+        .1
+        .split_once("\n    }")
+        .unwrap()
+        .0;
+    let before = dock
+        .find("let pre_focus = self.focus_key(target);")
+        .unwrap();
+    let attach = dock.find("target.mux.attach_tab(").unwrap();
+    let notify = dock
+        .find("self.note_focus_change(target, pre_focus);")
+        .unwrap();
+    assert!(before < attach && attach < notify);
+    assert!(notify < dock.find("self.resize_all(target);").unwrap());
+}
+
 /// A video preview requested before its tab moved reaches the window the
 /// tab is in now, and only for the exact pane and generation.
 #[test]
@@ -7920,6 +8337,31 @@ fn scaled_zoom_baselines_off_live_font_size() {
         !code.contains("cfg.font_size"),
         "ScaledZoom must not scale from the (stale) config font size"
     );
+}
+
+#[test]
+fn implicit_zoom_exits_restore_the_saved_font() {
+    let src = production_source();
+    for (start, end) in [
+        (
+            "Action::SplitRight | Action::SplitLeft => {",
+            "Action::SplitDown",
+        ),
+        (
+            "Action::SplitDown | Action::SplitUp | Action::SplitAuto => {",
+            "Action::ClosePane",
+        ),
+    ] {
+        let arm = src.split_once(start).unwrap().1.split_once(end).unwrap().0;
+        assert!(arm.contains("} else {\n                    self.restore_scaled_zoom_font(ws);"));
+    }
+    let rotation = src
+        .split_once("Action::RotateCw | Action::RotateCcw => {")
+        .unwrap()
+        .1;
+    let restore = rotation.find("self.restore_scaled_zoom_font(ws);").unwrap();
+    let resize = rotation.find("self.resize_all(ws);").unwrap();
+    assert!(restore < resize);
 }
 
 /// Zoom-all changes the window-wide font size like Ctrl+Plus, so it must
@@ -12963,6 +13405,28 @@ fn keybind_rebind_persistence_reports_missing_path_and_writes_valid_path() {
     assert!(saved.contains("Ctrl+Shift+Y=copy"));
 }
 
+/// A rebind saves its unbinds and its new binding in one edit. At the size
+/// cap the whole edit is refused, so the old chord stays bound; saving the
+/// unbind alone left the action with no chord at all after a reload.
+#[test]
+fn keybind_rebind_at_the_size_cap_leaves_the_config_unchanged() {
+    let dir = crate::test_tempdir();
+    let path = dir.path().join("config");
+    let mut original = String::from("keybind = Ctrl+Alt+R=new_tab\n#");
+    original.push_str(&"x".repeat(1024 * 1024 - original.len() - 1));
+    original.push('\n');
+    std::fs::write(&path, &original).unwrap();
+
+    let stale = vec!["Ctrl+Alt+R".to_string()];
+    assert!(!super::persist_keybind_rebind(
+        Some(&path),
+        &stale,
+        "Ctrl+Alt+Y",
+        "new_tab",
+    ));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+}
+
 #[test]
 fn cwd_is_local_rejects_unc_and_traversal() {
     use super::cwd_is_local;
@@ -13654,6 +14118,22 @@ fn painted_and_docking_tab_bands_share_one_function() {
     assert_eq!(src.matches("self.tab_band(ws, height)").count(), 2);
 }
 
+#[test]
+fn rescue_tick_finishes_released_tab_drags_before_following() {
+    let src = production_source();
+    let tick = src
+        .split_once("fn torn_drag_pointer_tick(")
+        .unwrap()
+        .1
+        .split_once("let cursor = cursor_screen_pos()?;")
+        .unwrap()
+        .1;
+    let before_follow = tick.split_once("if td.native {").unwrap().0;
+    assert!(before_follow.contains("if !primary_button_physically_held() {"));
+    assert!(before_follow.contains("self.revalidate_dock_latch(&ws)"));
+    assert!(before_follow.contains("self.finalize_torn_drag(&mut ws, commit);"));
+}
+
 /// Docking inserts BETWEEN segments, so n tabs have n+1 slots, decided by
 /// segment midpoints.
 #[test]
@@ -13670,6 +14150,19 @@ fn dock_insertion_index_slots_between_segments() {
     assert_eq!(dock_insertion_index(&mids, f32::MAX), 3);
     // No segments (hidden-bar fallback handles this elsewhere): 0.
     assert_eq!(dock_insertion_index(&[], 100.0), 0);
+}
+
+#[test]
+fn dock_insertion_index_preserves_visible_tab_indices() {
+    use crate::app::dock_insertion_index;
+    let mut mids = vec![-100_000.0; 20];
+    mids[..5].copy_from_slice(&[50.0, 150.0, 250.0, 350.0, 450.0]);
+    assert_eq!(dock_insertion_index(&mids, 475.0), 5);
+    assert_eq!(dock_insertion_index(&mids, 425.0), 4);
+    mids.fill(-100_000.0);
+    mids[8..11].copy_from_slice(&[50.0, 150.0, 250.0]);
+    assert_eq!(dock_insertion_index(&mids, 0.0), 8);
+    assert_eq!(dock_insertion_index(&mids, 251.0), 11);
 }
 
 /// Drift guard: the tear-at-threshold call sites and the native drag
@@ -13993,7 +14486,8 @@ fn item_to_click_maps_every_dispatchable_row_type() {
         item_to_click(
             &ContextMenuItem::ConfigItem {
                 label: "Clear".into(),
-                command: "clear".into()
+                command: "clear".into(),
+                new_pane: false,
             },
             0
         ),
@@ -16448,4 +16942,60 @@ fn update_rows_present_iff_notice_active() {
     let entries = super::palette_entries(Some(&notice), &es);
     let ranked = kettle_config::palette::rank_entries("release notes", &entries, &es);
     assert_eq!(entries[ranked[0]].1, Action::OpenUpdate);
+}
+
+#[test]
+fn remote_reconnect_menu_uses_new_pane_action() {
+    use super::ContextMenuClick;
+    let contexts = [
+        kettle_remote::RemoteContext::Ssh {
+            host: "box".into(),
+            user: Some("alice".into()),
+            options: kettle_remote::SshOptions::default(),
+        },
+        kettle_remote::RemoteContext::Container {
+            runtime: kettle_remote::ContainerRuntime::Docker,
+            container: "web".into(),
+            options: kettle_remote::ContainerOptions::default(),
+        },
+    ];
+    for ctx in contexts {
+        let item = super::remote_reconnect_item(&ctx, &EN_TEXT).unwrap();
+        assert!(super::item_is_dispatchable(&item));
+        let Some(ContextMenuClick::ReconnectRemote(command)) = super::item_to_click(&item, 0)
+        else {
+            panic!("reconnect must open a new pane");
+        };
+        assert_eq!(Some(command), kettle_remote::clone_session_command(&ctx));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn remote_reconnect_opens_local_shell_without_typing_into_source() {
+    use super::{BroadcastScope, Config, Mux, PtyGeometry};
+    let cfg = Config {
+        shell: Some("/bin/sh".into()),
+        ..Config::default()
+    };
+    let geometry = PtyGeometry::from_cell_size(80, 24, 8, 16);
+    let waker: kettle_core::Waker = Arc::new(|| {});
+    let mut mux = Mux::new();
+    mux.new_tab_with_geometry(&cfg, geometry, waker.clone(), &["/bin/cat".into()], None)
+        .expect("PTY fixture");
+    let source = mux.active_focus().unwrap();
+    let generation = mux.panes[&source].input_generation();
+    mux.panes.get_mut(&source).unwrap().read_only = true;
+    mux.broadcast = BroadcastScope::All;
+    assert_eq!(
+        super::reconnect_remote_session(&mut mux, &cfg, geometry, waker, ":".into(),).unwrap(),
+        super::PaneInputResult::Queued
+    );
+    let target = mux.active_focus().unwrap();
+    assert_ne!(target, source);
+    assert_eq!(mux.panes.len(), 2);
+    assert_eq!(mux.panes[&target].argv, vec!["/bin/sh".to_string()]);
+    assert_eq!(mux.panes[&source].input_generation(), generation);
+    assert_eq!(mux.panes[&target].input_generation(), 1);
+    mux.kill_children();
 }

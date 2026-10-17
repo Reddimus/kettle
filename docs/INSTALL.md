@@ -165,7 +165,7 @@ Make sure `~/.local/bin` is on your `PATH`. Hit the **Super key** and
 type **"kettle"** to launch. To remove everything later:
 
 ```sh
-./scripts/install.sh --uninstall
+~/.local/share/kettle/install.sh --uninstall
 ```
 
 ## From a release

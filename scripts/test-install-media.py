@@ -44,6 +44,63 @@ class MediaInstallTests(unittest.TestCase):
             timeout=30,
         )
 
+    def test_source_build_uses_the_artifacts_it_installs(self):
+        source = self.root / "source"
+        scripts = source / "scripts"
+        scripts.mkdir(parents=True)
+        for name in ("install.sh", "install-unix.py"):
+            shutil.copy2(self.package / name, scripts / name)
+        shutil.copytree(self.package / "packaging", source / "packaging")
+        for profile, binary in (("release", "kettle"), ("media-worker", "kettle-media-worker")):
+            stale = source / "target" / profile / binary
+            stale.parent.mkdir(parents=True)
+            stale.write_text("#!/bin/sh\nprintf 'kettle 0.0.0\\n'\n", encoding="ascii")
+            stale.chmod(0o755)
+        fake_bin = self.root / "fake-bin"
+        fake_bin.mkdir()
+        cargo = fake_bin / "cargo"
+        cargo.write_text(
+            "#!/bin/sh\nset -eu\n"
+            'target_dir=${CARGO_TARGET_DIR:-target}\nprofile=debug\n'
+            'while [ "$#" -gt 0 ]; do\n'
+            '  case "$1" in\n'
+            '    --target-dir) target_dir=$2; shift ;;\n'
+            '    --release) profile=release ;;\n'
+            '    --profile) profile=$2; shift ;;\n'
+            '  esac\n  shift\ndone\n'
+            'case "$profile" in\n'
+            '  release) binary=kettle ;;\n'
+            '  media-worker) binary=kettle-media-worker ;;\n'
+            '  *) exit 2 ;;\n'
+            'esac\n'
+            'mkdir -p "$target_dir/$profile"\n'
+            'cp "$KETTLE_TEST_PACKAGE/$binary" "$target_dir/$profile/$binary"\n',
+            encoding="ascii",
+        )
+        cargo.chmod(0o755)
+        environment = os.environ.copy()
+        environment.update({
+            "PATH": f"{fake_bin}{os.pathsep}{environment['PATH']}",
+            "CARGO_TARGET_DIR": str(self.root / "configured-target"),
+            "KETTLE_TEST_PACKAGE": str(self.package),
+        })
+        for arguments in ([], ["--skip-build"]):
+            with self.subTest(arguments=arguments):
+                result = subprocess.run(
+                    [
+                        "bash", str(scripts / "install.sh"),
+                        f"--prefix={self.prefix}", *arguments,
+                    ],
+                    cwd=source, env=environment, capture_output=True,
+                    text=True, timeout=30,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                for name in ("kettle", "kettle-media-worker"):
+                    self.assertEqual(
+                        (self.prefix / "bin" / name).read_bytes(),
+                        (self.package / name).read_bytes(),
+                    )
+
     def test_documented_source_build_launches_with_a_sibling_worker(self):
         source = self.root / "source"
         release = source / "target/release"
@@ -92,6 +149,28 @@ class MediaInstallTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse((self.prefix / "bin/kettle").exists())
         self.assertFalse((self.prefix / "bin/kettle-media-worker").exists())
+
+    def test_documented_uninstall_works_from_an_extracted_tarball(self):
+        home = self.root / "home"
+        home.mkdir()
+        self.prefix = home / ".local"
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        recipe = (ROOT / "docs/INSTALL.md").read_text().split(
+            'type **"kettle"** to launch. To remove everything later:', 1
+        )[1].split("```sh\n", 1)[1].split("\n```", 1)[0]
+        environment = os.environ.copy()
+        environment["HOME"] = str(home)
+        result = subprocess.run(
+            ["bash", "-c", recipe], cwd=self.package, env=environment,
+            capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for relative in (
+            "bin/kettle", "bin/kettle-media-worker",
+            "share/kettle/install.sh", "share/kettle/install-files.json",
+        ):
+            self.assertFalse((self.prefix / relative).exists(), relative)
 
     def test_uninstall_smoke_distinguishes_legacy_and_current_locks(self):
         source = (ROOT / "scripts/check-linux-installers.sh").read_text()
@@ -146,6 +225,63 @@ class MediaInstallTests(unittest.TestCase):
                     sum(command.startswith("cargo build ") for command in commands),
                     2,
                 )
+
+    def test_source_growth_is_rejected_before_writing_past_the_plan(self):
+        source = self.root / "growing-source"
+        source.write_bytes(b"x" * 8)
+        self.prefix.mkdir(mode=0o700)
+        destination = self.prefix / "copy"
+        destination.write_bytes(b"existing")
+        child = """
+import importlib.util, os, pathlib, sys
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("installer", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+source, prefix = sys.argv[2:]
+module.MAX_FILE_BYTES = 64
+expected_size, expected_digest = module._source_identity(source)
+open_source = module._open_source
+def growing_open(path):
+    handle = open_source(path)
+    with open(path, "ab") as output:
+        output.write(b"y" * 80)
+    return handle
+module._open_source = growing_open
+write_all = module._write_all
+read = module.os.read
+writes, reads = [], []
+def record_write(handle, chunk):
+    writes.append(len(chunk))
+    write_all(handle, chunk)
+def record_read(handle, maximum):
+    reads.append(maximum)
+    return read(handle, maximum)
+module._write_all = record_write
+module.os.read = record_read
+root = module._open_absolute_directory(prefix, create=False)
+try:
+    try:
+        module._publish_source(
+            root, "copy", source, expected_size, expected_digest, 0o644, {}
+        )
+    except module.InstallerError:
+        pass
+    else:
+        raise AssertionError("growing source was published")
+finally:
+    os.close(root)
+assert sum(writes) <= expected_size, writes
+assert reads and max(reads) <= expected_size + 1, reads
+assert (pathlib.Path(prefix) / "copy").read_bytes() == b"existing"
+assert not list(pathlib.Path(prefix).glob(".kettle-install-tmp-*"))
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", child, str(ROOT / "scripts/install-unix.py"),
+             str(source), str(self.prefix)],
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_fifo_leaves_are_rejected_without_blocking(self):
         import sys

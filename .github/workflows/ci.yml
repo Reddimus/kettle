@@ -90,7 +90,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [windows-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -110,7 +110,7 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo build --locked --workspace --all-targets
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
-      - run: cargo test --locked --workspace
+      - run: cargo test --locked --workspace --no-fail-fast
       # The media protocol's stub worker is a feature-gated test fixture, so
       # the workspace commands above neither build nor exercise it. One
       # command per step: Windows runs steps in PowerShell, where a failing

@@ -453,7 +453,7 @@ pub(crate) struct WindowAccent {
     pub(crate) theme_name: String,
     pub(crate) pool_candidates: [kettle_config::Rgb; 8],
     /// Cross-process presence claim; released when the window drops.
-    pub(crate) presence: Option<kettle_ctl::presence::PresenceGuard>,
+    pub(crate) presence: Option<crate::window_accent::AccentPresence>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

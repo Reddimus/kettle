@@ -13,15 +13,8 @@ const SINK_CALLS: &[&str] = &[
 ];
 const SINK_FIELDS: &[&str] = &["label:", "hint:", "title:", "prompt:"];
 /// Literals that read the same in every language: key names in the
-/// picker and editor hints, and a shell command the layout picker shows.
-const LANGUAGE_NEUTRAL: &[&str] = &[
-    "Enter",
-    "Esc",
-    "Tab",
-    "Tab/↑↓",
-    "↑↓",
-    "kettle --save-layout NAME",
-];
+/// picker and editor hints.
+const LANGUAGE_NEUTRAL: &[&str] = &["Enter", "Esc", "Tab", "Tab/↑↓", "↑↓"];
 
 /// The string literals (plain or raw) in `src[from..]` up to the end of the
 /// expression that starts there: a call's arguments when `from` is just

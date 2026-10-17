@@ -330,9 +330,19 @@ fn font(value: &str) -> Result<Vec<(String, String)>, FailureCode> {
         }
         rest = rest[end..].trim_start();
     }
-    let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
-    let size = rest[..end].split('/').next().unwrap_or_default();
-    let family = rest[end..].trim();
+    let end = rest
+        .find(|c: char| c.is_whitespace() || c == '/')
+        .unwrap_or(rest.len());
+    let size = &rest[..end];
+    rest = rest[end..].trim_start();
+    if let Some(after_slash) = rest.strip_prefix('/') {
+        let line_height = after_slash.trim_start();
+        let end = line_height
+            .find(char::is_whitespace)
+            .unwrap_or(line_height.len());
+        rest = &line_height[end..];
+    }
+    let family = rest.trim();
     if family.is_empty() || !size.starts_with(|c: char| c.is_ascii_digit() || c == '.') {
         return Ok(Vec::new());
     }
@@ -542,5 +552,23 @@ mod tests {
             declarations("font: 2em serif").unwrap_err(),
             FailureCode::RenderParse
         );
+    }
+
+    #[test]
+    fn font_shorthand_consumes_line_height_with_optional_whitespace() {
+        for shorthand in [
+            "32px 'Kettle Test Fallback'",
+            "32px/1.2 'Kettle Test Fallback'",
+            "32px /1.2 'Kettle Test Fallback'",
+            "32px/ 1.2 'Kettle Test Fallback'",
+            "32px / 1.2 'Kettle Test Fallback'",
+        ] {
+            let parts = declarations(&format!("font: {shorthand}")).unwrap();
+            assert!(parts.contains(&("font-size".to_owned(), "32px".to_owned())));
+            assert!(parts.contains(&(
+                "font-family".to_owned(),
+                "'Kettle Test Fallback'".to_owned()
+            )));
+        }
     }
 }

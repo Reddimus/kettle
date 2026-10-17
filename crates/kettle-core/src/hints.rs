@@ -138,7 +138,7 @@ pub(crate) fn quoted_paths(line: &str) -> impl Iterator<Item = (usize, usize, us
 /// quote: a `"`, `'` or `` ` `` where a token may start, the next of the same
 /// quote within [`MAX_QUOTED_PATH`] bytes, and a token boundary or a
 /// separator after it (past a location suffix). Runs do not overlap.
-fn quoted_runs(line: &str) -> impl Iterator<Item = (usize, usize)> + '_ {
+pub(crate) fn quoted_runs(line: &str) -> impl Iterator<Item = (usize, usize)> + '_ {
     let mut from = 0;
     // A quote that opened but did not close on a boundary still holds the
     // text up to its closing quote: another kind of quote inside it is part
@@ -192,6 +192,26 @@ fn quoted_runs(line: &str) -> impl Iterator<Item = (usize, usize)> + '_ {
         }
         None
     })
+}
+
+/// Whether a bare path reaches the end of any quoted run holding it.
+pub(crate) fn path_reaches_quote(
+    line: &str,
+    runs: &[(usize, usize)],
+    start: usize,
+    end: usize,
+) -> bool {
+    // Runs are ordered and do not overlap.
+    let holder = runs.partition_point(|&(open, _)| open < start);
+    runs[..holder]
+        .last()
+        .filter(|&&(_, close)| end <= close)
+        .is_none_or(|&(_, close)| {
+            skip_location(&line[end..close])
+                .0
+                .trim_start_matches(|c| ",;:?!.".contains(c))
+                .is_empty()
+        })
 }
 
 /// The length of the path in quoted text `body` (without a trailing `:12`
@@ -441,20 +461,7 @@ fn detect_line(
             // is part of a longer quoted name or sentence: `Files/a` in
             // `'My Files/a b.txt'`.
             let bounded = is_bounded(before, &line[m.end()..])
-                && (*kind != Kind::Path || {
-                    // Runs are in order and do not overlap, so only the last
-                    // one opening before the match can hold it.
-                    let holder = runs.partition_point(|&(open, _)| open < m.start());
-                    runs[..holder]
-                        .last()
-                        .filter(|&&(_, close)| m.end() <= close)
-                        .is_none_or(|&(_, close)| {
-                            skip_location(&line[m.end()..close])
-                                .0
-                                .trim_start_matches(|c| ",;:?!.".contains(c))
-                                .is_empty()
-                        })
-                });
+                && (*kind != Kind::Path || path_reaches_quote(line, &runs, m.start(), m.end()));
             let (bs, be) = (m.start(), m.start() + trimmed.len());
             if taken.overlaps(bs, be) {
                 continue;

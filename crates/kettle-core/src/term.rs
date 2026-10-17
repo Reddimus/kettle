@@ -6820,8 +6820,8 @@ impl Terminal {
             [program] => Some(program.as_str()),
             _ => None,
         };
-        crate::shell_startup::apply(&mut cmd, explicit, shell_startup);
         apply_working_directory(&mut cmd, cwd, cwd_policy);
+        crate::shell_startup::apply(&mut cmd, explicit, shell_startup);
         #[cfg(unix)]
         let reader_poll_fd = pair
             .master
@@ -7473,9 +7473,13 @@ impl Terminal {
                                             );
                                         }
                                         Chunk::Image(mut placed) => {
+                                            let key = placed.id.map(|id| (id, placed.placement_id));
                                             let completion = placed.completion.take();
                                             let result = place_image(&term, &images, &shared_geometry, &mut processor, placed);
                                             let admission = result.as_ref().map(|_| ()).map_err(|error| *error);
+                                            if admission.is_ok() {
+                                                reconcile_named_placement(&images, &virtuals, &relatives, key, PlacementForm::Physical);
+                                            }
                                             if let Ok(Some(batch)) = result {
                                                 apply_graphics_batch(
                                                     batch,
@@ -10625,6 +10629,9 @@ impl AnsiStripper {
                     self.state = Self::escape_follower(b);
                 }
                 StripState::EscapeIntermediate => {
+                    if matches!(b, 0x00..=0x17 | 0x19 | 0x1c..=0x1f) {
+                        out.push(b);
+                    }
                     if b == 0x1b {
                         self.state = StripState::EscSeen;
                     } else if b == 0x18 || b == 0x1a || (0x30..=0x7e).contains(&b) {
@@ -10632,6 +10639,9 @@ impl AnsiStripper {
                     }
                 }
                 StripState::Csi => {
+                    if matches!(b, 0x00..=0x17 | 0x19 | 0x1c..=0x1f) {
+                        out.push(b);
+                    }
                     if b == 0x1b {
                         self.state = StripState::EscSeen;
                     } else if b == 0x18 || b == 0x1a {
@@ -11340,6 +11350,43 @@ fn finish_graphics_placement(
     }
 }
 
+enum PlacementForm {
+    Physical,
+    Virtual,
+    Relative,
+}
+
+fn reconcile_named_placement(
+    images: &Images,
+    virtuals: &Virtuals,
+    relatives: &Relatives,
+    key: Option<(u32, u32)>,
+    form: PlacementForm,
+) {
+    let Some((id, placement)) = key.filter(|&(_, placement)| placement != 0) else {
+        return;
+    };
+    // Admission has committed. Cleanup cannot turn it into a rejected update.
+    if !matches!(form, PlacementForm::Physical) {
+        images
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|entry| entry.id != Some(id) || entry.placement_id != placement);
+    }
+    if !matches!(form, PlacementForm::Virtual) {
+        virtuals
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&(id, placement));
+    }
+    if !matches!(form, PlacementForm::Relative) {
+        relatives
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&(id, placement));
+    }
+}
+
 fn contains_placement_parent<T>(placements: &HashMap<(u32, u32), T>, parent: PlacementKey) -> bool {
     if parent.placement_id != 0 {
         placements.contains_key(&(parent.image_id, parent.placement_id))
@@ -11389,6 +11436,7 @@ fn apply_graphics_chunk_at(
     match chunk {
         Chunk::GraphicsReply(reply) => send_graphics_reply(context.proxy, reply),
         Chunk::Image(mut placed) => {
+            let key = placed.id.map(|id| (id, placed.placement_id));
             let completion = placed.completion.take();
             let geometry = context
                 .geometry
@@ -11396,6 +11444,15 @@ fn apply_graphics_chunk_at(
                 .map(|geometry| geometry.geometry)
                 .unwrap_or_else(|_| PtyGeometry::new(1, 1, 1, 1));
             let result = place_image_during_sync(term, context.images, geometry, placed);
+            if result.is_ok() {
+                reconcile_named_placement(
+                    context.images,
+                    context.virtuals,
+                    context.relatives,
+                    key,
+                    PlacementForm::Physical,
+                );
+            }
             finish_graphics_placement(extractor, context.proxy, completion, result);
         }
         Chunk::DeleteImages(delete) => apply_kitty_delete_at(term, delete, context, extractor),
@@ -11429,29 +11486,54 @@ fn apply_graphics_chunk_at(
                     .geometry;
                 resolve_kitty_placement(&img, params, geometry)
                     .ok_or(GraphicsAdmissionError::InvalidGeometry)?;
+                let key = (id, placement);
+                let entry = RelEntry {
+                    img,
+                    parent_img,
+                    parent_placement,
+                    h,
+                    v,
+                    z,
+                    params,
+                };
+                let mut proposed = context
+                    .relatives
+                    .lock()
+                    .map_err(|_| GraphicsAdmissionError::Unavailable)?
+                    .clone();
+                proposed.insert(key, entry.clone());
+                let resolver = relative_resolver(
+                    context.images,
+                    context.virtuals,
+                    &Terminal::placeholder_cells_from_term(term),
+                    proposed.iter().map(|(&key, entry)| (key, entry)),
+                );
+                if resolver.has_cycle(PlacementKey {
+                    image_id: id,
+                    placement_id: placement,
+                }) {
+                    return Err(GraphicsAdmissionError::InvalidGeometry);
+                }
                 let mut relatives = context
                     .relatives
                     .lock()
                     .map_err(|_| GraphicsAdmissionError::Unavailable)?;
-                let key = (id, placement);
                 let limit = kettle_vt::GraphicsLimits::default().placements;
                 if !relatives.contains_key(&key) && relatives.len() >= limit {
                     return Err(GraphicsAdmissionError::Unavailable);
                 }
-                relatives.insert(
-                    key,
-                    RelEntry {
-                        img,
-                        parent_img,
-                        parent_placement,
-                        h,
-                        v,
-                        z,
-                        params,
-                    },
-                );
+                relatives.insert(key, entry);
                 Ok(())
             })();
+            if result.is_ok() {
+                reconcile_named_placement(
+                    context.images,
+                    context.virtuals,
+                    context.relatives,
+                    Some((id, placement)),
+                    PlacementForm::Relative,
+                );
+            }
             finish_graphics_placement(extractor, context.proxy, completion, result);
         }
         Chunk::VirtualImage {
@@ -11485,6 +11567,15 @@ fn apply_graphics_chunk_at(
                 );
                 Ok(())
             })();
+            if result.is_ok() {
+                reconcile_named_placement(
+                    context.images,
+                    context.virtuals,
+                    context.relatives,
+                    Some((id, placement)),
+                    PlacementForm::Virtual,
+                );
+            }
             finish_graphics_placement(extractor, context.proxy, completion, result);
         }
         Chunk::Animation {
@@ -12374,6 +12465,24 @@ mod home_dir_tests {
                     output.extend(stripper.strip(&wire[split..]));
                     assert_eq!(output, expected, "control={control}, split={split}");
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn session_log_keeps_executable_controls_inside_escape_sequences() {
+        for (wire, expected) in [
+            (b"A\x1b[31\r\n\tmB".as_slice(), b"A\r\n\tB".as_slice()),
+            (b"A\x1b[31 \r\n\tmB", b"A\r\n\tB"),
+            (b"A\x1b( \r\n\tBB", b"A\r\n\tB"),
+            (b"A\x1b[31\r\n\t\x18B", b"A\r\n\tB"),
+            (b"A\x1b( \r\n\t\x1aB", b"A\r\n\tB"),
+        ] {
+            for split in 0..=wire.len() {
+                let mut filter = super::SessionLogFilter::default();
+                let mut output = filter.filter(&wire[..split], 1, true);
+                output.extend(filter.filter(&wire[split..], 1, true));
+                assert_eq!(output, expected, "wire={wire:?}, split={split}");
             }
         }
     }
@@ -18637,6 +18746,60 @@ mod image_lifecycle_tests {
     }
 
     #[test]
+    fn named_placement_changes_form_only_after_admission() {
+        for synchronized in [false, true] {
+            let mut harness = SyncGraphicsHarness::new();
+            harness.feed(b"\x1b_Ga=T,i=7,p=1,q=2,f=32,s=1,v=1,C=1;AQID/w==\x1b\\");
+            harness.feed(b"\x1b_Ga=T,i=8,p=2,q=2,f=32,s=1,v=1,C=1;CQgH/w==\x1b\\");
+            for (command, form) in [
+                ("a=p,i=7,p=1,P=8,Q=2,H=1,C=1", 2),
+                ("a=p,i=7,p=1,U=1,c=1,r=1", 1),
+                ("a=p,i=7,p=1,P=8,Q=2,H=1,C=1", 2),
+                ("a=p,i=7,p=1,C=1", 0),
+                ("a=p,i=7,p=1,U=1,c=1,r=1", 1),
+                ("a=p,i=7,p=1,C=1", 0),
+            ] {
+                if synchronized {
+                    harness.feed(b"\x1b[?2026h");
+                }
+                harness.feed(format!("\x1b_G{command}\x1b\\").as_bytes());
+                if synchronized {
+                    harness.feed(b"\x1b[?2026l");
+                }
+                assert_eq!(ordinary_reply_bytes(&harness), ["\x1b_Gi=7,p=1;OK\x1b\\"]);
+                assert_eq!(harness.active_ids().contains(&7), form == 0);
+                assert_eq!(
+                    harness.virtuals.lock().unwrap().contains_key(&(7, 1)),
+                    form == 1
+                );
+                assert_eq!(
+                    harness.relatives.lock().unwrap().contains_key(&(7, 1)),
+                    form == 2
+                );
+                if synchronized {
+                    harness.feed(b"\x1b[?2026h");
+                }
+                harness.feed(b"\x1b_Ga=p,i=7,p=1,P=8,Q=99,q=1,C=1\x1b\\");
+                if synchronized {
+                    harness.feed(b"\x1b[?2026l");
+                }
+                let replies = ordinary_reply_bytes(&harness);
+                assert_eq!(replies.len(), 1);
+                assert!(replies[0].starts_with("\x1b_Gi=7,p=1;ENOPARENT:"));
+                assert_eq!(harness.active_ids().contains(&7), form == 0);
+                assert_eq!(
+                    harness.virtuals.lock().unwrap().contains_key(&(7, 1)),
+                    form == 1
+                );
+                assert_eq!(
+                    harness.relatives.lock().unwrap().contains_key(&(7, 1)),
+                    form == 2
+                );
+            }
+        }
+    }
+
+    #[test]
     fn ordinary_graphics_rejected_crop_preserves_an_existing_physical_placement() {
         for synchronized in [false, true] {
             let mut harness = SyncGraphicsHarness::new();
@@ -18727,6 +18890,43 @@ mod image_lifecycle_tests {
             ),
             (386, 14, 1, 1)
         );
+    }
+
+    #[test]
+    fn ordinary_graphics_cyclic_relative_update_preserves_its_previous_parent() {
+        for synchronized in [false, true] {
+            for parent_placement in [0, 1] {
+                let mut harness = SyncGraphicsHarness::new();
+                harness.feed(b"\x1b_Ga=T,i=1,p=1,q=2,f=24,s=1,v=1,C=1;AAAA\x1b\\");
+                harness.feed(b"\x1b_Ga=T,i=2,p=1,P=1,Q=1,q=2,f=24,s=1,v=1;AAAA\x1b\\");
+                harness.feed(b"\x1b_Ga=T,i=3,p=1,P=2,Q=1,q=2,f=24,s=1,v=1;AAAA\x1b\\");
+                assert_eq!(harness.relatives.lock().unwrap().len(), 2);
+                assert!(ordinary_reply_bytes(&harness).is_empty());
+                if synchronized {
+                    harness.feed(b"\x1b[?2026h");
+                }
+                harness.feed(
+                    format!("\x1b_Ga=p,i=2,p=1,P=3,Q={parent_placement},H=2,q=1\x1b\\").as_bytes(),
+                );
+                if synchronized {
+                    assert!(ordinary_reply_bytes(&harness).is_empty());
+                    harness.feed(b"\x1b[?2026l");
+                }
+                let replies = ordinary_reply_bytes(&harness);
+                assert_eq!(replies.len(), 1);
+                assert!(replies[0].starts_with("\x1b_Gi=2,p=1;EINVAL:"));
+                let relatives = harness.relatives.lock().unwrap();
+                let previous = relatives.get(&(2, 1)).unwrap();
+                assert_eq!(
+                    (previous.parent_img, previous.parent_placement, previous.h),
+                    (1, 1, 0)
+                );
+                assert_eq!(relatives.get(&(3, 1)).unwrap().parent_img, 2);
+                drop(relatives);
+                harness.feed(b"\x1b_Ga=d,d=i,i=1,p=1\x1b\\");
+                assert!(harness.relatives.lock().unwrap().is_empty());
+            }
+        }
     }
 
     #[test]
@@ -19211,6 +19411,35 @@ mod image_lifecycle_tests {
                 "synchronized={synchronized}"
             );
             assert_eq!(harness.images.lock().unwrap().len(), 2);
+        }
+    }
+
+    #[test]
+    fn zero_image_number_retransmission_retires_pixels_and_animation() {
+        for synchronized in [false, true] {
+            let mut harness = SyncGraphicsHarness::new();
+            harness.feed(b"\x1b_Ga=T,i=7,p=1,f=32,s=1,v=1,C=1;AQID/w==\x1b\\");
+            harness.feed(b"\x1b_Ga=f,i=7,f=32,s=1,v=1;CQgH/w==\x1b\\");
+            harness.feed(b"\x1b_Ga=a,i=7,s=3\x1b\\");
+            let old = Arc::downgrade(&harness.images.lock().unwrap()[0].img.rgba);
+            assert!(harness.anims.lock().unwrap().contains_key(&7));
+            if synchronized {
+                harness.feed(b"\x1b[?2026h");
+            }
+            harness.feed(b"\x1b_Ga=t,i=7,I=0,f=32,s=1,v=1;BQYH/w==\x1b\\");
+            if synchronized {
+                assert_eq!(harness.active_ids(), [7]);
+                harness.feed(b"\x1b[?2026l");
+            }
+            assert!(harness.active_ids().is_empty());
+            assert!(!harness.anims.lock().unwrap().contains_key(&7));
+            assert!(old.upgrade().is_none());
+            harness.feed(b"\x1b_Ga=p,i=7,p=2,C=1\x1b\\");
+            assert_eq!(harness.active_ids(), [7]);
+            assert_eq!(
+                harness.images.lock().unwrap()[0].img.rgba.as_slice(),
+                &[5, 6, 7, 255]
+            );
         }
     }
 

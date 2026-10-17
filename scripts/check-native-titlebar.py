@@ -121,6 +121,19 @@ def fullscreen_restore(live, wanted):
     )
 
 
+def appkit_bounds(live, out):
+    """The window's on-screen bounds as the window server has them, which a
+    stale surface and a window that never left fullscreen both differ from.
+    """
+    query = out / "native-window-info"
+    if not query.exists():
+        return {"unavailable": "native-window-info was not built"}
+    result = modal.live_ui.run([str(query), str(live.pid), "Kettle caption fixture"], timeout=15)
+    if result.returncode != 0:
+        return {"error": result.stderr.strip()}
+    return json.loads(result.stdout)["kCGWindowBounds"]
+
+
 def native_fullscreen_roundtrip(live, out):
     wanted = live.json_ctl("ui_geometry")["surface"]
     modal.focus(live)
@@ -140,7 +153,8 @@ def native_fullscreen_roundtrip(live, out):
         fullscreen_restore(live, wanted)
     finally:
         for key, read in (("after", lambda: live.json_ctl("ui_geometry")),
-                          ("native_fullscreen_after", lambda: native_fullscreen(live))):
+                          ("native_fullscreen_after", lambda: native_fullscreen(live)),
+                          ("appkit_bounds_after", lambda: appkit_bounds(live, out))):
             try:
                 trace[key] = read()
             except Exception as error:
@@ -161,10 +175,12 @@ def programmatic_fullscreen_roundtrip(live, out):
                                          "borderless fullscreen did not settle")
         fullscreen_restore(live, wanted)
     finally:
-        try:
-            trace["after"] = live.json_ctl("ui_geometry")
-        except Exception as error:
-            trace["after_error"] = str(error)
+        for key, read in (("after", lambda: live.json_ctl("ui_geometry")),
+                          ("appkit_bounds_after", lambda: appkit_bounds(live, out))):
+            try:
+                trace[key] = read()
+            except Exception as error:
+                trace[key + "_error"] = str(error)
         (out / "borderless-fullscreen-state.json").write_text(json.dumps(trace, indent=2) + "\n")
     return {"restored_surface": wanted, "toggle_count": 2}
 
