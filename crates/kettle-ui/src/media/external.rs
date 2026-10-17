@@ -14,6 +14,7 @@
 mod document;
 #[cfg(target_os = "linux")]
 mod loupe;
+mod reveal;
 mod video;
 
 use std::fs::File;
@@ -28,6 +29,7 @@ use crate::media::ShelfItem;
 use crate::paste_image::{PastedImages, Reservation, StoreKind};
 
 pub(crate) use document::{DocumentSource, Reader, open as open_document};
+pub(crate) use reveal::{RevealTarget, Revealer, reveal};
 pub(crate) use video::{Player, VideoSource, open as open_video};
 
 /// Opens being prepared at once; one more is refused rather than queued.
@@ -165,15 +167,21 @@ pub(crate) enum Outside {
     Video(Player),
     /// The document viewer, given a private copy of the PDF.
     Document(Reader),
+    /// The file manager, showing a file Kettle does not draw in its folder.
+    Reveal(Revealer),
 }
 
 impl Outside {
-    /// What opens `item` outside Kettle, if this platform has it: the
-    /// document viewer for a PDF, never a picture of its page; the video
+    /// What opens `item` outside Kettle, if this platform has it: the file
+    /// manager for a file Kettle does not draw, which shows it in its folder
+    /// and opens nothing; the document viewer for a PDF, never a picture of
+    /// its page; the video
     /// player for a video shown from its file; the image viewer for
     /// anything else, an animation included.
     pub(crate) fn of(item: &ShelfItem) -> Option<Self> {
-        if item.kind == kettle_media::MediaKind::Pdf {
+        if item.kind.file().is_some() {
+            Revealer::find().map(Self::Reveal)
+        } else if item.kind == crate::media::ItemKind::Media(kettle_media::MediaKind::Pdf) {
             Reader::find().map(Self::Document)
         } else if item.video.is_some_and(|video| video.container.is_some()) {
             Player::find().map(Self::Video)
@@ -189,6 +197,7 @@ impl Outside {
             Self::Image(viewer) => viewer.label(tr),
             Self::Video(player) => player.label(tr),
             Self::Document(reader) => reader.label(tr),
+            Self::Reveal(revealer) => revealer.label(tr),
         }
     }
 }
@@ -253,6 +262,18 @@ impl OpenFailure {
                     Self::Changed => Text::NotifyBodyOpenDocumentChanged,
                     Self::Room => Text::NotifyBodyOpenDocumentRoom,
                     Self::Refused => Text::NotifyBodyOpenDocumentRefused,
+                },
+            ),
+            Outside::Reveal(_) => (
+                Text::NotifyTitleRevealFile,
+                match self {
+                    Self::Busy => Text::NotifyBodyRevealBusy,
+                    Self::Changed => Text::NotifyBodyRevealChanged,
+                    Self::Viewer => Text::NotifyBodyRevealManager,
+                    // Nothing is copied or played to show a file.
+                    Self::Copy | Self::Unplayable | Self::Room | Self::Refused => {
+                        Text::NotifyBodyRevealRefused
+                    }
                 },
             ),
         }
@@ -663,6 +684,24 @@ mod tests {
                 Text::NotifyBodyOpenImageCopy,
                 Text::NotifyBodyOpenImageCopy,
                 Text::NotifyBodyOpenImageRefused,
+            ]
+        );
+        let reveal = all.map(|why| why.notice(Outside::Reveal(Revealer::Finder)));
+        assert!(
+            reveal
+                .iter()
+                .all(|(title, _)| *title == Text::NotifyTitleRevealFile)
+        );
+        assert_eq!(
+            reveal.map(|(_, body)| body),
+            [
+                Text::NotifyBodyRevealBusy,
+                Text::NotifyBodyRevealRefused,
+                Text::NotifyBodyRevealManager,
+                Text::NotifyBodyRevealRefused,
+                Text::NotifyBodyRevealChanged,
+                Text::NotifyBodyRevealRefused,
+                Text::NotifyBodyRevealRefused,
             ]
         );
         let document = all.map(|why| why.notice(Outside::Document(Reader::Preview)));

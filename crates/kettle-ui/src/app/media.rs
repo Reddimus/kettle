@@ -1295,8 +1295,46 @@ impl App {
                 let _ = origin.refuse(FailureCode::NotInKettlePane);
                 return;
             }
+            // A file Kettle classified and does not draw, cannot decode here
+            // or will not at its size goes on the shelf as itself; anything
+            // else, and a kind asked for that the file is not, stays the
+            // failure it was.
             Err(RenderError::Failure(failure)) => {
-                return notify_preview_failure(tr, origin.refuse(failure));
+                let why = crate::media::FileWhy::of_job(&spec.kind, failure);
+                let facts = why.and_then(|why| match &spec.input {
+                    crate::media::SourceInput::Path {
+                        path,
+                        authorization,
+                    } => super::native_path_buf(path)
+                        .and_then(|path| crate::media::file_facts(&path, authorization, why)),
+                    _ => None,
+                });
+                let Some(facts) = facts else {
+                    return notify_preview_failure(tr, origin.refuse(failure));
+                };
+                let crate::media::Draft {
+                    key,
+                    title,
+                    provenance,
+                    inline,
+                    inline_refused,
+                    gallery: _,
+                } = draft;
+                let item = crate::media::ShelfItem::file(
+                    self.media.next_item(),
+                    key,
+                    title,
+                    provenance,
+                    facts,
+                    crate::media::ItemSource::undrawn(spec, facts.identity),
+                );
+                return self.publish_show(
+                    ws,
+                    (origin, route),
+                    item,
+                    (inline, inline_refused),
+                    None,
+                );
             }
         };
         let kettle_media::RenderOutput { kind, rendered } = output;
@@ -1309,14 +1347,13 @@ impl App {
             Ok(image) => image,
             Err(failure) => return notify_preview_failure(tr, origin.refuse(failure)),
         };
-        let visible = media_visible_items(self.all_windows(ws), &self.media.cards);
         let item_id = self.media.next_item();
         let crate::media::Draft {
             key,
             title,
             provenance,
             inline,
-            mut inline_refused,
+            inline_refused,
             gallery,
         } = draft;
         let textual = matches!(
@@ -1364,6 +1401,28 @@ impl App {
         );
         item.layout = Some(layout);
         item.video = video;
+        self.publish_show(ws, (origin, route), item, (inline, inline_refused), page);
+    }
+
+    /// Put `item`, made for a `show` or a user's preview by `origin` for
+    /// `route`, on its pane's shelf; print its card where one was asked
+    /// for and can be had; and answer, or open the lane the user asked for.
+    /// `page` is the page of a document it shows.
+    fn publish_show(
+        &mut self,
+        ws: &mut WindowState,
+        (origin, route): (crate::media::Requester, crate::media::Route),
+        item: crate::media::ShelfItem,
+        (inline, mut inline_refused): (
+            Option<crate::media::InlineDraft>,
+            Option<kettle_ctl::show::InlineRefusal>,
+        ),
+        page: Option<kettle_media::PageOf>,
+    ) {
+        use kettle_media::FailureCode;
+        let (kind, video, (width, height)) = (item.kind, item.video, item.size);
+        let warnings = item.warnings.clone();
+        let visible = media_visible_items(self.all_windows(ws), &self.media.cards);
         let Some(window) = window_with_pane(ws, &mut self.windows, route.pane) else {
             let _ = origin.refuse(FailureCode::NotInKettlePane);
             return;
@@ -1427,7 +1486,7 @@ impl App {
             .items()
             .iter()
             .find(|item| item.id == published.id)
-            .map(|item| (item.generation, item.image().cloned()));
+            .map(|item| (item.generation, item.card_image()));
         let cards = &mut self.media.cards;
         for (pane_id, nonce) in cards.retire(|card| {
             card.pane == route.pane
@@ -1502,13 +1561,22 @@ impl App {
             // Taken by `finish_lane_render` before publishing.
             crate::media::Requester::Lane(_) => return,
         };
-        let mut result = kettle_ctl::show::ShowResult::new(
-            (route.pane, route.verified, seq),
-            published.id,
-            kind,
-            (width, height),
-            &warnings,
-        );
+        let target = (route.pane, route.verified, seq);
+        let mut result = match kind {
+            crate::media::ItemKind::Media(kind) => kettle_ctl::show::ShowResult::new(
+                target,
+                published.id,
+                kind,
+                (width, height),
+                &warnings,
+            ),
+            crate::media::ItemKind::File(facts) => kettle_ctl::show::ShowResult::file(
+                target,
+                published.id,
+                facts.bytes,
+                facts.why.as_str(),
+            ),
+        };
         result.inline = delivery;
         result.inline_refused = inline_refused;
         result.page = page.map(kettle_ctl::show::ShowPage::from);

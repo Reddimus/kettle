@@ -11,6 +11,7 @@ mod cards;
 mod copy;
 mod crop;
 mod external;
+mod file_card;
 mod focus;
 mod inline;
 mod playback;
@@ -42,18 +43,21 @@ pub(crate) use crop::{LaneCrop, LaneTile, coverage as crop_coverage, plan_crop};
 /// Whether an item of `kind` draws as a Mermaid diagram: on the canvas its
 /// render chose, rendered again when that canvas changes. A Markdown item is
 /// a page of a Markdown file's Mermaid diagrams.
-pub(crate) fn draws_as_diagram(kind: kettle_media::MediaKind) -> bool {
+pub(crate) fn draws_as_diagram(kind: impl Into<ItemKind>) -> bool {
     matches!(
-        kind,
-        kettle_media::MediaKind::Mermaid | kettle_media::MediaKind::Markdown
+        kind.into(),
+        ItemKind::Media(kettle_media::MediaKind::Mermaid | kettle_media::MediaKind::Markdown)
     )
 }
 #[cfg(test)]
 pub(crate) use external::Viewer;
 pub(crate) use external::{
-    DocumentSource, OpenFailure, Outside, PrivateCopies, VideoSource, open as open_externally,
-    open_document, open_video,
+    DocumentSource, OpenFailure, Outside, PrivateCopies, RevealTarget, VideoSource,
+    open as open_externally, open_document, open_video, reveal,
 };
+#[cfg(test)]
+pub(crate) use file_card::FileFacts;
+pub(crate) use file_card::{FileWhy, facts as file_facts};
 pub(crate) use focus::{PageStep, PreviewFocus, PreviewKey, ViewerKey, preview_key, viewer_key};
 pub(crate) use inline::{card_caption, card_message, card_size};
 pub(crate) use playback::{
@@ -69,8 +73,8 @@ pub(crate) use preview::{
 pub(crate) use queue::Sender;
 pub(crate) use route::{PaneRoot, Route, nearest_pane, route};
 pub(crate) use shelf::{
-    ItemPixels, Provenance, Shelf, ShelfItem, ShelfKey, UnverifiedSender, report as shelf_report,
-    signer_name,
+    ItemKind, ItemPixels, Provenance, Shelf, ShelfItem, ShelfKey, UnverifiedSender,
+    report as shelf_report, signer_name,
 };
 pub(crate) use sightings::{CardSightings, MAX_CARD_INSTANCE};
 pub(crate) use source::{Gallery, ItemSource, JobSpec, ReadPage, SourceInput};

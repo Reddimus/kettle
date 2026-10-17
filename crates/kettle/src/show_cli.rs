@@ -768,6 +768,7 @@ mod tests {
             inline_refused: None,
             page: None,
             video: None,
+            file: None,
         };
         let text = confirmation(&result);
         assert!(text.contains("pane 3") && text.contains("svg 640x480"));

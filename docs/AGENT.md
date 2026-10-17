@@ -370,7 +370,18 @@ shown as its poster, the middle frame fitted to the lane, whose size
 `width` and `height` give; its result adds `video` with what the video is:
 `duration_ms`, its own `width` and `height` as shown, Kettle's name for the
 `codec` (`h264`, `vp8` and so on, or `unknown`), `fps_milli` when the stream
-says, and `has_audio`. Failures carry the fixed code,
+says, and `has_audio`. A file shown by its path that Kettle does not draw (a
+kind it draws no file of, such as a document, an archive or audio; one no
+decoder on this system reads; or one larger than it draws) is not a failure:
+it goes on the shelf as itself, `kind: "file"` with `width` and `height` 0,
+and the result adds `file`: its `bytes` and the `reason` nothing was drawn
+(`unsupported_media`; `codec_unavailable`, which covers a container or a
+codec no decoder here reads and no decoder at all; or `too_large`). Kettle reads only
+its metadata, from a file it opens itself, and only while that is the file
+named. Its card shows a page Kettle draws, captioned with the file's name
+and size; its lane says why nothing was drawn. A broken file is still
+`render_failed`, a changed one `changed`, and bytes a request carried that
+Kettle does not draw are still `unsupported_media`. Failures carry the fixed code,
 an optional fixed `reason` and wording that names no path, source or
 identifier: `not_in_kettle_pane`, `busy`, `bad_params`, `too_large`,
 `file_refused` (`not_found`, `permission`, `not_regular`, `too_large`),
@@ -500,9 +511,9 @@ motion allowed (`reduce-motion`, macOS's Reduce Motion), the real pointer
 resting on the lane's picture loops the frames a preview the user started
 left, for at most four seconds, reading nothing; a pointer a control client
 moves does not count.
-When no decoder reads a video, its notice says the user can install ffmpeg
-(`brew install ffmpeg` on macOS, the system's packages on Linux); Kettle
-never installs it.
+When no decoder reads a video the user previews by its path, it shows as a
+file card, whose lane says ffmpeg may add one (`brew install ffmpeg` on
+macOS, the system's packages on Linux); Kettle never installs it.
 Clicking an inline card opens that card's item in the configured preview
 presentation (`media-open-mode`). A card
 takes a primary press, and its release, before anything else in the window
@@ -540,8 +551,14 @@ Open in Document Viewer (Linux, Papers at `/usr/bin/papers`, with
 PDF, never a picture of its page, made from the file it was shown from
 while that is still the one shown, or from the bytes a request carried, and
 kept only once its every byte matches what was shown, from a store that
-keeps 8 copies and 512 MiB and is deleted on exit. A notice says why an
-open did not happen.
+keeps 8 copies and 512 MiB and is deleted on exit. A file shown as itself
+has Show in Finder (macOS) or Show in Folder (Linux) instead, as its lane's
+`↗` does: it opens the file's folder with the file selected, never the file,
+only while the path still names the file shown. On Linux it asks the
+desktop's file manager over the session bus (`org.freedesktop.FileManager1`),
+and only a known file manager the user runs (Nautilus, Nemo, Caja, Dolphin
+or Thunar, installed where only root may change it) receives the file. A
+notice says why an open did not happen.
 Nothing a program prints opens another app.
 `kettle ctl send_mouse` clicks a card the same way. Quick select (`hint_mode`) labels each card on screen in the
 focused pane, and picking its label opens it; text in a card's rows is its
@@ -558,7 +575,8 @@ a Markdown file's gallery is `markdown`), size, warnings, `verified`,
 `from_user` (the user previewed it from the pane), the
 `sender` of an unverified item (`executable`, `pid` and `signer`, null when
 unknown) and whether its pixels are `held` or
-`released`.
+`released`, or `none` for a file shown as itself, which adds `file` as the
+`show` result does.
 
 ### Which pane is calling
 
@@ -718,7 +736,7 @@ events it expects.
 | `resize_window` | full | request a live window client-area resize (`window`, `width`, `height`) and let the normal renderer/PTY resize path process it |
 | `perform_action` | full | dispatch a named Kettle app action (`action`, for example `start_search`, `command_palette`, `open_ssh`, `hint_mode`, `edit_tab_title`). The control-only `focus_window` action shows and focuses its target without toggling visibility. Use this for app chrome that is not pane input; `send_keys` intentionally writes terminal keystrokes to the focused pane |
 | `run_command` | full | run `command` in a pane, reply with `{exit_code, duration_ms, output, output_truncated}`; capture is capped at the newest 10,000 retained lines and then 512 KiB, and `output_truncated` is true if either cap drops output |
-| `show` | display | put an image, SVG, Mermaid diagram, Markdown diagram gallery, PDF page or video poster on the shelf of the caller's pane, reply with `{pane, verified, window, item, kind, width, height, warnings}` once it is there (see [Showing media](#showing-media)) |
+| `show` | display | put an image, SVG, Mermaid diagram, Markdown diagram gallery, PDF page or video poster on the shelf of the caller's pane, or a file it does not draw as a file card, reply with `{pane, verified, window, item, kind, width, height, warnings}` once it is there (see [Showing media](#showing-media)) |
 
 **Multi-window**: a kettle process can host several OS windows.
 `list_tabs` / `list_panes` enumerate them all, ordered by window seq;
@@ -1006,7 +1024,8 @@ media](#showing-media), with `status: "failed"` and the fixed `code`. When
 a decoder is what was missing (`unsupported_container`, `codec_unavailable`,
 `backend_unavailable`), the text adds that the user can install ffmpeg
 (`brew install ffmpeg` on macOS, the system's packages on Linux) and that the
-model must not install software itself. `backend_unavailable` with reason
+model must not install software itself; a file shown as itself for want of
+a decoder (`file.reason` `codec_unavailable`) says the same in its line. `backend_unavailable` with reason
 `sandbox` means Kettle could not confine its media worker on this system,
 and decodes no video there; nothing to install helps, and the text says
 not to retry or ask the user to turn off security.

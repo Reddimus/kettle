@@ -1500,16 +1500,17 @@ impl App {
         let Some(item) = preview_item(ws, pane) else {
             return;
         };
-        let (Some(placed), Some(visible), Some(layout), Some(held)) = (
+        let (Some(placed), Some(visible), Some(layout), Some(held), Some(kind)) = (
             geometry.image,
             geometry.visible(),
             item.layout,
             item.image().map(|image| (image.width, image.height)),
+            item.kind.media(),
         ) else {
             return;
         };
         let plan = crate::media::plan_crop(
-            item.kind,
+            kind,
             &layout,
             held,
             (f64::from(placed.2), f64::from(placed.3)),
@@ -2235,7 +2236,8 @@ impl App {
     /// What `pane`'s lane offers to open its item in outside Kettle: none
     /// when this platform has nothing permitted for it, an image's pixels
     /// were let go, or a PDF's bytes were. A video opens from its file, not
-    /// its poster, and a PDF from its file or bytes, not its page.
+    /// its poster, a PDF from its file or bytes, not its page, and a file
+    /// Kettle does not draw is shown in its folder.
     pub(super) fn preview_opens_outside(
         &self,
         ws: &WindowState,
@@ -2248,6 +2250,7 @@ impl App {
             Outside::Video(_) => true,
             Outside::Document(_) => crate::media::DocumentSource::of(item).is_some(),
             Outside::Image(_) => item.image().is_some(),
+            Outside::Reveal(_) => crate::media::RevealTarget::of(item).is_some(),
         }
         .then_some(outside)
     }
@@ -2309,6 +2312,10 @@ impl App {
                     None => failed(crate::media::OpenFailure::Copy),
                 }
             }
+            crate::media::Outside::Reveal(revealer) => match crate::media::RevealTarget::of(item) {
+                Some(target) => crate::media::reveal(target, revealer, failed),
+                None => failed(crate::media::OpenFailure::Changed),
+            },
         }
     }
 
@@ -2475,7 +2482,22 @@ impl App {
             }),
             document: item.source.is_document(),
             image: item.image().cloned(),
-            status: tr.text(kettle_i18n::Text::MediaViewerReleased).to_string(),
+            // What the lane says where no picture is: why a file was not
+            // drawn, or that pixels were let go.
+            status: tr
+                .text(match item.kind.file().map(|facts| facts.why) {
+                    Some(crate::media::FileWhy::Unsupported) => {
+                        kettle_i18n::Text::MediaViewerFileUnsupported
+                    }
+                    Some(crate::media::FileWhy::NoDecoder) => {
+                        kettle_i18n::Text::MediaViewerFileNoDecoder
+                    }
+                    Some(crate::media::FileWhy::TooLarge) => {
+                        kettle_i18n::Text::MediaViewerFileTooLarge
+                    }
+                    None => kettle_i18n::Text::MediaViewerReleased,
+                })
+                .to_string(),
             open_outside: self.preview_opens_outside(ws, pane).is_some(),
             canvas: preview_canvas(item, panel),
             mode,
@@ -2636,12 +2658,15 @@ impl App {
     ) -> (&'static str, kettle_render::MediaLaneSender) {
         let tr = &self.ui_text;
         let kind = tr.text(match item.kind {
-            kettle_media::MediaKind::Raster => kettle_i18n::Text::MediaViewerKindImage,
-            kettle_media::MediaKind::Svg => kettle_i18n::Text::MediaViewerKindSvg,
-            kettle_media::MediaKind::Mermaid => kettle_i18n::Text::MediaViewerKindMermaid,
-            kettle_media::MediaKind::Video => kettle_i18n::Text::MediaViewerKindVideo,
-            kettle_media::MediaKind::Markdown => kettle_i18n::Text::MediaViewerKindMarkdown,
-            kettle_media::MediaKind::Pdf => kettle_i18n::Text::MediaViewerKindPdf,
+            crate::media::ItemKind::Media(kind) => match kind {
+                kettle_media::MediaKind::Raster => kettle_i18n::Text::MediaViewerKindImage,
+                kettle_media::MediaKind::Svg => kettle_i18n::Text::MediaViewerKindSvg,
+                kettle_media::MediaKind::Mermaid => kettle_i18n::Text::MediaViewerKindMermaid,
+                kettle_media::MediaKind::Video => kettle_i18n::Text::MediaViewerKindVideo,
+                kettle_media::MediaKind::Markdown => kettle_i18n::Text::MediaViewerKindMarkdown,
+                kettle_media::MediaKind::Pdf => kettle_i18n::Text::MediaViewerKindPdf,
+            },
+            crate::media::ItemKind::File(_) => kettle_i18n::Text::MediaViewerKindFile,
         });
         let sender = match &item.provenance {
             crate::media::Provenance::Verified => kettle_render::MediaLaneSender {
