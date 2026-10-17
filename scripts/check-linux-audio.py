@@ -131,7 +131,7 @@ def main():
             result['reused_audio_service'] = True
             result['stalled_clock_unrun'] = 'needs an owned cold Pulse null sink'
         stages = [
-            ('decoder', executable(args.decoder_tests_json, 'ffmpeg'), [], 21),
+            ('decoder', executable(args.decoder_tests_json, 'ffmpeg'), [], 22),
             ('playback', native, ['--ignored', '--skip', stalled_case], 4),
             ('broker', executable(args.worker_tests_json, 'process_boundary'),
              ['--ignored', '--exact', 'linux_pcm_only_broker_plays_pauses_and_closes'], 1),
