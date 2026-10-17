@@ -903,15 +903,19 @@ impl Ffmpeg {
             _ => None,
         };
         let duration_us = match (probe.duration_us, &scanned, clock) {
-            (Some(duration), _, _) => duration,
+            (Some(duration), _, _) => i128::from(duration),
             (None, Some(timeline), Some(clock)) => {
                 let last = *timeline.starts.last().unwrap_or(&0);
-                (clock.micros(last) - probe.start_us).max(0)
-                    + i64::try_from(probe.frame_ms() * 1000).unwrap_or(0)
+                (i128::from(clock.micros(last)) - i128::from(probe.start_us)).max(0)
+                    + i128::from(probe.frame_ms()) * 1000
             }
             _ => return Err(FailureCode::RenderParse),
         };
-        let duration_ms = u64::try_from(duration_us / 1000).unwrap_or(0);
+        if duration_us > i128::from(kettle_media::MAX_VIDEO_DURATION_MS) * 1000 {
+            return Err(FailureCode::RenderParse);
+        }
+        let duration_ms =
+            u64::try_from(duration_us / 1000).map_err(|_| FailureCode::RenderParse)?;
         let (width, height) = probe.shown()?;
         let info = VideoInfo {
             duration_ms,

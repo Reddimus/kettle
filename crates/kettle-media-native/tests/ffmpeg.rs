@@ -518,6 +518,23 @@ fn descriptions_without_a_duration_or_video() {
     assert_eq!(result.unwrap_err(), FailureCode::RenderParse);
 }
 
+#[test]
+fn inferred_durations_reject_extreme_packet_timestamps() {
+    let undated: Vec<&str> = DESCRIPTION
+        .iter()
+        .copied()
+        .filter(|line| !line.contains("duration"))
+        .collect();
+    let clip = Clip::mp4();
+    for last in ["9223372036854775,K__", "9223372036854775807,K__"] {
+        let fake = Fake::new(&undated, &[last], GOOD);
+        let (result, seen) = take(&fake.decoder(), &clip, &[0], (8, 6), later());
+        assert_eq!(result.unwrap_err(), FailureCode::RenderParse);
+        assert_eq!(seen, None);
+        assert!(fake.calls("ffmpeg").is_empty());
+    }
+}
+
 /// Packets without timestamps leave seeking by time: each frame stands for
 /// its instant within one frame's length.
 #[test]

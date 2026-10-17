@@ -12,10 +12,10 @@
 //! - A property value may refer only to local fragments (`url(#id)`); a
 //!   declaration or attribute naming anything else is removed. A value whose
 //!   references cannot be read plainly (a backslash escape, an unclosed
-//!   `url(`) refuses the document rather than be guessed at, and a style
-//!   sheet may not import or name anything at all, even in the document:
-//!   which elements a rule reaches is not something the structural count can
-//!   know.
+//!   `url(`) refuses the document rather than be guessed at. Supported style
+//!   sheet rules are resolved into checked attributes; local references
+//!   survive, while imports are refused. Structural admission counts the
+//!   lowered document.
 //! - Event attributes, `xml:base`, comments and processing instructions are
 //!   dropped, and of namespaced attributes only `xlink:href` and `xml:space`
 //!   survive (usvg reads others by their local name). Of an element's two
