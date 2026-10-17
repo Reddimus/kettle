@@ -4514,6 +4514,82 @@ mod ordinary_graphics_reply_tests {
     }
 
     #[test]
+    fn screen_namespaces_share_upload_slots_and_release_them() {
+        let budget = crate::GraphicsBudget::isolated(crate::GraphicsLimits {
+            in_flight_slots: 1,
+            ..crate::GraphicsLimits::default()
+        })
+        .unwrap();
+        let mut extractor = Extractor::with_budget(budget.clone());
+        extractor.enter_alternate_screen(false);
+        extractor.feed(b"\x1b_Ga=t,i=7,f=32,s=1,v=1;AQID/w==\x1b\\");
+        extractor.leave_alternate_screen(false);
+        extractor.feed(b"\x1b_Ga=t,i=1,f=32,s=1,v=1,m=1;AQID\x1b\\");
+        extractor.enter_alternate_screen(false);
+        for command in [
+            "a=t,i=2,f=32,s=1,v=1,m=1;AQID",
+            "a=f,i=7,f=32,s=1,v=1,m=1;AQID",
+            "a=q,i=3,f=32,s=1,v=1,m=1;AQID",
+        ] {
+            let response = replies(&mut extractor, format!("\x1b_G{command}\x1b\\").as_bytes());
+            assert_eq!(response.len(), 1);
+            assert!(!response[0].contains(";OK"));
+        }
+        extractor.leave_alternate_screen(false);
+        assert_eq!(
+            replies(&mut extractor, b"\x1b_Gi=1,m=0;/w==\x1b\\"),
+            ["\x1b_Gi=1;OK\x1b\\"]
+        );
+        extractor.enter_alternate_screen(false);
+        assert!(replies(&mut extractor, b"\x1b_Ga=t,i=2,f=32,s=1,v=1,m=1;AQID\x1b\\").is_empty());
+        extractor.leave_alternate_screen(false);
+        extractor.enter_alternate_screen(true);
+        assert!(replies(&mut extractor, b"\x1b_Ga=t,i=4,f=32,s=1,v=1,m=1;AQID\x1b\\").is_empty());
+        extractor.feed(b"\x1b_Ga=d,d=I,i=4\x1b\\");
+        assert_eq!(
+            replies(&mut extractor, b"\x1b_Ga=t,i=5,f=32,s=1,v=1;AQID/w==\x1b\\"),
+            ["\x1b_Gi=5;OK\x1b\\"]
+        );
+        drop(extractor);
+        assert_eq!(budget.usage(), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn screen_namespaces_share_upload_bytes_before_accumulation() {
+        let budget = crate::GraphicsBudget::isolated(crate::GraphicsLimits {
+            transmission_bytes: 64,
+            in_flight_bytes: 96,
+            ..crate::GraphicsLimits::default()
+        })
+        .unwrap();
+        let mut extractor = Extractor::with_budget(budget.clone());
+        for alternate in [false, true] {
+            if alternate {
+                extractor.enter_alternate_screen(false);
+            }
+            let control = "i=1,m=1";
+            let payload = "A".repeat(48 - control.len());
+            assert!(
+                replies(
+                    &mut extractor,
+                    format!("\x1b_G{control};{payload}\x1b\\").as_bytes()
+                )
+                .is_empty()
+            );
+        }
+        assert_eq!(budget.usage().0, 96);
+        let response = replies(&mut extractor, b"\x1b_Gi=1,m=1;A\x1b\\");
+        assert_eq!(response.len(), 1);
+        assert!(response[0].starts_with("\x1b_Gi=1;ENOSPC:"));
+        assert_eq!(budget.usage().0, 48);
+        extractor.reset_all_graphics();
+        assert_eq!(budget.usage(), (0, 0, 0, 0));
+        extractor.feed(b"\x1b_Gi=9,m=1;AAAA\x1b\\");
+        drop(extractor);
+        assert_eq!(budget.usage(), (0, 0, 0, 0));
+    }
+
+    #[test]
     fn zero_identifiers_do_not_conflict_with_the_other_nonzero_identifier() {
         let mut extractor = Extractor::default();
         let response = replies(

@@ -266,6 +266,32 @@ impl RelativeResolver {
             .or_insert(key.placement_id);
     }
 
+    pub(crate) fn has_cycle(&self, mut parent: PlacementKey) -> bool {
+        let mut seen = HashSet::new();
+        loop {
+            if parent.placement_id == 0 {
+                let Some(&placement_id) = self
+                    .defaults
+                    .get(&parent.image_id)
+                    .or_else(|| self.relative_defaults.get(&parent.image_id))
+                else {
+                    return false;
+                };
+                parent.placement_id = placement_id;
+            }
+            if self.origins.contains_key(&parent) {
+                return false;
+            }
+            if !seen.insert(parent) {
+                return true;
+            }
+            let Some(&(grandparent, _, _)) = self.parents.get(&parent) else {
+                return false;
+            };
+            parent = grandparent;
+        }
+    }
+
     pub(crate) fn resolve(&self, mut parent: PlacementKey, max_depth: u32) -> Option<(u64, usize)> {
         if parent.placement_id == 0 {
             parent.placement_id = *self

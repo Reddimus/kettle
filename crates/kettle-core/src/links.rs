@@ -9,6 +9,8 @@ use std::sync::OnceLock;
 
 use crate::event::EventProxy;
 
+const MAX_URL_BYTES: usize = 4096;
+
 /// A clickable link in viewport (visible-row) coordinates.
 #[derive(Debug, Clone)]
 pub struct Link {
@@ -58,13 +60,23 @@ use crate::url_trim::trim_trailing;
 /// end byte before trimming, text): trimmed of trailing punctuation, and not
 /// starting inside a longer token. `/bar.png` in `foo(1)/bar.png` would name an unrelated file.
 fn path_candidates(text: &str) -> impl Iterator<Item = (usize, usize, &str)> {
+    let runs = crate::hints::quoted_runs(text).collect::<Vec<_>>();
     path_re().find_iter(text).filter_map(move |m| {
         let matched = trim_trailing(m.as_str());
         let before = text[..m.start()].chars().next_back();
+        let after_host = text[..m.start()].strip_suffix(':').is_some_and(|prefix| {
+            let previous = prefix
+                .rsplit(|c: char| c.is_whitespace() || "\"'`*([{<=:,;&>|".contains(c))
+                .next()
+                .unwrap_or("");
+            !previous.is_empty() && !previous.contains(['/', '\\'])
+        });
         let path_end = m.start() + strip_location_suffix(matched).len();
         (!matched.is_empty()
+            && !after_host
             && crate::hints::path_may_start_after(before)
-            && crate::hints::match_has_end(before, &text[path_end..]))
+            && crate::hints::match_has_end(before, &text[path_end..])
+            && crate::hints::path_reaches_quote(text, &runs, m.start(), m.end()))
         .then_some((m.start(), m.end(), matched))
     })
 }
@@ -107,22 +119,34 @@ pub fn links_with_cwd(term: &Term<EventProxy>, cwd: Option<&str>) -> Vec<Link> {
         while c < cols {
             let cell = &grid[Point::new(Line(gl), Column(c))];
             if let Some(h) = cell.hyperlink() {
-                let uri = h.uri().to_string();
                 let start = c;
                 while c < cols {
                     let cc = &grid[Point::new(Line(gl), Column(c))];
+                    // The same link, or the same target linked again beside
+                    // it. A target past the cap is never compared by its
+                    // bytes, which would cost its length at every cell.
                     match cc.hyperlink() {
-                        Some(h2) if h2.uri() == uri => c += 1,
+                        Some(h2)
+                            if std::ptr::eq(h2.uri(), h.uri())
+                                || (h.uri().len() <= MAX_URL_BYTES && h2.uri() == h.uri()) =>
+                        {
+                            c += 1
+                        }
                         _ => break,
                     }
                 }
                 let end = c.saturating_sub(1);
+                // An oversized target links nothing, but its cells stay
+                // covered, so their text is not linked in its place.
                 covered[row].insert(start, end + 1);
+                if h.uri().len() > MAX_URL_BYTES {
+                    continue;
+                }
                 out.push(Link {
                     row,
                     start_col: start,
                     end_col: end,
-                    uri,
+                    uri: h.uri().to_string(),
                     group,
                 });
                 group += 1;
@@ -357,7 +381,7 @@ fn encode_file_path(path: &str) -> String {
 /// We allow only a conservative scheme allowlist and reject controls,
 /// whitespace, and absurd lengths. Pure — fully unit tested.
 pub fn is_safe_url(uri: &str) -> bool {
-    if uri.is_empty() || uri.len() > 4096 {
+    if uri.is_empty() || uri.len() > MAX_URL_BYTES {
         return false;
     }
     if uri.chars().any(|c| c.is_control() || c == ' ') {
@@ -747,6 +771,24 @@ mod tests {
         term
     }
 
+    #[test]
+    fn oversized_osc8_targets_do_not_fall_back_to_text() {
+        for size in [4096, 4097] {
+            let uri = format!("https://target.test/{}", "a".repeat(size - 20));
+            assert_eq!(uri.len(), size);
+            let output =
+                format!("\x1b]8;;{uri}\x1b\\https://visible.test/a\r\n/etc/hosts\x1b]8;;\x1b\\");
+            let term = term_fed(80, 2, output.as_bytes());
+            let found = links_with_cwd(&term, Some("/work"));
+            if size > 4096 {
+                assert!(found.is_empty(), "{found:?}");
+            } else {
+                assert_eq!(found.len(), 2);
+                assert!(found.iter().all(|link| link.uri == uri));
+            }
+        }
+    }
+
     /// A URL wrapped in from above the first visible row, or running past the
     /// last, is cut: no link, not even a path link to its tail. Scrolled back
     /// to show all of it, it is one link.
@@ -831,6 +873,42 @@ mod tests {
         assert_eq!(found("--out=/tmp/x.png"), ["/tmp/x.png"]);
         assert_eq!(found("cmd >/tmp/out.log"), ["/tmp/out.log"]);
         assert_eq!(found("see src/main.rs:12"), ["src/main.rs:12"]);
+    }
+
+    #[test]
+    fn host_prefixed_paths_are_not_local_links() {
+        for line in [
+            "user@host:/etc/hosts",
+            "host:/etc/hosts",
+            "user@host:dir/file.txt",
+        ] {
+            let term = term_with(80, &[line], &[]);
+            assert!(links_with_cwd(&term, Some("/work")).is_empty(), "{line}");
+        }
+        let term = term_with(80, &["PATH=/usr/bin:/bin"], &[]);
+        assert!(
+            links_with_cwd(&term, Some("/work"))
+                .iter()
+                .any(|link| link.uri == "file:///bin")
+        );
+        let term = term_with(80, &["C:/Users/me/file.txt"], &[]);
+        assert_eq!(links(&term)[0].uri, "file:///C:/Users/me/file.txt");
+    }
+
+    #[test]
+    fn bare_paths_must_reach_their_enclosing_quote() {
+        for line in [
+            "'My Files/a b.txt'",
+            "\"cannot open src/main.rs now\"",
+            "\" docs/a b.pdf\"",
+        ] {
+            let term = term_with(80, &[line], &[]);
+            assert!(links_with_cwd(&term, Some("/work")).is_empty(), "{line}");
+        }
+        let term = term_with(80, &["\"see src/main.rs\""], &[]);
+        let found = links_with_cwd(&term, Some("/work"));
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].uri, "file:///work/src/main.rs");
     }
 
     #[test]

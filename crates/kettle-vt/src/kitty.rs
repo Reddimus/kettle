@@ -25,7 +25,7 @@ use std::io::Read;
 
 use base64::Engine;
 
-use crate::graphics_limits::{GraphicsBudget, GraphicsReservation};
+use crate::graphics_limits::{GraphicsBudget, GraphicsReservation, InFlightReservation};
 use crate::image::{ImageData, Placed, PlacementParams, rgba_bytes};
 
 // All byte/count ceilings come from `GraphicsLimits`; keeping one source of
@@ -36,6 +36,7 @@ struct Acc {
     control: String,
     payload: String,
     reservation: Option<GraphicsReservation>,
+    in_flight: Option<InFlightReservation>,
     reply: Option<ReplyIntent>,
 }
 
@@ -65,6 +66,16 @@ impl Acc {
         };
         if new_len == 0 || new_len > budget.limits().transmission_bytes {
             return false;
+        }
+        if let Some(r) = self.in_flight.as_mut() {
+            if !r.try_grow_to(new_len) {
+                return false;
+            }
+        } else {
+            let Some(r) = budget.reserve_in_flight(new_len) else {
+                return false;
+            };
+            self.in_flight = Some(r);
         }
         if let Some(r) = self.reservation.as_mut() {
             if !r.try_grow_to(new_len) {
@@ -587,6 +598,20 @@ impl KittyState {
             completion.intent.placement_id.unwrap_or(0),
         );
         if status == CommandStatus::Ok {
+            if key.1 != 0 {
+                match completion.previous {
+                    PlacementPrevious::Physical => {
+                        self.virtual_placements.remove(&key);
+                        self.rel.remove(&key);
+                    }
+                    PlacementPrevious::Virtual { .. } => {
+                        self.rel.remove(&key);
+                    }
+                    PlacementPrevious::Relative { .. } => {
+                        self.virtual_placements.remove(&key);
+                    }
+                }
+            }
             if let PlacementPrevious::Relative { attempted, .. } = completion.previous
                 && self.store.contains_key(&key.0)
             {
@@ -663,6 +688,7 @@ impl KittyState {
                 return CommandResult::refused(intent, CommandStatus::InvalidPlacement);
             }
             if !self.virtual_placements.contains_key(&key)
+                && (placement == 0 || !self.rel.contains_key(&key))
                 && self.placement_state_len() >= self.budget.limits().placements
             {
                 return CommandResult::refused(intent, CommandStatus::NoSpace);
@@ -691,6 +717,7 @@ impl KittyState {
                 return CommandResult::refused(intent, CommandStatus::MissingImage);
             }
             if !self.rel.contains_key(&key)
+                && (placement == 0 || !self.virtual_placements.contains_key(&key))
                 && self.placement_state_len() >= self.budget.limits().placements
             {
                 return CommandResult::refused(intent, CommandStatus::NoSpace);
@@ -901,8 +928,7 @@ impl KittyState {
         }
         let payload = payload.trim();
         if self.query_in_flight.is_none()
-            && self.in_flight.len() + usize::from(self.frame_in_flight.is_some())
-                >= self.budget.limits().in_flight_slots
+            && self.budget.in_flight_usage().0 >= self.budget.limits().in_flight_slots
             || !self.in_flight_append_fits(
                 self.query_in_flight.as_ref().map(|acc| &acc.data),
                 control,
@@ -948,17 +974,20 @@ impl KittyState {
             return KittyOut::None;
         };
         self.retire_retransmission(&command);
-        let result = self.feed_command(command);
-        let Some(pending) = self.pending_transmit.take() else {
-            return result.effect;
-        };
-        if let Some(request) = self.quota_request(&pending) {
-            let Some(victims) = request.plan(&[]) else {
-                return KittyOut::None;
-            };
-            self.reclaim_quota(&victims, false);
+        let mut result = self.feed_command(command);
+        if let Some(pending) = self.pending_transmit.take() {
+            if let Some(request) = self.quota_request(&pending) {
+                let Some(victims) = request.plan(&[]) else {
+                    return KittyOut::None;
+                };
+                self.reclaim_quota(&victims, false);
+            }
+            result = self.complete_transmit(pending);
         }
-        self.complete_transmit(pending).effect
+        if let CommandCompletion::Placement(completion) = result.completion {
+            self.finish_placement(completion, CommandStatus::Ok);
+        }
+        result.effect
     }
 
     pub(crate) fn is_query_command(&self, command: &Command<'_>) -> bool {
@@ -969,7 +998,10 @@ impl KittyState {
         let kv = &command.values;
         if self.is_query_control(kv)
             || !matches!(kv.get("a").map(String::as_str).unwrap_or("t"), "t" | "T")
-            || kv.contains_key("I")
+            || kv
+                .get("I")
+                .and_then(|value| value.parse::<u32>().ok())
+                .is_some_and(|number| number != 0)
         {
             return None;
         }
@@ -988,9 +1020,11 @@ impl KittyState {
         }) {
             return None;
         }
-        if self.in_flight.len()
-            + usize::from(self.frame_in_flight.is_some() && !cancels_frame)
-            + usize::from(self.query_in_flight.is_some())
+        if self
+            .budget
+            .in_flight_usage()
+            .0
+            .saturating_sub(usize::from(cancels_frame))
             >= self.budget.limits().in_flight_slots
             || !self.in_flight_append_fits(None, command.control, command.payload.trim())
         {
@@ -1302,10 +1336,7 @@ impl KittyState {
         // is saturated. A continuation chunk for an existing slot is
         // always allowed — only brand-new ids count against the cap.
         if !self.in_flight.contains_key(&id)
-            && self.in_flight.len()
-                + usize::from(self.frame_in_flight.is_some())
-                + usize::from(self.query_in_flight.is_some())
-                >= self.budget.limits().in_flight_slots
+            && self.budget.in_flight_usage().0 >= self.budget.limits().in_flight_slots
         {
             return CommandResult::refused(intent, CommandStatus::NoSpace);
         }
@@ -1334,6 +1365,7 @@ impl KittyState {
             control,
             payload,
             reservation: _payload_reservation,
+            in_flight: _in_flight_reservation,
             reply: _,
         } = self.in_flight.remove(&id).unwrap_or_default();
         let first = parse_control(&control);
@@ -1727,23 +1759,9 @@ impl KittyState {
             .retain(|&(image_id, _), relative| image_id != id && relative.parent_img != id);
     }
 
-    /// Total bytes currently buffered across every in-flight
-    /// transmission — all `in_flight` slots plus the animation `frame_in_flight`
-    /// slot. Used to enforce the shared in-flight byte limit. O(slots) ≤ 8, called
-    /// once per chunk, so trivially cheap.
+    /// Total buffered upload bytes across both screen namespaces.
     fn in_flight_bytes(&self) -> usize {
-        self.in_flight
-            .values()
-            .map(Acc::buffered_bytes)
-            .sum::<usize>()
-            + self
-                .frame_in_flight
-                .as_ref()
-                .map_or(0, |(_, a)| a.buffered_bytes())
-            + self
-                .query_in_flight
-                .as_ref()
-                .map_or(0, |acc| acc.data.buffered_bytes())
+        self.budget.in_flight_usage().1
     }
 
     fn in_flight_append_fits(&self, slot: Option<&Acc>, control: &str, payload: &str) -> bool {
@@ -1876,8 +1894,7 @@ impl KittyState {
             return CommandResult::refused(intent, CommandStatus::MissingImage);
         }
         if self.frame_in_flight.is_none()
-            && self.in_flight.len() + usize::from(self.query_in_flight.is_some())
-                >= self.budget.limits().in_flight_slots
+            && self.budget.in_flight_usage().0 >= self.budget.limits().in_flight_slots
         {
             return CommandResult::refused(intent, CommandStatus::NoSpace);
         }
@@ -3086,6 +3103,36 @@ mod tests {
         );
         assert!(k.virtual_placement(overflow, 0).is_some());
         assert_eq!(k.store.len(), cap);
+    }
+
+    #[test]
+    fn admitted_named_placements_reconcile_decoder_forms_at_capacity() {
+        let budget = crate::GraphicsBudget::isolated(crate::GraphicsLimits {
+            placements: 1,
+            ..crate::GraphicsLimits::default()
+        })
+        .unwrap();
+        let mut state = KittyState::new(budget);
+        state.feed(&format!("a=t,i=7,f=32,s=1,v=1;{PX}"));
+        for (command, virtual_form, relative_form) in [
+            ("a=p,i=7,p=1,U=1,c=1,r=1", true, false),
+            ("a=p,i=7,p=1,P=8,Q=2", false, true),
+            ("a=p,i=7,p=1,U=1,c=1,r=1", true, false),
+            ("a=p,i=7,p=1,C=1", false, false),
+        ] {
+            assert!(!matches!(state.feed(command), KittyOut::None));
+            assert_eq!(state.virtual_placement(7, 1).is_some(), virtual_form);
+            assert_eq!(state.relative_placement(7, 1).is_some(), relative_form);
+            if virtual_form {
+                let result = state.feed_command(Command::parse("a=p,i=7,p=1,P=8,Q=2").unwrap());
+                let CommandCompletion::Placement(completion) = result.completion else {
+                    panic!("replacement must reach admission");
+                };
+                state.finish_placement(completion, CommandStatus::MissingParent);
+                assert!(state.virtual_placement(7, 1).is_some());
+                assert!(state.relative_placement(7, 1).is_none());
+            }
+        }
     }
 
     #[test]

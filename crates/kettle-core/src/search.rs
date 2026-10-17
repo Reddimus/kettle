@@ -49,6 +49,15 @@ pub const MAX_SEARCH_OPERATION_BYTES: usize = 64 * 1024;
 /// Maximum aggregate terminal cells inspected while materializing one bounded call.
 pub const MAX_SEARCH_OPERATION_CELLS: usize = MAX_SEARCH_MATERIALIZED_CELLS;
 
+/// The most regex work one reverse-search call does before it yields, in
+/// haystack bytes. Each step is charged the whole suffix it may scan, an upper
+/// bound on a linear-time engine's work: a pattern such as `(?:aa)*z|a` scans
+/// to the end of the line for every match, so enumerating a long line's
+/// matches is quadratic. 32 MiB is a few tens of milliseconds of scanning
+/// even then, and a reverse search of a 64 KiB line full of matches takes at
+/// most 64 calls, one per redraw.
+pub const MAX_SEARCH_OPERATION_REGEX_BYTES: usize = 32 * 1024 * 1024;
+
 const MAX_SEARCH_NFA_BYTES: usize = 512 * 1024;
 const MAX_SEARCH_ONEPASS_BYTES: usize = 256 * 1024;
 const MAX_SEARCH_HYBRID_CACHE_BYTES: usize = 256 * 1024;
@@ -132,8 +141,8 @@ pub struct SearchBatch {
     pub accuracy_limited: bool,
     /// First unscanned point after an exact work-budget yield.
     ///
-    /// Continuations occur only between fully materialized and fully searched hard logical lines.
-    /// They are never returned for an accuracy-limited batch.
+    /// Reverse scans can retain a partially searched logical line in the compiled search. Resume
+    /// with the same compiled search and directional edge. Accuracy-limited batches never resume.
     pub continuation: Option<SearchPoint>,
 }
 
@@ -293,6 +302,21 @@ pub fn bounded_line_search_left<T>(
 #[derive(Clone, Debug)]
 pub struct CompiledSearch {
     regex: MetaRegex,
+    /// A reverse scan of a logical line that yielded, resumed by the next
+    /// call with the same bounds and text.
+    reverse_progress: Option<ReverseProgress>,
+    /// [`MAX_SEARCH_OPERATION_REGEX_BYTES`], smaller in tests.
+    regex_budget: usize,
+}
+
+#[derive(Clone, Debug)]
+struct ReverseProgress {
+    bounds: SearchBounds,
+    haystack: SearchHaystack,
+    next_start: usize,
+    last_match_end: Option<usize>,
+    rightmost: VecDeque<SearchSpan>,
+    seen: HashSet<SearchSpan>,
 }
 
 impl CompiledSearch {
@@ -353,7 +377,11 @@ impl CompiledSearch {
             Err(SearchCompileError::InvalidRegex) => build(&regex::escape(pattern))?,
             Err(error) => return Err(error),
         };
-        Ok(Some(Self { regex }))
+        Ok(Some(Self {
+            regex,
+            reverse_progress: None,
+            regex_budget: MAX_SEARCH_OPERATION_REGEX_BYTES,
+        }))
     }
 
     fn nonempty_matches<'a>(
@@ -576,8 +604,6 @@ impl CompiledSearch {
             SearchDirection::Reverse => {
                 let mut chunk_end = engine_high.line;
                 let mut frontier = start;
-                let mut rightmost = VecDeque::with_capacity(limit.min(256));
-                let mut chunk_seen = HashSet::with_capacity(limit.min(256));
                 loop {
                     if should_cancel() {
                         return cancelled_batch(matches, false);
@@ -601,28 +627,70 @@ impl CompiledSearch {
                     }
                     work.record(&haystack);
                     let remaining = limit.saturating_sub(matches.len());
-                    rightmost.clear();
-                    chunk_seen.clear();
-                    for found in self.nonempty_matches(&haystack) {
+                    let resume_bounds = SearchBounds::new(frontier, end);
+                    let mut progress = self
+                        .reverse_progress
+                        .take()
+                        .filter(|progress| {
+                            progress.bounds == resume_bounds && progress.haystack == haystack
+                        })
+                        .unwrap_or_else(|| ReverseProgress {
+                            bounds: resume_bounds,
+                            next_start: haystack.search_start,
+                            last_match_end: None,
+                            haystack: std::mem::take(&mut haystack),
+                            rightmost: VecDeque::with_capacity(remaining.min(256)),
+                            seen: HashSet::with_capacity(remaining.min(256)),
+                        });
+                    while progress.next_start <= progress.haystack.search_end {
                         if should_cancel() {
                             return cancelled_batch(matches, false);
                         }
-                        let Some(span) = haystack.map_match(found.start(), found.end()) else {
+                        let cost = progress
+                            .haystack
+                            .text
+                            .len()
+                            .saturating_sub(progress.next_start)
+                            .max(1);
+                        if work.regex_bytes + cost > self.regex_budget {
+                            self.reverse_progress = Some(progress);
+                            return yielded_batch(matches, frontier);
+                        }
+                        work.regex_bytes += cost;
+                        let input = Input::new(&progress.haystack.text)
+                            .span(progress.next_start..progress.haystack.search_end);
+                        let Some(found) = self.regex.find(input) else {
+                            break;
+                        };
+                        // Match find_iter's suppression of empty matches overlapping the
+                        // previous match, charging each engine invocation separately.
+                        if found.is_empty() && progress.last_match_end == Some(found.end()) {
+                            progress.next_start += 1;
+                            continue;
+                        }
+                        progress.next_start = found.end();
+                        progress.last_match_end = Some(found.end());
+                        let Some(span) = progress.haystack.map_match(found.start(), found.end())
+                        else {
                             continue;
                         };
                         if span.end < low
                             || span.start > high
                             || seen.contains(&span)
-                            || !chunk_seen.insert(span)
+                            || !progress.seen.insert(span)
                         {
                             continue;
                         }
-                        if rightmost.len() == remaining {
-                            rightmost.pop_front();
+                        if progress.rightmost.len() == MAX_SEARCH_MATCHES {
+                            progress.rightmost.pop_front();
                         }
-                        rightmost.push_back(span);
+                        progress.rightmost.push_back(span);
                     }
-                    while let Some(span) = rightmost.pop_back() {
+                    haystack = progress.haystack;
+                    while matches.len() < limit {
+                        let Some(span) = progress.rightmost.pop_back() else {
+                            break;
+                        };
                         if seen.insert(span) {
                             matches.push(span);
                         }
@@ -665,6 +733,7 @@ struct SearchWork {
     haystacks: usize,
     bytes: usize,
     cells: usize,
+    regex_bytes: usize,
 }
 
 impl SearchWork {
@@ -725,7 +794,7 @@ fn cancelled_batch(matches: Vec<SearchSpan>, truncated: bool) -> SearchBatch {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ByteMap {
     byte_end: u32,
     start_line: i32,
@@ -748,7 +817,7 @@ impl ByteMap {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct SearchHaystack {
     text: String,
     map: Vec<ByteMap>,
@@ -1324,6 +1393,65 @@ mod tests {
                 "reverse pattern {pattern:?}"
             );
         }
+    }
+
+    #[test]
+    fn reverse_regex_budget_resumes_without_losing_rightmost_matches() {
+        let mut term = empty_term(512, 1);
+        write_ascii(&mut term, 0, 0, &"a".repeat(512));
+        let low = SearchPoint::new(0, 0);
+        let high = SearchPoint::new(0, 511);
+        for pattern in [r"(?:aa)*z|a", r"(?:aa)*z|a|\b", r"\b|(?:aa)*z|a"] {
+            let mut search = CompiledSearch::compile(pattern, CaseSensitivity::Always)
+                .unwrap()
+                .unwrap();
+            search.regex_budget = 64 * 1024;
+            let mut bounds = SearchBounds::new(high, low);
+            let mut yields = 0;
+            loop {
+                let limit = if yields == 0 { 1 } else { 512 };
+                let batch = search.find_in_range(&term, bounds, SearchDirection::Reverse, limit);
+                assert!(!batch.accuracy_limited);
+                if let Some(next) = batch.continuation {
+                    assert!(batch.matches.is_empty());
+                    assert_eq!(next, high);
+                    bounds.start = next;
+                    yields += 1;
+                    assert!(yields < 16, "reverse enumeration did not advance");
+                } else {
+                    assert!(yields > 0, "regex enumeration bypassed the work budget");
+                    assert_eq!(
+                        batch.matches,
+                        (usize::from(pattern.starts_with(r"\b"))..512)
+                            .rev()
+                            .map(|col| {
+                                let point = SearchPoint::new(0, col);
+                                SearchSpan::new(point, point)
+                            })
+                            .collect::<Vec<_>>()
+                    );
+                    break;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reverse_regex_resume_restarts_after_terminal_text_changes() {
+        let mut term = empty_term(512, 1);
+        write_ascii(&mut term, 0, 0, &"a".repeat(512));
+        let mut search = CompiledSearch::compile(r"(?:aa)*z|a", CaseSensitivity::Always)
+            .unwrap()
+            .unwrap();
+        search.regex_budget = 64 * 1024;
+        let bounds = SearchBounds::new(SearchPoint::new(0, 511), SearchPoint::new(0, 0));
+        let first = search.find_in_range(&term, bounds, SearchDirection::Reverse, 1);
+        assert_eq!(first.continuation, Some(bounds.start));
+        write_ascii(&mut term, 0, 0, &"b".repeat(512));
+        let resumed = search.find_in_range(&term, bounds, SearchDirection::Reverse, 1);
+        assert!(resumed.exhausted);
+        assert!(resumed.matches.is_empty());
+        assert_eq!(resumed.continuation, None);
     }
 
     #[test]
