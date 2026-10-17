@@ -243,8 +243,9 @@ Use the recipes below rather than assuming `cargo test --workspace` covers them.
 `vendor-clipboard-check`.
 The parser gate tests and lints `vte` with `ansi` and `alacritty_terminal`.
 The PTY gate uses `serde_support` for compatibility with serialized builders.
-The clipboard gate runs display-free Linux URI-list tests; other hosts check
-formatting for that patch.
+The clipboard gate runs display-free Linux URI-list tests, then the X11 INCR
+paste test under `xvfb-run` when xvfb-run and xclip are installed. Other hosts
+check formatting for that patch.
 
 CI runs parser patches on Linux and portable-pty on all three native hosts.
 Only Windows executes its ConPTY-specific code.
@@ -613,6 +614,7 @@ Prerequisites beyond the desktop are included in the proof column.
 | Default window size | `just default-window-size-smoke` | Monitor-fitted defaults and explicit sizing; needs a sufficiently wide monitor | Linux/macOS |
 | Line edit chords | `just line-edit-chords-smoke` | Text-action backspace, macOS default chord, and search word deletion | Linux/macOS |
 | Dock menu | `just dock-menu-smoke` | Real Dock rows, window list, and New Window effect; accessibility and no other Kettle instance | macOS |
+| Live stress | `just stress-live [S1 … S10]` | Floods, resize storms, 100 tabs, huge pastes and titles, config churn, hostile media and 64 control clients leave Kettle alive and answering; S6 replaces the clipboard, then restores it; S9 needs a working worker | Linux/macOS |
 | Underline scroll | `just underline-scroll-smoke` | Repeated git-diff/delta scrolling preserves underline pixels; needs git, delta, less | Linux/macOS |
 | Search history | - | Scrollback search status, cells, and highlight pixels; direct helper case | Linux/macOS; Linux CI quarantined |
 | Native image paste routes | - | Native paste shortcuts, PRIMARY/middle-click, managed image path, and optional real composer attachments | Linux/macOS |
@@ -659,6 +661,12 @@ acceptance. The viewer helper uses native X11 input.
 The helper's `all` case does not include every scenario.
 Dock, clipboard receipt, selection-autoscroll, hover-wheel, and window-isolation
 cases have explicit opt-ins. Use the table instead of treating `all` as a gate.
+
+`just stress-live` runs every scenario when given no names. Each one must
+leave Kettle alive with no panic in its log, answering `get_state` within 2 s
+and echoing a typed command within 1 s. The script's docstring lists the
+scenarios; `--self-test`, part of `just script-fixture-self-test`, checks the
+pass criteria without a desktop.
 
 The tear-off recipe has two tiers. Its shell helper skips native pointer work
 outside X11. The control tier alone cannot prove the native drag gesture.
