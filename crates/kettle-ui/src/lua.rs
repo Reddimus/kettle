@@ -394,6 +394,17 @@ impl LuaEngine {
         Self::new_inner(theme_name, sandbox, DEFAULT_MAX_HOOK_FIRES)
     }
 
+    /// Construct a VM with the resolved startup config path.
+    pub fn new_with_config_path(
+        theme_name: &str,
+        sandbox: kettle_config::LuaSandbox,
+        config_path: Option<&Path>,
+    ) -> Result<Self> {
+        let engine = Self::new_with_sandbox(theme_name, sandbox)?;
+        engine.set_config_path(config_path)?;
+        Ok(engine)
+    }
+
     /// Test-only constructor that dials the instruction budget down
     /// so a runaway aborts in a few million instructions (sub-second) rather
     /// than the ~128 M production cap.
@@ -613,10 +624,13 @@ impl LuaEngine {
             .context("set kettle.version")?;
         let cfg_path: Option<String> =
             kettle_config::Config::default_path().map(|p| p.display().to_string());
+        lua.set_named_registry_value("kettle_config_path", cfg_path)?;
         kettle_tbl
             .set(
                 "config_path",
-                lua.create_function(move |_, ()| Ok(cfg_path.clone()))?,
+                lua.create_function(|lua, ()| {
+                    lua.named_registry_value::<Option<String>>("kettle_config_path")
+                })?,
             )
             .context("set kettle.config_path")?;
         let active_theme = Arc::new(Mutex::new(theme_name.to_string()));
@@ -964,6 +978,15 @@ impl LuaEngine {
             .map_err(|e| anyhow::anyhow!("active theme mutex: {e}"))?;
         theme_name.clone_into(&mut *active);
         Ok(())
+    }
+
+    pub(crate) fn set_config_path(&self, path: Option<&Path>) -> Result<()> {
+        self.lua
+            .set_named_registry_value(
+                "kettle_config_path",
+                path.map(|path| path.display().to_string()),
+            )
+            .context("set active config path")
     }
 
     /// List the labels of every Lua-registered context
@@ -1578,6 +1601,32 @@ mod tests {
         assert_eq!(
             eng.eval_str("return kettle.theme()").expect("theme"),
             "Solarized Dark"
+        );
+    }
+
+    #[test]
+    fn kettle_config_path_tracks_startup_and_profile_changes() {
+        let custom = Path::new("custom.config");
+        let profile = Path::new("profiles/dark.config");
+        let eng = LuaEngine::new_with_config_path(
+            "Default",
+            kettle_config::LuaSandbox::Safe,
+            Some(custom),
+        )
+        .expect("init");
+        assert_eq!(
+            eng.eval_str("return kettle.config_path()").unwrap(),
+            "custom.config"
+        );
+        eng.set_config_path(Some(profile)).unwrap();
+        assert_eq!(
+            eng.eval_str("return kettle.config_path()").unwrap(),
+            "profiles/dark.config"
+        );
+        eng.set_config_path(None).unwrap();
+        assert_eq!(
+            eng.eval_str("return kettle.config_path() == nil").unwrap(),
+            "true"
         );
     }
 

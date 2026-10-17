@@ -530,6 +530,78 @@ pub(crate) fn clamp_geometry_to_monitors(
     sanitized
 }
 
+#[derive(Default)]
+struct PendingSave {
+    snapshot: Option<(Session, Option<String>)>,
+    closing: bool,
+}
+
+pub(crate) struct SessionWriter {
+    pending: std::sync::Arc<(std::sync::Mutex<PendingSave>, std::sync::Condvar)>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl SessionWriter {
+    pub(crate) fn new() -> std::io::Result<Self> {
+        Self::with_sink(|session, layout| match layout {
+            Some(name) => session.save_layout(&name),
+            None => session.save(),
+        })
+    }
+
+    fn with_sink(
+        mut write: impl FnMut(Session, Option<String>) + Send + 'static,
+    ) -> std::io::Result<Self> {
+        let pending = std::sync::Arc::new((
+            std::sync::Mutex::new(PendingSave::default()),
+            std::sync::Condvar::new(),
+        ));
+        let shared = pending.clone();
+        let worker = std::thread::Builder::new()
+            .name("kettle-session-save".into())
+            .spawn(move || {
+                let (lock, ready) = &*shared;
+                loop {
+                    let next = {
+                        let mut state = lock.lock().expect("session save lock");
+                        while state.snapshot.is_none() && !state.closing {
+                            state = ready.wait(state).expect("session save lock");
+                        }
+                        match state.snapshot.take() {
+                            Some(snapshot) => snapshot,
+                            None => break,
+                        }
+                    };
+                    write(next.0, next.1);
+                }
+            })?;
+        Ok(Self {
+            pending,
+            worker: Some(worker),
+        })
+    }
+
+    pub(crate) fn submit(&self, session: Session, layout: Option<String>) {
+        let (lock, ready) = &*self.pending;
+        lock.lock().expect("session save lock").snapshot = Some((session, layout));
+        ready.notify_one();
+    }
+}
+
+impl Drop for SessionWriter {
+    fn drop(&mut self) {
+        let (lock, ready) = &*self.pending;
+        lock.lock().expect("session save lock").closing = true;
+        ready.notify_one();
+        // The last pending snapshot follows any write already in progress.
+        if let Some(worker) = self.worker.take()
+            && worker.join().is_err()
+        {
+            log::warn!("session save worker panicked");
+        }
+    }
+}
+
 /// Save a private, durable session snapshot. Exact on-disk bytes are compared
 /// before `atomic_replace` because this path follows many actions that do not
 /// change session state. Reading the file, rather than trusting cached bytes or
@@ -830,6 +902,51 @@ mod tests {
     /// the same way, by staging under the user-private profile instead.
     fn private_tempdir() -> kettle_test_support::PrivateTempDir {
         kettle_test_support::private_tempdir("kettle-session-test-")
+    }
+
+    #[test]
+    fn session_writer_coalesces_without_waiting_and_drains_the_final_save() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let dir = private_tempdir();
+        let path = dir.path().join("session.json");
+        let destination = path.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (written_tx, written_rx) = mpsc::channel();
+        let writer = SessionWriter::with_sink(move |session, _| {
+            if session.active == 1 {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            }
+            save_to_path(&session, &destination).unwrap();
+            written_tx.send(session.active).unwrap();
+        })
+        .unwrap();
+
+        writer.submit(
+            Session {
+                active: 1,
+                ..Session::default()
+            },
+            None,
+        );
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        for active in 2..=1000 {
+            writer.submit(
+                Session {
+                    active,
+                    ..Session::default()
+                },
+                None,
+            );
+        }
+        release_tx.send(()).unwrap();
+        drop(writer);
+
+        assert_eq!(written_rx.into_iter().collect::<Vec<_>>(), vec![1, 1000]);
+        assert_eq!(load_from_path(&path).unwrap().active, 1000);
     }
 
     /// An unchanged session must not be written again, and a changed one must.

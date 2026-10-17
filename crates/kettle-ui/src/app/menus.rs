@@ -1079,9 +1079,7 @@ impl App {
             ContextMenuClick::SetProfile(name) => {
                 ws.context_menu = None;
                 if let Some(p) = kettle_config::Config::path_for_profile(&name) {
-                    self.config_path = Some(p);
-                    self.config_trust = ConfigTrust::VerifyDirectory;
-                    self.reload_config(ws);
+                    self.switch_profile(ws, p);
                 }
             }
             ContextMenuClick::NewTabWithArgv(argv) => {

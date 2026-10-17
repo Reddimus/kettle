@@ -376,6 +376,11 @@ the per-pane output drain. Its subsystems are `impl App` blocks in
 | `accessibility` | the accessibility tree and its actions |
 | `config_reload`, `sessions`, `gpu_recovery` | reloads and themes; session save and restore; GPU loss |
 
+Session saves pass their opt-in gate before snapshotting. One worker performs
+serialization, comparison and durable replacement with one replaceable pending
+snapshot; it holds no queue lock during filesystem work. Shutdown drains the
+latest snapshot after any write already in progress and waits for completion.
+
 The other files in `app/` are its tests. Guards that read the App's source
 use `app_source()`, which joins app.rs and these modules.
 

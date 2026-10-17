@@ -293,6 +293,33 @@ fn deferred_authored_input_obeys_the_existing_queue_byte_limit() {
     assert_eq!(queue.len(), 1);
 }
 
+#[cfg(unix)]
+#[test]
+fn reload_metadata_errors_are_not_missing_configs() {
+    use std::os::unix::fs::symlink;
+
+    let dir = kettle_test_support::private_tempdir("kettle-reload-metadata-");
+    let path = dir.join("config");
+    assert!(
+        super::config_reload::read_config_for_reload(
+            &path,
+            kettle_config::ConfigTrust::ExplicitPath,
+        )
+        .unwrap()
+        .is_none()
+    );
+    symlink("config", &path).unwrap();
+    assert!(!path.exists());
+    assert!(path.try_exists().is_err());
+    assert!(
+        super::config_reload::read_config_for_reload(
+            &path,
+            kettle_config::ConfigTrust::ExplicitPath,
+        )
+        .is_err()
+    );
+}
+
 #[test]
 fn failed_additional_window_restore_preserves_source_session() {
     let src = super::production_source();
@@ -2615,6 +2642,41 @@ fn remote_poll_stages_checked_out_and_stored_windows_without_stale_roots() {
 }
 
 #[test]
+fn omitted_remote_probe_preserves_shell_until_pane_identity_changes() {
+    let probe = kettle_remote::RemoteProbe {
+        remote: None,
+        native_cwd: None,
+        foreground_shell: Some(kettle_remote::ShellLaunch {
+            argv: vec!["bash".into(), "-i".into()],
+            cwd: Some("/tmp".into()),
+        }),
+        foreground_process: None,
+    };
+    let mut applied = std::collections::HashMap::from([
+        ((1, 10), probe.clone()),
+        ((2, 20), probe.clone()),
+        ((3, 30), probe.clone()),
+        ((4, 40), probe.clone()),
+    ]);
+    let mut live = HashSet::from([(99, 99)]);
+    super::retain_live_remote_probes(
+        &mut applied,
+        &mut live,
+        [(1, Some(10)), (2, Some(21)), (4, None)],
+    );
+    assert_eq!(
+        applied,
+        std::collections::HashMap::from([((1, 10), probe.clone())])
+    );
+    let cleared = kettle_remote::RemoteProbe {
+        foreground_shell: None,
+        ..probe
+    };
+    assert!(stage_applied_remote_probe(&mut applied, 1, 10, &cleared));
+    assert!(applied[&(1, 10)].foreground_shell.is_none());
+}
+
+#[test]
 fn remote_snapshot_compares_against_ui_applied_state_not_worker_history() {
     let old = kettle_remote::RemoteProbe {
         remote: None,
@@ -2981,6 +3043,107 @@ fn watcher_accepts_content_and_name_changes_to_exact_path_only() {
     assert!(!super::watcher_event_matches(&unrelated, watched));
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn profile_switches_retarget_live_reload() {
+    use std::sync::{Arc, atomic::AtomicBool, mpsc};
+    use std::time::Duration;
+
+    let source = production_source();
+    let refresh = source
+        .split_once("fn refresh_config_watcher(")
+        .unwrap()
+        .1
+        .split_once("/// Read and install")
+        .unwrap()
+        .0;
+    assert!(refresh.contains("self.config_path.clone()"));
+    assert!(!refresh.contains("self.startup.config"));
+    assert_eq!(source.matches("self.switch_profile(ws, p);").count(), 2);
+
+    let root = kettle_test_support::private_tempdir("kettle-profile-watch-");
+    let original = root.join("config");
+    let profiles = root.join("profiles");
+    std::fs::create_dir(&profiles).unwrap();
+    let profile = profiles.join("work.config");
+    std::fs::write(&original, "").unwrap();
+    std::fs::write(&profile, "").unwrap();
+    let (tx, rx) = mpsc::channel();
+    let _watcher = super::config_watcher(
+        &profile,
+        kettle_config::ConfigTrust::VerifyDirectory,
+        Arc::new(AtomicBool::new(false)),
+        move || tx.send(()).is_ok(),
+    )
+    .unwrap();
+    std::fs::write(&original, "font-size = 13\n").unwrap();
+    assert!(rx.recv_timeout(Duration::from_millis(150)).is_err());
+    std::fs::write(&profile, "font-size = 14\n").unwrap();
+    rx.recv_timeout(Duration::from_secs(5)).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn config_watch_paths_follow_leaf_symlink_retargets() {
+    use std::os::unix::fs::symlink;
+
+    let root = kettle_test_support::private_tempdir("kettle-config-watch-link-");
+    let config_dir = root.join("config-dir");
+    let dotfiles = root.join("dotfiles");
+    std::fs::create_dir(&config_dir).unwrap();
+    std::fs::create_dir(&dotfiles).unwrap();
+    let first = dotfiles.join("first");
+    let second = dotfiles.join("second");
+    std::fs::write(&first, "").unwrap();
+    std::fs::write(&second, "").unwrap();
+    let link = config_dir.join("config");
+    symlink(&first, &link).unwrap();
+    for target in [&first, &second] {
+        let paths = super::config_watch_paths(&link).unwrap();
+        assert!(paths.contains(&std::path::absolute(&link).unwrap()));
+        assert!(paths.contains(&std::fs::canonicalize(target).unwrap()));
+        let event = notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
+            .add_path(std::fs::canonicalize(target).unwrap());
+        assert!(
+            paths
+                .iter()
+                .any(|path| super::watcher_event_matches(&event, path))
+        );
+        if target == &first {
+            std::fs::remove_file(&link).unwrap();
+            symlink(&second, &link).unwrap();
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn symlinked_config_target_events_reload() {
+    use std::os::unix::fs::symlink;
+    use std::sync::{Arc, atomic::AtomicBool, mpsc};
+    use std::time::Duration;
+
+    let root = kettle_test_support::private_tempdir("kettle-config-watch-target-");
+    let links = root.join("links");
+    let targets = root.join("targets");
+    std::fs::create_dir(&links).unwrap();
+    std::fs::create_dir(&targets).unwrap();
+    let target = targets.join("config");
+    let link = links.join("config");
+    std::fs::write(&target, "").unwrap();
+    symlink(&target, &link).unwrap();
+    let (tx, rx) = mpsc::channel();
+    let _watcher = super::config_watcher(
+        &link,
+        kettle_config::ConfigTrust::ExplicitPath,
+        Arc::new(AtomicBool::new(false)),
+        move || tx.send(()).is_ok(),
+    )
+    .unwrap();
+    std::fs::write(&target, "font-size = 15\n").unwrap();
+    rx.recv_timeout(Duration::from_secs(5)).unwrap();
+}
+
 #[test]
 fn watcher_handle_survives_only_a_successful_registration() {
     use std::sync::Arc;
@@ -3285,6 +3448,26 @@ fn output_continuation_keeps_progress_and_defers_a_definitive_miss() {
     let (status, retry_at) = super::finished_background_search(&job, std::time::Instant::now());
     assert_eq!(status, kettle_render::SearchStatus::Start);
     assert!(retry_at.is_none());
+}
+
+/// Turning updates off in Settings, or any other reload, refreshes the update
+/// notice at once. It once waited for the next focus change or hourly tick,
+/// so a focused window kept its chip for up to an hour.
+#[test]
+fn a_config_reload_refreshes_the_update_notice() {
+    let src = production_source();
+    let body = src
+        .split("fn load_reloaded_config(&mut self) -> bool {")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("load_reloaded_config body");
+    let assigned = body
+        .find("self.cfg = new;")
+        .expect("the new config is applied");
+    let refreshed = body
+        .find("self.request_update_facts(true);")
+        .expect("a reload refreshes the update notice");
+    assert!(assigned < refreshed, "facts are read with the new policy");
 }
 
 #[test]
@@ -4181,8 +4364,9 @@ fn a_throttled_process_poll_is_deferred_not_dropped() {
 
 #[test]
 fn a_flipped_theme_schedule_asks_for_one_redraw() {
-    // The first decision only seeds the schedule; a flip asks for a frame.
-    assert!(!super::theme_schedule_redraw_due(None, Some(true)));
+    assert!(super::theme_schedule_redraw_due(None, Some(true)));
+    assert!(super::theme_schedule_redraw_due(None, Some(false)));
+    assert!(!super::theme_schedule_redraw_due(None, None));
     assert!(!super::theme_schedule_redraw_due(Some(true), Some(true)));
     assert!(!super::theme_schedule_redraw_due(Some(false), None));
     assert!(super::theme_schedule_redraw_due(Some(true), Some(false)));
@@ -6374,6 +6558,20 @@ fn window_constructors_size_through_the_shared_startup_rule() {
         src.contains("let (w, h) = startup_inner_size(&self.cfg, monitor);\n            let scale = monitor.map_or(1.0, |m| m.scale);"),
         "the restore planner's fallback surface must be the same rule in physical pixels"
     );
+}
+
+#[test]
+fn later_saved_windows_do_not_depend_on_the_first_restore_succeeding() {
+    let src = production_source();
+    let restore = src
+        .split("if let Some((first, rest)) = wins.split_first() {")
+        .nth(1)
+        .expect("multi-window startup restore");
+    let (before_loop, _) = restore
+        .split_once(" in rest.iter()")
+        .expect("additional windows are attempted");
+    assert!(!before_loop.contains("if outcome.restored_any {"));
+    assert!(restore.contains("outcome.restored_any"));
 }
 
 /// Drift guard: in `load_startup_session()`, the explicit restore paths

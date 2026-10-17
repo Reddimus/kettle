@@ -1215,6 +1215,42 @@ impl FontFeature {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ThemeOverrides {
+    palette: Vec<(usize, Rgb)>,
+    background: Option<Rgb>,
+    foreground: Option<Rgb>,
+    cursor: Option<Rgb>,
+    cursor_text: Option<Rgb>,
+    selection_background: Option<Rgb>,
+    selection_foreground: Option<Rgb>,
+}
+
+impl ThemeOverrides {
+    fn apply(&self, theme: &mut Theme) {
+        for &(i, c) in &self.palette {
+            if i < 16 {
+                if i == 4 && theme.accent == theme.palette[4] {
+                    theme.accent = c;
+                }
+                theme.palette[i] = c;
+            }
+        }
+        for (slot, value) in [
+            (&mut theme.background, self.background),
+            (&mut theme.foreground, self.foreground),
+            (&mut theme.cursor, self.cursor),
+            (&mut theme.cursor_text, self.cursor_text),
+            (&mut theme.selection_background, self.selection_background),
+            (&mut theme.selection_foreground, self.selection_foreground),
+        ] {
+            if let Some(color) = value {
+                *slot = color;
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Keys this config sets that kettle accepts but does not act on — see
@@ -1229,6 +1265,7 @@ pub struct Config {
     pub font_size: f32,
     pub theme_name: String,
     pub theme: Theme,
+    pub theme_overrides: ThemeOverrides,
     pub scrollback: usize,
     pub scrollback_bytes: usize,
     pub padding_x: f32,
@@ -2813,6 +2850,7 @@ impl Default for Config {
             // name falls back to Catppuccin Mocha (`Theme::default`) instead.
             theme_name: "TokyoNight Night".to_string(),
             theme: Theme::by_name("TokyoNight Night"),
+            theme_overrides: ThemeOverrides::default(),
             scrollback: 10_000,
             scrollback_bytes: DEFAULT_SCROLLBACK_BYTES,
             padding_x: 8.0,
@@ -3089,6 +3127,31 @@ fn sort_profile_names(names: &mut [String]) {
 }
 
 impl Config {
+    /// Install the theme `theme-mode` selects: the light or dark theme when
+    /// forced, or, under `auto`, for `os_dark` when it is known. A schedule
+    /// decides by the clock instead, so it is left to its own evaluation.
+    pub fn resolve_theme_mode(&mut self, os_dark: Option<bool>) {
+        if self.theme_schedule.is_some() {
+            return;
+        }
+        if let Some(name) = resolve_theme_for_mode(
+            self.theme_mode,
+            &self.theme_name,
+            &self.light_theme,
+            &self.dark_theme,
+            os_dark,
+        ) {
+            self.theme = self.theme_by_name(&name);
+            self.theme_name = name;
+        }
+    }
+
+    pub fn theme_by_name(&self, name: &str) -> Theme {
+        let mut theme = Theme::by_name(name);
+        self.theme_overrides.apply(&mut theme);
+        theme
+    }
+
     /// How long the cursor keeps blinking after the last activity, or `None`
     /// when `cursor-blink-timeout = 0` asks it to blink indefinitely.
     pub fn cursor_blink_timeout(&self) -> Option<std::time::Duration> {
@@ -5638,44 +5701,17 @@ impl Config {
         if scrollback_infinite == Some(true) {
             cfg.scrollback = INFINITE_SCROLLBACK;
         }
-        for (i, c) in explicit_palette {
-            if i < 16 {
-                // A DERIVED accent (a theme without an
-                // explicit `accent` line snapshots `palette[4]` at parse
-                // time) must follow a config-level `palette = 4=#hex`
-                // override; an explicit theme accent (different from
-                // palette[4]) stays put. Equality is the derivation marker —
-                // and if a theme explicitly set accent == palette[4],
-                // following the override is indistinguishable from derived.
-                if i == 4 && cfg.theme.accent == cfg.theme.palette[4] {
-                    cfg.theme.accent = c;
-                }
-                cfg.theme.palette[i] = c;
-            }
-        }
-        // Apply explicit single-color overrides AFTER the
-        // theme + palette re-apply above so they're order-independent —
-        // `background = #ff0000` keeps the red whether the `theme =`
-        // line comes before or after it. Precedence (highest first):
-        // explicit single-color line > `palette = N=#hex` > `theme =`.
-        if let Some(c) = explicit_background {
-            cfg.theme.background = c;
-        }
-        if let Some(c) = explicit_foreground {
-            cfg.theme.foreground = c;
-        }
-        if let Some(c) = explicit_cursor {
-            cfg.theme.cursor = c;
-        }
-        if let Some(c) = explicit_cursor_text {
-            cfg.theme.cursor_text = c;
-        }
-        if let Some(c) = explicit_selection_bg {
-            cfg.theme.selection_background = c;
-        }
-        if let Some(c) = explicit_selection_fg {
-            cfg.theme.selection_foreground = c;
-        }
+        cfg.theme_overrides = ThemeOverrides {
+            palette: explicit_palette,
+            background: explicit_background,
+            foreground: explicit_foreground,
+            cursor: explicit_cursor,
+            cursor_text: explicit_cursor_text,
+            selection_background: explicit_selection_bg,
+            selection_foreground: explicit_selection_fg,
+        };
+        cfg.theme_overrides.apply(&mut cfg.theme);
+        cfg.resolve_theme_mode(None);
         // Terminator parity (config.py:215-216):
         // compose `visible_bell` + `urgent_bell` into kettle's
         // unified `BellMode` when EITHER appears in the config
@@ -8995,6 +9031,26 @@ split_horiz = <Control><Shift>j
     }
 
     #[test]
+    fn named_runtime_themes_preserve_explicit_colors() {
+        let cfg = Config::parse_text(
+            "palette = 4=#123456\nbackground = #010203\nforeground = #040506\n\
+             cursor-color = #070809\ncursor-fg-color = #ffffff\n\
+             selection-background = #101112\nselection-foreground = #131415\n",
+        );
+        for name in ["TokyoNight Day", "TokyoNight Night"] {
+            let theme = cfg.theme_by_name(name);
+            assert_eq!(theme.palette[4], Rgb::parse("#123456").unwrap());
+            assert_eq!(theme.accent, theme.palette[4]);
+            assert_eq!(theme.background, Rgb::parse("#010203").unwrap());
+            assert_eq!(theme.foreground, Rgb::parse("#040506").unwrap());
+            assert_eq!(theme.cursor, Rgb::parse("#070809").unwrap());
+            assert_eq!(theme.cursor_text, Rgb::parse("#ffffff").unwrap());
+            assert_eq!(theme.selection_background, Rgb::parse("#101112").unwrap());
+            assert_eq!(theme.selection_foreground, Rgb::parse("#131415").unwrap());
+        }
+    }
+
+    #[test]
     fn explicit_color_overrides_survive_a_later_theme_line() {
         // Explicit single-color overrides are applied AFTER the theme, so each
         // one wins wherever the `theme =` line sits. If the theme overwrote
@@ -10816,6 +10872,30 @@ split_horiz = <Control><Shift>j
             Language::En
         );
         assert_eq!(LanguagePreference::Auto.resolve(|| None), Language::En);
+    }
+
+    #[test]
+    fn loaded_theme_modes_resolve_forced_and_current_os_choices() {
+        for (mode, expected) in [("light", "TokyoNight Day"), ("dark", "TokyoNight Night")] {
+            let cfg = Config::parse_text(&format!(
+                "theme = Dracula\ntheme-mode = {mode}\n\
+                 light-theme = TokyoNight Day\ndark-theme = TokyoNight Night\n"
+            ));
+            assert_eq!(cfg.theme_name, expected);
+            assert_eq!(cfg.theme.background, Theme::by_name(expected).background);
+        }
+        let text = "theme-mode = auto\nlight-theme = TokyoNight Day\n\
+                    dark-theme = TokyoNight Night\ncursor-fg-color = #ffffff\n";
+        for _ in 0..2 {
+            let mut cfg = Config::parse_text(text);
+            cfg.resolve_theme_mode(Some(false));
+            assert_eq!(cfg.theme_name, "TokyoNight Day");
+            assert_eq!(
+                cfg.theme.background,
+                Theme::by_name("TokyoNight Day").background
+            );
+            assert_eq!(cfg.theme.cursor_text, Rgb::parse("#ffffff").unwrap());
+        }
     }
 
     #[test]

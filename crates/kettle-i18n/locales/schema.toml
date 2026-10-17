@@ -944,6 +944,9 @@ context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-re
 [messages.picker_a11y_themes]
 context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader name of the theme picker dialog."
 
+[messages.picker_create_layout_hint]
+context = "crates/kettle-ui/src/app.rs: command shown when no layouts exist. Keep kettle --layout unchanged; NAME is the name of the workspace to create and use."
+
 [messages.picker_hint_cancel]
 context = "crates/kettle-ui/src/app.rs: key hint after Esc: close the picker or the title editor. Lowercase, one or two words."
 

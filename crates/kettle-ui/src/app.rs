@@ -489,11 +489,9 @@ fn render_hidden_from_observations(
 /// under `RUST_LOG=warn,kettle::cursor_blink=info`.
 const CURSOR_BLINK_LOG: &str = "kettle::cursor_blink";
 
-/// Whether a theme schedule has flipped since the last redraw applied it.
-/// The first decision only seeds the schedule (`poll_theme_schedule`), so it
-/// asks for nothing.
+/// Whether a theme schedule has a decision that the last redraw did not apply.
 fn theme_schedule_redraw_due(last: Option<bool>, now: Option<bool>) -> bool {
-    matches!((last, now), (Some(last), Some(now)) if last != now)
+    now.is_some() && last != now
 }
 
 /// The wait until the next whole wall-clock minute, when a clock or sunrise
@@ -3597,6 +3595,41 @@ struct ContentBands {
     vertical_title_edit_h: f32,
 }
 
+impl ContentBands {
+    fn for_restore(mut self, mode: TabBarMode, tabs: usize, cell_height: f32) -> Self {
+        if matches!(mode, TabBarMode::Auto) {
+            self.tab_bar_h = if tabs > 1 { cell_height + 8.0 } else { 0.0 };
+        }
+        self
+    }
+}
+
+#[cfg(test)]
+mod restore_content_tests {
+    use super::*;
+
+    #[test]
+    fn restored_auto_tabs_reserve_chrome_before_spawning() {
+        let surface = (800, 600);
+        let empty = ContentBands::default();
+        let restored = empty.for_restore(TabBarMode::Auto, 2, 16.0);
+        let area = content_rect_for_with_strip(
+            surface,
+            restored,
+            TabBarPos::Top,
+            kettle_config::StatusBarMode::Off,
+            200.0,
+        );
+        assert_eq!(area, (0.0, 24.0, 800.0, 576.0));
+        assert_eq!(
+            grid_dims_px((area.2, area.3), (8.0, 16.0), (0.0, 0.0)),
+            (100, 36)
+        );
+        assert_eq!(empty.for_restore(TabBarMode::Auto, 1, 16.0).tab_bar_h, 0.0);
+        assert_eq!(empty.for_restore(TabBarMode::Off, 2, 16.0).tab_bar_h, 0.0);
+    }
+}
+
 /// Explicit strip-width variant, so callers with `cfg.tab_bar_width` in scope
 /// can pass it through. The non-`_with_strip` wrapper above keeps the same
 /// signature for code paths without a Config.
@@ -6046,6 +6079,20 @@ fn apply_remote_title_transition(
     }
 }
 
+fn retain_live_remote_probes(
+    applied: &mut std::collections::HashMap<(u64, u32), kettle_remote::RemoteProbe>,
+    live_panes: &mut HashSet<(u64, u32)>,
+    panes: impl IntoIterator<Item = (u64, Option<u32>)>,
+) {
+    live_panes.clear();
+    live_panes.extend(
+        panes
+            .into_iter()
+            .filter_map(|(pane_id, pid)| pid.map(|pid| (pane_id, pid))),
+    );
+    applied.retain(|key, _| live_panes.contains(key));
+}
+
 fn stage_applied_remote_probe(
     applied: &mut std::collections::HashMap<(u64, u32), kettle_remote::RemoteProbe>,
     pane_id: u64,
@@ -6189,6 +6236,55 @@ fn queue_watcher_event(
         pending.store(false, Ordering::Release);
         false
     }
+}
+
+fn config_watch_paths(path: &std::path::Path) -> std::io::Result<Vec<std::path::PathBuf>> {
+    let requested = std::path::absolute(path)?;
+    let mut paths = vec![requested.clone()];
+    match std::fs::canonicalize(&requested) {
+        Ok(target) if target != requested => paths.push(target),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    Ok(paths)
+}
+
+fn config_watcher(
+    path: &std::path::Path,
+    trust: ConfigTrust,
+    pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    send: impl Fn() -> bool + Send + 'static,
+) -> Result<notify::RecommendedWatcher, String> {
+    use notify::Watcher as _;
+
+    prepare_config_directory(path, trust).map_err(|error| error.to_string())?;
+    let watched = config_watch_paths(path).map_err(|error| error.to_string())?;
+    let mut directories = Vec::new();
+    for path in &watched {
+        if let Some(parent) = path.parent()
+            && !directories.iter().any(|directory| directory == parent)
+        {
+            directories.push(parent.to_path_buf());
+        }
+    }
+    let watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
+        if let Ok(event) = result
+            && watched
+                .iter()
+                .any(|path| watcher_event_matches(&event, path))
+        {
+            queue_watcher_event(&pending, &send);
+        }
+    })
+    .map_err(|error| error.to_string())?;
+    registered_watcher(watcher, |watcher| {
+        for directory in directories {
+            watcher.watch(&directory, notify::RecursiveMode::NonRecursive)?;
+        }
+        Ok::<_, notify::Error>(())
+    })
+    .map_err(|error| error.to_string())
 }
 
 fn registered_watcher<W, E>(
@@ -8514,7 +8610,8 @@ fn layout_picker_list(
                 separator: false,
                 enabled: false,
                 hint: if layouts.is_empty() {
-                    "kettle --save-layout NAME".to_string()
+                    tr.text(kettle_i18n::Text::PickerCreateLayoutHint)
+                        .to_string()
                 } else {
                     String::new()
                 },
@@ -9481,6 +9578,7 @@ pub struct App {
     /// from state this never sees, and a one-shot tab handoff is deleted as it
     /// is read.
     restore_source: Option<std::path::PathBuf>,
+    session_writer: crate::session::SessionWriter,
     /// All per-window state, keyed by the
     /// window's stable sequence number (`WindowState::seq`, 1-based, never
     /// reused). BTreeMap so iteration order is deterministic (window 1, 2,
@@ -9661,7 +9759,7 @@ pub struct App {
     /// stale-result baseline; worker results may overwrite each other before
     /// the event loop consumes them.
     remote_applied: std::collections::HashMap<(u64, u32), kettle_remote::RemoteProbe>,
-    remote_live_panes_scratch: std::collections::HashSet<u64>,
+    remote_live_panes_scratch: std::collections::HashSet<(u64, u32)>,
     /// Reused target collection for the cross-window remote poll.
     remote_targets_scratch: Vec<kettle_remote::RemoteProbeTarget>,
     /// Throttle the remote-detect poll to ~5 Hz. `None` makes the
@@ -9673,6 +9771,7 @@ pub struct App {
     /// The most-recent auto-theme "schedule decision" (true=dark)
     /// we've applied, so a boundary-crossing fires the swap exactly once.
     last_schedule_decision: Option<bool>,
+    os_theme_dark: Option<bool>,
     /// Resolved non-default config file (explicit path or named profile).
     config_path: Option<std::path::PathBuf>,
     /// Provenance paired with `config_path`; profile switching resets this to
@@ -10251,44 +10350,27 @@ impl App {
         // files there change often (session.json saves, palette edits, the
         // theme cache, editor swap files), and each atomic `save_session`
         // alone writes `session.json.tmp.*` then renames it, firing 3+ events.
-        let mut watcher = None;
         let config_reload_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        if let Some(path) = startup.config.clone().or_else(Config::default_path)
-            && let Some(dir) = path.parent().map(|p| p.to_path_buf())
-        {
-            match prepare_config_directory(&path, startup.config_trust) {
-                Err(error) => {
-                    log::warn!("config live-reload disabled for {}: {error}", dir.display())
-                }
-                Ok(()) => {
-                    let p = proxy.clone();
-                    let watched = path.clone();
-                    let pending = config_reload_pending.clone();
-                    use notify::Watcher;
-                    let built =
-                        notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-                            if let Ok(ev) = res
-                                && watcher_event_matches(&ev, &watched)
-                            {
-                                queue_watcher_event(&pending, || {
-                                    p.send_event(UserEvent::ReloadConfig).is_ok()
-                                });
-                            }
-                        });
-                    match built.and_then(|w| {
-                        registered_watcher(w, |w| {
-                            w.watch(&dir, notify::RecursiveMode::NonRecursive)
-                        })
-                    }) {
-                        Ok(w) => watcher = Some(w),
-                        Err(error) => log::warn!(
-                            "config live-reload unavailable for {}: {error}",
-                            dir.display()
-                        ),
-                    }
-                }
-            }
-        }
+        let watcher = startup
+            .config
+            .clone()
+            .or_else(Config::default_path)
+            .and_then(|path| {
+                let p = proxy.clone();
+                config_watcher(
+                    &path,
+                    startup.config_trust,
+                    config_reload_pending.clone(),
+                    move || p.send_event(UserEvent::ReloadConfig).is_ok(),
+                )
+                .map_err(|error| {
+                    log::warn!(
+                        "config live-reload unavailable for {}: {error}",
+                        path.display()
+                    );
+                })
+                .ok()
+            });
 
         // Remote-control watcher. Same notify pattern as the
         // config-reload watcher above. When startup.remote_file is
@@ -10496,9 +10578,10 @@ impl App {
         );
         let mut lua_engine: Option<crate::LuaEngine> = None;
         if let Some((script, trust)) = &init_lua {
-            match crate::LuaEngine::new_with_sandbox(
+            match crate::LuaEngine::new_with_config_path(
                 &initial_cfg.theme_name,
                 initial_cfg.lua_sandbox,
+                initial_path.as_deref(),
             ) {
                 Ok(eng) => {
                     let executed = match trust {
@@ -10653,6 +10736,7 @@ impl App {
             #[cfg(target_os = "linux")]
             wayland_file_drops: std::collections::BTreeMap::new(),
             restore_source: None,
+            session_writer: crate::session::SessionWriter::new()?,
             cfg: initial_cfg,
             // Assume writable; `resumed` clears it when a launch override
             // means the named layout was never loaded.
@@ -10732,6 +10816,7 @@ impl App {
             last_remote_poll: None,
             remote_poll_due: None,
             last_schedule_decision: None,
+            os_theme_dark: None,
             config_path: startup.config.clone(),
             config_trust: startup.config_trust,
             config_malformed_last: Vec::new(),
@@ -11545,13 +11630,17 @@ impl App {
     }
 
     fn area(&self, ws: &WindowState) -> Rect {
+        self.area_with_bands(ws, self.content_bands(ws))
+    }
+
+    fn area_with_bands(&self, ws: &WindowState, bands: ContentBands) -> Rect {
         let surface = Self::surface_size(ws).unwrap_or((800, 600));
         // Delegate to the pure helper, threading
         // `cfg.tab_bar_width` so a user-configured strip width
         // is honored.
         let mut area = content_rect_for_with_strip(
             surface,
-            self.content_bands(ws),
+            bands,
             self.cfg.tab_bar_pos,
             self.cfg.status_bar,
             self.cfg.tab_bar_width,
@@ -11628,7 +11717,12 @@ impl App {
     ) -> Vec<Vec<PtyGeometry>> {
         // A restored tab has no lanes: each pane's terminal is its leaf less
         // its titlebar.
-        let area = self.area(ws);
+        let bands = self.content_bands(ws).for_restore(
+            self.cfg.tab_bar,
+            session.tabs.len(),
+            Self::cell_size(ws).map_or(16.0, |(_, height)| height),
+        );
+        let area = self.area_with_bands(ws, bands);
         let style = self.layout_style(ws);
         let terminal = |leaf: Rect, panes: usize| {
             crate::pane_partition::partition_leaf(leaf, style.metrics(panes), None).terminal
@@ -13016,7 +13110,7 @@ impl App {
         // Terminator parity (layoutlauncher.py): build the layout picker's
         // query and hint the same way as the command palette. An empty
         // layouts dir is fine; the picker shows a "No saved layouts" row
-        // hinting `kettle --save-layout NAME`.
+        // hinting `kettle --layout NAME`.
         let (layout_picker_query, layout_picker_hint, layout_picker) = match &ws.layout_picker_input
         {
             Some((query, selected)) => (
@@ -14550,6 +14644,15 @@ impl App {
         // Snapshot the (tab, pane-leaf) the cursor lives in so we can detect
         // any focus change the action causes.
         let pre_focus = self.focus_key(ws);
+        let save_session = !matches!(
+            action,
+            Action::ScrollPageUp
+                | Action::ScrollPageDown
+                | Action::ScrollLineUp
+                | Action::ScrollLineDown
+                | Action::ScrollToTop
+                | Action::ScrollToBottom
+        );
         match action {
             Action::NewTab => {
                 // Fire LuaEvent::TabAdd with the new active tab index (via
@@ -15271,7 +15374,7 @@ impl App {
             }
             // Terminator parity (layoutlauncher.py): open the runtime layout
             // picker. With no saved layouts the modal still opens, with a hint
-            // to save one with `kettle --save-layout NAME`.
+            // to save one with `kettle --layout NAME`.
             Action::OpenLayoutPicker => {
                 self.close_all_modals(ws);
                 ws.layout_picker_entries = crate::session::Session::list_layouts();
@@ -15781,9 +15884,7 @@ impl App {
                         matches!(action, Action::NextProfile),
                     );
                     if let Some(p) = kettle_config::Config::path_for_profile(&next) {
-                        self.config_path = Some(p);
-                        self.config_trust = ConfigTrust::VerifyDirectory;
-                        self.reload_config(ws);
+                        self.switch_profile(ws, p);
                     }
                 }
             }
@@ -16062,7 +16163,9 @@ impl App {
         } else {
             self.resize_all(ws);
         }
-        self.save_session(ws);
+        if save_session {
+            self.save_session(ws);
+        }
         if let Some(w) = &ws.window {
             w.request_redraw();
         }
@@ -16230,19 +16333,19 @@ impl App {
         else {
             return;
         };
-        self.remote_live_panes_scratch.clear();
-        self.remote_live_panes_scratch
-            .extend(ws.mux.panes.keys().copied());
-        self.remote_live_panes_scratch.extend(
-            self.windows
-                .values()
-                .flat_map(|window| window.mux.panes.keys())
-                .copied(),
+        retain_live_remote_probes(
+            &mut self.remote_applied,
+            &mut self.remote_live_panes_scratch,
+            ws.mux
+                .panes
+                .iter()
+                .chain(
+                    self.windows
+                        .values()
+                        .flat_map(|window| window.mux.panes.iter()),
+                )
+                .map(|(&pane_id, pane)| (pane_id, pane.term.child_pid())),
         );
-        let live_panes = &self.remote_live_panes_scratch;
-        self.remote_applied.retain(|(pane_id, pid), _| {
-            live_panes.contains(pane_id) && snapshot.probes.contains_key(pid)
-        });
 
         if update_window_remote_contexts(&snapshot, &mut self.remote_applied, ws) {
             ws.reuse_pane_snapshots_once = false;
@@ -19378,7 +19481,7 @@ impl App {
                                 outcome.skipped
                             ));
                         }
-                        if outcome.restored_any {
+                        if !rest.is_empty() {
                             for (index, sw) in rest.iter().enumerate() {
                                 let sw = crate::session::SWindow {
                                     tabs: sw.tabs.to_vec(),

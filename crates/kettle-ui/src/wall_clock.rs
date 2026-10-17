@@ -2,8 +2,8 @@
 //!
 //! `std::time` has no time-zone support, so the offset comes from the C
 //! library: `localtime_r(3)` fills `tm_gmtoff`, the local offset east of UTC
-//! in seconds, from `TZ` or the system zone file. Windows builds fall back to
-//! UTC.
+//! in seconds, from `TZ` or the system zone file. Windows uses the system
+//! timezone conversion API.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -83,7 +83,44 @@ fn local_utc_offset(unix_secs: i64) -> i64 {
     offset
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn local_utc_offset(unix_secs: i64) -> i64 {
+    windows_local_utc_offset(unix_secs, None).unwrap_or(0)
+}
+
+#[cfg(windows)]
+fn windows_local_utc_offset(
+    unix_secs: i64,
+    zone: Option<&windows::Win32::System::Time::DYNAMIC_TIME_ZONE_INFORMATION>,
+) -> Option<i64> {
+    use windows::Win32::Foundation::{FILETIME, SYSTEMTIME};
+    use windows::Win32::System::Time::{
+        FileTimeToSystemTime, SystemTimeToFileTime, SystemTimeToTzSpecificLocalTimeEx,
+    };
+
+    let ticks = u64::try_from(unix_secs.checked_add(11_644_473_600)?)
+        .ok()?
+        .checked_mul(10_000_000)?;
+    let file_time = FILETIME {
+        dwLowDateTime: ticks as u32,
+        dwHighDateTime: (ticks >> 32) as u32,
+    };
+    let mut utc = SYSTEMTIME::default();
+    let mut local = SYSTEMTIME::default();
+    let mut local_file_time = FILETIME::default();
+    // SAFETY: all pointers refer to initialized, correctly sized storage;
+    // the optional zone remains alive for the synchronous conversion.
+    unsafe {
+        FileTimeToSystemTime(&file_time, &mut utc).ok()?;
+        SystemTimeToTzSpecificLocalTimeEx(zone.map(std::ptr::from_ref), &utc, &mut local).ok()?;
+        SystemTimeToFileTime(&local, &mut local_file_time).ok()?;
+    }
+    let local_ticks = (u64::from(local_file_time.dwHighDateTime) << 32)
+        | u64::from(local_file_time.dwLowDateTime);
+    i64::try_from((i128::from(local_ticks) - i128::from(ticks)) / 10_000_000).ok()
+}
+
+#[cfg(not(any(unix, windows)))]
 fn local_utc_offset(_unix_secs: i64) -> i64 {
     0
 }
@@ -195,6 +232,56 @@ mod tests {
             .0;
         assert!(status.contains("wall_clock::now_local()"));
         assert!(!status.contains(" UTC "), "the clock shows local time");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_zone_conversion_observes_dst_and_local_schedule() {
+        use windows::Win32::Foundation::SYSTEMTIME;
+        use windows::Win32::System::Time::DYNAMIC_TIME_ZONE_INFORMATION;
+
+        let mut zone = DYNAMIC_TIME_ZONE_INFORMATION {
+            Bias: 480,
+            DaylightBias: -60,
+            StandardDate: SYSTEMTIME {
+                wMonth: 11,
+                wDay: 1,
+                wHour: 2,
+                ..Default::default()
+            },
+            DaylightDate: SYSTEMTIME {
+                wMonth: 3,
+                wDay: 2,
+                wHour: 2,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        for (slot, unit) in zone
+            .TimeZoneKeyName
+            .iter_mut()
+            .zip("Pacific Standard Time".encode_utf16())
+        {
+            *slot = unit;
+        }
+        let offset = |secs| super::windows_local_utc_offset(secs, Some(&zone)).unwrap();
+        let january = 1_767_225_600;
+        assert_eq!(offset(january), -8 * 3600);
+        assert_eq!(offset(january + 181 * 86_400), -7 * 3600);
+        let spring = january + 66 * 86_400 + 10 * 3600;
+        assert_eq!(offset(spring - 1), -8 * 3600);
+        assert_eq!(offset(spring), -7 * 3600);
+        let evening_utc = ONE_AM_UTC + 19 * 3600;
+        let (h, m, _) = time_of_day(evening_utc, offset(evening_utc));
+        assert_eq!((h, m), (13, 0));
+        assert!(!kettle_config::schedule_decision_clock(
+            (h, m),
+            kettle_config::ThemeSchedule::Clock {
+                dark_at: (19, 0),
+                light_at: (7, 0),
+            },
+        ));
+        assert_eq!(super::windows_local_utc_offset(i64::MAX, Some(&zone)), None);
     }
 
     #[cfg(unix)]
