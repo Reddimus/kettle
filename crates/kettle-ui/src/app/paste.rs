@@ -330,7 +330,7 @@ impl App {
 
     pub(super) fn defer_terminal_input(
         &mut self,
-        ws: &WindowState,
+        ws: &mut WindowState,
         event: Option<&winit::event::KeyEvent>,
         bytes: &[u8],
         prepare_input: bool,
@@ -340,12 +340,19 @@ impl App {
             return false;
         }
         let recipients = self.broadcast_recipients(ws);
-        let ids = if ws.mux.is_broadcast_on() && !focused_only {
+        // A key release goes to the panes its press reached, as one sent at
+        // once does, even if focus or the broadcast scope moved since.
+        let pressed = event
+            .filter(|_| !prepare_input)
+            .and_then(|event| ws.terminal_key_recipients.remove(&event.physical_key));
+        let ids: Vec<u64> = if let Some(pressed) = pressed {
+            pressed.into_iter().collect()
+        } else if ws.mux.is_broadcast_on() && !focused_only {
             recipients.clone()
         } else {
             ws.mux.active_focus().into_iter().collect()
         };
-        let targets = ids
+        let targets: Vec<(u64, Vec<u8>)> = ids
             .into_iter()
             .filter_map(|id| {
                 let pane = ws.mux.panes.get(&id).or_else(|| {
@@ -366,6 +373,7 @@ impl App {
                 (!bytes.is_empty()).then_some((id, bytes))
             })
             .collect();
+        let reached: Vec<u64> = targets.iter().map(|(id, _)| *id).collect();
         let paste = QueuedPaste {
             window: ws.seq,
             target: paste_target(&ws.mux),
@@ -377,7 +385,18 @@ impl App {
                 prepare_input,
             },
         };
-        if let Some(result) = defer_authored_input(&mut self.queued_pastes, paste) {
+        let result = defer_authored_input(&mut self.queued_pastes, paste);
+        // A press queued here reaches these panes in its turn, so its
+        // release must go to them, whether it is sent at once or queued too.
+        if let Some(event) = event.filter(|_| prepare_input)
+            && result.is_some_and(|result| result.is_queued())
+        {
+            ws.terminal_key_recipients
+                .entry(event.physical_key)
+                .or_default()
+                .extend(reached);
+        }
+        if let Some(result) = result {
             self.report_input_result(result);
         }
         true

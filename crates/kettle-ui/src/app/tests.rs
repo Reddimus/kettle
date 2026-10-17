@@ -7176,6 +7176,32 @@ fn an_osc52_read_applies_earlier_writes_first() {
     assert!(applied.is_some() && applied < read, "{applied:?} {read:?}");
 }
 
+/// A key event queued behind a paste still being prepared keeps its press and
+/// release on the same panes, as one sent at once does. A queued press once
+/// recorded no recipients, so a release sent after the paste reached no pane,
+/// and a queued release went to whatever had focus by then: either way a
+/// Kitty-reporting program was left with a stuck key.
+#[test]
+fn queued_key_events_keep_press_and_release_on_the_same_panes() {
+    let src = production_source();
+    let body = src
+        .split("fn defer_terminal_input(")
+        .nth(1)
+        .and_then(|rest| rest.split("\n    fn ").next())
+        .expect("defer_terminal_input body");
+    assert!(
+        body.contains(".filter(|_| !prepare_input)")
+            && body.contains("ws.terminal_key_recipients.remove(&event.physical_key)"),
+        "a queued release takes the panes its press reached"
+    );
+    assert!(
+        body.contains(".filter(|_| prepare_input)")
+            && body.contains("result.is_some_and(|result| result.is_queued())")
+            && body.contains(".entry(event.physical_key)"),
+        "a press that was queued records the panes it will reach"
+    );
+}
+
 #[test]
 fn process_status_cannot_reap_a_pane_before_the_ordered_pty_exit() {
     let src = production_source();
